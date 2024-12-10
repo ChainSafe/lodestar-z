@@ -1,33 +1,35 @@
+/// See blst/bindings/rust/src/bindings.rs in blst repo for reference.
 const c = @cImport({
     @cInclude("blst.h");
 });
 
-const byte = u8;
-const limb_t = u64;
+/// Bindings for blst.h
+pub const byte = u8;
+pub const limb_t = u64;
 
-const blst_scalar = struct {
+pub const blst_scalar = struct {
     b: [256 / 8]byte,
 };
 
-const blst_fr = struct {
+pub const blst_fr = struct {
     l: [256 / 8 / @sizeOf(limb_t)]limb_t,
 };
 
-const blst_fp = struct {
+pub const blst_fp = struct {
     l: [384 / 8 / @sizeOf(limb_t)]limb_t,
 };
 
 // /* 0 is "real" part, 1 is "imaginary" */
 
-const blst_fp2 = struct {
+pub const blst_fp2 = struct {
     fp: [2]blst_fp,
 };
 
-const blst_fp6 = struct {
+pub const blst_fp6 = struct {
     fp2: [3]blst_fp2,
 };
 
-const blst_fp12 = struct {
+pub const blst_fp12 = struct {
     fp6: [2]blst_fp6,
 };
 
@@ -504,7 +506,7 @@ pub fn blst_p2_cneg(p: *blst_p2, cbit: bool) void {
     c.blst_p2_cneg(p, cbit);
 }
 
-pub fn blst_p2_to_affine(out *blst_p2_affline, in: *const blst_p2) void {
+pub fn blst_p2_to_affine(out: *blst_p2_affine, in: *const blst_p2) void {
     c.blst_p2_to_affine(out, in);
 }
 
@@ -553,12 +555,11 @@ pub fn blst_p2_affine_generator() *blst_p2_affine {
 }
 
 /// Multi-scalar multiplications and other multi-point operations.
-
-pub fn blst_p1s_to_affine(dst: []blst_p1_affline, points: []const blst_p1, npoints: usize) void {
+pub fn blst_p1s_to_affine(dst: []blst_p1_affine, points: []const blst_p1, npoints: usize) void {
     c.blst_p1s_to_affine(dst, points, npoints);
 }
 
-pub fn blst_p1s_add(ret: *blst_p1, points: []const blst_p1_affline, npoints: usize) void {
+pub fn blst_p1s_add(ret: *blst_p1, points: []const blst_p1_affine, npoints: usize) void {
     c.blst_p1s_add(ret, points, npoints);
 }
 
@@ -566,7 +567,7 @@ pub fn blst_p1s_mult_wbits_precompute_sizeof(wbits: usize, npoints: usize) usize
     return c.blst_p1s_mult_wbits_precompute_sizeof(wbits, npoints);
 }
 
-pub fn blst_p1s_mult_wbits_precompute(table: []blst_p1_affline, wbits: usize, points: []*const blst_p1_affline, npoints: usize) void {
+pub fn blst_p1s_mult_wbits_precompute(table: []blst_p1_affine, wbits: usize, points: []*const blst_p1_affine, npoints: usize) void {
     c.blst_p1s_mult_wbits_precompute(table, wbits, points, npoints);
 }
 
@@ -574,7 +575,7 @@ pub fn blst_p1s_mult_wbits_scratch_sizeof(npoints: usize) usize {
     return c.blst_p1s_mult_wbits_scratch_sizeof(npoints);
 }
 
-pub fn blst_p1s_mult_wbits(ret: *blst_p1, table: []const blst_p1_affline, wbits: usize, npoints: usize, scalars: []*const byte, nbits: usize, scratch: *limb_t) void {
+pub fn blst_p1s_mult_wbits(ret: *blst_p1, table: []const blst_p1_affine, wbits: usize, npoints: usize, scalars: []*const byte, nbits: usize, scratch: *limb_t) void {
     c.blst_p1s_mult_wbits(ret, table, wbits, npoints, scalars, nbits, scratch);
 }
 
@@ -582,19 +583,19 @@ pub fn blst_p1s_mult_pippenger_scratch_sizeof(npoints: usize) usize {
     return c.blst_p1s_mult_pippenger_scratch_sizeof(npoints);
 }
 
-pub fn blst_p1s_mult_pippenger(ret: *blst_p1, points: []*const blst_p1_affline, npoints: usize, scalars: []*const byte, nbits: usize, scratch: *limb_t) void {
+pub fn blst_p1s_mult_pippenger(ret: *blst_p1, points: []*const blst_p1_affine, npoints: usize, scalars: []*const byte, nbits: usize, scratch: *limb_t) void {
     c.blst_p1s_mult_pippenger(ret, points, npoints, scalars, nbits, scratch);
 }
 
-pub fn blst_p1s_tile_pippenger(ret: *blst_t1, points: []*const blst_p1_affline, npoints: usize, scalars: []*const byte, nbits: usize, scratch: *limb_t, bit0: usize, window: usize) void {
+pub fn blst_p1s_tile_pippenger(ret: *blst_p1, points: []*const blst_p1_affine, npoints: usize, scalars: []*const byte, nbits: usize, scratch: *limb_t, bit0: usize, window: usize) void {
     c.blst_p1s_tile_pippenger(ret, points, npoints, scalars, nbits, scratch, bit0, window);
 }
 
-pub fn blst_p2s_to_affine(dst: []blst_p2_affline, points: []*const blst_p2, npoints: usize) void {
+pub fn blst_p2s_to_affine(dst: []blst_p2_affine, points: []*const blst_p2, npoints: usize) void {
     c.blst_p2s_to_affine(dst, points, npoints);
 }
 
-pub fn blst_p2s_add(ret: *blst_p2, points: []*const blst_p2_affline, npoints: usize) void {
+pub fn blst_p2s_add(ret: *blst_p2, points: []*const blst_p2_affine, npoints: usize) void {
     c.blst_p2s_add(ret, points, npoints);
 }
 
@@ -602,7 +603,7 @@ pub fn blst_p2s_mult_wbits_precompute_sizeof(wbits: usize, npoints: usize) usize
     return c.blst_p2s_mult_wbits_precompute_sizeof(wbits, npoints);
 }
 
-pub fn blst_p2s_mult_wbits_precompute(table: []blst_p2_affline, wbits: usize, points: []*const blst_p2_affline, npoints: usize) void {
+pub fn blst_p2s_mult_wbits_precompute(table: []blst_p2_affine, wbits: usize, points: []*const blst_p2_affine, npoints: usize) void {
     c.blst_p2s_mult_wbits_precompute(table, wbits, points, npoints);
 }
 
@@ -610,7 +611,7 @@ pub fn blst_p2s_mult_wbits_scratch_sizeof(npoints: usize) usize {
     return c.blst_p2s_mult_wbits_scratch_sizeof(npoints);
 }
 
-pub fn blst_p2s_mult_wbits(ret: *blst_p2, table: []const blst_p2_affline, wbits: usize, npoints: usize, scalars: []*const byte, nbits: usize, scratch: *limb_t) void {
+pub fn blst_p2s_mult_wbits(ret: *blst_p2, table: []const blst_p2_affine, wbits: usize, npoints: usize, scalars: []*const byte, nbits: usize, scratch: *limb_t) void {
     c.blst_p2s_mult_wbits(ret, table, wbits, npoints, scalars, nbits, scratch);
 }
 
@@ -618,16 +619,15 @@ pub fn blst_p2s_mult_pippenger_scratch_sizeof(npoints: usize) usize {
     return c.blst_p2s_mult_pippenger_scratch_sizeof(npoints);
 }
 
-pub fn blst_p2s_mult_pippenger(ret: *blst_p2, points: []*const blst_p2_affline, npoints: usize, scalars: []*const byte, nbits: usize, scratch: *limb_t) void {
+pub fn blst_p2s_mult_pippenger(ret: *blst_p2, points: []*const blst_p2_affine, npoints: usize, scalars: []*const byte, nbits: usize, scratch: *limb_t) void {
     c.blst_p2s_mult_pippenger(ret, points, npoints, scalars, nbits, scratch);
 }
 
-pub fn blst_p2s_tile_pippenger(ret: *blst_p2, points: []*const blst_p2_affline, npoints: usize, scalars: []*const byte, nbits: usize, scratch: *limb_t, bit0: usize, window: usize) void {
+pub fn blst_p2s_tile_pippenger(ret: *blst_p2, points: []*const blst_p2_affine, npoints: usize, scalars: []*const byte, nbits: usize, scratch: *limb_t, bit0: usize, window: usize) void {
     c.blst_p2s_tile_pippenger(ret, points, npoints, scalars, nbits, scratch, bit0, window);
 }
 
 /// Hash-to-curve operations.
-
 pub fn blst_map_to_g1(out: *blst_p1, u: *const blst_fp, v: ?*const blst_fp) void {
     // TODO: do we need to unwrap value of v if it's not null?
     // same for below
@@ -647,7 +647,7 @@ pub fn blst_hash_to_g1(out: *blst_p1, msg: *const byte, msg_len: usize, dst: ?*c
     c.blst_hash_to_g1(out, msg, msg_len, dst, dst_len, aug, aug_len);
 }
 
-pub fn blst_encode_to_g2(out: *blst_p2, msg: *const byte, msg_len: usize, dst:?*const byte, dst_len: ?usize, aug: ?*const byte, aug_len: ?usize) void {
+pub fn blst_encode_to_g2(out: *blst_p2, msg: *const byte, msg_len: usize, dst: ?*const byte, dst_len: ?usize, aug: ?*const byte, aug_len: ?usize) void {
     c.blst_encode_to_g2(out, msg, msg_len, dst, dst_len, aug, aug_len);
 }
 
@@ -656,7 +656,6 @@ pub fn blst_hash_to_g2(out: *blst_p2, msg: *const byte, msg_len: usize, dst: ?*c
 }
 
 /// Zcash-compatible serialization/deserialization.
-
 pub fn blst_p1_serialize(out: []byte, a: *const blst_p1) IncorrectLen!void {
     if (out.len != 96) {
         return error.IncorrectLen;
@@ -696,7 +695,7 @@ const BLST_ERROR = enum(u8) {
     BAD_SCALAR,
 };
 
-pub fn blst_p1_uncompress(out: *blst_p1_affline, in: []const byte) IncorrectLen!BLST_ERROR {
+pub fn blst_p1_uncompress(out: *blst_p1_affine, in: []const byte) IncorrectLen!BLST_ERROR {
     if (in.len != 48) {
         return error.IncorrectLen;
     }
@@ -738,14 +737,14 @@ pub fn blst_p2_affine_compress(out: []byte, in: *const blst_p2_affine) Incorrect
     c.blst_p2_affine_compress(out, in);
 }
 
-pub const blst_p2_uncompress(out: *blst_p2_affline, in: []const byte) IncorrectLen!BLST_ERROR {
+pub fn blst_p2_uncompress(out: *blst_p2_affine, in: []const byte) IncorrectLen!BLST_ERROR {
     if (in.len != 96) {
         return error.IncorrectLen;
     }
     return c.blst_p2_uncompress(out, in);
 }
 
-pub const blst_p2_deserialize(out: *blst_p2_affline, in: []const byte) IncorrectLen!BLST_ERROR {
+pub fn blst_p2_deserialize(out: *blst_p2_affine, in: []const byte) IncorrectLen!BLST_ERROR {
     if (in.len != 192) {
         return error.IncorrectLen;
     }
@@ -753,7 +752,6 @@ pub const blst_p2_deserialize(out: *blst_p2_affline, in: []const byte) Incorrect
 }
 
 /// Secret-key operations.
-
 pub fn blst_keygen(out_sk: *blst_scalar, ikm: *const byte, ikm_len: usize, info: ?*const byte, info_len: ?usize) void {
     // TODO: unwrap option types?
     c.blst_keygen(out_sk, ikm, ikm_len, info, info_len);
@@ -767,7 +765,7 @@ pub fn blst_sign_pk_in_g1(out_sig: *blst_p2, hash: *const blst_p2, sk: *const bl
     c.blst_sign_pk_in_g1(out_sig, hash, sk);
 }
 
-pub fn blst_sk_to_pk_in_g2(blst_p2: *out_pk, sk: *const blst_scalar) void {
+pub fn blst_sk_to_pk_in_g2(out_pk: *blst_p2, sk: *const blst_scalar) void {
     c.blst_sk_to_pk_in_g2(out_pk, sk);
 }
 
@@ -776,12 +774,11 @@ pub fn blst_sign_pk_in_g2(out_sig: *blst_p1, hash: *const blst_p1, sk: *const bl
 }
 
 /// Pairing interface.
-
-pub fn blst_miller_loop(ret: *blst_fp12, q: *const blst_p2_affline, p: *const blst_p1_affline) void {
+pub fn blst_miller_loop(ret: *blst_fp12, q: *const blst_p2_affine, p: *const blst_p1_affine) void {
     c.blst_miller_loop(ret, q, p);
 }
 
-pub fn blst_miller_loop_n(ret: *blst_fp12, qs: []*const blst_p2_affline, ps: []*const blst_p1_affline, n: usize) void {
+pub fn blst_miller_loop_n(ret: *blst_fp12, qs: []*const blst_p2_affine, ps: []*const blst_p1_affine, n: usize) void {
     c.blst_miller_loop_n(ret, qs, ps, n);
 }
 
@@ -789,14 +786,14 @@ pub fn blst_final_exp(ret: *blst_fp12, f: *const blst_fp12) void {
     c.blst_final_exp(ret, f);
 }
 
-pub fn blst_precompute_lines(qlines: []blst_fp6, q: *const blst_p2_affline) IncorrectLen!void {
+pub fn blst_precompute_lines(qlines: []blst_fp6, q: *const blst_p2_affine) IncorrectLen!void {
     if (qlines.len != 68) {
         return error.IncorrectLen;
     }
     c.blst_precompute_lines(qlines, q);
 }
 
-pub fn blst_miller_loop_lines(ret: *blst_fp12, qlines: []const blst_fp6, p: *const blst_p1_affline) IncorrectLen!void {
+pub fn blst_miller_loop_lines(ret: *blst_fp12, qlines: []const blst_fp6, p: *const blst_p1_affine) IncorrectLen!void {
     if (qlines.len != 68) {
         return error.IncorrectLen;
     }
@@ -828,35 +825,35 @@ pub fn blst_pairing_commit(ctx: *blst_pairing) void {
     c.blst_pairing_commit(ctx);
 }
 
-pub fn blst_pairing_aggregate_pk_in_g2(ctx: *blst_pairing, pk: *const blst_p2_affline, signature: *const blst_p1_affline, msg: *const byte, msg_len: usize, aug: *const byte, aug_len: usize) BLST_ERROR {
+pub fn blst_pairing_aggregate_pk_in_g2(ctx: *blst_pairing, pk: *const blst_p2_affine, signature: *const blst_p1_affine, msg: *const byte, msg_len: usize, aug: *const byte, aug_len: usize) BLST_ERROR {
     return c.blst_pairing_aggregate_pk_in_g2(ctx, pk, signature, msg, msg_len, aug, aug_len);
 }
 
-pub fn blst_pairing_chk_n_aggr_pk_in_g2(ctx: *blst_pairing, pk: *const blst_p2_affline, pk_grpchk: bool, signature: *const blst_p1_affline, sig_grpchk: bool, msg: *const byte, msg_len: usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
+pub fn blst_pairing_chk_n_aggr_pk_in_g2(ctx: *blst_pairing, pk: *const blst_p2_affine, pk_grpchk: bool, signature: *const blst_p1_affine, sig_grpchk: bool, msg: *const byte, msg_len: usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
     return c.blst_pairing_chk_n_aggr_pk_in_g2(ctx, pk, pk_grpchk, signature, sig_grpchk, msg, msg_len, aug, aug_len);
 }
 
-pub fn blst_pairing_mul_n_aggregate_pk_in_g2(ctx: *blst_pairing, pk: *const blst_p2_affline, sig: *const blst_p1_affline, scalar: *const byte, nbits: usize, msg: *const byte, msg_len: usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
+pub fn blst_pairing_mul_n_aggregate_pk_in_g2(ctx: *blst_pairing, pk: *const blst_p2_affine, sig: *const blst_p1_affine, scalar: *const byte, nbits: usize, msg: *const byte, msg_len: usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
     return c.blst_pairing_mul_n_aggregate_pk_in_g2(ctx, pk, sig, scalar, nbits, msg, msg_len, aug, aug_len);
 }
 
-pub fn blst_pairing_chk_n_mul_n_aggr_pk_in_g2(ctx: *blst_pairing, pk: *const blst_p2_affline, pk_grpchk: bool, sig: *const blst_p1_affline, sig_grpchk: bool, scalar: *const byte, nbits: usize, msg: *const byte, msg_len: usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
+pub fn blst_pairing_chk_n_mul_n_aggr_pk_in_g2(ctx: *blst_pairing, pk: *const blst_p2_affine, pk_grpchk: bool, sig: *const blst_p1_affine, sig_grpchk: bool, scalar: *const byte, nbits: usize, msg: *const byte, msg_len: usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
     return c.blst_pairing_chk_n_mul_n_aggr_pk_in_g2(ctx, pk, pk_grpchk, sig, sig_grpchk, scalar, nbits, msg, msg_len, aug, aug_len);
 }
 
-pub fn blst_pairing_aggregate_pk_in_g1(ctx: *blst_pairing, pk: *const blst_p1_affline, signature: *const blst_p2_affline, msg: *const byte, msg_len: usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
+pub fn blst_pairing_aggregate_pk_in_g1(ctx: *blst_pairing, pk: *const blst_p1_affine, signature: *const blst_p2_affine, msg: *const byte, msg_len: usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
     return c.blst_pairing_aggregate_pk_in_g1(ctx, pk, signature, msg, msg_len, aug, aug_len);
 }
 
-pub fn blst_pairing_chk_n_aggr_pk_in_g1(ctx: *blst_pairing, pi: *const blst_p1_affline, pk_grpchk: bool, signature: *const blst_p2_affline, sig_grpchk: bool, msg: *const byte, msg_len: usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
+pub fn blst_pairing_chk_n_aggr_pk_in_g1(ctx: *blst_pairing, pi: *const blst_p1_affine, pk_grpchk: bool, signature: *const blst_p2_affine, sig_grpchk: bool, msg: *const byte, msg_len: usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
     return c.blst_pairing_chk_n_aggr_pk_in_g1(ctx, pi, pk_grpchk, signature, sig_grpchk, msg, msg_len, aug, aug_len);
 }
 
-pub fn blst_pairing_mul_n_aggregate_pk_in_g1(ctx: *blst_pairing, pk: *const blst_p1_affline, sig: *const blst_p2_affline, scalar: *const byte, nbits: usize, msg: *const byte, msg_len: usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
+pub fn blst_pairing_mul_n_aggregate_pk_in_g1(ctx: *blst_pairing, pk: *const blst_p1_affine, sig: *const blst_p2_affine, scalar: *const byte, nbits: usize, msg: *const byte, msg_len: usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
     return c.blst_pairing_mul_n_aggregate_pk_in_g1(ctx, pk, sig, scalar, nbits, msg, msg_len, aug, aug_len);
 }
 
-pub fn blst_pairing_chk_n_mul_n_aggr_pk_in_g1(ctx: *blst_pairing, pk: *const blst_p1_affline, pk_grpchk: bool, sig: *const blst_p2_affline, sig_grpchk: bool, scalar: *const byte, nbits: usize, msg: *const byte, msg_len: usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
+pub fn blst_pairing_chk_n_mul_n_aggr_pk_in_g1(ctx: *blst_pairing, pk: *const blst_p1_affine, pk_grpchk: bool, sig: *const blst_p2_affine, sig_grpchk: bool, scalar: *const byte, nbits: usize, msg: *const byte, msg_len: usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
     return c.blst_pairing_chk_n_mul_n_aggr_pk_in_g1(ctx, pk, pk_grpchk, sig, sig_grpchk, scalar, nbits, msg, msg_len, aug, aug_len);
 }
 
@@ -876,20 +873,193 @@ pub fn blst_aggregate_in_g2(out: *blst_p2, in: *const blst_p2, zwire: *const byt
     return c.blst_aggregate_in_g2(out, in, zwire);
 }
 
-pub fn blst_aggregated_in_g1(out: *blst_fp12, signature: *const blst_p1_affline) void {
+pub fn blst_aggregated_in_g1(out: *blst_fp12, signature: *const blst_p1_affine) void {
     c.blst_aggregated_in_g1(out, signature);
 }
 
-pub fn blst_aggregated_in_g2(out: *blst_fp12, signature: *const blst_p2_affline) void {
+pub fn blst_aggregated_in_g2(out: *blst_fp12, signature: *const blst_p2_affine) void {
     c.blst_aggregated_in_g2(out, signature);
 }
 
 /// "One-shot" CoreVerify entry points
-
-pub fn blst_core_verify_pk_in_g1(pk: *const blst_p1_affline, signature: *const blst_p2_affline, hash_or_encode: bool, msg: *const byte, msg_len: usize, dst: ?*const byte, dst_len: ?usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
+pub fn blst_core_verify_pk_in_g1(pk: *const blst_p1_affine, signature: *const blst_p2_affine, hash_or_encode: bool, msg: *const byte, msg_len: usize, dst: ?*const byte, dst_len: ?usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
     return c.blst_core_verify_pk_in_g1(pk, signature, hash_or_encode, msg, msg_len, dst, dst_len, aug, aug_len);
 }
 
-pub fn blst_core_verify_pk_in_g2(pk: *const blst_p2_affline, signature: *const blst_p1_affline, hash_or_encode: bool, msg: *const byte, msg_len: usize, dst: ?*const byte, dst_len: ?usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
+pub fn blst_core_verify_pk_in_g2(pk: *const blst_p2_affine, signature: *const blst_p1_affine, hash_or_encode: bool, msg: *const byte, msg_len: usize, dst: ?*const byte, dst_len: ?usize, aug: ?*const byte, aug_len: ?usize) BLST_ERROR {
     return c.blst_core_verify_pk_in_g2(pk, signature, hash_or_encode, msg, msg_len, dst, dst_len, aug, aug_len);
+}
+
+//// Bindings for blst_aux.h
+/// It's commented in blst_aux.h that these apis might be promoted to blst.h or removed,
+/// however since Rust use bindings for them, we'll just do the same
+pub fn blst_fr_ct_bfly(x0: *blst_fr, x1: *blst_fr, twiddle: *const blst_fr) void {
+    c.blst_fr_ct_bfly(x0, x1, twiddle);
+}
+
+pub fn blst_fr_gs_bfly(x0: *blst_fr, x1: *blst_fr, twiddle: *const blst_fr) void {
+    c.blst_fr_gs_bfly(x0, x1, twiddle);
+}
+
+pub fn blst_fr_to(ret: *blst_fr, a: *const blst_fr) void {
+    c.blst_fr_to(ret, a);
+}
+
+pub fn blst_fr_from(ret: *blst_fr, a: *const blst_fr) void {
+    c.blst_fr_from(ret, a);
+}
+
+pub fn blst_fp_to(ret: *blst_fp, a: *const blst_fp) void {
+    c.blst_fp_to(ret, a);
+}
+
+pub fn blst_fp_from(ret: *blst_fp, a: *const blst_fp) void {
+    c.blst_fp_from(ret, a);
+}
+
+pub fn blst_fp_is_square(a: *const blst_fp) bool {
+    return c.blst_fp_is_square(a);
+}
+
+pub fn blst_fp2_is_square(a: *const blst_fp2) bool {
+    return c.blst_fp2_is_square(a);
+}
+
+pub fn blst_p1_from_jacobian(out: *blst_p1, in: *const blst_p1) void {
+    c.blst_p1_from_jacobian(out, in);
+}
+
+pub fn blst_p2_from_jacobian(out: *blst_p2, in: *const blst_p2) void {
+    c.blst_p2_from_jacobian(out, in);
+}
+
+pub fn blst_sk_to_pk2_in_g1(out: []byte, out_pk: *blst_p1_affine, sk: *const blst_scalar) IncorrectLen!void {
+    if (out.len != 96) {
+        return error.IncorrectLen;
+    }
+    c.blst_sk_to_pk2_in_g1(out, out_pk, sk);
+}
+
+pub fn blst_sign_pk2_in_g1(out: []byte, out_sig: *blst_p2_affine, hash: *const blst_p2, sk: *const blst_scalar) IncorrectLen!void {
+    if (out != 192) {
+        return error.IncorrectLen;
+    }
+    c.blst_sign_pk2_in_g1(out, out_sig, hash, sk);
+}
+
+pub fn blst_sk_to_pk2_in_g2(out: []byte, out_pk: *blst_p2_affine, sk: *const blst_scalar) IncorrectLen!void {
+    if (out.len != 192) {
+        return error.IncorrectLen;
+    }
+    c.blst_sk_to_pk2_in_g2(out, out_pk, sk);
+}
+
+pub fn blst_sign_pk2_in_g2(out: []byte, out_sig: *blst_p1_affine, hash: *const blst_p1, sk: *const blst_scalar) IncorrectLen!void {
+    if (out.len != 96) {
+        return error.IncorrectLen;
+    }
+    c.blst_sign_pk2_in_g2(out, out_sig, hash, sk);
+}
+
+const blst_uniq = extern struct {
+    // This is intentionally left empty since it is opaque.
+    // Fields are not accessible in Zig or any other language.
+};
+
+pub fn blst_uniq_sizeof(n_nodes: usize) usize {
+    return c.blst_uniq_sizeof(n_nodes);
+}
+
+pub fn blst_uniq_init(tree: *blst_uniq) void {
+    c.blst_uniq_init(tree);
+}
+
+pub fn blst_uniq_test(tree: *blst_uniq, msg: *const byte, len: usize) bool {
+    return c.blst_uniq_test(tree, msg, len);
+}
+
+pub fn blst_expand_message_xmd(out: *byte, out_len: usize, msg: *const byte, msg_len: usize, dst: *const byte, dst_len: usize) void {
+    c.blst_expand_message_xmd(out, out_len, msg, msg_len, dst, dst_len);
+}
+
+pub fn blst_p1_unchecked_mult(out: *blst_p1, p: *const blst_p1, scalar: *const byte, nbits: usize) void {
+    c.blst_p1_unchecked_mult(out, p, scalar, nbits);
+}
+
+pub fn blst_p2_unchecked_mult(out: *blst_p2, p: *const blst_p2, scalar: *const byte, nbits: usize) void {
+    c.blst_p2_unchecked_mult(out, p, scalar, nbits);
+}
+
+pub fn blst_pairing_raw_aggregate(ctx: *blst_pairing, q: *const blst_p2_affine, p: *const blst_p1_affine) void {
+    c.blst_pairing_raw_aggregate(ctx, q, p);
+}
+
+pub fn blst_pairing_as_fp12(ctx: *blst_pairing) *blst_fp12 {
+    return c.blst_pairing_as_fp12(ctx);
+}
+
+pub fn blst_bendian_from_fp12(out: []byte, a: *const blst_fp12) IncorrectLen!void {
+    if (out.len != 48 * 12) {
+        return error.IncorrectLen;
+    }
+    c.blst_bendian_from_fp12(out, a);
+}
+
+pub fn blst_keygen_v3(out_sk: *blst_scalar, ikm: *const byte, ikm_len: usize, info: ?*const byte, info_len: ?usize) void {
+    c.blst_keygen_v3(out_sk, ikm, ikm_len, info, info_len);
+}
+
+pub fn blst_keygen_v4_5(out_sk: *blst_scalar, ikm: *const byte, ikm_len: usize, salt: *const byte, salt_len: usize, info: ?*const byte, info_len: ?usize) void {
+    c.blst_keygen_v4_5(out_sk, ikm, ikm_len, salt, salt_len, info, info_len);
+}
+
+pub fn blst_keygen_v5(out_sk: *blst_scalar, ikm: *const byte, ikm_len: usize, salt: *const byte, salt_len: usize, info: ?*const byte, info_len: ?usize) void {
+    c.blst_keygen_v5(out_sk, ikm, ikm_len, salt, salt_len, info, info_len);
+}
+
+pub fn blst_derive_master_eip2333(out_sk: *blst_scalar, ikm: *const byte, ikm_len: usize) void {
+    c.blst_derive_master_eip2333(out_sk, ikm, ikm_len);
+}
+
+pub fn blst_derive_child_eip2333(out_sk: *blst_scalar, sk: *const blst_scalar, child_index: usize) void {
+    c.blst_derive_child_eip2333(out_sk, sk, child_index);
+}
+
+pub fn blst_scalar_from_hexascii(out: *blst_scalar, sk: *const blst_scalar, child_index: usize) void {
+    c.blst_scalar_from_hexascii(out, sk, child_index);
+}
+
+pub fn blst_fr_from_hexascii(ret: *blst_fr, hex: *const byte) void {
+    c.blst_fr_from_hexascii(ret, hex);
+}
+
+pub fn blst_fp_from_hexascii(ret: *blst_fp, hex: *const byte) void {
+    c.blst_fp_from_hexascii(ret, hex);
+}
+
+pub fn blst_p1_sizeof() usize {
+    return c.blst_p1_sizeof();
+}
+
+pub fn blst_p1_affine_sizeof() usize {
+    return c.blst_p1_affine_sizeof();
+}
+
+pub fn blst_p2_sizeof() usize {
+    return c.blst_p2_sizeof();
+}
+
+pub fn blst_p2_affine_sizeof() usize {
+    return c.blst_p2_affine_sizeof();
+}
+
+pub fn blst_fp12_sizeof() usize {
+    return c.blst_fp12_sizeof();
+}
+
+pub fn blst_sha256(out: []byte, msg: *const byte, msg_len: usize) IncorrectLen!void {
+    if (out.len != 32) {
+        return error.IncorrectLen;
+    }
+    c.blst_sha256(out, msg, msg_len);
 }
