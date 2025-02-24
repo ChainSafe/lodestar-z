@@ -76,7 +76,6 @@ pub fn createMultiPoint(comptime IT: type, comptime OT: type, it_default_fn: any
                 scalars_refs[i] = &scalars[i * n_bytes];
             }
 
-            // std.debug.print("scratch_sizeof_fn(n_points) / 8: {}\n", .{scratch_sizeof_fn(n_points) / 8});
             var allocator = std.testing.allocator;
             const scratch = try allocator.alloc(u64, scratch_sizeof_fn(n_points) / 8);
             defer allocator.free(scratch);

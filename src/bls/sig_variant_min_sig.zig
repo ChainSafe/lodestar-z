@@ -84,7 +84,11 @@ test "test_sign_n_verify" {
 }
 
 test "test_aggregate" {
-    try SigVariant.testAggregate();
+    try SigVariant.testAggregate(false);
+}
+
+test "test_aggregate with aggregateVerifyC" {
+    try SigVariant.testAggregate(true);
 }
 
 test "test_multiple_agg_sigs" {

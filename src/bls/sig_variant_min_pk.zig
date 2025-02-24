@@ -80,7 +80,6 @@ pub const AggregatePublicKey = SigVariant.createAggregatePublicKey();
 pub const Signature = SigVariant.createSignature();
 pub const AggregateSignature = SigVariant.createAggregateSignature();
 pub const SecretKey = SigVariant.createSecretKey();
-pub const aggregateWithRandomness = SigVariant.aggregateWithRandomness;
 
 /// exported C-ABI functions need to be declared at top level, and they only work with extern struct
 const PublicKeyType = SigVariant.getPublicKeyType();
@@ -89,6 +88,7 @@ const SignatureType = SigVariant.getSignatureType();
 const AggregateSignatureType = SigVariant.getAggregateSignatureType();
 const SecretKeyType = SigVariant.getSecretKeyType();
 const SignatureSetType = SigVariant.getSignatureSetType();
+const PkAndSerializedSigType = SigVariant.getPkAndSerializedSigType();
 
 /// PublicKey functions
 export fn defaultPublicKey() PublicKeyType {
@@ -136,8 +136,8 @@ export fn isPublicKeyEqual(point: *PublicKeyType, other: *PublicKeyType) bool {
 }
 
 /// AggregatePublicKeyType functions
-export fn defaultAggregatePublicKey(out: *AggregatePublicKeyType) void {
-    return AggregatePublicKey.defaultAggregatePublicKey(out);
+export fn defaultAggregatePublicKey() AggregatePublicKeyType {
+    return AggregatePublicKey.defaultAggregatePublicKey();
 }
 
 export fn aggregateFromPublicKey(out: *AggregatePublicKeyType, pk: *const PublicKeyType) void {
@@ -148,16 +148,18 @@ export fn aggregateToPublicKey(out: *PublicKeyType, agg_pk: *const AggregatePubl
     return AggregatePublicKey.aggregateToPublicKey(out, agg_pk);
 }
 
-export fn aggregatePublicKeys(out: *AggregatePublicKeyType, pks: [*c]*const PublicKeyType, len: usize, pks_validate: bool) c_uint {
-    return AggregatePublicKey.aggregatePublicKeys(out, pks, len, pks_validate);
+export fn aggregatePublicKeys(out: *PublicKeyType, pks: [*c]*const PublicKeyType, len: usize, pks_validate: bool) c_uint {
+    var aggregate_pk = defaultAggregatePublicKey();
+    const res = AggregatePublicKey.aggregatePublicKeys(&aggregate_pk, pks, len, pks_validate);
+    aggregateToPublicKey(out, &aggregate_pk);
+    return res;
 }
 
-export fn aggregateCompressedPublicKeys(out: *AggregatePublicKeyType, pks: [*c][*c]const u8, len: usize, pks_validate: bool) c_uint {
-    return AggregatePublicKey.aggregateCompressedPublicKeys(out, pks, len, pks_validate);
-}
-
-export fn aggregateSerializedPublicKeys(out: *AggregatePublicKeyType, pks: [*c][*c]const u8, len: usize, pks_validate: bool) c_uint {
-    return AggregatePublicKey.aggregateSerializedPublicKeys(out, pks, len, pks_validate);
+export fn aggregateSerializedPublicKeys(out: *PublicKeyType, pks: [*c][*c]const u8, pks_len: usize, pk_len: usize, pks_validate: bool) c_uint {
+    var aggregate_pk = defaultAggregatePublicKey();
+    const res = AggregatePublicKey.aggregateSerializedPublicKeys(&aggregate_pk, pks, pks_len, pk_len, pks_validate);
+    aggregateToPublicKey(out, &aggregate_pk);
+    return res;
 }
 
 export fn addAggregatePublicKey(out: *AggregatePublicKeyType, agg_pk: *const AggregatePublicKeyType) void {
@@ -185,8 +187,9 @@ export fn sigValidate(out: *SignatureType, sig: [*c]const u8, sig_len: usize, si
     return Signature.sigValidateC(out, sig, sig_len, sig_infcheck);
 }
 
-export fn verifySignature(sig: *const SignatureType, sig_groupcheck: bool, msg: [*c]const u8, msg_len: usize, aug_ptr: [*c]const u8, aug_len: usize, pk: *const PublicKeyType, pk_validate: bool) c_uint {
-    return Signature.verifySignature(sig, sig_groupcheck, msg, msg_len, &DST[0], DST.len, aug_ptr, aug_len, pk, pk_validate);
+export fn verifySignature(sig: *const SignatureType, sig_groupcheck: bool, msg: [*c]const u8, msg_len: usize, pk: *const PublicKeyType, pk_validate: bool) c_uint {
+    // aug_ptr is null, aug_len is 0
+    return Signature.verifySignature(sig, sig_groupcheck, msg, msg_len, &DST[0], DST.len, null, 0, pk, pk_validate);
 }
 
 export fn aggregateVerify(sig: *const SignatureType, sig_groupcheck: bool, msgs: [*c][*c]const u8, msgs_len: usize, msg_len: usize, pks: [*c]const *PublicKeyType, pks_len: usize, pks_validate: bool, pairing_buffer: [*c]u8, pairing_buffer_len: usize) c_uint {
@@ -260,8 +263,8 @@ export fn isSignatureEqual(point: *const SignatureType, other: *const SignatureT
 }
 
 /// AggregateSignatureType functions
-export fn defaultAggregateSignature(out: *AggregateSignatureType) void {
-    return AggregateSignature.defaultAggregateSignature(out);
+export fn defaultAggregateSignature() AggregateSignatureType {
+    return AggregateSignature.defaultAggregateSignature();
 }
 
 export fn validateAggregateSignature(point: *const AggregateSignatureType) c_uint {
@@ -276,12 +279,18 @@ export fn aggregateToSignature(out: *SignatureType, agg_sig: *const AggregateSig
     return AggregateSignature.aggregateToSignature(out, agg_sig);
 }
 
-export fn aggregateSignatures(out: *AggregateSignatureType, sigs: [*c]*const SignatureType, len: usize, sigs_groupcheck: bool) c_uint {
-    return AggregateSignature.aggregateSignatures(out, sigs, len, sigs_groupcheck);
+export fn aggregateSignatures(out: *SignatureType, sigs: [*c]*const SignatureType, len: usize, sigs_groupcheck: bool) c_uint {
+    var aggregate_sig = defaultAggregateSignature();
+    const res = AggregateSignature.aggregateSignatures(&aggregate_sig, sigs, len, sigs_groupcheck);
+    aggregateToSignature(out, &aggregate_sig);
+    return res;
 }
 
-export fn aggregateSerialized(out: *AggregateSignatureType, sigs: [*c][*c]const u8, sigs_len: usize, sig_len: usize, sigs_groupcheck: bool) c_uint {
-    return AggregateSignature.aggregateSerializedC(out, sigs, sigs_len, sig_len, sigs_groupcheck);
+export fn aggregateSerializedSignatures(out: *SignatureType, sigs: [*c][*c]const u8, sigs_len: usize, sig_len: usize, sigs_groupcheck: bool) c_uint {
+    var aggregate_sig = defaultAggregateSignature();
+    const res = AggregateSignature.aggregateSerializedC(&aggregate_sig, sigs, sigs_len, sig_len, sigs_groupcheck);
+    aggregateToSignature(out, &aggregate_sig);
+    return res;
 }
 
 export fn addAggregate(out: *AggregateSignatureType, agg_sig: *const AggregateSignatureType) void {
@@ -376,12 +385,43 @@ export fn sizeOfPairing() c_uint {
 
 // TODO: aggregateWithRandomnessC: need to implement extern struct
 
+export fn aggregateWithRandomness(sets: [*c]*const PkAndSerializedSigType, sets_len: c_uint, pk_scratch_u8: [*c]u8, pk_scratch_len: c_uint, sig_scratch_u8: [*c]u8, sig_scratch_len: c_uint, pk_out: *PublicKeyType, sig_out: *SignatureType) c_uint {
+    return SigVariant.aggregateWithRandomnessC(sets, sets_len, pk_scratch_u8, pk_scratch_len, sig_scratch_u8, sig_scratch_len, pk_out, sig_out);
+}
+
+pub const CallbackFn = *const fn (result: c_uint) callconv(.C) void;
+
+export fn asyncAggregateWithRandomness(sets: [*c]*const PkAndSerializedSigType, sets_len: c_uint, pk_scratch_u8: [*c]u8, pk_scratch_len: c_uint, sig_scratch_u8: [*c]u8, sig_scratch_len: c_uint, pk_out: *PublicKeyType, sig_out: *SignatureType, callback: CallbackFn) c_uint {
+    // TODO: use thread pool
+    _ = std.Thread.spawn(.{}, struct {
+        fn run(sets_t: [*c]*const PkAndSerializedSigType, sets_len_t: c_uint, pk_scratch_u8_t: [*c]u8, pk_scratch_len_t: c_uint, sig_scratch_u8_t: [*c]u8, sig_scratch_len_t: c_uint, pk_out_t: *PublicKeyType, sig_out_t: *SignatureType, callback_t: CallbackFn) void {
+            const res = SigVariant.aggregateWithRandomnessC(sets_t, sets_len_t, pk_scratch_u8_t, pk_scratch_len_t, sig_scratch_u8_t, sig_scratch_len_t, pk_out_t, sig_out_t);
+            callback_t(res);
+        }
+    }.run, .{ sets, sets_len, pk_scratch_u8, pk_scratch_len, sig_scratch_u8, sig_scratch_len, pk_out, sig_out, callback }) catch return c.BLST_BAD_ENCODING;
+
+    return 0;
+}
+
+// this returns size in u8
+export fn sizeOfScratchPk(num_pks: usize) usize {
+    return c.blst_p1s_mult_pippenger_scratch_sizeof(num_pks);
+}
+
+export fn sizeOfScratchSig(num_sigs: usize) usize {
+    return c.blst_p2s_mult_pippenger_scratch_sizeof(num_sigs);
+}
+
 test "test_sign_n_verify" {
     try SigVariant.testSignNVerify();
 }
 
 test "test_aggregate" {
-    try SigVariant.testAggregate();
+    try SigVariant.testAggregate(true);
+}
+
+test "test_aggregate with aggregateVerifyC" {
+    try SigVariant.testAggregate(false);
 }
 
 test "test_multiple_agg_sigs" {

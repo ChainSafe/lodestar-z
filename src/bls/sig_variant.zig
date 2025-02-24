@@ -273,8 +273,8 @@ pub fn createSigVariant(
             };
         }
 
-        pub fn defaultAggregatePublicKey(out: *pk_type) void {
-            out.* = default_agg_pubkey_fn();
+        pub fn defaultAggregatePublicKey() pk_type {
+            return default_agg_pubkey_fn();
         }
 
         pub fn fromPublicKey(pk: *const PublicKey) @This() {
@@ -359,16 +359,7 @@ pub fn createSigVariant(
             return agg_pk;
         }
 
-        /// equivalent to aggregateSerialized but for compressed pks
-        pub fn aggregateCompressedPublicKeys(out: *pk_type, pks: [*c][*c]const u8, pks_len: usize, pks_validate: bool) c_uint {
-            return aggregateSerializedPublicKeysToOut(out, pks, pks_len, pk_comp_size, pks_validate);
-        }
-
-        pub fn aggregateSerializedPublicKeys(out: *pk_type, pks: [*c][*c]const u8, pks_len: usize, pks_validate: bool) c_uint {
-            return aggregateSerializedPublicKeysToOut(out, pks, pks_len, pk_ser_size, pks_validate);
-        }
-
-        fn aggregateSerializedPublicKeysToOut(out: *pk_type, pks: [*c][*c]const u8, pks_len: usize, pk_len: usize, pks_validate: bool) c_uint {
+        pub fn aggregateSerializedPublicKeys(out: *pk_type, pks: [*c][*c]const u8, pks_len: usize, pk_len: usize, pks_validate: bool) c_uint {
             if (pks_len <= 0) {
                 return c.BLST_AGGR_TYPE_MISMATCH;
             }
@@ -797,8 +788,8 @@ pub fn createSigVariant(
             };
         }
 
-        pub fn defaultAggregateSignature(out: *sig_type) void {
-            out.* = default_agg_sig_fn();
+        pub fn defaultAggregateSignature() sig_type {
+            return default_agg_sig_fn();
         }
 
         pub fn validate(self: *const @This()) BLST_ERROR!void {
@@ -877,8 +868,6 @@ pub fn createSigVariant(
 
             return c.BLST_SUCCESS;
         }
-
-        // TODO: aggregate_with_randomness
 
         pub fn aggregateSerialized(sigs: [][]const u8, sigs_groupcheck: bool) BLST_ERROR!@This() {
             // TODO - threading
@@ -1200,6 +1189,12 @@ pub fn createSigVariant(
         sig: []const u8,
     };
 
+    const PkAndSerializedSigC = extern struct {
+        pk: *pk_aff_type,
+        sig: [*c]const u8,
+        sig_len: usize,
+    };
+
     // for PublicKey and AggregatePublicKey
     const pk_multi_point = @import("./multi_point.zig").createMultiPoint(
         pk_aff_type,
@@ -1282,6 +1277,11 @@ pub fn createSigVariant(
             return SignatureSet;
         }
 
+        pub fn getPkAndSerializedSigType() type {
+            // return the C-ABI struct
+            return PkAndSerializedSigC;
+        }
+
         pub fn pubkeyFromAggregate(agg_pk: *const AggregatePublicKey) PublicKey {
             var pk_aff = PublicKey.default();
             pk_to_aff_fn(&pk_aff.point, &agg_pk.point);
@@ -1294,33 +1294,44 @@ pub fn createSigVariant(
                 return error.InvalidLen;
             }
 
-            try aggregateWithRandomnessC(&sets[0], sets.len, &pk_scratch_u8[0], pk_scratch_u8.len, &sig_scratch_u8[0], sig_scratch_u8.len, &pk_out.point, &sig_out.point);
+            var sets_c: [MAX_SIGNATURE_SETS]*const PkAndSerializedSigC = undefined;
+            for (0..sets.len) |i| {
+                sets_c[i] = &PkAndSerializedSigC{
+                    .pk = &sets[i].pk.point,
+                    .sig = &sets[i].sig[0],
+                    .sig_len = sets[i].sig.len,
+                };
+            }
+
+            const res = aggregateWithRandomnessC(&sets_c[0], sets.len, &pk_scratch_u8[0], pk_scratch_u8.len, &sig_scratch_u8[0], sig_scratch_u8.len, &pk_out.point, &sig_out.point);
+            if (toBlstError(res)) |err| {
+                return err;
+            }
         }
 
-        // TODO: make extern struct and export this function
-        pub fn aggregateWithRandomnessC(sets: [*c]*const PkAndSerializedSig, sets_len: usize, pk_scratch_u8: [*c]u8, pk_scratch_len: usize, sig_scratch_u8: [*c]u8, sig_scratch_len: usize, pk_out: *pk_aff_type, sig_out: *sig_aff_type) !void {
+        pub fn aggregateWithRandomnessC(sets: [*c]*const PkAndSerializedSigC, sets_len: usize, pk_scratch_u8: [*c]u8, pk_scratch_len: usize, sig_scratch_u8: [*c]u8, sig_scratch_len: usize, pk_out: *pk_aff_type, sig_out: *sig_aff_type) c_uint {
             if (sets_len == 0 or sets_len > MAX_SIGNATURE_SETS) {
-                return error.InvalidLen;
+                return c.BLST_BAD_ENCODING;
             }
 
-            const sig_scratch = try util.asU64Slice(sig_scratch_u8[0..pk_scratch_len]);
-            const pk_scratch = try util.asU64Slice(pk_scratch_u8[0..sig_scratch_len]);
+            const sig_scratch = util.asU64Slice(sig_scratch_u8[0..pk_scratch_len]) catch return c.BLST_VERIFY_FAIL;
+            const pk_scratch = util.asU64Slice(pk_scratch_u8[0..sig_scratch_len]) catch return c.BLST_VERIFY_FAIL;
 
             var pks_refs: [MAX_SIGNATURE_SETS]*pk_aff_type = undefined;
-            var sigs_refs: [MAX_SIGNATURE_SETS]*const sig_aff_type = undefined;
-
-            for (0..sets_len) |i| {
-                const set = sets[i];
-                pks_refs[i] = &set.pk.point;
-                const sig = try Signature.sigValidate(set.sig, true);
-                sigs_refs[i] = &sig.point;
-            }
-
+            var sigs = [_]sig_aff_type{default_sig_fn()} ** MAX_SIGNATURE_SETS;
+            var sigs_refs: [MAX_SIGNATURE_SETS]*sig_aff_type = undefined;
             var rands: [32 * MAX_SIGNATURE_SETS]u8 = [_]u8{0} ** (32 * MAX_SIGNATURE_SETS);
-            randBytes(rands[0..]);
-
+            randBytes(rands[0..(32 * sets_len)]);
             var scalars_refs: [MAX_SIGNATURE_SETS]*u8 = undefined;
+
             for (0..sets_len) |i| {
+                var set = sets[i];
+                pks_refs[i] = set.pk;
+                sigs_refs[i] = &sigs[i];
+                const res = Signature.sigValidateC(sigs_refs[i], &set.sig[0], set.sig_len, true);
+                if (res != c.BLST_SUCCESS) {
+                    return res;
+                }
                 scalars_refs[i] = &rands[i * 32];
             }
 
@@ -1333,6 +1344,8 @@ pub fn createSigVariant(
             var mult_sig_res = default_agg_sig_fn();
             multSignaturesC(&mult_sig_res, &sigs_refs[0], sets_len, &scalars_refs[0], n_bits, &sig_scratch[0]);
             AggregateSignature.aggregateToSignature(sig_out, &mult_sig_res);
+
+            return c.BLST_SUCCESS;
         }
 
         /// Multipoint
@@ -1410,7 +1423,7 @@ pub fn createSigVariant(
             try sig.verify(true, msg[0..], dst[0..], null, &pk, true);
         }
 
-        pub fn testAggregate() !void {
+        pub fn testAggregate(comptime is_diff_msg_len: bool) !void {
             const num_msgs = 10;
             const dst = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
 
@@ -1438,7 +1451,9 @@ pub fn createSigVariant(
 
             var msgs: [num_msgs][]u8 = undefined;
             // random message len
-            const msg_lens: [num_msgs]u64 = comptime .{ 33, 34, 39, 22, 43, 1, 24, 60, 2, 41 };
+            // same message length to test aggregateVerifyC
+            const same_msg_len = 32;
+            const msg_lens: [num_msgs]u64 = comptime if (is_diff_msg_len) .{ 33, 34, 39, 22, 43, 1, 24, 60, 2, 41 } else [_]u64{same_msg_len} ** num_msgs;
 
             inline for (0..num_msgs) |i| {
                 var msg = [_]u8{0} ** msg_lens[i];
@@ -1477,6 +1492,21 @@ pub fn createSigVariant(
 
             // positive test
             try agg_sig.aggregateVerify(false, msgs[0..], dst, pks_ptr[0..], false, pairing_buffer);
+
+            // only expect this to pass if all messages are the same length
+            // const res = Signature.verifyMultipleAggregateSignaturesC(&sets[0], num_sigs, msg_lens[0], &dst[0], dst.len, false, false, &rands_c[0], rands_c.len, 64, &pairing_buffer[0], pairing_buffer.len);
+            if (is_diff_msg_len == false) {
+                var msgs_refs: [num_msgs][*c]const u8 = undefined;
+                for (msgs[0..], 0..num_msgs) |msg, i| {
+                    msgs_refs[i] = &msg[0];
+                }
+                var pks_refs: [num_msgs]*pk_aff_type = undefined;
+                for (pks_ptr[0..], 0..num_msgs) |pk, i| {
+                    pks_refs[i] = &pk.point;
+                }
+                const res = Signature.aggregateVerifyC(&agg_sig.point, false, &msgs_refs[0], msgs_refs.len, same_msg_len, &dst[0], dst.len, &pks_refs[0], pks_refs.len, false, &pairing_buffer[0], pairing_buffer.len);
+                try std.testing.expect(res == c.BLST_SUCCESS);
+            }
 
             // Swap message/public key pairs to create bad signature
             if (agg_sig.aggregateVerify(false, msgs[0..], dst, pks_ptr_rev[0..], false, pairing_buffer)) {
@@ -1975,10 +2005,10 @@ pub fn randBytes(bytes: []u8) void {
 
 var random: ?std.rand.DefaultPrng = null;
 
-fn getRandom() std.rand.DefaultPrng {
+fn getRandom() *std.rand.DefaultPrng {
     if (random == null) {
         const timestamp: u64 = @intCast(std.time.milliTimestamp());
         random = std.rand.DefaultPrng.init(timestamp);
     }
-    return random.?;
+    return &random.?;
 }
