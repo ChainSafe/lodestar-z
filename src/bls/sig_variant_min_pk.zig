@@ -208,6 +208,8 @@ const RAND_BYTES = 8;
 const RAND_BITS = 8 * RAND_BYTES;
 var rands: [RAND_BYTES * MAX_SIGNATURE_SETS]u8 = [_]u8{0} ** (RAND_BYTES * MAX_SIGNATURE_SETS);
 var rand_refs: [MAX_SIGNATURE_SETS][*c]u8 = undefined;
+// Flag to track rand_refs initialization
+var rand_refs_initialized: bool = false;
 
 fn initRandRefs() void {
     for (0..MAX_SIGNATURE_SETS) |i| {
@@ -219,9 +221,11 @@ fn initRandRefs() void {
 /// - pairing_buffer: reuse at consumer side
 /// - random bytes: do stack allocation and reuse
 export fn verifyMultipleAggregateSignatures(sets: [*c]*const SignatureSetType, sets_len: usize, msg_len: usize, pks_validate: bool, sigs_groupcheck: bool, pairing_buffer: [*c]u8, pairing_buffer_len: usize) c_uint {
-    if (rand_refs[0] == undefined) {
+    if (rand_refs_initialized == false) {
         initRandRefs();
     }
+    rand_refs_initialized = true;
+
     if (sets_len > MAX_SIGNATURE_SETS) {
         return c.BLST_BAD_ENCODING;
     }
