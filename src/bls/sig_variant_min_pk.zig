@@ -2,6 +2,9 @@ const std = @import("std");
 const testing = std.testing;
 const Xoshiro256 = std.rand.Xoshiro256;
 const Pairing = @import("./pairing.zig").Pairing;
+const spawnTask = @import("./thread_pool.zig").spawnTask;
+const initializeThreadPool = @import("./thread_pool.zig").initializeThreadPool;
+const deinitializeThreadPool = @import("./thread_pool.zig").deinitializeThreadPool;
 const c = @cImport({
     @cInclude("blst.h");
 });
@@ -89,6 +92,7 @@ const AggregateSignatureType = SigVariant.getAggregateSignatureType();
 const SecretKeyType = SigVariant.getSecretKeyType();
 const SignatureSetType = SigVariant.getSignatureSetType();
 const PkAndSerializedSigType = SigVariant.getPkAndSerializedSigType();
+const CallBackFn = SigVariant.getCallBackFn();
 
 /// PublicKey functions
 export fn defaultPublicKey() PublicKeyType {
@@ -390,24 +394,23 @@ export fn sizeOfPairing() c_uint {
     return @intCast(Pairing.sizeOf());
 }
 
-// TODO: aggregateWithRandomnessC: need to implement extern struct
-
 export fn aggregateWithRandomness(sets: [*c]*const PkAndSerializedSigType, sets_len: c_uint, pk_scratch_u8: [*c]u8, pk_scratch_len: c_uint, sig_scratch_u8: [*c]u8, sig_scratch_len: c_uint, pk_out: *PublicKeyType, sig_out: *SignatureType) c_uint {
-    return SigVariant.aggregateWithRandomnessC(sets, sets_len, pk_scratch_u8, pk_scratch_len, sig_scratch_u8, sig_scratch_len, pk_out, sig_out);
+    return SigVariant.aggregateWithRandomnessC(sets, sets_len, pk_scratch_u8, pk_scratch_len, sig_scratch_u8, sig_scratch_len, pk_out, sig_out, null);
 }
 
-pub const CallbackFn = *const fn (result: c_uint) callconv(.C) void;
+export fn asyncAggregateWithRandomness(sets: [*c]*const PkAndSerializedSigType, sets_len: c_uint, pk_scratch_u8: [*c]u8, pk_scratch_len: c_uint, sig_scratch_u8: [*c]u8, sig_scratch_len: c_uint, pk_out: *PublicKeyType, sig_out: *SignatureType, callback: CallBackFn) c_uint {
+    return SigVariant.asyncAggregateWithRandomness(sets, sets_len, pk_scratch_u8, pk_scratch_len, sig_scratch_u8, sig_scratch_len, pk_out, sig_out, callback);
+}
 
-export fn asyncAggregateWithRandomness(sets: [*c]*const PkAndSerializedSigType, sets_len: c_uint, pk_scratch_u8: [*c]u8, pk_scratch_len: c_uint, sig_scratch_u8: [*c]u8, sig_scratch_len: c_uint, pk_out: *PublicKeyType, sig_out: *SignatureType, callback: CallbackFn) c_uint {
-    // TODO: use thread pool
-    _ = std.Thread.spawn(.{}, struct {
-        fn run(sets_t: [*c]*const PkAndSerializedSigType, sets_len_t: c_uint, pk_scratch_u8_t: [*c]u8, pk_scratch_len_t: c_uint, sig_scratch_u8_t: [*c]u8, sig_scratch_len_t: c_uint, pk_out_t: *PublicKeyType, sig_out_t: *SignatureType, callback_t: CallbackFn) void {
-            const res = SigVariant.aggregateWithRandomnessC(sets_t, sets_len_t, pk_scratch_u8_t, pk_scratch_len_t, sig_scratch_u8_t, sig_scratch_len_t, pk_out_t, sig_out_t);
-            callback_t(res);
-        }
-    }.run, .{ sets, sets_len, pk_scratch_u8, pk_scratch_len, sig_scratch_u8, sig_scratch_len, pk_out, sig_out, callback }) catch return c.BLST_BAD_ENCODING;
+/// a Bun application should call this before using any of the exported functions
+export fn init() c_uint {
+    initializeThreadPool(null) catch return c.BLST_BAD_ENCODING;
+    return c.BLST_SUCCESS;
+}
 
-    return 0;
+/// a Bun application should call this after using any of the exported functions
+export fn deinit() void {
+    deinitializeThreadPool();
 }
 
 // this returns size in u8

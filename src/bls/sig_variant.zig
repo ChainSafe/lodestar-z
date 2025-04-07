@@ -4,6 +4,9 @@ const testing = std.testing;
 const Xoshiro256 = std.rand.Xoshiro256;
 const P = @import("./pairing.zig").Pairing;
 const PairingError = @import("./pairing.zig").PairingError;
+const spawnTask = @import("./thread_pool.zig").spawnTask;
+const initializeThreadPool = @import("./thread_pool.zig").initializeThreadPool;
+const deinitializeThreadPool = @import("./thread_pool.zig").deinitializeThreadPool;
 
 const c = @cImport({
     @cInclude("blst.h");
@@ -15,6 +18,26 @@ const toBlstError = util.toBlstError;
 
 /// specific constant used in aggregateWithRandomness() to avoid heap allocation
 pub const MAX_SIGNATURE_SETS = 128;
+
+/// ideally I want to have this struct inside test but it does not work
+/// TODO: consider moving to test with zig verion > 0.13
+const Context = struct {
+    fn callback(verification_res: c_uint) callconv(.C) void {
+        if (Context.mutex) |_mutex| {
+            _mutex.lock();
+            var _verify_res = verification_res;
+            Context.verify_result = &_verify_res;
+            defer _mutex.unlock();
+            if (Context.cond) |_cond| {
+                _cond.signal();
+            }
+        }
+    }
+
+    var mutex: ?*std.Thread.Mutex = null;
+    var cond: ?*std.Thread.Condition = null;
+    var verify_result: ?*c_uint = null;
+};
 
 /// generic implementation for both min_pk and min_sig
 /// this is equivalent to Rust binding in blst/bindings/rust/src/lib.rs
@@ -1232,6 +1255,8 @@ pub fn createSigVariant(
 
     // TODO: consume the above struct to work with public data structures
 
+    const CallbackFn = *const fn (result: c_uint) callconv(.C) void;
+
     return struct {
         pub fn createSecretKey() type {
             return SecretKey;
@@ -1282,6 +1307,10 @@ pub fn createSigVariant(
             return PkAndSerializedSigC;
         }
 
+        pub fn getCallBackFn() type {
+            return CallbackFn;
+        }
+
         pub fn pubkeyFromAggregate(agg_pk: *const AggregatePublicKey) PublicKey {
             var pk_aff = PublicKey.default();
             pk_to_aff_fn(&pk_aff.point, &agg_pk.point);
@@ -1303,19 +1332,44 @@ pub fn createSigVariant(
                 };
             }
 
-            const res = aggregateWithRandomnessC(&sets_c[0], sets.len, &pk_scratch_u8[0], pk_scratch_u8.len, &sig_scratch_u8[0], sig_scratch_u8.len, &pk_out.point, &sig_out.point);
+            // no callback provided because this function is synchronous
+            const res = aggregateWithRandomnessC(&sets_c[0], sets.len, &pk_scratch_u8[0], pk_scratch_u8.len, &sig_scratch_u8[0], sig_scratch_u8.len, &pk_out.point, &sig_out.point, null);
             if (toBlstError(res)) |err| {
                 return err;
             }
         }
 
-        pub fn aggregateWithRandomnessC(sets: [*c]*const PkAndSerializedSigC, sets_len: usize, pk_scratch_u8: [*c]u8, pk_scratch_len: usize, sig_scratch_u8: [*c]u8, sig_scratch_len: usize, pk_out: *pk_aff_type, sig_out: *sig_aff_type) c_uint {
+        /// the same to aggregateWithRandomness with a callback provided
+        pub fn asyncAggregateWithRandomness(sets: [*c]*const PkAndSerializedSigC, sets_len: usize, pk_scratch_u8: [*c]u8, pk_scratch_len: usize, sig_scratch_u8: [*c]u8, sig_scratch_len: usize, pk_out: *pk_aff_type, sig_out: *sig_aff_type, callback: CallbackFn) c_uint {
+            spawnTask(struct {
+                fn run(sets_t: [*c]*const PkAndSerializedSigC, sets_len_t: usize, pk_scratch_u8_t: [*c]u8, pk_scratch_len_t: usize, sig_scratch_u8_t: [*c]u8, sig_scratch_len_t: usize, pk_out_t: *pk_aff_type, sig_out_t: *sig_aff_type, callback_t: CallbackFn) void {
+                    _ = aggregateWithRandomnessC(sets_t, sets_len_t, pk_scratch_u8_t, pk_scratch_len_t, sig_scratch_u8_t, sig_scratch_len_t, pk_out_t, sig_out_t, callback_t);
+                }
+            }.run, .{ sets, sets_len, pk_scratch_u8, pk_scratch_len, sig_scratch_u8, sig_scratch_len, pk_out, sig_out, callback }) catch return c.BLST_BAD_ENCODING;
+
+            return c.BLST_SUCCESS;
+        }
+
+        pub fn aggregateWithRandomnessC(sets: [*c]*const PkAndSerializedSigC, sets_len: usize, pk_scratch_u8: [*c]u8, pk_scratch_len: usize, sig_scratch_u8: [*c]u8, sig_scratch_len: usize, pk_out: *pk_aff_type, sig_out: *sig_aff_type, callbackFn: ?CallbackFn) c_uint {
             if (sets_len == 0 or sets_len > MAX_SIGNATURE_SETS) {
+                if (callbackFn) |callback| {
+                    callback(c.BLST_BAD_ENCODING);
+                }
                 return c.BLST_BAD_ENCODING;
             }
 
-            const sig_scratch = util.asU64Slice(sig_scratch_u8[0..pk_scratch_len]) catch return c.BLST_VERIFY_FAIL;
-            const pk_scratch = util.asU64Slice(pk_scratch_u8[0..sig_scratch_len]) catch return c.BLST_VERIFY_FAIL;
+            const sig_scratch = util.asU64Slice(sig_scratch_u8[0..pk_scratch_len]) catch {
+                if (callbackFn) |callback| {
+                    callback(c.BLST_VERIFY_FAIL);
+                }
+                return c.BLST_VERIFY_FAIL;
+            };
+            const pk_scratch = util.asU64Slice(pk_scratch_u8[0..sig_scratch_len]) catch {
+                if (callbackFn) |callback| {
+                    callback(c.BLST_VERIFY_FAIL);
+                }
+                return c.BLST_VERIFY_FAIL;
+            };
 
             var pks_refs: [MAX_SIGNATURE_SETS]*pk_aff_type = undefined;
             var sigs = [_]sig_aff_type{default_sig_fn()} ** MAX_SIGNATURE_SETS;
@@ -1330,6 +1384,9 @@ pub fn createSigVariant(
                 sigs_refs[i] = &sigs[i];
                 const res = Signature.sigValidateC(sigs_refs[i], &set.sig[0], set.sig_len, true);
                 if (res != c.BLST_SUCCESS) {
+                    if (callbackFn) |callback| {
+                        callback(res);
+                    }
                     return res;
                 }
                 scalars_refs[i] = &rands[i * 32];
@@ -1345,6 +1402,9 @@ pub fn createSigVariant(
             multSignaturesC(&mult_sig_res, &sigs_refs[0], sets_len, &scalars_refs[0], n_bits, &sig_scratch[0]);
             AggregateSignature.aggregateToSignature(sig_out, &mult_sig_res);
 
+            if (callbackFn) |callback| {
+                callback(c.BLST_SUCCESS);
+            }
             return c.BLST_SUCCESS;
         }
 
@@ -1957,10 +2017,13 @@ pub fn createSigVariant(
             var agg_sig = Signature.default();
 
             var set: [num_pks]*PkAndSerializedSig = undefined;
+            var set_c: [num_pks]*PkAndSerializedSigC = undefined;
             for (0..num_pks) |i| {
                 const bytes = sigs[i].serialize();
                 var s = PkAndSerializedSig{ .pk = &pks[i], .sig = bytes[0..] };
                 set[i] = &s;
+                var s_c = PkAndSerializedSigC{ .pk = &pks[i].point, .sig = &bytes[0], .sig_len = bytes.len };
+                set_c[i] = &s_c;
             }
 
             // scratch, allocate once and reuse
@@ -1975,6 +2038,33 @@ pub fn createSigVariant(
 
             try aggregateWithRandomness(set[0..], pk_scratch_u8, sig_scratch_u8, &agg_pk, &agg_sig);
 
+            try agg_sig.verify(true, msg[0..], dst, null, &agg_pk, true);
+
+            try initializeThreadPool(allocator);
+            defer deinitializeThreadPool();
+            var mutex = std.Thread.Mutex{};
+            Context.mutex = &mutex;
+            var cond = std.Thread.Condition{};
+            Context.cond = &cond;
+            Context.verify_result = null;
+
+            const call_res = asyncAggregateWithRandomness(&set_c[0], num_pks, &pk_scratch_u8[0], pk_scratch_u8.len, &sig_scratch_u8[0], sig_scratch_u8.len, &agg_pk.point, &agg_sig.point, Context.callback);
+            try std.testing.expectEqual(call_res, 0);
+            mutex.lock();
+            defer mutex.unlock();
+
+            // wait for the callback (triggerred from another thread) to finish
+            while (Context.verify_result == null) {
+                cond.wait(&mutex);
+            }
+
+            if (Context.verify_result) |verify_result| {
+                try std.testing.expectEqual(0, verify_result.*);
+            } else {
+                try std.testing.expect(false);
+            }
+
+            // make sure the aggregated public key and signature are valid
             try agg_sig.verify(true, msg[0..], dst, null, &agg_pk, true);
         }
 
