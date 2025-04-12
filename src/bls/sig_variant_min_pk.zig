@@ -226,7 +226,13 @@ fn initRandRefs() void {
 /// this is single thread version so it can reuse some params:
 /// - pairing_buffer: reuse at consumer side
 /// - random bytes: do stack allocation and reuse
-export fn verifyMultipleAggregateSignatures(sets: [*c]*const SignatureSetType, sets_len: usize, msg_len: usize, pks_validate: bool, sigs_groupcheck: bool, pairing_buffer: [*c]u8, pairing_buffer_len: usize) c_uint {
+export fn verifyMultipleAggregateSignatures(sets: [*c]*const SignatureSetType, sets_len: usize, msg_len: usize, pks_validate: bool, sigs_groupcheck: bool) c_uint {
+    return doVerifyMultipleAggregateSignatures(null, sets, sets_len, msg_len, pks_validate, sigs_groupcheck);
+}
+
+/// a zig application should pass the allocator to this function
+/// for Bun binding, allocator is null
+pub fn doVerifyMultipleAggregateSignatures(allocator: ?Allocator, sets: [*c]*const SignatureSetType, sets_len: usize, msg_len: usize, pks_validate: bool, sigs_groupcheck: bool) c_uint {
     if (rand_refs_initialized == false) {
         initRandRefs();
     }
@@ -236,7 +242,8 @@ export fn verifyMultipleAggregateSignatures(sets: [*c]*const SignatureSetType, s
         return c.BLST_BAD_ENCODING;
     }
     randBytes(rands[0..(sets_len * 8)]);
-    return Signature.verifyMultipleAggregateSignaturesC(sets, sets_len, msg_len, &DST[0], DST.len, pks_validate, sigs_groupcheck, &rand_refs[0], sets_len, RAND_BITS, pairing_buffer, pairing_buffer_len);
+    const pool = getMemoryPool(allocator) catch return c.BLST_BAD_ENCODING;
+    return Signature.verifyMultipleAggregateSignaturesC(sets, sets_len, msg_len, &DST[0], DST.len, pks_validate, sigs_groupcheck, &rand_refs[0], sets_len, RAND_BITS, pool);
 }
 
 export fn signatureFromAggregate(out: *SignatureType, agg_sig: *const AggregateSignatureType) void {
@@ -523,10 +530,6 @@ test "verify_multipleaggregatesignatures" {
     var sig0 = defaultSignature();
     sign(&sig0, &sk0, &msg0[0], msg0.len);
 
-    const allocator = std.testing.allocator;
-    const pairing_buffer = try allocator.alloc(u8, Pairing.sizeOf());
-    defer allocator.free(pairing_buffer);
-
     const set: SignatureSetType = .{
         .msg = &msg0[0],
         .pk = &pk0,
@@ -534,6 +537,8 @@ test "verify_multipleaggregatesignatures" {
     };
     var sets = [_]*const SignatureSetType{&set};
 
-    res = verifyMultipleAggregateSignatures(&sets[0], 1, msg0.len, false, false, &pairing_buffer[0], pairing_buffer.len);
+    try initializeThreadPool(null);
+    defer deinitializeThreadPool();
+    res = verifyMultipleAggregateSignatures(&sets[0], 1, msg0.len, false, false);
     try std.testing.expect(res == 0);
 }

@@ -13,6 +13,9 @@ pub const BLST_ERROR = error{
     FAILED_PAIRING,
 };
 
+// BLST_ERROR max as 7
+pub const BLST_FAILED_PAIRING: c_uint = 10;
+
 pub fn toBlstError(err: c_uint) ?BLST_ERROR {
     switch (err) {
         c.BLST_BAD_ENCODING => return BLST_ERROR.BAD_ENCODING,
@@ -22,6 +25,7 @@ pub fn toBlstError(err: c_uint) ?BLST_ERROR {
         c.BLST_VERIFY_FAIL => return BLST_ERROR.VERIFY_FAIL,
         c.BLST_PK_IS_INFINITY => return BLST_ERROR.PK_IS_INFINITY,
         c.BLST_BAD_SCALAR => return BLST_ERROR.BAD_SCALAR,
+        BLST_FAILED_PAIRING => return BLST_ERROR.FAILED_PAIRING,
         else => return null,
     }
 }

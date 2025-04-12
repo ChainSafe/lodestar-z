@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const WaitGroup = std.Thread.WaitGroup;
 
 threadlocal var thread_pool: ?*std.Thread.Pool = null;
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -33,16 +34,43 @@ pub fn spawnTask(comptime func: anytype, args: anytype) !void {
     }
 }
 
-test "thread pool with allocator" {
+/// Spawn a new thread with a WaitGroup so that we can wait for the whole WaitGroup to finish
+pub fn spawnTaskWg(wg: *WaitGroup, comptime func: anytype, args: anytype) void {
+    if (thread_pool) |pool| {
+        pool.spawnWg(wg, func, args);
+    } else {
+        @panic("Thread pool is not initialized");
+    }
+}
+
+/// Wait for all tasks that's spawned with the same WaitGroup
+pub fn waitAndWork(wg: *WaitGroup) void {
+    if (thread_pool) |pool| {
+        pool.waitAndWork(wg);
+    } else {
+        @panic("Thread pool is not initialized");
+    }
+}
+
+test "thread pool - spawnTask with allocator" {
     const allocator = std.testing.allocator;
-    try performTest(allocator);
+    try performSpawnTaskTest(allocator);
 }
 
-test "thread pool with no allocator" {
-    try performTest(null);
+test "thread pool - spawnTask with no allocator" {
+    try performSpawnTaskTest(null);
 }
 
-fn performTest(allocator: ?Allocator) !void {
+test "thread pool - spawnTaskWg with allocator" {
+    const allocator = std.testing.allocator;
+    try performSpawnTaskWgTest(allocator);
+}
+
+test "thread pool - spawnTaskWg with no allocator" {
+    try performSpawnTaskWgTest(null);
+}
+
+fn performSpawnTaskTest(allocator: ?Allocator) !void {
     try initializeThreadPool(allocator);
     defer deinitializeThreadPool();
     var m = std.Thread.Mutex{};
@@ -69,4 +97,30 @@ fn performTest(allocator: ?Allocator) !void {
     while (total_finished < 4) {
         c.wait(&m);
     }
+}
+
+fn performSpawnTaskWgTest(allocator: ?Allocator) !void {
+    try initializeThreadPool(allocator);
+    defer deinitializeThreadPool();
+    var wg = WaitGroup{};
+    var m = std.Thread.Mutex{};
+    var total_finished: usize = 0;
+
+    const Task = struct {
+        fn run(wait_ms: usize, mutex: *std.Thread.Mutex, finished: *usize) void {
+            mutex.lock();
+            defer mutex.unlock();
+            std.time.sleep(wait_ms * std.time.ns_per_ms);
+            finished.* += 1;
+        }
+    };
+
+    spawnTaskWg(&wg, Task.run, .{ 10, &m, &total_finished });
+    spawnTaskWg(&wg, Task.run, .{ 11, &m, &total_finished });
+    spawnTaskWg(&wg, Task.run, .{ 12, &m, &total_finished });
+    spawnTaskWg(&wg, Task.run, .{ 13, &m, &total_finished });
+
+    waitAndWork(&wg);
+
+    try std.testing.expectEqual(total_finished, 4);
 }

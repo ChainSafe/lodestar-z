@@ -5,8 +5,10 @@ const c = @cImport({
 });
 
 const ScratchSizeOfFn = *const fn (npoints: usize) callconv(.C) usize;
+const PairingSizeOfFn = *const fn () usize;
 
 const U64SliceArray = std.ArrayList([]u64);
+const U8SliceArray = std.ArrayList([]u8);
 
 /// for some apis, for example, aggregateWithRandomness, we have to allocate pk_scratch and sig_scratch buffer
 /// since these are not constant, we need to allocate them dynamically
@@ -14,16 +16,19 @@ const U64SliceArray = std.ArrayList([]u64);
 /// this implementation assumes an application only go with either min_pk or min_sig
 /// pk_scratch_sizeof_fn: it's c.blst_p1s_mult_pippenger_scratch_sizeof function for min_pk
 /// sig_scratch_sizeof_fn: it's c.blst_p2s_mult_pippenger_scratch_sizeof function for min_sig
-pub fn createMemoryPool(comptime scratch_in_batch: usize, comptime pk_scratch_sizeof_fn: ScratchSizeOfFn, comptime sig_scratch_sizeof_fn: ScratchSizeOfFn) type {
+pub fn createMemoryPool(comptime scratch_in_batch: usize, comptime pk_scratch_sizeof_fn: ScratchSizeOfFn, comptime sig_scratch_sizeof_fn: ScratchSizeOfFn, comptime pairing_sizeof_fn: PairingSizeOfFn) type {
     const MemoryPool = struct {
         // aggregateWithRandomness api, application decides number of signatures/publickeys to aggregate in batch
         // for Bun, it's 128
         pk_scratch_size_u64: usize,
         sig_scratch_size_u64: usize,
+        pairing_size_u8: usize,
         pk_scratch_arr: U64SliceArray,
         sig_scratch_arr: U64SliceArray,
+        pairing_buffer_arr: U8SliceArray,
         pk_scratch_mutex: std.Thread.Mutex,
         sig_scratch_mutex: std.Thread.Mutex,
+        pairing_mutex: std.Thread.Mutex,
         allocator: Allocator,
 
         // inspired by thread pool implementation, consumer need to do the allocator.create() before this calls
@@ -33,11 +38,14 @@ pub fn createMemoryPool(comptime scratch_in_batch: usize, comptime pk_scratch_si
             self.* = .{
                 .pk_scratch_size_u64 = pk_scratch_size_u64,
                 .sig_scratch_size_u64 = sig_scratch_size_u64,
+                .pairing_size_u8 = pairing_sizeof_fn(),
                 .pk_scratch_arr = try U64SliceArray.initCapacity(allocator, 0),
                 .sig_scratch_arr = try U64SliceArray.initCapacity(allocator, 0),
+                .pairing_buffer_arr = try U8SliceArray.initCapacity(allocator, 0),
                 .allocator = allocator,
                 .pk_scratch_mutex = std.Thread.Mutex{},
                 .sig_scratch_mutex = std.Thread.Mutex{},
+                .pairing_mutex = std.Thread.Mutex{},
             };
         }
 
@@ -53,6 +61,11 @@ pub fn createMemoryPool(comptime scratch_in_batch: usize, comptime pk_scratch_si
                 self.allocator.free(sig_scratch);
             }
             self.sig_scratch_arr.deinit();
+
+            for (self.pairing_buffer_arr.items) |pairing_buffer| {
+                self.allocator.free(pairing_buffer);
+            }
+            self.pairing_buffer_arr.deinit();
         }
 
         pub fn getPublicKeyScratch(self: *@This()) ![]u64 {
@@ -91,6 +104,24 @@ pub fn createMemoryPool(comptime scratch_in_batch: usize, comptime pk_scratch_si
             return last_scratch;
         }
 
+        pub fn getPairingBuffer(self: *@This()) ![]u8 {
+            if (self.pairing_buffer_arr.items.len == 0) {
+                // allocate new
+                return try self.allocator.alloc(u8, self.pairing_size_u8);
+            }
+
+            self.pairing_mutex.lock();
+            defer self.pairing_mutex.unlock();
+
+            // reuse last
+            const last_pairing_buffer = self.pairing_buffer_arr.pop();
+            if (last_pairing_buffer.len != self.pairing_size_u8) {
+                // this should not happen
+                return error.InvalidPairingBufferSize;
+            }
+            return last_pairing_buffer;
+        }
+
         pub fn returnPublicKeyScratch(self: *@This(), scratch: []u64) !void {
             if (scratch.len != self.pk_scratch_size_u64) {
                 // this should not happen
@@ -114,6 +145,18 @@ pub fn createMemoryPool(comptime scratch_in_batch: usize, comptime pk_scratch_si
             // return the scratch to the pool
             try self.sig_scratch_arr.append(scratch);
         }
+
+        pub fn returnPairingBuffer(self: *@This(), buffer: []u8) !void {
+            if (buffer.len != self.pairing_size_u8) {
+                // this should not happen
+                return error.InvalidPairingBufferSize;
+            }
+
+            self.pairing_mutex.lock();
+            defer self.pairing_mutex.unlock();
+            // return the pairing buffer to the pool
+            try self.pairing_buffer_arr.append(buffer);
+        }
     };
 
     return MemoryPool;
@@ -121,7 +164,11 @@ pub fn createMemoryPool(comptime scratch_in_batch: usize, comptime pk_scratch_si
 
 test "memory pool - public key scratch" {
     const scratch_in_batch = 128;
-    const MemoryPool = createMemoryPool(scratch_in_batch, c.blst_p1s_mult_pippenger_scratch_sizeof, c.blst_p2s_mult_pippenger_scratch_sizeof);
+    const MemoryPool = createMemoryPool(scratch_in_batch, c.blst_p1s_mult_pippenger_scratch_sizeof, c.blst_p2s_mult_pippenger_scratch_sizeof, struct {
+        pub fn pairingSizeOfFn() usize {
+            return 32;
+        }
+    }.pairingSizeOfFn);
     const allocator = std.testing.allocator;
     var pool = try allocator.create(MemoryPool);
     try pool.init(allocator);
@@ -145,7 +192,11 @@ test "memory pool - public key scratch" {
 
 test "memory pool - signature scratch" {
     const scratch_in_batch = 128;
-    const MemoryPool = createMemoryPool(scratch_in_batch, c.blst_p1s_mult_pippenger_scratch_sizeof, c.blst_p2s_mult_pippenger_scratch_sizeof);
+    const MemoryPool = createMemoryPool(scratch_in_batch, c.blst_p1s_mult_pippenger_scratch_sizeof, c.blst_p2s_mult_pippenger_scratch_sizeof, struct {
+        pub fn pairingSizeOfFn() usize {
+            return 32;
+        }
+    }.pairingSizeOfFn);
     const allocator = std.testing.allocator;
     var pool = try allocator.create(MemoryPool);
     try pool.init(allocator);
@@ -168,9 +219,42 @@ test "memory pool - signature scratch" {
     defer allocator.free(sig_scratch_0);
 }
 
+test "memory pool - pairing buffer" {
+    const scratch_in_batch = 128;
+    const MemoryPool = createMemoryPool(scratch_in_batch, c.blst_p1s_mult_pippenger_scratch_sizeof, c.blst_p2s_mult_pippenger_scratch_sizeof, struct {
+        pub fn pairingSizeOfFn() usize {
+            return 32;
+        }
+    }.pairingSizeOfFn);
+    const allocator = std.testing.allocator;
+    var pool = try allocator.create(MemoryPool);
+    try pool.init(allocator);
+    defer {
+        pool.deinit();
+        allocator.destroy(pool);
+    }
+
+    try std.testing.expect(pool.pairing_buffer_arr.items.len == 0);
+    // allocate new
+    var pairing_buffer_0 = try pool.getPairingBuffer();
+    try std.testing.expect(pool.pairing_buffer_arr.items.len == 0);
+    try pool.returnPairingBuffer(pairing_buffer_0);
+    try std.testing.expect(pool.pairing_buffer_arr.items.len == 1);
+
+    // reuse
+    pairing_buffer_0 = try pool.getPairingBuffer();
+    // no need to allocate again
+    try std.testing.expect(pool.pairing_buffer_arr.items.len == 0);
+    defer allocator.free(pairing_buffer_0);
+}
+
 test "memory pool - multi thread" {
     const scratch_in_batch = 128;
-    const MemoryPool = createMemoryPool(scratch_in_batch, c.blst_p1s_mult_pippenger_scratch_sizeof, c.blst_p2s_mult_pippenger_scratch_sizeof);
+    const MemoryPool = createMemoryPool(scratch_in_batch, c.blst_p1s_mult_pippenger_scratch_sizeof, c.blst_p2s_mult_pippenger_scratch_sizeof, struct {
+        pub fn pairingSizeOfFn() usize {
+            return 32;
+        }
+    }.pairingSizeOfFn);
     const allocator = std.testing.allocator;
     var memory_pool = try allocator.create(MemoryPool);
     try memory_pool.init(allocator);
@@ -195,9 +279,11 @@ test "memory pool - multi thread" {
             pub fn run(pool: *MemoryPool, done: *usize, m: *std.Thread.Mutex) void {
                 const pk_scratch = pool.getPublicKeyScratch() catch return;
                 const sig_scratch = pool.getSignatureScratch() catch return;
+                const pairing_buffer = pool.getPairingBuffer() catch return;
                 defer {
                     pool.returnPublicKeyScratch(pk_scratch) catch {};
                     pool.returnSignatureScratch(sig_scratch) catch {};
+                    pool.returnPairingBuffer(pairing_buffer) catch {};
                 }
                 std.time.sleep(1 * std.time.ns_per_ms);
                 m.lock();
@@ -212,4 +298,5 @@ test "memory pool - multi thread" {
     // on MacOS it prints 9, give some leeway for Linux
     try std.testing.expect(memory_pool.pk_scratch_arr.items.len < task_count / 2);
     try std.testing.expect(memory_pool.sig_scratch_arr.items.len < task_count / 2);
+    try std.testing.expect(memory_pool.pairing_buffer_arr.items.len < task_count / 2);
 }
