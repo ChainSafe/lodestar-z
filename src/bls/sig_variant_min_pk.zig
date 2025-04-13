@@ -198,16 +198,22 @@ export fn verifySignature(sig: *const SignatureType, sig_groupcheck: bool, msg: 
     return Signature.verifySignature(sig, sig_groupcheck, msg, msg_len, &DST[0], DST.len, null, 0, pk, pk_validate);
 }
 
-export fn aggregateVerify(sig: *const SignatureType, sig_groupcheck: bool, msgs: [*c][*c]const u8, msgs_len: usize, msg_len: usize, pks: [*c]const *PublicKeyType, pks_len: usize, pks_validate: bool, pairing_buffer: [*c]u8, pairing_buffer_len: usize) c_uint {
-    return Signature.aggregateVerifyC(sig, sig_groupcheck, msgs, msgs_len, msg_len, &DST[0], DST.len, pks, pks_len, pks_validate, pairing_buffer, pairing_buffer_len);
+export fn aggregateVerify(sig: *const SignatureType, sig_groupcheck: bool, msgs: [*c][*c]const u8, msgs_len: usize, msg_len: usize, pks: [*c]const *PublicKeyType, pks_len: usize, pks_validate: bool) c_uint {
+    // TODO: same function for zig application with allocator
+    const pool = getMemoryPool(null) catch return c.BLST_BAD_ENCODING;
+    return Signature.aggregateVerifyC(sig, sig_groupcheck, msgs, msgs_len, msg_len, &DST[0], DST.len, pks, pks_len, pks_validate, pool);
 }
 
-export fn fastAggregateVerify(sig: *const SignatureType, sig_groupcheck: bool, msg: [*c]const u8, msg_len: usize, pks: [*c]*const PublicKeyType, pks_len: usize, pairing_buffer: [*c]u8, pairing_buffer_len: usize) c_uint {
-    return Signature.fastAggregateVerifyC(sig, sig_groupcheck, msg, msg_len, &DST[0], DST.len, pks, pks_len, pairing_buffer, pairing_buffer_len);
+export fn fastAggregateVerify(sig: *const SignatureType, sig_groupcheck: bool, msg: [*c]const u8, msg_len: usize, pks: [*c]*const PublicKeyType, pks_len: usize) c_uint {
+    // TODO: same function for zig application with allocator
+    const pool = getMemoryPool(null) catch return c.BLST_BAD_ENCODING;
+    return Signature.fastAggregateVerifyC(sig, sig_groupcheck, msg, msg_len, &DST[0], DST.len, pks, pks_len, pool);
 }
 
-export fn fastAggregateVerifyPreAggregated(sig: *const SignatureType, sig_groupcheck: bool, msg: [*c]const u8, msg_len: usize, pk: *PublicKeyType, pairing_buffer: [*c]u8, pairing_buffer_len: usize) c_uint {
-    return Signature.fastAggregateVerifyPreAggregatedC(sig, sig_groupcheck, msg, msg_len, &DST[0], DST.len, pk, pairing_buffer, pairing_buffer_len);
+export fn fastAggregateVerifyPreAggregated(sig: *const SignatureType, sig_groupcheck: bool, msg: [*c]const u8, msg_len: usize, pk: *PublicKeyType) c_uint {
+    // TODO: same function for zig application with allocator
+    const pool = getMemoryPool(null) catch return c.BLST_BAD_ENCODING;
+    return Signature.fastAggregateVerifyPreAggregatedC(sig, sig_groupcheck, msg, msg_len, &DST[0], DST.len, pk, pool);
 }
 
 const RAND_BYTES = 8;

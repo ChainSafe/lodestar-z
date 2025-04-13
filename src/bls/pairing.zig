@@ -8,7 +8,7 @@ const c = @cImport({
     @cInclude("blst.h");
 });
 
-pub const PairingError = error{ BufferTooSmall, DstTooSmall };
+pub const PairingError = error{ BufferTooSmall, DstTooSmall, OutOfMemory, InvalidPairingBufferSize };
 
 const PTag = enum {
     p1,
