@@ -112,12 +112,12 @@ pub const Pairing = struct {
         }
     }
 
-    pub fn aggregatedG1(gtsig: *c.blst_fp12, sig: *const c.blst_p1_affine) void {
-        c.blst_aggregated_in_g1(gtsig, sig);
+    pub fn aggregatedG1(gtsig: *c.blst_fp12, sig: *const c.blst_p2_affine) void {
+        c.blst_aggregated_in_g2(gtsig, sig);
     }
 
-    pub fn aggregatedG2(gtsig: *c.blst_fp12, sig: *const c.blst_p2_affine) void {
-        c.blst_aggregated_in_g2(gtsig, sig);
+    pub fn aggregatedG2(gtsig: *c.blst_fp12, sig: *const c.blst_p1_affine) void {
+        c.blst_aggregated_in_g1(gtsig, sig);
     }
 
     pub fn commit(self: *Pairing) void {

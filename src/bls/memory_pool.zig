@@ -69,13 +69,13 @@ pub fn createMemoryPool(comptime scratch_in_batch: usize, comptime pk_scratch_si
         }
 
         pub fn getPublicKeyScratch(self: *@This()) ![]u64 {
+            self.pk_scratch_mutex.lock();
+            defer self.pk_scratch_mutex.unlock();
+
             if (self.pk_scratch_arr.items.len == 0) {
                 // allocate new
                 return try self.allocator.alloc(u64, self.pk_scratch_size_u64);
             }
-
-            self.pk_scratch_mutex.lock();
-            defer self.pk_scratch_mutex.unlock();
 
             // reuse last
             const last_scratch = self.pk_scratch_arr.pop();
@@ -87,13 +87,13 @@ pub fn createMemoryPool(comptime scratch_in_batch: usize, comptime pk_scratch_si
         }
 
         pub fn getSignatureScratch(self: *@This()) ![]u64 {
+            self.sig_scratch_mutex.lock();
+            defer self.sig_scratch_mutex.unlock();
+
             if (self.sig_scratch_arr.items.len == 0) {
                 // allocate new
                 return try self.allocator.alloc(u64, self.sig_scratch_size_u64);
             }
-
-            self.sig_scratch_mutex.lock();
-            defer self.sig_scratch_mutex.unlock();
 
             // reuse last
             const last_scratch = self.sig_scratch_arr.pop();
@@ -105,13 +105,13 @@ pub fn createMemoryPool(comptime scratch_in_batch: usize, comptime pk_scratch_si
         }
 
         pub fn getPairingBuffer(self: *@This()) ![]u8 {
+            self.pairing_mutex.lock();
+            defer self.pairing_mutex.unlock();
+
             if (self.pairing_buffer_arr.items.len == 0) {
                 // allocate new
                 return try self.allocator.alloc(u8, self.pairing_size_u8);
             }
-
-            self.pairing_mutex.lock();
-            defer self.pairing_mutex.unlock();
 
             // reuse last
             const last_pairing_buffer = self.pairing_buffer_arr.pop();
@@ -123,37 +123,40 @@ pub fn createMemoryPool(comptime scratch_in_batch: usize, comptime pk_scratch_si
         }
 
         pub fn returnPublicKeyScratch(self: *@This(), scratch: []u64) !void {
+            self.pk_scratch_mutex.lock();
+            defer self.pk_scratch_mutex.unlock();
+
             if (scratch.len != self.pk_scratch_size_u64) {
                 // this should not happen
                 return error.InvalidScratchSize;
             }
 
-            self.pk_scratch_mutex.lock();
-            defer self.pk_scratch_mutex.unlock();
             // return the scratch to the pool
             try self.pk_scratch_arr.append(scratch);
         }
 
         pub fn returnSignatureScratch(self: *@This(), scratch: []u64) !void {
+            self.sig_scratch_mutex.lock();
+            defer self.sig_scratch_mutex.unlock();
+
             if (scratch.len != self.sig_scratch_size_u64) {
                 // this should not happen
                 return error.InvalidScratchSize;
             }
 
-            self.sig_scratch_mutex.lock();
-            defer self.sig_scratch_mutex.unlock();
             // return the scratch to the pool
             try self.sig_scratch_arr.append(scratch);
         }
 
         pub fn returnPairingBuffer(self: *@This(), buffer: []u8) !void {
+            self.pairing_mutex.lock();
+            defer self.pairing_mutex.unlock();
+
             if (buffer.len != self.pairing_size_u8) {
                 // this should not happen
                 return error.InvalidPairingBufferSize;
             }
 
-            self.pairing_mutex.lock();
-            defer self.pairing_mutex.unlock();
             // return the pairing buffer to the pool
             try self.pairing_buffer_arr.append(buffer);
         }

@@ -199,20 +199,29 @@ export fn verifySignature(sig: *const SignatureType, sig_groupcheck: bool, msg: 
 }
 
 export fn aggregateVerify(sig: *const SignatureType, sig_groupcheck: bool, msgs: [*c][*c]const u8, msgs_len: usize, msg_len: usize, pks: [*c]const *PublicKeyType, pks_len: usize, pks_validate: bool) c_uint {
-    // TODO: same function for zig application with allocator
-    const pool = getMemoryPool(null) catch return c.BLST_BAD_ENCODING;
+    return doAggregateVerify(null, sig, sig_groupcheck, msgs, msgs_len, msg_len, pks, pks_len, pks_validate);
+}
+
+pub fn doAggregateVerify(allocator: ?Allocator, sig: *const SignatureType, sig_groupcheck: bool, msgs: [*c][*c]const u8, msgs_len: usize, msg_len: usize, pks: [*c]const *PublicKeyType, pks_len: usize, pks_validate: bool) c_uint {
+    const pool = getMemoryPool(allocator) catch return c.BLST_BAD_ENCODING;
     return Signature.aggregateVerifyC(sig, sig_groupcheck, msgs, msgs_len, msg_len, &DST[0], DST.len, pks, pks_len, pks_validate, pool);
 }
 
 export fn fastAggregateVerify(sig: *const SignatureType, sig_groupcheck: bool, msg: [*c]const u8, msg_len: usize, pks: [*c]*const PublicKeyType, pks_len: usize) c_uint {
-    // TODO: same function for zig application with allocator
-    const pool = getMemoryPool(null) catch return c.BLST_BAD_ENCODING;
+    return doFastAggregateVerify(null, sig, sig_groupcheck, msg, msg_len, pks, pks_len);
+}
+
+pub fn doFastAggregateVerify(allocator: ?Allocator, sig: *const SignatureType, sig_groupcheck: bool, msg: [*c]const u8, msg_len: usize, pks: [*c]*const PublicKeyType, pks_len: usize) c_uint {
+    const pool = getMemoryPool(allocator) catch return c.BLST_BAD_ENCODING;
     return Signature.fastAggregateVerifyC(sig, sig_groupcheck, msg, msg_len, &DST[0], DST.len, pks, pks_len, pool);
 }
 
 export fn fastAggregateVerifyPreAggregated(sig: *const SignatureType, sig_groupcheck: bool, msg: [*c]const u8, msg_len: usize, pk: *PublicKeyType) c_uint {
-    // TODO: same function for zig application with allocator
-    const pool = getMemoryPool(null) catch return c.BLST_BAD_ENCODING;
+    return doFastAggregateVerifyPreAggregated(null, sig, sig_groupcheck, msg, msg_len, pk);
+}
+
+pub fn doFastAggregateVerifyPreAggregated(allocator: ?Allocator, sig: *const SignatureType, sig_groupcheck: bool, msg: [*c]const u8, msg_len: usize, pk: *PublicKeyType) c_uint {
+    const pool = getMemoryPool(allocator) catch return c.BLST_BAD_ENCODING;
     return Signature.fastAggregateVerifyPreAggregatedC(sig, sig_groupcheck, msg, msg_len, &DST[0], DST.len, pk, pool);
 }
 

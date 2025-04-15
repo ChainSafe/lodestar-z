@@ -92,6 +92,18 @@ pub fn default_blst_p2_affine() c.blst_p2_affine {
     };
 }
 
+pub fn default_blst_fp6() c.blst_fp6 {
+    return .{
+        .fp2 = [_]c.blst_fp2{default_blst_fp2()} ** 3,
+    };
+}
+
+pub fn default_blst_fp12() c.blst_fp12 {
+    return .{
+        .fp6 = [_]c.blst_fp6{default_blst_fp6()} ** 2,
+    };
+}
+
 // TODO: remove this if not consumed
 pub fn asU64Slice(bytes: []u8) ![]u64 {
     if ((@intFromPtr(bytes.ptr) % @alignOf(u64)) != 0) {
