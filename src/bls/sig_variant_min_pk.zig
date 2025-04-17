@@ -203,7 +203,7 @@ export fn aggregateVerify(sig: *const SignatureType, sig_groupcheck: bool, msgs:
 }
 
 pub fn doAggregateVerify(allocator: ?Allocator, sig: *const SignatureType, sig_groupcheck: bool, msgs: [*c][*c]const u8, msgs_len: usize, msg_len: usize, pks: [*c]const *PublicKeyType, pks_len: usize, pks_validate: bool) c_uint {
-    const pool = getMemoryPool(allocator) catch return c.BLST_BAD_ENCODING;
+    const pool = getMemoryPool(allocator) catch return util.MEMORY_POOL_ERROR;
     return Signature.aggregateVerifyC(sig, sig_groupcheck, msgs, msgs_len, msg_len, &DST[0], DST.len, pks, pks_len, pks_validate, pool);
 }
 
@@ -212,7 +212,7 @@ export fn fastAggregateVerify(sig: *const SignatureType, sig_groupcheck: bool, m
 }
 
 pub fn doFastAggregateVerify(allocator: ?Allocator, sig: *const SignatureType, sig_groupcheck: bool, msg: [*c]const u8, msg_len: usize, pks: [*c]*const PublicKeyType, pks_len: usize) c_uint {
-    const pool = getMemoryPool(allocator) catch return c.BLST_BAD_ENCODING;
+    const pool = getMemoryPool(allocator) catch return util.MEMORY_POOL_ERROR;
     return Signature.fastAggregateVerifyC(sig, sig_groupcheck, msg, msg_len, &DST[0], DST.len, pks, pks_len, pool);
 }
 
@@ -221,7 +221,7 @@ export fn fastAggregateVerifyPreAggregated(sig: *const SignatureType, sig_groupc
 }
 
 pub fn doFastAggregateVerifyPreAggregated(allocator: ?Allocator, sig: *const SignatureType, sig_groupcheck: bool, msg: [*c]const u8, msg_len: usize, pk: *PublicKeyType) c_uint {
-    const pool = getMemoryPool(allocator) catch return c.BLST_BAD_ENCODING;
+    const pool = getMemoryPool(allocator) catch return util.MEMORY_POOL_ERROR;
     return Signature.fastAggregateVerifyPreAggregatedC(sig, sig_groupcheck, msg, msg_len, &DST[0], DST.len, pk, pool);
 }
 
@@ -257,7 +257,7 @@ pub fn doVerifyMultipleAggregateSignatures(allocator: ?Allocator, sets: [*c]*con
         return c.BLST_BAD_ENCODING;
     }
     randBytes(rands[0..(sets_len * 8)]);
-    const pool = getMemoryPool(allocator) catch return c.BLST_BAD_ENCODING;
+    const pool = getMemoryPool(allocator) catch return util.MEMORY_POOL_ERROR;
     return Signature.verifyMultipleAggregateSignaturesC(sets, sets_len, msg_len, &DST[0], DST.len, pks_validate, sigs_groupcheck, &rand_refs[0], sets_len, RAND_BITS, pool);
 }
 
@@ -440,7 +440,7 @@ export fn aggregateWithRandomness(sets: [*c]*const PkAndSerializedSigType, sets_
 /// a zig application should pass the allocator to this function
 /// for Bun binding, allocator is null
 pub fn doAggregateWithRandomness(allocator: ?Allocator, sets: [*c]*const PkAndSerializedSigType, sets_len: c_uint, pk_out: *PublicKeyType, sig_out: *SignatureType) c_uint {
-    const pool = getMemoryPool(allocator) catch return c.BLST_BAD_ENCODING;
+    const pool = getMemoryPool(allocator) catch return util.MEMORY_POOL_ERROR;
     const res = SigVariant.aggregateWithRandomnessC(sets, sets_len, pool, pk_out, sig_out, null);
     return res;
 }
@@ -452,7 +452,7 @@ export fn asyncAggregateWithRandomness(sets: [*c]*const PkAndSerializedSigType, 
 /// a zig application should pass the allocator to this function
 /// for Bun binding, allocator is null
 pub fn doAsyncAggregateWithRandomness(allocator: ?Allocator, sets: [*c]*const PkAndSerializedSigType, sets_len: c_uint, pk_out: *PublicKeyType, sig_out: *SignatureType, callback: CallBackFn) c_uint {
-    const pool = getMemoryPool(allocator) catch return c.BLST_BAD_ENCODING;
+    const pool = getMemoryPool(allocator) catch return util.MEMORY_POOL_ERROR;
     return SigVariant.asyncAggregateWithRandomness(sets, sets_len, pool, pk_out, sig_out, callback);
 }
 

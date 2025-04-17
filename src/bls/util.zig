@@ -11,10 +11,14 @@ pub const BLST_ERROR = error{
     PK_IS_INFINITY,
     BAD_SCALAR,
     FAILED_PAIRING,
+    MEMORY_POOL_ERROR,
+    THREAD_POOL_ERROR,
 };
 
 // BLST_ERROR max as 7
 pub const BLST_FAILED_PAIRING: c_uint = 10;
+pub const MEMORY_POOL_ERROR: c_uint = 11;
+pub const THREAD_POOL_ERROR: c_uint = 12;
 
 pub fn toBlstError(err: c_uint) ?BLST_ERROR {
     switch (err) {
@@ -26,6 +30,8 @@ pub fn toBlstError(err: c_uint) ?BLST_ERROR {
         c.BLST_PK_IS_INFINITY => return BLST_ERROR.PK_IS_INFINITY,
         c.BLST_BAD_SCALAR => return BLST_ERROR.BAD_SCALAR,
         BLST_FAILED_PAIRING => return BLST_ERROR.FAILED_PAIRING,
+        MEMORY_POOL_ERROR => return BLST_ERROR.MEMORY_POOL_ERROR,
+        THREAD_POOL_ERROR => return BLST_ERROR.THREAD_POOL_ERROR,
         else => return null,
     }
 }

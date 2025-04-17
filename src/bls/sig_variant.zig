@@ -1606,7 +1606,7 @@ pub fn createSigVariant(
                 fn run(sets_t: [*c]*const PkAndSerializedSigC, sets_len_t: usize, memory_pool: *MemoryPool, pk_out_t: *pk_aff_type, sig_out_t: *sig_aff_type, callback_t: CallbackFn) void {
                     _ = aggregateWithRandomnessC(sets_t, sets_len_t, memory_pool, pk_out_t, sig_out_t, callback_t);
                 }
-            }.run, .{ sets, sets_len, pool, pk_out, sig_out, callback }) catch return c.BLST_BAD_ENCODING;
+            }.run, .{ sets, sets_len, pool, pk_out, sig_out, callback }) catch return util.THREAD_POOL_ERROR;
 
             return c.BLST_SUCCESS;
         }
@@ -1621,16 +1621,16 @@ pub fn createSigVariant(
 
             const sig_scratch = pool.getSignatureScratch() catch {
                 if (callbackFn) |callback| {
-                    callback(c.BLST_VERIFY_FAIL);
+                    callback(util.MEMORY_POOL_ERROR);
                 }
-                return c.BLST_VERIFY_FAIL;
+                return util.MEMORY_POOL_ERROR;
             };
 
             const pk_scratch = pool.getPublicKeyScratch() catch {
                 if (callbackFn) |callback| {
-                    callback(c.BLST_VERIFY_FAIL);
+                    callback(util.MEMORY_POOL_ERROR);
                 }
-                return c.BLST_VERIFY_FAIL;
+                return util.MEMORY_POOL_ERROR;
             };
 
             defer {
