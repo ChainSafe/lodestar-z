@@ -2,12 +2,15 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const WaitGroup = std.Thread.WaitGroup;
 
-threadlocal var thread_pool: ?*std.Thread.Pool = null;
+var thread_pool: ?*std.Thread.Pool = null;
+var pool_mutex = std.Thread.Mutex{};
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
 /// a zig application may want to call this with a provided allocator
 /// a bun init() call should call this with null, ie, use the default allocator
 pub fn initializeThreadPool(inAllocator: ?Allocator) !void {
+    pool_mutex.lock();
+    defer pool_mutex.unlock();
     if (thread_pool != null) {
         return;
     }
@@ -18,6 +21,8 @@ pub fn initializeThreadPool(inAllocator: ?Allocator) !void {
 }
 
 pub fn deinitializeThreadPool() void {
+    pool_mutex.lock();
+    defer pool_mutex.unlock();
     if (thread_pool) |pool| {
         const allocator = pool.allocator;
         pool.deinit();
@@ -27,6 +32,8 @@ pub fn deinitializeThreadPool() void {
 }
 
 pub fn spawnTask(comptime func: anytype, args: anytype) !void {
+    pool_mutex.lock();
+    defer pool_mutex.unlock();
     if (thread_pool) |pool| {
         try pool.spawn(func, args);
     } else {
@@ -78,9 +85,9 @@ fn performSpawnTaskTest(allocator: ?Allocator) !void {
     var total_finished: usize = 0;
 
     const Task = struct {
-        fn run(wait_ms: usize, mutex: *std.Thread.Mutex, cond: *std.Thread.Condition, finished: *usize) void {
-            mutex.lock();
-            defer mutex.unlock();
+        fn run(wait_ms: usize, _mutex: *std.Thread.Mutex, cond: *std.Thread.Condition, finished: *usize) void {
+            _mutex.lock();
+            defer _mutex.unlock();
             std.time.sleep(wait_ms * std.time.ns_per_ms);
             finished.* += 1;
             cond.signal();
@@ -107,9 +114,9 @@ fn performSpawnTaskWgTest(allocator: ?Allocator) !void {
     var total_finished: usize = 0;
 
     const Task = struct {
-        fn run(wait_ms: usize, mutex: *std.Thread.Mutex, finished: *usize) void {
-            mutex.lock();
-            defer mutex.unlock();
+        fn run(wait_ms: usize, _mutex: *std.Thread.Mutex, finished: *usize) void {
+            _mutex.lock();
+            defer _mutex.unlock();
             std.time.sleep(wait_ms * std.time.ns_per_ms);
             finished.* += 1;
         }
