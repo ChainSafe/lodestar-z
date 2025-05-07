@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
-const Xoshiro256 = std.rand.Xoshiro256;
+const Xoshiro256 = std.Random.Xoshiro256;
 const Pairing = @import("./pairing.zig").Pairing;
 const spawnTask = @import("./thread_pool.zig").spawnTask;
 const initializeThreadPool = @import("./thread_pool.zig").initializeThreadPool;
@@ -262,20 +262,7 @@ pub fn doFastAggregateVerifyPreAggregated(allocator: ?Allocator, sig: *const Sig
 
 const RAND_BYTES = 8;
 const RAND_BITS = 8 * RAND_BYTES;
-var rands: [RAND_BYTES * MAX_SIGNATURE_SETS]u8 = [_]u8{0} ** (RAND_BYTES * MAX_SIGNATURE_SETS);
-var rand_refs: [MAX_SIGNATURE_SETS][*c]u8 = undefined;
-// Flag to track rand_refs initialization
-var rand_refs_initialized: bool = false;
 
-fn initRandRefs() void {
-    for (0..MAX_SIGNATURE_SETS) |i| {
-        rand_refs[i] = &rands[i * 8];
-    }
-}
-
-/// this is single thread version so it can reuse some params:
-/// - pairing_buffer: reuse at consumer side
-/// - random bytes: do stack allocation and reuse
 export fn verifyMultipleAggregateSignatures(sets: [*c]*const SignatureSetType, sets_len: usize, msg_len: usize, pks_validate: bool, sigs_groupcheck: bool) c_uint {
     return doVerifyMultipleAggregateSignatures(null, sets, sets_len, msg_len, pks_validate, sigs_groupcheck);
 }
@@ -283,16 +270,17 @@ export fn verifyMultipleAggregateSignatures(sets: [*c]*const SignatureSetType, s
 /// a zig application should pass the allocator to this function
 /// for Bun binding, allocator is null
 pub fn doVerifyMultipleAggregateSignatures(allocator: ?Allocator, sets: [*c]*const SignatureSetType, sets_len: usize, msg_len: usize, pks_validate: bool, sigs_groupcheck: bool) c_uint {
-    if (rand_refs_initialized == false) {
-        initRandRefs();
-    }
-    rand_refs_initialized = true;
-
     if (sets_len == 0 or sets_len > MAX_SIGNATURE_SETS) {
         return c.BLST_BAD_ENCODING;
     }
 
+    var rands = [_]u8{0} ** (RAND_BYTES * MAX_SIGNATURE_SETS);
     randBytes(rands[0..(sets_len * 8)]);
+    var rand_refs: [MAX_SIGNATURE_SETS][]const u8 = undefined;
+    for (0..sets_len) |i| {
+        rand_refs[i] = rands[(i * 8)..(i * 8 + 8)];
+    }
+
     const pool = getMemoryPool(allocator) catch return util.MEMORY_POOL_ERROR;
     return Signature.verifyMultipleAggregateSignaturesC(sets[0..sets_len], msg_len, DST, pks_validate, sigs_groupcheck, rand_refs[0..sets_len], RAND_BITS, pool);
 }

@@ -3,7 +3,7 @@ const Mutex = std.Thread.Mutex;
 const AtomicOrder = std.builtin.AtomicOrder;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
-const Xoshiro256 = std.rand.Xoshiro256;
+const Xoshiro256 = std.Random.Xoshiro256;
 const P = @import("./pairing.zig").Pairing;
 const PairingError = @import("./pairing.zig").PairingError;
 const spawnTask = @import("./thread_pool.zig").spawnTask;
@@ -26,7 +26,6 @@ const toBlstError = util.toBlstError;
 pub const MAX_SIGNATURE_SETS = 128;
 
 /// ideally I want to have this struct inside test but it does not work
-/// TODO: consider moving to test with zig verion > 0.13
 const Context = struct {
     fn callback(verification_res: c_uint) callconv(.C) void {
         if (Context.mutex) |_mutex| {
@@ -907,7 +906,7 @@ pub fn createSigVariant(
 
         /// C-ABI version of verifyMultipleAggregateSignatures() with
         /// - extra msg_len parameter, all messages should have the same length
-        pub fn verifyMultipleAggregateSignaturesC(sets: []*const SignatureSet, msg_len: usize, dst: []const u8, pks_validate: bool, sigs_groupcheck: bool, rands: [][*c]const u8, rand_bits: usize, pool: *MemoryPool) c_uint {
+        pub fn verifyMultipleAggregateSignaturesC(sets: []*const SignatureSet, msg_len: usize, dst: []const u8, pks_validate: bool, sigs_groupcheck: bool, rands: [][]const u8, rand_bits: usize, pool: *MemoryPool) c_uint {
             const sets_len = sets.len;
             const rands_len = rands.len;
             if (sets_len == 0 or rands_len != sets_len) {
@@ -932,7 +931,7 @@ pub fn createSigVariant(
 
             for (0..n_workers) |_| {
                 spawnTaskWg(&wg, struct {
-                    fn run(_sets: []*const SignatureSet, _msg_len: usize, _dst: []const u8, _pks_validate: bool, _sigs_groupcheck: bool, _rands: [][*c]const u8, _rand_bits: usize, _pool: *MemoryPool, _atomic_counter: *AtomicCounter, _atomic_valid: *AtomicError, _acc: *Pairing) void {
+                    fn run(_sets: []*const SignatureSet, _msg_len: usize, _dst: []const u8, _pks_validate: bool, _sigs_groupcheck: bool, _rands: [][]const u8, _rand_bits: usize, _pool: *MemoryPool, _atomic_counter: *AtomicCounter, _atomic_valid: *AtomicError, _acc: *Pairing) void {
                         var pairing = Pairing.new(_pool, hash_or_encode, _dst) catch {
                             // .release will publish the value to other threads
                             _atomic_valid.store(BLST_FAILED_PAIRING, AtomicOrder.release);
@@ -955,7 +954,7 @@ pub fn createSigVariant(
                                 break;
                             }
                             const set = _sets[counter];
-                            pairing.mulAndAggregate(set.pk, _pks_validate, set.sig, _sigs_groupcheck, _rands[counter], _rand_bits, set.msg[0.._msg_len], null) catch {
+                            pairing.mulAndAggregate(set.pk, _pks_validate, set.sig, _sigs_groupcheck, &_rands[counter][0], _rand_bits, set.msg[0.._msg_len], null) catch {
                                 // .release will publish the value to other threads
                                 _atomic_valid.store(c.BLST_VERIFY_FAIL, .release);
                                 return;
@@ -1680,12 +1679,12 @@ pub fn createSigVariant(
                 pool.returnSignatureScratch(sig_scratch) catch {};
             }
 
-            var pks_refs: [MAX_SIGNATURE_SETS]*pk_aff_type = undefined;
+            var pks_refs: [MAX_SIGNATURE_SETS]*const pk_aff_type = undefined;
             var sigs = [_]sig_aff_type{default_sig_fn()} ** MAX_SIGNATURE_SETS;
             var sigs_refs: [MAX_SIGNATURE_SETS]*sig_aff_type = undefined;
             var rands: [32 * MAX_SIGNATURE_SETS]u8 = [_]u8{0} ** (32 * MAX_SIGNATURE_SETS);
             randBytes(rands[0..(32 * sets_len)]);
-            var scalars_refs: [MAX_SIGNATURE_SETS]*u8 = undefined;
+            var scalars_refs: [MAX_SIGNATURE_SETS]*const u8 = undefined;
 
             for (0..sets_len) |i| {
                 var set = sets[i];
@@ -1708,7 +1707,7 @@ pub fn createSigVariant(
             AggregatePublicKey.aggregateToPublicKey(pk_out, &mult_pk_res);
 
             var mult_sig_res = default_agg_sig_fn();
-            multSignaturesC(&mult_sig_res, &sigs_refs[0], sets_len, &scalars_refs[0], n_bits, &sig_scratch[0]);
+            multSignaturesC(&mult_sig_res, @ptrCast(&sigs_refs[0]), sets_len, &scalars_refs[0], n_bits, &sig_scratch[0]);
             AggregateSignature.aggregateToSignature(sig_out, &mult_sig_res);
 
             if (callbackFn) |callback| {
@@ -1796,7 +1795,7 @@ pub fn createSigVariant(
             const num_msgs = 10;
             const dst = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
 
-            var rng = std.rand.DefaultPrng.init(12345);
+            var rng = std.Random.DefaultPrng.init(12345);
             var sks = [_]SecretKey{SecretKey.default()} ** num_msgs;
             for (0..num_msgs) |i| {
                 sks[i] = getRandomKey(&rng);
@@ -1848,7 +1847,7 @@ pub fn createSigVariant(
                 }
             }
 
-            var sig_ptrs: [num_msgs]*Signature = undefined;
+            var sig_ptrs: [num_msgs]*const Signature = undefined;
             for (sigs[0..], 0..num_msgs) |*sig_ptr, i| {
                 sig_ptrs[i] = sig_ptr;
             }
@@ -1866,7 +1865,11 @@ pub fn createSigVariant(
             }
 
             // positive test
-            try agg_sig.aggregateVerify(false, msgs[0..], dst, pks_ptr[0..], false, memory_pool);
+            var ro_msgs: [num_msgs][]const u8 = undefined;
+            for (0..num_msgs) |i| {
+                ro_msgs[i] = msgs[i];
+            }
+            try agg_sig.aggregateVerify(false, ro_msgs[0..], dst, pks_ptr[0..], false, memory_pool);
 
             // only expect this to pass if all messages are the same length
             // const res = Signature.verifyMultipleAggregateSignaturesC(&sets[0], num_sigs, msg_lens[0], &dst[0], dst.len, false, false, &rands_c[0], rands_c.len, 64, &pairing_buffer[0], pairing_buffer.len);
@@ -1884,7 +1887,7 @@ pub fn createSigVariant(
             }
 
             // Swap message/public key pairs to create bad signature
-            if (agg_sig.aggregateVerify(false, msgs[0..], dst, pks_ptr_rev[0..], false, memory_pool)) {
+            if (agg_sig.aggregateVerify(false, ro_msgs[0..], dst, pks_ptr_rev[0..], false, memory_pool)) {
                 try std.testing.expect(false);
             } else |err| switch (err) {
                 BLST_ERROR.VERIFY_FAIL => {},
@@ -1908,7 +1911,7 @@ pub fn createSigVariant(
             const num_pks_per_sig = 10;
             const num_sigs = 10;
 
-            var rng = std.rand.DefaultPrng.init(12345);
+            var rng = std.Random.DefaultPrng.init(12345);
 
             var msgs: [num_sigs][]u8 = undefined;
             var sigs: [num_sigs]Signature = undefined;
@@ -1935,7 +1938,7 @@ pub fn createSigVariant(
                 // Create public keys
                 var sks_i: [num_pks_per_sig]SecretKey = undefined;
                 var pks_i: [num_pks_per_sig]PublicKey = undefined;
-                var pks_refs_i: [num_pks_per_sig]*PublicKey = undefined;
+                var pks_refs_i: [num_pks_per_sig]*const PublicKey = undefined;
                 for (0..num_pks_per_sig) |j| {
                     sks_i[j] = getRandomKey(&rng);
                     pks_i[j] = sks_i[j].skToPk();
@@ -2015,7 +2018,7 @@ pub fn createSigVariant(
                 pks_refs[i] = pk;
             }
 
-            var msgs_rev: [num_sigs][]u8 = undefined;
+            var msgs_rev: [num_sigs][]const u8 = undefined;
             for (msgs[0..], 0..num_sigs) |msg, i| {
                 msgs_rev[num_sigs - i - 1] = msg;
             }
@@ -2040,18 +2043,27 @@ pub fn createSigVariant(
                 deinitializeThreadPool();
             }
 
-            try Signature.verifyMultipleAggregateSignatures(msgs[0..], dst, pks_refs[0..], false, sigs_refs[0..], false, rands[0..], 64, memory_pool);
+            var ro_msgs: [num_sigs][]const u8 = undefined;
+            for (0..num_sigs) |i| {
+                ro_msgs[i] = msgs[i];
+            }
+
+            var ro_rands: [num_sigs][]const u8 = undefined;
+            for (0..num_sigs) |i| {
+                ro_rands[i] = rands[i];
+            }
+            try Signature.verifyMultipleAggregateSignatures(ro_msgs[0..], dst, pks_refs[0..], false, sigs_refs[0..], false, ro_rands[0..], 64, memory_pool);
             var sets: [num_sigs]*const SignatureSet = undefined;
             for (0..num_sigs) |i| {
                 sets[i] = &.{ .msg = &msgs[i][0], .pk = &pks[i].point, .sig = &sigs[i].point };
             }
 
             // only expect this to pass if all messages are the same length
-            const res = Signature.verifyMultipleAggregateSignaturesC(sets[0..], msg_lens[0], dst, false, false, rands_c[0..], 64, memory_pool);
+            const res = Signature.verifyMultipleAggregateSignaturesC(sets[0..], msg_lens[0], dst, false, false, ro_rands[0..], 64, memory_pool);
             try std.testing.expect(is_diff_msg_len == (res != c.BLST_SUCCESS));
 
             // negative tests (use reverse msgs, pks, and sigs)
-            var verify_res = Signature.verifyMultipleAggregateSignatures(msgs_rev[0..], dst, pks_refs[0..], false, sigs_refs[0..], false, rands[0..], 64, memory_pool);
+            var verify_res = Signature.verifyMultipleAggregateSignatures(msgs_rev[0..], dst, pks_refs[0..], false, sigs_refs[0..], false, ro_rands[0..], 64, memory_pool);
             if (verify_res) {
                 try std.testing.expect(false);
             } else |err| {
@@ -2064,11 +2076,11 @@ pub fn createSigVariant(
                 for (0..num_sigs) |i| {
                     sets_msgs_rev[i] = &.{ .msg = &msgs_rev[i][0], .pk = &pks[i].point, .sig = &sigs[i].point };
                 }
-                verify_c_res = Signature.verifyMultipleAggregateSignaturesC(sets_msgs_rev[0..], msg_lens[0], dst, false, false, rands_c[0..], 64, memory_pool);
+                verify_c_res = Signature.verifyMultipleAggregateSignaturesC(sets_msgs_rev[0..], msg_lens[0], dst, false, false, ro_rands[0..], 64, memory_pool);
                 try std.testing.expect(verify_c_res != c.BLST_SUCCESS);
             }
 
-            verify_res = Signature.verifyMultipleAggregateSignatures(msgs[0..], dst, pks_rev[0..], false, sigs_refs[0..], false, rands[0..], 64, memory_pool);
+            verify_res = Signature.verifyMultipleAggregateSignatures(ro_msgs[0..], dst, pks_rev[0..], false, sigs_refs[0..], false, ro_rands[0..], 64, memory_pool);
             if (verify_res) {
                 try std.testing.expect(false);
             } else |err| {
@@ -2080,11 +2092,11 @@ pub fn createSigVariant(
                 for (0..num_sigs) |i| {
                     sets_pks_rev[i] = &.{ .msg = &msgs[i][0], .pk = &pks_rev[i].point, .sig = &sigs[i].point };
                 }
-                verify_c_res = Signature.verifyMultipleAggregateSignaturesC(sets_pks_rev[0..], msg_lens[0], dst, false, false, rands_c[0..], 64, memory_pool);
+                verify_c_res = Signature.verifyMultipleAggregateSignaturesC(sets_pks_rev[0..], msg_lens[0], dst, false, false, ro_rands[0..], 64, memory_pool);
                 try std.testing.expect(verify_c_res != c.BLST_SUCCESS);
             }
 
-            verify_res = Signature.verifyMultipleAggregateSignatures(msgs[0..], dst, pks_refs[0..], false, sig_rev_refs[0..], false, rands[0..], 64, memory_pool);
+            verify_res = Signature.verifyMultipleAggregateSignatures(ro_msgs[0..], dst, pks_refs[0..], false, sig_rev_refs[0..], false, ro_rands[0..], 64, memory_pool);
             if (verify_res) {
                 try std.testing.expect(false);
             } else |err| {
@@ -2096,13 +2108,13 @@ pub fn createSigVariant(
                 for (0..num_sigs) |i| {
                     sets_sigs_rev[i] = &.{ .msg = &msgs[i][0], .pk = &pks[i].point, .sig = &sig_rev_refs[i].point };
                 }
-                verify_c_res = Signature.verifyMultipleAggregateSignaturesC(sets_sigs_rev[0..], msg_lens[0], dst, false, false, rands_c[0..], 64, memory_pool);
+                verify_c_res = Signature.verifyMultipleAggregateSignaturesC(sets_sigs_rev[0..], msg_lens[0], dst, false, false, ro_rands[0..], 64, memory_pool);
                 try std.testing.expect(verify_c_res != c.BLST_SUCCESS);
             }
         }
 
         pub fn testSerialization() !void {
-            var rng = std.rand.DefaultPrng.init(12345);
+            var rng = std.Random.DefaultPrng.init(12345);
             const sk = getRandomKey(&rng);
             const sk2 = getRandomKey(&rng);
 
@@ -2134,7 +2146,7 @@ pub fn createSigVariant(
         }
 
         pub fn testSerde() !void {
-            var rng = std.rand.DefaultPrng.init(12345);
+            var rng = std.Random.DefaultPrng.init(12345);
             const sk = getRandomKey(&rng);
             const pk = sk.skToPk();
             const sig = sk.sign("asdf", "qwer", "zxcv");
@@ -2176,7 +2188,7 @@ pub fn createSigVariant(
             try std.testing.expect(@sizeOf(AggregateSignature) == @sizeOf(sig_type));
 
             // make sure wrapped structs and C structs point to the same memory so that we can safely use @ptrCast
-            var rng = std.rand.DefaultPrng.init(12345);
+            var rng = std.Random.DefaultPrng.init(12345);
             const sk = getRandomKey(&rng);
             const pk = sk.skToPk();
             const pk_addr = @intFromPtr(&pk);
@@ -2213,7 +2225,7 @@ pub fn createSigVariant(
             const dst = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
             const num_pks = 10;
 
-            var rng = std.rand.DefaultPrng.init(12345);
+            var rng = std.Random.DefaultPrng.init(12345);
 
             // Create public keys
             var sks = [_]SecretKey{SecretKey.default()} ** num_pks;
@@ -2225,7 +2237,7 @@ pub fn createSigVariant(
             for (0..num_pks) |i| {
                 pks[i] = sks[i].skToPk();
             }
-            var pks_refs: [num_pks]*PublicKey = undefined;
+            var pks_refs: [num_pks]*const PublicKey = undefined;
             for (pks[0..], 0..num_pks) |*pk, i| {
                 pks_refs[i] = pk;
             }
@@ -2242,7 +2254,7 @@ pub fn createSigVariant(
             for (0..num_pks) |i| {
                 sigs[i] = sks[i].sign(msg[0..], dst, null);
             }
-            var sigs_refs: [num_pks]*Signature = undefined;
+            var sigs_refs: [num_pks]*const Signature = undefined;
             for (sigs[0..], 0..num_pks) |*sig, i| {
                 sigs_refs[i] = sig;
             }
@@ -2299,7 +2311,7 @@ pub fn createSigVariant(
             const dst = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
             const num_pks = 10;
 
-            var rng = std.rand.DefaultPrng.init(12345);
+            var rng = std.Random.DefaultPrng.init(12345);
 
             // Create public keys
             var sks = [_]SecretKey{SecretKey.default()} ** num_pks;
@@ -2342,8 +2354,8 @@ pub fn createSigVariant(
             var agg_pk = PublicKey.default();
             var agg_sig = Signature.default();
 
-            var set: [num_pks]*PkAndSerializedSig = undefined;
-            var set_c: [num_pks]*PkAndSerializedSigC = undefined;
+            var set: [num_pks]*const PkAndSerializedSig = undefined;
+            var set_c: [num_pks]*const PkAndSerializedSigC = undefined;
             for (0..num_pks) |i| {
                 const bytes = sigs[i].serialize();
                 var s = PkAndSerializedSig{ .pk = &pks[i], .sig = bytes[0..] };
@@ -2422,12 +2434,12 @@ pub fn randBytes(bytes: []u8) void {
     rand.random().bytes(bytes);
 }
 
-var random: ?std.rand.DefaultPrng = null;
+var random: ?std.Random.DefaultPrng = null;
 
-fn getRandom() *std.rand.DefaultPrng {
+fn getRandom() *std.Random.DefaultPrng {
     if (random == null) {
         const timestamp: u64 = @intCast(std.time.milliTimestamp());
-        random = std.rand.DefaultPrng.init(timestamp);
+        random = std.Random.DefaultPrng.init(timestamp);
     }
     return &random.?;
 }

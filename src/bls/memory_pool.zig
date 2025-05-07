@@ -78,12 +78,17 @@ pub fn createMemoryPool(comptime scratch_in_batch: usize, comptime pk_scratch_si
             }
 
             // reuse last
-            const last_scratch = self.pk_scratch_arr.pop();
-            if (last_scratch.len != self.pk_scratch_size_u64) {
+            const opt_last_scratch = self.pk_scratch_arr.pop();
+            if (opt_last_scratch) |last_scratch| {
+                if (last_scratch.len != self.pk_scratch_size_u64) {
+                    // this should not happen
+                    return error.InvalidScratchSize;
+                }
+                return last_scratch;
+            } else {
                 // this should not happen
-                return error.InvalidScratchSize;
+                return error.NotFound;
             }
-            return last_scratch;
         }
 
         pub fn getSignatureScratch(self: *@This()) ![]u64 {
@@ -96,12 +101,17 @@ pub fn createMemoryPool(comptime scratch_in_batch: usize, comptime pk_scratch_si
             }
 
             // reuse last
-            const last_scratch = self.sig_scratch_arr.pop();
-            if (last_scratch.len != self.sig_scratch_size_u64) {
+            const optional_last_scratch = self.sig_scratch_arr.pop();
+            if (optional_last_scratch) |last_scratch| {
+                if (last_scratch.len != self.sig_scratch_size_u64) {
+                    // this should not happen
+                    return error.InvalidScratchSize;
+                }
+                return last_scratch;
+            } else {
                 // this should not happen
-                return error.InvalidScratchSize;
+                return error.NotFound;
             }
-            return last_scratch;
         }
 
         pub fn getPairingBuffer(self: *@This()) ![]u8 {
@@ -114,12 +124,17 @@ pub fn createMemoryPool(comptime scratch_in_batch: usize, comptime pk_scratch_si
             }
 
             // reuse last
-            const last_pairing_buffer = self.pairing_buffer_arr.pop();
-            if (last_pairing_buffer.len != self.pairing_size_u8) {
+            const opt_pairing_buffer = self.pairing_buffer_arr.pop();
+            if (opt_pairing_buffer) |pairing_buffer| {
+                if (pairing_buffer.len != self.pairing_size_u8) {
+                    // this should not happen
+                    return error.InvalidPairingBufferSize;
+                }
+                return pairing_buffer;
+            } else {
                 // this should not happen
-                return error.InvalidPairingBufferSize;
+                return error.NotFound;
             }
-            return last_pairing_buffer;
         }
 
         pub fn returnPublicKeyScratch(self: *@This(), scratch: []u64) !void {

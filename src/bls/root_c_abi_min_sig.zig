@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const Xoshiro256 = std.rand.Xoshiro256;
+const Xoshiro256 = std.Random.Xoshiro256;
 const Pairing = @import("./pairing.zig").Pairing;
 const c = @cImport({
     @cInclude("blst.h");

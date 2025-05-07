@@ -33,7 +33,7 @@ pub fn createMultiPoint(comptime IT: type, comptime OT: type, it_default_fn: any
 
             var scalars = [_]u8{0} ** (n_points * n_bytes);
 
-            var rng = std.rand.DefaultPrng.init(12345);
+            var rng = std.Random.DefaultPrng.init(12345);
             rng.random().bytes(scalars[0..]);
 
             var points: [n_points]OT = undefined;
@@ -58,7 +58,7 @@ pub fn createMultiPoint(comptime IT: type, comptime OT: type, it_default_fn: any
 
             to_affines_fn(aff_points_refs[0], &points_refs, n_points);
             var add_res = ot_default_fn();
-            MultiPoint.add(&add_res, &aff_points_refs[0], aff_points_refs.len);
+            MultiPoint.add(&add_res, @ptrCast(&aff_points_refs[0]), aff_points_refs.len);
             try std.testing.expect(out_eql_fn(&naive, &add_res));
         }
 
@@ -68,7 +68,7 @@ pub fn createMultiPoint(comptime IT: type, comptime OT: type, it_default_fn: any
             const n_bytes = (n_bits + 7) / 8;
 
             var scalars = [_]u8{0} ** (n_points * n_bytes);
-            var rng = std.rand.DefaultPrng.init(12345);
+            var rng = std.Random.DefaultPrng.init(12345);
             rng.random().bytes(scalars[0..]);
 
             var scalars_refs: [n_points]*const u8 = undefined;
@@ -103,7 +103,7 @@ pub fn createMultiPoint(comptime IT: type, comptime OT: type, it_default_fn: any
                 to_affines_fn(aff_points_refs[0], &points_refs, (i + 1));
                 if (i < 27) {
                     var mult_res = ot_default_fn();
-                    MultiPoint.mult(&mult_res, &aff_points_refs[0], (i + 1), &scalars_refs[0], n_bits, &scratch[0]);
+                    MultiPoint.mult(&mult_res, @ptrCast(&aff_points_refs[0]), (i + 1), &scalars_refs[0], n_bits, &scratch[0]);
                     try std.testing.expect(out_eql_fn(&naive, &mult_res));
                 }
             }
@@ -115,7 +115,7 @@ pub fn createMultiPoint(comptime IT: type, comptime OT: type, it_default_fn: any
             to_affines_fn(aff_points_refs[0], &points_refs, n_points);
 
             var mult_res = ot_default_fn();
-            MultiPoint.mult(&mult_res, &aff_points_refs[0], aff_points_refs.len, &scalars_refs[0], n_bits, &scratch[0]);
+            MultiPoint.mult(&mult_res, @ptrCast(&aff_points_refs[0]), aff_points_refs.len, &scalars_refs[0], n_bits, &scratch[0]);
             try std.testing.expect(out_eql_fn(&naive, &mult_res));
         }
     };
