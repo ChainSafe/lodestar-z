@@ -32,8 +32,6 @@ pub fn deinitializeThreadPool() void {
 }
 
 pub fn spawnTask(comptime func: anytype, args: anytype) !void {
-    pool_mutex.lock();
-    defer pool_mutex.unlock();
     if (thread_pool) |pool| {
         try pool.spawn(func, args);
     } else {
@@ -86,14 +84,17 @@ fn performSpawnTaskTest(allocator: ?Allocator) !void {
 
     const Task = struct {
         fn run(wait_ms: usize, _mutex: *std.Thread.Mutex, cond: *std.Thread.Condition, finished: *usize) void {
-            _mutex.lock();
-            defer _mutex.unlock();
             std.time.sleep(wait_ms * std.time.ns_per_ms);
-            finished.* += 1;
+            {
+                _mutex.lock();
+                defer _mutex.unlock();
+                finished.* += 1;
+            }
             cond.signal();
         }
     };
 
+    const start = std.time.milliTimestamp();
     try spawnTask(Task.run, .{ 10, &m, &c, &total_finished });
     try spawnTask(Task.run, .{ 11, &m, &c, &total_finished });
     try spawnTask(Task.run, .{ 12, &m, &c, &total_finished });
@@ -104,6 +105,8 @@ fn performSpawnTaskTest(allocator: ?Allocator) !void {
     while (total_finished < 4) {
         c.wait(&m);
     }
+    // if tasks are executed sequentially, total time is 10 + 11 + 12 + 13 = 46ms, so expect it < 20ms because we execute them in parallel
+    std.debug.print("Time taken for performSpawnTaskTest: {d} ms\n", .{std.time.milliTimestamp() - start});
 }
 
 fn performSpawnTaskWgTest(allocator: ?Allocator) !void {
@@ -115,19 +118,25 @@ fn performSpawnTaskWgTest(allocator: ?Allocator) !void {
 
     const Task = struct {
         fn run(wait_ms: usize, _mutex: *std.Thread.Mutex, finished: *usize) void {
-            _mutex.lock();
-            defer _mutex.unlock();
             std.time.sleep(wait_ms * std.time.ns_per_ms);
-            finished.* += 1;
+            {
+                _mutex.lock();
+                defer _mutex.unlock();
+                finished.* += 1;
+            }
         }
     };
 
+    const start = std.time.milliTimestamp();
     spawnTaskWg(&wg, Task.run, .{ 10, &m, &total_finished });
     spawnTaskWg(&wg, Task.run, .{ 11, &m, &total_finished });
     spawnTaskWg(&wg, Task.run, .{ 12, &m, &total_finished });
     spawnTaskWg(&wg, Task.run, .{ 13, &m, &total_finished });
 
     waitAndWork(&wg);
+
+    // if tasks are executed sequentially, total time is 10 + 11 + 12 + 13 = 46ms, so expect it < 20ms because we execute them in parallel
+    std.debug.print("Time taken for performSpawnTaskWgTest: {d} ms\n", .{std.time.milliTimestamp() - start});
 
     try std.testing.expectEqual(total_finished, 4);
 }
