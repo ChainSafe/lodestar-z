@@ -410,13 +410,13 @@ pub fn createSigVariant(
             if (pks.len == 0) {
                 return BLST_ERROR.AGGR_TYPE_MISMATCH;
             }
-            var pk = PublicKey.fromBytes(pks[0]);
+            var pk = try PublicKey.fromBytes(pks[0]);
             if (pks_validate) {
                 try pk.validate();
             }
             var agg_pk = @This().fromPublicKey(&pk);
             for (pks[1..]) |s| {
-                pk = PublicKey.fromBytes(s);
+                pk = try PublicKey.fromBytes(s);
                 if (pks_validate) {
                     try pk.validate();
                 }

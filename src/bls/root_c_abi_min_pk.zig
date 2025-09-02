@@ -84,17 +84,17 @@ pub const AggregatePublicKey = SigVariant.createAggregatePublicKey();
 pub const Signature = SigVariant.createSignature();
 pub const AggregateSignature = SigVariant.createAggregateSignature();
 pub const SecretKey = SigVariant.createSecretKey();
+pub const MemoryPool = SigVariant.getMemoryPoolType();
 
 /// exported C-ABI functions need to be declared at top level, and they only work with extern struct
-const PublicKeyType = SigVariant.getPublicKeyType();
-const AggregatePublicKeyType = SigVariant.getAggregatePublicKeyType();
-const SignatureType = SigVariant.getSignatureType();
-const AggregateSignatureType = SigVariant.getAggregateSignatureType();
-const SecretKeyType = SigVariant.getSecretKeyType();
-const SignatureSetType = SigVariant.getSignatureSetType();
-const PkAndSerializedSigType = SigVariant.getPkAndSerializedSigType();
-const CallBackFn = SigVariant.getCallBackFn();
-const MemoryPool = SigVariant.getMemoryPoolType();
+pub const PublicKeyType = SigVariant.getPublicKeyType();
+pub const AggregatePublicKeyType = SigVariant.getAggregatePublicKeyType();
+pub const SignatureType = SigVariant.getSignatureType();
+pub const AggregateSignatureType = SigVariant.getAggregateSignatureType();
+pub const SecretKeyType = SigVariant.getSecretKeyType();
+pub const SignatureSetType = SigVariant.getSignatureSetType();
+pub const PkAndSerializedSigType = SigVariant.getPkAndSerializedSigType();
+pub const CallBackFn = SigVariant.getCallBackFn();
 
 /// PublicKey functions
 export fn defaultPublicKey() PublicKeyType {
