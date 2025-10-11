@@ -5,9 +5,8 @@ const Allocator = std.mem.Allocator;
 /// T should be `*Something`, not `*const Something` due to deinit()
 pub fn ReferenceCount(comptime T: type) type {
     return struct {
-        // TODO: switch to std.atomic
         allocator: Allocator,
-        _ref_count: usize,
+        _ref_count: std.atomic.Value(u32),
         instance: T,
 
         pub fn init(allocator: Allocator, instance: T) !*@This() {
@@ -15,20 +14,16 @@ pub fn ReferenceCount(comptime T: type) type {
             errdefer allocator.destroy(ptr);
             ptr.* = .{
                 .allocator = allocator,
-                ._ref_count = 1,
+                ._ref_count = std.atomic.Value(u32).init(1),
                 .instance = instance,
             };
             return ptr;
         }
 
-        pub fn deinit(self: *@This()) void {
+        /// private deinit, consumer should call release() instead
+        fn deinit(self: *@This()) void {
             self.instance.deinit();
             self.allocator.destroy(self);
-        }
-
-        pub fn clone(allocator: Allocator, instance: T) !*@This() {
-            const cloned = try instance.clone(allocator);
-            return @This().init(cloned);
         }
 
         pub fn get(self: *@This()) T {
@@ -36,13 +31,13 @@ pub fn ReferenceCount(comptime T: type) type {
         }
 
         pub fn acquire(self: *@This()) *@This() {
-            self._ref_count += 1;
+            _ = self._ref_count.fetchAdd(1, .acquire);
             return self;
         }
 
         pub fn release(self: *@This()) void {
-            self._ref_count -= 1;
-            if (self._ref_count == 0) {
+            const old_rc = self._ref_count.fetchSub(1, .release);
+            if (old_rc == 1) {
                 self.deinit();
             }
         }
