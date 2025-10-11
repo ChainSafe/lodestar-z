@@ -30,12 +30,12 @@ pub fn ReferenceCount(comptime T: type) type {
             return self.instance;
         }
 
-        pub fn acquire(self: *@This()) *@This() {
+        pub fn ref(self: *@This()) *@This() {
             _ = self._ref_count.fetchAdd(1, .acquire);
             return self;
         }
 
-        pub fn release(self: *@This()) void {
+        pub fn unref(self: *@This()) void {
             const old_rc = self._ref_count.fetchSub(1, .release);
             if (old_rc == 1) {
                 self.deinit();
@@ -55,12 +55,12 @@ test "ReferenceCount - *std.ArrayList(u32)" {
     // ref_count = 1
     var wrapped_array_list = try WrappedArrayList.init(allocator, &array_list);
     // ref_count = 2
-    _ = wrapped_array_list.acquire();
+    _ = wrapped_array_list.ref();
 
     // ref_count = 1
-    wrapped_array_list.release();
+    wrapped_array_list.unref();
     // ref_count = 0 ===> deinit
-    wrapped_array_list.release();
+    wrapped_array_list.unref();
 
     // the test does not leak any memory because array_list.deinit() is automatically called
 }
@@ -72,12 +72,12 @@ test "ReferenceCount - std.ArrayList(u32)" {
     // ref_count = 1
     var wrapped_array_list = try WrappedArrayList.init(allocator, std.ArrayList(u32).init(allocator));
     // ref_count = 2
-    _ = wrapped_array_list.acquire();
+    _ = wrapped_array_list.ref();
 
     // ref_count = 1
-    wrapped_array_list.release();
+    wrapped_array_list.unref();
     // ref_count = 0 ===> deinit
-    wrapped_array_list.release();
+    wrapped_array_list.unref();
 
     // the test does not leak any memory because array_list.deinit() is automatically called
 }
