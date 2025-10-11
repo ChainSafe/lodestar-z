@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 
 /// A reference counted wrapper for a type `T`.
 /// T should be `*Something`, not `*const Something` due to deinit()
-pub fn ReferenceCount(comptime T: type) type {
+pub fn RefCount(comptime T: type) type {
     return struct {
         allocator: Allocator,
         _ref_count: std.atomic.Value(u32),
@@ -43,9 +43,9 @@ pub fn ReferenceCount(comptime T: type) type {
     };
 }
 
-test "ReferenceCount - *std.ArrayList(u32)" {
+test "RefCount - *std.ArrayList(u32)" {
     const allocator = std.testing.allocator;
-    const WrappedArrayList = ReferenceCount(*std.ArrayList(u32));
+    const WrappedArrayList = RefCount(*std.ArrayList(u32));
 
     var array_list = std.ArrayList(u32).init(allocator);
     try array_list.append(1);
@@ -64,9 +64,9 @@ test "ReferenceCount - *std.ArrayList(u32)" {
     // the test does not leak any memory because array_list.deinit() is automatically called
 }
 
-test "ReferenceCount - std.ArrayList(u32)" {
+test "RefCount - std.ArrayList(u32)" {
     const allocator = std.testing.allocator;
-    const WrappedArrayList = ReferenceCount(std.ArrayList(u32));
+    const WrappedArrayList = RefCount(std.ArrayList(u32));
 
     // ref_count = 1
     var wrapped_array_list = try WrappedArrayList.init(allocator, std.ArrayList(u32).init(allocator));
