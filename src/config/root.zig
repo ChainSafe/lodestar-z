@@ -14,6 +14,16 @@ pub const chiado_chain_config = @import("./chain/networks/chiado.zig").chiado_ch
 pub const sepolia_chain_config = @import("./chain/networks/sepolia.zig").sepolia_chain_config;
 pub const hoodi_chain_config = @import("./chain/networks/hoodi.zig").hoodi_chain_config;
 
+pub fn hexToBytesComptime(comptime n: usize, comptime input: []const u8) [n]u8 {
+    var out: [n]u8 = undefined;
+    if (input[0] == '0' and input[1] == 'x') {
+        _ = std.fmt.hexToBytes(&out, input[2..]) catch unreachable;
+    } else {
+        _ = std.fmt.hexToBytes(&out, input) catch unreachable;
+    }
+    return out;
+}
+
 test {
     testing.refAllDecls(@This());
 }

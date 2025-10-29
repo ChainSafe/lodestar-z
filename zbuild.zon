@@ -56,7 +56,7 @@
         },
         .config = .{
             .root_source_file = "src/config/root.zig",
-            .imports = .{ .build_options, .preset, .consensus_types, .hex, .constants },
+            .imports = .{ .build_options, .preset, .consensus_types, .constants },
         },
         .consensus_types = .{
             .root_source_file = "src/consensus_types/root.zig",
@@ -91,7 +91,6 @@
                 .blst,
                 .preset,
                 .constants,
-                .hex,
             },
         },
     },

@@ -1,9 +1,8 @@
 const std = @import("std");
-const hex_utils = @import("hex");
 const preset = @import("preset").preset;
 const ChainConfig = @import("../chain_config.zig").ChainConfig;
 const BlobScheduleEntry = @import("../chain_config.zig").BlobScheduleEntry;
-const b = hex_utils.hexToBytesComptime;
+const b = @import("../../root.zig").hexToBytesComptime;
 
 const mainnet = @import("./mainnet.zig").mainnet_chain_config;
 
