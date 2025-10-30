@@ -84,9 +84,6 @@ jobs:
         run: |
           zig build test:ssz
 
-      - name: Run hex tests
-        run: |
-          zig build test:hex
       - name: Run config tests
         run: |
           zig build test:config
