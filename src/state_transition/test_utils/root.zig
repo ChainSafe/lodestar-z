@@ -8,11 +8,11 @@ pub const generateElectraBlock = @import("./generate_block.zig").generateElectra
 
 /// Convert hex to bytes with 0x-prefix support
 pub fn hexToBytes(out: []u8, input: []const u8) ![]u8 {
-    if (input[0] == '0' and input[1] == 'x') {
+    if (std.mem.startsWith(u8, input, "0x")) {
         return try fmt.hexToBytes(out, input[2..]);
-    } else {
-        return try fmt.hexToBytes(out, input);
     }
+
+    return try fmt.hexToBytes(out, input);
 }
 
 pub fn hexToRoot(input: *const [66]u8) ![32]u8 {

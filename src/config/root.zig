@@ -16,11 +16,13 @@ pub const hoodi_chain_config = @import("./chain/networks/hoodi.zig").hoodi_chain
 
 pub fn hexToBytesComptime(comptime n: usize, comptime input: []const u8) [n]u8 {
     var out: [n]u8 = undefined;
-    if (input[0] == '0' and input[1] == 'x') {
-        _ = std.fmt.hexToBytes(&out, input[2..]) catch unreachable;
-    } else {
-        _ = std.fmt.hexToBytes(&out, input) catch unreachable;
-    }
+    const input_slice = if (std.mem.startsWith(u8, input, "0x"))
+        input[2..]
+    else
+        input;
+
+    _ = std.fmt.hexToBytes(&out, input_slice) catch
+        @compileError(std.fmt.comptimePrint("Failed to convert hex {:x} to bytes at comptime", .{input}));
     return out;
 }
 
