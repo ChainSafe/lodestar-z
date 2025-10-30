@@ -22,7 +22,7 @@ pub fn hexToBytesComptime(comptime n: usize, comptime input: []const u8) [n]u8 {
         input;
 
     _ = std.fmt.hexToBytes(&out, input_slice) catch
-        @compileError(std.fmt.comptimePrint("Failed to convert hex {:x} to bytes at comptime", .{input}));
+        @compileError(std.fmt.comptimePrint("Failed to convert hex {s} to bytes at comptime", .{input}));
     return out;
 }
 

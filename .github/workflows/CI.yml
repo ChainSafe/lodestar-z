@@ -72,6 +72,8 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: zig fmt --check .
 
+<<<<<<< Conflict 1 of 1
++++++++ Contents of side #1
       - name: Run hashing tests
         run: |
           zig build test:hashing
