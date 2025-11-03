@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - te/fix_spec_tests_2nd
   pull_request:
     branches:
       - main
