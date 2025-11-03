@@ -15,12 +15,14 @@ const supported_forks = [_]ForkSeq{
 const supported_test_runners = [_]RunnerKind{
     .operations,
     .sanity,
+    .epoch_processing,
 };
 
 fn TestWriter(comptime kind: RunnerKind) type {
     return switch (kind) {
         .operations => @import("./writer/operations.zig"),
         .sanity => @import("./writer/sanity.zig"),
+        .epoch_processing => @import("./writer/epoch_processing.zig"),
         else => @compileError("Unsupported test runner"),
     };
 }
