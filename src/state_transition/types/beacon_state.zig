@@ -456,7 +456,7 @@ pub const BeaconStateAllForks = union(enum) {
         switch (self.*) {
             .phase0 => @panic("rotate_epoch_participations is not available in phase0"),
             inline else => |state| {
-                state.previous_epoch_participation.deinit(allocator);
+                state.previous_epoch_participation.clearRetainingCapacity();
                 try state.previous_epoch_participation.appendSlice(allocator, state.current_epoch_participation.items);
                 @memset(state.current_epoch_participation.items, 0);
             },
