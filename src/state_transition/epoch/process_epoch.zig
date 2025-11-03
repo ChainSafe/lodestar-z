@@ -55,7 +55,7 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
     }
 
     if (state.isPhase0()) {
-        processParticipationRecordUpdates(cached_state);
+        processParticipationRecordUpdates(cached_state, allocator);
     } else {
         try processParticipationFlagUpdates(cached_state, allocator);
     }
