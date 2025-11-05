@@ -1,4 +1,5 @@
 const std = @import("std");
+const ct = @import("consensus_types");
 const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const ForkSeq = @import("config").ForkSeq;
@@ -51,12 +52,14 @@ pub fn processPendingConsolidations(allocator: Allocator, cached_state: *CachedB
     }
 
     if (next_pending_consolidation > 0) {
-        const new_pending_consolidations = pending_consolidations.items[next_pending_consolidation..];
-        // cannot use memcpy due to overlap
-        const items = pending_consolidations.items;
-        for (0..new_pending_consolidations.len) |i| {
-            items[i] = items[i + next_pending_consolidation];
-        }
-        try pending_consolidations.resize(allocator, new_pending_consolidations.len);
+        const new_len = pending_consolidations.items.len - next_pending_consolidation;
+
+        std.mem.copyForwards(
+            ct.electra.PendingConsolidation.Type,
+            pending_consolidations.items[0..new_len],
+            pending_consolidations.items[next_pending_consolidation .. next_pending_consolidation + new_len],
+        );
+
+        try pending_consolidations.resize(allocator, new_len);
     }
 }

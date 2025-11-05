@@ -230,9 +230,9 @@ fn computeDomain(domain_type: DomainType, fork_version: Version, genesis_validat
     var fork_data_root: [32]u8 = undefined;
     try computeForkDataRoot(fork_version, genesis_validators_root, &fork_data_root);
     // 4 first bytes is domain_type
-    std.mem.copyForwards(u8, out[0..4], domain_type[0..4]);
+    @memcpy(out[0..4], domain_type[0..4]);
     // 28 next bytes is first 28 bytes of fork_data_root
-    std.mem.copyForwards(u8, out[4..], fork_data_root[0..28]);
+    @memcpy(out[4..32], fork_data_root[0..28]);
 }
 
 fn computeForkDataRoot(current_version: Version, genesis_validators_root: Root, out: *[32]u8) !void {
