@@ -326,4 +326,5 @@ pub fn build(b: *std.Build) void {
     module_spec_tests.addImport("state_transition", module_state_transition);
     module_spec_tests.addImport("ssz", dep_ssz.module("ssz"));
     module_spec_tests.addImport("blst", dep_blst.module("blst"));
+    module_spec_tests.addImport("persistent_merkle_tree", dep_ssz.module("persistent_merkle_tree"));
 }

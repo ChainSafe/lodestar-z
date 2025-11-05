@@ -3,9 +3,17 @@ const std = @import("std");
 pub const RunnerKind = enum {
     epoch_processing,
     finality,
+    merkle_proof,
     operations,
     random,
     rewards,
     sanity,
     shuffling,
+
+    pub fn hasSuiteCase(comptime self: RunnerKind) bool {
+        return switch (self) {
+            .merkle_proof => true,
+            else => false,
+        };
+    }
 };
