@@ -51,14 +51,7 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
 
         /// consumer should deinit the returned state and destroy the pointer
         pub fn loadPostState(allocator: Allocator, dir: std.fs.Dir) !?BeaconStateAllForks {
-            const post_exist = if (dir.statFile("post.ssz_snappy")) |_| true else |err| blk: {
-                if (err == error.FileNotFound) {
-                    break :blk false;
-                } else {
-                    return err;
-                }
-            };
-            if (post_exist) {
+            if (dir.statFile("post.ssz_snappy")) |_| {
                 const post_state = try allocator.create(ForkTypes.BeaconState.Type);
                 errdefer {
                     ForkTypes.BeaconState.deinit(allocator, post_state);
@@ -67,8 +60,12 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
                 post_state.* = ForkTypes.BeaconState.default_value;
                 try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", post_state);
                 return try BeaconStateAllForks.init(fork, post_state);
-            } else {
-                return null;
+            } else |err| {
+                if (err == error.FileNotFound) {
+                    return null;
+                } else {
+                    return err;
+                }
             }
         }
     };
