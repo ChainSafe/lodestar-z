@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ForkSeq = @import("config").ForkSeq;
 
 const ssz = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -31,6 +32,7 @@ const processEpoch = @import("epoch/process_epoch.zig").processEpoch;
 const computeEpochAtSlot = @import("utils/epoch.zig").computeEpochAtSlot;
 const processSlot = @import("slot/process_slot.zig").processSlot;
 const deinitReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
+const upgradeStateToAltair = @import("slot/upgrade_state_to_altair.zig").upgradeStateToAltair;
 
 const SignedBlock = @import("types/signed_block.zig").SignedBlock;
 
@@ -55,13 +57,13 @@ pub fn processSlotsWithTransientCache(
     slot: Slot,
     _: EpochTransitionCacheOpts,
 ) !void {
-    var cached_state = post_state.state;
-    if (cached_state.slot() > slot) return error.outdatedSlot;
+    var state = post_state.state;
+    if (state.slot() > slot) return error.outdatedSlot;
 
-    while (cached_state.slot() < slot) {
+    while (state.slot() < slot) {
         try processSlot(allocator, post_state);
 
-        if ((cached_state.slot() + 1) % preset.SLOTS_PER_EPOCH == 0) {
+        if ((state.slot() + 1) % preset.SLOTS_PER_EPOCH == 0) {
             // TODO(bing): metrics
             // const epochTransitionTimer = metrics?.epochTransitionTime.startTimer();
 
@@ -72,28 +74,25 @@ pub fn processSlotsWithTransientCache(
                 allocator.destroy(epoch_transition_cache);
             }
             try processEpoch(allocator, post_state, epoch_transition_cache);
-
             // TODO(bing): registerValidatorStatuses
 
-            cached_state.slotPtr().* += 1;
+            state.slotPtr().* += 1;
 
             try post_state.epoch_cache_ref.get().afterProcessEpoch(post_state, epoch_transition_cache);
             // post_state.commit
-            var root: Root = undefined;
-            try cached_state.hashTreeRoot(allocator, &root);
+
+            const state_epoch = computeEpochAtSlot(state.slot());
+
+            const config = post_state.config;
+            if (state_epoch == config.chain.ALTAIR_FORK_EPOCH) {
+                try upgradeStateToAltair(allocator, post_state);
+            }
+            // TODO: handle other forks
         } else {
-            cached_state.slotPtr().* += 1;
+            state.slotPtr().* += 1;
         }
 
         //epochTransitionTimer
-        const state_epoch = computeEpochAtSlot(cached_state.slot());
-
-        inline for (post_state.config.forks_descending_epoch_order) |f| {
-            if (post_state.state.forkSeq().lt(f.fork_seq) and state_epoch == f.epoch) {
-                _ = try post_state.state.upgradeUnsafe(allocator);
-                break; // no need to check all forks once one hits
-            }
-        }
     }
 }
 

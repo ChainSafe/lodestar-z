@@ -29,7 +29,6 @@ pub fn Transition(comptime fork: ForkSeq) type {
                 tc.deinit();
                 state_transition.deinitStateTransition();
             }
-
             try tc.runTest();
         }
 
@@ -45,7 +44,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
             defer meta_file.close();
             const meta_content = try meta_file.readToEndAlloc(allocator, 1024);
             defer allocator.free(meta_content);
-            const meta_content_one_line = std.mem.trim(u8, meta_content, " \n{}");
+            const meta_content_one_line = std.mem.trim(u8, meta_content, " \n");
             // sample content of meta.yaml: {post_fork: electra, fork_epoch: 2, blocks_count: 96, fork_block: 62}
             // Parse YAML for fork_epoch (simplified; assume "fork_epoch: N")
             const fork_epoch = if (std.mem.indexOf(u8, meta_content_one_line, "fork_epoch: ")) |start| blk: {
