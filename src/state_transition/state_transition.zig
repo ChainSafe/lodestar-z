@@ -33,6 +33,7 @@ const computeEpochAtSlot = @import("utils/epoch.zig").computeEpochAtSlot;
 const processSlot = @import("slot/process_slot.zig").processSlot;
 const deinitReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
 const upgradeStateToAltair = @import("slot/upgrade_state_to_altair.zig").upgradeStateToAltair;
+const upgradeStateToBellatrix = @import("slot/upgrade_state_to_bellatrix.zig").upgradeStateToBellatrix;
 
 const SignedBlock = @import("types/signed_block.zig").SignedBlock;
 
@@ -87,7 +88,9 @@ pub fn processSlotsWithTransientCache(
             if (state_epoch == config.chain.ALTAIR_FORK_EPOCH) {
                 try upgradeStateToAltair(allocator, post_state);
             }
-            // TODO: handle other forks
+            if (state_epoch == config.chain.BELLATRIX_FORK_EPOCH) {
+                try upgradeStateToBellatrix(allocator, post_state);
+            }
         } else {
             state.slotPtr().* += 1;
         }
