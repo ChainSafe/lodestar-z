@@ -130,7 +130,11 @@ pub fn Transition(comptime fork: ForkSeq) type {
                     .{
                         .regular = &beacon_block,
                     },
-                    .{},
+                    .{
+                        .verify_state_root = true,
+                        .verify_proposer = false,
+                        .verify_signatures = false,
+                    },
                 );
 
                 // don't deinit the initial pre state, we do it in deinit()
