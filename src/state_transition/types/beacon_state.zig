@@ -532,12 +532,12 @@ pub const BeaconStateAllForks = union(enum) {
         };
     }
 
-    pub fn setLatestExecutionPayloadHeader(self: *BeaconStateAllForks, header: *const ExecutionPayloadHeader) void {
+    pub fn setLatestExecutionPayloadHeader(self: *BeaconStateAllForks, header: ExecutionPayloadHeader) void {
         switch (self.*) {
-            .bellatrix => |state| state.latest_execution_payload_header = header.*.bellatrix.*,
-            .capella => |state| state.latest_execution_payload_header = header.*.capella.*,
-            .deneb => |state| state.latest_execution_payload_header = header.*.deneb.*,
-            .electra => |state| state.latest_execution_payload_header = header.*.electra.*,
+            .bellatrix => |state| state.latest_execution_payload_header = header.bellatrix.*,
+            .capella => |state| state.latest_execution_payload_header = header.capella.*,
+            .deneb => |state| state.latest_execution_payload_header = header.deneb.*,
+            .electra => |state| state.latest_execution_payload_header = header.electra.*,
             else => panic("latest_execution_payload_header is not available in {}", .{self}),
         }
     }
