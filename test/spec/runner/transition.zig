@@ -58,35 +58,39 @@ pub fn Transition(comptime fork: ForkSeq) type {
             // Parse YAML for blocks_count (simplified; assume "blocks_count: N")
             const blocks_count = if (std.mem.indexOf(u8, meta_content_one_line, "blocks_count: ")) |start| blk: {
                 const str = meta_content_one_line[start + "blocks_count: ".len ..];
-                if (std.mem.indexOf(u8, str, ",")) |end| {
+                if (std.mem.indexOfAny(u8, str, &.{ ',', '}' })) |end| {
                     const num_str = str[0..end];
                     break :blk std.fmt.parseInt(usize, std.mem.trim(u8, num_str, " "), 10) catch 1;
                 } else unreachable;
             } else unreachable;
 
-            // Parse YAML for fork_block
-            const fork_block_idx = if (std.mem.indexOf(u8, meta_content_one_line, "fork_block: ")) |start| blk: {
+            // Parse YAML for fork_block, this is optional
+            const opt_fork_block_idx = if (std.mem.indexOf(u8, meta_content_one_line, "fork_block: ")) |start| blk: {
                 const str = meta_content_one_line[start + "fork_block: ".len ..];
                 if (std.mem.indexOf(u8, str, "}")) |end| {
                     const num_str = str[0..end];
                     break :blk std.fmt.parseInt(u64, std.mem.trim(u8, num_str, " "), 10) catch 0;
                 } else unreachable;
-            } else unreachable;
+            } else null;
 
             // load blocks
             tc.blocks = try allocator.alloc(SignedBeaconBlock, blocks_count);
+            var loaded_blocks: usize = 0;
             errdefer {
-                for (tc.blocks) |*block| {
-                    // block.deinit(allocator);
-                    test_case.deinitSignedBeaconBlock(block, allocator);
+                for (0..loaded_blocks) |i| {
+                    test_case.deinitSignedBeaconBlock(&tc.blocks[i], allocator);
                 }
                 allocator.free(tc.blocks);
             }
             for (0..blocks_count) |i| {
-                const fork_block = if (i <= fork_block_idx) tc_utils.getForkPre() else fork;
+                const fork_block = if (opt_fork_block_idx) |fork_block_idx| (if (i <= fork_block_idx)
+                    tc_utils.getForkPre()
+                else
+                    fork) else fork;
                 const block_filename = try std.fmt.allocPrint(allocator, "blocks_{d}.ssz_snappy", .{i});
                 defer allocator.free(block_filename);
                 tc.blocks[i] = try loadSignedBeaconBlock(allocator, fork_block, dir, block_filename);
+                loaded_blocks += 1;
             }
 
             // load pre state
@@ -101,7 +105,6 @@ pub fn Transition(comptime fork: ForkSeq) type {
 
         pub fn deinit(self: *Self) void {
             for (self.blocks) |*block| {
-                // block.deinit(self.pre.allocator);
                 test_case.deinitSignedBeaconBlock(block, self.pre.allocator);
             }
             self.pre.allocator.free(self.blocks);
