@@ -30,7 +30,7 @@ pub const header =
 ;
 
 const test_template =
-    \\test "{s} sanity {s} {s}" {{
+    \\test "{s} transition {s}" {{
     \\    const test_dir_name = try std.fs.path.join(allocator, &[_][]const u8{{
     \\        spec_test_options.spec_test_out_dir,
     \\        spec_test_options.spec_test_version,
@@ -59,7 +59,7 @@ pub fn writeTest(
     defer std.heap.page_allocator.free(execute_call);
     try writer.print(test_template, .{
         @tagName(fork),
-        @tagName(handler),
+        // skip handler
         test_case_name,
 
         @tagName(fork),
