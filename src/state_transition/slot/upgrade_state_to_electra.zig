@@ -55,8 +55,9 @@ pub fn upgradeStateToElectra(allocator: Allocator, cached_state: *CachedBeaconSt
 
     const sort_fn = struct {
         pub fn sort(validator_arr: []ssz.phase0.Validator.Type, a: ValidatorIndex, b: ValidatorIndex) bool {
-            const res = validator_arr[a].activation_eligibility_epoch - validator_arr[b].activation_eligibility_epoch;
-            return if (res != 0) res < 0 else a < b;
+            const activation_eligibility_epoch_a = validator_arr[a].activation_eligibility_epoch;
+            const activation_eligibility_epoch_b = validator_arr[b].activation_eligibility_epoch;
+            return if (activation_eligibility_epoch_a != activation_eligibility_epoch_b) activation_eligibility_epoch_a < activation_eligibility_epoch_b else a < b;
         }
     }.sort;
     std.mem.sort(ValidatorIndex, pre_activation.items, validators, sort_fn);
