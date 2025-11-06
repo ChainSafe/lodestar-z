@@ -36,6 +36,7 @@ const upgradeStateToAltair = @import("slot/upgrade_state_to_altair.zig").upgrade
 const upgradeStateToBellatrix = @import("slot/upgrade_state_to_bellatrix.zig").upgradeStateToBellatrix;
 const upgradeStateToCapella = @import("slot/upgrade_state_to_capella.zig").upgradeStateToCapella;
 const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
+const upgradeStateToElectra = @import("slot/upgrade_state_to_electra.zig").upgradeStateToElectra;
 
 const SignedBlock = @import("types/signed_block.zig").SignedBlock;
 
@@ -98,6 +99,9 @@ pub fn processSlotsWithTransientCache(
             }
             if (state_epoch == config.chain.DENEB_FORK_EPOCH) {
                 try upgradeStateToDeneb(allocator, post_state);
+            }
+            if (state_epoch == config.chain.ELECTRA_FORK_EPOCH) {
+                try upgradeStateToElectra(allocator, post_state);
             }
         } else {
             state.slotPtr().* += 1;
