@@ -642,9 +642,8 @@ pub const BeaconStateAllForks = union(enum) {
                     try f.type.clone(&@field(state, f.name), &@field(upgraded, f.name));
                 } else {
                     if (@TypeOf(@field(upgraded, f.name)) != @TypeOf(f.type.default_value)) {
-                        // should not happen, not sure why I got type mismatch error without the if check here
-                        // we'll likely not use this technique for TreeView anyway
-                        return error.TypeMismatch;
+                        // 2 BeaconState of prev_fork and cur_fork has same field name but different types
+                        // for example latest_execution_payload_header changed from Bellatrix to Capella
                     } else {
                         @field(upgraded, f.name) = f.type.default_value;
                         try f.type.clone(allocator, &@field(state, f.name), &@field(upgraded, f.name));
@@ -685,7 +684,6 @@ pub const BeaconStateAllForks = union(enum) {
                         state,
                     ),
                 };
-                allocator.destroy(state);
                 return self;
             },
             .bellatrix => |state| {
@@ -697,7 +695,6 @@ pub const BeaconStateAllForks = union(enum) {
                         state,
                     ),
                 };
-                allocator.destroy(state);
                 return self;
             },
             .capella => |state| {
@@ -709,7 +706,6 @@ pub const BeaconStateAllForks = union(enum) {
                         state,
                     ),
                 };
-                allocator.destroy(state);
                 return self;
             },
             .deneb => |state| {
@@ -721,7 +717,6 @@ pub const BeaconStateAllForks = union(enum) {
                         state,
                     ),
                 };
-                allocator.destroy(state);
                 return self;
             },
             .electra => |_| {
@@ -781,13 +776,37 @@ test "upgrade state - sanity" {
         ssz.phase0.BeaconState.deinit(allocator, old_phase0_state);
         allocator.destroy(old_phase0_state);
     }
+
     var altair = try phase0.upgradeUnsafe(allocator);
-    defer altair.deinit(allocator);
+    const old_altair_state = altair.altair;
+    defer {
+        ssz.altair.BeaconState.deinit(allocator, old_altair_state);
+        allocator.destroy(old_altair_state);
+    }
 
-    // var bellatrix = try altair.upgradeUnsafe(allocator);
-    // defer bellatrix.deinit(allocator);
+    var bellatrix = try altair.upgradeUnsafe(allocator);
+    const old_bellatrix_state = bellatrix.bellatrix;
+    defer {
+        ssz.bellatrix.BeaconState.deinit(allocator, old_bellatrix_state);
+        allocator.destroy(old_bellatrix_state);
+    }
 
-    // const capella = try bellatrix.upgradeUnsafe(allocator);
-    // var deneb = try capella.upgradeUnsafe(allocator);
-    // defer deneb.deinit(allocator);
+    var capella = try bellatrix.upgradeUnsafe(allocator);
+    const old_capella_state = capella.capella;
+    defer {
+        ssz.capella.BeaconState.deinit(allocator, old_capella_state);
+        allocator.destroy(old_capella_state);
+    }
+
+    var deneb = try capella.upgradeUnsafe(allocator);
+    const old_deneb_state = deneb.deneb;
+    defer {
+        ssz.deneb.BeaconState.deinit(allocator, old_deneb_state);
+        allocator.destroy(old_deneb_state);
+    }
+
+    var electra = try deneb.upgradeUnsafe(allocator);
+    defer electra.deinit(allocator);
+
+    // TODO: fulu
 }
