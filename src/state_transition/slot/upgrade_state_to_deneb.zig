@@ -23,8 +23,7 @@ pub fn upgradeStateToDeneb(allocator: Allocator, cached_state: *CachedBeaconStat
 
     // add excessBlobGas and blobGasUsed to latestExecutionPayloadHeader
     // ownership is transferred to BeaconState
-    const deneb_latest_execution_payload_header = try allocator.create(ssz.deneb.ExecutionPayloadHeader.Type);
-    deneb_latest_execution_payload_header.* = ssz.deneb.ExecutionPayloadHeader.default_value;
+    var deneb_latest_execution_payload_header = ssz.deneb.ExecutionPayloadHeader.default_value;
     const capella_latest_execution_payload_header = capella_state.latest_execution_payload_header;
 
     deneb_latest_execution_payload_header.parent_hash = capella_latest_execution_payload_header.parent_hash;
@@ -46,6 +45,6 @@ pub fn upgradeStateToDeneb(allocator: Allocator, cached_state: *CachedBeaconStat
     deneb_latest_execution_payload_header.blob_gas_used = 0;
 
     state.setLatestExecutionPayloadHeader(.{
-        .deneb = deneb_latest_execution_payload_header,
+        .deneb = &deneb_latest_execution_payload_header,
     });
 }
