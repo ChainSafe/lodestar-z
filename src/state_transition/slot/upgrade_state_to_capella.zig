@@ -58,8 +58,7 @@ pub fn upgradeStateToCapella(allocator: Allocator, cached_state: *CachedBeaconSt
         .epoch = cached_state.getEpochCache().epoch,
     };
 
-    const capella_latest_execution_payload_header = try allocator.create(ssz.capella.ExecutionPayloadHeader.Type);
-    capella_latest_execution_payload_header.* = ssz.capella.ExecutionPayloadHeader.default_value;
+    var capella_latest_execution_payload_header = ssz.capella.ExecutionPayloadHeader.default_value;
     const bellatrix_latest_execution_payload_header = bellatrix_state.latest_execution_payload_header;
 
     capella_latest_execution_payload_header.parent_hash = bellatrix_latest_execution_payload_header.parent_hash;
@@ -80,6 +79,6 @@ pub fn upgradeStateToCapella(allocator: Allocator, cached_state: *CachedBeaconSt
     capella_latest_execution_payload_header.withdrawals_root = [_]u8{0} ** 32;
 
     state.setLatestExecutionPayloadHeader(.{
-        .capella = capella_latest_execution_payload_header,
+        .capella = &capella_latest_execution_payload_header,
     });
 }
