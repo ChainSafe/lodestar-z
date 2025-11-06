@@ -35,6 +35,7 @@ const deinitReusedEpochTransitionCache = @import("cache/epoch_transition_cache.z
 const upgradeStateToAltair = @import("slot/upgrade_state_to_altair.zig").upgradeStateToAltair;
 const upgradeStateToBellatrix = @import("slot/upgrade_state_to_bellatrix.zig").upgradeStateToBellatrix;
 const upgradeStateToCapella = @import("slot/upgrade_state_to_capella.zig").upgradeStateToCapella;
+const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
 
 const SignedBlock = @import("types/signed_block.zig").SignedBlock;
 
@@ -94,6 +95,9 @@ pub fn processSlotsWithTransientCache(
             }
             if (state_epoch == config.chain.CAPELLA_FORK_EPOCH) {
                 try upgradeStateToCapella(allocator, post_state);
+            }
+            if (state_epoch == config.chain.DENEB_FORK_EPOCH) {
+                try upgradeStateToDeneb(allocator, post_state);
             }
         } else {
             state.slotPtr().* += 1;

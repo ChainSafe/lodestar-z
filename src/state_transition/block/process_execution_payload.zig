@@ -99,5 +99,5 @@ pub fn processExecutionPayload(
         .blinded => |b| b.executionPayloadHeader(),
     };
 
-    state.setLatestExecutionPayloadHeader(&payload_header);
+    state.setLatestExecutionPayloadHeader(payload_header);
 }
