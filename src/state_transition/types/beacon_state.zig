@@ -30,6 +30,7 @@ const Bytes32 = ssz.primitive.Bytes32.Type;
 const Gwei = ssz.primitive.Gwei.Type;
 const Epoch = ssz.primitive.Epoch.Type;
 const ForkSeq = @import("config").ForkSeq;
+const isFixedType = @import("ssz").isFixedType;
 
 /// wrapper for all BeaconState types across forks so that we don't have to do switch/case for all methods
 /// right now this works with regular types
@@ -334,6 +335,12 @@ pub const BeaconStateAllForks = union(enum) {
         };
     }
 
+    pub fn forkPtr(self: *const BeaconStateAllForks) *Fork {
+        return switch (self.*) {
+            inline else => |state| &state.fork,
+        };
+    }
+
     pub fn latestBlockHeader(self: *const BeaconStateAllForks) *BeaconBlockHeader {
         return switch (self.*) {
             inline else => |state| &state.latest_block_header,
@@ -525,12 +532,12 @@ pub const BeaconStateAllForks = union(enum) {
         };
     }
 
-    pub fn setLatestExecutionPayloadHeader(self: *BeaconStateAllForks, header: *const ExecutionPayloadHeader) void {
+    pub fn setLatestExecutionPayloadHeader(self: *BeaconStateAllForks, header: ExecutionPayloadHeader) void {
         switch (self.*) {
-            .bellatrix => |state| state.latest_execution_payload_header = header.*.bellatrix.*,
-            .capella => |state| state.latest_execution_payload_header = header.*.capella.*,
-            .deneb => |state| state.latest_execution_payload_header = header.*.deneb.*,
-            .electra => |state| state.latest_execution_payload_header = header.*.electra.*,
+            .bellatrix => |state| state.latest_execution_payload_header = header.bellatrix.*,
+            .capella => |state| state.latest_execution_payload_header = header.capella.*,
+            .deneb => |state| state.latest_execution_payload_header = header.deneb.*,
+            .electra => |state| state.latest_execution_payload_header = header.electra.*,
             else => panic("latest_execution_payload_header is not available in {}", .{self}),
         }
     }
@@ -627,10 +634,21 @@ pub const BeaconStateAllForks = union(enum) {
         state: *F.Type,
     ) !*T.Type {
         var upgraded = try allocator.create(T.Type);
+        errdefer allocator.destroy(upgraded);
         upgraded.* = T.default_value;
-        inline for (@typeInfo(F).@"struct".fields) |f| {
+        inline for (F.fields) |f| {
             if (@hasField(T.Type, f.name)) {
-                f.type.clone(allocator, &@field(state, f.name), &@field(upgraded, f.name));
+                if (comptime isFixedType(f.type)) {
+                    try f.type.clone(&@field(state, f.name), &@field(upgraded, f.name));
+                } else {
+                    if (@TypeOf(@field(upgraded, f.name)) != @TypeOf(f.type.default_value)) {
+                        // 2 BeaconState of prev_fork and cur_fork has same field name but different types
+                        // for example latest_execution_payload_header changed from Bellatrix to Capella
+                    } else {
+                        @field(upgraded, f.name) = f.type.default_value;
+                        try f.type.clone(allocator, &@field(state, f.name), &@field(upgraded, f.name));
+                    }
+                }
             }
         }
 
@@ -643,6 +661,7 @@ pub const BeaconStateAllForks = union(enum) {
     /// Destroys the old `state`.
     ///
     /// Caller must make sure an upgrade is needed by checking BeaconConfig then free upgraded state.
+    /// Caller needs to deinit the old state
     pub fn upgradeUnsafe(self: *BeaconStateAllForks, allocator: std.mem.Allocator) !*BeaconStateAllForks {
         switch (self.*) {
             .phase0 => |state| {
@@ -654,7 +673,6 @@ pub const BeaconStateAllForks = union(enum) {
                         state,
                     ),
                 };
-                allocator.destroy(state);
                 return self;
             },
             .altair => |state| {
@@ -666,7 +684,6 @@ pub const BeaconStateAllForks = union(enum) {
                         state,
                     ),
                 };
-                allocator.destroy(state);
                 return self;
             },
             .bellatrix => |state| {
@@ -678,7 +695,6 @@ pub const BeaconStateAllForks = union(enum) {
                         state,
                     ),
                 };
-                allocator.destroy(state);
                 return self;
             },
             .capella => |state| {
@@ -690,7 +706,6 @@ pub const BeaconStateAllForks = union(enum) {
                         state,
                     ),
                 };
-                allocator.destroy(state);
                 return self;
             },
             .deneb => |state| {
@@ -702,7 +717,6 @@ pub const BeaconStateAllForks = union(enum) {
                         state,
                     ),
                 };
-                allocator.destroy(state);
                 return self;
             },
             .electra => |_| {
@@ -757,9 +771,42 @@ test "upgrade state - sanity" {
     phase0_state.* = ssz.phase0.BeaconState.default_value;
 
     var phase0 = BeaconStateAllForks{ .phase0 = phase0_state };
+    const old_phase0_state = phase0.phase0;
+    defer {
+        ssz.phase0.BeaconState.deinit(allocator, old_phase0_state);
+        allocator.destroy(old_phase0_state);
+    }
+
     var altair = try phase0.upgradeUnsafe(allocator);
-    const bellatrix = try altair.upgradeUnsafe(allocator);
-    const capella = try bellatrix.upgradeUnsafe(allocator);
+    const old_altair_state = altair.altair;
+    defer {
+        ssz.altair.BeaconState.deinit(allocator, old_altair_state);
+        allocator.destroy(old_altair_state);
+    }
+
+    var bellatrix = try altair.upgradeUnsafe(allocator);
+    const old_bellatrix_state = bellatrix.bellatrix;
+    defer {
+        ssz.bellatrix.BeaconState.deinit(allocator, old_bellatrix_state);
+        allocator.destroy(old_bellatrix_state);
+    }
+
+    var capella = try bellatrix.upgradeUnsafe(allocator);
+    const old_capella_state = capella.capella;
+    defer {
+        ssz.capella.BeaconState.deinit(allocator, old_capella_state);
+        allocator.destroy(old_capella_state);
+    }
+
     var deneb = try capella.upgradeUnsafe(allocator);
-    defer deneb.deinit(allocator);
+    const old_deneb_state = deneb.deneb;
+    defer {
+        ssz.deneb.BeaconState.deinit(allocator, old_deneb_state);
+        allocator.destroy(old_deneb_state);
+    }
+
+    var electra = try deneb.upgradeUnsafe(allocator);
+    defer electra.deinit(allocator);
+
+    // TODO: fulu
 }

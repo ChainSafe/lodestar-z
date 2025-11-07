@@ -7,5 +7,6 @@ pub const RunnerKind = enum {
     random,
     rewards,
     sanity,
+    transition,
     shuffling,
 };

@@ -1,6 +1,5 @@
 const std = @import("std");
 const blst = @import("blst");
-const BlstPublicKey = blst.PublicKey;
 const AggregatePublicKey = blst.AggregatePublicKey;
 const Allocator = std.mem.Allocator;
 const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
@@ -15,31 +14,39 @@ const ForkSeq = @import("config").ForkSeq;
 const intSqrt = @import("../utils/math.zig").intSqrt;
 
 pub const getNextSyncCommitteeIndices = @import("./seed.zig").getNextSyncCommitteeIndices;
-const SyncCommitteeInfo = struct {
+pub const SyncCommitteeInfo = struct {
+    // TODO: switch to fixed-size array since preset.SYNC_COMMITTEE_SIZE is constant
     indices: std.ArrayList(ValidatorIndex),
     sync_committee: *SyncCommittee,
+
+    pub fn deinit(self: *SyncCommitteeInfo, allocator: Allocator) void {
+        allocator.destroy(self.sync_committee);
+        self.indices.deinit();
+    }
 };
 
 /// Consumer must deallocate the returned `SyncCommitteeInfo` struct
-/// TODO: remove if not used
-pub fn getNextSyncCommittee(allocator: Allocator, state: *const BeaconStateAllForks, active_validators_indices: std.ArrayList(ValidatorIndex), effective_balance_increment: EffiectiveBalanceIncrements) !*SyncCommitteeInfo {
-    const indices = std.ArrayList(ValidatorIndex).init(allocator).resize(preset.SYNC_COMMITTEE_SIZE);
+pub fn getNextSyncCommittee(allocator: Allocator, state: *const BeaconStateAllForks, active_validators_indices: []const ValidatorIndex, effective_balance_increment: EffiectiveBalanceIncrements, out: *SyncCommitteeInfo) !void {
+    var indices = std.ArrayList(ValidatorIndex).init(allocator);
+    try indices.resize(preset.SYNC_COMMITTEE_SIZE);
     try getNextSyncCommitteeIndices(allocator, state, active_validators_indices, effective_balance_increment, indices.items);
 
     // Using the index2pubkey cache is slower because it needs the serialized pubkey.
     var pubkeys: [preset.SYNC_COMMITTEE_SIZE]PublicKey = undefined;
-    for (indices, 0..) |index, i| {
-        pubkeys[i] = state.validators()[index].pubkey;
+    var blst_pubkeys: [preset.SYNC_COMMITTEE_SIZE]blst.PublicKey = undefined;
+    for (indices.items, 0..) |index, i| {
+        pubkeys[i] = state.validators().items[index].pubkey;
+        blst_pubkeys[i] = try blst.PublicKey.uncompress(&pubkeys[i]);
     }
 
-    const aggregated_pk = try AggregatePublicKey.aggregateSerialized(pubkeys[0..], false);
+    const aggregated_pk = try AggregatePublicKey.aggregate(&blst_pubkeys, false);
     const sync_committee = try allocator.create(SyncCommittee);
     errdefer allocator.destroy(sync_committee);
     sync_committee.* = .{
         .pubkeys = pubkeys,
-        .aggregate_pubkey = aggregated_pk,
+        .aggregate_pubkey = aggregated_pk.toPublicKey().compress(),
     };
-    return .{
+    out.* = .{
         .indices = indices,
         .sync_committee = sync_committee,
     };
