@@ -1,0 +1,7 @@
+zig build test:spec_tests -Dspec_tests.filters="electra transition transition_with_non_empty_activation_queue" -Dpreset=minimal
+
+==> passed with MAX_BLOB_COMMITMENTS_PER_BLOCK=4096
+
+but a lot of tests failed sanity tests due to that
+  for example
+  zig build test:spec_tests -Dspec_tests.filters="electra sanity blocks withdrawal_and_switch_to_compounding_request_same_validator" -Dpreset=minimal

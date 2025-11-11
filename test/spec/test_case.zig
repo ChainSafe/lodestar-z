@@ -25,8 +25,8 @@ pub const BlsSetting = enum {
 
     pub fn verify(self: BlsSetting) bool {
         return switch (self) {
-            .default, .required => true,
-            .ignored => false,
+            .required => true,
+            .default, .ignored => false,
         };
     }
 };
@@ -249,7 +249,11 @@ pub fn expectEqualBeaconStates(expected: BeaconStateAllForks, actual: BeaconStat
             if (!deneb.BeaconState.equals(expected.deneb, actual.deneb)) return error.NotEqual;
         },
         .electra => {
-            if (!electra.BeaconState.equals(expected.electra, actual.electra)) return error.NotEqual;
+            if (!electra.BeaconState.equals(expected.electra, actual.electra)) {
+                // more debug
+                if (!phase0.BeaconBlockHeader.equals(&expected.electra.latest_block_header, &actual.electra.latest_block_header)) return error.LatestBlockHeaderNotEqual;
+                return error.NotEqual;
+            }
         },
     }
 }

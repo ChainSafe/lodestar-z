@@ -10,6 +10,8 @@ const test_case = @import("../test_case.zig");
 const loadSszValue = test_case.loadSszSnappyValue;
 const expectEqualBeaconStates = test_case.expectEqualBeaconStates;
 const TestCaseUtils = test_case.TestCaseUtils;
+const BlsSetting = test_case.BlsSetting;
+const loadBlsSetting = test_case.loadBlsSetting;
 
 /// https://github.com/ethereum/consensus-specs/blob/master/tests/formats/sanity/README.md
 pub const Handler = enum {
@@ -100,6 +102,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
         // a null post state means the test is expected to fail
         post: ?BeaconStateAllForks,
         blocks: []SignedBeaconBlock.Type,
+        bls_setting: BlsSetting,
 
         const Self = @This();
 
@@ -118,6 +121,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
                 .pre = undefined,
                 .post = undefined,
                 .blocks = undefined,
+                .bls_setting = loadBlsSetting(allocator, dir),
             };
 
             // load pre state
@@ -171,6 +175,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
         }
 
         pub fn process(self: *Self) !*CachedBeaconStateAllForks {
+            const verify = self.bls_setting.verify();
             var post_state: *CachedBeaconStateAllForks = self.pre.cached_state;
             for (self.blocks, 0..) |*block, i| {
                 const signed_block = @unionInit(state_transition.SignedBeaconBlock, @tagName(fork), block);
@@ -188,7 +193,11 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
                         .{
                             .regular = &signed_block,
                         },
-                        .{},
+                        .{
+                            .verify_state_root = verify,
+                            .verify_proposer = verify,
+                            .verify_signatures = verify,
+                        },
                     );
 
                     // don't deinit the initial pre state, we do it in deinit()
@@ -209,11 +218,11 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
         pub fn runTest(self: *Self) !void {
             if (self.post) |post| {
                 const actual = try self.process();
-                try expectEqualBeaconStates(post, actual.state.*);
                 defer {
                     actual.deinit();
                     self.pre.allocator.destroy(actual);
                 }
+                try expectEqualBeaconStates(post, actual.state.*);
             } else {
                 _ = self.process() catch |err| {
                     if (err == error.SkipZigTest) {
