@@ -1,6 +1,6 @@
 const std = @import("std");
-const ssz = @import("consensus_types");
-const Epoch = ssz.primitive.Epoch.Type;
+const ct = @import("consensus_types");
+const Epoch = ct.primitive.Epoch.Type;
 const Preset = @import("preset").Preset;
 
 /// Run-time chain configuration

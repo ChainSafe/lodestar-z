@@ -1,16 +1,16 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const ssz = @import("consensus_types");
-const Root = ssz.primitive.Root.Type;
+const ct = @import("consensus_types");
+const Root = ct.primitive.Root.Type;
 const preset = @import("preset").preset;
 const c = @import("constants");
 const ForkSeq = @import("config").ForkSeq;
-const Withdrawal = ssz.capella.Withdrawal.Type;
-const Withdrawals = ssz.capella.Withdrawals.Type;
-const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
-const ExecutionAddress = ssz.primitive.ExecutionAddress.Type;
-const PendingPartialWithdrawal = ssz.electra.PendingPartialWithdrawal.Type;
+const Withdrawal = ct.capella.Withdrawal.Type;
+const Withdrawals = ct.capella.Withdrawals.Type;
+const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
+const ExecutionAddress = ct.primitive.ExecutionAddress.Type;
+const PendingPartialWithdrawal = ct.electra.PendingPartialWithdrawal.Type;
 const ExecutionPayload = @import("../types/execution_payload.zig").ExecutionPayload;
 const hasExecutionWithdrawalCredential = @import("../utils/electra.zig").hasExecutionWithdrawalCredential;
 const hasEth1WithdrawalCredential = @import("../utils/capella.zig").hasEth1WithdrawalCredential;
@@ -40,7 +40,7 @@ pub fn processWithdrawals(
     const num_withdrawals = expected_withdrawals.len;
 
     var expected_withdrawals_root: [32]u8 = undefined;
-    try ssz.capella.Withdrawals.hashTreeRoot(allocator, &expected_withdrawals_result.withdrawals, &expected_withdrawals_root);
+    try ct.capella.Withdrawals.hashTreeRoot(allocator, &expected_withdrawals_result.withdrawals, &expected_withdrawals_root);
 
     if (!std.mem.eql(u8, &expected_withdrawals_root, &payload_withdrawals_root)) {
         return error.WithdrawalsRootMismatch;

@@ -1,9 +1,9 @@
 const std = @import("std");
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const ssz = @import("consensus_types");
-const DepositRequest = ssz.electra.DepositRequest.Type;
-const PendingDeposit = ssz.electra.PendingDeposit.Type;
-const Root = ssz.primitive.Root.Type;
+const ct = @import("consensus_types");
+const DepositRequest = ct.electra.DepositRequest.Type;
+const PendingDeposit = ct.electra.PendingDeposit.Type;
+const Root = ct.primitive.Root.Type;
 const c = @import("constants");
 
 pub fn processDepositRequest(allocator: std.mem.Allocator, cached_state: *CachedBeaconStateAllForks, deposit_request: *const DepositRequest) !void {

@@ -2,33 +2,33 @@ const std = @import("std");
 const panic = std.debug.panic;
 const Allocator = std.mem.Allocator;
 const expect = std.testing.expect;
-const ssz = @import("consensus_types");
+const ct = @import("consensus_types");
 const preset = @import("preset").preset;
-const BeaconStatePhase0 = ssz.phase0.BeaconState.Type;
-const BeaconStateAltair = ssz.altair.BeaconState.Type;
-const BeaconStateBellatrix = ssz.bellatrix.BeaconState.Type;
-const BeaconStateCapella = ssz.capella.BeaconState.Type;
-const BeaconStateDeneb = ssz.deneb.BeaconState.Type;
-const BeaconStateElectra = ssz.electra.BeaconState.Type;
+const BeaconStatePhase0 = ct.phase0.BeaconState.Type;
+const BeaconStateAltair = ct.altair.BeaconState.Type;
+const BeaconStateBellatrix = ct.bellatrix.BeaconState.Type;
+const BeaconStateCapella = ct.capella.BeaconState.Type;
+const BeaconStateDeneb = ct.deneb.BeaconState.Type;
+const BeaconStateElectra = ct.electra.BeaconState.Type;
 const ExecutionPayloadHeader = @import("./execution_payload.zig").ExecutionPayloadHeader;
-const Root = ssz.primitive.Root.Type;
-const Fork = ssz.phase0.Fork.Type;
-const BeaconBlockHeader = ssz.phase0.BeaconBlockHeader.Type;
-const Eth1Data = ssz.phase0.Eth1Data.Type;
-const Eth1DataVotes = ssz.phase0.Eth1DataVotes.Type;
-const Validator = ssz.phase0.Validator.Type;
-const Validators = ssz.phase0.Validators.Type;
-const PendingAttestation = ssz.phase0.PendingAttestation.Type;
-const JustificationBits = ssz.phase0.JustificationBits.Type;
-const Checkpoint = ssz.phase0.Checkpoint.Type;
-const SyncCommittee = ssz.altair.SyncCommittee.Type;
-const HistoricalSummary = ssz.capella.HistoricalSummary.Type;
-const PendingDeposit = ssz.electra.PendingDeposit.Type;
-const PendingPartialWithdrawal = ssz.electra.PendingPartialWithdrawal.Type;
-const PendingConsolidation = ssz.electra.PendingConsolidation.Type;
-const Bytes32 = ssz.primitive.Bytes32.Type;
-const Gwei = ssz.primitive.Gwei.Type;
-const Epoch = ssz.primitive.Epoch.Type;
+const Root = ct.primitive.Root.Type;
+const Fork = ct.phase0.Fork.Type;
+const BeaconBlockHeader = ct.phase0.BeaconBlockHeader.Type;
+const Eth1Data = ct.phase0.Eth1Data.Type;
+const Eth1DataVotes = ct.phase0.Eth1DataVotes.Type;
+const Validator = ct.phase0.Validator.Type;
+const Validators = ct.phase0.Validators.Type;
+const PendingAttestation = ct.phase0.PendingAttestation.Type;
+const JustificationBits = ct.phase0.JustificationBits.Type;
+const Checkpoint = ct.phase0.Checkpoint.Type;
+const SyncCommittee = ct.altair.SyncCommittee.Type;
+const HistoricalSummary = ct.capella.HistoricalSummary.Type;
+const PendingDeposit = ct.electra.PendingDeposit.Type;
+const PendingPartialWithdrawal = ct.electra.PendingPartialWithdrawal.Type;
+const PendingConsolidation = ct.electra.PendingConsolidation.Type;
+const Bytes32 = ct.primitive.Bytes32.Type;
+const Gwei = ct.primitive.Gwei.Type;
+const Epoch = ct.primitive.Epoch.Type;
 const ForkSeq = @import("config").ForkSeq;
 
 /// wrapper for all BeaconState types across forks so that we don't have to do switch/case for all methods
@@ -47,32 +47,32 @@ pub const BeaconStateAllForks = union(enum) {
 
         switch (f) {
             .phase0 => {
-                const T = ssz.phase0.BeaconState;
+                const T = ct.phase0.BeaconState;
                 const src: *T.Type = @ptrCast(@alignCast(state_any));
                 state = .{ .phase0 = src };
             },
             .altair => {
-                const T = ssz.altair.BeaconState;
+                const T = ct.altair.BeaconState;
                 const src: *T.Type = @ptrCast(@alignCast(state_any));
                 state = .{ .altair = src };
             },
             .bellatrix => {
-                const T = ssz.bellatrix.BeaconState;
+                const T = ct.bellatrix.BeaconState;
                 const src: *T.Type = @ptrCast(@alignCast(state_any));
                 state = .{ .bellatrix = src };
             },
             .capella => {
-                const T = ssz.capella.BeaconState;
+                const T = ct.capella.BeaconState;
                 const src: *T.Type = @ptrCast(@alignCast(state_any));
                 state = .{ .capella = src };
             },
             .deneb => {
-                const T = ssz.deneb.BeaconState;
+                const T = ct.deneb.BeaconState;
                 const src: *T.Type = @ptrCast(@alignCast(state_any));
                 state = .{ .deneb = src };
             },
             .electra => {
-                const T = ssz.electra.BeaconState;
+                const T = ct.electra.BeaconState;
                 const src: *T.Type = @ptrCast(@alignCast(state_any));
                 state = .{ .electra = src };
             },
@@ -104,37 +104,37 @@ pub const BeaconStateAllForks = union(enum) {
                 const cloned_state = try allocator.create(BeaconStatePhase0);
                 errdefer allocator.destroy(cloned_state);
                 out.* = .{ .phase0 = cloned_state };
-                try ssz.phase0.BeaconState.clone(allocator, state, cloned_state);
+                try ct.phase0.BeaconState.clone(allocator, state, cloned_state);
             },
             .altair => |state| {
                 const cloned_state = try allocator.create(BeaconStateAltair);
                 errdefer allocator.destroy(cloned_state);
                 out.* = .{ .altair = cloned_state };
-                try ssz.altair.BeaconState.clone(allocator, state, cloned_state);
+                try ct.altair.BeaconState.clone(allocator, state, cloned_state);
             },
             .bellatrix => |state| {
                 const cloned_state = try allocator.create(BeaconStateBellatrix);
                 errdefer allocator.destroy(cloned_state);
                 out.* = .{ .bellatrix = cloned_state };
-                try ssz.bellatrix.BeaconState.clone(allocator, state, cloned_state);
+                try ct.bellatrix.BeaconState.clone(allocator, state, cloned_state);
             },
             .capella => |state| {
                 const cloned_state = try allocator.create(BeaconStateCapella);
                 errdefer allocator.destroy(cloned_state);
                 out.* = .{ .capella = cloned_state };
-                try ssz.capella.BeaconState.clone(allocator, state, cloned_state);
+                try ct.capella.BeaconState.clone(allocator, state, cloned_state);
             },
             .deneb => |state| {
                 const cloned_state = try allocator.create(BeaconStateDeneb);
                 errdefer allocator.destroy(cloned_state);
                 out.* = .{ .deneb = cloned_state };
-                try ssz.deneb.BeaconState.clone(allocator, state, cloned_state);
+                try ct.deneb.BeaconState.clone(allocator, state, cloned_state);
             },
             .electra => |state| {
                 const cloned_state = try allocator.create(BeaconStateElectra);
                 errdefer allocator.destroy(cloned_state);
                 out.* = .{ .electra = cloned_state };
-                try ssz.electra.BeaconState.clone(allocator, state, cloned_state);
+                try ct.electra.BeaconState.clone(allocator, state, cloned_state);
             },
         }
 
@@ -143,39 +143,39 @@ pub const BeaconStateAllForks = union(enum) {
 
     pub fn hashTreeRoot(self: *const BeaconStateAllForks, allocator: std.mem.Allocator, out: *[32]u8) !void {
         return switch (self.*) {
-            .phase0 => |state| try ssz.phase0.BeaconState.hashTreeRoot(allocator, state, out),
-            .altair => |state| try ssz.altair.BeaconState.hashTreeRoot(allocator, state, out),
-            .bellatrix => |state| try ssz.bellatrix.BeaconState.hashTreeRoot(allocator, state, out),
-            .capella => |state| try ssz.capella.BeaconState.hashTreeRoot(allocator, state, out),
-            .deneb => |state| try ssz.deneb.BeaconState.hashTreeRoot(allocator, state, out),
-            .electra => |state| try ssz.electra.BeaconState.hashTreeRoot(allocator, state, out),
+            .phase0 => |state| try ct.phase0.BeaconState.hashTreeRoot(allocator, state, out),
+            .altair => |state| try ct.altair.BeaconState.hashTreeRoot(allocator, state, out),
+            .bellatrix => |state| try ct.bellatrix.BeaconState.hashTreeRoot(allocator, state, out),
+            .capella => |state| try ct.capella.BeaconState.hashTreeRoot(allocator, state, out),
+            .deneb => |state| try ct.deneb.BeaconState.hashTreeRoot(allocator, state, out),
+            .electra => |state| try ct.electra.BeaconState.hashTreeRoot(allocator, state, out),
         };
     }
 
     pub fn deinit(self: *BeaconStateAllForks, allocator: Allocator) void {
         switch (self.*) {
             .phase0 => |state| {
-                ssz.phase0.BeaconState.deinit(allocator, state);
+                ct.phase0.BeaconState.deinit(allocator, state);
                 allocator.destroy(state);
             },
             .altair => |state| {
-                ssz.altair.BeaconState.deinit(allocator, state);
+                ct.altair.BeaconState.deinit(allocator, state);
                 allocator.destroy(state);
             },
             .capella => |state| {
-                ssz.capella.BeaconState.deinit(allocator, state);
+                ct.capella.BeaconState.deinit(allocator, state);
                 allocator.destroy(state);
             },
             .bellatrix => |state| {
-                ssz.bellatrix.BeaconState.deinit(allocator, state);
+                ct.bellatrix.BeaconState.deinit(allocator, state);
                 allocator.destroy(state);
             },
             .deneb => |state| {
-                ssz.deneb.BeaconState.deinit(allocator, state);
+                ct.deneb.BeaconState.deinit(allocator, state);
                 allocator.destroy(state);
             },
             .electra => |state| {
-                ssz.electra.BeaconState.deinit(allocator, state);
+                ct.electra.BeaconState.deinit(allocator, state);
                 allocator.destroy(state);
             },
         }
@@ -432,7 +432,7 @@ pub const BeaconStateAllForks = union(enum) {
             .phase0 => |state| {
                 state.previous_epoch_attestations.clearRetainingCapacity();
                 state.previous_epoch_attestations = state.current_epoch_attestations;
-                state.current_epoch_attestations = ssz.phase0.EpochAttestations.default_value;
+                state.current_epoch_attestations = ct.phase0.EpochAttestations.default_value;
             },
             else => @panic("shift_epoch_pending_attestations is not available post phase0"),
         }
@@ -619,7 +619,7 @@ pub const BeaconStateAllForks = union(enum) {
         };
     }
 
-    /// Copies ssz fields of `BeaconState` from type `F` to type `T`, provided they have the same field name.
+    /// Copies ct fields of `BeaconState` from type `F` to type `T`, provided they have the same field name.
     fn populateFields(
         comptime F: type,
         comptime T: type,
@@ -648,8 +648,8 @@ pub const BeaconStateAllForks = union(enum) {
             .phase0 => |state| {
                 self.* = .{
                     .altair = try populateFields(
-                        ssz.phase0.BeaconState,
-                        ssz.altair.BeaconState,
+                        ct.phase0.BeaconState,
+                        ct.altair.BeaconState,
                         allocator,
                         state,
                     ),
@@ -660,8 +660,8 @@ pub const BeaconStateAllForks = union(enum) {
             .altair => |state| {
                 self.* = .{
                     .bellatrix = try populateFields(
-                        ssz.altair.BeaconState,
-                        ssz.bellatrix.BeaconState,
+                        ct.altair.BeaconState,
+                        ct.bellatrix.BeaconState,
                         allocator,
                         state,
                     ),
@@ -672,8 +672,8 @@ pub const BeaconStateAllForks = union(enum) {
             .bellatrix => |state| {
                 self.* = .{
                     .capella = try populateFields(
-                        ssz.bellatrix.BeaconState,
-                        ssz.capella.BeaconState,
+                        ct.bellatrix.BeaconState,
+                        ct.capella.BeaconState,
                         allocator,
                         state,
                     ),
@@ -684,8 +684,8 @@ pub const BeaconStateAllForks = union(enum) {
             .capella => |state| {
                 self.* = .{
                     .deneb = try populateFields(
-                        ssz.capella.BeaconState,
-                        ssz.deneb.BeaconState,
+                        ct.capella.BeaconState,
+                        ct.deneb.BeaconState,
                         allocator,
                         state,
                     ),
@@ -696,8 +696,8 @@ pub const BeaconStateAllForks = union(enum) {
             .deneb => |state| {
                 self.* = .{
                     .electra = try populateFields(
-                        ssz.deneb.BeaconState,
-                        ssz.electra.BeaconState,
+                        ct.deneb.BeaconState,
+                        ct.electra.BeaconState,
                         allocator,
                         state,
                     ),
@@ -714,7 +714,7 @@ pub const BeaconStateAllForks = union(enum) {
 
 test "electra - sanity" {
     const allocator = std.testing.allocator;
-    var electra_state = ssz.electra.BeaconState.default_value;
+    var electra_state = ct.electra.BeaconState.default_value;
     electra_state.slot = 12345;
     var beacon_state = BeaconStateAllForks{
         .electra = &electra_state,
@@ -736,7 +736,7 @@ test "electra - sanity" {
 
 test "clone - sanity" {
     const allocator = std.testing.allocator;
-    var electra_state = ssz.electra.BeaconState.default_value;
+    var electra_state = ct.electra.BeaconState.default_value;
     electra_state.slot = 12345;
     var beacon_state = BeaconStateAllForks{
         .electra = &electra_state,
@@ -753,8 +753,8 @@ test "clone - sanity" {
 
 test "upgrade state - sanity" {
     const allocator = std.testing.allocator;
-    const phase0_state = try allocator.create(ssz.phase0.BeaconState.Type);
-    phase0_state.* = ssz.phase0.BeaconState.default_value;
+    const phase0_state = try allocator.create(ct.phase0.BeaconState.Type);
+    phase0_state.* = ct.phase0.BeaconState.default_value;
 
     var phase0 = BeaconStateAllForks{ .phase0 = phase0_state };
     var altair = try phase0.upgradeUnsafe(allocator);

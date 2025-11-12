@@ -7,14 +7,13 @@ const state_transition = @import("state_transition");
 const BeaconStateAllForks = state_transition.BeaconStateAllForks;
 const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
 
-const ssz = @import("consensus_types");
-const consensus_types = @import("consensus_types");
-const phase0 = consensus_types.phase0;
-const altair = consensus_types.altair;
-const bellatrix = consensus_types.bellatrix;
-const capella = consensus_types.capella;
-const deneb = consensus_types.deneb;
-const electra = consensus_types.electra;
+const ct = @import("consensus_types");
+const phase0 = ct.phase0;
+const altair = ct.altair;
+const bellatrix = ct.bellatrix;
+const capella = ct.capella;
+const deneb = ct.deneb;
+const electra = ct.electra;
 
 pub const BlsSetting = enum {
     default,
@@ -30,7 +29,7 @@ pub const BlsSetting = enum {
 };
 
 pub fn TestCaseUtils(comptime fork: ForkSeq) type {
-    const ForkTypes = @field(ssz, fork.forkName());
+    const ForkTypes = @field(ct, fork.forkName());
     return struct {
         pub fn loadPreState(allocator: Allocator, dir: std.fs.Dir) !TestCachedBeaconStateAllForks {
             const pre_state = try allocator.create(ForkTypes.BeaconState.Type);

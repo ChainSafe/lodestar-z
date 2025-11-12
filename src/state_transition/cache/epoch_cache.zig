@@ -2,15 +2,15 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const preset = @import("preset").preset;
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
-const ssz = @import("consensus_types");
+const ct = @import("consensus_types");
 const c = @import("constants");
 const blst = @import("blst");
-const Epoch = ssz.primitive.Epoch.Type;
-const Slot = ssz.primitive.Slot.Type;
-const BLSSignature = ssz.primitive.BLSSignature.Type;
-const SyncPeriod = ssz.primitive.SyncPeriod.Type;
-const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
-const CommitteeIndex = ssz.primitive.CommitteeIndex.Type;
+const Epoch = ct.primitive.Epoch.Type;
+const Slot = ct.primitive.Slot.Type;
+const BLSSignature = ct.primitive.BLSSignature.Type;
+const SyncPeriod = ct.primitive.SyncPeriod.Type;
+const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
+const CommitteeIndex = ct.primitive.CommitteeIndex.Type;
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
 const PubkeyIndexMap = @import("../utils/pubkey_index_map.zig").PubkeyIndexMap(ValidatorIndex);
@@ -496,7 +496,7 @@ pub const EpochCache = struct {
 
     /// consumer takes ownership of the returned indexed attestation
     /// hence it needs to deinit attesting_indices inside
-    pub fn computeIndexedAttestationPhase0(self: *const EpochCache, attestation: *const ssz.phase0.Attestation.Type, out: *ssz.phase0.IndexedAttestation.Type) !void {
+    pub fn computeIndexedAttestationPhase0(self: *const EpochCache, attestation: *const ct.phase0.Attestation.Type, out: *ct.phase0.IndexedAttestation.Type) !void {
         var attesting_indices_ = try self.getAttestingIndicesPhase0(attestation);
         const sort_fn = struct {
             pub fn sort(_: void, a: ValidatorIndex, b: ValidatorIndex) bool {
@@ -518,7 +518,7 @@ pub const EpochCache = struct {
 
     /// consumer takes ownership of the returned indexed attestation
     /// hence it needs to deinit attesting_indices inside
-    pub fn computeIndexedAttestationElectra(self: *const EpochCache, attestation: *const ssz.electra.Attestation.Type, out: *ssz.electra.IndexedAttestation.Type) !void {
+    pub fn computeIndexedAttestationElectra(self: *const EpochCache, attestation: *const ct.electra.Attestation.Type, out: *ct.electra.IndexedAttestation.Type) !void {
         var attesting_indices_ = try self.getAttestingIndicesElectra(attestation);
         const sort_fn = struct {
             pub fn sort(_: void, a: ValidatorIndex, b: ValidatorIndex) bool {
@@ -546,7 +546,7 @@ pub const EpochCache = struct {
     }
 
     /// Consumer takes ownership of the returned array
-    pub fn getAttestingIndicesPhase0(self: *const EpochCache, attestation: *const ssz.phase0.Attestation.Type) !std.ArrayList(ValidatorIndex) {
+    pub fn getAttestingIndicesPhase0(self: *const EpochCache, attestation: *const ct.phase0.Attestation.Type) !std.ArrayList(ValidatorIndex) {
         const aggregation_bits = attestation.aggregation_bits;
         const data = attestation.data;
         const validator_indices = try self.getBeaconCommittee(data.slot, data.index);
@@ -554,7 +554,7 @@ pub const EpochCache = struct {
     }
 
     /// consumer takes ownership of the returned array
-    pub fn getAttestingIndicesElectra(self: *const EpochCache, attestation: *const ssz.electra.Attestation.Type) !std.ArrayList(ValidatorIndex) {
+    pub fn getAttestingIndicesElectra(self: *const EpochCache, attestation: *const ct.electra.Attestation.Type) !std.ArrayList(ValidatorIndex) {
         const aggregation_bits = attestation.aggregation_bits;
         const committee_bits = attestation.committee_bits;
         const data = attestation.data;
@@ -596,16 +596,16 @@ pub const EpochCache = struct {
         return isAggregatorFromCommitteeLength(committee.length, slot_signature);
     }
 
-    pub fn getPubkey(self: *const EpochCache, index: ValidatorIndex) ?ssz.primitive.BLSPubkey {
+    pub fn getPubkey(self: *const EpochCache, index: ValidatorIndex) ?ct.primitive.BLSPubkey {
         return if (index < self.index_to_pubkey.items.len) self.index_to_pubkey[index] else null;
     }
 
-    pub fn getValidatorIndex(self: *const EpochCache, pubkey: *const ssz.primitive.BLSPubkey.Type) ?ValidatorIndex {
+    pub fn getValidatorIndex(self: *const EpochCache, pubkey: *const ct.primitive.BLSPubkey.Type) ?ValidatorIndex {
         return self.pubkey_to_index.get(pubkey[0..]);
     }
 
     /// Sets `index` at `PublicKey` within the index to pubkey map and allocates and puts a new `PublicKey` at `index` within the set of validators.
-    pub fn addPubkey(self: *EpochCache, index: ValidatorIndex, pubkey: ssz.primitive.BLSPubkey.Type) !void {
+    pub fn addPubkey(self: *EpochCache, index: ValidatorIndex, pubkey: ct.primitive.BLSPubkey.Type) !void {
         std.debug.assert(index <= self.index_to_pubkey.items.len);
         try self.pubkey_to_index.set(pubkey[0..], index);
         // this is deinit() by application

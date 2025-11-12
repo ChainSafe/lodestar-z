@@ -1,5 +1,5 @@
 const std = @import("std");
-const ssz = @import("consensus_types");
+const ct = @import("consensus_types");
 const Allocator = std.mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
 const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
@@ -8,7 +8,7 @@ const EpochCache = @import("./epoch_cache.zig").EpochCache;
 const EpochCacheImmutableData = @import("./epoch_cache.zig").EpochCacheImmutableData;
 const EpochCacheOpts = @import("./epoch_cache.zig").EpochCacheOpts;
 const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
-const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
+const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
 const PubkeyIndexMap = @import("pubkey_cache.zig").PubkeyIndexMap(ValidatorIndex);
 const Index2PubkeyCache = @import("pubkey_cache.zig").Index2PubkeyCache;
 

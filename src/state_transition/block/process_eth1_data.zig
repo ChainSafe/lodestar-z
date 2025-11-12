@@ -1,6 +1,6 @@
 const std = @import("std");
-const ssz = @import("consensus_types");
-const Eth1Data = ssz.phase0.Eth1Data.Type;
+const ct = @import("consensus_types");
+const Eth1Data = ct.phase0.Eth1Data.Type;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const preset = @import("preset").preset;
 
@@ -50,5 +50,5 @@ pub fn becomesNewEth1Data(cached_state: *const CachedBeaconStateAllForks, new_et
 
 // TODO: should have a different implement in TreeView
 fn isEqualEth1DataView(a: *const Eth1Data, b: *const Eth1Data) bool {
-    return ssz.phase0.Eth1Data.equals(a, b);
+    return ct.phase0.Eth1Data.equals(a, b);
 }

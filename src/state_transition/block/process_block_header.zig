@@ -1,11 +1,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ssz = @import("consensus_types");
+const ct = @import("consensus_types");
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
 const BeaconConfig = @import("config").BeaconConfig;
-const BeaconBlockHeader = ssz.phase0.BeaconBlockHeader.Type;
-const Root = ssz.primitive.Root;
+const BeaconBlockHeader = ct.phase0.BeaconBlockHeader.Type;
+const Root = ct.primitive.Root;
 const SignedBlock = @import("../types/signed_block.zig").SignedBlock;
 const ZERO_HASH = @import("constants").ZERO_HASH;
 
@@ -32,7 +32,7 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaco
 
     // verify that the parent matches
     var header_parent_root: [32]u8 = undefined;
-    try ssz.phase0.BeaconBlockHeader.hashTreeRoot(state.latestBlockHeader(), &header_parent_root);
+    try ct.phase0.BeaconBlockHeader.hashTreeRoot(state.latestBlockHeader(), &header_parent_root);
     if (!std.mem.eql(u8, &block.parentRoot(), &header_parent_root)) {
         return error.BlockParentRootMismatch;
     }

@@ -1,13 +1,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
-const BLSPubkey = ssz.primitive.BLSPubkey.Type;
-const WithdrawalCredentials = ssz.primitive.Root.Type;
-const BLSSignature = ssz.primitive.BLSSignature.Type;
-const DepositMessage = ssz.phase0.DepositMessage.Type;
-const Domain = ssz.primitive.Domain.Type;
-const Root = ssz.primitive.Root.Type;
-const ssz = @import("consensus_types");
+const BLSPubkey = ct.primitive.BLSPubkey.Type;
+const WithdrawalCredentials = ct.primitive.Root.Type;
+const BLSSignature = ct.primitive.BLSSignature.Type;
+const DepositMessage = ct.phase0.DepositMessage.Type;
+const Domain = ct.primitive.Domain.Type;
+const Root = ct.primitive.Root.Type;
+const ct = @import("consensus_types");
 const c = @import("constants");
 const preset = @import("preset").preset;
 const DOMAIN_DEPOSIT = c.DOMAIN_DEPOSIT;
@@ -16,15 +16,15 @@ const computeDomain = @import("../utils/domain.zig").computeDomain;
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const blst = @import("blst");
 const verify = @import("../utils/bls.zig").verify;
-const ForkSeq = ssz.primitive.ForkSeq.Type;
+const ForkSeq = ct.primitive.ForkSeq.Type;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const getMaxEffectiveBalance = @import("../utils/validator.zig").getMaxEffectiveBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 const verifyMerkleBranch = @import("../utils/verify_merkle_branch.zig").verifyMerkleBranch;
 
 pub const DepositData = union(enum) {
-    phase0: ssz.phase0.DepositData.Type,
-    electra: ssz.electra.DepositRequest.Type,
+    phase0: ct.phase0.DepositData.Type,
+    electra: ct.electra.DepositRequest.Type,
 
     pub fn pubkey(self: *const DepositData) BLSPubkey {
         return switch (self.*) {
@@ -55,11 +55,11 @@ pub const DepositData = union(enum) {
     }
 };
 
-pub fn processDeposit(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, deposit: *const ssz.phase0.Deposit.Type) !void {
+pub fn processDeposit(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, deposit: *const ct.phase0.Deposit.Type) !void {
     const state = cached_state.state;
     // verify the merkle branch
     var deposit_data_root: Root = undefined;
-    try ssz.phase0.DepositData.hashTreeRoot(&deposit.data, &deposit_data_root);
+    try ct.phase0.DepositData.hashTreeRoot(&deposit.data, &deposit_data_root);
     if (!verifyMerkleBranch(
         deposit_data_root,
         &deposit.proof,
@@ -103,7 +103,7 @@ pub fn applyDeposit(allocator: Allocator, cached_state: *CachedBeaconStateAllFor
             increaseBalance(state, index, amount);
         }
     } else {
-        const pending_deposit = ssz.electra.PendingDeposit.Type{
+        const pending_deposit = ct.electra.PendingDeposit.Type{
             .pubkey = pubkey,
             .withdrawal_credentials = withdrawal_credentials,
             .amount = amount,
@@ -191,7 +191,7 @@ pub fn isValidDepositSignature(config: *const BeaconConfig, pubkey: BLSPubkey, w
     var domain: Domain = undefined;
     computeDomain(DOMAIN_DEPOSIT, GENESIS_FORK_VERSION, ZERO_HASH, &domain) catch return false;
     var signing_root: Root = undefined;
-    computeSigningRoot(ssz.phase0.DepositMessage, &deposit_message, domain, &signing_root) catch return false;
+    computeSigningRoot(ct.phase0.DepositMessage, &deposit_message, domain, &signing_root) catch return false;
 
     // Pubkeys must be checked for group + inf. This must be done only once when the validator deposit is processed
     const public_key = blst.PublicKey.uncompress(&pubkey) catch return false;

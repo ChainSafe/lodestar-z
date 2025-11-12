@@ -1,13 +1,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ssz = @import("consensus_types");
-const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
+const ct = @import("consensus_types");
+const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
 const preset = @import("preset").preset;
 const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
 const getSeed = @import("./seed.zig").getSeed;
 const c = @import("constants");
 const innerShuffleList = @import("./shuffle.zig").innerShuffleList;
-const Epoch = ssz.primitive.Epoch.Type;
+const Epoch = ct.primitive.Epoch.Type;
 const ReferenceCount = @import("./reference_count.zig").ReferenceCount;
 
 pub const EpochShufflingRc = ReferenceCount(*EpochShuffling);

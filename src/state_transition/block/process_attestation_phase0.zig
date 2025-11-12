@@ -2,17 +2,17 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
-const ssz = @import("consensus_types");
-const s = @import("ssz");
+const ssz = @import("ssz");
+const ct = @import("consensus_types");
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const isValidIndexedAttestation = @import("./is_valid_indexed_attestation.zig").isValidIndexedAttestation;
-const Slot = ssz.primitive.Slot.Type;
-const Checkpoint = ssz.phase0.Checkpoint.Type;
-const Phase0Attestation = ssz.phase0.Attestation.Type;
-const ElectraAttestation = ssz.electra.Attestation.Type;
-const PendingAttestation = ssz.phase0.PendingAttestation.Type;
+const Slot = ct.primitive.Slot.Type;
+const Checkpoint = ct.phase0.Checkpoint.Type;
+const Phase0Attestation = ct.phase0.Attestation.Type;
+const ElectraAttestation = ct.electra.Attestation.Type;
+const PendingAttestation = ct.phase0.PendingAttestation.Type;
 
 pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, attestation: *const Phase0Attestation, verify_signature: bool) !void {
     const state = cached_state.state;
@@ -20,11 +20,11 @@ pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaco
     const slot = state.slot();
     const data = attestation.data;
 
-    try validateAttestation(ssz.phase0.Attestation.Type, cached_state, attestation);
+    try validateAttestation(ct.phase0.Attestation.Type, cached_state, attestation);
 
     // should store a clone of aggregation_bits on Phase0 BeaconState to avoid double free error
-    var cloned_aggregation_bits: s.BitListType(preset.MAX_VALIDATORS_PER_COMMITTEE).Type = undefined;
-    try s.BitListType(preset.MAX_VALIDATORS_PER_COMMITTEE).clone(allocator, &attestation.aggregation_bits, &cloned_aggregation_bits);
+    var cloned_aggregation_bits: ssz.BitListType(preset.MAX_VALIDATORS_PER_COMMITTEE).Type = undefined;
+    try ssz.BitListType(preset.MAX_VALIDATORS_PER_COMMITTEE).clone(allocator, &attestation.aggregation_bits, &cloned_aggregation_bits);
     var appended: bool = false;
     errdefer {
         if (!appended) {
@@ -40,14 +40,14 @@ pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaco
     };
 
     if (data.target.epoch == epoch_cache.epoch) {
-        if (!ssz.phase0.Checkpoint.equals(&data.source, state.currentJustifiedCheckpoint())) {
+        if (!ct.phase0.Checkpoint.equals(&data.source, state.currentJustifiedCheckpoint())) {
             return error.InvalidAttestationSourceNotEqualToCurrentJustifiedCheckpoint;
         }
         if (state.currentEpochPendingAttestations().append(allocator, pending_attestation)) |_| {
             appended = true;
         } else |err| return err;
     } else {
-        if (!ssz.phase0.Checkpoint.equals(&data.source, state.previousJustifiedCheckpoint())) {
+        if (!ct.phase0.Checkpoint.equals(&data.source, state.previousJustifiedCheckpoint())) {
             return error.InvalidAttestationSourceNotEqualToPreviousJustifiedCheckpoint;
         }
         if (state.previousEpochPendingAttestations().append(allocator, pending_attestation)) |_| {
@@ -55,13 +55,14 @@ pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaco
         } else |err| return err;
     }
 
-    var indexed_attestation: ssz.phase0.IndexedAttestation.Type = undefined;
+    var indexed_attestation: ct.phase0.IndexedAttestation.Type = undefined;
     try epoch_cache.computeIndexedAttestationPhase0(attestation, &indexed_attestation);
-    defer ssz.phase0.IndexedAttestation.deinit(allocator, &indexed_attestation);
+    defer ct.phase0.IndexedAttestation.deinit(allocator, &indexed_attestation);
 
-    if (!try isValidIndexedAttestation(ssz.phase0.IndexedAttestation.Type, cached_state, &indexed_attestation, verify_signature)) {
+    if (!try isValidIndexedAttestation(ct.phase0.IndexedAttestation.Type, cached_state, &indexed_attestation, verify_signature)) {
         return error.InvalidAttestationInvalidIndexedAttestation;
     }
+    _ = try isValidIndexedAttestation(ct.phase0.IndexedAttestation.Type, cached_state, &indexed_attestation, verify_signature);
 }
 
 /// AT could be either Phase0Attestation or ElectraAttestation

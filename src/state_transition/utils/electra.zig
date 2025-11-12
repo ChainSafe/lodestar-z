@@ -1,14 +1,14 @@
 const std = @import("std");
 const c = @import("constants");
 const COMPOUNDING_WITHDRAWAL_PREFIX = c.COMPOUNDING_WITHDRAWAL_PREFIX;
-const ssz = @import("consensus_types");
+const ct = @import("consensus_types");
 const MIN_ACTIVATION_BALANCE = @import("preset").preset.MIN_ACTIVATION_BALANCE;
 const GENESIS_SLOT = @import("preset").GENESIS_SLOT;
 
-pub const WithdrawalCredentials = ssz.primitive.Root.Type;
-pub const WithdrawalCredentialsLength = ssz.primitive.Root.length;
-const BLSPubkey = ssz.primitive.BLSPubkey.Type;
-const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
+pub const WithdrawalCredentials = ct.primitive.Root.Type;
+pub const WithdrawalCredentialsLength = ct.primitive.Root.length;
+const BLSPubkey = ct.primitive.BLSPubkey.Type;
+const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
 
 const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
@@ -27,7 +27,7 @@ pub fn hasExecutionWithdrawalCredential(withdrawal_credentials: WithdrawalCreden
 pub fn switchToCompoundingValidator(allocator: Allocator, state_cache: *CachedBeaconStateAllForks, index: ValidatorIndex) !void {
     var validator = &state_cache.state.validators().items[index];
 
-    // directly modifying the byte leads to ssz.primitive missing the modification resulting into
+    // directly modifying the byte leads to ct.primitive missing the modification resulting into
     // wrong root compute, although slicing can be avoided but anyway this is not going
     // to be a hot path so its better to clean slice and avoid side effects
     var new_withdrawal_credentials = [_]u8{0} ** WithdrawalCredentialsLength;
@@ -45,7 +45,7 @@ pub fn queueExcessActiveBalance(allocator: Allocator, cached_state: *CachedBeaco
         const excess_balance = balance.* - MIN_ACTIVATION_BALANCE;
         balance.* = MIN_ACTIVATION_BALANCE;
 
-        const pending_deposit = ssz.electra.PendingDeposit.Type{
+        const pending_deposit = ct.electra.PendingDeposit.Type{
             .pubkey = validator.pubkey,
             .withdrawal_credentials = validator.withdrawal_credentials,
             .amount = excess_balance,

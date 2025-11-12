@@ -1,13 +1,13 @@
 const std = @import("std");
-const ssz = @import("consensus_types");
+const ct = @import("consensus_types");
 
-const AttestationData = ssz.primitive.AttestationData.Type;
-const BLSSignature = ssz.primitive.BLSSignature.Type;
-const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
+const AttestationData = ct.primitive.AttestationData.Type;
+const BLSSignature = ct.primitive.BLSSignature.Type;
+const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
 
 pub const Attestations = union(enum) {
-    phase0: *const ssz.phase0.Attestations.Type,
-    electra: *const ssz.electra.Attestations.Type,
+    phase0: *const ct.phase0.Attestations.Type,
+    electra: *const ct.electra.Attestations.Type,
 
     pub fn length(self: *const Attestations) usize {
         return switch (self.*) {
@@ -24,13 +24,13 @@ pub const Attestations = union(enum) {
 };
 
 pub const AttestationItems = union(enum) {
-    phase0: []ssz.phase0.Attestation.Type,
-    electra: []ssz.electra.Attestation.Type,
+    phase0: []ct.phase0.Attestation.Type,
+    electra: []ct.electra.Attestation.Type,
 };
 
 pub const IndexedAttestation = union(enum) {
-    phase0: *const ssz.phase0.IndexedAttestation.Type,
-    electra: *const ssz.electra.IndexedAttestation.Type,
+    phase0: *const ct.phase0.IndexedAttestation.Type,
+    electra: *const ct.electra.IndexedAttestation.Type,
 
     pub fn getAttestationData(self: *const IndexedAttestation) AttestationData {
         return switch (self.*) {

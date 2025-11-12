@@ -1,7 +1,7 @@
 const std = @import("std");
-const ssz = @import("consensus_types");
-const Epoch = ssz.primitive.Epoch.Type;
-const Version = ssz.primitive.Version.Type;
+const ct = @import("consensus_types");
+const Epoch = ct.primitive.Epoch.Type;
+const Version = ct.primitive.Version.Type;
 
 pub const TOTAL_FORKS = 6;
 

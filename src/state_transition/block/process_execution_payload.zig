@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const ssz = @import("consensus_types");
+const ct = @import("consensus_types");
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const SignedBlock = @import("../types/signed_block.zig").SignedBlock;
@@ -16,7 +16,7 @@ const getRandaoMix = @import("../utils/seed.zig").getRandaoMix;
 const PartialPayload = struct {
     parent_hash: [32]u8 = undefined,
     block_hash: [32]u8 = undefined,
-    prev_randao: ssz.primitive.Bytes32.Type = undefined,
+    prev_randao: ct.primitive.Bytes32.Type = undefined,
     timestamp: u64 = undefined,
 };
 

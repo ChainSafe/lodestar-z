@@ -1,12 +1,12 @@
 const std = @import("std");
-const ssz = @import("consensus_types");
-const Domain = ssz.primitive.Domain.Type;
-const Version = ssz.primitive.Version.Type;
-const DomainType = ssz.primitive.DomainType.Type;
-const Root = ssz.primitive.Root.Type;
-const Fork = ssz.phase0.Fork.Type;
-const ForkData = ssz.phase0.ForkData.Type;
-const Epoch = ssz.primitive.Epoch.Type;
+const ct = @import("consensus_types");
+const Domain = ct.primitive.Domain.Type;
+const Version = ct.primitive.Version.Type;
+const DomainType = ct.primitive.DomainType.Type;
+const Root = ct.primitive.Root.Type;
+const Fork = ct.phase0.Fork.Type;
+const ForkData = ct.phase0.ForkData.Type;
+const Epoch = ct.primitive.Epoch.Type;
 
 // Only used by processDeposit +  lightclient
 
@@ -29,5 +29,5 @@ pub fn computeForkDataRoot(current_version: Version, genesis_validators_root: Ro
         .current_version = current_version,
         .genesis_validators_root = genesis_validators_root,
     };
-    try ssz.phase0.ForkData.hashTreeRoot(&fork_data, out);
+    try ct.phase0.ForkData.hashTreeRoot(&fork_data, out);
 }

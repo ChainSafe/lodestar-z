@@ -1,8 +1,8 @@
-const ssz = @import("consensus_types");
-const Slot = ssz.primitive.Slot.Type;
+const ct = @import("consensus_types");
+const Slot = ct.primitive.Slot.Type;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const Root = ssz.primitive.Root.Type;
-const Epoch = ssz.primitive.Epoch.Type;
+const Root = ct.primitive.Root.Type;
+const Epoch = ct.primitive.Epoch.Type;
 const Body = @import("../types/signed_block.zig").SignedBlock.Body;
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
@@ -34,7 +34,7 @@ pub fn randaoRevealSignatureSet(
     const epoch = computeEpochAtSlot(slot);
     const domain = try config.getDomain(state.slot(), c.DOMAIN_RANDAO, slot);
     var signing_root: Root = undefined;
-    try computeSigningRoot(ssz.primitive.Epoch, &epoch, domain, &signing_root);
+    try computeSigningRoot(ct.primitive.Epoch, &epoch, domain, &signing_root);
     return .{
         .pubkey = epoch_cache.index_to_pubkey.items[proposer_idx],
         .signing_root = signing_root,

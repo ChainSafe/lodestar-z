@@ -1,5 +1,5 @@
 const Allocator = @import("std").mem.Allocator;
-const ssz = @import("consensus_types");
+const ct = @import("consensus_types");
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const preset = @import("preset").preset;

@@ -1,7 +1,7 @@
 const std = @import("std");
-const ssz = @import("consensus_types");
+const ct = @import("consensus_types");
 const digest = @import("./sha256.zig").digest;
-const Root = ssz.primitive.Root.Type;
+const Root = ct.primitive.Root.Type;
 
 pub fn verifyMerkleBranch(leaf: Root, proof: *const [33]Root, depth: usize, index: usize, root: Root) bool {
     var value = leaf;

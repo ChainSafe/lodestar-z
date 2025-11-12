@@ -4,11 +4,11 @@ const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeac
 const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
 const getBlockRootFn = @import("../utils/block_root.zig").getBlockRoot;
 const getBlockRootAtSlotFn = @import("../utils/block_root.zig").getBlockRootAtSlot;
-const ssz = @import("consensus_types");
-const Checkpoint = ssz.phase0.Checkpoint.Type;
-const Epoch = ssz.primitive.Epoch.Type;
-const Slot = ssz.primitive.Slot.Type;
-const Root = ssz.primitive.Root.Type;
+const ct = @import("consensus_types");
+const Checkpoint = ct.phase0.Checkpoint.Type;
+const Epoch = ct.primitive.Epoch.Type;
+const Slot = ct.primitive.Slot.Type;
+const Root = ct.primitive.Root.Type;
 
 pub const RootCache = struct {
     allocator: Allocator,

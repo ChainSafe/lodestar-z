@@ -1,13 +1,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ssz = @import("consensus_types");
+const ct = @import("consensus_types");
 const preset = @import("preset").preset;
-const ForkData = ssz.phase0.ForkData.Type;
-const Epoch = ssz.primitive.Epoch.Type;
-const Slot = ssz.primitive.Slot.Type;
-const Version = ssz.primitive.Version.Type;
-const Root = ssz.primitive.Root.Type;
-const DomainType = ssz.primitive.DomainType.Type;
+const ForkData = ct.phase0.ForkData.Type;
+const Epoch = ct.primitive.Epoch.Type;
+const Slot = ct.primitive.Slot.Type;
+const Version = ct.primitive.Version.Type;
+const Root = ct.primitive.Root.Type;
+const DomainType = ct.primitive.DomainType.Type;
 const c = @import("constants");
 const DOMAIN_VOLUNTARY_EXIT = c.DOMAIN_VOLUNTARY_EXIT;
 const ALL_DOMAINS = c.ALL_DOMAINS;
@@ -240,7 +240,7 @@ fn computeForkDataRoot(current_version: Version, genesis_validators_root: Root, 
         .current_version = current_version,
         .genesis_validators_root = genesis_validators_root,
     };
-    try ssz.phase0.ForkData.hashTreeRoot(&fork_data, out);
+    try ct.phase0.ForkData.hashTreeRoot(&fork_data, out);
 }
 
 inline fn getDomainTypeKey(domain_type: *const DomainType) DomainTypeKey {
