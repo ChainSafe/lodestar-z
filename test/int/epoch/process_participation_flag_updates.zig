@@ -13,7 +13,7 @@ test "processParticipationFlagUpdates - sanity" {
     inline for (validator_count_arr) |validator_count| {
         var test_state = try TestCachedBeaconStateAllForks.init(allocator, validator_count);
         defer test_state.deinit();
-        try processParticipationFlagUpdates(test_state.cached_state, allocator);
+        try processParticipationFlagUpdates(allocator, test_state.cached_state);
     }
     defer state_transition.deinitStateTransition();
 }

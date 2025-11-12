@@ -114,9 +114,8 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
                 .historical_roots_update => try state_transition.processHistoricalRootsUpdate(allocator, pre, epoch_transition_cache),
                 .inactivity_updates => try state_transition.processInactivityUpdates(pre, epoch_transition_cache),
                 .justification_and_finalization => try state_transition.processJustificationAndFinalization(pre, epoch_transition_cache),
-                // TODO: allocator as first param
-                .participation_flag_updates => try state_transition.processParticipationFlagUpdates(pre, allocator),
-                .participation_record_updates => state_transition.processParticipationRecordUpdates(pre, allocator),
+                .participation_flag_updates => try state_transition.processParticipationFlagUpdates(allocator, pre),
+                .participation_record_updates => state_transition.processParticipationRecordUpdates(allocator, pre),
                 .randao_mixes_reset => state_transition.processRandaoMixesReset(pre, epoch_transition_cache),
                 .registry_updates => try state_transition.processRegistryUpdates(pre, epoch_transition_cache),
                 .rewards_and_penalties => try state_transition.processRewardsAndPenalties(allocator, pre, epoch_transition_cache),

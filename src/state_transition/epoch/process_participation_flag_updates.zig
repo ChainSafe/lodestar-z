@@ -6,7 +6,7 @@ const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").Epoc
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 
-pub fn processParticipationFlagUpdates(cached_state: *CachedBeaconStateAllForks, allocator: std.mem.Allocator) !void {
+pub fn processParticipationFlagUpdates(allocator: std.mem.Allocator, cached_state: *CachedBeaconStateAllForks) !void {
     const state = cached_state.state;
     // rotate EpochParticipation
     try state.rotateEpochParticipations(allocator);
