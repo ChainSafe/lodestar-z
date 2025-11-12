@@ -1,3 +1,4 @@
+const std = @import("std");
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
@@ -56,5 +57,5 @@ pub fn initiateValidatorExit(cached_state: *const CachedBeaconStateAllForks, val
         validator.exit_epoch = computeExitEpochAndUpdateChurn(cached_state, validator.effective_balance);
     }
 
-    validator.withdrawable_epoch = validator.exit_epoch + config.MIN_VALIDATOR_WITHDRAWABILITY_DELAY;
+    validator.withdrawable_epoch = try std.math.add(u64, validator.exit_epoch, config.MIN_VALIDATOR_WITHDRAWABILITY_DELAY);
 }
