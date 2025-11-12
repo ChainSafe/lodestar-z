@@ -1,16 +1,16 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ssz = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const AttestationData = ssz.phase0.AttestationData.Type;
-const AttesterSlashing = ssz.phase0.AttesterSlashing.Type;
+const AttestationData = types.phase0.AttestationData.Type;
+const AttesterSlashing = types.phase0.AttesterSlashing.Type;
 
-const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
-const Slot = ssz.primitive.Slot.Type;
+const ValidatorIndex = types.primitive.ValidatorIndex.Type;
+const Slot = types.primitive.Slot.Type;
 
 pub fn isSlashableAttestationData(data1: *const AttestationData, data2: *const AttestationData) bool {
     // Double vote
-    if (!ssz.phase0.AttestationData.equals(data1, data2) and data1.target.epoch == data2.target.epoch) {
+    if (!types.phase0.AttestationData.equals(data1, data2) and data1.target.epoch == data2.target.epoch) {
         return true;
     }
     // Surround vote

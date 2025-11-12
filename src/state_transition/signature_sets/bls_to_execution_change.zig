@@ -1,14 +1,14 @@
 const std = @import("std");
-const ssz = @import("consensus_types");
+const types = @import("consensus_types");
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const SignedBLSToExecutionChange = ssz.capella.SignedBLSToExecutionChange.Type;
+const SignedBLSToExecutionChange = types.capella.SignedBLSToExecutionChange.Type;
 const BeaconConfig = @import("config").BeaconConfig;
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
 const ForkSeq = @import("config").ForkSeq;
 const c = @import("constants");
 const blst = @import("blst");
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
-const Root = ssz.primitive.Root.Type;
+const Root = types.primitive.Root.Type;
 const SignedBeaconBlock = @import("../types/beacon_block.zig").SignedBeaconBlock;
 const verifySingleSignatureSet = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
 
@@ -22,7 +22,7 @@ pub fn getBlsToExecutionChangeSignatureSet(config: *const BeaconConfig, signed_b
     // signatureFork for signing domain is fixed
     const domain = try config.getDomainByForkSeq(.phase0, c.DOMAIN_BLS_TO_EXECUTION_CHANGE);
     var signing_root: Root = undefined;
-    try computeSigningRoot(ssz.capella.BLSToExecutionChange, &signed_bls_to_execution_change.message, domain, &signing_root);
+    try computeSigningRoot(types.capella.BLSToExecutionChange, &signed_bls_to_execution_change.message, domain, &signing_root);
 
     return SingleSignatureSet{
         .pubkey = try blst.PublicKey.uncompress(&signed_bls_to_execution_change.message.from_bls_pubkey),

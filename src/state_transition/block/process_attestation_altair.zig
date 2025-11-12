@@ -2,8 +2,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
-const ssz = @import("consensus_types");
-const Epoch = ssz.primitive.Epoch.Type;
+const types = @import("consensus_types");
+const Epoch = types.primitive.Epoch.Type;
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const c = @import("constants");
@@ -11,9 +11,9 @@ const RootCache = @import("../utils/root_cache.zig").RootCache;
 const validateAttestation = @import("./process_attestation_phase0.zig").validateAttestation;
 const getAttestationWithIndicesSignatureSet = @import("../signature_sets/indexed_attestation.zig").getAttestationWithIndicesSignatureSet;
 const verifyAggregatedSignatureSet = @import("../utils/signature_sets.zig").verifyAggregatedSignatureSet;
-const Phase0Attestation = ssz.phase0.Attestation.Type;
-const ElectraAttestation = ssz.electra.Attestation.Type;
-const Checkpoint = ssz.phase0.Checkpoint.Type;
+const Phase0Attestation = types.phase0.Attestation.Type;
+const ElectraAttestation = types.electra.Attestation.Type;
+const Checkpoint = types.phase0.Checkpoint.Type;
 const isTimelyTarget = @import("./process_attestation_phase0.zig").isTimelyTarget;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 
@@ -26,8 +26,8 @@ const TIMELY_HEAD = 1 << c.TIMELY_HEAD_FLAG_INDEX;
 const SLOTS_PER_EPOCH_SQRT = std.math.sqrt(preset.SLOTS_PER_EPOCH);
 
 /// AT = AttestationType
-/// for phase0 it's `ssz.phase0.Attestation.Type`
-/// for electra it's `ssz.electra.Attestation.Type`
+/// for phase0 it's `types.phase0.Attestation.Type`
+/// for electra it's `types.electra.Attestation.Type`
 pub fn processAttestationsAltair(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, comptime AT: type, attestations: []AT, verify_signature: bool) !void {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
@@ -117,7 +117,7 @@ pub fn processAttestationsAltair(allocator: Allocator, cached_state: *const Cach
     increaseBalance(state, try epoch_cache.getBeaconProposer(state_slot), proposer_reward);
 }
 
-pub fn getAttestationParticipationStatus(state: *const BeaconStateAllForks, data: ssz.phase0.AttestationData.Type, inclusion_delay: u64, current_epoch: Epoch, root_cache: *RootCache) !u8 {
+pub fn getAttestationParticipationStatus(state: *const BeaconStateAllForks, data: types.phase0.AttestationData.Type, inclusion_delay: u64, current_epoch: Epoch, root_cache: *RootCache) !u8 {
     const justified_checkpoint: Checkpoint = if (data.target.epoch == current_epoch)
         root_cache.current_justified_checkpoint
     else

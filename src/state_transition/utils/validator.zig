@@ -1,16 +1,16 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ssz = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const Validator = ssz.phase0.Validator.Type;
+const Validator = types.phase0.Validator.Type;
 
-const Epoch = ssz.primitive.Epoch.Type;
-const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
+const Epoch = types.primitive.Epoch.Type;
+const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const WithdrawalCredentials = ssz.primitive.Root.Type;
+const WithdrawalCredentials = types.primitive.Root.Type;
 const hasCompoundingWithdrawalCredential = @import("./electra.zig").hasCompoundingWithdrawalCredential;
 
 pub fn isActiveValidator(validator: *const Validator, epoch: Epoch) bool {

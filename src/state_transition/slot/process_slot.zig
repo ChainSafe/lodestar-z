@@ -1,9 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const ssz = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const Root = ssz.primitive.Root.Type;
+const Root = types.primitive.Root.Type;
 const ZERO_HASH = @import("constants").ZERO_HASH;
 
 pub fn processSlot(allocator: Allocator, cached_state: *CachedBeaconStateAllForks) !void {
@@ -23,7 +23,7 @@ pub fn processSlot(allocator: Allocator, cached_state: *CachedBeaconStateAllFork
 
     // Cache block root
     var previous_block_root: Root = undefined;
-    try ssz.phase0.BeaconBlockHeader.hashTreeRoot(latest_block_header, &previous_block_root);
+    try types.phase0.BeaconBlockHeader.hashTreeRoot(latest_block_header, &previous_block_root);
     const block_roots = state.blockRoots();
     @memcpy(block_roots[state.slot() % preset.SLOTS_PER_HISTORICAL_ROOT][0..], previous_block_root[0..]);
 }
