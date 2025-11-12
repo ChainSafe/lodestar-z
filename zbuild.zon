@@ -12,15 +12,24 @@
         .blst = .{
             .url = "git+https://github.com/chainsafe/blst-z#7c135f5049d99f603856a1c8728321cb69682788",
         },
-        .ssz = .{
-            .url = "git+https://github.com/chainsafe/ssz-z#ef6e164c481068f60228ad9d865686b0232c0618",
+        .hashtree = .{
+            .url = "git+https://github.com/chainsafe/hashtree-z#43a58b0fd4813515cda3d0ffc622125243a01c54",
         },
         .snappy = .{
             .url = "git+https://github.com/chainsafe/snappy.zig#ede2ad602ac9ffa506e3724a2bf5fc14c806187f",
         },
+        .yaml = .{
+            .url = "git+https://github.com/chainsafe/zig-yaml#e0e5962579e990a66c21424416c7ac092b20b772",
+        },
+        .zbench = .{
+            .url = "git+https://github.com/hendriknielaender/zBench#d8c7dd485306b88b757d52005614ebcb0a336942",
+        },
     },
     .options_modules = .{
         .build_options = .{
+            .zero_hash_max_depth = .{
+                .type = "u8",
+            },
             .preset = .{
                 .default = "mainnet",
                 .type = "string",
@@ -42,9 +51,6 @@
         },
     },
     .modules = .{
-        .hex = .{
-            .root_source_file = "src/hex.zig",
-        },
         .constants = .{
             .root_source_file = "src/constants/root.zig",
         },
@@ -56,9 +62,24 @@
             .root_source_file = "src/consensus_types/root.zig",
             .imports = .{ .build_options, .ssz, .constants, .preset },
         },
+        .hashing = .{
+            .root_source_file = "src/hashing/root.zig",
+            .imports = .{ .build_options, .hex, .hashtree },
+        },
+        .hex = .{
+            .root_source_file = "src/hex.zig",
+        },
+        .persistent_merkle_tree = .{
+            .root_source_file = "src/persistent_merkle_tree/root.zig",
+            .imports = .{ .build_options, .hex, .hashing },
+        },
         .preset = .{
             .root_source_file = "src/preset/root.zig",
             .imports = .{ .build_options, .constants },
+        },
+        .ssz = .{
+            .root_source_file = "src/ssz/root.zig",
+            .imports = .{ .build_options, .hex, .hashing, .persistent_merkle_tree },
         },
         .state_transition = .{
             .root_source_file = "src/state_transition/root.zig",
@@ -87,6 +108,54 @@
                 .imports = .{ .spec_test_options, .config, .preset, .consensus_types, .state_transition },
             },
         },
+        .write_ssz_generic_spec_tests = .{
+            .root_module = .{
+                .root_source_file = "test/spec/ssz/write_generic_tests.zig",
+                .imports = .{.spec_test_options},
+            },
+        },
+        .write_ssz_static_spec_tests = .{
+            .root_module = .{
+                .root_source_file = "test/spec/ssz/write_static_tests.zig",
+                .imports = .{.spec_test_options},
+            },
+        },
+        .bench_ssz_attestation = .{
+            .root_module = .{
+                .root_source_file = "bench/ssz/attestation.zig",
+                .imports = .{ .consensus_types, .ssz, .zbench },
+            },
+        },
+        .bench_ssz_block = .{
+            .root_module = .{
+                .root_source_file = "bench/ssz/block.zig",
+                .imports = .{ .consensus_types, .ssz, .zbench },
+            },
+        },
+        .bench_ssz_state = .{
+            .root_module = .{
+                .root_source_file = "bench/ssz/state.zig",
+                .imports = .{ .consensus_types, .ssz, .zbench },
+            },
+        },
+        .bench_merkle_gindex = .{
+            .root_module = .{
+                .root_source_file = "bench/ssz/gindex.zig",
+                .imports = .{ .hashing, .persistent_merkle_tree, .zbench },
+            },
+        },
+        .bench_merkle_node = .{
+            .root_module = .{
+                .root_source_file = "src/persistent_merkle_tree/node_bench.zig",
+                .imports = .{ .hashing, .zbench },
+            },
+        },
+        .bench_hashing = .{
+            .root_module = .{
+                .root_source_file = "bench/ssz/hashing.zig",
+                .imports = .{ .hashing, .zbench },
+            },
+        },
     },
     .tests = .{
         .int = .{
@@ -100,6 +169,8 @@
                     .consensus_types,
                     .preset,
                     .constants,
+                    .hex,
+                    .persistent_merkle_tree,
                 },
             },
             .filters = .{},
@@ -117,6 +188,20 @@
                     .ssz,
                     .blst,
                 },
+            },
+            .filters = .{},
+        },
+        .ssz_generic_spec_tests = .{
+            .root_module = .{
+                .root_source_file = "test/spec/ssz/generic_tests.zig",
+                .imports = .{ .hex, .snappy, .persistent_merkle_tree, .ssz, .spec_test_options, .yaml },
+            },
+            .filters = .{},
+        },
+        .ssz_static_spec_tests = .{
+            .root_module = .{
+                .root_source_file = "test/spec/ssz/static_tests.zig",
+                .imports = .{ .hex, .snappy, .persistent_merkle_tree, .ssz, .build_options, .spec_test_options, .consensus_types, .yaml },
             },
             .filters = .{},
         },
