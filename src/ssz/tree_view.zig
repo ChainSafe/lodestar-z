@@ -65,6 +65,57 @@ pub const Data = struct {
 
         self.changed.clearRetainingCapacity();
     }
+
+    pub fn getChildNode(self: *Data, pool: *Node.Pool, gindex: Gindex) !Node.Id {
+        const gop = try self.children_nodes.getOrPut(gindex);
+        if (gop.found_existing) {
+            return gop.value_ptr.*;
+        }
+        const child_node = try self.root.getNode(pool, gindex);
+        gop.value_ptr.* = child_node;
+        return child_node;
+    }
+
+    pub fn getChildData(self: *Data, allocator: std.mem.Allocator, pool: *Node.Pool, gindex: Gindex) !Data {
+        const gop = try self.children_data.getOrPut(gindex);
+        if (gop.found_existing) {
+            return gop.value_ptr.*;
+        }
+        const child_node = try self.getChildNode(pool, gindex);
+        const child_data = try Data.init(allocator, pool, child_node);
+        gop.value_ptr.* = child_data;
+
+        // TODO only update changed if the subview is mutable
+        try self.data.changed.put(gindex, {});
+
+        return child_data;
+    }
+
+    pub fn setChildNode(self: *Data, pool: *Node.Pool, gindex: Gindex, node: Node.Id) !void {
+        try self.data.changed.put(gindex, {});
+        const opt_old_node = try self.children_nodes.fetchPut(
+            gindex,
+            node,
+        );
+        if (opt_old_node) |old_node| {
+            // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
+            // Tree-owned nodes already have a refcount, so skip unref in that case.
+            if (old_node.value.getState(pool).getRefCount() == 0) {
+                pool.unref(old_node.value);
+            }
+        }
+    }
+
+    pub fn setChildData(self: *Data, pool: *Node.Pool, gindex: Gindex, data: Data) !void {
+        try self.data.changed.put(gindex, {});
+        const opt_old_data = try self.children_data.fetchPut(
+            gindex,
+            data,
+        );
+        if (opt_old_data) |old_data| {
+            @constCast(&old_data.value).deinit(pool);
+        }
+    }
 };
 
 /// A treeview provides a view into a merkle tree of a given SSZ type.
@@ -104,27 +155,6 @@ pub fn TreeView(comptime ST: type) type {
             out.* = self.data.root.getRoot(self.pool).*;
         }
 
-        fn getChildNode(self: *Self, gindex: Gindex) !Node.Id {
-            const gop = try self.data.children_nodes.getOrPut(gindex);
-            if (gop.found_existing) {
-                return gop.value_ptr.*;
-            }
-            const child_node = try self.data.root.getNode(self.pool, gindex);
-            gop.value_ptr.* = child_node;
-            return child_node;
-        }
-
-        fn getChildData(self: *Self, gindex: Gindex) !Data {
-            const gop = try self.data.children_data.getOrPut(gindex);
-            if (gop.found_existing) {
-                return gop.value_ptr.*;
-            }
-            const child_node = try self.getChildNode(gindex);
-            const child_data = try Data.init(self.allocator, self.pool, child_node);
-            gop.value_ptr.* = child_data;
-            return child_data;
-        }
-
         pub const Element: type = if (isBasicType(ST.Element))
             ST.Element.Type
         else
@@ -149,20 +179,19 @@ pub fn TreeView(comptime ST: type) type {
             }
             const child_gindex = elementChildGindex(index);
             if (comptime isBasicType(ST.Element)) {
+                const child_node = try self.data.getChildNode(self.pool, child_gindex);
                 var value: ST.Element.Type = undefined;
-                const child_node = try self.getChildNode(child_gindex);
                 try ST.Element.tree.toValuePacked(child_node, self.pool, index, &value);
                 return value;
             } else {
-                const child_data = try self.getChildData(child_gindex);
-
-                // TODO only update changed if the subview is mutable
-                try self.data.changed.put(child_gindex, {});
-
                 return TreeView(ST.Element){
                     .allocator = self.allocator,
                     .pool = self.pool,
-                    .data = child_data,
+                    .data = try self.data.getChildData(
+                        self.allocator,
+                        self.pool,
+                        child_gindex,
+                    ),
                 };
             }
         }
@@ -176,34 +205,15 @@ pub fn TreeView(comptime ST: type) type {
                 @compileError("setElement can only be used with vector or list types");
             }
             const child_gindex = elementChildGindex(index);
-            try self.data.changed.put(child_gindex, {});
             if (comptime isBasicType(ST.Element)) {
-                const child_node = try self.getChildNode(child_gindex);
-                const opt_old_node = try self.data.children_nodes.fetchPut(
+                const child_node = try self.data.getChildNode(self.pool, child_gindex);
+                try self.data.setChildNode(
+                    self.pool,
                     child_gindex,
-                    try ST.Element.tree.fromValuePacked(
-                        child_node,
-                        self.pool,
-                        index,
-                        &value,
-                    ),
+                    try ST.Element.tree.fromValuePacked(child_node, self.pool, index, &value),
                 );
-                if (opt_old_node) |old_node| {
-                    // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
-                    // Tree-owned nodes already have a refcount, so skip unref in that case.
-                    if (old_node.value.getState(self.pool).getRefCount() == 0) {
-                        self.pool.unref(old_node.value);
-                    }
-                }
             } else {
-                const opt_old_data = try self.data.children_data.fetchPut(
-                    child_gindex,
-                    value.data,
-                );
-                if (opt_old_data) |old_data_value| {
-                    var data: *Data = @constCast(&old_data_value.value);
-                    data.deinit(self.pool);
-                }
+                try self.data.setChildData(self.pool, child_gindex, value.data);
             }
         }
 
@@ -226,20 +236,19 @@ pub fn TreeView(comptime ST: type) type {
             const ChildST = ST.getFieldType(field_name);
             const child_gindex = Gindex.fromDepth(ST.chunk_depth, field_index);
             if (comptime isBasicType(ChildST)) {
+                const child_node = try self.data.getChildNode(self.pool, child_gindex);
                 var value: ChildST.Type = undefined;
-                const child_node = try self.getChildNode(child_gindex);
                 try ChildST.tree.toValue(child_node, self.pool, &value);
                 return value;
             } else {
-                const child_data = try self.getChildData(child_gindex);
-
-                // TODO only update changed if the subview is mutable
-                try self.data.changed.put(child_gindex, {});
-
                 return TreeView(ChildST){
                     .allocator = self.allocator,
                     .pool = self.pool,
-                    .data = child_data,
+                    .data = try self.data.getChildData(
+                        self.allocator,
+                        self.pool,
+                        child_gindex,
+                    ),
                 };
             }
         }
@@ -255,31 +264,14 @@ pub fn TreeView(comptime ST: type) type {
             const field_index = comptime ST.getFieldIndex(field_name);
             const ChildST = ST.getFieldType(field_name);
             const child_gindex = Gindex.fromDepth(ST.chunk_depth, field_index);
-            try self.data.changed.put(child_gindex, {});
             if (comptime isBasicType(ChildST)) {
-                const opt_old_node = try self.data.children_nodes.fetchPut(
+                try self.data.setChildNode(
+                    self.pool,
                     child_gindex,
-                    try ChildST.tree.fromValue(
-                        self.pool,
-                        &value,
-                    ),
+                    try ChildST.tree.fromValue(self.pool, &value),
                 );
-                if (opt_old_node) |old_node| {
-                    // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
-                    // Tree-owned nodes already have a refcount, so skip unref in that case.
-                    if (old_node.value.getState(self.pool).getRefCount() == 0) {
-                        self.pool.unref(old_node.value);
-                    }
-                }
             } else {
-                const opt_old_data = try self.data.children_data.fetchPut(
-                    child_gindex,
-                    value.data,
-                );
-                if (opt_old_data) |old_data_value| {
-                    var data: *Data = @constCast(&old_data_value.value);
-                    data.deinit(self.pool);
-                }
+                try self.data.setChildData(self.pool, child_gindex, value.data);
             }
         }
     };
