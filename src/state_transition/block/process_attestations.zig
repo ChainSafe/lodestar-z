@@ -18,7 +18,7 @@ pub fn processAttestations(allocator: Allocator, cached_state: *CachedBeaconStat
         .phase0 => |attestations_phase0| {
             if (state.isPostAltair()) {
                 // altair to deneb
-                try processAttestationsAltair(allocator, cached_state, attestations_phase0.items, verify_signatures);
+                try processAttestationsAltair(allocator, cached_state, ssz.phase0.Attestation.Type, attestations_phase0.items, verify_signatures);
             } else {
                 // phase0
                 for (attestations_phase0.items) |attestation| {
@@ -27,7 +27,7 @@ pub fn processAttestations(allocator: Allocator, cached_state: *CachedBeaconStat
             }
         },
         .electra => |attestations_electra| {
-            try processAttestationsAltair(allocator, cached_state, attestations_electra.items, verify_signatures);
+            try processAttestationsAltair(allocator, cached_state, ssz.electra.Attestation.Type, attestations_electra.items, verify_signatures);
         },
     }
 }

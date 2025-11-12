@@ -20,7 +20,7 @@ pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaco
     const slot = state.slot();
     const data = attestation.data;
 
-    try validateAttestation(cached_state, attestation);
+    try validateAttestation(ssz.phase0.Attestation.Type, cached_state, attestation);
 
     // should store a clone of aggregation_bits on Phase0 BeaconState to avoid double free error
     var cloned_aggregation_bits: s.BitListType(preset.MAX_VALIDATORS_PER_COMMITTEE).Type = undefined;
@@ -62,10 +62,8 @@ pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaco
 }
 
 /// AT could be either Phase0Attestation or ElectraAttestation
-pub fn validateAttestation(cached_state: *const CachedBeaconStateAllForks, attestation: anytype) !void {
-    const T = @typeInfo(@TypeOf(attestation)).pointer.child;
-    std.debug.assert(T == Phase0Attestation or T == ElectraAttestation);
-    const is_electra = T == ElectraAttestation;
+pub fn validateAttestation(comptime AT: type, cached_state: *const CachedBeaconStateAllForks, attestation: *const AT) !void {
+    const is_electra = AT == ElectraAttestation;
     const epoch_cache = cached_state.getEpochCache();
     const state = cached_state.state;
     const state_slot = state.slot();
