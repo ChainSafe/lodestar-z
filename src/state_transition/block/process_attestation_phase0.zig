@@ -66,7 +66,6 @@ pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaco
 
 /// AT could be either Phase0Attestation or ElectraAttestation
 pub fn validateAttestation(comptime AT: type, cached_state: *const CachedBeaconStateAllForks, attestation: *const AT) !void {
-    const is_electra = AT == ElectraAttestation;
     const epoch_cache = cached_state.getEpochCache();
     const state = cached_state.state;
     const state_slot = state.slot();
@@ -88,7 +87,7 @@ pub fn validateAttestation(comptime AT: type, cached_state: *const CachedBeaconS
     }
 
     // same to fork >= ForkSeq.electra but more type safe
-    if (is_electra) {
+    if (AT == ElectraAttestation) {
         if (data.index != 0) {
             return error.InvalidAttestationNonZeroDataIndex;
         }
