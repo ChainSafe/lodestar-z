@@ -61,6 +61,7 @@ pub fn processBlock(
             const payload_withdrawals_root = switch (body) {
                 .regular => |b| blk: {
                     const actual_withdrawals = b.executionPayload().getWithdrawals();
+                    std.debug.assert(withdrawals_result.withdrawals.items.len == actual_withdrawals.items.len);
                     var root: Root = undefined;
                     try ssz.capella.Withdrawals.hashTreeRoot(allocator, &actual_withdrawals, &root);
                     break :blk root;

@@ -213,7 +213,7 @@ pub const BeaconConfig = struct {
     }
 
     pub fn getDomainForVoluntaryExit(self: *const BeaconConfig, state_slot: Slot, message_slot: ?Slot) ![32]u8 {
-        const domain = if (state_slot / preset.SLOTS_PER_EPOCH < self.chain.DENEB_FORK_EPOCH) {
+        const domain = if (@divFloor(state_slot, preset.SLOTS_PER_EPOCH) < self.chain.DENEB_FORK_EPOCH) {
             return self.getDomain(state_slot, DOMAIN_VOLUNTARY_EXIT, message_slot);
         } else {
             return self.getDomainByForkSeq(ForkSeq.capella, DOMAIN_VOLUNTARY_EXIT);

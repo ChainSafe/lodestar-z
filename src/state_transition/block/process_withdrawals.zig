@@ -66,16 +66,16 @@ pub fn processWithdrawals(
         next_withdrawal_index.* = latest_withdrawal.index + 1;
     }
 
-    // Update the nextWithdrawalValidatorIndex
-    const nextWithdrawalValidatorIndex = state.nextWithdrawalValidatorIndex();
+    // Update the next_withdrawal_validator_index
+    const next_withdrawal_validator_index = state.nextWithdrawalValidatorIndex();
     if (expected_withdrawals.len == preset.MAX_WITHDRAWALS_PER_PAYLOAD) {
-        // All slots filled, nextWithdrawalValidatorIndex should be validatorIndex having next turn
-        nextWithdrawalValidatorIndex.* =
+        // All slots filled, next_withdrawal_validator_index should be validatorIndex having next turn
+        next_withdrawal_validator_index.* =
             (expected_withdrawals[expected_withdrawals.len - 1].validator_index + 1) % state.validators().items.len;
     } else {
-        // expected withdrawals came up short in the bound, so we move nextWithdrawalValidatorIndex to
+        // expected withdrawals came up short in the bound, so we move next_withdrawal_validator_index to
         // the next post the bound
-        nextWithdrawalValidatorIndex.* = (nextWithdrawalValidatorIndex.* + preset.MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP) % state.validators().items.len;
+        next_withdrawal_validator_index.* = (next_withdrawal_validator_index.* + preset.MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP) % state.validators().items.len;
     }
 }
 
