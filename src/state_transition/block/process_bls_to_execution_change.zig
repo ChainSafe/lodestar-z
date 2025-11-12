@@ -7,14 +7,15 @@ const c = @import("constants");
 const digest = @import("../utils/sha256.zig").digest;
 const verifyBlsToExecutionChangeSignature = @import("../signature_sets/bls_to_execution_change.zig").verifyBlsToExecutionChangeSignature;
 
-pub fn processBlsToExecutionChange(state: *CachedBeaconStateAllForks, signed_bls_to_execution_change: *const SignedBLSToExecutionChange) !void {
+pub fn processBlsToExecutionChange(cached_state: *CachedBeaconStateAllForks, signed_bls_to_execution_change: *const SignedBLSToExecutionChange) !void {
     const address_change = signed_bls_to_execution_change.message;
+    const state = cached_state.state;
 
-    try isValidBlsToExecutionChange(state, signed_bls_to_execution_change, true);
+    try isValidBlsToExecutionChange(cached_state, signed_bls_to_execution_change, true);
 
-    var new_withdrawal_credentials: Root = undefined;
+    var new_withdrawal_credentials: Root = [_]u8{0} ** 32;
     const validator_index = address_change.validator_index;
-    var validator = state.state.validators().items[validator_index];
+    var validator = &state.validators().items[validator_index];
     new_withdrawal_credentials[0] = c.ETH1_ADDRESS_WITHDRAWAL_PREFIX;
     @memcpy(new_withdrawal_credentials[12..], &address_change.to_execution_address);
 

@@ -15,4 +15,5 @@ test "processRandaoMixesReset - sanity" {
             .void_return = true,
         },
     ).testProcessEpochFn();
+    defer state_transition.deinitStateTransition();
 }

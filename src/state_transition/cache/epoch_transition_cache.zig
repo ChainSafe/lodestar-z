@@ -41,7 +41,8 @@ const ValidatorActivation = struct {
 const ValidatorActivationList = std.ArrayList(ValidatorActivation);
 
 /// this is a cache that's never gc'd, it is used to store data that is reused across multiple epochs
-pub const ReusedEpochTransitionCache = struct {
+const ReusedEpochTransitionCache = struct {
+    allocator: Allocator,
     is_active_prev_epoch: BoolArray,
     is_active_current_epoch: BoolArray,
     is_active_next_epoch: BoolArray,
@@ -62,8 +63,8 @@ pub const ReusedEpochTransitionCache = struct {
     penalties: U64Array,
 
     pub fn init(allocator: Allocator, validator_count: usize) !ReusedEpochTransitionCache {
-        // TODO: should we allocate more than validator_count?
         return .{
+            .allocator = allocator,
             .is_active_prev_epoch = try BoolArray.initCapacity(allocator, validator_count),
             .is_active_current_epoch = try BoolArray.initCapacity(allocator, validator_count),
             .is_active_next_epoch = try BoolArray.initCapacity(allocator, validator_count),
@@ -77,6 +78,25 @@ pub const ReusedEpochTransitionCache = struct {
             .rewards = try U64Array.initCapacity(allocator, validator_count),
             .penalties = try U64Array.initCapacity(allocator, validator_count),
         };
+    }
+
+    pub fn resize(self: *ReusedEpochTransitionCache, validator_count: usize) !void {
+        try self.is_active_prev_epoch.resize(validator_count);
+        try self.is_active_current_epoch.resize(validator_count);
+        try self.is_active_next_epoch.resize(validator_count);
+        try self.proposer_indices.resize(validator_count);
+        try self.inclusion_delays.resize(validator_count);
+        try self.flags.resize(validator_count);
+        try self.next_epoch_shuffling_active_validator_indices.resize(validator_count);
+        try self.is_compounding_validator_arr.resize(validator_count);
+        try self.previous_epoch_participation.resize(validator_count);
+        try self.current_epoch_participation.resize(validator_count);
+        try self.rewards.resize(validator_count);
+        try self.penalties.resize(validator_count);
+
+        @memset(self.is_active_prev_epoch.items, true);
+        @memset(self.is_active_current_epoch.items, true);
+        @memset(self.is_active_next_epoch.items, true);
     }
 
     pub fn deinit(self: *ReusedEpochTransitionCache) void {
@@ -94,6 +114,39 @@ pub const ReusedEpochTransitionCache = struct {
         self.penalties.deinit();
     }
 };
+
+var _reused_cache: ?*ReusedEpochTransitionCache = null;
+var _reused_lock: std.Thread.Mutex = std.Thread.Mutex{};
+
+fn getReusedEpochTransitionCache(allocator: Allocator, validator_count: usize) !*ReusedEpochTransitionCache {
+    _reused_lock.lock();
+    defer _reused_lock.unlock();
+
+    if (_reused_cache) |cache| {
+        try cache.resize(validator_count);
+        return cache;
+    }
+    _reused_cache = try allocator.create(ReusedEpochTransitionCache);
+    errdefer {
+        allocator.destroy(_reused_cache.?);
+        _reused_cache = null;
+    }
+    _reused_cache.?.* = try ReusedEpochTransitionCache.init(allocator, validator_count);
+    try _reused_cache.?.resize(validator_count);
+    return _reused_cache.?;
+}
+
+pub fn deinitReusedEpochTransitionCache() void {
+    _reused_lock.lock();
+    defer _reused_lock.unlock();
+
+    if (_reused_cache) |cache| {
+        const allocator = cache.allocator;
+        cache.deinit();
+        allocator.destroy(cache);
+        _reused_cache = null;
+    }
+}
 
 pub const EpochTransitionCacheOpts = struct {
     /// Assert progressive balances the same in the cache.
@@ -121,8 +174,8 @@ pub const EpochTransitionCache = struct {
     inclusion_delays: []const usize,
     // this is borrowed from ReusedEpochTransitionCache
     flags: []const u8,
-    // this is borrowed from ReusedEpochTransitionCache, we append it in processPendingDeposits()
-    is_compounding_validator_arr: BoolArray,
+    // this is borrowed from ReusedEpochTransitionCache, we append it in processPendingDeposits() so it needs to be mutable and avoid stale pointer in ReusedEpochTransitionCache.deinit()
+    is_compounding_validator_arr: *BoolArray,
     rewards: []u64,
     penalties: []u64,
     balances: ?U64Array,
@@ -136,7 +189,8 @@ pub const EpochTransitionCache = struct {
     is_active_next_epoch: []const bool,
 
     // TODO: no need EpochTransitionCacheOpts for zig version
-    pub fn beforeProcessEpoch(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, reused_cache: *ReusedEpochTransitionCache, out: *EpochTransitionCache) !void {
+    // this is the same to beforeProcessEpoch in typesript version
+    pub fn init(allocator: Allocator, cached_state: *CachedBeaconStateAllForks) !*EpochTransitionCache {
         const config = cached_state.config;
         var epoch_cache = cached_state.getEpochCache();
         const state = cached_state.state;
@@ -157,43 +211,14 @@ pub const EpochTransitionCache = struct {
 
         var total_active_stake_by_increment: u64 = 0;
         const validator_count = state.validators().items.len;
-        try reused_cache.next_epoch_shuffling_active_validator_indices.resize(validator_count);
-        var next_epoch_shuffling_active_indices_length: usize = 0;
-        // pre-fill with true (most validators are active)
-        try reused_cache.is_active_prev_epoch.resize(validator_count);
-        try reused_cache.is_active_current_epoch.resize(validator_count);
-        try reused_cache.is_active_next_epoch.resize(validator_count);
-        @memset(reused_cache.is_active_prev_epoch.items, true);
-        @memset(reused_cache.is_active_current_epoch.items, true);
-        @memset(reused_cache.is_active_next_epoch.items, true);
-
-        // this will be populated in processRewardsAndPenalties()
-        try reused_cache.rewards.resize(validator_count);
-        try reused_cache.penalties.resize(validator_count);
-
-        // During the epoch transition, additional data is precomputed to avoid traversing any state a second
-        // time. Attestations are a big part of this, and each validator has a "status" to represent its
-        // precomputed participation.
-        // - proposerIndex: number; // -1 when not included by any proposer, for phase0 only so it's declared inside phase0 block below
-        // - inclusionDelay: number;// for phase0 only so it's declared inside phase0 block below
-        // - flags: number; // bitfield of AttesterFlags
-        try reused_cache.flags.resize(validator_count);
-        // flags.fill(0);
-        // flags will be zero'd out below
-        // In the first loop, set slashed+eligibility
-        // In the second loop, set participation flags
-        // TODO: optimize by combining the two loops
-        // likely will require splitting into phase0 and post-phase0 versions
-
-        if (fork_seq.isPostElectra()) {
-            try reused_cache.is_compounding_validator_arr.resize(validator_count);
-        }
 
         // Clone before being mutated in processEffectiveBalanceUpdates
         try epoch_cache.beforeEpochTransition();
 
         const effective_balances_by_increments = epoch_cache.getEffectiveBalanceIncrements().items;
 
+        var next_epoch_shuffling_active_indices_length: usize = 0;
+        var reused_cache = try getReusedEpochTransitionCache(allocator, validator_count);
         for (0..validator_count) |i| {
             const validator = state.validators().items[i];
             var flag: u8 = 0;
@@ -424,7 +449,10 @@ pub const EpochTransitionCache = struct {
             try indices_eligible_for_activation.append(activation.validator_index);
         }
 
-        out.* = .{
+        const epoch_transition_cache = try allocator.create(EpochTransitionCache);
+        errdefer allocator.destroy(epoch_transition_cache);
+
+        epoch_transition_cache.* = .{
             .prev_epoch = prev_epoch,
             .current_epoch = current_epoch,
             .total_active_stake_by_increment = total_active_stake_by_increment,
@@ -446,12 +474,14 @@ pub const EpochTransitionCache = struct {
             .proposer_indices = reused_cache.proposer_indices.items,
             .inclusion_delays = reused_cache.inclusion_delays.items,
             .flags = reused_cache.flags.items,
-            .is_compounding_validator_arr = reused_cache.is_compounding_validator_arr,
+            .is_compounding_validator_arr = &reused_cache.is_compounding_validator_arr,
             .rewards = reused_cache.rewards.items,
             .penalties = reused_cache.penalties.items,
             // Will be assigned in processRewardsAndPenalties()
             .balances = null,
         };
+
+        return epoch_transition_cache;
     }
 
     pub fn deinit(self: *EpochTransitionCache) void {

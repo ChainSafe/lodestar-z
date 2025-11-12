@@ -1,3 +1,4 @@
+const std = @import("std");
 const ssz = @import("consensus_types");
 
 const AttestationData = ssz.primitive.AttestationData.Type;
@@ -27,11 +28,6 @@ pub const AttestationItems = union(enum) {
     electra: []ssz.electra.Attestation.Type,
 };
 
-pub const Attestation = union(enum) {
-    phase0: ssz.phase0.Attestation.Type,
-    electra: ssz.electra.Attestation.Type,
-};
-
 pub const IndexedAttestation = union(enum) {
     phase0: *const ssz.phase0.IndexedAttestation.Type,
     electra: *const ssz.electra.IndexedAttestation.Type,
@@ -50,7 +46,7 @@ pub const IndexedAttestation = union(enum) {
         };
     }
 
-    pub fn getAttestingIndices(self: *const IndexedAttestation) []ValidatorIndex {
+    pub fn getAttestingIndices(self: *const IndexedAttestation) std.ArrayListUnmanaged(ValidatorIndex) {
         return switch (self.*) {
             .phase0 => |indexed_attestation| indexed_attestation.attesting_indices,
             .electra => |indexed_attestation| indexed_attestation.attesting_indices,

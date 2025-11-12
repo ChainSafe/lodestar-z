@@ -78,7 +78,13 @@ const SyncCommitteeCache = struct {
         errdefer allocator.destroy(validator_index_map);
 
         validator_index_map.* = SyncComitteeValidatorIndexMap.init(allocator);
-        errdefer validator_index_map.deinit();
+        errdefer {
+            var value_iterator = validator_index_map.valueIterator();
+            while (value_iterator.next()) |value| {
+                value.deinit();
+            }
+            validator_index_map.deinit();
+        }
 
         try computeSyncCommitteeMap(allocator, validator_indices, validator_index_map);
 

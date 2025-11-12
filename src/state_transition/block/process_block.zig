@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const ForkSeq = @import("config").ForkSeq;
 const ssz = @import("consensus_types");
+const Root = ssz.primitive.Root.Type;
 const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
 const preset = @import("preset").preset;
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
@@ -45,6 +46,7 @@ pub fn processBlock(
         // TODO Deneb: Allow to disable withdrawals for interop testing
         // https://github.com/ethereum/consensus-specs/blob/b62c9e877990242d63aa17a2a59a49bc649a2f2e/specs/eip4844/beacon-chain.md#disabling-withdrawals
         if (state.isPostCapella()) {
+            // TODO: given max withdrawals of MAX_WITHDRAWALS_PER_PAYLOAD, can use fixed size array instead of heap alloc
             var withdrawals_result = WithdrawalsResult{ .withdrawals = try Withdrawals.initCapacity(
                 allocator,
                 preset.MAX_WITHDRAWALS_PER_PAYLOAD,
@@ -53,26 +55,20 @@ pub fn processBlock(
             defer withdrawal_balances.deinit();
 
             try getExpectedWithdrawals(allocator, &withdrawals_result, &withdrawal_balances, cached_state);
-            defer withdrawals_result.withdrawals.clearRetainingCapacity();
+            defer withdrawals_result.withdrawals.deinit(allocator);
 
             const body = block.beaconBlockBody();
-            switch (body) {
-                .regular => |b| {
+            const payload_withdrawals_root = switch (body) {
+                .regular => |b| blk: {
                     const actual_withdrawals = b.executionPayload().getWithdrawals();
                     std.debug.assert(withdrawals_result.withdrawals.items.len == actual_withdrawals.items.len);
-                    for (withdrawals_result.withdrawals.items, actual_withdrawals.items) |expected, actual| {
-                        std.debug.assert(ssz.capella.Withdrawal.equals(&expected, &actual));
-                    }
+                    var root: Root = undefined;
+                    try ssz.capella.Withdrawals.hashTreeRoot(allocator, &actual_withdrawals, &root);
+                    break :blk root;
                 },
-                .blinded => |b| {
-                    const header = b.executionPayloadHeader();
-                    var expected: [32]u8 = undefined;
-                    try ssz.capella.Withdrawals.hashTreeRoot(allocator, &withdrawals_result.withdrawals, &expected);
-                    var actual = header.getWithdrawalsRoot();
-                    std.debug.assert(std.mem.eql(u8, &expected, &actual));
-                },
-            }
-            try processWithdrawals(cached_state, withdrawals_result);
+                .blinded => |b| b.executionPayloadHeader().getWithdrawalsRoot(),
+            };
+            try processWithdrawals(allocator, cached_state, withdrawals_result, payload_withdrawals_root);
         }
 
         try processExecutionPayload(

@@ -23,9 +23,9 @@ pub fn getProposerSlashingSignatureSets(cached_state: *const CachedBeaconStateAl
     const domain_1 = try config.getDomain(state.slot(), c.DOMAIN_BEACON_PROPOSER, signed_header_1.message.slot);
     const domain_2 = try config.getDomain(state.slot(), c.DOMAIN_BEACON_PROPOSER, signed_header_2.message.slot);
     var signing_root_1: [32]u8 = undefined;
-    try computeSigningRoot(ssz.phase0.SignedBeaconBlockHeader, &signed_header_1, domain_1, &signing_root_1);
+    try computeSigningRoot(ssz.phase0.BeaconBlockHeader, &signed_header_1.message, domain_1, &signing_root_1);
     var signing_root_2: [32]u8 = undefined;
-    try computeSigningRoot(ssz.phase0.SignedBeaconBlockHeader, &signed_header_2, domain_2, &signing_root_2);
+    try computeSigningRoot(ssz.phase0.BeaconBlockHeader, &signed_header_2.message, domain_2, &signing_root_2);
 
     result[0] = SingleSignatureSet{
         .pubkey = epoch_cache.index_to_pubkey.items[signed_header_1.message.proposer_index],

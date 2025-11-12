@@ -458,7 +458,7 @@ pub const BeaconStateAllForks = union(enum) {
             inline else => |state| {
                 state.previous_epoch_participation.clearRetainingCapacity();
                 try state.previous_epoch_participation.appendSlice(allocator, state.current_epoch_participation.items);
-                state.current_epoch_participation.clearRetainingCapacity();
+                @memset(state.current_epoch_participation.items, 0);
             },
         }
     }
@@ -515,21 +515,22 @@ pub const BeaconStateAllForks = union(enum) {
         }
     }
 
-    pub fn latestExecutionPayloadHeader(self: *const BeaconStateAllForks) *const ExecutionPayloadHeader {
+    pub fn latestExecutionPayloadHeader(self: *const BeaconStateAllForks) ExecutionPayloadHeader {
         return switch (self.*) {
-            .bellatrix => |state| &.{ .bellatrix = state.latest_execution_payload_header },
-            .capella => |state| &.{ .capella = state.latest_execution_payload_header },
-            .deneb, .electra => |state| &.{ .deneb = state.latest_execution_payload_header },
+            .bellatrix => |state| .{ .bellatrix = &state.latest_execution_payload_header },
+            .capella => |state| .{ .capella = &state.latest_execution_payload_header },
+            .deneb => |state| .{ .deneb = &state.latest_execution_payload_header },
+            .electra => |state| .{ .electra = &state.latest_execution_payload_header },
             else => panic("latest_execution_payload_header is not available in {}", .{self}),
         };
     }
 
     pub fn setLatestExecutionPayloadHeader(self: *BeaconStateAllForks, header: *const ExecutionPayloadHeader) void {
         switch (self.*) {
-            .bellatrix => |state| state.latest_execution_payload_header = header.*.bellatrix,
-            .capella => |state| state.latest_execution_payload_header = header.*.capella,
-            .deneb => |state| state.latest_execution_payload_header = header.*.deneb,
-            .electra => |state| state.latest_execution_payload_header = header.*.electra,
+            .bellatrix => |state| state.latest_execution_payload_header = header.*.bellatrix.*,
+            .capella => |state| state.latest_execution_payload_header = header.*.capella.*,
+            .deneb => |state| state.latest_execution_payload_header = header.*.deneb.*,
+            .electra => |state| state.latest_execution_payload_header = header.*.electra.*,
             else => panic("latest_execution_payload_header is not available in {}", .{self}),
         }
     }
@@ -641,8 +642,8 @@ pub const BeaconStateAllForks = union(enum) {
     /// Allocates a new `state` of the next fork, clones all fields of the current `state` to it and assigns `self` to it.
     /// Destroys the old `state`.
     ///
-    /// Caller must free upgraded state.
-    pub fn upgrade(self: *BeaconStateAllForks, allocator: std.mem.Allocator) !*BeaconStateAllForks {
+    /// Caller must make sure an upgrade is needed by checking BeaconConfig then free upgraded state.
+    pub fn upgradeUnsafe(self: *BeaconStateAllForks, allocator: std.mem.Allocator) !*BeaconStateAllForks {
         switch (self.*) {
             .phase0 => |state| {
                 self.* = .{
@@ -756,9 +757,9 @@ test "upgrade state - sanity" {
     phase0_state.* = ssz.phase0.BeaconState.default_value;
 
     var phase0 = BeaconStateAllForks{ .phase0 = phase0_state };
-    var altair = try phase0.upgrade(allocator);
-    const bellatrix = try altair.upgrade(allocator);
-    const capella = try bellatrix.upgrade(allocator);
-    var deneb = try capella.upgrade(allocator);
+    var altair = try phase0.upgradeUnsafe(allocator);
+    const bellatrix = try altair.upgradeUnsafe(allocator);
+    const capella = try bellatrix.upgradeUnsafe(allocator);
+    var deneb = try capella.upgradeUnsafe(allocator);
     defer deneb.deinit(allocator);
 }

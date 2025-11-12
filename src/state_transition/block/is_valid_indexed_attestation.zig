@@ -15,6 +15,7 @@ pub fn isValidIndexedAttestation(comptime IA: type, cached_state: *const CachedB
 
     if (verify_signature) {
         const signature_set = try getIndexedAttestationSignatureSet(IA, cached_state.allocator, cached_state, indexed_attestation);
+        defer cached_state.allocator.free(signature_set.pubkeys);
         return try verifyAggregatedSignatureSet(&signature_set);
     } else {
         return true;
@@ -37,8 +38,10 @@ pub fn isValidIndexedAttestationIndices(cached_state: *const CachedBeaconStateAl
     // Just check if they are monotonically increasing,
     // instead of creating a set and sorting it. Should be (O(n)) instead of O(n log(n))
     var prev: ValidatorIndex = 0;
-    for (indices) |index| {
-        if (index <= prev) return false;
+    for (indices, 0..) |index, i| {
+        if (i >= 1 and index <= prev) {
+            return false;
+        }
         prev = index;
     }
 

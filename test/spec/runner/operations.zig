@@ -1,4 +1,5 @@
 const ssz = @import("consensus_types");
+const Root = ssz.primitive.Root.Type;
 const ForkSeq = @import("config").ForkSeq;
 const Preset = @import("preset").Preset;
 const preset = @import("preset").preset;
@@ -9,6 +10,7 @@ const BeaconStateAllForks = state_transition.BeaconStateAllForks;
 const Withdrawals = ssz.capella.Withdrawals.Type;
 const WithdrawalsResult = state_transition.WithdrawalsResult;
 const test_case = @import("../test_case.zig");
+const TestCaseUtils = test_case.TestCaseUtils;
 const loadSszValue = test_case.loadSszSnappyValue;
 const loadBlsSetting = test_case.loadBlsSetting;
 const expectEqualBeaconStates = test_case.expectEqualBeaconStates;
@@ -65,13 +67,15 @@ pub const Operation = enum {
 
 pub const Handler = Operation;
 
-pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation, comptime valid: bool) type {
+pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
     const ForkTypes = @field(ssz, fork.forkName());
+    const tc_utils = TestCaseUtils(fork);
     const OpType = @field(ForkTypes, operation.operationObject());
 
     return struct {
         pre: TestCachedBeaconStateAllForks,
-        post: if (valid) BeaconStateAllForks else void,
+        // a null post state means the test is expected to fail
+        post: ?BeaconStateAllForks,
         op: OpType.Type,
         bls_setting: BlsSetting,
 
@@ -91,8 +95,15 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation, comptime 
                 .op = OpType.default_value,
                 .bls_setting = loadBlsSetting(allocator, dir),
             };
-            // init the op
 
+            // load pre state
+            tc.pre = try tc_utils.loadPreState(allocator, dir);
+            errdefer tc.pre.deinit();
+
+            // load pre state
+            tc.post = try tc_utils.loadPostState(allocator, dir);
+
+            // load the op
             try loadSszValue(OpType, allocator, dir, comptime operation.inputName() ++ ".ssz_snappy", &tc.op);
             errdefer {
                 if (comptime @hasDecl(OpType, "deinit")) {
@@ -100,32 +111,6 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation, comptime 
                 }
             }
 
-            // init the pre state
-
-            const pre_state = try allocator.create(ForkTypes.BeaconState.Type);
-            errdefer {
-                ForkTypes.BeaconState.deinit(allocator, pre_state);
-                allocator.destroy(pre_state);
-            }
-            pre_state.* = ForkTypes.BeaconState.default_value;
-            try loadSszValue(ForkTypes.BeaconState, allocator, dir, "pre.ssz_snappy", pre_state);
-
-            var pre_state_all_forks = try BeaconStateAllForks.init(fork, pre_state);
-
-            tc.pre = try TestCachedBeaconStateAllForks.initFromState(allocator, &pre_state_all_forks);
-
-            // init the post state if this is a "valid" test case
-
-            if (valid) {
-                const post_state = try allocator.create(ForkTypes.BeaconState.Type);
-                errdefer {
-                    ForkTypes.BeaconState.deinit(allocator, post_state);
-                    allocator.destroy(post_state);
-                }
-                post_state.* = ForkTypes.BeaconState.default_value;
-                try loadSszValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", post_state);
-                tc.post = try BeaconStateAllForks.init(fork, post_state);
-            }
             return tc;
         }
 
@@ -134,8 +119,8 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation, comptime 
                 OpType.deinit(self.pre.allocator, &self.op);
             }
             self.pre.deinit();
-            if (valid) {
-                self.post.deinit(self.pre.allocator);
+            if (self.post) |*post| {
+                post.deinit(self.pre.allocator);
             }
         }
 
@@ -182,7 +167,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation, comptime 
                         self.pre.allocator,
                         self.pre.cached_state,
                         .{ .regular = @unionInit(state_transition.BeaconBlockBody, @tagName(fork), &self.op) },
-                        .{ .data_availability_status = .available, .execution_payload_status = .valid },
+                        .{ .data_availability_status = .available, .execution_payload_status = if (self.post != null) .valid else .invalid },
                     );
                 },
                 .proposer_slashing => {
@@ -211,15 +196,19 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation, comptime 
                     try state_transition.getExpectedWithdrawals(self.pre.allocator, &withdrawals_result, &withdrawal_balances, self.pre.cached_state);
                     defer withdrawals_result.withdrawals.deinit(self.pre.allocator);
 
-                    try state_transition.processWithdrawals(self.pre.cached_state, withdrawals_result);
+                    var payload_withdrawals_root: Root = undefined;
+                    // self.op is ExecutionPayload in this case
+                    try ssz.capella.Withdrawals.hashTreeRoot(self.pre.allocator, &self.op.withdrawals, &payload_withdrawals_root);
+
+                    try state_transition.processWithdrawals(self.pre.allocator, self.pre.cached_state, withdrawals_result, payload_withdrawals_root);
                 },
             }
         }
 
         pub fn runTest(self: *Self) !void {
-            if (valid) {
+            if (self.post) |post| {
                 try self.process();
-                try expectEqualBeaconStates(self.post, self.pre.cached_state.state.*);
+                try expectEqualBeaconStates(post, self.pre.cached_state.state.*);
             } else {
                 self.process() catch |err| {
                     if (err == error.SkipZigTest) {

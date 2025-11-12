@@ -51,7 +51,7 @@ pub fn processEffectiveBalanceUpdates(cached_state: *CachedBeaconStateAllForks, 
         {
             // Update the state tree
             // Should happen rarely, so it's fine to update the tree
-            var validator = validators.items[i];
+            var validator = &validators.items[i];
             effective_balance = @min(
                 balance - (balance % preset.EFFECTIVE_BALANCE_INCREMENT),
                 effective_balance_limit,
@@ -63,19 +63,18 @@ pub fn processEffectiveBalanceUpdates(cached_state: *CachedBeaconStateAllForks, 
             // TODO: describe issue. Compute progressive target balances
             // Must update target balances for consistency, see comments below
             if (state.isPostAltair()) {
-                const delta_effective_balance_increment = new_effective_balance_increment - effective_balance_increment;
                 const previous_epoch_participation = state.previousEpochParticipations().items;
                 const current_epoch_participation = state.currentEpochParticipations().items;
 
                 if (!validator.slashed) {
                     if (previous_epoch_participation[i] & TIMELY_TARGET == TIMELY_TARGET) {
-                        epoch_cache.previous_target_unslashed_balance_increments += delta_effective_balance_increment;
+                        epoch_cache.previous_target_unslashed_balance_increments += new_effective_balance_increment - effective_balance_increment;
                     }
 
                     // currentTargetUnslashedBalanceIncrements is transfered to previousTargetUnslashedBalanceIncrements in afterEpochTransitionCache
                     // at epoch transition of next epoch (in EpochTransitionCache), prevTargetUnslStake is calculated based on newEffectiveBalanceIncrement
                     if (current_epoch_participation[i] & TIMELY_TARGET == TIMELY_TARGET) {
-                        epoch_cache.current_target_unslashed_balance_increments += delta_effective_balance_increment;
+                        epoch_cache.current_target_unslashed_balance_increments += new_effective_balance_increment - effective_balance_increment;
                     }
                 }
             }
@@ -86,7 +85,8 @@ pub fn processEffectiveBalanceUpdates(cached_state: *CachedBeaconStateAllForks, 
         }
 
         // TODO: Do this in afterEpochTransitionCache, looping a Uint8Array should be very cheap
-        if (cache.is_active_next_epoch[i]) {
+        // post-electra we may add new validator to registry in processPendingDeposits()
+        if (i < cache.is_active_next_epoch.len and cache.is_active_next_epoch[i]) {
             // We track nextEpochTotalActiveBalanceByIncrement as ETH to fit total network balance in a JS number (53 bits)
             next_epoch_total_active_balance_by_increment += effective_balance_increment;
         }

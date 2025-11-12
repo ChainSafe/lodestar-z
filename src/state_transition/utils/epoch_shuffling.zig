@@ -35,6 +35,7 @@ pub const EpochShuffling = struct {
 
     pub fn init(allocator: Allocator, seed: [32]u8, epoch: Epoch, active_indices: []const ValidatorIndex) !*EpochShuffling {
         const shuffling = try allocator.alloc(ValidatorIndex, active_indices.len);
+        errdefer allocator.free(shuffling);
         std.mem.copyForwards(ValidatorIndex, shuffling, active_indices);
         try unshuffleList(shuffling, seed[0..], preset.SHUFFLE_ROUND_COUNT);
         const committees = try buildCommitteesFromShuffling(allocator, shuffling);

@@ -27,7 +27,7 @@ pub fn processWithdrawalRequest(allocator: std.mem.Allocator, cached_state: *Cac
     const is_full_exit_request = amount == c.FULL_EXIT_REQUEST_AMOUNT;
 
     // If partial withdrawal queue is full, only full exits are processed
-    if (pending_partial_withdrawals.items.len >= c.PENDING_PARTIAL_WITHDRAWALS_LIMIT and
+    if (pending_partial_withdrawals.items.len >= preset.PENDING_PARTIAL_WITHDRAWALS_LIMIT and
         !is_full_exit_request)
     {
         return;
@@ -37,7 +37,7 @@ pub fn processWithdrawalRequest(allocator: std.mem.Allocator, cached_state: *Cac
     // note that we don't need to check for 6110 unfinalized vals as they won't be eligible for withdraw/exit anyway
     const validator_index = pubkey_to_index.get(&withdrawal_request.validator_pubkey) orelse return;
 
-    var validator = validators.items[validator_index];
+    const validator = &validators.items[validator_index];
     if (!isValidatorEligibleForWithdrawOrExit(validator, &withdrawal_request.source_address, cached_state)) {
         return;
     }
@@ -49,7 +49,7 @@ pub fn processWithdrawalRequest(allocator: std.mem.Allocator, cached_state: *Cac
     if (is_full_exit_request) {
         // only exit validator if it has no pending withdrawals in the queue
         if (pending_balance_to_withdraw == 0) {
-            try initiateValidatorExit(cached_state, &validator);
+            try initiateValidatorExit(cached_state, validator);
         }
         return;
     }
@@ -76,7 +76,7 @@ pub fn processWithdrawalRequest(allocator: std.mem.Allocator, cached_state: *Cac
     }
 }
 
-fn isValidatorEligibleForWithdrawOrExit(validator: Validator, source_address: []const u8, cached_state: *const CachedBeaconStateAllForks) bool {
+fn isValidatorEligibleForWithdrawOrExit(validator: *const Validator, source_address: []const u8, cached_state: *const CachedBeaconStateAllForks) bool {
     const withdrawal_credentials = validator.withdrawal_credentials;
     const address = withdrawal_credentials[12..];
     const epoch_cache = cached_state.getEpochCache();
@@ -85,7 +85,7 @@ fn isValidatorEligibleForWithdrawOrExit(validator: Validator, source_address: []
 
     return (hasExecutionWithdrawalCredential(withdrawal_credentials) and
         std.mem.eql(u8, address, source_address) and
-        isActiveValidator(&validator, current_epoch) and
+        isActiveValidator(validator, current_epoch) and
         validator.exit_epoch == c.FAR_FUTURE_EPOCH and
         current_epoch >= validator.activation_epoch + config.chain.SHARD_COMMITTEE_PERIOD);
 }

@@ -2,7 +2,7 @@ const std = @import("std");
 const spec_test_options = @import("spec_test_options");
 const ForkSeq = @import("config").ForkSeq;
 const Preset = @import("preset").Preset;
-const Handler = @import("../runner/Operations.zig").Handler;
+const Handler = @import("../runner/operations.zig").Handler;
 
 pub const handlers = std.enums.values(Handler);
 
@@ -14,7 +14,7 @@ pub const header =
     \\const ForkSeq = @import("config").ForkSeq;
     \\const active_preset = @import("preset").active_preset;
     \\const spec_test_options = @import("spec_test_options");
-    \\const Operations = @import("../runner/Operations.zig");
+    \\const Operations = @import("../runner/operations.zig");
     \\
     \\const allocator = std.testing.allocator;
     \\
@@ -31,7 +31,7 @@ const test_template =
     \\    defer allocator.free(test_dir_name);
     \\    const test_dir = std.fs.cwd().openDir(test_dir_name, .{{}}) catch return error.SkipZigTest;
     \\
-    \\    try Operations.TestCase(.{s}, .{s}, {}).execute(allocator, test_dir);
+    \\    try Operations.TestCase(.{s}, .{s}).execute(allocator, test_dir);
     \\}}
     \\
     \\
@@ -47,7 +47,6 @@ pub fn writeTest(
     handler: Handler,
     test_case_name: []const u8,
 ) !void {
-    const valid = !std.mem.startsWith(u8, test_case_name, "invalid");
     try writer.print(test_template, .{
         @tagName(fork),
         @tagName(handler),
@@ -59,6 +58,5 @@ pub fn writeTest(
 
         @tagName(fork),
         @tagName(handler),
-        valid,
     });
 }

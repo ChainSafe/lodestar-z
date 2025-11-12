@@ -25,7 +25,7 @@ pub fn hasExecutionWithdrawalCredential(withdrawal_credentials: WithdrawalCreden
 }
 
 pub fn switchToCompoundingValidator(allocator: Allocator, state_cache: *CachedBeaconStateAllForks, index: ValidatorIndex) !void {
-    var validator = state_cache.state.validators().items[index];
+    var validator = &state_cache.state.validators().items[index];
 
     // directly modifying the byte leads to ssz.primitive missing the modification resulting into
     // wrong root compute, although slicing can be avoided but anyway this is not going

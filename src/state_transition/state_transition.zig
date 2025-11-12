@@ -30,6 +30,7 @@ const ReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").R
 const processEpoch = @import("epoch/process_epoch.zig").processEpoch;
 const computeEpochAtSlot = @import("utils/epoch.zig").computeEpochAtSlot;
 const processSlot = @import("slot/process_slot.zig").processSlot;
+const deinitReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
 
 const SignedBlock = @import("types/signed_block.zig").SignedBlock;
 
@@ -57,14 +58,6 @@ pub fn processSlotsWithTransientCache(
     var cached_state = post_state.state;
     if (cached_state.slot() > slot) return error.outdatedSlot;
 
-    const validator_count = post_state.epoch_cache_ref.get().current_shuffling.get().active_indices.len;
-
-    // TODO: do not always allocate
-    var reused_epoch_transition_cache = try ReusedEpochTransitionCache.init(allocator, validator_count);
-    defer reused_epoch_transition_cache.deinit();
-    var epoch_transition_cache: EpochTransitionCache = undefined;
-    defer epoch_transition_cache.deinit();
-
     while (cached_state.slot() < slot) {
         try processSlot(allocator, post_state);
 
@@ -73,15 +66,21 @@ pub fn processSlotsWithTransientCache(
             // const epochTransitionTimer = metrics?.epochTransitionTime.startTimer();
 
             // TODO(bing): metrics: time beforeProcessEpoch
-            try EpochTransitionCache.beforeProcessEpoch(allocator, post_state, &reused_epoch_transition_cache, &epoch_transition_cache);
-            try processEpoch(allocator, post_state, &epoch_transition_cache);
+            var epoch_transition_cache = try EpochTransitionCache.init(allocator, post_state);
+            defer {
+                epoch_transition_cache.deinit();
+                allocator.destroy(epoch_transition_cache);
+            }
+            try processEpoch(allocator, post_state, epoch_transition_cache);
 
             // TODO(bing): registerValidatorStatuses
 
             cached_state.slotPtr().* += 1;
 
-            try post_state.epoch_cache_ref.get().afterProcessEpoch(post_state, &epoch_transition_cache);
+            try post_state.epoch_cache_ref.get().afterProcessEpoch(post_state, epoch_transition_cache);
             // post_state.commit
+            var root: Root = undefined;
+            try cached_state.hashTreeRoot(allocator, &root);
         } else {
             cached_state.slotPtr().* += 1;
         }
@@ -89,9 +88,9 @@ pub fn processSlotsWithTransientCache(
         //epochTransitionTimer
         const state_epoch = computeEpochAtSlot(cached_state.slot());
 
-        for (post_state.config.forks_descending_epoch_order) |f| {
-            if (state_epoch == f.epoch) {
-                _ = try post_state.state.upgrade(allocator);
+        inline for (post_state.config.forks_descending_epoch_order) |f| {
+            if (post_state.state.forkSeq().lt(f.fork_seq) and state_epoch == f.epoch) {
+                _ = try post_state.state.upgradeUnsafe(allocator);
                 break; // no need to check all forks once one hits
             }
         }
@@ -164,21 +163,25 @@ pub fn stateTransition(
 
     // Verify state root
     if (opts.verify_state_root) {
-        var out: [32]u8 = undefined;
+        var post_state_root: [32]u8 = undefined;
         //    const hashTreeRootTimer = metrics?.stateHashTreeRootTime.startTimer({
         //      source: StateHashTreeRootSource.stateTransition,
         //    });
-        try post_state.state.hashTreeRoot(allocator, &out);
+        try post_state.state.hashTreeRoot(allocator, &post_state_root);
         //    hashTreeRootTimer?.();
 
         const block_state_root = switch (block) {
             .regular => |b| b.stateRoot(),
             .blinded => |b| b.stateRoot(),
         };
-        if (!std.mem.eql(u8, &out, &block_state_root)) {
+        if (!std.mem.eql(u8, &post_state_root, &block_state_root)) {
             return error.InvalidStateRoot;
         }
     }
 
     return post_state;
+}
+
+pub fn deinitStateTransition() void {
+    deinitReusedEpochTransitionCache();
 }

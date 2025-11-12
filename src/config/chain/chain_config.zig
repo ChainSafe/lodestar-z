@@ -1,3 +1,4 @@
+const std = @import("std");
 const ssz = @import("consensus_types");
 const Epoch = ssz.primitive.Epoch.Type;
 const Preset = @import("preset").Preset;
@@ -91,3 +92,20 @@ pub const BlobScheduleEntry = struct {
     EPOCH: Epoch,
     MAX_BLOBS_PER_BLOCK: u64,
 };
+
+pub fn mergeChainConfig(config: ChainConfig, fields: anytype) ChainConfig {
+    var merged = config;
+    inline for (std.meta.fields(@TypeOf(fields))) |field| {
+        @field(merged, field.name) = @field(fields, field.name);
+    }
+    return merged;
+}
+
+test mergeChainConfig {
+    const mainnet_config = @import("./networks/mainnet.zig").mainnet_chain_config;
+    const old_altair_epoch = mainnet_config.ALTAIR_FORK_EPOCH;
+    const merged_config = mergeChainConfig(mainnet_config, .{
+        .ALTAIR_FORK_EPOCH = old_altair_epoch + 1000,
+    });
+    try std.testing.expect(merged_config.ALTAIR_FORK_EPOCH == old_altair_epoch + 1000);
+}

@@ -5,9 +5,11 @@ const Preset = @import("preset").Preset;
 const state_transition = @import("state_transition");
 const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
 const BeaconStateAllForks = state_transition.BeaconStateAllForks;
+const CachedBeaconStateAllForks = state_transition.CachedBeaconStateAllForks;
 const test_case = @import("../test_case.zig");
 const loadSszValue = test_case.loadSszSnappyValue;
 const expectEqualBeaconStates = test_case.expectEqualBeaconStates;
+const TestCaseUtils = test_case.TestCaseUtils;
 
 /// https://github.com/ethereum/consensus-specs/blob/master/tests/formats/sanity/README.md
 pub const Handler = enum {
@@ -22,7 +24,7 @@ pub const Handler = enum {
 };
 
 pub fn SlotsTestCase(comptime fork: ForkSeq) type {
-    const ForkTypes = @field(ssz, fork.forkName());
+    const tc_utils = TestCaseUtils(fork);
 
     return struct {
         pre: TestCachedBeaconStateAllForks,
@@ -33,7 +35,10 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
 
         pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
             var tc = try Self.init(allocator, dir);
-            defer tc.deinit();
+            defer {
+                tc.deinit();
+                state_transition.deinitStateTransition();
+            }
 
             try tc.runTest();
         }
@@ -45,35 +50,21 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
                 .slots = 0,
             };
 
-            // Load slots
+            // load pre state
+            tc.pre = try tc_utils.loadPreState(allocator, dir);
+            errdefer tc.pre.deinit();
+
+            // load post state
+            tc.post = try tc_utils.loadPostState(allocator, dir) orelse
+                return error.PostStateNotFound;
+
+            // load slots
             var slots_file = try dir.openFile("slots.yaml", .{});
             defer slots_file.close();
             const slots_content = try slots_file.readToEndAlloc(allocator, 1024);
             defer allocator.free(slots_content);
             // Parse YAML for slots (simplified; assume single value)
-            tc.slots = std.fmt.parseInt(u64, std.mem.trim(u8, slots_content, " \n"), 10) catch 0;
-
-            // Load pre state
-            const pre_state = try allocator.create(ForkTypes.BeaconState.Type);
-            errdefer {
-                ForkTypes.BeaconState.deinit(allocator, pre_state);
-                allocator.destroy(pre_state);
-            }
-            pre_state.* = ForkTypes.BeaconState.default_value;
-            try loadSszValue(ForkTypes.BeaconState, allocator, dir, "pre.ssz_snappy", pre_state);
-
-            var pre_state_all_forks = try BeaconStateAllForks.init(fork, pre_state);
-            tc.pre = try TestCachedBeaconStateAllForks.initFromState(allocator, &pre_state_all_forks);
-
-            // Load post state
-            const post_state = try allocator.create(ForkTypes.BeaconState.Type);
-            errdefer {
-                ForkTypes.BeaconState.deinit(allocator, post_state);
-                allocator.destroy(post_state);
-            }
-            post_state.* = ForkTypes.BeaconState.default_value;
-            try loadSszValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", post_state);
-            tc.post = try BeaconStateAllForks.init(fork, post_state);
+            tc.slots = std.fmt.parseInt(u64, std.mem.trim(u8, slots_content, "... \n"), 10) catch 0;
 
             return tc;
         }
@@ -99,20 +90,25 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
     };
 }
 
-pub fn BlocksTestCase(comptime fork: ForkSeq, comptime valid: bool) type {
+pub fn BlocksTestCase(comptime fork: ForkSeq) type {
     const ForkTypes = @field(ssz, fork.forkName());
+    const tc_utils = TestCaseUtils(fork);
     const SignedBeaconBlock = @field(ForkTypes, "SignedBeaconBlock");
 
     return struct {
         pre: TestCachedBeaconStateAllForks,
-        post: if (valid) BeaconStateAllForks else void,
+        // a null post state means the test is expected to fail
+        post: ?BeaconStateAllForks,
         blocks: []SignedBeaconBlock.Type,
 
         const Self = @This();
 
         pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
             var tc = try Self.init(allocator, dir);
-            defer tc.deinit();
+            defer {
+                tc.deinit();
+                state_transition.deinitStateTransition();
+            }
 
             try tc.runTest();
         }
@@ -123,6 +119,13 @@ pub fn BlocksTestCase(comptime fork: ForkSeq, comptime valid: bool) type {
                 .post = undefined,
                 .blocks = undefined,
             };
+
+            // load pre state
+            tc.pre = try tc_utils.loadPreState(allocator, dir);
+            errdefer tc.pre.deinit();
+
+            // load post state
+            tc.post = try tc_utils.loadPostState(allocator, dir);
 
             // Load meta.yaml for blocks_count
             var meta_file = try dir.openFile("meta.yaml", .{});
@@ -136,19 +139,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq, comptime valid: bool) type {
                 break :blk std.fmt.parseInt(usize, std.mem.trim(u8, num_str, " "), 10) catch 1;
             } else 1;
 
-            // Load pre state
-            const pre_state = try allocator.create(ForkTypes.BeaconState.Type);
-            errdefer {
-                ForkTypes.BeaconState.deinit(allocator, pre_state);
-                allocator.destroy(pre_state);
-            }
-            pre_state.* = ForkTypes.BeaconState.default_value;
-            try loadSszValue(ForkTypes.BeaconState, allocator, dir, "pre.ssz_snappy", pre_state);
-
-            var pre_state_all_forks = try BeaconStateAllForks.init(fork, pre_state);
-            tc.pre = try TestCachedBeaconStateAllForks.initFromState(allocator, &pre_state_all_forks);
-
-            // Load blocks
+            // load blocks
             tc.blocks = try allocator.alloc(SignedBeaconBlock.Type, blocks_count);
             errdefer {
                 for (tc.blocks) |*block| {
@@ -158,21 +149,9 @@ pub fn BlocksTestCase(comptime fork: ForkSeq, comptime valid: bool) type {
             }
             for (tc.blocks, 0..) |*block, i| {
                 block.* = SignedBeaconBlock.default_value;
-                const block_filename = try std.fmt.allocPrint(allocator, "block_{d}.ssz_snappy", .{i});
+                const block_filename = try std.fmt.allocPrint(allocator, "blocks_{d}.ssz_snappy", .{i});
                 defer allocator.free(block_filename);
                 try loadSszValue(SignedBeaconBlock, allocator, dir, block_filename, block);
-            }
-
-            // Load post state if valid
-            if (valid) {
-                const post_state = try allocator.create(ForkTypes.BeaconState.Type);
-                errdefer {
-                    ForkTypes.BeaconState.deinit(allocator, post_state);
-                    allocator.destroy(post_state);
-                }
-                post_state.* = ForkTypes.BeaconState.default_value;
-                try loadSszValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", post_state);
-                tc.post = try BeaconStateAllForks.init(fork, post_state);
             }
 
             return tc;
@@ -186,33 +165,57 @@ pub fn BlocksTestCase(comptime fork: ForkSeq, comptime valid: bool) type {
             }
             self.pre.allocator.free(self.blocks);
             self.pre.deinit();
-            if (valid) {
-                self.post.deinit(self.pre.allocator);
+            if (self.post) |*post| {
+                post.deinit(self.pre.allocator);
             }
         }
 
-        pub fn process(self: *Self) !void {
-            var state = self.pre.cached_state;
-            for (self.blocks) |*block| {
+        pub fn process(self: *Self) !*CachedBeaconStateAllForks {
+            var post_state: *CachedBeaconStateAllForks = self.pre.cached_state;
+            for (self.blocks, 0..) |*block, i| {
                 const signed_block = @unionInit(state_transition.SignedBeaconBlock, @tagName(fork), block);
-                state = try state_transition.state_transition.stateTransition(
-                    self.pre.allocator,
-                    state,
-                    .{
-                        .regular = &signed_block,
-                    },
-                    .{},
-                );
+                {
+                    // if error, clean pre_state of stateTransition() function
+                    errdefer {
+                        if (i > 0) {
+                            post_state.deinit();
+                            self.pre.allocator.destroy(post_state);
+                        }
+                    }
+                    const new_post_state = try state_transition.state_transition.stateTransition(
+                        self.pre.allocator,
+                        post_state,
+                        .{
+                            .regular = &signed_block,
+                        },
+                        .{},
+                    );
+
+                    // don't deinit the initial pre state, we do it in deinit()
+                    const to_destroy = post_state;
+                    post_state = new_post_state;
+
+                    // clean post_state of stateTransition() function
+                    if (i > 0) {
+                        to_destroy.deinit();
+                        self.pre.allocator.destroy(to_destroy);
+                    }
+                }
             }
-            self.pre.cached_state = state;
+
+            return post_state;
         }
 
         pub fn runTest(self: *Self) !void {
-            if (valid) {
-                try self.process();
-                try expectEqualBeaconStates(self.post, self.pre.cached_state.state.*);
+            if (self.post) |post| {
+                const actual = try self.process();
+                try expectEqualBeaconStates(post, actual.state.*);
+                defer {
+                    actual.deinit();
+                    self.pre.allocator.destroy(actual);
+                }
             } else {
-                self.process() catch |err| {
+                _ = self.process() catch |err| {
                     if (err == error.SkipZigTest) {
                         return err;
                     }

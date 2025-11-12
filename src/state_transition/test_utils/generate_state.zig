@@ -1,6 +1,7 @@
 const std = @import("std");
 const blst = @import("blst");
 const Allocator = std.mem.Allocator;
+const ForkSeq = @import("config").ForkSeq;
 const mainnet_chain_config = @import("config").mainnet_chain_config;
 const minimal_chain_config = @import("config").minimal_chain_config;
 const ssz = @import("consensus_types");
@@ -8,10 +9,12 @@ const hex = @import("hex");
 const ElectraBeaconState = ssz.electra.BeaconState.Type;
 const BLSPubkey = ssz.primitive.BLSPubkey.Type;
 const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
+const Epoch = ssz.primitive.Epoch.Type;
 const preset = @import("preset").preset;
 const active_preset = @import("preset").active_preset;
 const BeaconConfig = @import("config").BeaconConfig;
 const ChainConfig = @import("config").ChainConfig;
+const mergeChainConfig = @import("config").mergeChainConfig;
 const state_transition = @import("../root.zig");
 const CachedBeaconStateAllForks = state_transition.CachedBeaconStateAllForks;
 const BeaconStateAllForks = state_transition.BeaconStateAllForks;
@@ -120,7 +123,7 @@ pub fn generateElectraState(allocator: Allocator, chain_config: ChainConfig, val
     beacon_state.* = .{ .electra = electra_state };
     const validators = beacon_state.validators();
     var next_sync_committee_indices: [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex = undefined;
-    try getNextSyncCommitteeIndices(allocator, beacon_state, active_validator_indices.items, &effective_balance_increments, &next_sync_committee_indices);
+    try getNextSyncCommitteeIndices(allocator, beacon_state, active_validator_indices.items, effective_balance_increments, &next_sync_committee_indices);
 
     var next_sync_committee_pubkeys: [preset.SYNC_COMMITTEE_SIZE]BLSPubkey = undefined;
     var next_sync_committee_pubkeys_slices: [preset.SYNC_COMMITTEE_SIZE]blst.PublicKey = undefined;
@@ -155,18 +158,20 @@ pub const TestCachedBeaconStateAllForks = struct {
         errdefer state.deinit(allocator);
         defer allocator.destroy(state);
 
-        return initFromState(allocator, state);
+        return initFromState(allocator, state, ForkSeq.electra, state.fork().epoch);
     }
 
-    pub fn initFromState(allocator: Allocator, state: *BeaconStateAllForks) !TestCachedBeaconStateAllForks {
+    pub fn initFromState(allocator: Allocator, state: *BeaconStateAllForks, fork: ForkSeq, fork_epoch: Epoch) !TestCachedBeaconStateAllForks {
         const owned_state = try allocator.create(BeaconStateAllForks);
         owned_state.* = state.*;
 
         const pubkey_index_map = try PubkeyIndexMap.init(allocator);
+        errdefer allocator.destroy(pubkey_index_map);
         const index_pubkey_cache = try allocator.create(Index2PubkeyCache);
         errdefer allocator.destroy(index_pubkey_cache);
         index_pubkey_cache.* = Index2PubkeyCache.init(allocator);
-        const config = try BeaconConfig.init(allocator, active_chain_config, owned_state.genesisValidatorsRoot());
+        const chain_config = getConfig(active_chain_config, fork, fork_epoch);
+        const config = try BeaconConfig.init(allocator, chain_config, owned_state.genesisValidatorsRoot());
 
         try syncPubkeys(owned_state.validators().items, pubkey_index_map, index_pubkey_cache);
 
@@ -199,6 +204,38 @@ pub const TestCachedBeaconStateAllForks = struct {
         self.allocator.destroy(self.cached_state);
     }
 };
+
+/// get a ChainConfig for spec test, refer to https://github.com/ChainSafe/lodestar/blob/v1.35.0/packages/beacon-node/test/utils/config.ts#L9
+pub fn getConfig(config: ChainConfig, fork: ForkSeq, fork_epoch: Epoch) ChainConfig {
+    switch (fork) {
+        .phase0 => return config,
+        .altair => return mergeChainConfig(config, .{
+            .ALTAIR_FORK_EPOCH = fork_epoch,
+        }),
+        .bellatrix => return mergeChainConfig(config, .{
+            .ALTAIR_FORK_EPOCH = 0,
+            .BELLATRIX_FORK_EPOCH = fork_epoch,
+        }),
+        .capella => return mergeChainConfig(config, .{
+            .ALTAIR_FORK_EPOCH = 0,
+            .BELLATRIX_FORK_EPOCH = 0,
+            .CAPELLA_FORK_EPOCH = fork_epoch,
+        }),
+        .deneb => return mergeChainConfig(config, .{
+            .ALTAIR_FORK_EPOCH = 0,
+            .BELLATRIX_FORK_EPOCH = 0,
+            .CAPELLA_FORK_EPOCH = 0,
+            .DENEB_FORK_EPOCH = fork_epoch,
+        }),
+        .electra => return mergeChainConfig(config, .{
+            .ALTAIR_FORK_EPOCH = 0,
+            .BELLATRIX_FORK_EPOCH = 0,
+            .CAPELLA_FORK_EPOCH = 0,
+            .DENEB_FORK_EPOCH = 0,
+            .ELECTRA_FORK_EPOCH = fork_epoch,
+        }),
+    }
+}
 
 test TestCachedBeaconStateAllForks {
     const allocator = std.testing.allocator;

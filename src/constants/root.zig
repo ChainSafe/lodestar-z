@@ -5,6 +5,7 @@ pub const DEPOSIT_CONTRACT_TREE_DEPTH = std.math.pow(usize, 2, 5); // 32
 pub const JUSTIFICATION_BITS_LENGTH = 4;
 pub const ZERO_HASH = [_]u8{0} ** 32;
 pub const ZERO_HASH_HEX = "0x0000000000000000000000000000000000000000000000000000000000000000";
+pub const GENESIS_SLOT = 0;
 
 // Withdrawal prefixes
 // Since the prefixes are just 1 byte, we define and use them as number
@@ -108,7 +109,6 @@ pub const NEXT_SYNC_COMMITTEE_INDEX_ELECTRA = 23;
 pub const DEPOSIT_REQUEST_TYPE = 0x00;
 pub const WITHDRAWAL_REQUEST_TYPE = 0x01;
 pub const CONSOLIDATION_REQUEST_TYPE = 0x02;
-pub const PENDING_PARTIAL_WITHDRAWALS_LIMIT = 134_217_728;
 
 pub const CURRENT_SYNC_COMMITTEE_GINDEX = 54;
 pub const EXECUTION_PAYLOAD_GINDEX = 25;

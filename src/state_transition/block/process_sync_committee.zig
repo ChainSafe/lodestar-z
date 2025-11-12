@@ -69,7 +69,7 @@ pub fn processSyncAggregate(
         } else {
             // Negative rewards for non participants
             if (index == proposer_index) {
-                balances.items[proposer_index] = @max(0, proposer_balance - sync_participant_reward);
+                proposer_balance = @max(0, proposer_balance - sync_participant_reward);
             } else {
                 decreaseBalance(state, index, sync_participant_reward);
             }

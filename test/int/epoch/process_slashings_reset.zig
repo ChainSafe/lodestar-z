@@ -12,4 +12,5 @@ test "processSlashingsReset - sanity" {
         .err_return = false,
         .void_return = true,
     }).testProcessEpochFn();
+    defer state_transition.deinitStateTransition();
 }

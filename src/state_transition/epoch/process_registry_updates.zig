@@ -19,9 +19,8 @@ pub fn processRegistryUpdates(cached_state: *CachedBeaconStateAllForks, cache: *
     for (cache.indices_to_eject.items) |index| {
         // set validator exit epoch and withdrawable epoch
         // TODO: Figure out a way to quickly set properties on the validators tree
-        var validator = validators.items[index];
-        try initiateValidatorExit(cached_state, &validator);
-        validators.items[index] = validator;
+        const validator = &validators.items[index];
+        try initiateValidatorExit(cached_state, validator);
     }
 
     // set new activation eligibilities
@@ -36,7 +35,7 @@ pub fn processRegistryUpdates(cached_state: *CachedBeaconStateAllForks, cache: *
     // dequeue validators for activation up to churn limit
     for (0..len) |i| {
         const validator_index = cache.indices_eligible_for_activation.items[i];
-        var validator = validators.items[validator_index];
+        const validator = &validators.items[validator_index];
         // placement in queue is finalized
         if (validator.activation_eligibility_epoch > finality_epoch) {
             // remaining validators all have an activationEligibilityEpoch that is higher anyway, break early

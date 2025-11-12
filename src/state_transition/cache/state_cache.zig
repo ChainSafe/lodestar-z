@@ -51,11 +51,13 @@ pub const CachedBeaconStateAllForks = struct {
     pub fn clone(self: *CachedBeaconStateAllForks, allocator: Allocator) !*CachedBeaconStateAllForks {
         const cached_state = try allocator.create(CachedBeaconStateAllForks);
         errdefer allocator.destroy(cached_state);
+        const epoch_cache_ref = self.epoch_cache_ref.acquire();
+        errdefer epoch_cache_ref.release();
 
         cached_state.* = .{
             .allocator = allocator,
             .config = self.config,
-            .epoch_cache_ref = self.epoch_cache_ref.acquire(),
+            .epoch_cache_ref = epoch_cache_ref,
             .state = try self.state.clone(allocator),
         };
         return cached_state;

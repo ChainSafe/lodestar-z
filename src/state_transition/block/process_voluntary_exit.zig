@@ -13,9 +13,8 @@ pub fn processVoluntaryExit(cached_state: *CachedBeaconStateAllForks, signed_vol
     if (!try isValidVoluntaryExit(cached_state, signed_voluntary_exit, verify_signature)) {
         return error.InvalidVoluntaryExit;
     }
-
-    var validator = cached_state.state.validators().items[signed_voluntary_exit.message.validator_index];
-    try initiateValidatorExit(cached_state, &validator);
+    const validator = &cached_state.state.validators().items[signed_voluntary_exit.message.validator_index];
+    try initiateValidatorExit(cached_state, validator);
 }
 
 pub fn isValidVoluntaryExit(cached_state: *CachedBeaconStateAllForks, signed_voluntary_exit: *const SignedVoluntaryExit, verify_signature: bool) !bool {

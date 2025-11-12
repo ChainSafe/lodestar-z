@@ -21,16 +21,13 @@ pub fn slashValidator(
     const epoch = epoch_cache.epoch;
     const effective_balance_increments = epoch_cache.effective_balance_increment;
 
-    var validator = state.validators().items[slashed_index];
+    var validator = &state.validators().items[slashed_index];
 
     // TODO: Bellatrix initiateValidatorExit validators.update() with the one below
-    try initiateValidatorExit(cached_state, &validator);
+    try initiateValidatorExit(cached_state, validator);
 
     validator.slashed = true;
     validator.withdrawable_epoch = @max(validator.withdrawable_epoch, epoch + preset.EPOCHS_PER_SLASHINGS_VECTOR);
-
-    const validators = state.validators();
-    validators.items[slashed_index] = validator;
 
     const effective_balance = validator.effective_balance;
 

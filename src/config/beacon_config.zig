@@ -213,7 +213,7 @@ pub const BeaconConfig = struct {
     }
 
     pub fn getDomainForVoluntaryExit(self: *const BeaconConfig, state_slot: Slot, message_slot: ?Slot) ![32]u8 {
-        const domain = if (state_slot < self.chain.DENEB_FORK_EPOCH * preset.SLOTS_PER_EPOCH) {
+        const domain = if (@divFloor(state_slot, preset.SLOTS_PER_EPOCH) < self.chain.DENEB_FORK_EPOCH) {
             return self.getDomain(state_slot, DOMAIN_VOLUNTARY_EXIT, message_slot);
         } else {
             return self.getDomainByForkSeq(ForkSeq.capella, DOMAIN_VOLUNTARY_EXIT);
@@ -227,8 +227,12 @@ pub const BeaconConfig = struct {
 };
 
 fn computeDomain(domain_type: DomainType, fork_version: Version, genesis_validators_root: Root, out: *[32]u8) !void {
-    try computeForkDataRoot(fork_version, genesis_validators_root, out);
-    std.mem.copyForwards(u8, out[0..], domain_type[0..]);
+    var fork_data_root: [32]u8 = undefined;
+    try computeForkDataRoot(fork_version, genesis_validators_root, &fork_data_root);
+    // 4 first bytes is domain_type
+    @memcpy(out[0..4], domain_type[0..4]);
+    // 28 next bytes is first 28 bytes of fork_data_root
+    @memcpy(out[4..32], fork_data_root[0..28]);
 }
 
 fn computeForkDataRoot(current_version: Version, genesis_validators_root: Root, out: *[32]u8) !void {

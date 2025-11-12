@@ -53,7 +53,7 @@ test "computeProposers - sanity" {
     try computeProposers(allocator, ForkSeq.electra, epoch_seed, 0, active_indices[0..], effective_balance_increments, &out);
 }
 
-pub fn getNextSyncCommitteeIndices(allocator: Allocator, state: *const BeaconStateAllForks, active_indices: []const ValidatorIndex, effective_balance_increments: *const EffectiveBalanceIncrements, out: []ValidatorIndex) !void {
+pub fn getNextSyncCommitteeIndices(allocator: Allocator, state: *const BeaconStateAllForks, active_indices: []const ValidatorIndex, effective_balance_increments: EffectiveBalanceIncrements, out: []ValidatorIndex) !void {
     const rand_byte_count: ByteCount = if (state.isPostElectra()) ByteCount.Two else ByteCount.One;
     const max_effective_balance: u64 = if (state.isPostElectra()) preset.MAX_EFFECTIVE_BALANCE_ELECTRA else preset.MAX_EFFECTIVE_BALANCE;
 

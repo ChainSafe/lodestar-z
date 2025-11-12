@@ -61,4 +61,6 @@ test "state transition - electra block" {
             }
         }
     }
+
+    defer state_transition.deinitStateTransition();
 }

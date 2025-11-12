@@ -12,4 +12,5 @@ test "processHistoricalSummariesUpdate - sanity" {
         .err_return = true,
         .void_return = true,
     }).testProcessEpochFn();
+    defer state_transition.deinitStateTransition();
 }

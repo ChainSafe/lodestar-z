@@ -52,7 +52,8 @@ pub fn processExecutionPayload(
     // Verify consistency of the parent hash, block number, base fee per gas and gas limit
     // with respect to the previous execution payload header
     if (isMergeTransitionComplete(state)) {
-        if (!std.mem.eql(u8, &partial_payload.parent_hash, &partial_payload.block_hash)) {
+        const latest_header = state.latestExecutionPayloadHeader();
+        if (!std.mem.eql(u8, &partial_payload.parent_hash, &latest_header.getBlockHash())) {
             return error.InvalidExecutionPayloadParentHash;
         }
     }

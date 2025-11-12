@@ -85,6 +85,12 @@ pub const SignedBlock = union(enum) {
                 inline .regular, .blinded => |b| b.blsToExecutionChanges(),
             };
         }
+
+        pub fn hashTreeRoot(self: *const Body, allocator: std.mem.Allocator, out: *Root) !void {
+            return switch (self.*) {
+                inline .regular, .blinded => |b| b.hashTreeRoot(allocator, out),
+            };
+        }
     };
 
     pub fn message(self: *const SignedBlock) Block {

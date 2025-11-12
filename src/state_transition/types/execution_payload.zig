@@ -30,7 +30,7 @@ pub const ExecutionPayload = union(enum) {
                 errdefer header.extra_data.deinit(allocator);
                 try ssz.bellatrix.Transactions.hashTreeRoot(allocator, &payload.transactions, &header.transactions_root);
                 return .{
-                    .bellatrix = header,
+                    .bellatrix = &header,
                 };
             },
             .capella => |payload| {
@@ -43,7 +43,7 @@ pub const ExecutionPayload = union(enum) {
                 try ssz.bellatrix.Transactions.hashTreeRoot(allocator, &payload.transactions, &header.transactions_root);
                 try ssz.capella.Withdrawals.hashTreeRoot(allocator, &payload.withdrawals, &header.withdrawals_root);
                 return .{
-                    .capella = header,
+                    .capella = &header,
                 };
             },
             .deneb => |payload| {
@@ -58,7 +58,7 @@ pub const ExecutionPayload = union(enum) {
                 header.blob_gas_used = payload.blob_gas_used;
                 header.excess_blob_gas = payload.excess_blob_gas;
                 return .{
-                    .deneb = header,
+                    .deneb = &header,
                 };
             },
             .electra => |payload| {
@@ -74,7 +74,7 @@ pub const ExecutionPayload = union(enum) {
                 header.blob_gas_used = payload.blob_gas_used;
                 header.excess_blob_gas = payload.excess_blob_gas;
                 return .{
-                    .electra = header,
+                    .electra = &header,
                 };
             },
         };
@@ -187,10 +187,10 @@ pub const ExecutionPayload = union(enum) {
 };
 
 pub const ExecutionPayloadHeader = union(enum) {
-    bellatrix: ssz.bellatrix.ExecutionPayloadHeader.Type,
-    capella: ssz.capella.ExecutionPayloadHeader.Type,
-    deneb: ssz.deneb.ExecutionPayloadHeader.Type,
-    electra: ssz.electra.ExecutionPayloadHeader.Type,
+    bellatrix: *const ssz.bellatrix.ExecutionPayloadHeader.Type,
+    capella: *const ssz.capella.ExecutionPayloadHeader.Type,
+    deneb: *const ssz.deneb.ExecutionPayloadHeader.Type,
+    electra: *const ssz.electra.ExecutionPayloadHeader.Type,
 
     pub fn isCapellaPayloadHeader(self: *const ExecutionPayloadHeader) bool {
         return switch (self.*) {

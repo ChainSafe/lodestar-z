@@ -417,9 +417,9 @@ pub const BlindedBeaconBlockBody = union(enum) {
     // bellatrix fields
     pub fn executionPayloadHeader(self: *const BlindedBeaconBlockBody) ExecutionPayloadHeader {
         return switch (self.*) {
-            .capella => |body| .{ .capella = body.execution_payload_header },
-            .deneb => |body| .{ .deneb = body.execution_payload_header },
-            .electra => |body| .{ .electra = body.execution_payload_header },
+            .capella => |body| .{ .capella = &body.execution_payload_header },
+            .deneb => |body| .{ .deneb = &body.execution_payload_header },
+            .electra => |body| .{ .electra = &body.execution_payload_header },
         };
     }
 

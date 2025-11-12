@@ -2,7 +2,7 @@ const std = @import("std");
 const spec_test_options = @import("spec_test_options");
 const ForkSeq = @import("config").ForkSeq;
 const Preset = @import("preset").Preset;
-const Handler = @import("../runner/Sanity.zig").Handler;
+const Handler = @import("../runner/sanity.zig").Handler;
 
 pub const handlers = std.enums.values(Handler);
 
@@ -14,7 +14,7 @@ pub const header =
     \\const ForkSeq = @import("config").ForkSeq;
     \\const active_preset = @import("preset").active_preset;
     \\const spec_test_options = @import("spec_test_options");
-    \\const Sanity = @import("../runner/Sanity.zig");
+    \\const Sanity = @import("../runner/sanity.zig");
     \\
     \\const allocator = std.testing.allocator;
     \\
@@ -47,10 +47,9 @@ pub fn writeTest(
     handler: Handler,
     test_case_name: []const u8,
 ) !void {
-    const valid = !std.mem.startsWith(u8, test_case_name, "invalid");
     const execute_call = switch (handler) {
         .slots => std.fmt.allocPrint(std.heap.page_allocator, "try Sanity.SlotsTestCase(.{s}).execute(allocator, test_dir);", .{@tagName(fork)}) catch unreachable,
-        .blocks => std.fmt.allocPrint(std.heap.page_allocator, "try Sanity.BlocksTestCase(.{s}, {}).execute(allocator, test_dir);", .{ @tagName(fork), valid }) catch unreachable,
+        .blocks => std.fmt.allocPrint(std.heap.page_allocator, "try Sanity.BlocksTestCase(.{s}).execute(allocator, test_dir);", .{@tagName(fork)}) catch unreachable,
     };
     defer std.heap.page_allocator.free(execute_call);
     try writer.print(test_template, .{

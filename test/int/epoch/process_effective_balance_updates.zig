@@ -15,4 +15,5 @@ test "processEffectiveBalanceUpdates - sanity" {
             .void_return = false,
         },
     ).testProcessEpochFn();
+    defer state_transition.deinitStateTransition();
 }

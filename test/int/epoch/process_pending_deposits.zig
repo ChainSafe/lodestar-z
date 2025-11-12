@@ -15,4 +15,5 @@ test "processPendingDeposits - sanity" {
         // .no_void_return = false,
         .void_return = true,
     }).testProcessEpochFn();
+    defer state_transition.deinitStateTransition();
 }

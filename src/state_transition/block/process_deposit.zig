@@ -63,7 +63,7 @@ pub fn processDeposit(allocator: Allocator, cached_state: *CachedBeaconStateAllF
     if (!verifyMerkleBranch(
         deposit_data_root,
         &deposit.proof,
-        preset.DEPOSIT_CONTRACT_TREE_DEPTH + 1,
+        c.DEPOSIT_CONTRACT_TREE_DEPTH + 1,
         state.eth1DepositIndex(),
         state.eth1Data().deposit_root,
     )) {
@@ -94,7 +94,7 @@ pub fn applyDeposit(allocator: Allocator, cached_state: *CachedBeaconStateAllFor
 
     if (state.isPreElectra()) {
         if (is_new_validator) {
-            if (try isValidDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
+            if (isValidDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
                 try addValidatorToRegistry(allocator, cached_state, pubkey, withdrawal_credentials, amount);
             }
         } else {
@@ -108,11 +108,11 @@ pub fn applyDeposit(allocator: Allocator, cached_state: *CachedBeaconStateAllFor
             .withdrawal_credentials = withdrawal_credentials,
             .amount = amount,
             .signature = signature,
-            .slot = preset.GENESIS_SLOT, // Use GENESIS_SLOT to distinguish from a pending deposit request
+            .slot = c.GENESIS_SLOT, // Use GENESIS_SLOT to distinguish from a pending deposit request
         };
 
         if (is_new_validator) {
-            if (try isValidDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
+            if (isValidDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
                 try addValidatorToRegistry(allocator, cached_state, pubkey, withdrawal_credentials, 0);
                 try state.pendingDeposits().append(allocator, pending_deposit);
             }
@@ -175,7 +175,9 @@ pub fn addValidatorToRegistry(
     try balances.append(allocator, amount);
 }
 
-pub fn isValidDepositSignature(config: *const BeaconConfig, pubkey: BLSPubkey, withdrawal_credential: WithdrawalCredentials, amount: u64, deposit_signature: BLSSignature) !bool {
+/// refer to https://github.com/ethereum/consensus-specs/blob/v1.5.0/specs/electra/beacon-chain.md#new-is_valid_deposit_signature
+/// no need to return error union since consumer does not care about the reason of failure
+pub fn isValidDepositSignature(config: *const BeaconConfig, pubkey: BLSPubkey, withdrawal_credential: WithdrawalCredentials, amount: u64, deposit_signature: BLSSignature) bool {
     // verify the deposit signature (proof of posession) which is not checked by the deposit contract
     const deposit_message = DepositMessage{
         .pubkey = pubkey,
@@ -187,14 +189,14 @@ pub fn isValidDepositSignature(config: *const BeaconConfig, pubkey: BLSPubkey, w
 
     // fork-agnostic domain since deposits are valid across forks
     var domain: Domain = undefined;
-    try computeDomain(DOMAIN_DEPOSIT, GENESIS_FORK_VERSION, ZERO_HASH, &domain);
+    computeDomain(DOMAIN_DEPOSIT, GENESIS_FORK_VERSION, ZERO_HASH, &domain) catch return false;
     var signing_root: Root = undefined;
-    try computeSigningRoot(ssz.phase0.DepositMessage, &deposit_message, domain, &signing_root);
+    computeSigningRoot(ssz.phase0.DepositMessage, &deposit_message, domain, &signing_root) catch return false;
 
     // Pubkeys must be checked for group + inf. This must be done only once when the validator deposit is processed
-    const public_key = try blst.PublicKey.uncompress(&pubkey);
-    try public_key.validate();
-    const signature = try blst.Signature.uncompress(&deposit_signature);
-    try signature.validate(true);
+    const public_key = blst.PublicKey.uncompress(&pubkey) catch return false;
+    public_key.validate() catch return false;
+    const signature = blst.Signature.uncompress(&deposit_signature) catch return false;
+    signature.validate(true) catch return false;
     return verify(&signing_root, &public_key, &signature, null, null);
 }

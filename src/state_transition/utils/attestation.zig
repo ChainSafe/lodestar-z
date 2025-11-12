@@ -10,10 +10,9 @@ const Slot = ssz.primitive.Slot.Type;
 
 pub fn isSlashableAttestationData(data1: *const AttestationData, data2: *const AttestationData) bool {
     // Double vote
-    // TODO(bing): implement equals API. For now return skip
-    // if (!ssz.phase0.AttestationData.equals(data1, data2) and data1.target.epoch == data2.target.epoch) {
-    //     return true;
-    // }
+    if (!ssz.phase0.AttestationData.equals(data1, data2) and data1.target.epoch == data2.target.epoch) {
+        return true;
+    }
     // Surround vote
     if (data1.source.epoch < data2.source.epoch and data2.target.epoch < data1.target.epoch) {
         return true;

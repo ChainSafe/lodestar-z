@@ -18,7 +18,6 @@ pub const committee_indices = @import("./utils/committee_indices.zig");
 pub const Index2PubkeyCache = @import("./cache/pubkey_cache.zig").Index2PubkeyCache;
 pub const syncPubkeys = @import("./cache/pubkey_cache.zig").syncPubkeys;
 
-pub const ReusedEpochTransitionCache = @import("./cache/epoch_transition_cache.zig").ReusedEpochTransitionCache;
 pub const EpochTransitionCache = @import("./cache/epoch_transition_cache.zig").EpochTransitionCache;
 pub const processEpoch = @import("./epoch/process_epoch.zig").processEpoch;
 pub const processJustificationAndFinalization = @import("./epoch/process_justification_and_finalization.zig").processJustificationAndFinalization;
@@ -62,6 +61,7 @@ pub const processConsolidationRequest = @import("./block/process_consolidation_r
 // utils
 pub const getBlockRootAtSlot = @import("./utils/block_root.zig").getBlockRootAtSlot;
 pub const computeStartSlotAtEpoch = @import("./utils/epoch.zig").computeStartSlotAtEpoch;
+pub const deinitStateTransition = @import("./state_transition.zig").deinitStateTransition;
 
 pub const WithdrawalsResult = @import("./block/process_withdrawals.zig").WithdrawalsResult;
 

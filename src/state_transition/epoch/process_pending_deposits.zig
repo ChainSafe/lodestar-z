@@ -93,8 +93,9 @@ pub fn processPendingDeposits(allocator: Allocator, cached_state: *CachedBeaconS
     }
 
     if (next_deposit_index > 0) {
-        try pending_deposits.resize(allocator, pending_deposits_len - next_deposit_index);
-        @memcpy(pending_deposits.items[0..], pending_deposits.items[next_deposit_index..]);
+        const new_len = pending_deposits_len - next_deposit_index;
+        @memcpy(pending_deposits.items[0..new_len], pending_deposits.items[next_deposit_index..]);
+        try pending_deposits.resize(allocator, new_len);
     }
 
     // TODO: consider doing this for TreeView
@@ -115,7 +116,7 @@ pub fn processPendingDeposits(allocator: Allocator, cached_state: *CachedBeaconS
 fn applyPendingDeposit(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, deposit: PendingDeposit, cache: *EpochTransitionCache) !void {
     const epoch_cache = cached_state.getEpochCache();
     const state = cached_state.state;
-    const validator_index = epoch_cache.getValidatorIndex(&deposit.pubkey) orelse return error.ValidatorNotFound;
+    const validator_index = epoch_cache.getValidatorIndex(&deposit.pubkey) orelse null;
     const pubkey = deposit.pubkey;
     // TODO: is this withdrawal_credential(s) the same to spec?
     const withdrawal_credential = deposit.withdrawal_credentials;
@@ -125,11 +126,7 @@ fn applyPendingDeposit(allocator: Allocator, cached_state: *CachedBeaconStateAll
 
     if (!is_validator_known) {
         // Verify the deposit signature (proof of possession) which is not checked by the deposit contract
-        if (try isValidDepositSignature(cached_state.config, pubkey, withdrawal_credential, amount, signature)) {
-            try addValidatorToRegistry(allocator, cached_state, pubkey, withdrawal_credential, amount);
-        }
-
-        if (try isValidDepositSignature(cached_state.config, pubkey, withdrawal_credential, amount, signature)) {
+        if (isValidDepositSignature(cached_state.config, pubkey, withdrawal_credential, amount, signature)) {
             try addValidatorToRegistry(allocator, cached_state, pubkey, withdrawal_credential, amount);
             try cache.is_compounding_validator_arr.append(hasCompoundingWithdrawalCredential(withdrawal_credential));
             // set balance, so that the next deposit of same pubkey will increase the balance correctly
@@ -140,10 +137,15 @@ fn applyPendingDeposit(allocator: Allocator, cached_state: *CachedBeaconStateAll
             }
         }
     } else {
-        // Increase balance
-        increaseBalance(state, validator_index, amount);
-        if (cache.balances) |*balances| {
-            balances.items[validator_index] += amount;
+        if (validator_index) |val_idx| {
+            // Increase balance
+            increaseBalance(state, val_idx, amount);
+            if (cache.balances) |*balances| {
+                balances.items[val_idx] += amount;
+            }
+        } else {
+            // should not happen since we checked in isValidatorKnown() above
+            return error.UnexpectedNullValidatorIndex;
         }
     }
 }

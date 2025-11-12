@@ -12,6 +12,7 @@ const SyncCommittee = ssz.altair.SyncCommittee.Type;
 const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
 const PublicKey = ssz.primitive.BLSPubkey.Type;
 const ForkSeq = @import("config").ForkSeq;
+const intSqrt = @import("../utils/math.zig").intSqrt;
 
 pub const getNextSyncCommitteeIndices = @import("./seed.zig").getNextSyncCommitteeIndices;
 const SyncCommitteeInfo = struct {
@@ -46,15 +47,13 @@ pub fn getNextSyncCommittee(allocator: Allocator, state: *const BeaconStateAllFo
 
 pub fn computeSyncParticipantReward(total_active_balance_increments: u64) u64 {
     const total_active_balance = total_active_balance_increments * preset.EFFECTIVE_BALANCE_INCREMENT;
-    const base_reward_per_increment = @divFloor((preset.EFFECTIVE_BALANCE_INCREMENT * preset.BASE_REWARD_FACTOR), total_active_balance);
+    const base_reward_per_increment = @divFloor((preset.EFFECTIVE_BALANCE_INCREMENT * preset.BASE_REWARD_FACTOR), intSqrt(total_active_balance));
     const total_base_rewards = base_reward_per_increment * total_active_balance_increments;
     const max_participant_rewards = @divFloor(@divFloor(total_base_rewards * c.SYNC_REWARD_WEIGHT, c.WEIGHT_DENOMINATOR), preset.SLOTS_PER_EPOCH);
     return @divFloor(max_participant_rewards, preset.SYNC_COMMITTEE_SIZE);
 }
 
 pub fn computeBaseRewardPerIncrement(total_active_stake_by_increment: u64) u64 {
-    const total_active_stake: f64 = @floatFromInt(total_active_stake_by_increment * preset.EFFECTIVE_BALANCE_INCREMENT);
-    const total_active_stake_sqrt_f64: f64 = @sqrt(total_active_stake);
-    const total_active_stake_sqrt: u64 = @intFromFloat(total_active_stake_sqrt_f64);
+    const total_active_stake_sqrt = intSqrt(total_active_stake_by_increment * preset.EFFECTIVE_BALANCE_INCREMENT);
     return @divFloor((preset.EFFECTIVE_BALANCE_INCREMENT * preset.BASE_REWARD_FACTOR), total_active_stake_sqrt);
 }

@@ -37,7 +37,7 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaco
         return error.BlockParentRootMismatch;
     }
     var body_root: [32]u8 = undefined;
-    try block.hashTreeRoot(allocator, &body_root);
+    try block.beaconBlockBody().hashTreeRoot(allocator, &body_root);
     // cache current block as the new latest block
     const state_latest_block_header = state.latestBlockHeader();
     const latest_block_header: BeaconBlockHeader = .{

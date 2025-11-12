@@ -1,9 +1,13 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const snappy = @import("snappy");
 const ForkSeq = @import("config").ForkSeq;
 const isFixedType = @import("ssz").isFixedType;
-const BeaconStateAllForks = @import("state_transition").BeaconStateAllForks;
+const state_transition = @import("state_transition");
+const BeaconStateAllForks = state_transition.BeaconStateAllForks;
+const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
 
+const ssz = @import("consensus_types");
 const consensus_types = @import("consensus_types");
 const phase0 = consensus_types.phase0;
 const altair = consensus_types.altair;
@@ -24,6 +28,48 @@ pub const BlsSetting = enum {
         };
     }
 };
+
+pub fn TestCaseUtils(comptime fork: ForkSeq) type {
+    const ForkTypes = @field(ssz, fork.forkName());
+    return struct {
+        pub fn loadPreState(allocator: Allocator, dir: std.fs.Dir) !TestCachedBeaconStateAllForks {
+            const pre_state = try allocator.create(ForkTypes.BeaconState.Type);
+            var transfered_pre_state: bool = false;
+            errdefer {
+                if (!transfered_pre_state) {
+                    ForkTypes.BeaconState.deinit(allocator, pre_state);
+                    allocator.destroy(pre_state);
+                }
+            }
+            pre_state.* = ForkTypes.BeaconState.default_value;
+            try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "pre.ssz_snappy", pre_state);
+            transfered_pre_state = true;
+
+            var pre_state_all_forks = try BeaconStateAllForks.init(fork, pre_state);
+            return try TestCachedBeaconStateAllForks.initFromState(allocator, &pre_state_all_forks, fork, pre_state_all_forks.fork().epoch);
+        }
+
+        /// consumer should deinit the returned state and destroy the pointer
+        pub fn loadPostState(allocator: Allocator, dir: std.fs.Dir) !?BeaconStateAllForks {
+            if (dir.statFile("post.ssz_snappy")) |_| {
+                const post_state = try allocator.create(ForkTypes.BeaconState.Type);
+                errdefer {
+                    ForkTypes.BeaconState.deinit(allocator, post_state);
+                    allocator.destroy(post_state);
+                }
+                post_state.* = ForkTypes.BeaconState.default_value;
+                try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", post_state);
+                return try BeaconStateAllForks.init(fork, post_state);
+            } else |err| {
+                if (err == error.FileNotFound) {
+                    return null;
+                } else {
+                    return err;
+                }
+            }
+        }
+    };
+}
 
 pub fn loadBlsSetting(allocator: std.mem.Allocator, dir: std.fs.Dir) BlsSetting {
     var file = dir.openFile("meta.yaml", .{}) catch return .default;

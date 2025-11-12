@@ -77,7 +77,8 @@ pub fn getAttestationDeltas(allocator: Allocator, cached_state: *const CachedBea
     defer reward_penalty_item_cache.deinit();
 
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
-    std.debug.assert(flags.len == effective_balance_increments.items.len);
+    std.debug.assert(flags.len == state.validators().items.len);
+    std.debug.assert(flags.len <= effective_balance_increments.items.len);
     for (0..flags.len) |i| {
         const flag = flags[i];
         const effective_balance_increment = effective_balance_increments.items[i];
