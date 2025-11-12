@@ -15,6 +15,7 @@ const supported_forks = [_]ForkSeq{
 const supported_test_runners = [_]RunnerKind{
     .merkle_proof,
     .operations,
+    .rewards,
     .sanity,
 };
 
@@ -22,6 +23,7 @@ fn TestWriter(comptime kind: RunnerKind) type {
     return switch (kind) {
         .merkle_proof => @import("./writer/merkle_proof.zig"),
         .operations => @import("./writer/operations.zig"),
+        .rewards => @import("./writer/rewards.zig"),
         .sanity => @import("./writer/sanity.zig"),
         else => @compileError("Unsupported test runner"),
     };

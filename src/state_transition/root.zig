@@ -25,6 +25,7 @@ pub const processInactivityUpdates = @import("./epoch/process_inactivity_updates
 pub const processRegistryUpdates = @import("./epoch/process_registry_updates.zig").processRegistryUpdates;
 pub const processSlashings = @import("./epoch/process_slashings.zig").processSlashings;
 pub const processRewardsAndPenalties = @import("./epoch/process_rewards_and_penalties.zig").processRewardsAndPenalties;
+pub const getRewardsAndPenalties = @import("./epoch/process_rewards_and_penalties.zig").getRewardsAndPenalties;
 pub const processEth1DataReset = @import("./epoch/process_eth1_data_reset.zig").processEth1DataReset;
 pub const processPendingDeposits = @import("./epoch/process_pending_deposits.zig").processPendingDeposits;
 pub const processPendingConsolidations = @import("./epoch/process_pending_consolidations.zig").processPendingConsolidations;
