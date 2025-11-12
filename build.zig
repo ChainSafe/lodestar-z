@@ -7,6 +7,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const options_build_options = b.addOptions();
+    const option_zero_hash_max_depth = b.option(u8, "zero_hash_max_depth", "");
+    options_build_options.addOption(?u8, "zero_hash_max_depth", option_zero_hash_max_depth);
     const option_preset = b.option([]const u8, "preset", "") orelse "mainnet";
     options_build_options.addOption([]const u8, "preset", option_preset);
     const options_module_build_options = options_build_options.createModule();
@@ -25,7 +27,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
-    const dep_ssz = b.dependency("ssz", .{
+    const dep_hashtree = b.dependency("hashtree", .{
         .optimize = optimize,
         .target = target,
     });
@@ -35,12 +37,15 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
-    const module_hex = b.createModule(.{
-        .root_source_file = b.path("src/hex.zig"),
-        .target = target,
+    const dep_yaml = b.dependency("yaml", .{
         .optimize = optimize,
+        .target = target,
     });
-    b.modules.put(b.dupe("hex"), module_hex) catch @panic("OOM");
+
+    const dep_zbench = b.dependency("zbench", .{
+        .optimize = optimize,
+        .target = target,
+    });
 
     const module_constants = b.createModule(.{
         .root_source_file = b.path("src/constants/root.zig"),
@@ -63,12 +68,40 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("consensus_types"), module_consensus_types) catch @panic("OOM");
 
+    const module_hashing = b.createModule(.{
+        .root_source_file = b.path("src/hashing/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("hashing"), module_hashing) catch @panic("OOM");
+
+    const module_hex = b.createModule(.{
+        .root_source_file = b.path("src/hex.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("hex"), module_hex) catch @panic("OOM");
+
+    const module_persistent_merkle_tree = b.createModule(.{
+        .root_source_file = b.path("src/persistent_merkle_tree/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("persistent_merkle_tree"), module_persistent_merkle_tree) catch @panic("OOM");
+
     const module_preset = b.createModule(.{
         .root_source_file = b.path("src/preset/root.zig"),
         .target = target,
         .optimize = optimize,
     });
     b.modules.put(b.dupe("preset"), module_preset) catch @panic("OOM");
+
+    const module_ssz = b.createModule(.{
+        .root_source_file = b.path("src/ssz/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("ssz"), module_ssz) catch @panic("OOM");
 
     const module_state_transition = b.createModule(.{
         .root_source_file = b.path("src/state_transition/root.zig"),
@@ -123,21 +156,191 @@ pub fn build(b: *std.Build) void {
     const tls_run_exe_write_spec_tests = b.step("run:write_spec_tests", "Run the write_spec_tests executable");
     tls_run_exe_write_spec_tests.dependOn(&run_exe_write_spec_tests.step);
 
-    const tls_run_test = b.step("test", "Run all tests");
-
-    const test_hex = b.addTest(.{
-        .name = "hex",
-        .root_module = module_hex,
-        .filters = b.option([][]const u8, "hex.filters", "hex test filters") orelse &[_][]const u8{},
+    const module_write_ssz_generic_spec_tests = b.createModule(.{
+        .root_source_file = b.path("test/spec/ssz/write_generic_tests.zig"),
+        .target = target,
+        .optimize = optimize,
     });
-    const install_test_hex = b.addInstallArtifact(test_hex, .{});
-    const tls_install_test_hex = b.step("build-test:hex", "Install the hex test");
-    tls_install_test_hex.dependOn(&install_test_hex.step);
+    b.modules.put(b.dupe("write_ssz_generic_spec_tests"), module_write_ssz_generic_spec_tests) catch @panic("OOM");
 
-    const run_test_hex = b.addRunArtifact(test_hex);
-    const tls_run_test_hex = b.step("test:hex", "Run the hex test");
-    tls_run_test_hex.dependOn(&run_test_hex.step);
-    tls_run_test.dependOn(&run_test_hex.step);
+    const exe_write_ssz_generic_spec_tests = b.addExecutable(.{
+        .name = "write_ssz_generic_spec_tests",
+        .root_module = module_write_ssz_generic_spec_tests,
+    });
+
+    const install_exe_write_ssz_generic_spec_tests = b.addInstallArtifact(exe_write_ssz_generic_spec_tests, .{});
+
+    const tls_install_exe_write_ssz_generic_spec_tests = b.step("build-exe:write_ssz_generic_spec_tests", "Install the write_ssz_generic_spec_tests executable");
+    tls_install_exe_write_ssz_generic_spec_tests.dependOn(&install_exe_write_ssz_generic_spec_tests.step);
+    b.getInstallStep().dependOn(&install_exe_write_ssz_generic_spec_tests.step);
+
+    const run_exe_write_ssz_generic_spec_tests = b.addRunArtifact(exe_write_ssz_generic_spec_tests);
+    if (b.args) |args| run_exe_write_ssz_generic_spec_tests.addArgs(args);
+    const tls_run_exe_write_ssz_generic_spec_tests = b.step("run:write_ssz_generic_spec_tests", "Run the write_ssz_generic_spec_tests executable");
+    tls_run_exe_write_ssz_generic_spec_tests.dependOn(&run_exe_write_ssz_generic_spec_tests.step);
+
+    const module_write_ssz_static_spec_tests = b.createModule(.{
+        .root_source_file = b.path("test/spec/ssz/write_static_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("write_ssz_static_spec_tests"), module_write_ssz_static_spec_tests) catch @panic("OOM");
+
+    const exe_write_ssz_static_spec_tests = b.addExecutable(.{
+        .name = "write_ssz_static_spec_tests",
+        .root_module = module_write_ssz_static_spec_tests,
+    });
+
+    const install_exe_write_ssz_static_spec_tests = b.addInstallArtifact(exe_write_ssz_static_spec_tests, .{});
+
+    const tls_install_exe_write_ssz_static_spec_tests = b.step("build-exe:write_ssz_static_spec_tests", "Install the write_ssz_static_spec_tests executable");
+    tls_install_exe_write_ssz_static_spec_tests.dependOn(&install_exe_write_ssz_static_spec_tests.step);
+    b.getInstallStep().dependOn(&install_exe_write_ssz_static_spec_tests.step);
+
+    const run_exe_write_ssz_static_spec_tests = b.addRunArtifact(exe_write_ssz_static_spec_tests);
+    if (b.args) |args| run_exe_write_ssz_static_spec_tests.addArgs(args);
+    const tls_run_exe_write_ssz_static_spec_tests = b.step("run:write_ssz_static_spec_tests", "Run the write_ssz_static_spec_tests executable");
+    tls_run_exe_write_ssz_static_spec_tests.dependOn(&run_exe_write_ssz_static_spec_tests.step);
+
+    const module_bench_ssz_attestation = b.createModule(.{
+        .root_source_file = b.path("bench/ssz/attestation.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("bench_ssz_attestation"), module_bench_ssz_attestation) catch @panic("OOM");
+
+    const exe_bench_ssz_attestation = b.addExecutable(.{
+        .name = "bench_ssz_attestation",
+        .root_module = module_bench_ssz_attestation,
+    });
+
+    const install_exe_bench_ssz_attestation = b.addInstallArtifact(exe_bench_ssz_attestation, .{});
+
+    const tls_install_exe_bench_ssz_attestation = b.step("build-exe:bench_ssz_attestation", "Install the bench_ssz_attestation executable");
+    tls_install_exe_bench_ssz_attestation.dependOn(&install_exe_bench_ssz_attestation.step);
+    b.getInstallStep().dependOn(&install_exe_bench_ssz_attestation.step);
+
+    const run_exe_bench_ssz_attestation = b.addRunArtifact(exe_bench_ssz_attestation);
+    if (b.args) |args| run_exe_bench_ssz_attestation.addArgs(args);
+    const tls_run_exe_bench_ssz_attestation = b.step("run:bench_ssz_attestation", "Run the bench_ssz_attestation executable");
+    tls_run_exe_bench_ssz_attestation.dependOn(&run_exe_bench_ssz_attestation.step);
+
+    const module_bench_ssz_block = b.createModule(.{
+        .root_source_file = b.path("bench/ssz/block.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("bench_ssz_block"), module_bench_ssz_block) catch @panic("OOM");
+
+    const exe_bench_ssz_block = b.addExecutable(.{
+        .name = "bench_ssz_block",
+        .root_module = module_bench_ssz_block,
+    });
+
+    const install_exe_bench_ssz_block = b.addInstallArtifact(exe_bench_ssz_block, .{});
+
+    const tls_install_exe_bench_ssz_block = b.step("build-exe:bench_ssz_block", "Install the bench_ssz_block executable");
+    tls_install_exe_bench_ssz_block.dependOn(&install_exe_bench_ssz_block.step);
+    b.getInstallStep().dependOn(&install_exe_bench_ssz_block.step);
+
+    const run_exe_bench_ssz_block = b.addRunArtifact(exe_bench_ssz_block);
+    if (b.args) |args| run_exe_bench_ssz_block.addArgs(args);
+    const tls_run_exe_bench_ssz_block = b.step("run:bench_ssz_block", "Run the bench_ssz_block executable");
+    tls_run_exe_bench_ssz_block.dependOn(&run_exe_bench_ssz_block.step);
+
+    const module_bench_ssz_state = b.createModule(.{
+        .root_source_file = b.path("bench/ssz/state.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("bench_ssz_state"), module_bench_ssz_state) catch @panic("OOM");
+
+    const exe_bench_ssz_state = b.addExecutable(.{
+        .name = "bench_ssz_state",
+        .root_module = module_bench_ssz_state,
+    });
+
+    const install_exe_bench_ssz_state = b.addInstallArtifact(exe_bench_ssz_state, .{});
+
+    const tls_install_exe_bench_ssz_state = b.step("build-exe:bench_ssz_state", "Install the bench_ssz_state executable");
+    tls_install_exe_bench_ssz_state.dependOn(&install_exe_bench_ssz_state.step);
+    b.getInstallStep().dependOn(&install_exe_bench_ssz_state.step);
+
+    const run_exe_bench_ssz_state = b.addRunArtifact(exe_bench_ssz_state);
+    if (b.args) |args| run_exe_bench_ssz_state.addArgs(args);
+    const tls_run_exe_bench_ssz_state = b.step("run:bench_ssz_state", "Run the bench_ssz_state executable");
+    tls_run_exe_bench_ssz_state.dependOn(&run_exe_bench_ssz_state.step);
+
+    const module_bench_merkle_gindex = b.createModule(.{
+        .root_source_file = b.path("bench/ssz/gindex.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("bench_merkle_gindex"), module_bench_merkle_gindex) catch @panic("OOM");
+
+    const exe_bench_merkle_gindex = b.addExecutable(.{
+        .name = "bench_merkle_gindex",
+        .root_module = module_bench_merkle_gindex,
+    });
+
+    const install_exe_bench_merkle_gindex = b.addInstallArtifact(exe_bench_merkle_gindex, .{});
+
+    const tls_install_exe_bench_merkle_gindex = b.step("build-exe:bench_merkle_gindex", "Install the bench_merkle_gindex executable");
+    tls_install_exe_bench_merkle_gindex.dependOn(&install_exe_bench_merkle_gindex.step);
+    b.getInstallStep().dependOn(&install_exe_bench_merkle_gindex.step);
+
+    const run_exe_bench_merkle_gindex = b.addRunArtifact(exe_bench_merkle_gindex);
+    if (b.args) |args| run_exe_bench_merkle_gindex.addArgs(args);
+    const tls_run_exe_bench_merkle_gindex = b.step("run:bench_merkle_gindex", "Run the bench_merkle_gindex executable");
+    tls_run_exe_bench_merkle_gindex.dependOn(&run_exe_bench_merkle_gindex.step);
+
+    const module_bench_merkle_node = b.createModule(.{
+        .root_source_file = b.path("src/persistent_merkle_tree/node_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("bench_merkle_node"), module_bench_merkle_node) catch @panic("OOM");
+
+    const exe_bench_merkle_node = b.addExecutable(.{
+        .name = "bench_merkle_node",
+        .root_module = module_bench_merkle_node,
+    });
+
+    const install_exe_bench_merkle_node = b.addInstallArtifact(exe_bench_merkle_node, .{});
+
+    const tls_install_exe_bench_merkle_node = b.step("build-exe:bench_merkle_node", "Install the bench_merkle_node executable");
+    tls_install_exe_bench_merkle_node.dependOn(&install_exe_bench_merkle_node.step);
+    b.getInstallStep().dependOn(&install_exe_bench_merkle_node.step);
+
+    const run_exe_bench_merkle_node = b.addRunArtifact(exe_bench_merkle_node);
+    if (b.args) |args| run_exe_bench_merkle_node.addArgs(args);
+    const tls_run_exe_bench_merkle_node = b.step("run:bench_merkle_node", "Run the bench_merkle_node executable");
+    tls_run_exe_bench_merkle_node.dependOn(&run_exe_bench_merkle_node.step);
+
+    const module_bench_hashing = b.createModule(.{
+        .root_source_file = b.path("bench/ssz/hashing.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("bench_hashing"), module_bench_hashing) catch @panic("OOM");
+
+    const exe_bench_hashing = b.addExecutable(.{
+        .name = "bench_hashing",
+        .root_module = module_bench_hashing,
+    });
+
+    const install_exe_bench_hashing = b.addInstallArtifact(exe_bench_hashing, .{});
+
+    const tls_install_exe_bench_hashing = b.step("build-exe:bench_hashing", "Install the bench_hashing executable");
+    tls_install_exe_bench_hashing.dependOn(&install_exe_bench_hashing.step);
+    b.getInstallStep().dependOn(&install_exe_bench_hashing.step);
+
+    const run_exe_bench_hashing = b.addRunArtifact(exe_bench_hashing);
+    if (b.args) |args| run_exe_bench_hashing.addArgs(args);
+    const tls_run_exe_bench_hashing = b.step("run:bench_hashing", "Run the bench_hashing executable");
+    tls_run_exe_bench_hashing.dependOn(&run_exe_bench_hashing.step);
+
+    const tls_run_test = b.step("test", "Run all tests");
 
     const test_constants = b.addTest(.{
         .name = "constants",
@@ -181,6 +384,48 @@ pub fn build(b: *std.Build) void {
     tls_run_test_consensus_types.dependOn(&run_test_consensus_types.step);
     tls_run_test.dependOn(&run_test_consensus_types.step);
 
+    const test_hashing = b.addTest(.{
+        .name = "hashing",
+        .root_module = module_hashing,
+        .filters = b.option([][]const u8, "hashing.filters", "hashing test filters") orelse &[_][]const u8{},
+    });
+    const install_test_hashing = b.addInstallArtifact(test_hashing, .{});
+    const tls_install_test_hashing = b.step("build-test:hashing", "Install the hashing test");
+    tls_install_test_hashing.dependOn(&install_test_hashing.step);
+
+    const run_test_hashing = b.addRunArtifact(test_hashing);
+    const tls_run_test_hashing = b.step("test:hashing", "Run the hashing test");
+    tls_run_test_hashing.dependOn(&run_test_hashing.step);
+    tls_run_test.dependOn(&run_test_hashing.step);
+
+    const test_hex = b.addTest(.{
+        .name = "hex",
+        .root_module = module_hex,
+        .filters = b.option([][]const u8, "hex.filters", "hex test filters") orelse &[_][]const u8{},
+    });
+    const install_test_hex = b.addInstallArtifact(test_hex, .{});
+    const tls_install_test_hex = b.step("build-test:hex", "Install the hex test");
+    tls_install_test_hex.dependOn(&install_test_hex.step);
+
+    const run_test_hex = b.addRunArtifact(test_hex);
+    const tls_run_test_hex = b.step("test:hex", "Run the hex test");
+    tls_run_test_hex.dependOn(&run_test_hex.step);
+    tls_run_test.dependOn(&run_test_hex.step);
+
+    const test_persistent_merkle_tree = b.addTest(.{
+        .name = "persistent_merkle_tree",
+        .root_module = module_persistent_merkle_tree,
+        .filters = b.option([][]const u8, "persistent_merkle_tree.filters", "persistent_merkle_tree test filters") orelse &[_][]const u8{},
+    });
+    const install_test_persistent_merkle_tree = b.addInstallArtifact(test_persistent_merkle_tree, .{});
+    const tls_install_test_persistent_merkle_tree = b.step("build-test:persistent_merkle_tree", "Install the persistent_merkle_tree test");
+    tls_install_test_persistent_merkle_tree.dependOn(&install_test_persistent_merkle_tree.step);
+
+    const run_test_persistent_merkle_tree = b.addRunArtifact(test_persistent_merkle_tree);
+    const tls_run_test_persistent_merkle_tree = b.step("test:persistent_merkle_tree", "Run the persistent_merkle_tree test");
+    tls_run_test_persistent_merkle_tree.dependOn(&run_test_persistent_merkle_tree.step);
+    tls_run_test.dependOn(&run_test_persistent_merkle_tree.step);
+
     const test_preset = b.addTest(.{
         .name = "preset",
         .root_module = module_preset,
@@ -194,6 +439,20 @@ pub fn build(b: *std.Build) void {
     const tls_run_test_preset = b.step("test:preset", "Run the preset test");
     tls_run_test_preset.dependOn(&run_test_preset.step);
     tls_run_test.dependOn(&run_test_preset.step);
+
+    const test_ssz = b.addTest(.{
+        .name = "ssz",
+        .root_module = module_ssz,
+        .filters = b.option([][]const u8, "ssz.filters", "ssz test filters") orelse &[_][]const u8{},
+    });
+    const install_test_ssz = b.addInstallArtifact(test_ssz, .{});
+    const tls_install_test_ssz = b.step("build-test:ssz", "Install the ssz test");
+    tls_install_test_ssz.dependOn(&install_test_ssz.step);
+
+    const run_test_ssz = b.addRunArtifact(test_ssz);
+    const tls_run_test_ssz = b.step("test:ssz", "Run the ssz test");
+    tls_run_test_ssz.dependOn(&run_test_ssz.step);
+    tls_run_test.dependOn(&run_test_ssz.step);
 
     const test_state_transition = b.addTest(.{
         .name = "state_transition",
@@ -237,6 +496,118 @@ pub fn build(b: *std.Build) void {
     tls_run_test_write_spec_tests.dependOn(&run_test_write_spec_tests.step);
     tls_run_test.dependOn(&run_test_write_spec_tests.step);
 
+    const test_write_ssz_generic_spec_tests = b.addTest(.{
+        .name = "write_ssz_generic_spec_tests",
+        .root_module = module_write_ssz_generic_spec_tests,
+        .filters = b.option([][]const u8, "write_ssz_generic_spec_tests.filters", "write_ssz_generic_spec_tests test filters") orelse &[_][]const u8{},
+    });
+    const install_test_write_ssz_generic_spec_tests = b.addInstallArtifact(test_write_ssz_generic_spec_tests, .{});
+    const tls_install_test_write_ssz_generic_spec_tests = b.step("build-test:write_ssz_generic_spec_tests", "Install the write_ssz_generic_spec_tests test");
+    tls_install_test_write_ssz_generic_spec_tests.dependOn(&install_test_write_ssz_generic_spec_tests.step);
+
+    const run_test_write_ssz_generic_spec_tests = b.addRunArtifact(test_write_ssz_generic_spec_tests);
+    const tls_run_test_write_ssz_generic_spec_tests = b.step("test:write_ssz_generic_spec_tests", "Run the write_ssz_generic_spec_tests test");
+    tls_run_test_write_ssz_generic_spec_tests.dependOn(&run_test_write_ssz_generic_spec_tests.step);
+    tls_run_test.dependOn(&run_test_write_ssz_generic_spec_tests.step);
+
+    const test_write_ssz_static_spec_tests = b.addTest(.{
+        .name = "write_ssz_static_spec_tests",
+        .root_module = module_write_ssz_static_spec_tests,
+        .filters = b.option([][]const u8, "write_ssz_static_spec_tests.filters", "write_ssz_static_spec_tests test filters") orelse &[_][]const u8{},
+    });
+    const install_test_write_ssz_static_spec_tests = b.addInstallArtifact(test_write_ssz_static_spec_tests, .{});
+    const tls_install_test_write_ssz_static_spec_tests = b.step("build-test:write_ssz_static_spec_tests", "Install the write_ssz_static_spec_tests test");
+    tls_install_test_write_ssz_static_spec_tests.dependOn(&install_test_write_ssz_static_spec_tests.step);
+
+    const run_test_write_ssz_static_spec_tests = b.addRunArtifact(test_write_ssz_static_spec_tests);
+    const tls_run_test_write_ssz_static_spec_tests = b.step("test:write_ssz_static_spec_tests", "Run the write_ssz_static_spec_tests test");
+    tls_run_test_write_ssz_static_spec_tests.dependOn(&run_test_write_ssz_static_spec_tests.step);
+    tls_run_test.dependOn(&run_test_write_ssz_static_spec_tests.step);
+
+    const test_bench_ssz_attestation = b.addTest(.{
+        .name = "bench_ssz_attestation",
+        .root_module = module_bench_ssz_attestation,
+        .filters = b.option([][]const u8, "bench_ssz_attestation.filters", "bench_ssz_attestation test filters") orelse &[_][]const u8{},
+    });
+    const install_test_bench_ssz_attestation = b.addInstallArtifact(test_bench_ssz_attestation, .{});
+    const tls_install_test_bench_ssz_attestation = b.step("build-test:bench_ssz_attestation", "Install the bench_ssz_attestation test");
+    tls_install_test_bench_ssz_attestation.dependOn(&install_test_bench_ssz_attestation.step);
+
+    const run_test_bench_ssz_attestation = b.addRunArtifact(test_bench_ssz_attestation);
+    const tls_run_test_bench_ssz_attestation = b.step("test:bench_ssz_attestation", "Run the bench_ssz_attestation test");
+    tls_run_test_bench_ssz_attestation.dependOn(&run_test_bench_ssz_attestation.step);
+    tls_run_test.dependOn(&run_test_bench_ssz_attestation.step);
+
+    const test_bench_ssz_block = b.addTest(.{
+        .name = "bench_ssz_block",
+        .root_module = module_bench_ssz_block,
+        .filters = b.option([][]const u8, "bench_ssz_block.filters", "bench_ssz_block test filters") orelse &[_][]const u8{},
+    });
+    const install_test_bench_ssz_block = b.addInstallArtifact(test_bench_ssz_block, .{});
+    const tls_install_test_bench_ssz_block = b.step("build-test:bench_ssz_block", "Install the bench_ssz_block test");
+    tls_install_test_bench_ssz_block.dependOn(&install_test_bench_ssz_block.step);
+
+    const run_test_bench_ssz_block = b.addRunArtifact(test_bench_ssz_block);
+    const tls_run_test_bench_ssz_block = b.step("test:bench_ssz_block", "Run the bench_ssz_block test");
+    tls_run_test_bench_ssz_block.dependOn(&run_test_bench_ssz_block.step);
+    tls_run_test.dependOn(&run_test_bench_ssz_block.step);
+
+    const test_bench_ssz_state = b.addTest(.{
+        .name = "bench_ssz_state",
+        .root_module = module_bench_ssz_state,
+        .filters = b.option([][]const u8, "bench_ssz_state.filters", "bench_ssz_state test filters") orelse &[_][]const u8{},
+    });
+    const install_test_bench_ssz_state = b.addInstallArtifact(test_bench_ssz_state, .{});
+    const tls_install_test_bench_ssz_state = b.step("build-test:bench_ssz_state", "Install the bench_ssz_state test");
+    tls_install_test_bench_ssz_state.dependOn(&install_test_bench_ssz_state.step);
+
+    const run_test_bench_ssz_state = b.addRunArtifact(test_bench_ssz_state);
+    const tls_run_test_bench_ssz_state = b.step("test:bench_ssz_state", "Run the bench_ssz_state test");
+    tls_run_test_bench_ssz_state.dependOn(&run_test_bench_ssz_state.step);
+    tls_run_test.dependOn(&run_test_bench_ssz_state.step);
+
+    const test_bench_merkle_gindex = b.addTest(.{
+        .name = "bench_merkle_gindex",
+        .root_module = module_bench_merkle_gindex,
+        .filters = b.option([][]const u8, "bench_merkle_gindex.filters", "bench_merkle_gindex test filters") orelse &[_][]const u8{},
+    });
+    const install_test_bench_merkle_gindex = b.addInstallArtifact(test_bench_merkle_gindex, .{});
+    const tls_install_test_bench_merkle_gindex = b.step("build-test:bench_merkle_gindex", "Install the bench_merkle_gindex test");
+    tls_install_test_bench_merkle_gindex.dependOn(&install_test_bench_merkle_gindex.step);
+
+    const run_test_bench_merkle_gindex = b.addRunArtifact(test_bench_merkle_gindex);
+    const tls_run_test_bench_merkle_gindex = b.step("test:bench_merkle_gindex", "Run the bench_merkle_gindex test");
+    tls_run_test_bench_merkle_gindex.dependOn(&run_test_bench_merkle_gindex.step);
+    tls_run_test.dependOn(&run_test_bench_merkle_gindex.step);
+
+    const test_bench_merkle_node = b.addTest(.{
+        .name = "bench_merkle_node",
+        .root_module = module_bench_merkle_node,
+        .filters = b.option([][]const u8, "bench_merkle_node.filters", "bench_merkle_node test filters") orelse &[_][]const u8{},
+    });
+    const install_test_bench_merkle_node = b.addInstallArtifact(test_bench_merkle_node, .{});
+    const tls_install_test_bench_merkle_node = b.step("build-test:bench_merkle_node", "Install the bench_merkle_node test");
+    tls_install_test_bench_merkle_node.dependOn(&install_test_bench_merkle_node.step);
+
+    const run_test_bench_merkle_node = b.addRunArtifact(test_bench_merkle_node);
+    const tls_run_test_bench_merkle_node = b.step("test:bench_merkle_node", "Run the bench_merkle_node test");
+    tls_run_test_bench_merkle_node.dependOn(&run_test_bench_merkle_node.step);
+    tls_run_test.dependOn(&run_test_bench_merkle_node.step);
+
+    const test_bench_hashing = b.addTest(.{
+        .name = "bench_hashing",
+        .root_module = module_bench_hashing,
+        .filters = b.option([][]const u8, "bench_hashing.filters", "bench_hashing test filters") orelse &[_][]const u8{},
+    });
+    const install_test_bench_hashing = b.addInstallArtifact(test_bench_hashing, .{});
+    const tls_install_test_bench_hashing = b.step("build-test:bench_hashing", "Install the bench_hashing test");
+    tls_install_test_bench_hashing.dependOn(&install_test_bench_hashing.step);
+
+    const run_test_bench_hashing = b.addRunArtifact(test_bench_hashing);
+    const tls_run_test_bench_hashing = b.step("test:bench_hashing", "Run the bench_hashing test");
+    tls_run_test_bench_hashing.dependOn(&run_test_bench_hashing.step);
+    tls_run_test.dependOn(&run_test_bench_hashing.step);
+
     const module_int = b.createModule(.{
         .root_source_file = b.path("test/int/root.zig"),
         .target = target,
@@ -279,6 +650,48 @@ pub fn build(b: *std.Build) void {
     tls_run_test_spec_tests.dependOn(&run_test_spec_tests.step);
     tls_run_test.dependOn(&run_test_spec_tests.step);
 
+    const module_ssz_generic_spec_tests = b.createModule(.{
+        .root_source_file = b.path("test/spec/ssz/generic_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("ssz_generic_spec_tests"), module_ssz_generic_spec_tests) catch @panic("OOM");
+
+    const test_ssz_generic_spec_tests = b.addTest(.{
+        .name = "ssz_generic_spec_tests",
+        .root_module = module_ssz_generic_spec_tests,
+        .filters = b.option([][]const u8, "ssz_generic_spec_tests.filters", "ssz_generic_spec_tests test filters") orelse &[_][]const u8{},
+    });
+    const install_test_ssz_generic_spec_tests = b.addInstallArtifact(test_ssz_generic_spec_tests, .{});
+    const tls_install_test_ssz_generic_spec_tests = b.step("build-test:ssz_generic_spec_tests", "Install the ssz_generic_spec_tests test");
+    tls_install_test_ssz_generic_spec_tests.dependOn(&install_test_ssz_generic_spec_tests.step);
+
+    const run_test_ssz_generic_spec_tests = b.addRunArtifact(test_ssz_generic_spec_tests);
+    const tls_run_test_ssz_generic_spec_tests = b.step("test:ssz_generic_spec_tests", "Run the ssz_generic_spec_tests test");
+    tls_run_test_ssz_generic_spec_tests.dependOn(&run_test_ssz_generic_spec_tests.step);
+    tls_run_test.dependOn(&run_test_ssz_generic_spec_tests.step);
+
+    const module_ssz_static_spec_tests = b.createModule(.{
+        .root_source_file = b.path("test/spec/ssz/static_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("ssz_static_spec_tests"), module_ssz_static_spec_tests) catch @panic("OOM");
+
+    const test_ssz_static_spec_tests = b.addTest(.{
+        .name = "ssz_static_spec_tests",
+        .root_module = module_ssz_static_spec_tests,
+        .filters = b.option([][]const u8, "ssz_static_spec_tests.filters", "ssz_static_spec_tests test filters") orelse &[_][]const u8{},
+    });
+    const install_test_ssz_static_spec_tests = b.addInstallArtifact(test_ssz_static_spec_tests, .{});
+    const tls_install_test_ssz_static_spec_tests = b.step("build-test:ssz_static_spec_tests", "Install the ssz_static_spec_tests test");
+    tls_install_test_ssz_static_spec_tests.dependOn(&install_test_ssz_static_spec_tests.step);
+
+    const run_test_ssz_static_spec_tests = b.addRunArtifact(test_ssz_static_spec_tests);
+    const tls_run_test_ssz_static_spec_tests = b.step("test:ssz_static_spec_tests", "Run the ssz_static_spec_tests test");
+    tls_run_test_ssz_static_spec_tests.dependOn(&run_test_ssz_static_spec_tests.step);
+    tls_run_test.dependOn(&run_test_ssz_static_spec_tests.step);
+
     module_config.addImport("build_options", options_module_build_options);
     module_config.addImport("preset", module_preset);
     module_config.addImport("consensus_types", module_consensus_types);
@@ -286,15 +699,28 @@ pub fn build(b: *std.Build) void {
     module_config.addImport("constants", module_constants);
 
     module_consensus_types.addImport("build_options", options_module_build_options);
-    module_consensus_types.addImport("ssz", dep_ssz.module("ssz"));
+    module_consensus_types.addImport("ssz", module_ssz);
     module_consensus_types.addImport("constants", module_constants);
     module_consensus_types.addImport("preset", module_preset);
+
+    module_hashing.addImport("build_options", options_module_build_options);
+    module_hashing.addImport("hex", module_hex);
+    module_hashing.addImport("hashtree", dep_hashtree.module("hashtree"));
+
+    module_persistent_merkle_tree.addImport("build_options", options_module_build_options);
+    module_persistent_merkle_tree.addImport("hex", module_hex);
+    module_persistent_merkle_tree.addImport("hashing", module_hashing);
 
     module_preset.addImport("build_options", options_module_build_options);
     module_preset.addImport("constants", module_constants);
 
+    module_ssz.addImport("build_options", options_module_build_options);
+    module_ssz.addImport("hex", module_hex);
+    module_ssz.addImport("hashing", module_hashing);
+    module_ssz.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+
     module_state_transition.addImport("build_options", options_module_build_options);
-    module_state_transition.addImport("ssz", dep_ssz.module("ssz"));
+    module_state_transition.addImport("ssz", module_ssz);
     module_state_transition.addImport("config", module_config);
     module_state_transition.addImport("consensus_types", module_consensus_types);
     module_state_transition.addImport("blst", dep_blst.module("blst"));
@@ -310,13 +736,41 @@ pub fn build(b: *std.Build) void {
     module_write_spec_tests.addImport("consensus_types", module_consensus_types);
     module_write_spec_tests.addImport("state_transition", module_state_transition);
 
+    module_write_ssz_generic_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
+
+    module_write_ssz_static_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
+
+    module_bench_ssz_attestation.addImport("consensus_types", module_consensus_types);
+    module_bench_ssz_attestation.addImport("ssz", module_ssz);
+    module_bench_ssz_attestation.addImport("zbench", dep_zbench.module("zbench"));
+
+    module_bench_ssz_block.addImport("consensus_types", module_consensus_types);
+    module_bench_ssz_block.addImport("ssz", module_ssz);
+    module_bench_ssz_block.addImport("zbench", dep_zbench.module("zbench"));
+
+    module_bench_ssz_state.addImport("consensus_types", module_consensus_types);
+    module_bench_ssz_state.addImport("ssz", module_ssz);
+    module_bench_ssz_state.addImport("zbench", dep_zbench.module("zbench"));
+
+    module_bench_merkle_gindex.addImport("hashing", module_hashing);
+    module_bench_merkle_gindex.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_bench_merkle_gindex.addImport("zbench", dep_zbench.module("zbench"));
+
+    module_bench_merkle_node.addImport("hashing", module_hashing);
+    module_bench_merkle_node.addImport("zbench", dep_zbench.module("zbench"));
+
+    module_bench_hashing.addImport("hashing", module_hashing);
+    module_bench_hashing.addImport("zbench", dep_zbench.module("zbench"));
+
     module_int.addImport("build_options", options_module_build_options);
-    module_int.addImport("ssz", dep_ssz.module("ssz"));
+    module_int.addImport("ssz", module_ssz);
     module_int.addImport("state_transition", module_state_transition);
     module_int.addImport("config", module_config);
     module_int.addImport("consensus_types", module_consensus_types);
     module_int.addImport("preset", module_preset);
     module_int.addImport("constants", module_constants);
+    module_int.addImport("hex", module_hex);
+    module_int.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
 
     module_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
     module_spec_tests.addImport("consensus_types", module_consensus_types);
@@ -324,6 +778,22 @@ pub fn build(b: *std.Build) void {
     module_spec_tests.addImport("preset", module_preset);
     module_spec_tests.addImport("snappy", dep_snappy.module("snappy"));
     module_spec_tests.addImport("state_transition", module_state_transition);
-    module_spec_tests.addImport("ssz", dep_ssz.module("ssz"));
+    module_spec_tests.addImport("ssz", module_ssz);
     module_spec_tests.addImport("blst", dep_blst.module("blst"));
+
+    module_ssz_generic_spec_tests.addImport("hex", module_hex);
+    module_ssz_generic_spec_tests.addImport("snappy", dep_snappy.module("snappy"));
+    module_ssz_generic_spec_tests.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_ssz_generic_spec_tests.addImport("ssz", module_ssz);
+    module_ssz_generic_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
+    module_ssz_generic_spec_tests.addImport("yaml", dep_yaml.module("yaml"));
+
+    module_ssz_static_spec_tests.addImport("hex", module_hex);
+    module_ssz_static_spec_tests.addImport("snappy", dep_snappy.module("snappy"));
+    module_ssz_static_spec_tests.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_ssz_static_spec_tests.addImport("ssz", module_ssz);
+    module_ssz_static_spec_tests.addImport("build_options", options_module_build_options);
+    module_ssz_static_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
+    module_ssz_static_spec_tests.addImport("consensus_types", module_consensus_types);
+    module_ssz_static_spec_tests.addImport("yaml", dep_yaml.module("yaml"));
 }

@@ -49,6 +49,10 @@ pub fn hexByteLen(hex: []const u8) usize {
     return if (hasOxPrefix(hex)) (hex.len - 2) / 2 else hex.len / 2;
 }
 
+pub fn hexLenFromBytes(bytes: []const u8) usize {
+    return 2 + bytes.len * 2;
+}
+
 test "rootToHex" {
     const TestCase = struct {
         root: *const [32]u8,

@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  zbuild: 
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: "0.14.0"
+
+      - name: Install zbuild
+        run: |
+          git clone https://github.com/ChainSafe/zbuild.git
+          cd zbuild
+          zig build -Doptimize=ReleaseFast
+          sudo cp zig-out/bin/zbuild /usr/local/bin/zbuild
+
+      - name: Verify zbuild
+        run: zbuild version
+
+      - name: Check if build.zig is sync'ed with zbuild.zon
+        run: |
+          zbuild sync
+          git diff --exit-code
+
+  unit-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: "0.14.0"
+
+      - name: Unit tests
+        run: |
+          zig build test:hashing
+          zig build test:persistent_merkle_tree
+          zig build test:ssz
+          zig build test:int
+
+  spec-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: "0.14.0"
+
+      - name: Cache spec tests
+        id: spec-tests
+        uses: actions/cache@v4
+        with:
+          path: test/spec/spec_tests
+          key: ${{ hashFiles('test/spec/version.txt') }}
+
+      - name: Download spec tests
+        run: |
+          zig build run:download_spec_tests
+
+      - name: Write generic spec tests
+        run: |
+          zig build run:write_generic_spec_tests
+
+      - name: Write static spec tests
+        run: |
+          zig build run:write_static_spec_tests
+
+      - name: Run generic spec tests
+        run: |
+          zig build test:generic_spec_tests
+
+      - name: Run minimal static spec tests
+        run: |
+          zig build test:static_spec_tests -Dpreset=minimal
+
+      - name: Run mainnet static spec tests
+        run: |
+          zig build test:static_spec_tests -Dpreset=mainnet

@@ -10,13 +10,21 @@
             .url = "git+https://github.com/chainsafe/blst-z#7c135f5049d99f603856a1c8728321cb69682788",
             .hash = "blst_z-0.0.0-td3FNDuaAAA1nbeXzEihbQm-w9sJWrGpkrEjioonUnrV",
         },
-        .ssz = .{
-            .url = "git+https://github.com/chainsafe/ssz-z#ef6e164c481068f60228ad9d865686b0232c0618",
-            .hash = "ssz-0.1.0-yORmzIQUBQAS7wYVsMD2lIUqH13en3svqO8Rrtjbg9gF",
+        .hashtree = .{
+            .url = "git+https://github.com/chainsafe/hashtree-z#43a58b0fd4813515cda3d0ffc622125243a01c54",
+            .hash = "hashtree-0.1.0-sBOovrYSAAArAQVa-a6BhOPWPTrgKrJtufxWjQYMNNAN",
         },
         .snappy = .{
             .url = "git+https://github.com/chainsafe/snappy.zig#ede2ad602ac9ffa506e3724a2bf5fc14c806187f",
             .hash = "snappy-0.1.0-n4AaqtMYAACgB1kHWQ2_CFI-gbtYEUCbXyYlQZ2ENyfd",
+        },
+        .yaml = .{
+            .url = "git+https://github.com/chainsafe/zig-yaml#e0e5962579e990a66c21424416c7ac092b20b772",
+            .hash = "zig_yaml-0.1.0-C1161m2NAgDhth5OvjG1o1UNKcdo-XNfO82m10J1g4Cl",
+        },
+        .zbench = .{
+            .url = "git+https://github.com/hendriknielaender/zBench#d8c7dd485306b88b757d52005614ebcb0a336942",
+            .hash = "zbench-0.10.0-YTdc714iAQDO4lTHMnIljYHPZ5v_sNTsw75vAmO1pyT-",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
