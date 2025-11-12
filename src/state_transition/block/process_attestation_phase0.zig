@@ -43,18 +43,21 @@ pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaco
         if (!ssz.phase0.Checkpoint.equals(&data.source, state.currentJustifiedCheckpoint())) {
             return error.InvalidAttestationSourceNotEqualToCurrentJustifiedCheckpoint;
         }
-        try state.currentEpochPendingAttestations().append(allocator, pending_attestation);
+        if (state.currentEpochPendingAttestations().append(allocator, pending_attestation)) |_| {
+            appended = true;
+        } else |err| return err;
     } else {
         if (!ssz.phase0.Checkpoint.equals(&data.source, state.previousJustifiedCheckpoint())) {
             return error.InvalidAttestationSourceNotEqualToPreviousJustifiedCheckpoint;
         }
-        try state.previousEpochPendingAttestations().append(allocator, pending_attestation);
+        if (state.previousEpochPendingAttestations().append(allocator, pending_attestation)) |_| {
+            appended = true;
+        } else |err| return err;
     }
-    appended = true;
 
     var indexed_attestation: ssz.phase0.IndexedAttestation.Type = undefined;
     try epoch_cache.computeIndexedAttestationPhase0(attestation, &indexed_attestation);
-    defer indexed_attestation.attesting_indices.deinit(allocator);
+    defer ssz.phase0.IndexedAttestation.deinit(allocator, &indexed_attestation);
 
     if (!try isValidIndexedAttestation(ssz.phase0.IndexedAttestation.Type, cached_state, &indexed_attestation, verify_signature)) {
         return error.InvalidAttestationInvalidIndexedAttestation;
