@@ -3,9 +3,9 @@ const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const SignedBeaconBlock = @import("../types/beacon_block.zig").SignedBeaconBlock;
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
-const ct = @import("consensus_types");
-const Root = ct.primitive.Root;
-const SignedVoluntaryExit = ct.phase0.SignedVoluntaryExit.Type;
+const types = @import("consensus_types");
+const Root = types.primitive.Root;
+const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit.Type;
 const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAtEpoch;
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const verifySingleSignatureSet = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
@@ -23,7 +23,7 @@ pub fn getVoluntaryExitSignatureSet(cached_state: *const CachedBeaconStateAllFor
     const slot = computeStartSlotAtEpoch(signed_voluntary_exit.message.epoch);
     const domain = try config.getDomainForVoluntaryExit(state.slot(), slot);
     var signing_root: [32]u8 = undefined;
-    try computeSigningRoot(ct.phase0.VoluntaryExit, &signed_voluntary_exit.message, domain, &signing_root);
+    try computeSigningRoot(types.phase0.VoluntaryExit, &signed_voluntary_exit.message, domain, &signing_root);
 
     return .{
         .pubkey = epoch_cache.index_to_pubkey.items[signed_voluntary_exit.message.validator_index],

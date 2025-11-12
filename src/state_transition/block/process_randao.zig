@@ -1,12 +1,12 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
 const Body = @import("../types/signed_block.zig").SignedBlock.Body;
-const Bytes32 = ct.primitive.Bytes32.Type;
+const Bytes32 = types.primitive.Bytes32.Type;
 const getRandaoMix = @import("../utils/seed.zig").getRandaoMix;
 const verifyRandaoSignature = @import("../signature_sets/randao.zig").verifyRandaoSignature;
 const digest = @import("../utils/sha256.zig").digest;
@@ -39,7 +39,7 @@ pub fn processRandao(
 
 fn xor(a: Bytes32, b: Bytes32) Bytes32 {
     var result: Bytes32 = undefined;
-    for (0..ct.primitive.Bytes32.length) |i| {
+    for (0..types.primitive.Bytes32.length) |i| {
         result[i] = a[i] ^ b[i];
     }
     return result;

@@ -1,14 +1,14 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Domain = ct.primitive.Domain.Type;
-const Root = ct.primitive.Root.Type;
-const ct = @import("consensus_types");
+const Domain = types.primitive.Domain.Type;
+const Root = types.primitive.Root.Type;
+const types = @import("consensus_types");
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
 const SignedBeaconBlock = @import("../state_transition.zig").SignedBeaconBlock;
 const Block = @import("../state_transition.zig").Block;
 const SignedBlock = @import("../types/signed_block.zig").SignedBlock;
 
-const SigningData = ct.phase0.SigningData.Type;
+const SigningData = types.phase0.SigningData.Type;
 
 /// Return the signing root of an object by calculating the root of the object-domain tree.
 pub fn computeSigningRoot(comptime T: type, ssz_object: *const T.Type, domain: Domain, out: *[32]u8) !void {
@@ -19,7 +19,7 @@ pub fn computeSigningRoot(comptime T: type, ssz_object: *const T.Type, domain: D
         .domain = domain,
     };
 
-    try ct.phase0.SigningData.hashTreeRoot(&domain_wrapped_object, out);
+    try types.phase0.SigningData.hashTreeRoot(&domain_wrapped_object, out);
 }
 
 pub fn computeBlockSigningRoot(allocator: Allocator, block: *const SignedBlock, domain: Domain, out: *[32]u8) !void {
@@ -29,12 +29,12 @@ pub fn computeBlockSigningRoot(allocator: Allocator, block: *const SignedBlock, 
         .object_root = object_root,
         .domain = domain,
     };
-    try ct.phase0.SigningData.hashTreeRoot(&domain_wrapped_object, out);
+    try types.phase0.SigningData.hashTreeRoot(&domain_wrapped_object, out);
 }
 
 test "computeSigningRoot - sanity" {
-    const ssz_type = ct.phase0.Checkpoint;
-    const ssz_object: ct.phase0.Checkpoint.Type = .{
+    const ssz_type = types.phase0.Checkpoint;
+    const ssz_object: types.phase0.Checkpoint.Type = .{
         .epoch = 1,
         .root = [_]u8{0x01} ** 32,
     };
@@ -46,9 +46,9 @@ test "computeSigningRoot - sanity" {
 
 test "computeBlockSigningRoot - sanity" {
     const allocator = std.testing.allocator;
-    var electra_block = ct.electra.BeaconBlock.default_value;
+    var electra_block = types.electra.BeaconBlock.default_value;
     electra_block.slot = 2025;
-    var signed_electra_block = ct.electra.SignedBeaconBlock.default_value;
+    var signed_electra_block = types.electra.SignedBeaconBlock.default_value;
     signed_electra_block.message = electra_block;
     const domain = [_]u8{0x01} ** 32;
     var out: [32]u8 = undefined;

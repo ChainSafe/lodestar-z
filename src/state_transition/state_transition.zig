@@ -1,25 +1,25 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const Root = ct.primitive.Root.Type;
+const Root = types.primitive.Root.Type;
 const ZERO_HASH = @import("constants").ZERO_HASH;
 
 const ExecutionPayload = @import("types/execution_payload.zig").ExecutionPayload;
 
-const Slot = ct.primitive.Slot.Type;
+const Slot = types.primitive.Slot.Type;
 
 const CachedBeaconStateAllForks = @import("cache/state_cache.zig").CachedBeaconStateAllForks;
 pub const SignedBeaconBlock = @import("types/beacon_block.zig").SignedBeaconBlock;
 const verifyProposerSignature = @import("./signature_sets/proposer.zig").verifyProposerSignature;
 const processBlock = @import("./block/process_block.zig").processBlock;
 const BeaconBlock = @import("types/beacon_block.zig").BeaconBlock;
-const SignedVoluntaryExit = ct.phase0.SignedVoluntaryExit.Type;
+const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit.Type;
 const Attestation = @import("types/attestation.zig").Attestation;
 const Attestations = @import("types/attestation.zig").Attestations;
 const AttesterSlashings = @import("types/attester_slashing.zig").AttesterSlashings;
-const ProposerSlashing = ct.phase0.ProposerSlashing.Type;
+const ProposerSlashing = types.phase0.ProposerSlashing.Type;
 const BlindedBeaconBlock = @import("types/beacon_block.zig").BlindedBeaconBlock;
 const BlindedBeaconBlockBody = @import("types/beacon_block.zig").BlindedBeaconBlockBody;
 const BeaconBlockBody = @import("types/beacon_block.zig").BeaconBlockBody;

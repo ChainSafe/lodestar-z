@@ -1,5 +1,5 @@
 const std = @import("std");
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;

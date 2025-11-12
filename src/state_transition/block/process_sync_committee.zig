@@ -3,15 +3,15 @@ const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
 const SignedBlock = @import("../types/signed_block.zig").SignedBlock;
-const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
+const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const AggregatedSignatureSet = @import("../utils/signature_sets.zig").AggregatedSignatureSet;
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const Root = ct.primitive.Root.Type;
+const Root = types.primitive.Root.Type;
 const G2_POINT_AT_INFINITY = @import("constants").G2_POINT_AT_INFINITY;
 const c = @import("constants");
 const blst = @import("blst");
-const BLSPubkey = ct.primitive.BLSPubkey.Type;
+const BLSPubkey = types.primitive.BLSPubkey.Type;
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const verifyAggregatedSignatureSet = @import("../utils/signature_sets.zig").verifyAggregatedSignatureSet;
 const balance_utils = @import("../utils/balance.zig");
@@ -127,7 +127,7 @@ pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *const C
         pubkeys[i] = epoch_cache.index_to_pubkey.items[participant_indices_[i]];
     }
     var signing_root: Root = undefined;
-    try computeSigningRoot(ct.primitive.Root, &root_signed, domain, &signing_root);
+    try computeSigningRoot(types.primitive.Root, &root_signed, domain, &signing_root);
 
     return .{
         .pubkeys = pubkeys,

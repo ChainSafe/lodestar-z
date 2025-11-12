@@ -1,5 +1,5 @@
 const std = @import("std");
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const ForkSeq = @import("config").ForkSeq;
@@ -55,7 +55,7 @@ pub fn processPendingConsolidations(allocator: Allocator, cached_state: *CachedB
         const new_len = pending_consolidations.items.len - next_pending_consolidation;
 
         std.mem.copyForwards(
-            ct.electra.PendingConsolidation.Type,
+            types.electra.PendingConsolidation.Type,
             pending_consolidations.items[0..new_len],
             pending_consolidations.items[next_pending_consolidation .. next_pending_consolidation + new_len],
         );

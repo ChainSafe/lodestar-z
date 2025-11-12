@@ -1,28 +1,28 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 const ssz = @import("ssz");
 const hex = @import("hex");
-const Slot = ct.primitive.Slot.Type;
+const Slot = types.primitive.Slot.Type;
 const preset = @import("preset").preset;
 const state_transition = @import("../root.zig");
-const Root = ct.primitive.Root.Type;
+const Root = types.primitive.Root.Type;
 const ZERO_HASH = @import("constants").ZERO_HASH;
 const CachedBeaconStateAllForks = state_transition.CachedBeaconStateAllForks;
 const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
 const getBlockRootAtSlot = state_transition.getBlockRootAtSlot;
 
 /// Generate a valid electra block for the given pre-state.
-pub fn generateElectraBlock(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, out: *ct.electra.SignedBeaconBlock.Type) !void {
+pub fn generateElectraBlock(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, out: *types.electra.SignedBeaconBlock.Type) !void {
     const state = cached_state.state;
-    var attestations = ct.electra.Attestations.default_value;
+    var attestations = types.electra.Attestations.default_value;
     // no need to fill up to MAX_ATTESTATIONS_ELECTRA
     const att_slot: Slot = state.slot() - 2;
     const att_index = 0;
     const att_block_root = try getBlockRootAtSlot(state, att_slot);
     const target_epoch = cached_state.getEpochCache().epoch;
     const target_epoch_slot = computeStartSlotAtEpoch(target_epoch);
-    const att_data: ct.phase0.AttestationData.Type = .{
+    const att_data: types.phase0.AttestationData.Type = .{
         .slot = att_slot,
         .index = att_index,
         .beacon_block_root = att_block_root,
@@ -41,13 +41,13 @@ pub fn generateElectraBlock(allocator: Allocator, cached_state: *const CachedBea
 
     var aggregation_bits = try ssz.BitListType(preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT).Type.fromBitLen(allocator, total_committee_size);
     // TODO: why this does not work
-    // var aggregation_bits = @field(ct.electra.Attestation.Fields, "aggregation_bits").Type.fromBitLen(allocator, total_committee_size);
+    // var aggregation_bits = @field(types.electra.Attestation.Fields, "aggregation_bits").Type.fromBitLen(allocator, total_committee_size);
     for (0..total_committee_size) |i| {
         try aggregation_bits.set(allocator, i, true);
     }
 
     var committee_bits = ssz.BitVectorType(preset.MAX_COMMITTEES_PER_SLOT).default_value;
-    // var committee_bits = @field(ct.electra.Attestation.Fields, "committee_bits").default_value;
+    // var committee_bits = @field(types.electra.Attestation.Fields, "committee_bits").default_value;
     for (0..committee_count) |i| {
         try committee_bits.set(i, true);
     }
@@ -55,11 +55,11 @@ pub fn generateElectraBlock(allocator: Allocator, cached_state: *const CachedBea
     try attestations.append(allocator, .{
         .aggregation_bits = aggregation_bits,
         .data = att_data,
-        .signature = ct.primitive.BLSSignature.default_value,
+        .signature = types.primitive.BLSSignature.default_value,
         .committee_bits = committee_bits,
     });
 
-    var execution_payload = ct.electra.ExecutionPayload.default_value;
+    var execution_payload = types.electra.ExecutionPayload.default_value;
     execution_payload.timestamp = 1737111896;
 
     out.* = .{
@@ -72,24 +72,24 @@ pub fn generateElectraBlock(allocator: Allocator, cached_state: *const CachedBea
             .state_root = [_]u8{0} ** 32,
             .body = .{
                 .randao_reveal = [_]u8{0} ** 96,
-                .eth1_data = ct.phase0.Eth1Data.default_value,
+                .eth1_data = types.phase0.Eth1Data.default_value,
                 .graffiti = [_]u8{0} ** 32,
                 // TODO: populate data to test other operations
-                .proposer_slashings = ct.phase0.ProposerSlashings.default_value,
-                .attester_slashings = ct.phase0.AttesterSlashings.default_value,
+                .proposer_slashings = types.phase0.ProposerSlashings.default_value,
+                .attester_slashings = types.phase0.AttesterSlashings.default_value,
                 .attestations = attestations,
-                .deposits = ct.phase0.Deposits.default_value,
-                .voluntary_exits = ct.phase0.VoluntaryExits.default_value,
+                .deposits = types.phase0.Deposits.default_value,
+                .voluntary_exits = types.phase0.VoluntaryExits.default_value,
                 .sync_aggregate = .{
                     .sync_committee_bits = ssz.BitVectorType(preset.SYNC_COMMITTEE_SIZE).default_value,
-                    .sync_committee_signature = ct.primitive.BLSSignature.default_value,
+                    .sync_committee_signature = types.primitive.BLSSignature.default_value,
                 },
                 .execution_payload = execution_payload,
-                .bls_to_execution_changes = ct.capella.SignedBLSToExecutionChanges.default_value,
-                .blob_kzg_commitments = ct.electra.BlobKzgCommitments.default_value,
-                .execution_requests = ct.electra.ExecutionRequests.default_value,
+                .bls_to_execution_changes = types.capella.SignedBLSToExecutionChanges.default_value,
+                .blob_kzg_commitments = types.electra.BlobKzgCommitments.default_value,
+                .execution_requests = types.electra.ExecutionRequests.default_value,
             },
         },
-        .signature = ct.primitive.BLSSignature.default_value,
+        .signature = types.primitive.BLSSignature.default_value,
     };
 }

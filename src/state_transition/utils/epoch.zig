@@ -1,12 +1,12 @@
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
-const Slot = ct.primitive.Slot.Type;
-const Epoch = ct.primitive.Epoch.Type;
-const SyncPeriod = ct.primitive.SyncPeriod.Type;
+const Slot = types.primitive.Slot.Type;
+const Epoch = types.primitive.Epoch.Type;
+const SyncPeriod = types.primitive.SyncPeriod.Type;
 const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
-const Gwei = ct.primitive.Gwei.Type;
+const Gwei = types.primitive.Gwei.Type;
 const getActivationExitChurnLimit = @import("../utils/validator.zig").getActivationExitChurnLimit;
 const getConsolidationChurnLimit = @import("../utils/validator.zig").getConsolidationChurnLimit;
 

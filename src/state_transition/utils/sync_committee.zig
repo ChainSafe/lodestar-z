@@ -5,12 +5,12 @@ const AggregatePublicKey = blst.AggregatePublicKey;
 const Allocator = std.mem.Allocator;
 const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
 const EffiectiveBalanceIncrements = @import("../cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
-const SyncCommittee = ct.altair.SyncCommittee.Type;
-const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
-const PublicKey = ct.primitive.BLSPubkey.Type;
+const SyncCommittee = types.altair.SyncCommittee.Type;
+const ValidatorIndex = types.primitive.ValidatorIndex.Type;
+const PublicKey = types.primitive.BLSPubkey.Type;
 const ForkSeq = @import("config").ForkSeq;
 const intSqrt = @import("../utils/math.zig").intSqrt;
 

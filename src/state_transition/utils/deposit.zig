@@ -1,6 +1,6 @@
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const Eth1Data = ct.phase0.Eth1Data.Type;
+const Eth1Data = types.phase0.Eth1Data.Type;
 const MAX_DEPOSITS = preset.MAX_DEPOSITS;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 

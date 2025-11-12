@@ -3,16 +3,16 @@ const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
 const ssz = @import("ssz");
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const isValidIndexedAttestation = @import("./is_valid_indexed_attestation.zig").isValidIndexedAttestation;
-const Slot = ct.primitive.Slot.Type;
-const Checkpoint = ct.phase0.Checkpoint.Type;
-const Phase0Attestation = ct.phase0.Attestation.Type;
-const ElectraAttestation = ct.electra.Attestation.Type;
-const PendingAttestation = ct.phase0.PendingAttestation.Type;
+const Slot = types.primitive.Slot.Type;
+const Checkpoint = types.phase0.Checkpoint.Type;
+const Phase0Attestation = types.phase0.Attestation.Type;
+const ElectraAttestation = types.electra.Attestation.Type;
+const PendingAttestation = types.phase0.PendingAttestation.Type;
 
 pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, attestation: *const Phase0Attestation, verify_signature: bool) !void {
     const state = cached_state.state;
@@ -20,7 +20,7 @@ pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaco
     const slot = state.slot();
     const data = attestation.data;
 
-    try validateAttestation(ct.phase0.Attestation.Type, cached_state, attestation);
+    try validateAttestation(types.phase0.Attestation.Type, cached_state, attestation);
 
     // should store a clone of aggregation_bits on Phase0 BeaconState to avoid double free error
     var cloned_aggregation_bits: ssz.BitListType(preset.MAX_VALIDATORS_PER_COMMITTEE).Type = undefined;
@@ -40,14 +40,14 @@ pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaco
     };
 
     if (data.target.epoch == epoch_cache.epoch) {
-        if (!ct.phase0.Checkpoint.equals(&data.source, state.currentJustifiedCheckpoint())) {
+        if (!types.phase0.Checkpoint.equals(&data.source, state.currentJustifiedCheckpoint())) {
             return error.InvalidAttestationSourceNotEqualToCurrentJustifiedCheckpoint;
         }
         if (state.currentEpochPendingAttestations().append(allocator, pending_attestation)) |_| {
             appended = true;
         } else |err| return err;
     } else {
-        if (!ct.phase0.Checkpoint.equals(&data.source, state.previousJustifiedCheckpoint())) {
+        if (!types.phase0.Checkpoint.equals(&data.source, state.previousJustifiedCheckpoint())) {
             return error.InvalidAttestationSourceNotEqualToPreviousJustifiedCheckpoint;
         }
         if (state.previousEpochPendingAttestations().append(allocator, pending_attestation)) |_| {
@@ -55,14 +55,14 @@ pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaco
         } else |err| return err;
     }
 
-    var indexed_attestation: ct.phase0.IndexedAttestation.Type = undefined;
+    var indexed_attestation: types.phase0.IndexedAttestation.Type = undefined;
     try epoch_cache.computeIndexedAttestationPhase0(attestation, &indexed_attestation);
-    defer ct.phase0.IndexedAttestation.deinit(allocator, &indexed_attestation);
+    defer types.phase0.IndexedAttestation.deinit(allocator, &indexed_attestation);
 
-    if (!try isValidIndexedAttestation(ct.phase0.IndexedAttestation.Type, cached_state, &indexed_attestation, verify_signature)) {
+    if (!try isValidIndexedAttestation(types.phase0.IndexedAttestation.Type, cached_state, &indexed_attestation, verify_signature)) {
         return error.InvalidAttestationInvalidIndexedAttestation;
     }
-    _ = try isValidIndexedAttestation(ct.phase0.IndexedAttestation.Type, cached_state, &indexed_attestation, verify_signature);
+    _ = try isValidIndexedAttestation(types.phase0.IndexedAttestation.Type, cached_state, &indexed_attestation, verify_signature);
 }
 
 /// AT could be either Phase0Attestation or ElectraAttestation

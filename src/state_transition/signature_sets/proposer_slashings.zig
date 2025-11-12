@@ -4,13 +4,13 @@ const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeac
 const SignedBeaconBlock = @import("../types/beacon_block.zig").SignedBeaconBlock;
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
 const c = @import("constants");
-const ct = @import("consensus_types");
-const Root = ct.primitive.Root;
+const types = @import("consensus_types");
+const Root = types.primitive.Root;
 const computeBlockSigningRoot = @import("../utils/signing_root.zig").computeBlockSigningRoot;
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const verifySignatureSet = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
 
-pub fn getProposerSlashingSignatureSets(cached_state: *const CachedBeaconStateAllForks, proposer_slashing: *const ct.phase0.ProposerSlashing.Type) ![2]SingleSignatureSet {
+pub fn getProposerSlashingSignatureSets(cached_state: *const CachedBeaconStateAllForks, proposer_slashing: *const types.phase0.ProposerSlashing.Type) ![2]SingleSignatureSet {
     const config = cached_state.config;
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
@@ -23,9 +23,9 @@ pub fn getProposerSlashingSignatureSets(cached_state: *const CachedBeaconStateAl
     const domain_1 = try config.getDomain(state.slot(), c.DOMAIN_BEACON_PROPOSER, signed_header_1.message.slot);
     const domain_2 = try config.getDomain(state.slot(), c.DOMAIN_BEACON_PROPOSER, signed_header_2.message.slot);
     var signing_root_1: [32]u8 = undefined;
-    try computeSigningRoot(ct.phase0.BeaconBlockHeader, &signed_header_1.message, domain_1, &signing_root_1);
+    try computeSigningRoot(types.phase0.BeaconBlockHeader, &signed_header_1.message, domain_1, &signing_root_1);
     var signing_root_2: [32]u8 = undefined;
-    try computeSigningRoot(ct.phase0.BeaconBlockHeader, &signed_header_2.message, domain_2, &signing_root_2);
+    try computeSigningRoot(types.phase0.BeaconBlockHeader, &signed_header_2.message, domain_2, &signing_root_2);
 
     result[0] = SingleSignatureSet{
         .pubkey = epoch_cache.index_to_pubkey.items[signed_header_1.message.proposer_index],

@@ -3,10 +3,10 @@ const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const ForkSeq = @import("config").ForkSeq;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
-const BLSPubkey = ct.primitive.BLSPubkey.Type;
+const ValidatorIndex = types.primitive.ValidatorIndex.Type;
+const BLSPubkey = types.primitive.BLSPubkey.Type;
 const getNextSyncCommitteeIndices = @import("../utils/sync_committee.zig").getNextSyncCommitteeIndices;
 const blst = @import("blst");
 

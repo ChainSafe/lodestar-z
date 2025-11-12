@@ -1,9 +1,9 @@
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 
 pub const AttesterSlashings = union(enum) {
     // no need pointer because this is ArrayList already
-    phase0: ct.phase0.AttesterSlashings.Type,
-    electra: ct.electra.AttesterSlashings.Type,
+    phase0: types.phase0.AttesterSlashings.Type,
+    electra: types.electra.AttesterSlashings.Type,
 
     pub fn length(self: *const AttesterSlashings) usize {
         return switch (self.*) {
@@ -20,6 +20,6 @@ pub const AttesterSlashings = union(enum) {
 };
 
 pub const AttesterSlashingItems = union(enum) {
-    phase0: []ct.phase0.AttesterSlashing.Type,
-    electra: []ct.electra.AttesterSlashing.Type,
+    phase0: []types.phase0.AttesterSlashing.Type,
+    electra: []types.electra.AttesterSlashing.Type,
 };

@@ -7,17 +7,17 @@ test "process block header - sanity" {
 
     const proposers = test_state.cached_state.getEpochCache().proposers;
 
-    var message: ct.electra.BeaconBlock.Type = ct.electra.BeaconBlock.default_value;
+    var message: types.electra.BeaconBlock.Type = types.electra.BeaconBlock.default_value;
     const proposer_index = proposers[slot % preset.SLOTS_PER_EPOCH];
 
     var header_parent_root: [32]u8 = undefined;
-    try ct.phase0.BeaconBlockHeader.hashTreeRoot(test_state.cached_state.state.latestBlockHeader(), &header_parent_root);
+    try types.phase0.BeaconBlockHeader.hashTreeRoot(test_state.cached_state.state.latestBlockHeader(), &header_parent_root);
 
     message.slot = slot;
     message.proposer_index = proposer_index;
     message.parent_root = header_parent_root;
 
-    var beacon_block: ct.electra.SignedBeaconBlock.Type = ct.electra.SignedBeaconBlock.default_value;
+    var beacon_block: types.electra.SignedBeaconBlock.Type = types.electra.SignedBeaconBlock.default_value;
     beacon_block.message = message;
     const signed_beacon_block = SignedBeaconBlock{ .electra = &beacon_block };
     const block = SignedBlock{ .regular = &signed_beacon_block };
@@ -25,7 +25,7 @@ test "process block header - sanity" {
 }
 
 const std = @import("std");
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 const config = @import("config");
 
 const state_transition = @import("state_transition");

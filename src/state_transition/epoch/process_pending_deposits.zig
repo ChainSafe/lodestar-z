@@ -1,5 +1,5 @@
 const std = @import("std");
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
@@ -12,7 +12,7 @@ const addValidatorToRegistry = @import("../block/process_deposit.zig").addValida
 const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCompoundingWithdrawalCredential;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAtEpoch;
-const PendingDeposit = ct.electra.PendingDeposit.Type;
+const PendingDeposit = types.electra.PendingDeposit.Type;
 const GENESIS_SLOT = @import("preset").GENESIS_SLOT;
 const c = @import("constants");
 
@@ -34,7 +34,7 @@ pub fn processPendingDeposits(allocator: Allocator, cached_state: *CachedBeaconS
     const pending_deposits = state.pendingDeposits();
     const pending_deposits_len = pending_deposits.items.len;
     outer: while (start_index < pending_deposits_len) : (start_index += chunk) {
-        // TODO(ct.primitive): implement getReadonlyByRange api for TreeView
+        // TODO(types.primitive): implement getReadonlyByRange api for TreeView
         // const deposits: []PendingDeposit = state.getPendingDeposits().getReadonlyByRange(start_index, chunk);
         const deposits: []PendingDeposit = pending_deposits.items[start_index..@min(start_index + chunk, pending_deposits_len)];
         for (deposits) |deposit| {

@@ -8,12 +8,12 @@ const SignedBeaconBlock = @import("../types/beacon_block.zig").SignedBeaconBlock
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const c = @import("constants");
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 
-const AttestationData = ct.phase0.AttestationData.Type;
-const Attestation = ct.primitive.Attestation.Type;
-const BLSSignature = ct.primitive.BLSSignature.Type;
-const Root = ct.primitive.Root.Type;
+const AttestationData = types.phase0.AttestationData.Type;
+const Attestation = types.primitive.Attestation.Type;
+const BLSSignature = types.primitive.BLSSignature.Type;
+const Root = types.primitive.Root.Type;
 const AggregatedSignatureSet = @import("../utils/signature_sets.zig").AggregatedSignatureSet;
 const createAggregateSignatureSetFromComponents = @import("../utils/signature_sets.zig").createAggregateSignatureSetFromComponents;
 const IndexedAttestation = @import("../types/attestation.zig").IndexedAttestation;
@@ -24,7 +24,7 @@ pub fn getAttestationDataSigningRoot(cached_state: *const CachedBeaconStateAllFo
     const state = cached_state.state;
     const domain = try config.getDomain(state.slot(), c.DOMAIN_BEACON_ATTESTER, slot);
 
-    try computeSigningRoot(ct.phase0.AttestationData, data, domain, out);
+    try computeSigningRoot(types.phase0.AttestationData, data, domain, out);
 }
 
 /// Consumer need to free the returned pubkeys array

@@ -4,14 +4,14 @@ test "process operations" {
     var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
     defer test_state.deinit();
 
-    const beacon_block: ct.electra.SignedBeaconBlock.Type = ct.electra.SignedBeaconBlock.default_value;
+    const beacon_block: types.electra.SignedBeaconBlock.Type = types.electra.SignedBeaconBlock.default_value;
     const signed_beacon_block = SignedBeaconBlock{ .electra = &beacon_block };
     const block = SignedBlock{ .regular = &signed_beacon_block };
     try processOperations(allocator, test_state.cached_state, &block.beaconBlockBody(), .{});
 }
 
 const std = @import("std");
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 
 const state_transition = @import("state_transition");
 const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;

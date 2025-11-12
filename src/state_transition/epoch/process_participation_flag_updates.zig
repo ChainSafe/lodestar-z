@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const ForkSeq = @import("config").ForkSeq;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
 
 pub fn processParticipationFlagUpdates(cached_state: *CachedBeaconStateAllForks, allocator: std.mem.Allocator) !void {
@@ -17,11 +17,11 @@ pub fn processParticipationFlagUpdates(cached_state: *CachedBeaconStateAllForks,
     // data transformation and create the required tree almost for free.
 
     // TODO(ct) implement this using TreeView
-    //   const currentEpochParticipationNode = ct.altair.EpochParticipation.tree_setChunksNode(
+    //   const currentEpochParticipationNode = types.altair.EpochParticipation.tree_setChunksNode(
     //   state.currentEpochParticipation.node,
-    //   zeroNode(ct.altair.EpochParticipation.chunkDepth),
+    //   zeroNode(types.altair.EpochParticipation.chunkDepth),
     //   state.currentEpochParticipation.length
     // );
 
-    // state.currentEpochParticipation = ct.altair.EpochParticipation.getViewDU(currentEpochParticipationNode);
+    // state.currentEpochParticipation = types.altair.EpochParticipation.getViewDU(currentEpochParticipationNode);
 }

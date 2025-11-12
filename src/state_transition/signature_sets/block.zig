@@ -1,5 +1,5 @@
 const std = @import("std");
-const ct = @import("consensus_types");
+const types = @import("consensus_types");
 
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
@@ -24,7 +24,7 @@ test "blockSignatureSets" {
 
     const signature_sets = try std.ArrayList(SingleSignatureSet).init(allocator);
 
-    const block = &ct.electra.SignedBeaconBlock.default_value;
+    const block = &types.electra.SignedBeaconBlock.default_value;
     const signed_beacon_block = SignedBeaconBlock{ .electra = block };
     const signed_block = SignedBlock{ .regular = &signed_beacon_block };
 
