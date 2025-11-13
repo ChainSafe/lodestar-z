@@ -32,7 +32,7 @@ const computeEpochAtSlot = @import("utils/epoch.zig").computeEpochAtSlot;
 const processSlot = @import("slot/process_slot.zig").processSlot;
 const deinitReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
 
-const SignedBlock = @import("types/signed_block.zig").SignedBlock;
+const SignedBlock = @import("types/block.zig").SignedBlock;
 
 pub const ExecutionPayloadStatus = enum(u8) {
     pre_merge,

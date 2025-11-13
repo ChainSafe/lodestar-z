@@ -2,7 +2,7 @@ const std = @import("std");
 const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
-const Block = @import("../types/signed_block.zig").Block;
+const Block = @import("../types/block.zig").Block;
 const BeaconBlockBody = @import("../types/beacon_block.zig").BeaconBlockBody;
 const ExecutionPayload = @import("../types/beacon_block.zig").ExecutionPayload;
 // const ExecutionPayloadHeader
