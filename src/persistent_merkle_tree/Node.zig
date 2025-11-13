@@ -428,16 +428,6 @@ pub const Id = enum(u32) {
         return pool.nodes.items(.right)[@intFromEnum(node_id)];
     }
 
-    pub fn getSingleProof(
-        root_node: Id,
-        allocator: Allocator,
-        pool: *Pool,
-        gindex: Gindex,
-    ) (Error || proof.Error)![][32]u8 {
-        const single_proof = try proof.createSingleProof(allocator, pool, root_node, gindex);
-        return single_proof.witnesses;
-    }
-
     pub fn getState(node_id: Id, pool: *Pool) State {
         return pool.nodes.items(.state)[@intFromEnum(node_id)];
     }

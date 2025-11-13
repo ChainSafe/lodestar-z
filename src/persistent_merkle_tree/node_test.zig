@@ -180,41 +180,6 @@ test "get/setNode" {
 
     try std.testing.expectEqual(leaf, try new_node.getNode(p, Gindex.fromDepth(3, 0)));
 }
-
-test "getSingleProof returns witnesses from leaf to root" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 8);
-    defer pool.deinit();
-    const p = &pool;
-
-    const hash_a: [32]u8 = [_]u8{0x0A} ** 32;
-    const hash_b: [32]u8 = [_]u8{0x0B} ** 32;
-    const hash_c: [32]u8 = [_]u8{0x0C} ** 32;
-    const hash_d: [32]u8 = [_]u8{0x0D} ** 32;
-
-    const leaf0 = try pool.createLeaf(&hash_a, false);
-    const leaf1 = try pool.createLeaf(&hash_b, false);
-    const leaf2 = try pool.createLeaf(&hash_c, false);
-    const leaf3 = try pool.createLeaf(&hash_d, false);
-
-    const left_branch = try pool.createBranch(leaf0, leaf1, false);
-    const right_branch = try pool.createBranch(leaf2, leaf3, false);
-    const root = try pool.createBranch(left_branch, right_branch, true);
-    defer pool.unref(root);
-
-    const gindex = Gindex.fromDepth(2, 1);
-    const witnesses = try root.getSingleProof(allocator, p, gindex);
-    defer allocator.free(witnesses);
-
-    try std.testing.expectEqual(@as(usize, 2), witnesses.len);
-
-    const expected_leaf_sibling = leaf0.getRoot(p);
-    try std.testing.expectEqual(expected_leaf_sibling.*, witnesses[0]);
-
-    const expected_branch_sibling = right_branch.getRoot(p);
-    try std.testing.expectEqual(expected_branch_sibling.*, witnesses[1]);
-}
-
 test "setNodes for checkpoint tree" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 10);
