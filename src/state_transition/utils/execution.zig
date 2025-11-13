@@ -2,23 +2,23 @@ const std = @import("std");
 const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
-const SignedBlock = @import("../types/signed_block.zig").SignedBlock;
+const Block = @import("../types/signed_block.zig").Block;
 const BeaconBlockBody = @import("../types/beacon_block.zig").BeaconBlockBody;
 const ExecutionPayload = @import("../types/beacon_block.zig").ExecutionPayload;
 // const ExecutionPayloadHeader
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
 
-pub fn isExecutionEnabled(state: *const BeaconStateAllForks, block: *const SignedBlock) bool {
+pub fn isExecutionEnabled(state: *const BeaconStateAllForks, block: Block) bool {
     if (!state.isPostBellatrix()) return false;
     if (isMergeTransitionComplete(state)) return true;
 
     // TODO(bing): in lodestar prod, state root comparison should be enough but spec tests were failing. This switch block is a failsafe for that.
     //
     // Ref: https://github.com/ChainSafe/lodestar/blob/7f2271a1e2506bf30378da98a0f548290441bdc5/packages/state-transition/src/util/execution.ts#L37-L42
-    switch (block.*) {
+    switch (block) {
         .blinded => |b| {
-            const body = b.beaconBlock().beaconBlockBody();
+            const body = b.beaconBlockBody();
 
             return switch (body) {
                 .capella => |bd| !types.capella.ExecutionPayloadHeader.equals(&bd.execution_payload_header, &types.capella.ExecutionPayloadHeader.default_value),
@@ -27,7 +27,7 @@ pub fn isExecutionEnabled(state: *const BeaconStateAllForks, block: *const Signe
             };
         },
         .regular => |b| {
-            const body = b.beaconBlock().beaconBlockBody();
+            const body = b.beaconBlockBody();
 
             return switch (body) {
                 .phase0, .altair => @panic("Unsupported"),

@@ -3,7 +3,7 @@ const Slot = types.primitive.Slot.Type;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const Root = types.primitive.Root.Type;
 const Epoch = types.primitive.Epoch.Type;
-const Body = @import("../types/signed_block.zig").SignedBlock.Body;
+const Body = @import("../types/signed_block.zig").Body;
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const c = @import("constants");
@@ -12,7 +12,7 @@ const verifySingleSignatureSet = @import("../utils/signature_sets.zig").verifySi
 
 pub fn verifyRandaoSignature(
     state: *const CachedBeaconStateAllForks,
-    body: *const Body,
+    body: Body,
     slot: Slot,
     proposer_idx: u64,
 ) !bool {
@@ -22,7 +22,7 @@ pub fn verifyRandaoSignature(
 
 pub fn randaoRevealSignatureSet(
     cached_state: *const CachedBeaconStateAllForks,
-    body: *const Body,
+    body: Body,
     slot: Slot,
     proposer_idx: u64,
 ) !SingleSignatureSet {

@@ -5,6 +5,7 @@ const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const SignedBlock = @import("../types/signed_block.zig").SignedBlock;
+const Body = @import("../types/signed_block.zig").Body;
 const ExecutionPayloadStatus = @import("../state_transition.zig").ExecutionPayloadStatus;
 const SignedBlindedBeaconBlock = @import("../types/beacon_block.zig").SignedBlindedBeaconBlock;
 const BlockExternalData = @import("../state_transition.zig").BlockExternalData;
@@ -23,7 +24,7 @@ const PartialPayload = struct {
 pub fn processExecutionPayload(
     allocator: Allocator,
     cached_state: *const CachedBeaconStateAllForks,
-    body: SignedBlock.Body,
+    body: Body,
     external_data: BlockExternalData,
 ) !void {
     const state = cached_state.state;
