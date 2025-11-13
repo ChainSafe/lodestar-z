@@ -6,7 +6,6 @@ const hashOne = @import("hashing").hashOne;
 const getZeroHash = @import("hashing").getZeroHash;
 const max_depth = @import("hashing").max_depth;
 const Depth = @import("hashing").Depth;
-const proof = @import("proof.zig");
 const Gindex = @import("gindex.zig").Gindex;
 
 hash: [32]u8,
