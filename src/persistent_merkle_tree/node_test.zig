@@ -180,6 +180,7 @@ test "get/setNode" {
 
     try std.testing.expectEqual(leaf, try new_node.getNode(p, Gindex.fromDepth(3, 0)));
 }
+
 test "setNodes for checkpoint tree" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 10);
