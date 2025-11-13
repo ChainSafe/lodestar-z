@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
+pub const Block = @import("./types/block.zig").Block;
 pub const BeaconBlock = @import("./types/beacon_block.zig").BeaconBlock;
 pub const BeaconBlockBody = @import("./types/beacon_block.zig").BeaconBlockBody;
 pub const BeaconStateAllForks = @import("./types/beacon_state.zig").BeaconStateAllForks;
@@ -71,7 +72,7 @@ pub const bls = @import("utils/bls.zig");
 const seed = @import("./utils/seed.zig");
 pub const state_transition = @import("./state_transition.zig");
 const EpochShuffling = @import("./utils/epoch_shuffling.zig");
-pub const SignedBlock = @import("./types/signed_block.zig").SignedBlock;
+pub const SignedBlock = @import("./types/block.zig").SignedBlock;
 pub const SignedBeaconBlock = @import("./types/beacon_block.zig").SignedBeaconBlock;
 pub const Attestations = @import("./types/attestation.zig").Attestations;
 

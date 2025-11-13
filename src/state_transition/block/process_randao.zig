@@ -5,7 +5,7 @@ const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
-const Body = @import("../types/signed_block.zig").SignedBlock.Body;
+const Body = @import("../types/block.zig").Body;
 const Bytes32 = types.primitive.Bytes32.Type;
 const getRandaoMix = @import("../utils/seed.zig").getRandaoMix;
 const verifyRandaoSignature = @import("../signature_sets/randao.zig").verifyRandaoSignature;
@@ -13,7 +13,7 @@ const digest = @import("../utils/sha256.zig").digest;
 
 pub fn processRandao(
     cached_state: *const CachedBeaconStateAllForks,
-    body: *const Body,
+    body: Body,
     proposer_idx: u64,
     verify_signature: bool,
 ) !void {

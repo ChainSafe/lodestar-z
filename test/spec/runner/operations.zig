@@ -146,9 +146,8 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     try state_transition.processAttesterSlashing(OpType.Type, self.pre.cached_state, &self.op, verify);
                 },
                 .block_header => {
-                    return error.SkipZigTest;
-                    // TODO: processBlockHeader currently takes signed block which is incorrect. Wait for it to accept unsigned block.
-                    // try state_transition.processBlockHeader(self.pre.allocator, self.pre.cached_state, &self.op);
+                    const block = state_transition.Block{ .regular = @unionInit(state_transition.BeaconBlock, @tagName(fork), &self.op) };
+                    try state_transition.processBlockHeader(self.pre.allocator, self.pre.cached_state, block);
                 },
                 .bls_to_execution_change => {
                     try state_transition.processBlsToExecutionChange(self.pre.cached_state, &self.op);
