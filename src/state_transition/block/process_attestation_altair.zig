@@ -46,7 +46,7 @@ pub fn processAttestationsAltair(allocator: Allocator, cached_state: *const Cach
     var proposer_reward: u64 = 0;
     for (attestations) |*attestation| {
         const data = attestation.data;
-        try validateAttestation(cached_state, attestation);
+        try validateAttestation(AT, cached_state, attestation);
 
         // Retrieve the validator indices from the attestation participation bitfield
         const attesting_indices = try if (AT == Phase0Attestation) epoch_cache.getAttestingIndicesPhase0(attestation) else epoch_cache.getAttestingIndicesElectra(attestation);
