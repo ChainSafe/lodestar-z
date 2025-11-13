@@ -97,7 +97,7 @@ pub fn processPendingDeposits(allocator: Allocator, cached_state: *CachedBeaconS
     if (next_deposit_index > 0) {
         // TODO: implement sliceFrom for TreeView api
         const new_len = pending_deposits_len - next_deposit_index;
-        std.mem.copyForwards(ssz.electra.PendingDeposit.Type, pending_deposits.items[0..new_len], pending_deposits.items[next_deposit_index..pending_deposits_len]);
+        std.mem.copyForwards(types.electra.PendingDeposit.Type, pending_deposits.items[0..new_len], pending_deposits.items[next_deposit_index..pending_deposits_len]);
         try pending_deposits.resize(allocator, new_len);
     }
 
