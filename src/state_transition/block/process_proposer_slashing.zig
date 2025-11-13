@@ -1,7 +1,7 @@
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const ForkSeq = @import("config").ForkSeq;
-const ssz = @import("consensus_types");
-const ProposerSlashing = ssz.phase0.ProposerSlashing.Type;
+const types = @import("consensus_types");
+const ProposerSlashing = types.phase0.ProposerSlashing.Type;
 const isSlashableValidator = @import("../utils/validator.zig").isSlashableValidator;
 const getProposerSlashingSignatureSets = @import("../signature_sets/proposer_slashings.zig").getProposerSlashingSignatureSets;
 const verifySignature = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
@@ -42,7 +42,7 @@ pub fn assertValidProposerSlashing(
     }
 
     // verify headers are different
-    if (ssz.phase0.BeaconBlockHeader.equals(&header_1, &header_2)) {
+    if (types.phase0.BeaconBlockHeader.equals(&header_1, &header_2)) {
         return error.InvalidProposerSlashingHeadersEqual;
     }
 

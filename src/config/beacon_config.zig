@@ -1,13 +1,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ssz = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const ForkData = ssz.phase0.ForkData.Type;
-const Epoch = ssz.primitive.Epoch.Type;
-const Slot = ssz.primitive.Slot.Type;
-const Version = ssz.primitive.Version.Type;
-const Root = ssz.primitive.Root.Type;
-const DomainType = ssz.primitive.DomainType.Type;
+const ForkData = types.phase0.ForkData.Type;
+const Epoch = types.primitive.Epoch.Type;
+const Slot = types.primitive.Slot.Type;
+const Version = types.primitive.Version.Type;
+const Root = types.primitive.Root.Type;
+const DomainType = types.primitive.DomainType.Type;
 const c = @import("constants");
 const DOMAIN_VOLUNTARY_EXIT = c.DOMAIN_VOLUNTARY_EXIT;
 const ALL_DOMAINS = c.ALL_DOMAINS;
@@ -213,7 +213,7 @@ pub const BeaconConfig = struct {
     }
 
     pub fn getDomainForVoluntaryExit(self: *const BeaconConfig, state_slot: Slot, message_slot: ?Slot) ![32]u8 {
-        const domain = if (state_slot / preset.SLOTS_PER_EPOCH < self.chain.DENEB_FORK_EPOCH) {
+        const domain = if (@divFloor(state_slot, preset.SLOTS_PER_EPOCH) < self.chain.DENEB_FORK_EPOCH) {
             return self.getDomain(state_slot, DOMAIN_VOLUNTARY_EXIT, message_slot);
         } else {
             return self.getDomainByForkSeq(ForkSeq.capella, DOMAIN_VOLUNTARY_EXIT);
@@ -230,9 +230,9 @@ fn computeDomain(domain_type: DomainType, fork_version: Version, genesis_validat
     var fork_data_root: [32]u8 = undefined;
     try computeForkDataRoot(fork_version, genesis_validators_root, &fork_data_root);
     // 4 first bytes is domain_type
-    std.mem.copyForwards(u8, out[0..4], domain_type[0..4]);
+    @memcpy(out[0..4], domain_type[0..4]);
     // 28 next bytes is first 28 bytes of fork_data_root
-    std.mem.copyForwards(u8, out[4..], fork_data_root[0..28]);
+    @memcpy(out[4..32], fork_data_root[0..28]);
 }
 
 fn computeForkDataRoot(current_version: Version, genesis_validators_root: Root, out: *[32]u8) !void {
@@ -240,7 +240,7 @@ fn computeForkDataRoot(current_version: Version, genesis_validators_root: Root, 
         .current_version = current_version,
         .genesis_validators_root = genesis_validators_root,
     };
-    try ssz.phase0.ForkData.hashTreeRoot(&fork_data, out);
+    try types.phase0.ForkData.hashTreeRoot(&fork_data, out);
 }
 
 inline fn getDomainTypeKey(domain_type: *const DomainType) DomainTypeKey {

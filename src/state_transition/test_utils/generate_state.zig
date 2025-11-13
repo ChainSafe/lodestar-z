@@ -4,12 +4,12 @@ const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
 const mainnet_chain_config = @import("config").mainnet_chain_config;
 const minimal_chain_config = @import("config").minimal_chain_config;
-const ssz = @import("consensus_types");
+const types = @import("consensus_types");
 const hex = @import("hex");
-const ElectraBeaconState = ssz.electra.BeaconState.Type;
-const BLSPubkey = ssz.primitive.BLSPubkey.Type;
-const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
-const Epoch = ssz.primitive.Epoch.Type;
+const Epoch = types.primitive.Epoch.Type;
+const ElectraBeaconState = types.electra.BeaconState.Type;
+const BLSPubkey = types.primitive.BLSPubkey.Type;
+const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const preset = @import("preset").preset;
 const active_preset = @import("preset").active_preset;
 const BeaconConfig = @import("config").BeaconConfig;
@@ -33,7 +33,7 @@ const active_chain_config = if (active_preset == .mainnet) mainnet_chain_config 
 pub fn generateElectraState(allocator: Allocator, chain_config: ChainConfig, validator_count: usize) !*BeaconStateAllForks {
     const electra_state = try allocator.create(ElectraBeaconState);
     errdefer allocator.destroy(electra_state);
-    electra_state.* = ssz.electra.BeaconState.default_value;
+    electra_state.* = types.electra.BeaconState.default_value;
     electra_state.genesis_time = 1596546008;
     electra_state.genesis_validators_root = try hex.hexToRoot("0x8a8b3f1f1e2d3c4b5a697887766554433221100ffeeddccbbaa9988776655443");
     // set the slot to be ready for the next epoch transition
@@ -61,7 +61,7 @@ pub fn generateElectraState(allocator: Allocator, chain_config: ChainConfig, val
     try interopPubkeysCached(validator_count, pubkeys);
 
     for (0..validator_count) |i| {
-        const validator = ssz.phase0.Validator.Type{
+        const validator = types.phase0.Validator.Type{
             .pubkey = pubkeys[i],
             .withdrawal_credentials = [_]u8{0} ** 32,
             .effective_balance = EFFECTIVE_BALANCE,
@@ -100,7 +100,7 @@ pub fn generateElectraState(allocator: Allocator, chain_config: ChainConfig, val
     // electra_state.randao_mixes = [_][32]u8{[_]u8{4} ** 32} ** preset.EPOCHS_PER_HISTORICAL_VECTOR;
     // no need to populate slashings
     // finality
-    electra_state.justification_bits = ssz.phase0.JustificationBits.default_value;
+    electra_state.justification_bits = types.phase0.JustificationBits.default_value;
     for (0..4) |i| {
         try electra_state.justification_bits.set(i, true);
     }

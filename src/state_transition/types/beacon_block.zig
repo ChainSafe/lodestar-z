@@ -3,18 +3,18 @@ const std = @import("std");
 const panic = std.debug.panic;
 const Allocator = std.mem.Allocator;
 const expect = std.testing.expect;
-const ssz = @import("consensus_types");
-const Slot = ssz.primitive.Slot.Type;
-const Deposit = ssz.phase0.Deposit.Type;
-const SignedVoluntaryExit = ssz.phase0.SignedVoluntaryExit.Type;
-const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
-const SignedBLSToExecutionChange = ssz.capella.SignedBLSToExecutionChange.Type;
-const DepositRequest = ssz.electra.DepositRequest.Type;
-const WithdrawalRequest = ssz.electra.WithdrawalRequest.Type;
-const ConsolidationRequest = ssz.electra.ConsolidationRequest.Type;
-const Root = ssz.primitive.Root.Type;
-const ProposerSlashing = ssz.phase0.ProposerSlashing.Type;
-const ProposerSlashings = ssz.phase0.ProposerSlashings.Type;
+const types = @import("consensus_types");
+const Slot = types.primitive.Slot.Type;
+const Deposit = types.phase0.Deposit.Type;
+const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit.Type;
+const ValidatorIndex = types.primitive.ValidatorIndex.Type;
+const SignedBLSToExecutionChange = types.capella.SignedBLSToExecutionChange.Type;
+const DepositRequest = types.electra.DepositRequest.Type;
+const WithdrawalRequest = types.electra.WithdrawalRequest.Type;
+const ConsolidationRequest = types.electra.ConsolidationRequest.Type;
+const Root = types.primitive.Root.Type;
+const ProposerSlashing = types.phase0.ProposerSlashing.Type;
+const ProposerSlashings = types.phase0.ProposerSlashings.Type;
 const ExecutionPayload = @import("./execution_payload.zig").ExecutionPayload;
 const ExecutionPayloadHeader = @import("./execution_payload.zig").ExecutionPayloadHeader;
 const Attestations = @import("./attestation.zig").Attestations;
@@ -22,12 +22,12 @@ const AttesterSlashings = @import("./attester_slashing.zig").AttesterSlashings;
 const AttesterSlashing = @import("./attester_slashing.zig").AttesterSlashing;
 
 pub const SignedBeaconBlock = union(enum) {
-    phase0: *const ssz.phase0.SignedBeaconBlock.Type,
-    altair: *const ssz.altair.SignedBeaconBlock.Type,
-    bellatrix: *const ssz.bellatrix.SignedBeaconBlock.Type,
-    capella: *const ssz.capella.SignedBeaconBlock.Type,
-    deneb: *const ssz.deneb.SignedBeaconBlock.Type,
-    electra: *const ssz.electra.SignedBeaconBlock.Type,
+    phase0: *const types.phase0.SignedBeaconBlock.Type,
+    altair: *const types.altair.SignedBeaconBlock.Type,
+    bellatrix: *const types.bellatrix.SignedBeaconBlock.Type,
+    capella: *const types.capella.SignedBeaconBlock.Type,
+    deneb: *const types.deneb.SignedBeaconBlock.Type,
+    electra: *const types.electra.SignedBeaconBlock.Type,
 
     pub fn beaconBlock(self: *const SignedBeaconBlock) BeaconBlock {
         return switch (self.*) {
@@ -40,7 +40,7 @@ pub const SignedBeaconBlock = union(enum) {
         };
     }
 
-    pub fn signature(self: *const SignedBeaconBlock) ssz.primitive.BLSSignature.Type {
+    pub fn signature(self: *const SignedBeaconBlock) types.primitive.BLSSignature.Type {
         return switch (self.*) {
             inline .phase0, .altair, .bellatrix, .capella, .deneb, .electra => |block| block.signature,
         };
@@ -48,9 +48,9 @@ pub const SignedBeaconBlock = union(enum) {
 };
 
 pub const SignedBlindedBeaconBlock = union(enum) {
-    capella: *const ssz.capella.SignedBlindedBeaconBlock.Type,
-    deneb: *const ssz.deneb.SignedBlindedBeaconBlock.Type,
-    electra: *const ssz.electra.SignedBlindedBeaconBlock.Type,
+    capella: *const types.capella.SignedBlindedBeaconBlock.Type,
+    deneb: *const types.deneb.SignedBlindedBeaconBlock.Type,
+    electra: *const types.electra.SignedBlindedBeaconBlock.Type,
 
     pub fn beaconBlock(self: *const SignedBlindedBeaconBlock) BlindedBeaconBlock {
         return switch (self.*) {
@@ -60,7 +60,7 @@ pub const SignedBlindedBeaconBlock = union(enum) {
         };
     }
 
-    pub fn signature(self: *const SignedBlindedBeaconBlock) ssz.primitive.BLSSignature.Type {
+    pub fn signature(self: *const SignedBlindedBeaconBlock) types.primitive.BLSSignature.Type {
         return switch (self.*) {
             inline .capella, .deneb, .electra => |block| block.signature,
         };
@@ -68,21 +68,21 @@ pub const SignedBlindedBeaconBlock = union(enum) {
 };
 
 pub const BeaconBlock = union(enum) {
-    phase0: *const ssz.phase0.BeaconBlock.Type,
-    altair: *const ssz.altair.BeaconBlock.Type,
-    bellatrix: *const ssz.bellatrix.BeaconBlock.Type,
-    capella: *const ssz.capella.BeaconBlock.Type,
-    deneb: *const ssz.deneb.BeaconBlock.Type,
-    electra: *const ssz.electra.BeaconBlock.Type,
+    phase0: *const types.phase0.BeaconBlock.Type,
+    altair: *const types.altair.BeaconBlock.Type,
+    bellatrix: *const types.bellatrix.BeaconBlock.Type,
+    capella: *const types.capella.BeaconBlock.Type,
+    deneb: *const types.deneb.BeaconBlock.Type,
+    electra: *const types.electra.BeaconBlock.Type,
 
     pub fn hashTreeRoot(self: *const BeaconBlock, allocator: std.mem.Allocator, out: *[32]u8) !void {
         switch (self.*) {
-            .phase0 => |block| try ssz.phase0.BeaconBlock.hashTreeRoot(allocator, block, out),
-            .altair => |block| try ssz.altair.BeaconBlock.hashTreeRoot(allocator, block, out),
-            .bellatrix => |block| try ssz.bellatrix.BeaconBlock.hashTreeRoot(allocator, block, out),
-            .capella => |block| try ssz.capella.BeaconBlock.hashTreeRoot(allocator, block, out),
-            .deneb => |block| try ssz.deneb.BeaconBlock.hashTreeRoot(allocator, block, out),
-            .electra => |block| try ssz.electra.BeaconBlock.hashTreeRoot(allocator, block, out),
+            .phase0 => |block| try types.phase0.BeaconBlock.hashTreeRoot(allocator, block, out),
+            .altair => |block| try types.altair.BeaconBlock.hashTreeRoot(allocator, block, out),
+            .bellatrix => |block| try types.bellatrix.BeaconBlock.hashTreeRoot(allocator, block, out),
+            .capella => |block| try types.capella.BeaconBlock.hashTreeRoot(allocator, block, out),
+            .deneb => |block| try types.deneb.BeaconBlock.hashTreeRoot(allocator, block, out),
+            .electra => |block| try types.electra.BeaconBlock.hashTreeRoot(allocator, block, out),
         }
     }
     pub fn format(
@@ -137,9 +137,9 @@ pub const BeaconBlock = union(enum) {
 };
 
 pub const BlindedBeaconBlock = union(enum) {
-    capella: *const ssz.capella.BlindedBeaconBlock.Type,
-    deneb: *const ssz.deneb.BlindedBeaconBlock.Type,
-    electra: *const ssz.electra.BlindedBeaconBlock.Type,
+    capella: *const types.capella.BlindedBeaconBlock.Type,
+    deneb: *const types.deneb.BlindedBeaconBlock.Type,
+    electra: *const types.electra.BlindedBeaconBlock.Type,
 
     const Self = @This();
 
@@ -153,9 +153,9 @@ pub const BlindedBeaconBlock = union(enum) {
 
     pub fn hashTreeRoot(self: *const Self, allocator: std.mem.Allocator, out: *[32]u8) !void {
         switch (self.*) {
-            .capella => |block| try ssz.capella.BlindedBeaconBlock.hashTreeRoot(allocator, block, out),
-            .deneb => |block| try ssz.deneb.BlindedBeaconBlock.hashTreeRoot(allocator, block, out),
-            .electra => |block| try ssz.electra.BlindedBeaconBlock.hashTreeRoot(allocator, block, out),
+            .capella => |block| try types.capella.BlindedBeaconBlock.hashTreeRoot(allocator, block, out),
+            .deneb => |block| try types.deneb.BlindedBeaconBlock.hashTreeRoot(allocator, block, out),
+            .electra => |block| try types.electra.BlindedBeaconBlock.hashTreeRoot(allocator, block, out),
         }
     }
 
@@ -185,12 +185,12 @@ pub const BlindedBeaconBlock = union(enum) {
 };
 
 pub const BeaconBlockBody = union(enum) {
-    phase0: *const ssz.phase0.BeaconBlockBody.Type,
-    altair: *const ssz.altair.BeaconBlockBody.Type,
-    bellatrix: *const ssz.bellatrix.BeaconBlockBody.Type,
-    capella: *const ssz.capella.BeaconBlockBody.Type,
-    deneb: *const ssz.deneb.BeaconBlockBody.Type,
-    electra: *const ssz.electra.BeaconBlockBody.Type,
+    phase0: *const types.phase0.BeaconBlockBody.Type,
+    altair: *const types.altair.BeaconBlockBody.Type,
+    bellatrix: *const types.bellatrix.BeaconBlockBody.Type,
+    capella: *const types.capella.BeaconBlockBody.Type,
+    deneb: *const types.deneb.BeaconBlockBody.Type,
+    electra: *const types.electra.BeaconBlockBody.Type,
 
     pub fn format(
         self: BeaconBlockBody,
@@ -207,12 +207,12 @@ pub const BeaconBlockBody = union(enum) {
 
     pub fn hashTreeRoot(self: *const BeaconBlockBody, allocator: std.mem.Allocator, out: *[32]u8) !void {
         return switch (self.*) {
-            .phase0 => |body| try ssz.phase0.BeaconBlockBody.hashTreeRoot(allocator, body, out),
-            .altair => |body| try ssz.altair.BeaconBlockBody.hashTreeRoot(allocator, body, out),
-            .bellatrix => |body| try ssz.bellatrix.BeaconBlockBody.hashTreeRoot(allocator, body, out),
-            .capella => |body| try ssz.capella.BeaconBlockBody.hashTreeRoot(allocator, body, out),
-            .deneb => |body| try ssz.deneb.BeaconBlockBody.hashTreeRoot(allocator, body, out),
-            .electra => |body| try ssz.electra.BeaconBlockBody.hashTreeRoot(allocator, body, out),
+            .phase0 => |body| try types.phase0.BeaconBlockBody.hashTreeRoot(allocator, body, out),
+            .altair => |body| try types.altair.BeaconBlockBody.hashTreeRoot(allocator, body, out),
+            .bellatrix => |body| try types.bellatrix.BeaconBlockBody.hashTreeRoot(allocator, body, out),
+            .capella => |body| try types.capella.BeaconBlockBody.hashTreeRoot(allocator, body, out),
+            .deneb => |body| try types.deneb.BeaconBlockBody.hashTreeRoot(allocator, body, out),
+            .electra => |body| try types.electra.BeaconBlockBody.hashTreeRoot(allocator, body, out),
         };
     }
 
@@ -225,19 +225,19 @@ pub const BeaconBlockBody = union(enum) {
     }
 
     // phase0 fields
-    pub fn randaoReveal(self: *const BeaconBlockBody) ssz.primitive.BLSSignature.Type {
+    pub fn randaoReveal(self: *const BeaconBlockBody) types.primitive.BLSSignature.Type {
         return switch (self.*) {
             inline .phase0, .altair, .bellatrix, .capella, .deneb, .electra => |body| body.randao_reveal,
         };
     }
 
-    pub fn eth1Data(self: *const BeaconBlockBody) *const ssz.phase0.Eth1Data.Type {
+    pub fn eth1Data(self: *const BeaconBlockBody) *const types.phase0.Eth1Data.Type {
         return switch (self.*) {
             inline .phase0, .altair, .bellatrix, .capella, .deneb, .electra => |body| &body.eth1_data,
         };
     }
 
-    pub fn graffiti(self: *const BeaconBlockBody) ssz.primitive.Bytes32.Type {
+    pub fn graffiti(self: *const BeaconBlockBody) types.primitive.Bytes32.Type {
         return switch (self.*) {
             inline .phase0, .altair, .bellatrix, .capella, .deneb, .electra => |body| body.graffiti,
         };
@@ -276,7 +276,7 @@ pub const BeaconBlockBody = union(enum) {
     }
 
     // altair fields
-    pub fn syncAggregate(self: *const BeaconBlockBody) *const ssz.altair.SyncAggregate.Type {
+    pub fn syncAggregate(self: *const BeaconBlockBody) *const types.altair.SyncAggregate.Type {
         return switch (self.*) {
             inline .altair, .bellatrix, .capella, .deneb, .electra => |body| &body.sync_aggregate,
             else => @panic("SyncAggregate is not available in phase0"),
@@ -305,7 +305,7 @@ pub const BeaconBlockBody = union(enum) {
     }
 
     // deneb fields
-    pub fn blobKzgCommitments(self: *const BeaconBlockBody) *const ssz.deneb.BlobKzgCommitments.Type {
+    pub fn blobKzgCommitments(self: *const BeaconBlockBody) *const types.deneb.BlobKzgCommitments.Type {
         return switch (self.*) {
             .deneb => |body| &body.blob_kzg_commitments,
             .electra => |body| &body.blob_kzg_commitments,
@@ -314,7 +314,7 @@ pub const BeaconBlockBody = union(enum) {
     }
 
     // electra fields
-    pub fn executionRequests(self: *const BeaconBlockBody) *const ssz.electra.ExecutionRequests.Type {
+    pub fn executionRequests(self: *const BeaconBlockBody) *const types.electra.ExecutionRequests.Type {
         return switch (self.*) {
             .electra => |body| &body.execution_requests,
             else => panic("ExecutionRequests is not available in {}", .{self}),
@@ -344,32 +344,32 @@ pub const BeaconBlockBody = union(enum) {
 };
 
 pub const BlindedBeaconBlockBody = union(enum) {
-    capella: *const ssz.capella.BlindedBeaconBlockBody.Type,
-    deneb: *const ssz.deneb.BlindedBeaconBlockBody.Type,
-    electra: *const ssz.electra.BlindedBeaconBlockBody.Type,
+    capella: *const types.capella.BlindedBeaconBlockBody.Type,
+    deneb: *const types.deneb.BlindedBeaconBlockBody.Type,
+    electra: *const types.electra.BlindedBeaconBlockBody.Type,
 
     pub fn hashTreeRoot(self: *const BlindedBeaconBlockBody, allocator: std.mem.Allocator, out: *[32]u8) !void {
         return switch (self.*) {
-            .capella => |body| try ssz.capella.BlindedBeaconBlockBody.hashTreeRoot(allocator, body, out),
-            .deneb => |body| try ssz.deneb.BlindedBeaconBlockBody.hashTreeRoot(allocator, body, out),
-            .electra => |body| try ssz.electra.BlindedBeaconBlockBody.hashTreeRoot(allocator, body, out),
+            .capella => |body| try types.capella.BlindedBeaconBlockBody.hashTreeRoot(allocator, body, out),
+            .deneb => |body| try types.deneb.BlindedBeaconBlockBody.hashTreeRoot(allocator, body, out),
+            .electra => |body| try types.electra.BlindedBeaconBlockBody.hashTreeRoot(allocator, body, out),
         };
     }
 
     // phase0 fields
-    pub fn randaoReveal(self: *const BlindedBeaconBlockBody) ssz.primitive.BLSSignature.Type {
+    pub fn randaoReveal(self: *const BlindedBeaconBlockBody) types.primitive.BLSSignature.Type {
         return switch (self.*) {
             inline .capella, .deneb, .electra => |body| body.randao_reveal,
         };
     }
 
-    pub fn eth1Data(self: *const BlindedBeaconBlockBody) *const ssz.phase0.Eth1Data.Type {
+    pub fn eth1Data(self: *const BlindedBeaconBlockBody) *const types.phase0.Eth1Data.Type {
         return switch (self.*) {
             inline .capella, .deneb, .electra => |body| &body.eth1_data,
         };
     }
 
-    pub fn graffiti(self: *const BlindedBeaconBlockBody) ssz.primitive.Bytes32.Type {
+    pub fn graffiti(self: *const BlindedBeaconBlockBody) types.primitive.Bytes32.Type {
         return switch (self.*) {
             inline .capella, .deneb, .electra => |body| body.graffiti,
         };
@@ -408,7 +408,7 @@ pub const BlindedBeaconBlockBody = union(enum) {
     }
 
     // altair fields
-    pub fn syncAggregate(self: *const BlindedBeaconBlockBody) *const ssz.altair.SyncAggregate.Type {
+    pub fn syncAggregate(self: *const BlindedBeaconBlockBody) *const types.altair.SyncAggregate.Type {
         return switch (self.*) {
             inline .capella, .deneb, .electra => |body| &body.sync_aggregate,
         };
@@ -433,7 +433,7 @@ pub const BlindedBeaconBlockBody = union(enum) {
     }
 
     // deneb fields
-    pub fn blobKzgCommitments(self: *const BlindedBeaconBlockBody) *const ssz.deneb.BlobKzgCommitments.Type {
+    pub fn blobKzgCommitments(self: *const BlindedBeaconBlockBody) *const types.deneb.BlobKzgCommitments.Type {
         return switch (self.*) {
             .capella => @panic("BlobKzgCommitments is not available in capella"),
             .deneb => |body| &body.blob_kzg_commitments,
@@ -442,7 +442,7 @@ pub const BlindedBeaconBlockBody = union(enum) {
     }
 
     // electra fields
-    pub fn executionRequests(self: *const BlindedBeaconBlockBody) *const ssz.electra.ExecutionRequests.Type {
+    pub fn executionRequests(self: *const BlindedBeaconBlockBody) *const types.electra.ExecutionRequests.Type {
         return switch (self.*) {
             .capella => @panic("ExecutionRequests is not available in capella"),
             .deneb => @panic("ExecutionRequests is not available in deneb"),
@@ -479,15 +479,15 @@ fn testBlockSanity(Block: type) !void {
     const allocator = std.testing.allocator;
 
     const is_blinded = Block == BlindedBeaconBlock;
-    const ssz_block = if (is_blinded) ssz.electra.BlindedBeaconBlock else ssz.electra.BeaconBlock;
+    const ssz_block = if (is_blinded) types.electra.BlindedBeaconBlock else types.electra.BeaconBlock;
     var electra_block = ssz_block.default_value;
 
     electra_block.slot = 12345;
     electra_block.proposer_index = 1;
     electra_block.body.randao_reveal = [_]u8{1} ** 96;
-    var attestations = try std.ArrayListUnmanaged(ssz.electra.Attestation.Type).initCapacity(std.testing.allocator, 10);
+    var attestations = try std.ArrayListUnmanaged(types.electra.Attestation.Type).initCapacity(std.testing.allocator, 10);
     defer attestations.deinit(allocator);
-    var attestation0 = ssz.electra.Attestation.default_value;
+    var attestation0 = types.electra.Attestation.default_value;
     attestation0.data.slot = 12345;
     try attestations.append(allocator, attestation0);
     electra_block.body.attestations = attestations;

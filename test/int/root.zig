@@ -18,6 +18,16 @@ const process_participation_flag_updates = @import("./epoch/process_participatio
 const process_sync_committee_updates = @import("./epoch/process_sync_committee_updates.zig");
 const process_epoch = @import("./epoch/process_epoch.zig");
 
+const list_basic = @import("./ssz/list_basic.zig");
+const vector_basic = @import("./ssz/vector_basic.zig");
+const container = @import("./ssz/container.zig");
+const vector_composite = @import("./ssz/vector_composite.zig");
+const list_composite = @import("./ssz/list_composite.zig");
+const bit_vector = @import("./ssz/bit_vector.zig");
+const bit_list = @import("./ssz/bit_list.zig");
+const byte_list = @import("./ssz/byte_list.zig");
+const tree_view = @import("./ssz/tree_view.zig");
+
 test {
     testing.refAllDecls(epoch_transition_cache);
     testing.refAllDecls(process_justification_and_finalization);
@@ -46,4 +56,14 @@ test {
     testing.refAllDecls(@import("./process_operations.zig"));
     testing.refAllDecls(@import("./process_sync_aggregate.zig"));
     testing.refAllDecls(@import("./process_blob_kzg_commitments.zig"));
+
+    testing.refAllDecls(list_basic);
+    testing.refAllDecls(vector_basic);
+    testing.refAllDecls(container);
+    testing.refAllDecls(vector_composite);
+    testing.refAllDecls(list_composite);
+    testing.refAllDecls(bit_vector);
+    testing.refAllDecls(bit_list);
+    testing.refAllDecls(byte_list);
+    testing.refAllDecls(tree_view);
 }

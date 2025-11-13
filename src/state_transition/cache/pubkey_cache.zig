@@ -1,12 +1,12 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const blst = @import("blst");
-const ssz = @import("consensus_types");
+const types = @import("consensus_types");
 const PublicKey = blst.PublicKey;
-const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
+const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const PubkeyIndexMap = @import("../utils/pubkey_index_map.zig").PubkeyIndexMap(ValidatorIndex);
-const Validator = ssz.phase0.Validator.Type;
-// ArrayListUnmanaged is used in ssz VariableListType
+const Validator = types.phase0.Validator.Type;
+// ArrayListUnmanaged is used in ct VariableListType
 const ValidatorList = std.ArrayListUnmanaged(Validator);
 
 pub const Index2PubkeyCache = std.ArrayList(PublicKey);

@@ -2,14 +2,14 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const ForkSeq = @import("config").ForkSeq;
-const ssz = @import("consensus_types");
-const Root = ssz.primitive.Root.Type;
-const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
+const types = @import("consensus_types");
+const Root = types.primitive.Root.Type;
+const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const preset = @import("preset").preset;
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
 const SignedBlock = @import("../types/signed_block.zig").SignedBlock;
 const BlockExternalData = @import("../state_transition.zig").BlockExternalData;
-const Withdrawals = ssz.capella.Withdrawals.Type;
+const Withdrawals = types.capella.Withdrawals.Type;
 const WithdrawalsResult = @import("./process_withdrawals.zig").WithdrawalsResult;
 const processBlobKzgCommitments = @import("./process_blob_kzg_commitments.zig").processBlobKzgCommitments;
 const processBlockHeader = @import("./process_block_header.zig").processBlockHeader;
@@ -61,8 +61,9 @@ pub fn processBlock(
             const payload_withdrawals_root = switch (body) {
                 .regular => |b| blk: {
                     const actual_withdrawals = b.executionPayload().getWithdrawals();
+                    std.debug.assert(withdrawals_result.withdrawals.items.len == actual_withdrawals.items.len);
                     var root: Root = undefined;
-                    try ssz.capella.Withdrawals.hashTreeRoot(allocator, &actual_withdrawals, &root);
+                    try types.capella.Withdrawals.hashTreeRoot(allocator, &actual_withdrawals, &root);
                     break :blk root;
                 },
                 .blinded => |b| b.executionPayloadHeader().getWithdrawalsRoot(),

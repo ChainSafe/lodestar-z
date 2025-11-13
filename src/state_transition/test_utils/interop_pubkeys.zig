@@ -1,8 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const blst = @import("blst");
-const ssz = @import("consensus_types");
-const BLSPubkey = ssz.primitive.BLSPubkey.Type;
+const types = @import("consensus_types");
+const BLSPubkey = types.primitive.BLSPubkey.Type;
 const Secretkey = blst.SecretKey;
 
 /// Generates a list of BLS public keys for interop testing.

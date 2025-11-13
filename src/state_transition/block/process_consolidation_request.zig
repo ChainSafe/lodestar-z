@@ -1,10 +1,10 @@
 const std = @import("std");
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const ssz = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const c = @import("constants");
-const ConsolidationRequest = ssz.electra.ConsolidationRequest.Type;
-const PendingConsolidation = ssz.electra.PendingConsolidation.Type;
+const FAR_FUTURE_EPOCH = @import("constants").FAR_FUTURE_EPOCH;
+const ConsolidationRequest = types.electra.ConsolidationRequest.Type;
+const PendingConsolidation = types.electra.PendingConsolidation.Type;
 const hasEth1WithdrawalCredential = @import("../utils/capella.zig").hasEth1WithdrawalCredential;
 const electra_utils = @import("../utils/electra.zig");
 const hasCompoundingWithdrawalCredential = electra_utils.hasCompoundingWithdrawalCredential;
@@ -81,7 +81,7 @@ pub fn processConsolidationRequest(
     }
 
     // Verify exits for source and target have not been initiated
-    if (source_validator.exit_epoch != c.FAR_FUTURE_EPOCH or target_validator.exit_epoch != c.FAR_FUTURE_EPOCH) {
+    if (source_validator.exit_epoch != FAR_FUTURE_EPOCH or target_validator.exit_epoch != FAR_FUTURE_EPOCH) {
         return;
     }
 
@@ -140,7 +140,7 @@ fn isValidSwitchToCompoundRequest(cached_state: *const CachedBeaconStateAllForks
     }
 
     // Verify exit for source has not been initiated
-    if (source_validator.exit_epoch != c.FAR_FUTURE_EPOCH) {
+    if (source_validator.exit_epoch != FAR_FUTURE_EPOCH) {
         return false;
     }
 

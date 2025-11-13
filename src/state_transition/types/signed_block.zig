@@ -17,13 +17,13 @@ pub const SignedBlock = union(enum) {
             };
         }
 
-        pub fn eth1Data(self: *const Body) *const ssz.phase0.Eth1Data.Type {
+        pub fn eth1Data(self: *const Body) *const types.phase0.Eth1Data.Type {
             return switch (self.*) {
                 inline .regular, .blinded => |b| b.eth1Data(),
             };
         }
 
-        pub fn randaoReveal(self: *const Body) ssz.primitive.BLSSignature.Type {
+        pub fn randaoReveal(self: *const Body) types.primitive.BLSSignature.Type {
             return switch (self.*) {
                 inline .regular, .blinded => |b| b.randaoReveal(),
             };
@@ -50,7 +50,7 @@ pub const SignedBlock = union(enum) {
             };
         }
 
-        pub fn syncAggregate(self: *const Body) *const ssz.altair.SyncAggregate.Type {
+        pub fn syncAggregate(self: *const Body) *const types.altair.SyncAggregate.Type {
             return switch (self.*) {
                 inline .regular, .blinded => |b| b.syncAggregate(),
             };
@@ -134,7 +134,7 @@ pub const SignedBlock = union(enum) {
         };
     }
 
-    pub fn signature(self: *const SignedBlock) ssz.primitive.BLSSignature.Type {
+    pub fn signature(self: *const SignedBlock) types.primitive.BLSSignature.Type {
         return switch (self.*) {
             inline .regular, .blinded => |b| b.signature(),
         };
@@ -142,23 +142,23 @@ pub const SignedBlock = union(enum) {
 };
 
 const std = @import("std");
-const ssz = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const ZERO_HASH = @import("constants").ZERO_HASH;
 
-const Root = ssz.primitive.Root.Type;
-const Deposit = ssz.phase0.Deposit.Type;
-const DepositRequest = ssz.electra.DepositRequest.Type;
-const WithdrawalRequest = ssz.electra.WithdrawalRequest.Type;
-const ConsolidationRequest = ssz.electra.ConsolidationRequest.Type;
+const Root = types.primitive.Root.Type;
+const Deposit = types.phase0.Deposit.Type;
+const DepositRequest = types.electra.DepositRequest.Type;
+const WithdrawalRequest = types.electra.WithdrawalRequest.Type;
+const ConsolidationRequest = types.electra.ConsolidationRequest.Type;
 
 const Attestation = @import("attestation.zig").Attestation;
 const Attestations = @import("attestation.zig").Attestations;
 const AttesterSlashings = @import("attester_slashing.zig").AttesterSlashings;
-const ProposerSlashing = ssz.phase0.ProposerSlashing.Type;
-const SignedVoluntaryExit = ssz.phase0.SignedVoluntaryExit.Type;
-const Slot = ssz.primitive.Slot.Type;
-const SignedBLSToExecutionChange = ssz.capella.SignedBLSToExecutionChange.Type;
+const ProposerSlashing = types.phase0.ProposerSlashing.Type;
+const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit.Type;
+const Slot = types.primitive.Slot.Type;
+const SignedBLSToExecutionChange = types.capella.SignedBLSToExecutionChange.Type;
 
 const BeaconBlock = @import("beacon_block.zig").BeaconBlock;
 const SignedBeaconBlock = @import("beacon_block.zig").SignedBeaconBlock;

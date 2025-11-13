@@ -14,7 +14,7 @@ test "process withdrawals - sanity" {
     defer withdrawal_balances.deinit();
 
     var root: Root = undefined;
-    try ssz.capella.Withdrawals.hashTreeRoot(allocator, &withdrawals_result.withdrawals, &root);
+    try types.capella.Withdrawals.hashTreeRoot(allocator, &withdrawals_result.withdrawals, &root);
 
     try getExpectedWithdrawals(allocator, &withdrawals_result, &withdrawal_balances, test_state.cached_state);
     try processWithdrawals(allocator, test_state.cached_state, withdrawals_result, root);
@@ -27,7 +27,7 @@ const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeac
 const processWithdrawals = state_transition.processWithdrawals;
 const getExpectedWithdrawals = state_transition.getExpectedWithdrawals;
 const WithdrawalsResult = state_transition.WithdrawalsResult;
-const ssz = @import("consensus_types");
-const Root = ssz.primitive.Root.Type;
-const Withdrawals = ssz.capella.Withdrawals.Type;
-const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
+const types = @import("consensus_types");
+const Root = types.primitive.Root.Type;
+const Withdrawals = types.capella.Withdrawals.Type;
+const ValidatorIndex = types.primitive.ValidatorIndex.Type;

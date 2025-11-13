@@ -1,16 +1,16 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const ssz = @import("consensus_types");
-const Root = ssz.primitive.Root.Type;
+const types = @import("consensus_types");
+const Root = types.primitive.Root.Type;
 const preset = @import("preset").preset;
 const c = @import("constants");
 const ForkSeq = @import("config").ForkSeq;
-const Withdrawal = ssz.capella.Withdrawal.Type;
-const Withdrawals = ssz.capella.Withdrawals.Type;
-const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
-const ExecutionAddress = ssz.primitive.ExecutionAddress.Type;
-const PendingPartialWithdrawal = ssz.electra.PendingPartialWithdrawal.Type;
+const Withdrawal = types.capella.Withdrawal.Type;
+const Withdrawals = types.capella.Withdrawals.Type;
+const ValidatorIndex = types.primitive.ValidatorIndex.Type;
+const ExecutionAddress = types.primitive.ExecutionAddress.Type;
+const PendingPartialWithdrawal = types.electra.PendingPartialWithdrawal.Type;
 const ExecutionPayload = @import("../types/execution_payload.zig").ExecutionPayload;
 const hasExecutionWithdrawalCredential = @import("../utils/electra.zig").hasExecutionWithdrawalCredential;
 const hasEth1WithdrawalCredential = @import("../utils/capella.zig").hasEth1WithdrawalCredential;
@@ -40,7 +40,7 @@ pub fn processWithdrawals(
     const num_withdrawals = expected_withdrawals.len;
 
     var expected_withdrawals_root: [32]u8 = undefined;
-    try ssz.capella.Withdrawals.hashTreeRoot(allocator, &expected_withdrawals_result.withdrawals, &expected_withdrawals_root);
+    try types.capella.Withdrawals.hashTreeRoot(allocator, &expected_withdrawals_result.withdrawals, &expected_withdrawals_root);
 
     if (!std.mem.eql(u8, &expected_withdrawals_root, &payload_withdrawals_root)) {
         return error.WithdrawalsRootMismatch;
@@ -66,16 +66,16 @@ pub fn processWithdrawals(
         next_withdrawal_index.* = latest_withdrawal.index + 1;
     }
 
-    // Update the nextWithdrawalValidatorIndex
-    const nextWithdrawalValidatorIndex = state.nextWithdrawalValidatorIndex();
+    // Update the next_withdrawal_validator_index
+    const next_withdrawal_validator_index = state.nextWithdrawalValidatorIndex();
     if (expected_withdrawals.len == preset.MAX_WITHDRAWALS_PER_PAYLOAD) {
-        // All slots filled, nextWithdrawalValidatorIndex should be validatorIndex having next turn
-        nextWithdrawalValidatorIndex.* =
+        // All slots filled, next_withdrawal_validator_index should be validatorIndex having next turn
+        next_withdrawal_validator_index.* =
             (expected_withdrawals[expected_withdrawals.len - 1].validator_index + 1) % state.validators().items.len;
     } else {
-        // expected withdrawals came up short in the bound, so we move nextWithdrawalValidatorIndex to
+        // expected withdrawals came up short in the bound, so we move next_withdrawal_validator_index to
         // the next post the bound
-        nextWithdrawalValidatorIndex.* = (nextWithdrawalValidatorIndex.* + preset.MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP) % state.validators().items.len;
+        next_withdrawal_validator_index.* = (next_withdrawal_validator_index.* + preset.MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP) % state.validators().items.len;
     }
 }
 

@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const ForkSeq = @import("config").ForkSeq;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
-const ssz = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
 
 pub fn processParticipationFlagUpdates(cached_state: *CachedBeaconStateAllForks, allocator: std.mem.Allocator) !void {
@@ -16,12 +16,12 @@ pub fn processParticipationFlagUpdates(cached_state: *CachedBeaconStateAllForks,
     // Since the chunks represent all zero'ed data we can re-use the pre-computed zeroNode at chunkDepth to skip any
     // data transformation and create the required tree almost for free.
 
-    // TODO(ssz) implement this using TreeView
-    //   const currentEpochParticipationNode = ssz.altair.EpochParticipation.tree_setChunksNode(
+    // TODO(ct) implement this using TreeView
+    //   const currentEpochParticipationNode = types.altair.EpochParticipation.tree_setChunksNode(
     //   state.currentEpochParticipation.node,
-    //   zeroNode(ssz.altair.EpochParticipation.chunkDepth),
+    //   zeroNode(types.altair.EpochParticipation.chunkDepth),
     //   state.currentEpochParticipation.length
     // );
 
-    // state.currentEpochParticipation = ssz.altair.EpochParticipation.getViewDU(currentEpochParticipationNode);
+    // state.currentEpochParticipation = types.altair.EpochParticipation.getViewDU(currentEpochParticipationNode);
 }

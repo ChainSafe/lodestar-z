@@ -1,9 +1,9 @@
 const std = @import("std");
-const ssz = @import("consensus_types");
+const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
 const digest = @import("./sha256.zig").digest;
-const BLSSignature = ssz.primitive.BLSSignature.Type;
+const BLSSignature = types.primitive.BLSSignature.Type;
 const ZERO_BIGINT = 0;
 
 pub fn isSyncCommitteeAggregator(selection_proof: BLSSignature) bool {
