@@ -6,6 +6,7 @@ const hashOne = @import("hashing").hashOne;
 const getZeroHash = @import("hashing").getZeroHash;
 const max_depth = @import("hashing").max_depth;
 const Depth = @import("hashing").Depth;
+const proof = @import("proof.zig");
 const Gindex = @import("gindex.zig").Gindex;
 
 hash: [32]u8,
@@ -425,6 +426,16 @@ pub const Id = enum(u32) {
         }
 
         return pool.nodes.items(.right)[@intFromEnum(node_id)];
+    }
+
+    pub fn getSingleProof(
+        root_node: Id,
+        allocator: Allocator,
+        pool: *Pool,
+        gindex: Gindex,
+    ) (Error || proof.Error)![][32]u8 {
+        const single_proof = try proof.createSingleProof(allocator, pool, root_node, gindex);
+        return single_proof.witnesses;
     }
 
     pub fn getState(node_id: Id, pool: *Pool) State {
