@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
-const SignedBlock = @import("../types/signed_block.zig").SignedBlock;
+const Block = @import("../types/block.zig").Block;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const AggregatedSignatureSet = @import("../utils/signature_sets.zig").AggregatedSignatureSet;
 const types = @import("consensus_types");
@@ -21,16 +21,17 @@ const decreaseBalance = balance_utils.decreaseBalance;
 pub fn processSyncAggregate(
     allocator: Allocator,
     cached_state: *CachedBeaconStateAllForks,
-    block: *const SignedBlock,
+    block: Block,
     verify_signatures: bool,
 ) !void {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const committee_indices = @as(*const [preset.SYNC_COMMITTEE_SIZE]u64, @ptrCast(epoch_cache.current_sync_committee_indexed.get().getValidatorIndices()));
+    const body = block.beaconBlockBody();
 
     // different from the spec but not sure how to get through signature verification for default/empty SyncAggregate in the spec test
     if (verify_signatures) {
-        const participant_indices = try block.beaconBlockBody().syncAggregate().sync_committee_bits.intersectValues(
+        const participant_indices = try body.syncAggregate().sync_committee_bits.intersectValues(
             ValidatorIndex,
             allocator,
             committee_indices,
@@ -47,7 +48,7 @@ pub fn processSyncAggregate(
 
     const sync_participant_reward = epoch_cache.sync_participant_reward;
     const sync_proposer_reward = epoch_cache.sync_proposer_reward;
-    const sync_comittee_bits = block.beaconBlockBody().syncAggregate().sync_committee_bits;
+    const sync_comittee_bits = body.syncAggregate().sync_committee_bits;
     const proposer_index = try epoch_cache.getBeaconProposer(state.slot());
     const balances = state.balances();
     var proposer_balance = balances.items[proposer_index];
@@ -81,7 +82,7 @@ pub fn processSyncAggregate(
 }
 
 /// Consumers should deinit the returned pubkeys
-pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, block: *const SignedBlock, participant_indices: ?[]usize) !?AggregatedSignatureSet {
+pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, block: Block, participant_indices: ?[]usize) !?AggregatedSignatureSet {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const sync_aggregate = block.beaconBlockBody().syncAggregate();

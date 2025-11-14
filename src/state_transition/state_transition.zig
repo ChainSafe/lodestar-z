@@ -32,7 +32,7 @@ const computeEpochAtSlot = @import("utils/epoch.zig").computeEpochAtSlot;
 const processSlot = @import("slot/process_slot.zig").processSlot;
 const deinitReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
 
-const SignedBlock = @import("types/signed_block.zig").SignedBlock;
+const SignedBlock = @import("types/block.zig").SignedBlock;
 
 pub const ExecutionPayloadStatus = enum(u8) {
     pre_merge,
@@ -131,7 +131,7 @@ pub fn stateTransition(
     try processSlotsWithTransientCache(allocator, post_state, block_slot, .{});
 
     // Verify proposer signature only
-    if (opts.verify_proposer and !try verifyProposerSignature(post_state, &signed_block)) {
+    if (opts.verify_proposer and !try verifyProposerSignature(post_state, signed_block)) {
         return error.InvalidBlockSignature;
     }
 
@@ -141,7 +141,7 @@ pub fn stateTransition(
     try processBlock(
         allocator,
         post_state,
-        &signed_block,
+        block,
         BlockExternalData{
             .execution_payload_status = .valid,
             .data_availability_status = .available,

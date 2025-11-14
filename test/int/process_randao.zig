@@ -17,11 +17,9 @@ test "process randao - sanity" {
     message.proposer_index = proposer_index;
     message.parent_root = header_parent_root;
 
-    var beacon_block: types.electra.SignedBeaconBlock.Type = types.electra.SignedBeaconBlock.default_value;
-    beacon_block.message = message;
-    const signed_beacon_block = SignedBeaconBlock{ .electra = &beacon_block };
-    const block = SignedBlock{ .regular = &signed_beacon_block };
-    try processRandao(test_state.cached_state, &block.beaconBlockBody(), block.proposerIndex(), false);
+    const beacon_block = BeaconBlock{ .electra = &message };
+    const block = Block{ .regular = beacon_block };
+    try processRandao(test_state.cached_state, block.beaconBlockBody(), block.proposerIndex(), false);
 }
 
 const std = @import("std");
@@ -35,5 +33,5 @@ const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeac
 const preset = @import("preset").preset;
 
 const processRandao = state_transition.processRandao;
-const SignedBlock = state_transition.SignedBlock;
-const SignedBeaconBlock = state_transition.SignedBeaconBlock;
+const Block = state_transition.Block;
+const BeaconBlock = state_transition.BeaconBlock;

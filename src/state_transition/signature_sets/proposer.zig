@@ -9,26 +9,27 @@ const Root = types.primitive.Root;
 const computeBlockSigningRoot = @import("../utils/signing_root.zig").computeBlockSigningRoot;
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const verifySignatureSet = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
-const SignedBlock = @import("../types/signed_block.zig").SignedBlock;
+const SignedBlock = @import("../types/block.zig").SignedBlock;
 
-pub fn verifyProposerSignature(cached_state: *CachedBeaconStateAllForks, signed_block: *const SignedBlock) !bool {
+pub fn verifyProposerSignature(cached_state: *CachedBeaconStateAllForks, signed_block: SignedBlock) !bool {
     const signature_set = try getBlockProposerSignatureSet(cached_state.allocator, cached_state, signed_block);
     return try verifySignatureSet(&signature_set);
 }
 
 // TODO: support SignedBlindedBeaconBlock
-pub fn getBlockProposerSignatureSet(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, signed_block: *const SignedBlock) !SingleSignatureSet {
+pub fn getBlockProposerSignatureSet(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, signed_block: SignedBlock) !SingleSignatureSet {
     const config = cached_state.config;
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
-    const domain = try config.getDomain(state.slot(), c.DOMAIN_BEACON_PROPOSER, signed_block.slot());
+    const block = signed_block.message();
+    const domain = try config.getDomain(state.slot(), c.DOMAIN_BEACON_PROPOSER, block.slot());
     // var signing_root: Root = undefined;
     var signing_root_buf: [32]u8 = undefined;
-    try computeBlockSigningRoot(allocator, signed_block, domain, &signing_root_buf);
+    try computeBlockSigningRoot(allocator, block, domain, &signing_root_buf);
 
     // Root.uncompressFromBytes(&signing_root_buf, &signing_root);
     return .{
-        .pubkey = epoch_cache.index_to_pubkey.items[signed_block.proposerIndex()],
+        .pubkey = epoch_cache.index_to_pubkey.items[block.proposerIndex()],
         .signing_root = signing_root_buf,
         .signature = signed_block.signature(),
     };

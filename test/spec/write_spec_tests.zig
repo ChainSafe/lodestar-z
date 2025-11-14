@@ -17,6 +17,7 @@ const supported_test_runners = [_]RunnerKind{
     .operations,
     .rewards,
     .sanity,
+    .epoch_processing,
 };
 
 fn TestWriter(comptime kind: RunnerKind) type {
@@ -25,6 +26,7 @@ fn TestWriter(comptime kind: RunnerKind) type {
         .operations => @import("./writer/operations.zig"),
         .rewards => @import("./writer/rewards.zig"),
         .sanity => @import("./writer/sanity.zig"),
+        .epoch_processing => @import("./writer/epoch_processing.zig"),
         else => @compileError("Unsupported test runner"),
     };
 }

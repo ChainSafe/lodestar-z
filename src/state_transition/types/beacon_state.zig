@@ -427,10 +427,10 @@ pub const BeaconStateAllForks = union(enum) {
         };
     }
 
-    pub fn rotateEpochPendingAttestations(self: *BeaconStateAllForks) void {
+    pub fn rotateEpochPendingAttestations(self: *BeaconStateAllForks, allocator: Allocator) void {
         switch (self.*) {
             .phase0 => |state| {
-                state.previous_epoch_attestations.clearRetainingCapacity();
+                state.previous_epoch_attestations.deinit(allocator);
                 state.previous_epoch_attestations = state.current_epoch_attestations;
                 state.current_epoch_attestations = types.phase0.EpochAttestations.default_value;
             },
