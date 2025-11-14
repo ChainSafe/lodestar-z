@@ -428,6 +428,8 @@ pub const Id = enum(u32) {
         return pool.nodes.items(.right)[@intFromEnum(node_id)];
     }
 
+    /// Returns the witnesses for a single proof for the given `gindex`.
+    /// The caller is responsible for freeing the returned slice.
     pub fn getSingleProof(
         root_node: Id,
         allocator: Allocator,
