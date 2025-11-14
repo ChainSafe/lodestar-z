@@ -171,6 +171,7 @@
                     .constants,
                     .hex,
                     .persistent_merkle_tree,
+                    .blst,
                 },
             },
             .filters = .{},
