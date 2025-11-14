@@ -41,7 +41,7 @@ pub fn processSyncAggregate(
         );
         defer participant_indices.deinit();
 
-        // When there's no participation we consider the signature valid and just ignore it
+        // When there's no participation we cons ider the signature valid and just ignore it
         if (participant_indices.items.len > 0) {
             const previous_slot = @max(state.slot(), 1) - 1;
             const root_signed = try getBlockRootAtSlot(state, previous_slot);
@@ -64,6 +64,10 @@ pub fn processSyncAggregate(
 
             if (!try verifyAggregatedSignatureSet(&signature_set)) {
                 return error.SyncCommitteeSignatureInvalid;
+            }
+        } else {
+            if (!std.mem.eql(u8, &signature, &c.G2_POINT_AT_INFINITY)) {
+                return error.EmptySyncCommitteeSignatureIsNotInfinity;
             }
         }
     }
