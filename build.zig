@@ -6,16 +6,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const dep_blst = b.dependency("blst", .{});
-
-    const dep_hashtree = b.dependency("hashtree", .{});
-
-    const dep_snappy = b.dependency("snappy", .{});
-
-    const dep_yaml = b.dependency("yaml", .{});
-
-    const dep_zbench = b.dependency("zbench", .{});
-
     const options_build_options = b.addOptions();
     const option_zero_hash_max_depth = b.option(u8, "zero_hash_max_depth", "");
     options_build_options.addOption(?u8, "zero_hash_max_depth", option_zero_hash_max_depth);
@@ -31,6 +21,31 @@ pub fn build(b: *std.Build) void {
     const option_spec_test_out_dir = b.option([]const u8, "spec_test_out_dir", "") orelse "test/spec/spec_tests";
     options_spec_test_options.addOption([]const u8, "spec_test_out_dir", option_spec_test_out_dir);
     const options_module_spec_test_options = options_spec_test_options.createModule();
+
+    const dep_blst = b.dependency("blst", .{
+        .optimize = optimize,
+        .target = target,
+    });
+
+    const dep_hashtree = b.dependency("hashtree", .{
+        .optimize = optimize,
+        .target = target,
+    });
+
+    const dep_snappy = b.dependency("snappy", .{
+        .optimize = optimize,
+        .target = target,
+    });
+
+    const dep_yaml = b.dependency("yaml", .{
+        .optimize = optimize,
+        .target = target,
+    });
+
+    const dep_zbench = b.dependency("zbench", .{
+        .optimize = optimize,
+        .target = target,
+    });
 
     const module_constants = b.createModule(.{
         .root_source_file = b.path("src/constants/root.zig"),
@@ -330,7 +345,7 @@ pub fn build(b: *std.Build) void {
     const test_constants = b.addTest(.{
         .name = "constants",
         .root_module = module_constants,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "constants.filters", "constants test filters") orelse &[_][]const u8{},
     });
     const install_test_constants = b.addInstallArtifact(test_constants, .{});
     const tls_install_test_constants = b.step("build-test:constants", "Install the constants test");
@@ -344,7 +359,7 @@ pub fn build(b: *std.Build) void {
     const test_config = b.addTest(.{
         .name = "config",
         .root_module = module_config,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "config.filters", "config test filters") orelse &[_][]const u8{},
     });
     const install_test_config = b.addInstallArtifact(test_config, .{});
     const tls_install_test_config = b.step("build-test:config", "Install the config test");
@@ -358,7 +373,7 @@ pub fn build(b: *std.Build) void {
     const test_consensus_types = b.addTest(.{
         .name = "consensus_types",
         .root_module = module_consensus_types,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "consensus_types.filters", "consensus_types test filters") orelse &[_][]const u8{},
     });
     const install_test_consensus_types = b.addInstallArtifact(test_consensus_types, .{});
     const tls_install_test_consensus_types = b.step("build-test:consensus_types", "Install the consensus_types test");
@@ -372,7 +387,7 @@ pub fn build(b: *std.Build) void {
     const test_hashing = b.addTest(.{
         .name = "hashing",
         .root_module = module_hashing,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "hashing.filters", "hashing test filters") orelse &[_][]const u8{},
     });
     const install_test_hashing = b.addInstallArtifact(test_hashing, .{});
     const tls_install_test_hashing = b.step("build-test:hashing", "Install the hashing test");
@@ -386,7 +401,7 @@ pub fn build(b: *std.Build) void {
     const test_hex = b.addTest(.{
         .name = "hex",
         .root_module = module_hex,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "hex.filters", "hex test filters") orelse &[_][]const u8{},
     });
     const install_test_hex = b.addInstallArtifact(test_hex, .{});
     const tls_install_test_hex = b.step("build-test:hex", "Install the hex test");
@@ -400,7 +415,7 @@ pub fn build(b: *std.Build) void {
     const test_persistent_merkle_tree = b.addTest(.{
         .name = "persistent_merkle_tree",
         .root_module = module_persistent_merkle_tree,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "persistent_merkle_tree.filters", "persistent_merkle_tree test filters") orelse &[_][]const u8{},
     });
     const install_test_persistent_merkle_tree = b.addInstallArtifact(test_persistent_merkle_tree, .{});
     const tls_install_test_persistent_merkle_tree = b.step("build-test:persistent_merkle_tree", "Install the persistent_merkle_tree test");
@@ -414,7 +429,7 @@ pub fn build(b: *std.Build) void {
     const test_preset = b.addTest(.{
         .name = "preset",
         .root_module = module_preset,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "preset.filters", "preset test filters") orelse &[_][]const u8{},
     });
     const install_test_preset = b.addInstallArtifact(test_preset, .{});
     const tls_install_test_preset = b.step("build-test:preset", "Install the preset test");
@@ -428,7 +443,7 @@ pub fn build(b: *std.Build) void {
     const test_ssz = b.addTest(.{
         .name = "ssz",
         .root_module = module_ssz,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "ssz.filters", "ssz test filters") orelse &[_][]const u8{},
     });
     const install_test_ssz = b.addInstallArtifact(test_ssz, .{});
     const tls_install_test_ssz = b.step("build-test:ssz", "Install the ssz test");
@@ -442,7 +457,7 @@ pub fn build(b: *std.Build) void {
     const test_state_transition = b.addTest(.{
         .name = "state_transition",
         .root_module = module_state_transition,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "state_transition.filters", "state_transition test filters") orelse &[_][]const u8{},
     });
     const install_test_state_transition = b.addInstallArtifact(test_state_transition, .{});
     const tls_install_test_state_transition = b.step("build-test:state_transition", "Install the state_transition test");
@@ -456,7 +471,7 @@ pub fn build(b: *std.Build) void {
     const test_download_spec_tests = b.addTest(.{
         .name = "download_spec_tests",
         .root_module = module_download_spec_tests,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "download_spec_tests.filters", "download_spec_tests test filters") orelse &[_][]const u8{},
     });
     const install_test_download_spec_tests = b.addInstallArtifact(test_download_spec_tests, .{});
     const tls_install_test_download_spec_tests = b.step("build-test:download_spec_tests", "Install the download_spec_tests test");
@@ -470,7 +485,7 @@ pub fn build(b: *std.Build) void {
     const test_write_spec_tests = b.addTest(.{
         .name = "write_spec_tests",
         .root_module = module_write_spec_tests,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "write_spec_tests.filters", "write_spec_tests test filters") orelse &[_][]const u8{},
     });
     const install_test_write_spec_tests = b.addInstallArtifact(test_write_spec_tests, .{});
     const tls_install_test_write_spec_tests = b.step("build-test:write_spec_tests", "Install the write_spec_tests test");
@@ -484,7 +499,7 @@ pub fn build(b: *std.Build) void {
     const test_write_ssz_generic_spec_tests = b.addTest(.{
         .name = "write_ssz_generic_spec_tests",
         .root_module = module_write_ssz_generic_spec_tests,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "write_ssz_generic_spec_tests.filters", "write_ssz_generic_spec_tests test filters") orelse &[_][]const u8{},
     });
     const install_test_write_ssz_generic_spec_tests = b.addInstallArtifact(test_write_ssz_generic_spec_tests, .{});
     const tls_install_test_write_ssz_generic_spec_tests = b.step("build-test:write_ssz_generic_spec_tests", "Install the write_ssz_generic_spec_tests test");
@@ -498,7 +513,7 @@ pub fn build(b: *std.Build) void {
     const test_write_ssz_static_spec_tests = b.addTest(.{
         .name = "write_ssz_static_spec_tests",
         .root_module = module_write_ssz_static_spec_tests,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "write_ssz_static_spec_tests.filters", "write_ssz_static_spec_tests test filters") orelse &[_][]const u8{},
     });
     const install_test_write_ssz_static_spec_tests = b.addInstallArtifact(test_write_ssz_static_spec_tests, .{});
     const tls_install_test_write_ssz_static_spec_tests = b.step("build-test:write_ssz_static_spec_tests", "Install the write_ssz_static_spec_tests test");
@@ -512,7 +527,7 @@ pub fn build(b: *std.Build) void {
     const test_bench_ssz_attestation = b.addTest(.{
         .name = "bench_ssz_attestation",
         .root_module = module_bench_ssz_attestation,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "bench_ssz_attestation.filters", "bench_ssz_attestation test filters") orelse &[_][]const u8{},
     });
     const install_test_bench_ssz_attestation = b.addInstallArtifact(test_bench_ssz_attestation, .{});
     const tls_install_test_bench_ssz_attestation = b.step("build-test:bench_ssz_attestation", "Install the bench_ssz_attestation test");
@@ -526,7 +541,7 @@ pub fn build(b: *std.Build) void {
     const test_bench_ssz_block = b.addTest(.{
         .name = "bench_ssz_block",
         .root_module = module_bench_ssz_block,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "bench_ssz_block.filters", "bench_ssz_block test filters") orelse &[_][]const u8{},
     });
     const install_test_bench_ssz_block = b.addInstallArtifact(test_bench_ssz_block, .{});
     const tls_install_test_bench_ssz_block = b.step("build-test:bench_ssz_block", "Install the bench_ssz_block test");
@@ -540,7 +555,7 @@ pub fn build(b: *std.Build) void {
     const test_bench_ssz_state = b.addTest(.{
         .name = "bench_ssz_state",
         .root_module = module_bench_ssz_state,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "bench_ssz_state.filters", "bench_ssz_state test filters") orelse &[_][]const u8{},
     });
     const install_test_bench_ssz_state = b.addInstallArtifact(test_bench_ssz_state, .{});
     const tls_install_test_bench_ssz_state = b.step("build-test:bench_ssz_state", "Install the bench_ssz_state test");
@@ -554,7 +569,7 @@ pub fn build(b: *std.Build) void {
     const test_bench_merkle_gindex = b.addTest(.{
         .name = "bench_merkle_gindex",
         .root_module = module_bench_merkle_gindex,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "bench_merkle_gindex.filters", "bench_merkle_gindex test filters") orelse &[_][]const u8{},
     });
     const install_test_bench_merkle_gindex = b.addInstallArtifact(test_bench_merkle_gindex, .{});
     const tls_install_test_bench_merkle_gindex = b.step("build-test:bench_merkle_gindex", "Install the bench_merkle_gindex test");
@@ -568,7 +583,7 @@ pub fn build(b: *std.Build) void {
     const test_bench_merkle_node = b.addTest(.{
         .name = "bench_merkle_node",
         .root_module = module_bench_merkle_node,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "bench_merkle_node.filters", "bench_merkle_node test filters") orelse &[_][]const u8{},
     });
     const install_test_bench_merkle_node = b.addInstallArtifact(test_bench_merkle_node, .{});
     const tls_install_test_bench_merkle_node = b.step("build-test:bench_merkle_node", "Install the bench_merkle_node test");
@@ -582,7 +597,7 @@ pub fn build(b: *std.Build) void {
     const test_bench_hashing = b.addTest(.{
         .name = "bench_hashing",
         .root_module = module_bench_hashing,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "bench_hashing.filters", "bench_hashing test filters") orelse &[_][]const u8{},
     });
     const install_test_bench_hashing = b.addInstallArtifact(test_bench_hashing, .{});
     const tls_install_test_bench_hashing = b.step("build-test:bench_hashing", "Install the bench_hashing test");
@@ -603,7 +618,7 @@ pub fn build(b: *std.Build) void {
     const test_int = b.addTest(.{
         .name = "int",
         .root_module = module_int,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "int.filters", "int test filters") orelse &[_][]const u8{},
     });
     const install_test_int = b.addInstallArtifact(test_int, .{});
     const tls_install_test_int = b.step("build-test:int", "Install the int test");
@@ -624,7 +639,7 @@ pub fn build(b: *std.Build) void {
     const test_spec_tests = b.addTest(.{
         .name = "spec_tests",
         .root_module = module_spec_tests,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "spec_tests.filters", "spec_tests test filters") orelse &[_][]const u8{},
     });
     const install_test_spec_tests = b.addInstallArtifact(test_spec_tests, .{});
     const tls_install_test_spec_tests = b.step("build-test:spec_tests", "Install the spec_tests test");
@@ -645,7 +660,7 @@ pub fn build(b: *std.Build) void {
     const test_ssz_generic_spec_tests = b.addTest(.{
         .name = "ssz_generic_spec_tests",
         .root_module = module_ssz_generic_spec_tests,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "ssz_generic_spec_tests.filters", "ssz_generic_spec_tests test filters") orelse &[_][]const u8{},
     });
     const install_test_ssz_generic_spec_tests = b.addInstallArtifact(test_ssz_generic_spec_tests, .{});
     const tls_install_test_ssz_generic_spec_tests = b.step("build-test:ssz_generic_spec_tests", "Install the ssz_generic_spec_tests test");
@@ -666,7 +681,7 @@ pub fn build(b: *std.Build) void {
     const test_ssz_static_spec_tests = b.addTest(.{
         .name = "ssz_static_spec_tests",
         .root_module = module_ssz_static_spec_tests,
-        .filters = &[_][]const u8{},
+        .filters = b.option([][]const u8, "ssz_static_spec_tests.filters", "ssz_static_spec_tests test filters") orelse &[_][]const u8{},
     });
     const install_test_ssz_static_spec_tests = b.addInstallArtifact(test_ssz_static_spec_tests, .{});
     const tls_install_test_ssz_static_spec_tests = b.step("build-test:ssz_static_spec_tests", "Install the ssz_static_spec_tests test");
