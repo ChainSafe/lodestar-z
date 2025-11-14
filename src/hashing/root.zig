@@ -14,3 +14,7 @@ const merkleize_ = @import("merkleize.zig");
 pub const merkleize = merkleize_.merkleize;
 pub const mixInLength = merkleize_.mixInLength;
 pub const maxChunksToDepth = merkleize_.maxChunksToDepth;
+
+test {
+    @import("std").testing.refAllDecls(@This());
+}
