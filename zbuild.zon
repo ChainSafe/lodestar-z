@@ -37,7 +37,7 @@
         },
         .spec_test_options = .{
             .spec_test_url = .{
-                .default = "https://github.com/ethereum/consensus-spec-tests",
+                .default = "https://github.com/ethereum/consensus-specs",
                 .type = "string",
             },
             .spec_test_version = .{
