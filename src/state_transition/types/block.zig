@@ -155,6 +155,7 @@ const ConsolidationRequest = types.electra.ConsolidationRequest.Type;
 
 const Attestation = @import("attestation.zig").Attestation;
 const Attestations = @import("attestation.zig").Attestations;
+const SyncAggregate = types.altair.SyncAggregate.Type;
 const AttesterSlashings = @import("attester_slashing.zig").AttesterSlashings;
 const ProposerSlashing = types.phase0.ProposerSlashing.Type;
 const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit.Type;

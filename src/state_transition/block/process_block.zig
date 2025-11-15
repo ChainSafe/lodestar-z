@@ -28,6 +28,7 @@ pub const ProcessBlockOpts = struct {
     verify_signature: bool = true,
 };
 
+/// Process a block and update the state following Ethereum Consensus specifications.
 pub fn processBlock(
     allocator: Allocator,
     cached_state: *CachedBeaconStateAllForks,
@@ -83,7 +84,7 @@ pub fn processBlock(
     try processEth1Data(allocator, cached_state, body.eth1Data());
     try processOperations(allocator, cached_state, body, opts);
     if (state.isPostAltair()) {
-        try processSyncAggregate(allocator, cached_state, block, opts.verify_signature);
+        try processSyncAggregate(allocator, cached_state, body.syncAggregate(), opts.verify_signature);
     }
 
     if (state.isPostDeneb()) {
