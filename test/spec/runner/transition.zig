@@ -125,7 +125,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
                     self.pre.allocator,
                     post_state,
                     .{
-                        .regular = &beacon_block,
+                        .regular = beacon_block,
                     },
                     .{
                         .verify_state_root = true,
