@@ -34,8 +34,7 @@ pub fn merkleize(chunk_pairs: [][2][32]u8, chunk_depth: Depth, out: *[32]u8) !vo
 /// ```
 pub fn maxChunksToDepth(n: usize) Depth {
     if (n == 0) return 0;
-    const bit_len: usize = @sizeOf(usize) * 8 - @clz(n - 1);
-    return @intCast(@sizeOf(usize) * 8 - @clz(std.math.pow(usize, 2, bit_len) - 1));
+    return @intCast(std.math.log2_int_ceil(usize, n));
 }
 
 pub fn mixInLength(len: u256, out: *[32]u8) void {
