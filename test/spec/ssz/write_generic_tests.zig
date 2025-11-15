@@ -1,6 +1,8 @@
 const std = @import("std");
 const spec_test_options = @import("spec_test_options");
 
+const SKIPPED_TEST_DIR_NAMES = .{ "basic_progressive_list", "compatible_unions", "progressive_bitlist", "progressive_containers" };
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
@@ -37,7 +39,7 @@ pub fn main() !void {
 
     const generic_tests_dir = try std.fs.cwd().openDir(generic_tests_dir_name, .{ .iterate = true });
     var generic_tests_dir_it = generic_tests_dir.iterate();
-    while (try generic_tests_dir_it.next()) |g_test_entry| {
+    outer: while (try generic_tests_dir_it.next()) |g_test_entry| {
         switch (g_test_entry.kind) {
             .directory => {},
             else => {
@@ -46,9 +48,11 @@ pub fn main() !void {
         }
 
         const test_dir_name = g_test_entry.name;
-        if (std.mem.indexOf(u8, test_dir_name, "progressive") != null or std.mem.eql(u8, test_dir_name, "compatible_unions")) {
-            std.debug.print("TODO: implement {s} test \n", .{test_dir_name});
-            continue;
+        inline for (SKIPPED_TEST_DIR_NAMES) |skipped_test_dir_name| {
+            if (std.mem.eql(u8, test_dir_name, skipped_test_dir_name)) {
+                std.debug.print("TODO: implement {s} test \n", .{test_dir_name});
+                continue :outer;
+            }
         }
 
         const valid_tests_dir_name = try std.fs.path.join(allocator, &[_][]const u8{
@@ -69,6 +73,7 @@ pub fn main() !void {
             }
 
             const test_name = valid_test_entry.name;
+            // TODO: https://github.com/ChainSafe/lodestar-z/issues/98
             if (std.mem.startsWith(u8, test_name, "Progressive")) {
                 continue;
             }
@@ -95,6 +100,7 @@ pub fn main() !void {
             }
 
             const test_name = invalid_test_entry.name;
+            // TODO: https://github.com/ChainSafe/lodestar-z/issues/98
             if (std.mem.startsWith(u8, test_name, "Progressive")) {
                 continue;
             }
