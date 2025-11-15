@@ -177,8 +177,8 @@ pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: s
 }
 
 /// TODO: move this to SignedBeaconBlock deinit method if this is useful there
-pub fn deinitSignedBeaconBlock(signed_block: *SignedBeaconBlock, allocator: std.mem.Allocator) void {
-    switch (signed_block.*) {
+pub fn deinitSignedBeaconBlock(signed_block: SignedBeaconBlock, allocator: std.mem.Allocator) void {
+    switch (signed_block) {
         .phase0 => |b| {
             phase0.SignedBeaconBlock.deinit(allocator, @constCast(b));
             allocator.destroy(b);
