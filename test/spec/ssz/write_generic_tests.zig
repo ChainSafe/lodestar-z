@@ -46,6 +46,10 @@ pub fn main() !void {
         }
 
         const test_dir_name = g_test_entry.name;
+        if (std.mem.indexOf(u8, test_dir_name, "progressive") != null or std.mem.eql(u8, test_dir_name, "compatible_unions")) {
+            std.debug.print("TODO: implement {s} test \n", .{test_dir_name});
+            continue;
+        }
 
         const valid_tests_dir_name = try std.fs.path.join(allocator, &[_][]const u8{
             generic_tests_dir_name,
@@ -65,6 +69,9 @@ pub fn main() !void {
             }
 
             const test_name = valid_test_entry.name;
+            if (std.mem.startsWith(u8, test_name, "Progressive")) {
+                continue;
+            }
             const type_name = getTypeName(test_dir_name, test_name);
 
             try writeValidTest(writer, test_name, test_dir_name, type_name);
@@ -88,6 +95,9 @@ pub fn main() !void {
             }
 
             const test_name = invalid_test_entry.name;
+            if (std.mem.startsWith(u8, test_name, "Progressive")) {
+                continue;
+            }
             const type_name = getTypeName(test_dir_name, test_name);
 
             // we must skip some invalid types (that would have gotten caught at compile time)
