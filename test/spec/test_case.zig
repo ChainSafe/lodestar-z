@@ -24,8 +24,8 @@ pub const BlsSetting = enum {
 
     pub fn verify(self: BlsSetting) bool {
         return switch (self) {
-            .default, .required => true,
-            .ignored => false,
+            .required => true,
+            .default, .ignored => false,
         };
     }
 };
@@ -46,7 +46,7 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
 
         pub fn loadPreStatePreFork(allocator: Allocator, dir: std.fs.Dir, fork_epoch: Epoch) !TestCachedBeaconStateAllForks {
             const fork_pre = comptime getForkPre();
-            const ForkPreTypes = @field(ssz, fork_pre.forkName());
+            const ForkPreTypes = @field(types, fork_pre.forkName());
             const pre_state = try allocator.create(ForkPreTypes.BeaconState.Type);
             var transfered_pre_state: bool = false;
             errdefer {
@@ -127,7 +127,7 @@ pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: s
         .phase0 => blk: {
             const out = try allocator.create(phase0.SignedBeaconBlock.Type);
             out.* = phase0.SignedBeaconBlock.default_value;
-            try loadSszSnappyValue(ssz.phase0.SignedBeaconBlock, allocator, dir, file_name, out);
+            try loadSszSnappyValue(types.phase0.SignedBeaconBlock, allocator, dir, file_name, out);
             break :blk SignedBeaconBlock{
                 .phase0 = out,
             };
@@ -135,7 +135,7 @@ pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: s
         .altair => blk: {
             const out = try allocator.create(altair.SignedBeaconBlock.Type);
             out.* = altair.SignedBeaconBlock.default_value;
-            try loadSszSnappyValue(ssz.altair.SignedBeaconBlock, allocator, dir, file_name, out);
+            try loadSszSnappyValue(types.altair.SignedBeaconBlock, allocator, dir, file_name, out);
             break :blk SignedBeaconBlock{
                 .altair = out,
             };
@@ -143,7 +143,7 @@ pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: s
         .bellatrix => blk: {
             const out = try allocator.create(bellatrix.SignedBeaconBlock.Type);
             out.* = bellatrix.SignedBeaconBlock.default_value;
-            try loadSszSnappyValue(ssz.bellatrix.SignedBeaconBlock, allocator, dir, file_name, out);
+            try loadSszSnappyValue(types.bellatrix.SignedBeaconBlock, allocator, dir, file_name, out);
             break :blk SignedBeaconBlock{
                 .bellatrix = out,
             };
@@ -151,7 +151,7 @@ pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: s
         .capella => blk: {
             const out = try allocator.create(capella.SignedBeaconBlock.Type);
             out.* = capella.SignedBeaconBlock.default_value;
-            try loadSszSnappyValue(ssz.capella.SignedBeaconBlock, allocator, dir, file_name, out);
+            try loadSszSnappyValue(types.capella.SignedBeaconBlock, allocator, dir, file_name, out);
             break :blk SignedBeaconBlock{
                 .capella = out,
             };
@@ -159,7 +159,7 @@ pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: s
         .deneb => blk: {
             const out = try allocator.create(deneb.SignedBeaconBlock.Type);
             out.* = deneb.SignedBeaconBlock.default_value;
-            try loadSszSnappyValue(ssz.deneb.SignedBeaconBlock, allocator, dir, file_name, out);
+            try loadSszSnappyValue(types.deneb.SignedBeaconBlock, allocator, dir, file_name, out);
             break :blk SignedBeaconBlock{
                 .deneb = out,
             };
@@ -167,7 +167,7 @@ pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: s
         .electra => blk: {
             const out = try allocator.create(electra.SignedBeaconBlock.Type);
             out.* = electra.SignedBeaconBlock.default_value;
-            try loadSszSnappyValue(ssz.electra.SignedBeaconBlock, allocator, dir, file_name, out);
+            try loadSszSnappyValue(types.electra.SignedBeaconBlock, allocator, dir, file_name, out);
             break :blk SignedBeaconBlock{
                 .electra = out,
             };
@@ -246,7 +246,11 @@ pub fn expectEqualBeaconStates(expected: BeaconStateAllForks, actual: BeaconStat
             if (!deneb.BeaconState.equals(expected.deneb, actual.deneb)) return error.NotEqual;
         },
         .electra => {
-            if (!electra.BeaconState.equals(expected.electra, actual.electra)) return error.NotEqual;
+            if (!electra.BeaconState.equals(expected.electra, actual.electra)) {
+                // more debug
+                if (!phase0.BeaconBlockHeader.equals(&expected.electra.latest_block_header, &actual.electra.latest_block_header)) return error.LatestBlockHeaderNotEqual;
+                return error.NotEqual;
+            }
         },
     }
 }

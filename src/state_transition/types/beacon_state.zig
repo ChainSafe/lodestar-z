@@ -773,35 +773,35 @@ test "upgrade state - sanity" {
     var phase0 = BeaconStateAllForks{ .phase0 = phase0_state };
     const old_phase0_state = phase0.phase0;
     defer {
-        ssz.phase0.BeaconState.deinit(allocator, old_phase0_state);
+        types.phase0.BeaconState.deinit(allocator, old_phase0_state);
         allocator.destroy(old_phase0_state);
     }
 
     var altair = try phase0.upgradeUnsafe(allocator);
     const old_altair_state = altair.altair;
     defer {
-        ssz.altair.BeaconState.deinit(allocator, old_altair_state);
+        types.altair.BeaconState.deinit(allocator, old_altair_state);
         allocator.destroy(old_altair_state);
     }
 
     var bellatrix = try altair.upgradeUnsafe(allocator);
     const old_bellatrix_state = bellatrix.bellatrix;
     defer {
-        ssz.bellatrix.BeaconState.deinit(allocator, old_bellatrix_state);
+        types.bellatrix.BeaconState.deinit(allocator, old_bellatrix_state);
         allocator.destroy(old_bellatrix_state);
     }
 
     var capella = try bellatrix.upgradeUnsafe(allocator);
     const old_capella_state = capella.capella;
     defer {
-        ssz.capella.BeaconState.deinit(allocator, old_capella_state);
+        types.capella.BeaconState.deinit(allocator, old_capella_state);
         allocator.destroy(old_capella_state);
     }
 
     var deneb = try capella.upgradeUnsafe(allocator);
     const old_deneb_state = deneb.deneb;
     defer {
-        ssz.deneb.BeaconState.deinit(allocator, old_deneb_state);
+        types.deneb.BeaconState.deinit(allocator, old_deneb_state);
         allocator.destroy(old_deneb_state);
     }
 
