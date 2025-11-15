@@ -2,4 +2,4 @@
 // This file exists as a cache key for the spec tests in CI.
 // Do not commit changes by hand.
 
-v1.5.0
+v1.6.0-beta.2
