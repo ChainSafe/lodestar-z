@@ -13,14 +13,18 @@ const supported_forks = [_]ForkSeq{
 };
 
 const supported_test_runners = [_]RunnerKind{
+    .merkle_proof,
     .operations,
+    .rewards,
     .sanity,
     .epoch_processing,
 };
 
 fn TestWriter(comptime kind: RunnerKind) type {
     return switch (kind) {
+        .merkle_proof => @import("./writer/merkle_proof.zig"),
         .operations => @import("./writer/operations.zig"),
+        .rewards => @import("./writer/rewards.zig"),
         .sanity => @import("./writer/sanity.zig"),
         .epoch_processing => @import("./writer/epoch_processing.zig"),
         else => @compileError("Unsupported test runner"),
@@ -29,10 +33,7 @@ fn TestWriter(comptime kind: RunnerKind) type {
 
 pub fn main() !void {
     const test_case_dir = "test/spec/test_case/";
-    std.fs.cwd().makeDir(test_case_dir) catch |err| {
-        if (err != error.PathAlreadyExists) return err;
-        // ignore if the directory already exists
-    };
+    try std.fs.cwd().makePath(test_case_dir);
 
     inline for (supported_test_runners) |kind| {
         const test_case_file = test_case_dir ++ @tagName(kind) ++ "_tests.zig";
@@ -45,6 +46,7 @@ pub fn main() !void {
 
     {
         const test_root_file = "test/spec/root.zig";
+        try std.fs.cwd().makePath("test/spec");
         const out = try std.fs.cwd().createFile(test_root_file, .{});
         defer out.close();
         const writer = out.writer().any();
@@ -89,22 +91,39 @@ pub fn writeTests(
     defer preset_dir.close();
 
     inline for (forks) |fork| {
-        var fork_dir = try preset_dir.openDir(@tagName(fork) ++ "/" ++ @tagName(kind), .{});
-        defer fork_dir.close();
+        const fork_path = @tagName(fork) ++ "/" ++ @tagName(kind);
+        const maybe_fork_dir = preset_dir.openDir(fork_path, .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => return err,
+        };
 
-        inline for (TestWriter(kind).handlers) |handler| {
-            st: {
-                var suite_dir = fork_dir.openDir(comptime handler.suiteName(), .{ .iterate = true }) catch break :st;
+        if (maybe_fork_dir) |dir| {
+            var fork_dir = dir;
+            defer fork_dir.close();
+
+            inline for (TestWriter(kind).handlers) |handler| handler_loop: {
+                var suite_dir = fork_dir.openDir(comptime handler.suiteName(), .{ .iterate = true }) catch |err| switch (err) {
+                    error.FileNotFound => break :handler_loop,
+                    else => return err,
+                };
                 defer suite_dir.close();
 
-                var test_case_iterator = suite_dir.iterate();
-                while (try test_case_iterator.next()) |test_case_entry| {
-                    if (test_case_entry.kind != .directory) {
-                        continue;
-                    }
-                    const test_case_name = test_case_entry.name;
+                var suite_iter = suite_dir.iterate();
+                while (try suite_iter.next()) |suite_entry| {
+                    if (suite_entry.kind != .directory) continue;
 
-                    try TestWriter(kind).writeTest(writer, fork, handler, test_case_name);
+                    if (comptime kind.hasSuiteCase()) {
+                        var case_dir = suite_dir.openDir(suite_entry.name, .{ .iterate = true }) catch continue;
+                        defer case_dir.close();
+
+                        var case_iter = case_dir.iterate();
+                        while (try case_iter.next()) |case_entry| {
+                            if (case_entry.kind != .directory) continue;
+                            try TestWriter(kind).writeTest(writer, fork, handler, suite_entry.name, case_entry.name);
+                        }
+                    } else {
+                        try TestWriter(kind).writeTest(writer, fork, handler, suite_entry.name);
+                    }
                 }
             }
         }

@@ -4,7 +4,9 @@
 const testing = @import("std").testing;
 
 comptime {
+    testing.refAllDecls(@import("./test_case/merkle_proof_tests.zig"));
     testing.refAllDecls(@import("./test_case/operations_tests.zig"));
+    testing.refAllDecls(@import("./test_case/rewards_tests.zig"));
     testing.refAllDecls(@import("./test_case/sanity_tests.zig"));
     testing.refAllDecls(@import("./test_case/epoch_processing_tests.zig"));
 }

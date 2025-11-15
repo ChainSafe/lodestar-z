@@ -187,6 +187,7 @@
                     .state_transition,
                     .ssz,
                     .blst,
+                    .persistent_merkle_tree,
                 },
             },
             .filters = .{},
