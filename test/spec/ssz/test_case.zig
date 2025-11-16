@@ -16,9 +16,34 @@ pub fn parseYaml(comptime ST: type, allocator: Allocator, y: yaml.Yaml, out: *ST
         const bytes = try hex.hexToBytes(bytes_buf, yaml_bytes);
         out.* = ST.Type{ .data = bytes[0..ST.byte_length].* };
         return;
-    } else if (comptime ssz.isBitListType(ST)) {
-        const bytes_buf = try allocator.alloc(u8, ((ST.limit + 7) / 8) + 2);
+    } else if (comptime ST.kind == .compatible_union) {
+        const map = try y.docs.items[0].asMap();
+
+        // Parse selector field
+        y.docs.items[0] = map.get("selector").?;
+        const selector_str = try y.parse(allocator, []const u8);
+        const selector = try std.fmt.parseInt(u8, selector_str, 10);
+        out.selector = selector;
+
+        // Parse data field based on selector
+        y.docs.items[0] = map.get("data").?;
+        inline for (ST._union_options) |option| {
+            const option_selector = option.@"0";
+            if (selector == option_selector) {
+                const option_type = option.@"1";
+                const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option_selector});
+
+                // Initialize union field and parse in-place to avoid intermediate copy
+                out.data = @unionInit(@TypeOf(out.data), field_name, option_type.default_value);
+                try parseYaml(option_type, allocator, y, &@field(out.data, field_name));
+
+                return;
+            }
+        }
+        return error.InvalidSelector;
+    } else if (comptime ssz.isBitListType(ST) or ssz.isProgressiveBitListType(ST)) {
         const yaml_bytes = try y.parse(allocator, []const u8);
+        const bytes_buf = try allocator.alloc(u8, hex.hexByteLen(yaml_bytes));
         const data = try hex.hexToBytes(bytes_buf, yaml_bytes);
         // we need to find the padding bit to find the bit_len, and then remove it
         // do this manually, otherwise we're testing the deserialization codepath against itself
@@ -41,14 +66,14 @@ pub fn parseYaml(comptime ST: type, allocator: Allocator, y: yaml.Yaml, out: *ST
 
         out.* = bl;
         return;
-    } else if (ST.kind == .container) {
+    } else if (ST.kind == .container or ST.kind == .progressive_container) {
         const map = try y.docs.items[0].asMap();
         inline for (ST.fields) |field| {
             y.docs.items[0] = map.get(field.name).?;
             try parseYaml(field.type, allocator, y, &@field(out, field.name));
         }
         return;
-    } else if (ST.kind == .list) {
+    } else if (ST.kind == .list or ST.kind == .progressive_list) {
         if (comptime ssz.isByteListType(ST)) {
             const hex_bytes = try y.parse(allocator, []u8);
             const bytes_buf = try allocator.alloc(u8, (hex_bytes.len - 2) / 2);
@@ -252,7 +277,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     // test merkleization
 
     var root_actual_oneshot: [32]u8 = undefined;
-    if (comptime ssz.isFixedType(ST)) {
+    if (comptime ssz.isFixedType(ST) and ST.kind != .progressive_container) {
         try ST.hashTreeRoot(value_expected, &root_actual_oneshot);
     } else {
         try ST.hashTreeRoot(allocator, value_expected, &root_actual_oneshot);
@@ -260,7 +285,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     try std.testing.expectEqualSlices(u8, &root_expected, &root_actual_oneshot);
 
     var root_actual_serialized: [32]u8 = undefined;
-    if (comptime ssz.isFixedType(ST)) {
+    if (comptime ssz.isFixedType(ST) and ST.kind != .progressive_container) {
         try ST.serialized.hashTreeRoot(serialized_expected, &root_actual_serialized);
     } else {
         try ST.serialized.hashTreeRoot(allocator, serialized_expected, &root_actual_serialized);
@@ -278,7 +303,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     var pool = try Node.Pool.init(gpa, 1_000_000);
     defer pool.deinit();
 
-    const node = if (comptime ssz.isFixedType(ST))
+    const node = if (comptime ssz.isFixedType(ST) and ST.kind != .progressive_container)
         try ST.tree.fromValue(&pool, value_expected)
     else
         try ST.tree.fromValue(allocator, &pool, value_expected);
@@ -305,7 +330,7 @@ pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir) !voi
 
     const serialized_file = try path.openFile("serialized.ssz_snappy", .{});
     defer serialized_file.close();
-    const serialized_snappy_bytes = try serialized_file.readToEndAlloc(allocator, 1_000_000);
+    const serialized_snappy_bytes = try serialized_file.readToEndAlloc(allocator, 10_000_000);
 
     const serialized_buf = try allocator.alloc(u8, try snappy.uncompressedLength(serialized_snappy_bytes));
     const serialized_len = try snappy.uncompress(serialized_snappy_bytes, serialized_buf);
