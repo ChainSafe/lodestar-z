@@ -100,7 +100,6 @@ pub fn ProgressiveBitList() type {
                 }
             }
         }
-
     };
 }
 
