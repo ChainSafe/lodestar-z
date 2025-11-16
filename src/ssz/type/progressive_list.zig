@@ -105,19 +105,11 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
             }
 
             var i: usize = 0;
-            while (true) : (i += 1) {
-                switch (try source.peekNextTokenType()) {
-                    .array_end => {
-                        _ = try source.next();
-                        return;
-                    },
-                    else => {},
-                }
-
+            while ((try source.peekNextTokenType()) != .array_end) : (i += 1) {
                 try out.append(allocator, Element.default_value);
                 try Element.deserializeFromJson(source, &out.items[i]);
             }
-            return error.invalidLength;
+            _ = try source.next();
         }
 
         pub const serialized = struct {
@@ -494,19 +486,11 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
             }
 
             var i: usize = 0;
-            while (true) : (i += 1) {
-                switch (try source.peekNextTokenType()) {
-                    .array_end => {
-                        _ = try source.next();
-                        return;
-                    },
-                    else => {},
-                }
-
+            while ((try source.peekNextTokenType()) != .array_end) : (i += 1) {
                 try out.append(allocator, Element.default_value);
                 try Element.deserializeFromJson(allocator, source, &out.items[i]);
             }
-            return error.invalidLength;
+            _ = try source.next();
         }
     };
 }
