@@ -277,7 +277,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     // test merkleization
 
     var root_actual_oneshot: [32]u8 = undefined;
-    if (comptime ssz.isFixedType(ST)) {
+    if (comptime ssz.isFixedType(ST) and ST.kind != .progressive_container) {
         try ST.hashTreeRoot(value_expected, &root_actual_oneshot);
     } else {
         try ST.hashTreeRoot(allocator, value_expected, &root_actual_oneshot);
@@ -285,7 +285,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     try std.testing.expectEqualSlices(u8, &root_expected, &root_actual_oneshot);
 
     var root_actual_serialized: [32]u8 = undefined;
-    if (comptime ssz.isFixedType(ST)) {
+    if (comptime ssz.isFixedType(ST) and ST.kind != .progressive_container) {
         try ST.serialized.hashTreeRoot(serialized_expected, &root_actual_serialized);
     } else {
         try ST.serialized.hashTreeRoot(allocator, serialized_expected, &root_actual_serialized);
@@ -303,7 +303,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     var pool = try Node.Pool.init(gpa, 1_000_000);
     defer pool.deinit();
 
-    const node = if (comptime ssz.isFixedType(ST))
+    const node = if (comptime ssz.isFixedType(ST) and ST.kind != .progressive_container)
         try ST.tree.fromValue(&pool, value_expected)
     else
         try ST.tree.fromValue(allocator, &pool, value_expected);

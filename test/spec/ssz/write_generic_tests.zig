@@ -93,13 +93,9 @@ fn getTypeName(test_dir_name: []const u8, test_name: []const u8) []const u8 {
     }
     if (std.mem.eql(u8, test_dir_name, "basic_progressive_list")) {
         var split_it = std.mem.splitScalar(u8, test_name, '_');
-        const part1 = split_it.next() orelse unreachable;
-        const part2 = split_it.next() orelse unreachable;
-        var result = std.ArrayList(u8).init(std.heap.page_allocator);
-        result.appendSlice(part1) catch unreachable;
-        result.append('_') catch unreachable;
-        result.appendSlice(part2) catch unreachable;
-        return result.items;
+        _ = split_it.next();
+        _ = split_it.next();
+        return test_name[0 .. (split_it.index orelse (split_it.buffer.len + 1)) - 1];
     }
     if (std.mem.eql(u8, test_dir_name, "progressive_containers")) {
         if (std.mem.indexOf(u8, test_name, "TestStruct")) |idx| {

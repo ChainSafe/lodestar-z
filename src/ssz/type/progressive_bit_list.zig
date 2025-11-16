@@ -177,7 +177,7 @@ pub fn ProgressiveBitListType() type {
 
             const last_byte_clz = @clz(last_byte);
             if (last_byte_clz == 8) {
-                return error.noPaddingBit;
+                return error.InvalidSSZ;
             }
             const last_1_index: u3 = @intCast(7 - last_byte_clz);
             const bit_len = (data.len - 1) * 8 + last_1_index;
@@ -210,7 +210,7 @@ pub fn ProgressiveBitListType() type {
 
                 const last_byte_clz = @clz(last_byte);
                 if (last_byte_clz == 8) {
-                    return error.noPaddingBit;
+                    return error.InvalidSSZ;
                 }
                 const last_1_index: u3 = @intCast(7 - last_byte_clz);
                 const bit_len = (data.len - 1) * 8 + last_1_index;
@@ -227,7 +227,7 @@ pub fn ProgressiveBitListType() type {
 
                 const last_byte_clz = @clz(last_byte);
                 if (last_byte_clz == 8) {
-                    return error.noPaddingBit;
+                    return error.InvalidSSZ;
                 }
                 const last_1_index: u3 = @intCast(7 - last_byte_clz);
                 const bit_len = (data.len - 1) * 8 + last_1_index;
@@ -244,7 +244,7 @@ pub fn ProgressiveBitListType() type {
 
                 const last_byte_clz = @clz(last_byte);
                 if (last_byte_clz == 8) {
-                    return error.noPaddingBit;
+                    return error.InvalidSSZ;
                 }
                 const last_1_index: u3 = @intCast(7 - last_byte_clz);
                 const bit_len = (data.len - 1) * 8 + last_1_index;

@@ -66,7 +66,7 @@ pub fn Hasher(comptime ST: type) type {
             } else {
                 switch (ST.kind) {
                     .progressive_list, .progressive_bit_list => {
-                        try ST.hashTreeRoot(scratch.allocator(), value, out);
+                        try ST.hashTreeRoot(scratch.getAllocator(), value, out);
                     },
                     .list => {
                         const chunk_count = ST.chunkCount(value);
@@ -111,14 +111,10 @@ pub fn Hasher(comptime ST: type) type {
                         try h.merkleize(@ptrCast(scratch.chunks.items), ST.chunk_depth, out);
                     },
                     .progressive_container => {
-                        if (comptime isFixedType(ST)) {
-                            try ST.hashTreeRoot(value, out);
-                        } else {
-                            try ST.hashTreeRoot(scratch.allocator(), value, out);
-                        }
+                        try ST.hashTreeRoot(scratch.getAllocator(), value, out);
                     },
                     .compatible_union => {
-                        try ST.hashTreeRoot(scratch.allocator(), value, out);
+                        try ST.hashTreeRoot(scratch.getAllocator(), value, out);
                     },
                     else => unreachable,
                 }
@@ -131,8 +127,8 @@ pub const HasherData = struct {
     chunks: std.ArrayList([32]u8),
     children: ?[]HasherData,
 
-    pub fn initCapacity(alloc: std.mem.Allocator, capacity: usize, children: ?[]HasherData) !HasherData {
-        var chunks = try std.ArrayList([32]u8).initCapacity(alloc, capacity);
+    pub fn initCapacity(allocator: std.mem.Allocator, capacity: usize, children: ?[]HasherData) !HasherData {
+        var chunks = try std.ArrayList([32]u8).initCapacity(allocator, capacity);
         chunks.expandToCapacity();
         @memset(chunks.items, [_]u8{0} ** 32);
         return HasherData{
@@ -141,17 +137,17 @@ pub const HasherData = struct {
         };
     }
 
-    pub fn deinit(self: HasherData, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: HasherData, allocator: std.mem.Allocator) void {
         if (self.children) |children| {
             for (children) |child| {
-                child.deinit(alloc);
+                child.deinit(allocator);
             }
-            alloc.free(children);
+            allocator.free(children);
         }
         self.chunks.deinit();
     }
 
-    pub fn allocator(self: *HasherData) std.mem.Allocator {
+    pub fn getAllocator(self: *HasherData) std.mem.Allocator {
         return self.chunks.allocator;
     }
 };

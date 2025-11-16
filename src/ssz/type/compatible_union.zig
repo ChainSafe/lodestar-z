@@ -208,14 +208,13 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
                     const value_data_ptr = &@field(value.data, field_name);
-                    // Need to initialize the union with the correct tag before accessing the field
-                    var temp_data: option_type.Type = undefined;
+                    out.data = @unionInit(@TypeOf(out.data), field_name, option_type.default_value);
+                    const out_data_ptr = &@field(out.data, field_name);
                     if (comptime isFixedType(option_type)) {
-                        try option_type.clone(value_data_ptr, &temp_data);
+                        try option_type.clone(value_data_ptr, out_data_ptr);
                     } else {
-                        try option_type.clone(allocator, value_data_ptr, &temp_data);
+                        try option_type.clone(allocator, value_data_ptr, out_data_ptr);
                     }
-                    out.data = @unionInit(@TypeOf(out.data), field_name, temp_data);
                     return;
                 }
             }
@@ -234,7 +233,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
 
                     const data_ptr = &@field(value.data, field_name);
 
-                    if (comptime isFixedType(option_type)) {
+                    if (comptime isFixedType(option_type) and option_type.kind != .progressive_container) {
                         try option_type.hashTreeRoot(data_ptr, &data_root);
                     } else {
                         try option_type.hashTreeRoot(allocator, data_ptr, &data_root);
@@ -301,17 +300,14 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                     const option_type = option.@"1";
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                    // Deserialize into a temporary value, then set the union properly
-                    var temp_value: option_type.Type = option_type.default_value;
+                    out.data = @unionInit(@TypeOf(out.data), field_name, option_type.default_value);
+                    const out_data_ptr = &@field(out.data, field_name);
 
                     if (comptime isFixedType(option_type)) {
-                        try option_type.deserializeFromBytes(data[1..], &temp_value);
+                        try option_type.deserializeFromBytes(data[1..], out_data_ptr);
                     } else {
-                        try option_type.deserializeFromBytes(allocator, data[1..], &temp_value);
+                        try option_type.deserializeFromBytes(allocator, data[1..], out_data_ptr);
                     }
-
-                    // Set the union with the correct tag
-                    out.data = @unionInit(@TypeOf(out.data), field_name, temp_value);
 
                     return;
                 }
@@ -343,7 +339,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                     if (selector == option.@"0") {
                         const option_type = option.@"1";
 
-                        if (comptime isFixedType(option_type)) {
+                        if (comptime isFixedType(option_type) and option_type.kind != .progressive_container) {
                             try option_type.serialized.hashTreeRoot(data[1..], &data_root);
                         } else {
                             try option_type.serialized.hashTreeRoot(allocator, data[1..], &data_root);
@@ -408,15 +404,14 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                         const option_type = option.@"1";
                         const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                        var temp_value: option_type.Type = option_type.default_value;
+                        out.data = @unionInit(@TypeOf(out.data), field_name, option_type.default_value);
+                        const out_data_ptr = &@field(out.data, field_name);
 
                         if (comptime isFixedType(option_type)) {
-                            try option_type.tree.toValue(data_node, pool, &temp_value);
+                            try option_type.tree.toValue(data_node, pool, out_data_ptr);
                         } else {
-                            try option_type.tree.toValue(allocator, data_node, pool, &temp_value);
+                            try option_type.tree.toValue(allocator, data_node, pool, out_data_ptr);
                         }
-
-                        out.data = @unionInit(@TypeOf(out.data), field_name, temp_value);
                         return;
                     }
                 }
@@ -435,7 +430,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
 
                         const data_ptr = &@field(value.data, field_name);
 
-                        if (comptime isFixedType(option_type)) {
+                        if (comptime isFixedType(option_type) and option_type.kind != .progressive_container) {
                             data_tree = try option_type.tree.fromValue(pool, data_ptr);
                         } else {
                             data_tree = try option_type.tree.fromValue(allocator, pool, data_ptr);
@@ -495,15 +490,14 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                     const option_type = option.@"1";
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                    var temp_value: option_type.Type = option_type.default_value;
+                    out.data = @unionInit(@TypeOf(out.data), field_name, option_type.default_value);
+                    const out_data_ptr = &@field(out.data, field_name);
 
                     if (comptime isFixedType(option_type)) {
-                        try option_type.deserializeFromJson(source, &temp_value);
+                        try option_type.deserializeFromJson(source, out_data_ptr);
                     } else {
-                        try option_type.deserializeFromJson(allocator, source, &temp_value);
+                        try option_type.deserializeFromJson(allocator, source, out_data_ptr);
                     }
-
-                    out.data = @unionInit(@TypeOf(out.data), field_name, temp_value);
 
                     // End object "}"
                     switch (try source.next()) {
