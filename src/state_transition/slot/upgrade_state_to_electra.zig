@@ -6,6 +6,7 @@ const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
 const constants = @import("constants");
 const computeActivationExitEpoch = @import("../utils/epoch.zig").computeActivationExitEpoch;
 const getActivationExitChurnLimit = @import("../utils/validator.zig").getActivationExitChurnLimit;
+const getConsolidationChurnLimit = @import("../utils/validator.zig").getConsolidationChurnLimit;
 const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCompoundingWithdrawalCredential;
 const queueExcessActiveBalance = @import("../utils/electra.zig").queueExcessActiveBalance;
 
@@ -49,10 +50,9 @@ pub fn upgradeStateToElectra(allocator: Allocator, cached_state: *CachedBeaconSt
     }
 
     state.earliestExitEpoch().* = earliest_exit_epoch + 1;
-    state.consolidationBalanceToConsume().* = 0;
     state.earliestConsolidationEpoch().* = computeActivationExitEpoch(current_epoch_pre);
-
     state.exitBalanceToConsume().* = getActivationExitChurnLimit(cached_state.getEpochCache());
+    state.consolidationBalanceToConsume().* = getConsolidationChurnLimit(cached_state.getEpochCache());
 
     const sort_fn = struct {
         pub fn sort(validator_arr: []ssz.phase0.Validator.Type, a: ValidatorIndex, b: ValidatorIndex) bool {

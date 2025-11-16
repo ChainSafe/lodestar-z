@@ -77,7 +77,6 @@ pub fn Transition(comptime fork: ForkSeq) type {
             tc.blocks = try allocator.alloc(SignedBeaconBlock, blocks_count);
             errdefer {
                 for (tc.blocks) |block| {
-                    // block.deinit(allocator);
                     test_case.deinitSignedBeaconBlock(block, allocator);
                 }
                 allocator.free(tc.blocks);
@@ -103,7 +102,6 @@ pub fn Transition(comptime fork: ForkSeq) type {
 
         pub fn deinit(self: *Self) void {
             for (self.blocks) |block| {
-                // block.deinit(self.pre.allocator);
                 test_case.deinitSignedBeaconBlock(block, self.pre.allocator);
             }
             self.pre.allocator.free(self.blocks);
@@ -153,11 +151,11 @@ pub fn Transition(comptime fork: ForkSeq) type {
         pub fn runTest(self: *Self) !void {
             if (self.post) |post| {
                 const actual = try self.process();
-                try expectEqualBeaconStates(post, actual.state.*);
                 defer {
                     actual.deinit();
                     self.pre.allocator.destroy(actual);
                 }
+                try expectEqualBeaconStates(post, actual.state.*);
             } else {
                 _ = self.process() catch |err| {
                     if (err == error.SkipZigTest) {
