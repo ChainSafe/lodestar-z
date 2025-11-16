@@ -33,12 +33,9 @@ pub fn parseYaml(comptime ST: type, allocator: Allocator, y: yaml.Yaml, out: *ST
                 const option_type = option.@"1";
                 const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option_selector});
 
-                // Parse into a temporary value with proper initialization
-                var temp_value: option_type.Type = option_type.default_value;
-                try parseYaml(option_type, allocator, y, &temp_value);
-
-                // Set the union with the correct tag by constructing the value
-                out.data = @unionInit(@TypeOf(out.data), field_name, temp_value);
+                // Initialize union field and parse in-place to avoid intermediate copy
+                out.data = @unionInit(@TypeOf(out.data), field_name, option_type.default_value);
+                try parseYaml(option_type, allocator, y, &@field(out.data, field_name));
 
                 return;
             }
