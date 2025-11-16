@@ -7,7 +7,7 @@ const build_options = @import("build_options");
 const default_max_depth = 64;
 
 // Allow overriding via `build.zig`
-const user_max_depth: u8 = if (@hasDecl(build_options, "max_depth"))
+pub const user_max_depth: u8 = if (@hasDecl(build_options, "max_depth"))
     if (@typeInfo(@TypeOf(build_options.max_depth)) == .optional)
         build_options.max_depth orelse default_max_depth
     else

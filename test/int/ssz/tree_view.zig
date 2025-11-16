@@ -149,3 +149,254 @@ test "TreeView list element roundtrip" {
     try std.testing.expectEqual(roundtrip.items.len, expected_list.items.len);
     try std.testing.expectEqualSlices(u32, expected_list.items, roundtrip.items);
 }
+
+test "TreeView list push updates cached length" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const ListType = ssz.FixedListType(Uint32, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &[_]u32{ 1, 2, 3 });
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), try view.getLength());
+
+    try view.push(@as(u32, 55));
+
+    try std.testing.expectEqual(@as(usize, 4), try view.getLength());
+    try std.testing.expectEqual(@as(u32, 55), try view.getElement(3));
+
+    try view.commit();
+
+    try std.testing.expectEqual(@as(usize, 4), try view.getLength());
+
+    var expected: ListType.Type = .empty;
+    defer expected.deinit(allocator);
+    try expected.appendSlice(allocator, &[_]u32{ 1, 2, 3, 55 });
+
+    var expected_root: [32]u8 = undefined;
+    try ListType.hashTreeRoot(allocator, &expected, &expected_root);
+
+    var actual_root: [32]u8 = undefined;
+    try view.hashTreeRoot(&actual_root);
+
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}
+
+test "TreeView vector getAllElements fills provided buffer" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const VectorType = ssz.FixedVectorType(Uint32, 8);
+
+    const values = [_]u32{ 9, 8, 7, 6, 5, 4, 3, 2 };
+    const root_node = try VectorType.tree.fromValue(&pool, &values);
+    var view = try ssz.TreeView(VectorType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    const out = try allocator.alloc(u32, values.len);
+    defer allocator.free(out);
+
+    const filled = try view.getAllElements(out);
+    try std.testing.expectEqual(out.ptr, filled.ptr);
+    try std.testing.expectEqual(out.len, filled.len);
+    try std.testing.expectEqualSlices(u32, values[0..], filled);
+
+    const wrong = try allocator.alloc(u32, values.len - 1);
+    defer allocator.free(wrong);
+    try std.testing.expectError(error.InvalidSize, view.getAllElements(wrong));
+}
+
+test "TreeView vector getAllElementsAlloc roundtrip" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint16 = ssz.UintType(16);
+    const VectorType = ssz.FixedVectorType(Uint16, 5);
+    const values = [_]u16{ 3, 1, 4, 1, 5 };
+
+    const root_node = try VectorType.tree.fromValue(&pool, &values);
+    var view = try ssz.TreeView(VectorType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    const filled = try view.getAllElementsAlloc(allocator);
+    defer allocator.free(filled);
+
+    try std.testing.expectEqualSlices(u16, values[0..], filled);
+}
+
+test "TreeView vector getAllElementsAlloc repeat reflects updates" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const VectorType = ssz.FixedVectorType(Uint32, 6);
+    var values = [_]u32{ 10, 20, 30, 40, 50, 60 };
+
+    const root_node = try VectorType.tree.fromValue(&pool, &values);
+    var view = try ssz.TreeView(VectorType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    const first = try view.getAllElementsAlloc(allocator);
+    defer allocator.free(first);
+    try std.testing.expectEqualSlices(u32, values[0..], first);
+
+    try view.setElement(3, 99);
+
+    const second = try view.getAllElementsAlloc(allocator);
+    defer allocator.free(second);
+    values[3] = 99;
+    try std.testing.expectEqualSlices(u32, values[0..], second);
+}
+
+test "TreeView list getAllElementsAlloc handles zero length" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 64);
+    defer pool.deinit();
+
+    const Uint8 = ssz.UintType(8);
+    const ListType = ssz.FixedListType(Uint8, 4);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    const filled = try view.getAllElementsAlloc(allocator);
+    defer allocator.free(filled);
+
+    try std.testing.expectEqual(@as(usize, 0), filled.len);
+}
+
+test "TreeView list getAllElementsAlloc spans multiple chunks" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    const Uint16 = ssz.UintType(16);
+    const ListType = ssz.FixedListType(Uint16, 64);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+
+    var values: [20]u16 = undefined;
+    for (&values, 0..) |*val, idx| {
+        val.* = @intCast((idx * 3 + 1) % 17);
+    }
+    try list.appendSlice(allocator, &values);
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    const filled = try view.getAllElementsAlloc(allocator);
+    defer allocator.free(filled);
+
+    try std.testing.expectEqualSlices(u16, values[0..], filled);
+}
+
+test "TreeView list push batches before commit" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const ListType = ssz.FixedListType(Uint32, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &[_]u32{ 1, 2, 3, 4 });
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    try view.push(@as(u32, 5));
+    try view.push(@as(u32, 6));
+    try view.push(@as(u32, 7));
+    try view.push(@as(u32, 8));
+    try view.push(@as(u32, 9));
+
+    try std.testing.expectEqual(@as(usize, 9), try view.getLength());
+    try std.testing.expectEqual(@as(u32, 9), try view.getElement(8));
+
+    try view.commit();
+
+    try std.testing.expectEqual(@as(usize, 9), try view.getLength());
+    try std.testing.expectEqual(@as(u32, 9), try view.getElement(8));
+
+    var expected: ListType.Type = .empty;
+    defer expected.deinit(allocator);
+    try expected.appendSlice(allocator, &[_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9 });
+
+    var expected_root: [32]u8 = undefined;
+    try ListType.hashTreeRoot(allocator, &expected, &expected_root);
+    var actual_root: [32]u8 = undefined;
+    try view.hashTreeRoot(&actual_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}
+
+test "TreeView list push across chunk boundary resets prefetch" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const ListType = ssz.FixedListType(Uint32, 32);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &[_]u32{ 0, 1, 2, 3, 4, 5, 6, 7 });
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    const initial = try view.getAllElementsAlloc(allocator);
+    defer allocator.free(initial);
+    try std.testing.expectEqual(@as(usize, 8), initial.len);
+
+    try view.push(@as(u32, 8));
+    try view.push(@as(u32, 9));
+
+    try std.testing.expectEqual(@as(usize, 10), try view.getLength());
+    try std.testing.expectEqual(@as(u32, 9), try view.getElement(9));
+
+    const filled = try view.getAllElementsAlloc(allocator);
+    defer allocator.free(filled);
+    var expected: [10]u32 = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    try std.testing.expectEqualSlices(u32, expected[0..], filled);
+}
+
+test "TreeView list push enforces limit" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const ListType = ssz.FixedListType(Uint32, 2);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &[_]u32{ 1, 2 });
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    try std.testing.expectError(error.LengthOverLimit, view.push(@as(u32, 3)));
+    try std.testing.expectEqual(@as(usize, 2), try view.getLength());
+}

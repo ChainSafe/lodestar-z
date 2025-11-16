@@ -10,6 +10,7 @@ const OffsetIterator = @import("offsets.zig").OffsetIterator;
 const merkleize = @import("hashing").merkleize;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
+const chunk = @import("chunk.zig");
 
 pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
     comptime {
@@ -110,10 +111,11 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
                 try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
 
                 if (comptime isBasicType(Element)) {
-                    // tightly packed list
+                    const items_per_chunk = chunk.itemsPerChunk(Element);
+                    // tightly packed vector
                     for (0..length) |i| {
                         try Element.tree.toValuePacked(
-                            nodes[i * Element.fixed_size / 32],
+                            nodes[i / items_per_chunk],
                             pool,
                             i,
                             &out[i],
@@ -134,7 +136,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
                 var nodes: [chunk_count]Node.Id = undefined;
 
                 if (comptime isBasicType(Element)) {
-                    const items_per_chunk = 32 / Element.fixed_size;
+                    const items_per_chunk = chunk.itemsPerChunk(Element);
                     var l: usize = 0;
                     for (0..chunk_count) |i| {
                         var leaf_buf = [_]u8{0} ** 32;

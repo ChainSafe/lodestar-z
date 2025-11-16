@@ -2,6 +2,7 @@ const depth = @import("depth.zig");
 pub const GindexUint = depth.GindexUint;
 pub const max_depth = depth.max_depth;
 pub const Depth = depth.Depth;
+pub const user_max_depth = depth.user_max_depth;
 
 const sha256 = @import("sha256.zig");
 pub const hash = sha256.hash;
