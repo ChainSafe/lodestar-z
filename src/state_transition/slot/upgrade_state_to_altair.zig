@@ -5,8 +5,8 @@ const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllF
 const getNextSyncCommittee = @import("../utils/sync_committee.zig").getNextSyncCommittee;
 const SyncCommitteeInfo = @import("../utils/sync_committee.zig").SyncCommitteeInfo;
 const sumTargetUnslashedBalanceIncrements = @import("../utils/target_unslashed_balance.zig").sumTargetUnslashedBalanceIncrements;
-const ssz = @import("consensus_types");
-const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
+const types = @import("consensus_types");
+const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const RootCache = @import("../utils/root_cache.zig").RootCache;
 const getAttestationParticipationStatus = @import("../block//process_attestation_altair.zig").getAttestationParticipationStatus;
 
@@ -18,7 +18,7 @@ pub fn upgradeStateToAltair(allocator: Allocator, cached_state: *CachedBeaconSta
     }
     const phase0_state = state.phase0;
     defer {
-        ssz.phase0.BeaconState.deinit(allocator, phase0_state);
+        types.phase0.BeaconState.deinit(allocator, phase0_state);
         allocator.destroy(phase0_state);
     }
     _ = try state.upgradeUnsafe(allocator);
@@ -57,7 +57,7 @@ pub fn upgradeStateToAltair(allocator: Allocator, cached_state: *CachedBeaconSta
 }
 
 /// Translate_participation in https://github.com/ethereum/consensus-specs/blob/v1.1.10/specs/altair/fork.md
-fn translateParticipation(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, pending_attestations: ssz.phase0.EpochAttestations.Type) !void {
+fn translateParticipation(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, pending_attestations: types.phase0.EpochAttestations.Type) !void {
     const epoch_cache = cached_state.getEpochCache();
     const root_cache = try RootCache.init(allocator, cached_state);
     defer root_cache.deinit();

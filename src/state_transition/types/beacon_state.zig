@@ -437,6 +437,9 @@ pub const BeaconStateAllForks = union(enum) {
     pub fn rotateEpochPendingAttestations(self: *BeaconStateAllForks, allocator: Allocator) void {
         switch (self.*) {
             .phase0 => |state| {
+                for (state.previous_epoch_attestations.items) |*attestation| {
+                    types.phase0.PendingAttestation.deinit(allocator, attestation);
+                }
                 state.previous_epoch_attestations.deinit(allocator);
                 state.previous_epoch_attestations = state.current_epoch_attestations;
                 state.current_epoch_attestations = types.phase0.EpochAttestations.default_value;
@@ -656,10 +659,7 @@ pub const BeaconStateAllForks = union(enum) {
     }
 
     /// Upgrade `self` from a certain fork to the next.
-    ///
     /// Allocates a new `state` of the next fork, clones all fields of the current `state` to it and assigns `self` to it.
-    /// Destroys the old `state`.
-    ///
     /// Caller must make sure an upgrade is needed by checking BeaconConfig then free upgraded state.
     /// Caller needs to deinit the old state
     pub fn upgradeUnsafe(self: *BeaconStateAllForks, allocator: std.mem.Allocator) !*BeaconStateAllForks {
