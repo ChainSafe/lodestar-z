@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const max_depth = @import("hashing").max_depth;
+const Depth = @import("hashing").Depth;
 
 const Node = @import("Node.zig");
 const Gindex = @import("gindex.zig").Gindex;
@@ -346,6 +347,49 @@ test "setNodesAtDepth, setNodes vs setNode multiple times" {
 
         const hash2 = root2.getRoot(p);
         try std.testing.expectEqualSlices(u8, hash_ok, hash2);
+    }
+}
+
+test "truncateAfterIndex zeros nodes after index" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 128);
+    defer pool.deinit();
+    const p = &pool;
+
+    const depth: Depth = 4;
+    const max_length = @as(usize, 1) << depth;
+
+    var leaves = try allocator.alloc(Node.Id, max_length);
+    defer allocator.free(leaves);
+    var original_leaves = try allocator.alloc(Node.Id, max_length);
+    defer allocator.free(original_leaves);
+    for (0..max_length) |i| {
+        const leaf = try pool.createLeafFromUint(@intCast(i + 1), false);
+        leaves[i] = leaf;
+        original_leaves[i] = leaf;
+    }
+
+    const base_root = try Node.fillWithContents(p, leaves, depth, true);
+    defer p.unref(base_root);
+
+    const out_leaves = try allocator.alloc(Node.Id, max_length);
+    defer allocator.free(out_leaves);
+
+    const zero_leaf: Node.Id = @enumFromInt(0);
+
+    for (0..max_length - 1) |idx| {
+        const truncated = try Node.Id.truncateAfterIndex(base_root, p, depth, idx);
+        defer p.unref(truncated);
+
+        try truncated.getNodesAtDepth(p, depth, 0, out_leaves);
+
+        for (0..max_length) |leaf_idx| {
+            const expected = if (leaf_idx <= idx)
+                original_leaves[leaf_idx]
+            else
+                zero_leaf;
+            try std.testing.expectEqual(expected, out_leaves[leaf_idx]);
+        }
     }
 }
 

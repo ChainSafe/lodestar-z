@@ -226,6 +226,15 @@ pub fn TreeView(comptime ST: type) type {
             return Gindex.fromDepth(1, 1);
         }
 
+        inline fn chunksRootGindex() Gindex {
+            comptime {
+                if (!is_list_view) {
+                    @compileError("chunksRootGindex can only be used with List types");
+                }
+            }
+            return Gindex.fromDepth(1, 0);
+        }
+
         fn updateListLength(self: *Self, new_length: usize) !void {
             comptime {
                 if (!is_list_view) {
@@ -422,6 +431,112 @@ pub fn TreeView(comptime ST: type) type {
 
             try self.setElement(length, value);
             try self.updateListLength(length + 1);
+        }
+
+        pub fn sliceTo(self: *Self, index: usize) !Self {
+            comptime {
+                if (!is_list_view) {
+                    @compileError("sliceTo can only be used with List types");
+                }
+            }
+
+            try self.commit();
+
+            const length = try self.getLength();
+            if (length == 0 or index >= length - 1) {
+                return try Self.init(self.allocator, self.pool, self.data.root);
+            }
+
+            const new_length = index + 1;
+            const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
+            const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, is_list_view);
+
+            var new_root: Node.Id = undefined;
+            if (comptime is_basic_array_view) {
+                const items_per_chunk = itemsPerChunk(ST.Element);
+                const chunk_index = index / items_per_chunk;
+                const chunk_offset = index % items_per_chunk;
+                const chunk_node = try Node.Id.getNodeAtDepth(self.data.root, self.pool, chunk_depth, chunk_index);
+
+                var chunk_bytes = chunk_node.getRoot(self.pool).*;
+                const keep_bytes = (chunk_offset + 1) * ST.Element.fixed_size;
+                if (keep_bytes < BYTES_PER_CHUNK) {
+                    @memset(chunk_bytes[keep_bytes..], 0);
+                }
+
+                const truncated_chunk_node = try self.pool.createLeaf(&chunk_bytes, false);
+                var chunk_inserted = false;
+                defer if (!chunk_inserted) self.pool.unref(truncated_chunk_node);
+
+                new_root = try Node.Id.setNodeAtDepth(self.data.root, self.pool, chunk_depth, chunk_index, truncated_chunk_node);
+                chunk_inserted = true;
+
+                new_root = try Node.Id.truncateAfterIndex(new_root, self.pool, chunk_depth, chunk_index);
+            } else {
+                new_root = try Node.Id.truncateAfterIndex(self.data.root, self.pool, chunk_depth, index);
+            }
+
+            const length_node = try self.pool.createLeafFromUint(@intCast(new_length), false);
+            var length_inserted = false;
+            defer if (!length_inserted) self.pool.unref(length_node);
+            new_root = try Node.Id.setNode(new_root, self.pool, listLengthGindex(), length_node);
+            length_inserted = true;
+
+            errdefer self.pool.unref(new_root);
+            const new_data = try Data.init(self.allocator, self.pool, new_root);
+            return Self{
+                .allocator = self.allocator,
+                .pool = self.pool,
+                .data = new_data,
+            };
+        }
+
+        pub fn sliceFrom(self: *Self, index: usize) !Self {
+            comptime {
+                if (!is_list_view or is_basic_array_view) {
+                    @compileError("sliceFrom can only be used with List of composite types");
+                }
+            }
+
+            try self.commit();
+
+            const length = try self.getLength();
+            if (index == 0) {
+                return try Self.init(self.allocator, self.pool, self.data.root);
+            }
+
+            const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
+            const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, is_list_view);
+            const target_length = if (index >= length) 0 else length - index;
+
+            var chunk_root_inserted = target_length == 0;
+            var chunk_root: Node.Id = undefined;
+            if (target_length == 0) {
+                chunk_root = @enumFromInt(base_chunk_depth);
+            } else {
+                const nodes = try self.allocator.alloc(Node.Id, target_length);
+                defer self.allocator.free(nodes);
+                try self.data.root.getNodesAtDepth(self.pool, chunk_depth, index, nodes);
+
+                chunk_root = try Node.fillWithContents(self.pool, nodes, base_chunk_depth, false);
+                defer if (!chunk_root_inserted) self.pool.unref(chunk_root);
+            }
+
+            const length_node = try self.pool.createLeafFromUint(@intCast(target_length), false);
+            var length_inserted = false;
+            defer if (!length_inserted) self.pool.unref(length_node);
+
+            const new_root = try self.pool.createBranch(chunk_root, length_node, false);
+            length_inserted = true;
+            chunk_root_inserted = true;
+
+            errdefer self.pool.unref(new_root);
+            const new_data = try Data.init(self.allocator, self.pool, new_root);
+            return Self{
+                .allocator = self.allocator,
+                .pool = self.pool,
+                .data = new_data,
+            };
         }
 
         pub fn Field(comptime field_name: []const u8) type {

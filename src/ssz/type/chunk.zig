@@ -18,7 +18,7 @@ pub inline fn chunkCount(length: usize, comptime ElementType: type) usize {
 }
 
 /// Returns the chunk depth, accounting for the extra level used by SSZ lists when
-/// mixing in their lengths. 
+/// mixing in their lengths.
 pub inline fn chunkDepth(comptime DepthType: type, chunk_depth: DepthType, comptime is_list: bool) DepthType {
     return if (is_list) chunk_depth + 1 else chunk_depth;
 }
