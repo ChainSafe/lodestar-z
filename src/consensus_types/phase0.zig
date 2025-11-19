@@ -166,6 +166,14 @@ pub const SignedBeaconBlockHeader = ssz.FixedContainerType(struct {
 
 pub const EpochAttestations = ssz.VariableListType(PendingAttestation, preset.MAX_ATTESTATIONS * preset.SLOTS_PER_EPOCH);
 
+pub const Balances = ssz.FixedListType(p.Gwei, preset.VALIDATOR_REGISTRY_LIMIT);
+
+pub const RandaoMixes = ssz.FixedVectorType(p.Bytes32, preset.EPOCHS_PER_HISTORICAL_VECTOR);
+
+pub const Slashings = ssz.FixedVectorType(p.Gwei, preset.EPOCHS_PER_SLASHINGS_VECTOR);
+
+pub const HistoricalRoots = ssz.FixedListType(p.Root, preset.HISTORICAL_ROOTS_LIMIT);
+
 pub const BeaconState = ssz.VariableContainerType(struct {
     genesis_time: p.Uint64,
     genesis_validators_root: p.Root,
@@ -174,14 +182,14 @@ pub const BeaconState = ssz.VariableContainerType(struct {
     latest_block_header: BeaconBlockHeader,
     block_roots: HistoricalBlockRoots,
     state_roots: HistoricalStateRoots,
-    historical_roots: ssz.FixedListType(p.Root, preset.HISTORICAL_ROOTS_LIMIT),
+    historical_roots: HistoricalRoots,
     eth1_data: Eth1Data,
     eth1_data_votes: Eth1DataVotes,
     eth1_deposit_index: p.Uint64,
     validators: Validators,
-    balances: ssz.FixedListType(p.Gwei, preset.VALIDATOR_REGISTRY_LIMIT),
-    randao_mixes: ssz.FixedVectorType(p.Bytes32, preset.EPOCHS_PER_HISTORICAL_VECTOR),
-    slashings: ssz.FixedVectorType(p.Gwei, preset.EPOCHS_PER_SLASHINGS_VECTOR),
+    balances: Balances,
+    randao_mixes: RandaoMixes,
+    slashings: Slashings,
     previous_epoch_attestations: EpochAttestations,
     current_epoch_attestations: EpochAttestations,
     justification_bits: JustificationBits,
