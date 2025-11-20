@@ -4,11 +4,11 @@ const ForkSeq = @import("config").ForkSeq;
 const preset_mod = @import("preset");
 const test_case = @import("../test_case.zig");
 const loadSszValue = test_case.loadSszSnappyValue;
+const hex = @import("hex");
 
 const Root = ct.primitive.Root.Type;
 const pmt = @import("persistent_merkle_tree");
 const Node = pmt.Node;
-const NodeId = Node.Id;
 const Gindex = pmt.Gindex;
 
 pub const Handler = enum {
@@ -20,9 +20,9 @@ pub const Handler = enum {
 };
 
 const MerkleProof = struct {
-    leaf: Root,
+    leaf: [66]u8,
     leaf_index: u64,
-    branch: []Root,
+    branch: [][66]u8,
 
     pub fn deinit(self: *MerkleProof, allocator: std.mem.Allocator) void {
         allocator.free(self.branch);
@@ -74,67 +74,26 @@ pub fn TestCase(comptime fork: ForkSeq, comptime handler: Handler) type {
         }
 
         fn runTest(self: *Self, allocator: std.mem.Allocator) !void {
-            try verifyLeaf(self);
-            try verifyBranch(allocator, self);
-        }
-
-        fn verifyLeaf(self: *Self) !void {
-            // TODO: handle post-Fulu forks where blob_kzg_commitments is a list root, similar to Lodestar merkleProof tests.
-            const leaf_gindex_value = preset_mod.KZG_COMMITMENT_GINDEX0;
-            const actual_leaf_index: u64 = @intCast(leaf_gindex_value);
-
-            try std.testing.expectEqual(self.proof.leaf_index, actual_leaf_index);
-
-            if (self.body.blob_kzg_commitments.items.len == 0) {
-                return error.EmptyBlobKzgCommitments;
-            }
-
-            var actual_leaf: Root = undefined;
+            const actual_leaf_index: u64 = @intCast(preset_mod.KZG_COMMITMENT_GINDEX0);
+            var actual_leaf: [32]u8 = undefined;
             try KzgCommitment.hashTreeRoot(&self.body.blob_kzg_commitments.items[0], &actual_leaf);
-
-            try std.testing.expect(std.mem.eql(u8, &self.proof.leaf, &actual_leaf));
-        }
-
-        fn verifyBranch(allocator: std.mem.Allocator, self: *Self) !void {
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            defer arena.deinit();
-            const arena_allocator = arena.allocator();
+            const actual_leaf_hex = try hex.rootToHex(&actual_leaf);
 
             var pool = try Node.Pool.init(allocator, 2048);
             defer pool.deinit();
 
-            const root_node = try BeaconBlockBody.tree.fromValue(arena_allocator, &pool, &self.body);
+            const root_node = try BeaconBlockBody.tree.fromValue(allocator, &pool, &self.body);
+            const gindex = Gindex.fromUint(@as(Gindex.Uint, actual_leaf_index));
 
-            var actual_branch: std.ArrayListUnmanaged(Root) = .empty;
-            defer actual_branch.deinit(allocator);
+            var single_proof = try pmt.proof.createSingleProof(allocator, &pool, root_node, gindex);
+            defer single_proof.deinit(allocator);
 
-            try buildBranch(&pool, root_node, preset_mod.KZG_COMMITMENT_GINDEX0, allocator, &actual_branch);
-
-            try std.testing.expectEqualSlices(Root, self.proof.branch, actual_branch.items);
-        }
-
-        fn buildBranch(
-            pool: *Node.Pool,
-            root_node: Node.Id,
-            leaf_gindex_value: usize,
-            allocator: std.mem.Allocator,
-            branch_out: *std.ArrayListUnmanaged(Root),
-        ) !void {
-            // TODO: switch to a persistent_merkle_tree helper if/when one exists (e.g. getSingleProof).
-            const leaf_gindex = Gindex.fromUint(@as(Gindex.Uint, @intCast(leaf_gindex_value)));
-
-            var current = leaf_gindex;
-            while (@intFromEnum(current) > 1) {
-                const sibling = if ((@intFromEnum(current) & 1) == 0)
-                    @as(Gindex, @enumFromInt(@intFromEnum(current) + 1))
-                else
-                    @as(Gindex, @enumFromInt(@intFromEnum(current) - 1));
-
-                const sibling_node = try NodeId.getNode(root_node, pool, sibling);
-                const sibling_root = sibling_node.getRoot(pool);
-                try branch_out.append(allocator, sibling_root.*);
-
-                current = @as(Gindex, @enumFromInt(@intFromEnum(current) >> 1));
+            try std.testing.expectEqual(self.proof.leaf_index, actual_leaf_index);
+            try std.testing.expectEqualSlices(u8, self.proof.leaf[0..66], &actual_leaf_hex);
+            try std.testing.expectEqual(self.proof.branch.len, single_proof.witnesses.len);
+            for (self.proof.branch, 0..) |expected_witness, i| {
+                const actual_witness_hex = try hex.rootToHex(&single_proof.witnesses[i]);
+                try std.testing.expectEqualSlices(u8, expected_witness[0..66], &actual_witness_hex);
             }
         }
 
@@ -149,34 +108,32 @@ pub fn TestCase(comptime fork: ForkSeq, comptime handler: Handler) type {
         }
 
         fn parseProofYaml(allocator: std.mem.Allocator, contents: []const u8) !MerkleProof {
-            var proof = MerkleProof{
-                .leaf = undefined,
-                .leaf_index = 0,
-                .branch = &.{},
-            };
-
-            var branch: std.ArrayListUnmanaged(Root) = .empty;
+            var branch: std.ArrayListUnmanaged([66]u8) = .empty;
             errdefer branch.deinit(allocator);
+            var leaf: [66]u8 = undefined;
+            var leaf_index: u64 = 0;
 
             var leaf_parsed = false;
             var index_parsed = false;
 
             var iter = std.mem.tokenizeScalar(u8, contents, '\n');
+            const quote = "'\"";
             while (iter.next()) |line| {
-                const trimmed = std.mem.trim(u8, line, " \r\t");
-                if (trimmed.len == 0) continue;
+                if (line.len == 0) continue;
 
-                if (std.mem.startsWith(u8, trimmed, "leaf:")) {
-                    const value_slice = std.mem.trim(u8, trimmed["leaf:".len..], " \t");
-                    proof.leaf = try parseHexRoot(value_slice);
+                if (std.mem.startsWith(u8, line, "leaf: ")) {
+                    const value_slice = std.mem.trim(u8, line["leaf: ".len..], quote);
+                    std.debug.assert(value_slice.len == 66);
+                    leaf = value_slice[0..66].*;
                     leaf_parsed = true;
-                } else if (std.mem.startsWith(u8, trimmed, "leaf_index:")) {
-                    const value_slice = std.mem.trim(u8, trimmed["leaf_index:".len..], " \t");
-                    proof.leaf_index = try std.fmt.parseInt(u64, value_slice, 10);
+                } else if (std.mem.startsWith(u8, line, "leaf_index: ")) {
+                    const value_slice = std.mem.trim(u8, line["leaf_index: ".len..], quote);
+                    leaf_index = try std.fmt.parseInt(u64, value_slice, 10);
                     index_parsed = true;
-                } else if (trimmed[0] == '-') {
-                    const value_slice = std.mem.trim(u8, trimmed[1..], " '\t");
-                    const branch_value = try parseHexRoot(value_slice);
+                } else if (std.mem.startsWith(u8, line, "- ")) {
+                    const value_slice = std.mem.trim(u8, line[2..], quote);
+                    std.debug.assert(value_slice.len == 66);
+                    const branch_value = value_slice[0..66].*;
                     try branch.append(allocator, branch_value);
                 }
             }
@@ -185,22 +142,17 @@ pub fn TestCase(comptime fork: ForkSeq, comptime handler: Handler) type {
                 return error.InvalidProof;
             }
 
-            proof.branch = try branch.toOwnedSlice(allocator);
-            return proof;
-        }
-
-        fn parseHexRoot(raw_value: []const u8) !Root {
-            var value = std.mem.trim(u8, raw_value, " '\t\"");
-            if (std.mem.startsWith(u8, value, "0x")) {
-                value = value[2..];
-            }
-            if (value.len != 64) {
-                return error.InvalidHexLength;
+            const gindex = Gindex.fromUint(@as(Gindex.Uint, leaf_index));
+            const expected_branch_len: usize = @intCast(gindex.pathLen());
+            if (branch.items.len != expected_branch_len) {
+                return error.InvalidProof;
             }
 
-            var out: Root = undefined;
-            _ = try std.fmt.hexToBytes(out[0..], value);
-            return out;
+            return .{
+                .leaf = leaf,
+                .leaf_index = leaf_index,
+                .branch = try branch.toOwnedSlice(allocator),
+            };
         }
     };
 }
