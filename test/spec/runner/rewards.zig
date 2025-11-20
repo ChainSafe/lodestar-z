@@ -114,7 +114,11 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             }
         }
 
-        fn loadDeltas(allocator: std.mem.Allocator, dir: std.fs.Dir, comptime filename: []const u8) !DeltasType.Type {
+        fn loadDeltas(
+            allocator: std.mem.Allocator,
+            dir: std.fs.Dir,
+            comptime filename: []const u8,
+        ) !DeltasType.Type {
             var deltas = DeltasType.default_value;
             errdefer {
                 if (comptime @hasDecl(DeltasType, "deinit")) {
@@ -125,7 +129,11 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             return deltas;
         }
 
-        fn loadOptionalDeltas(allocator: std.mem.Allocator, dir: std.fs.Dir, comptime filename: []const u8) !?DeltasType.Type {
+        fn loadOptionalDeltas(
+            allocator: std.mem.Allocator,
+            dir: std.fs.Dir,
+            comptime filename: []const u8,
+        ) !?DeltasType.Type {
             var deltas = DeltasType.default_value;
             errdefer {
                 if (comptime @hasDecl(DeltasType, "deinit")) {
@@ -162,7 +170,11 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             try std.testing.expectEqualSlices(u64, self.expected_penalties, penalties);
         }
 
-        fn accumulateDeltas(expected_rewards: []u64, expected_penalties: []u64, deltas: *const DeltasType.Type) !void {
+        fn accumulateDeltas(
+            expected_rewards: []u64,
+            expected_penalties: []u64,
+            deltas: *const DeltasType.Type,
+        ) !void {
             const values = deltas.*;
             const rewards = values[0].items;
             const penalties = values[1].items;
