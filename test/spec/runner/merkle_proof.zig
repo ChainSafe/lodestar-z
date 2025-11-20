@@ -137,11 +137,8 @@ pub fn TestCase(comptime fork: ForkSeq) type {
         fn parseProofYaml(allocator: std.mem.Allocator, contents: []const u8) !MerkleProof {
             var branch: std.ArrayListUnmanaged([66]u8) = .empty;
             errdefer branch.deinit(allocator);
-            var leaf: [66]u8 = undefined;
-            var leaf_index: u64 = 0;
-
-            var leaf_parsed = false;
-            var index_parsed = false;
+            var leaf: ?[66]u8 = null;
+            var leaf_index: ?u64 = null;
 
             var iter = std.mem.tokenizeScalar(u8, contents, '\n');
             const quote = "'\"";
@@ -152,11 +149,9 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                     const value_slice = std.mem.trim(u8, line["leaf: ".len..], quote);
                     std.debug.assert(value_slice.len == 66);
                     leaf = value_slice[0..66].*;
-                    leaf_parsed = true;
                 } else if (std.mem.startsWith(u8, line, "leaf_index: ")) {
                     const value_slice = std.mem.trim(u8, line["leaf_index: ".len..], quote);
                     leaf_index = try std.fmt.parseInt(u64, value_slice, 10);
-                    index_parsed = true;
                 } else if (std.mem.startsWith(u8, line, "- ")) {
                     const value_slice = std.mem.trim(u8, line[2..], quote);
                     std.debug.assert(value_slice.len == 66);
@@ -165,19 +160,19 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 }
             }
 
-            if (!leaf_parsed or !index_parsed) {
+            if (leaf == null or leaf_index == null) {
                 return error.InvalidProof;
             }
 
-            const gindex = Gindex.fromUint(@as(Gindex.Uint, leaf_index));
+            const gindex = Gindex.fromUint(@as(Gindex.Uint, leaf_index.?));
             const expected_branch_len: usize = @intCast(gindex.pathLen());
             if (branch.items.len != expected_branch_len) {
                 return error.InvalidProof;
             }
 
             return .{
-                .leaf = leaf,
-                .leaf_index = leaf_index,
+                .leaf = leaf.?,
+                .leaf_index = leaf_index.?,
                 .branch = try branch.toOwnedSlice(allocator),
             };
         }
