@@ -189,6 +189,7 @@
                     .ssz,
                     .blst,
                     .persistent_merkle_tree,
+                    .hex,
                 },
             },
             .filters = .{},
