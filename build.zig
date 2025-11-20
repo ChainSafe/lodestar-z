@@ -14,9 +14,9 @@ pub fn build(b: *std.Build) void {
     const options_module_build_options = options_build_options.createModule();
 
     const options_spec_test_options = b.addOptions();
-    const option_spec_test_url = b.option([]const u8, "spec_test_url", "") orelse "https://github.com/ethereum/consensus-spec-tests";
+    const option_spec_test_url = b.option([]const u8, "spec_test_url", "") orelse "https://github.com/ethereum/consensus-specs";
     options_spec_test_options.addOption([]const u8, "spec_test_url", option_spec_test_url);
-    const option_spec_test_version = b.option([]const u8, "spec_test_version", "") orelse "v1.5.0";
+    const option_spec_test_version = b.option([]const u8, "spec_test_version", "") orelse "v1.6.0-beta.2";
     options_spec_test_options.addOption([]const u8, "spec_test_version", option_spec_test_version);
     const option_spec_test_out_dir = b.option([]const u8, "spec_test_out_dir", "") orelse "test/spec/spec_tests";
     options_spec_test_options.addOption([]const u8, "spec_test_out_dir", option_spec_test_out_dir);
@@ -771,6 +771,7 @@ pub fn build(b: *std.Build) void {
     module_int.addImport("constants", module_constants);
     module_int.addImport("hex", module_hex);
     module_int.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_int.addImport("blst", dep_blst.module("blst"));
 
     module_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
     module_spec_tests.addImport("consensus_types", module_consensus_types);

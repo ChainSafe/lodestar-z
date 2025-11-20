@@ -8,6 +8,7 @@ pub const RunnerKind = enum {
     random,
     rewards,
     sanity,
+    transition,
     shuffling,
 
     pub fn hasSuiteCase(comptime self: RunnerKind) bool {
