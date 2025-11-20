@@ -29,7 +29,7 @@ const test_template =
     \\    defer allocator.free(test_dir_name);
     \\    const test_dir = std.fs.cwd().openDir(test_dir_name, .{{}}) catch return error.SkipZigTest;
     \\
-    \\    try MerkleProof.TestCase(.{s}, .{s}).execute(allocator, test_dir);
+    \\    try MerkleProof.TestCase(.{s}).execute(allocator, test_dir);
     \\}}
     \\
     \\
@@ -48,7 +48,6 @@ pub fn writeTest(
 ) !void {
     try writer.print(test_template, .{
         @tagName(fork),
-        @tagName(handler),
         test_suite_name,
         test_case_name,
 
@@ -58,6 +57,6 @@ pub fn writeTest(
         test_case_name,
 
         @tagName(fork),
-        @tagName(handler),
+        @tagName(fork),
     });
 }

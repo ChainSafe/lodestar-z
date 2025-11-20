@@ -6,8 +6,8 @@ const test_case = @import("../test_case.zig");
 const loadSszValue = test_case.loadSszSnappyValue;
 const hex = @import("hex");
 
-const Root = ct.primitive.Root.Type;
 const pmt = @import("persistent_merkle_tree");
+const proof = pmt.proof;
 const Node = pmt.Node;
 const Gindex = pmt.Gindex;
 
@@ -29,8 +29,7 @@ const MerkleProof = struct {
     }
 };
 
-pub fn TestCase(comptime fork: ForkSeq, comptime handler: Handler) type {
-    _ = handler;
+pub fn TestCase(comptime fork: ForkSeq) type {
     const ForkTypes = @field(ct, fork.forkName());
     const BeaconBlockBody = ForkTypes.BeaconBlockBody;
     const KzgCommitment = ct.primitive.KZGCommitment;
@@ -57,12 +56,12 @@ pub fn TestCase(comptime fork: ForkSeq, comptime handler: Handler) type {
             }
             try loadSszValue(BeaconBlockBody, allocator, dir, "object.ssz_snappy", &body);
 
-            const proof = try loadProof(allocator, dir);
-            errdefer proof.deinit(allocator);
+            var proof_data: MerkleProof = undefined;
+            try loadProof(allocator, dir, &proof_data);
 
             return .{
                 .body = body,
-                .proof = proof,
+                .proof = proof_data,
             };
         }
 
@@ -77,7 +76,6 @@ pub fn TestCase(comptime fork: ForkSeq, comptime handler: Handler) type {
             const actual_leaf_index: u64 = @intCast(preset_mod.KZG_COMMITMENT_GINDEX0);
             var actual_leaf: [32]u8 = undefined;
             try KzgCommitment.hashTreeRoot(&self.body.blob_kzg_commitments.items[0], &actual_leaf);
-            const actual_leaf_hex = try hex.rootToHex(&actual_leaf);
 
             var pool = try Node.Pool.init(allocator, 2048);
             defer pool.deinit();
@@ -88,23 +86,52 @@ pub fn TestCase(comptime fork: ForkSeq, comptime handler: Handler) type {
             var single_proof = try pmt.proof.createSingleProof(allocator, &pool, root_node, gindex);
             defer single_proof.deinit(allocator);
 
-            try std.testing.expectEqual(self.proof.leaf_index, actual_leaf_index);
-            try std.testing.expectEqualSlices(u8, self.proof.leaf[0..66], &actual_leaf_hex);
-            try std.testing.expectEqual(self.proof.branch.len, single_proof.witnesses.len);
-            for (self.proof.branch, 0..) |expected_witness, i| {
-                const actual_witness_hex = try hex.rootToHex(&single_proof.witnesses[i]);
-                try std.testing.expectEqualSlices(u8, expected_witness[0..66], &actual_witness_hex);
+            var actual_proof = try buildActualProof(allocator, actual_leaf_index, &actual_leaf, single_proof.witnesses);
+            defer actual_proof.deinit(allocator);
+
+            try expectEqualProof(&self.proof, &actual_proof);
+        }
+
+        fn buildActualProof(
+            allocator: std.mem.Allocator,
+            leaf_index: u64,
+            leaf_bytes: *const [32]u8,
+            witnesses: [][32]u8,
+        ) !MerkleProof {
+            var branch = try allocator.alloc([66]u8, witnesses.len);
+            errdefer allocator.free(branch);
+
+            for (witnesses, 0..) |witness, i| {
+                branch[i] = try hex.rootToHex(&witness);
+            }
+
+            return .{
+                .leaf = try hex.rootToHex(leaf_bytes),
+                .leaf_index = leaf_index,
+                .branch = branch,
+            };
+        }
+
+        fn expectEqualProof(
+            expected: *const MerkleProof,
+            actual: *const MerkleProof,
+        ) !void {
+            try std.testing.expectEqual(expected.leaf_index, actual.leaf_index);
+            try std.testing.expectEqualSlices(u8, expected.leaf[0..66], actual.leaf[0..66]);
+            try std.testing.expectEqual(expected.branch.len, actual.branch.len);
+            for (expected.branch, 0..) |expected_witness, i| {
+                try std.testing.expectEqualSlices(u8, expected_witness[0..66], actual.branch[i][0..66]);
             }
         }
 
-        fn loadProof(allocator: std.mem.Allocator, dir: std.fs.Dir) !MerkleProof {
+        fn loadProof(allocator: std.mem.Allocator, dir: std.fs.Dir, out: *MerkleProof) !void {
             var file = try dir.openFile("proof.yaml", .{});
             defer file.close();
 
             const contents = try file.readToEndAlloc(allocator, 4096);
             defer allocator.free(contents);
 
-            return parseProofYaml(allocator, contents);
+            out.* = try parseProofYaml(allocator, contents);
         }
 
         fn parseProofYaml(allocator: std.mem.Allocator, contents: []const u8) !MerkleProof {
