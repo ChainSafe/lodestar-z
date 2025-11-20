@@ -1,14 +1,11 @@
 const std = @import("std");
-const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const preset = @import("preset").preset;
 const MIN_EPOCHS_TO_INACTIVITY_PENALTY = preset.MIN_EPOCHS_TO_INACTIVITY_PENALTY;
+const computePreviousEpoch = @import("./epoch.zig").computePreviousEpoch;
 
 pub fn getFinalityDelay(cached_state: *const CachedBeaconStateAllForks) u64 {
-    const previous_epoch = if (cached_state.getEpochCache().epoch > GENESIS_EPOCH)
-        cached_state.getEpochCache().epoch - 1
-    else
-        GENESIS_EPOCH;
+    const previous_epoch = computePreviousEpoch(cached_state.getEpochCache().epoch);
     std.debug.assert(previous_epoch >= cached_state.state.finalizedCheckpoint().epoch);
 
     // previous_epoch = epoch - 1
