@@ -9,5 +9,6 @@ comptime {
     testing.refAllDecls(@import("./test_case/rewards_tests.zig"));
     testing.refAllDecls(@import("./test_case/sanity_tests.zig"));
     testing.refAllDecls(@import("./test_case/epoch_processing_tests.zig"));
+    testing.refAllDecls(@import("./test_case/fork_tests.zig"));
     testing.refAllDecls(@import("./test_case/transition_tests.zig"));
 }

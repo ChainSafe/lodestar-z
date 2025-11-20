@@ -36,15 +36,17 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
     return struct {
         body: BeaconBlockBody.Type,
-        proof: MerkleProof,
+        expect_proof: MerkleProof,
+        actual_proof: MerkleProof,
+        allocator: std.mem.Allocator,
 
         const Self = @This();
 
         pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
             var tc = try Self.init(allocator, dir);
-            defer tc.deinit(allocator);
+            defer tc.deinit();
 
-            try tc.runTest(allocator);
+            try tc.runTest();
         }
 
         fn init(allocator: std.mem.Allocator, dir: std.fs.Dir) !Self {
@@ -61,35 +63,38 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
             return .{
                 .body = body,
-                .proof = proof_data,
+                .expect_proof = proof_data,
+                .actual_proof = undefined,
+                .allocator = allocator,
             };
         }
 
-        fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            self.proof.deinit(allocator);
+        fn deinit(self: *Self) void {
+            self.expect_proof.deinit(self.allocator);
             if (comptime @hasDecl(BeaconBlockBody, "deinit")) {
-                BeaconBlockBody.deinit(allocator, &self.body);
+                BeaconBlockBody.deinit(self.allocator, &self.body);
             }
         }
 
-        fn runTest(self: *Self, allocator: std.mem.Allocator) !void {
+        fn runTest(self: *Self) !void {
+            try self.process();
+            try expectEqualProof(&self.expect_proof, &self.actual_proof);
+        }
+
+        fn process(self: *Self) !void {
             const actual_leaf_index: u64 = @intCast(preset_mod.KZG_COMMITMENT_GINDEX0);
             var actual_leaf: [32]u8 = undefined;
             try KzgCommitment.hashTreeRoot(&self.body.blob_kzg_commitments.items[0], &actual_leaf);
 
-            var pool = try Node.Pool.init(allocator, 2048);
+            var pool = try Node.Pool.init(self.allocator, 2048);
             defer pool.deinit();
 
-            const root_node = try BeaconBlockBody.tree.fromValue(allocator, &pool, &self.body);
+            const root_node = try BeaconBlockBody.tree.fromValue(self.allocator, &pool, &self.body);
             const gindex = Gindex.fromUint(@as(Gindex.Uint, actual_leaf_index));
 
-            var single_proof = try pmt.proof.createSingleProof(allocator, &pool, root_node, gindex);
-            defer single_proof.deinit(allocator);
-
-            var actual_proof = try buildActualProof(allocator, actual_leaf_index, &actual_leaf, single_proof.witnesses);
-            defer actual_proof.deinit(allocator);
-
-            try expectEqualProof(&self.proof, &actual_proof);
+            var single_proof = try pmt.proof.createSingleProof(self.allocator, &pool, root_node, gindex);
+            defer single_proof.deinit(self.allocator);
+            self.actual_proof = try buildActualProof(self.allocator, actual_leaf_index, &actual_leaf, single_proof.witnesses);
         }
 
         fn buildActualProof(

@@ -31,6 +31,8 @@ pub fn TestCase(comptime fork: ForkSeq) type {
         pre: TestCachedBeaconStateAllForks,
         expected_rewards: []u64,
         expected_penalties: []u64,
+        actual_rewards: []u64,
+        actual_penalties: []u64,
 
         const Self = @This();
 
@@ -56,6 +58,8 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 .pre = pre_state,
                 .expected_rewards = expected.rewards,
                 .expected_penalties = expected.penalties,
+                .actual_rewards = undefined,
+                .actual_penalties = undefined,
             };
         }
 
@@ -148,6 +152,12 @@ pub fn TestCase(comptime fork: ForkSeq) type {
         }
 
         fn runTest(self: *Self) !void {
+            try self.process();
+            try std.testing.expectEqualSlices(u64, self.expected_rewards, self.actual_rewards);
+            try std.testing.expectEqualSlices(u64, self.expected_penalties, self.actual_penalties);
+        }
+
+        fn process(self: *Self) !void {
             const allocator = self.pre.allocator;
             const cloned_state = try self.pre.cached_state.clone(allocator);
             defer {
@@ -163,11 +173,8 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
             try getRewardsAndPenaltiesFn(allocator, cloned_state, epoch_cache, epoch_cache.rewards, epoch_cache.penalties);
 
-            const rewards = epoch_cache.rewards;
-            const penalties = epoch_cache.penalties;
-
-            try std.testing.expectEqualSlices(u64, self.expected_rewards, rewards);
-            try std.testing.expectEqualSlices(u64, self.expected_penalties, penalties);
+            self.actual_rewards = epoch_cache.rewards;
+            self.actual_penalties = epoch_cache.penalties;
         }
 
         fn accumulateDeltas(

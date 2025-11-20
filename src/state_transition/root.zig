@@ -39,6 +39,12 @@ pub const processParticipationFlagUpdates = @import("./epoch/process_participati
 pub const processSyncCommitteeUpdates = @import("./epoch/process_sync_committee_updates.zig").processSyncCommitteeUpdates;
 pub const getNextSyncCommitteeIndices = @import("./utils/sync_committee.zig").getNextSyncCommitteeIndices;
 
+pub const upgradeStateToAltair = @import("./slot/upgrade_state_to_altair.zig").upgradeStateToAltair;
+pub const upgradeStateToBellatrix = @import("./slot/upgrade_state_to_bellatrix.zig").upgradeStateToBellatrix;
+pub const upgradeStateToCapella = @import("./slot/upgrade_state_to_capella.zig").upgradeStateToCapella;
+pub const upgradeStateToDeneb = @import("./slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
+pub const upgradeStateToElectra = @import("./slot/upgrade_state_to_electra.zig").upgradeStateToElectra;
+
 // Block
 pub const processBlockHeader = @import("./block/process_block_header.zig").processBlockHeader;
 pub const processWithdrawals = @import("./block/process_withdrawals.zig").processWithdrawals;

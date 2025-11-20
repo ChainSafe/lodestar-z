@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const RunnerKind = enum {
     epoch_processing,
+    fork,
     finality,
     merkle_proof,
     operations,
