@@ -6,10 +6,11 @@ const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
 const BeaconConfig = @import("config").BeaconConfig;
 const BeaconBlockHeader = types.phase0.BeaconBlockHeader.Type;
 const Root = types.primitive.Root;
-const SignedBlock = @import("../types/signed_block.zig").SignedBlock;
+const SignedBlock = @import("../types/block.zig").SignedBlock;
 const ZERO_HASH = @import("constants").ZERO_HASH;
+const Block = @import("../types/block.zig").Block;
 
-pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, block: *const SignedBlock) !void {
+pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, block: Block) !void {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const slot = state.slot();
@@ -55,7 +56,8 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaco
     }
 }
 
-pub fn blockToHeader(allocator: Allocator, block: *const SignedBlock, out: *BeaconBlockHeader) !void {
+pub fn blockToHeader(allocator: Allocator, signed_block: SignedBlock, out: *BeaconBlockHeader) !void {
+    const block = signed_block.message();
     out.slot = block.slot();
     out.proposer_index = block.proposerIndex();
     out.parent_root = block.parentRoot();

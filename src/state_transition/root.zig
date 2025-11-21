@@ -71,7 +71,8 @@ pub const bls = @import("utils/bls.zig");
 const seed = @import("./utils/seed.zig");
 pub const state_transition = @import("./state_transition.zig");
 const EpochShuffling = @import("./utils/epoch_shuffling.zig");
-pub const SignedBlock = @import("./types/signed_block.zig").SignedBlock;
+pub const SignedBlock = @import("./types/block.zig").SignedBlock;
+pub const Block = @import("./types/block.zig").Block;
 pub const SignedBeaconBlock = @import("./types/beacon_block.zig").SignedBeaconBlock;
 pub const Attestations = @import("./types/attestation.zig").Attestations;
 

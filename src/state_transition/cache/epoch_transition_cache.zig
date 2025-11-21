@@ -207,6 +207,7 @@ pub const EpochTransitionCache = struct {
         var indices_eligible_for_activation_queue = std.ArrayList(ValidatorIndex).init(allocator);
         // we will extract indices_eligible_for_activation from validator_activation_list later
         var validator_activation_list = ValidatorActivationList.init(allocator);
+        defer validator_activation_list.deinit();
         var indices_to_eject = std.ArrayList(ValidatorIndex).init(allocator);
 
         var total_active_stake_by_increment: u64 = 0;

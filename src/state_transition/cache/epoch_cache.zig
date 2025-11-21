@@ -662,12 +662,14 @@ pub const EpochCache = struct {
         self.next_sync_committee_indexed = try SyncCommitteeCacheRc.init(allocator, next_sync_committee_indexed);
     }
 
-    // TODO: review the use of this function, use the rotateSyncCommitteeIndexed() instead
-    // TODO: also increase reference count
-    // pub fn setSyncCommitteesIndexed(self: *EpochCache, next_sync_committee_indices: std.ArrayList(ValidatorIndex)) !void {
-    //     self.next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(self.allocator, next_sync_committee_indices);
-    //     self.current_sync_committee_indexed = self.next_sync_committee_indexed;
-    // }
+    /// this is used at fork boundary from phase0 to altair
+    pub fn setSyncCommitteesIndexed(self: *EpochCache, next_sync_committee_indices: []const ValidatorIndex) !void {
+        // both current and next sync committee are set to the same value at fork boundary
+        self.next_sync_committee_indexed.release();
+        self.next_sync_committee_indexed = try SyncCommitteeCacheRc.init(self.allocator, try SyncCommitteeCacheAllForks.initValidatorIndices(self.allocator, next_sync_committee_indices));
+        self.current_sync_committee_indexed.release();
+        self.current_sync_committee_indexed = try SyncCommitteeCacheRc.init(self.allocator, try SyncCommitteeCacheAllForks.initValidatorIndices(self.allocator, next_sync_committee_indices));
+    }
 
     /// This is different from typescript version: only allocate new EffectiveBalanceIncrements if needed
     pub fn effectiveBalanceIncrementsSet(self: *EpochCache, allocator: Allocator, index: usize, effective_balance: u64) !void {

@@ -15,12 +15,16 @@ const supported_forks = [_]ForkSeq{
 const supported_test_runners = [_]RunnerKind{
     .operations,
     .sanity,
+    .epoch_processing,
+    .transition,
 };
 
 fn TestWriter(comptime kind: RunnerKind) type {
     return switch (kind) {
         .operations => @import("./writer/operations.zig"),
         .sanity => @import("./writer/sanity.zig"),
+        .epoch_processing => @import("./writer/epoch_processing.zig"),
+        .transition => @import("./writer/transition.zig"),
         else => @compileError("Unsupported test runner"),
     };
 }
@@ -86,8 +90,13 @@ pub fn writeTests(
     var preset_dir = try root_dir.openDir("minimal/tests/minimal", .{});
     defer preset_dir.close();
 
-    inline for (forks) |fork| {
-        var fork_dir = try preset_dir.openDir(@tagName(fork) ++ "/" ++ @tagName(kind), .{});
+    f: for (forks) |fork| {
+        const fork_dir_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ @tagName(fork), @tagName(kind) });
+        defer std.heap.page_allocator.free(fork_dir_path);
+        var fork_dir = preset_dir.openDir(fork_dir_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => continue :f,
+            else => return err,
+        };
         defer fork_dir.close();
 
         inline for (TestWriter(kind).handlers) |handler| {

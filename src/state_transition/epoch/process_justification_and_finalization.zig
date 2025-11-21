@@ -25,11 +25,11 @@ pub fn weighJustificationAndFinalization(cached_state: *CachedBeaconStateAllFork
     const current_epoch = computeEpochAtSlot(state.slot());
     const previous_epoch = if (current_epoch == GENESIS_EPOCH) GENESIS_EPOCH else current_epoch - 1;
 
-    const old_previous_justified_checkpoint = state.previousJustifiedCheckpoint();
-    const old_current_justified_checkpoint = state.currentJustifiedCheckpoint();
+    const old_previous_justified_checkpoint = state.previousJustifiedCheckpoint().*;
+    const old_current_justified_checkpoint = state.currentJustifiedCheckpoint().*;
 
     // Process justifications
-    old_previous_justified_checkpoint.* = old_current_justified_checkpoint.*;
+    state.previousJustifiedCheckpoint().* = old_current_justified_checkpoint;
     const justification_bits = state.justificationBits();
     var bits = [_]bool{false} ** JustificationBits.length;
     justification_bits.toBoolArray(&bits);
@@ -66,18 +66,18 @@ pub fn weighJustificationAndFinalization(cached_state: *CachedBeaconStateAllFork
     // Process finalizations
     // The 2nd/3rd/4th most recent epochs are all justified, the 2nd using the 4th as source
     if (bits[1] and bits[2] and bits[3] and old_previous_justified_checkpoint.epoch + 3 == current_epoch) {
-        finalized_checkpoint.* = old_previous_justified_checkpoint.*;
+        finalized_checkpoint.* = old_previous_justified_checkpoint;
     }
     // The 2nd/3rd most recent epochs are both justified, the 2nd using the 3rd as source
     if (bits[1] and bits[2] and old_previous_justified_checkpoint.epoch + 2 == current_epoch) {
-        finalized_checkpoint.* = old_previous_justified_checkpoint.*;
+        finalized_checkpoint.* = old_previous_justified_checkpoint;
     }
     // The 1st/2nd/3rd most recent epochs are all justified, the 1st using the 3rd as source
     if (bits[0] and bits[1] and bits[2] and old_current_justified_checkpoint.epoch + 2 == current_epoch) {
-        finalized_checkpoint.* = old_current_justified_checkpoint.*;
+        finalized_checkpoint.* = old_current_justified_checkpoint;
     }
     // The 1st/2nd most recent epochs are both justified, the 1st using the 2nd as source
     if (bits[0] and bits[1] and old_current_justified_checkpoint.epoch + 1 == current_epoch) {
-        finalized_checkpoint.* = old_current_justified_checkpoint.*;
+        finalized_checkpoint.* = old_current_justified_checkpoint;
     }
 }

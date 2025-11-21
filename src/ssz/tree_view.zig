@@ -519,8 +519,8 @@ pub fn TreeView(comptime ST: type) type {
                 try self.data.root.getNodesAtDepth(self.pool, chunk_depth, index, nodes);
 
                 chunk_root = try Node.fillWithContents(self.pool, nodes, base_chunk_depth, false);
-                defer if (!chunk_root_inserted) self.pool.unref(chunk_root);
             }
+            defer if (!chunk_root_inserted) self.pool.unref(chunk_root);
 
             const length_node = try self.pool.createLeafFromUint(@intCast(target_length), false);
             var length_inserted = false;

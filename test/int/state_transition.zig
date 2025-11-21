@@ -40,7 +40,7 @@ test "state transition - electra block" {
         }
 
         const signed_beacon_block = SignedBeaconBlock{ .electra = electra_block_ptr };
-        const signed_block = SignedBlock{ .regular = &signed_beacon_block };
+        const signed_block = SignedBlock{ .regular = signed_beacon_block };
 
         // this returns the error so no need to handle returned post_state
         // TODO: if blst can publish BlstError.BadEncoding, can just use testing.expectError

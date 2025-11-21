@@ -126,45 +126,45 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
 
         pub fn process(self: *Self) !void {
             const verify = self.bls_setting.verify();
+            const allocator = self.pre.allocator;
 
             switch (operation) {
                 .attestation => {
                     const attestations_fork: ForkSeq = if (fork.gte(.electra)) .electra else .phase0;
                     var attestations = @field(ssz, attestations_fork.forkName()).Attestations.default_value;
-                    defer attestations.deinit(self.pre.allocator);
+                    defer attestations.deinit(allocator);
                     const attestation: *@field(ssz, attestations_fork.forkName()).Attestation.Type = @ptrCast(@alignCast(&self.op));
-                    try attestations.append(self.pre.allocator, attestation.*);
+                    try attestations.append(allocator, attestation.*);
                     const atts = attestations;
                     const attestations_wrapper: state_transition.Attestations = if (fork.gte(.electra))
                         .{ .electra = &atts }
                     else
                         .{ .phase0 = &atts };
 
-                    try state_transition.processAttestations(self.pre.allocator, self.pre.cached_state, attestations_wrapper, verify);
+                    try state_transition.processAttestations(allocator, self.pre.cached_state, attestations_wrapper, verify);
                 },
                 .attester_slashing => {
                     try state_transition.processAttesterSlashing(OpType.Type, self.pre.cached_state, &self.op, verify);
                 },
                 .block_header => {
-                    return error.SkipZigTest;
-                    // TODO: processBlockHeader currently takes signed block which is incorrect. Wait for it to accept unsigned block.
-                    // try state_transition.processBlockHeader(self.pre.allocator, self.pre.cached_state, &self.op);
+                    const block = state_transition.Block{ .regular = @unionInit(state_transition.BeaconBlock, @tagName(fork), &self.op) };
+                    try state_transition.processBlockHeader(allocator, self.pre.cached_state, block);
                 },
                 .bls_to_execution_change => {
                     try state_transition.processBlsToExecutionChange(self.pre.cached_state, &self.op);
                 },
                 .consolidation_request => {
-                    try state_transition.processConsolidationRequest(self.pre.allocator, self.pre.cached_state, &self.op);
+                    try state_transition.processConsolidationRequest(allocator, self.pre.cached_state, &self.op);
                 },
                 .deposit => {
-                    try state_transition.processDeposit(self.pre.allocator, self.pre.cached_state, &self.op);
+                    try state_transition.processDeposit(allocator, self.pre.cached_state, &self.op);
                 },
                 .deposit_request => {
-                    try state_transition.processDepositRequest(self.pre.allocator, self.pre.cached_state, &self.op);
+                    try state_transition.processDepositRequest(allocator, self.pre.cached_state, &self.op);
                 },
                 .execution_payload => {
                     try state_transition.processExecutionPayload(
-                        self.pre.allocator,
+                        allocator,
                         self.pre.cached_state,
                         .{ .regular = @unionInit(state_transition.BeaconBlockBody, @tagName(fork), &self.op) },
                         .{ .data_availability_status = .available, .execution_payload_status = if (self.post != null) .valid else .invalid },
@@ -174,33 +174,33 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     try state_transition.processProposerSlashing(self.pre.cached_state, &self.op, verify);
                 },
                 .sync_aggregate => {
-                    return error.SkipZigTest;
+                    try state_transition.processSyncAggregate(allocator, self.pre.cached_state, &self.op, verify);
                 },
                 .voluntary_exit => {
                     try state_transition.processVoluntaryExit(self.pre.cached_state, &self.op, verify);
                 },
                 .withdrawal_request => {
-                    try state_transition.processWithdrawalRequest(self.pre.allocator, self.pre.cached_state, &self.op);
+                    try state_transition.processWithdrawalRequest(allocator, self.pre.cached_state, &self.op);
                 },
                 .withdrawals => {
                     var withdrawals_result = WithdrawalsResult{
                         .withdrawals = try Withdrawals.initCapacity(
-                            self.pre.allocator,
+                            allocator,
                             preset.MAX_WITHDRAWALS_PER_PAYLOAD,
                         ),
                     };
 
-                    var withdrawal_balances = std.AutoHashMap(u64, usize).init(self.pre.allocator);
+                    var withdrawal_balances = std.AutoHashMap(u64, usize).init(allocator);
                     defer withdrawal_balances.deinit();
 
-                    try state_transition.getExpectedWithdrawals(self.pre.allocator, &withdrawals_result, &withdrawal_balances, self.pre.cached_state);
-                    defer withdrawals_result.withdrawals.deinit(self.pre.allocator);
+                    try state_transition.getExpectedWithdrawals(allocator, &withdrawals_result, &withdrawal_balances, self.pre.cached_state);
+                    defer withdrawals_result.withdrawals.deinit(allocator);
 
                     var payload_withdrawals_root: Root = undefined;
                     // self.op is ExecutionPayload in this case
-                    try ssz.capella.Withdrawals.hashTreeRoot(self.pre.allocator, &self.op.withdrawals, &payload_withdrawals_root);
+                    try ssz.capella.Withdrawals.hashTreeRoot(allocator, &self.op.withdrawals, &payload_withdrawals_root);
 
-                    try state_transition.processWithdrawals(self.pre.allocator, self.pre.cached_state, withdrawals_result, payload_withdrawals_root);
+                    try state_transition.processWithdrawals(allocator, self.pre.cached_state, withdrawals_result, payload_withdrawals_root);
                 },
             }
         }

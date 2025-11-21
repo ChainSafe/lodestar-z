@@ -3,7 +3,7 @@ const types = @import("consensus_types");
 
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const SignedBlock = @import("../types/signed_block.zig").SignedBlock;
+const SignedBlock = @import("../types/block.zig").SignedBlock;
 const SignedBeaconBlock = @import("../state_transition.zig").SignedBeaconBlock;
 const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
 const randaoRevealSignatureSet = @import("./randao.zig").randaoRevealSignatureSet;

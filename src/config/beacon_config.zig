@@ -150,10 +150,6 @@ pub const BeaconConfig = struct {
         return self.forks_ascending_epoch_order[@intFromEnum(ForkSeq.phase0)];
     }
 
-    pub fn forkName(self: *const BeaconConfig, slot: Slot) []const u8 {
-        return self.forkInfo(slot).name;
-    }
-
     pub fn forkSeq(self: *const BeaconConfig, slot: Slot) ForkSeq {
         return self.forkInfo(slot).fork_seq;
     }

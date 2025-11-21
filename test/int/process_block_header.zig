@@ -17,22 +17,18 @@ test "process block header - sanity" {
     message.proposer_index = proposer_index;
     message.parent_root = header_parent_root;
 
-    var beacon_block: types.electra.SignedBeaconBlock.Type = types.electra.SignedBeaconBlock.default_value;
-    beacon_block.message = message;
-    const signed_beacon_block = SignedBeaconBlock{ .electra = &beacon_block };
-    const block = SignedBlock{ .regular = &signed_beacon_block };
-    try processBlockHeader(allocator, test_state.cached_state, &block);
+    const beacon_block = BeaconBlock{ .electra = &message };
+
+    const block = Block{ .regular = beacon_block };
+    try processBlockHeader(allocator, test_state.cached_state, block);
 }
 
 const std = @import("std");
 const types = @import("consensus_types");
 const config = @import("config");
-
 const state_transition = @import("state_transition");
 const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
-
 const preset = @import("preset").preset;
-
 const processBlockHeader = state_transition.processBlockHeader;
-const SignedBlock = state_transition.SignedBlock;
-const SignedBeaconBlock = state_transition.SignedBeaconBlock;
+const Block = state_transition.Block;
+const BeaconBlock = state_transition.BeaconBlock;

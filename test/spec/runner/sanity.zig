@@ -182,14 +182,9 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
                             self.pre.allocator.destroy(post_state);
                         }
                     }
-                    const new_post_state = try state_transition.state_transition.stateTransition(
-                        self.pre.allocator,
-                        post_state,
-                        .{
-                            .regular = &signed_block,
-                        },
-                        .{},
-                    );
+                    const new_post_state = try state_transition.state_transition.stateTransition(self.pre.allocator, post_state, .{
+                        .regular = signed_block,
+                    }, .{});
 
                     // don't deinit the initial pre state, we do it in deinit()
                     const to_destroy = post_state;
@@ -209,11 +204,11 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
         pub fn runTest(self: *Self) !void {
             if (self.post) |post| {
                 const actual = try self.process();
-                try expectEqualBeaconStates(post, actual.state.*);
                 defer {
                     actual.deinit();
                     self.pre.allocator.destroy(actual);
                 }
+                try expectEqualBeaconStates(post, actual.state.*);
             } else {
                 _ = self.process() catch |err| {
                     if (err == error.SkipZigTest) {
