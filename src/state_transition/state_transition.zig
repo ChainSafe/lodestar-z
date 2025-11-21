@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
+const metrics = @import("metrics.zig");
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -71,7 +72,10 @@ pub fn processSlotsWithTransientCache(
         if ((state.slot() + 1) % preset.SLOTS_PER_EPOCH == 0) {
             // TODO(bing): metrics
             // const epochTransitionTimer = metrics?.epochTransitionTime.startTimer();
+            //
 
+            var epoch_transition_timer = metrics.startTimer(&metrics.metrics.epoch_transition);
+            defer _ = epoch_transition_timer.stopAndObserve();
             // TODO(bing): metrics: time beforeProcessEpoch
             var epoch_transition_cache = try EpochTransitionCache.init(allocator, post_state);
             defer {
@@ -112,8 +116,6 @@ pub fn processSlotsWithTransientCache(
         } else {
             state.slotPtr().* += 1;
         }
-
-        //epochTransitionTimer
     }
 }
 
@@ -154,6 +156,8 @@ pub fn stateTransition(
     if (opts.verify_proposer and !try verifyProposerSignature(post_state, signed_block)) {
         return error.InvalidBlockSignature;
     }
+
+    try metrics.initializeMetrics(.{});
 
     //  // Note: time only on success
     //  const processBlockTimer = metrics?.processBlockTime.startTimer();
