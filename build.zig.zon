@@ -26,6 +26,10 @@
             .url = "git+https://github.com/hendriknielaender/zBench#d8c7dd485306b88b757d52005614ebcb0a336942",
             .hash = "zbench-0.10.0-YTdc714iAQDO4lTHMnIljYHPZ5v_sNTsw75vAmO1pyT-",
         },
+        .metrics = .{
+            .url = "git+https://github.com/karlseguin/metrics.zig.git#603954879849c331a26529b88254770089acac8b",
+            .hash = "metrics-0.0.0-W7G4eP2_AQAdJGKMonHeZFaY4oU4ZXPFFTqFCFXItX3O",
+        },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
 }
