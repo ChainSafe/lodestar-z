@@ -56,6 +56,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const dep_metrics = b.dependency("metrics", .{
+        .optimize = optimize,
+        .target = target,
+    });
+
     const module_constants = b.createModule(.{
         .root_source_file = b.path("src/constants/root.zig"),
         .target = target,
@@ -899,6 +904,7 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("constants", module_constants);
     module_state_transition.addImport("hex", module_hex);
     module_state_transition.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
 
     module_download_era_files.addImport("download_era_options", options_module_download_era_options);
 

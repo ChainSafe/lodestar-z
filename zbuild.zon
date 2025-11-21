@@ -24,6 +24,9 @@
         .zbench = .{
             .url = "git+https://github.com/hendriknielaender/zBench#d8c7dd485306b88b757d52005614ebcb0a336942",
         },
+        .metrics = .{
+            .url = "git+https://github.com/karlseguin/metrics.zig.git#603954879849c331a26529b88254770089acac8b",
+        },
     },
     .options_modules = .{
         .build_options = .{
@@ -114,6 +117,7 @@
                 .constants,
                 .hex,
                 .persistent_merkle_tree,
+                .metrics,
             },
         },
     },
