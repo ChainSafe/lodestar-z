@@ -781,6 +781,8 @@ pub fn build(b: *std.Build) void {
     module_spec_tests.addImport("state_transition", module_state_transition);
     module_spec_tests.addImport("ssz", module_ssz);
     module_spec_tests.addImport("blst", dep_blst.module("blst"));
+    module_spec_tests.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_spec_tests.addImport("hex", module_hex);
 
     module_ssz_generic_spec_tests.addImport("hex", module_hex);
     module_ssz_generic_spec_tests.addImport("snappy", dep_snappy.module("snappy"));

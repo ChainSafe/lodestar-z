@@ -95,9 +95,12 @@ pub fn getCurrentEpoch(state: BeaconStateAllForks) Epoch {
     return computeEpochAtSlot(state.slot());
 }
 
+pub fn computePreviousEpoch(epoch: Epoch) Epoch {
+    return if (epoch == GENESIS_EPOCH) GENESIS_EPOCH else epoch - 1;
+}
+
 pub fn getPreviousEpoch(state: BeaconStateAllForks) Epoch {
-    const current_epoch = getCurrentEpoch(state);
-    return if (current_epoch == GENESIS_EPOCH) GENESIS_EPOCH else current_epoch - 1;
+    return computePreviousEpoch(getCurrentEpoch(state));
 }
 
 pub fn computeSyncPeriodAtSlot(slot: Slot) SyncPeriod {

@@ -147,6 +147,7 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
                 }
 
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
+                defer allocator.free(nodes);
                 for (0..chunk_count) |i| {
                     var leaf_buf = [_]u8{0} ** 32;
                     const start_idx = i * 32;
