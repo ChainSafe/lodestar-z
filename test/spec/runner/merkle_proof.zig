@@ -71,6 +71,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
         fn deinit(self: *Self) void {
             self.expect_proof.deinit(self.allocator);
+            self.actual_proof.deinit(self.allocator);
             if (comptime @hasDecl(BeaconBlockBody, "deinit")) {
                 BeaconBlockBody.deinit(self.allocator, &self.body);
             }

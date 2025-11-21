@@ -48,15 +48,15 @@ pub fn writeTest(
 ) !void {
     try writer.print(test_template, .{
         @tagName(fork),
-        test_suite_name,
-        test_case_name,
-
-        @tagName(fork),
         @tagName(handler),
         test_suite_name,
         test_case_name,
 
+        @tagName(handler),
+        test_suite_name,
+        test_case_name,
         @tagName(fork),
+
         @tagName(fork),
     });
 }
