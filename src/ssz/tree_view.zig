@@ -510,22 +510,19 @@ pub fn TreeView(comptime ST: type) type {
             const target_length = if (index >= length) 0 else length - index;
 
             var chunk_root_inserted = target_length == 0;
-            var chunk_root_ready = false;
-            var chunk_root: Node.Id = undefined;
+            var chunk_root: ?Node.Id = null;
             // Only release the chunk root when (a) we actually built a temporary subtree and
             // (b) the new branch never adopted it.
-            defer if (chunk_root_ready and !chunk_root_inserted) self.pool.unref(chunk_root);
+            defer if (chunk_root != null and !chunk_root_inserted) self.pool.unref(chunk_root.?);
 
             if (target_length == 0) {
                 chunk_root = @enumFromInt(base_chunk_depth);
-                chunk_root_ready = true;
             } else {
                 const nodes = try self.allocator.alloc(Node.Id, target_length);
                 defer self.allocator.free(nodes);
                 try self.data.root.getNodesAtDepth(self.pool, chunk_depth, index, nodes);
 
                 chunk_root = try Node.fillWithContents(self.pool, nodes, base_chunk_depth, false);
-                chunk_root_ready = true;
             }
 
             const length_node = try self.pool.createLeafFromUint(@intCast(target_length), false);
@@ -533,7 +530,7 @@ pub fn TreeView(comptime ST: type) type {
             // Drop the temporary length leaf unless we attach it to the new branch
             defer if (!length_inserted) self.pool.unref(length_node);
 
-            const new_root = try self.pool.createBranch(chunk_root, length_node, false);
+            const new_root = try self.pool.createBranch(chunk_root.?, length_node, false);
             length_inserted = true;
             chunk_root_inserted = true;
 
