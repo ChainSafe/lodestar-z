@@ -516,7 +516,7 @@ test "TreeView composite list sliceFrom returns suffix" {
 }
 
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listComposite/tree.test.ts#L209-L229
-test "TreeView composite list sliceFrom handles signed indexes" {
+test "TreeView composite list sliceFrom handles boundary conditions" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();

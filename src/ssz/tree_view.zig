@@ -227,15 +227,6 @@ pub fn TreeView(comptime ST: type) type {
             return Gindex.fromDepth(1, 1);
         }
 
-        inline fn listChunksRootGindex() Gindex {
-            comptime {
-                if (!is_list_view) {
-                    @compileError("listChunksRootGindex can only be used with List types");
-                }
-            }
-            return Gindex.fromDepth(1, 0);
-        }
-
         fn updateListLength(self: *Self, new_length: usize) !void {
             comptime {
                 if (!is_list_view) {
@@ -498,8 +489,8 @@ pub fn TreeView(comptime ST: type) type {
         }
 
         /// Return a new view containing all elements from `index` to the end.
-        /// Only available for list views of composite types because basic lists
-        /// reuse chunk nodes and would need per-element truncation instead of slicing.
+        /// Only available for list views of composite types.
+        /// Basic list slicing would require per-element extraction and repacking since multiple elements are tightly packed within each chunk.
         pub fn sliceFrom(self: *Self, index: usize) !Self {
             comptime {
                 if (!is_list_view or is_basic_array_view) {
