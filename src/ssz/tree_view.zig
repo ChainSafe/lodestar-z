@@ -1,9 +1,19 @@
 const std = @import("std");
-const Depth = @import("hashing").Depth;
+const math = std.math;
+const hashing = @import("hashing");
+const Depth = hashing.Depth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("type/type_kind.zig").isBasicType;
-const BYTES_PER_CHUNK = @import("type/root.zig").BYTES_PER_CHUNK;
+const TypeKind = @import("type/type_kind.zig").TypeKind;
+const type_root = @import("type/root.zig");
+const BYTES_PER_CHUNK = type_root.BYTES_PER_CHUNK;
+const itemsPerChunk = type_root.itemsPerChunk;
+const chunkCount = type_root.chunkCount;
+const chunkDepth = type_root.chunkDepth;
+const ListLengthUint = hashing.GindexUint;
+// A sentinel value indicating that the list length cache is unset.
+const list_length_unset = hashing.max_depth;
 
 pub const Data = struct {
     root: Node.Id,
@@ -17,6 +27,14 @@ pub const Data = struct {
     /// whether the corresponding child node/data has changed since the last update of the root
     changed: std.AutoArrayHashMap(Gindex, void),
 
+    /// Number of chunk nodes (starting from index 0) that have been prefetched into the cache.
+    /// Only used for basic array views.
+    prefetched_chunk_count: usize,
+
+    /// Cached length for list views. `list_length_unset` marks the value as invalid/unpopulated, so
+    /// the next `getLength()` fetches from the tree before returning a concrete length.
+    list_length: ListLengthUint,
+
     pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, root: Node.Id) !Data {
         try pool.ref(root);
         return Data{
@@ -24,6 +42,8 @@ pub const Data = struct {
             .children_nodes = std.AutoHashMap(Gindex, Node.Id).init(allocator),
             .children_data = std.AutoHashMap(Gindex, Data).init(allocator),
             .changed = std.AutoArrayHashMap(Gindex, void).init(allocator),
+            .prefetched_chunk_count = 0,
+            .list_length = list_length_unset,
         };
     }
 
@@ -58,12 +78,13 @@ pub const Data = struct {
             }
         }
 
-        const new_root = try self.root.setNodes(pool, gindices, nodes);
+        const new_root = try self.root.setNodesGrouped(pool, gindices, nodes);
         try pool.ref(new_root);
         pool.unref(self.root);
         self.root = new_root;
 
         self.changed.clearRetainingCapacity();
+        self.list_length = list_length_unset;
     }
 };
 
@@ -82,6 +103,13 @@ pub fn TreeView(comptime ST: type) type {
         pub const SszType: type = ST;
 
         const Self = @This();
+
+        /// Which variant this TreeView is
+        const is_container_view = ST.kind == TypeKind.container;
+        const is_list_view = ST.kind == TypeKind.list;
+        const is_vector_view = ST.kind == TypeKind.vector;
+        const is_array_view = is_list_view or is_vector_view;
+        const is_basic_array_view = is_array_view and @hasDecl(ST, "Element") and isBasicType(ST.Element);
 
         pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, root: Node.Id) !Self {
             return Self{
@@ -102,6 +130,19 @@ pub fn TreeView(comptime ST: type) type {
         pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
             try self.commit();
             out.* = self.data.root.getRoot(self.pool).*;
+        }
+
+        /// Get (and cache) the length of the list. Only available for List types.
+        pub fn getLength(self: *Self) !usize {
+            if (comptime !is_list_view) {
+                @compileError("getLength can only be used with List types");
+            }
+            if (self.data.list_length != list_length_unset) {
+                return @intCast(self.data.list_length);
+            }
+            const len = try ST.tree.length(self.data.root, self.pool);
+            self.data.list_length = @intCast(len);
+            return len;
         }
 
         fn getChildNode(self: *Self, gindex: Gindex) !Node.Id {
@@ -125,20 +166,102 @@ pub fn TreeView(comptime ST: type) type {
             return child_data;
         }
 
+        /// Prefetch up to `chunk_count` chunk leaves into the cache so repeated reads from
+        /// basic arrays avoid re-traversing the tree.
+        fn ensureChunkPrefetch(self: *Self, chunk_count: usize, items_per_chunk: usize) !void {
+            comptime {
+                if (!is_basic_array_view) {
+                    @compileError("ensureChunkPrefetch can only be used with basic array views");
+                }
+            }
+
+            if (chunk_count == 0) return;
+            if (self.data.prefetched_chunk_count >= chunk_count) return;
+
+            const start_index = self.data.prefetched_chunk_count;
+            const remaining = chunk_count - start_index;
+
+            const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
+            const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, is_list_view);
+
+            const nodes = try self.allocator.alloc(Node.Id, remaining);
+            defer self.allocator.free(nodes);
+
+            try self.data.root.getNodesAtDepth(self.pool, chunk_depth, start_index, nodes);
+
+            for (nodes, 0..) |node, offset| {
+                const chunk_idx = start_index + offset;
+                const gindex = elementChildGindex(chunk_idx * items_per_chunk);
+                const gop = try self.data.children_nodes.getOrPut(gindex);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = node;
+                }
+            }
+
+            self.data.prefetched_chunk_count = chunk_count;
+        }
+
         pub const Element: type = if (isBasicType(ST.Element))
             ST.Element.Type
         else
             TreeView(ST.Element);
 
         inline fn elementChildGindex(index: usize) Gindex {
+            const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
             return Gindex.fromDepth(
                 // Lists mix in their length at one extra depth level.
-                ST.chunk_depth + if (ST.kind == .list) 1 else 0,
+                chunkDepth(Depth, base_chunk_depth, is_list_view),
                 if (comptime isBasicType(ST.Element)) blk: {
-                    const per_chunk = BYTES_PER_CHUNK / ST.Element.fixed_size;
+                    const per_chunk = itemsPerChunk(ST.Element);
                     break :blk index / per_chunk;
                 } else index,
             );
+        }
+
+        inline fn listLengthGindex() Gindex {
+            comptime {
+                if (!is_list_view) {
+                    @compileError("listLengthGindex can only be used with List types");
+                }
+            }
+            return Gindex.fromDepth(1, 1);
+        }
+
+        fn updateListLength(self: *Self, new_length: usize) !void {
+            comptime {
+                if (!is_list_view) {
+                    @compileError("updateListLength can only be used with List types");
+                }
+            }
+            if (new_length > ST.limit) {
+                return error.LengthOverLimit;
+            }
+
+            const length_node = try self.pool.createLeafFromUint(@intCast(new_length), false);
+            var inserted = false;
+            defer if (!inserted) self.pool.unref(length_node); // only drop if we never attach it to the tree
+
+            const gindex = listLengthGindex();
+            const opt_old = try self.data.children_nodes.fetchPut(gindex, length_node);
+            inserted = true;
+            if (opt_old) |old_entry| {
+                // Multiple local mutations before commit() leave our cloned nodes with
+                // refcount 0. Only free those; tree-owned nodes keep a positive refcount.
+                if (old_entry.value.getState(self.pool).getRefCount() == 0) {
+                    self.pool.unref(old_entry.value);
+                }
+            }
+
+            try self.data.changed.put(gindex, {});
+            self.data.list_length = @intCast(new_length);
+
+            if (comptime is_basic_array_view) {
+                const chunk_count = chunkCount(new_length, ST.Element);
+                // If the list shrank, discard prefetched chunks that fall beyond the new length
+                if (self.data.prefetched_chunk_count > chunk_count) {
+                    self.data.prefetched_chunk_count = chunk_count;
+                }
+            }
         }
 
         /// Get an element by index. If the element is a basic type, returns the value directly.
@@ -164,6 +287,84 @@ pub fn TreeView(comptime ST: type) type {
                     .pool = self.pool,
                     .data = child_data,
                 };
+            }
+        }
+
+        /// Allocate and return all elements as an array. Only available for basic array types (Vector/List of basic types).
+        /// Returns a slice that must be freed by the caller.
+        pub fn getAllElementsAlloc(self: *Self, allocator: std.mem.Allocator) ![]ST.Element.Type {
+            if (!comptime is_basic_array_view) {
+                @compileError("getAllElementsAlloc can only be used with Vector/List of basic types");
+            }
+
+            const length = if (comptime is_list_view) try self.getLength() else ST.length;
+            const values = try allocator.alloc(ST.Element.Type, length);
+            errdefer allocator.free(values);
+
+            return try self.getAllElements(values);
+        }
+
+        /// Populate a caller-provided buffer with all elements and return it.
+        pub fn getAllElements(self: *Self, values: []ST.Element.Type) ![]ST.Element.Type {
+            if (!comptime is_basic_array_view) {
+                @compileError("getAllElements can only be used with Vector/List of basic types");
+            }
+
+            const length = if (comptime is_list_view) try self.getLength() else ST.length;
+            if (values.len != length) {
+                return error.InvalidSize;
+            }
+
+            if (length == 0) {
+                return values;
+            }
+
+            const items_per_chunk = itemsPerChunk(ST.Element);
+            const len_full_chunks = length / items_per_chunk;
+            const remainder = length % items_per_chunk;
+            const chunk_count = len_full_chunks + @intFromBool(remainder != 0);
+
+            if (chunk_count > 0) {
+                try self.ensureChunkPrefetch(chunk_count, items_per_chunk);
+            }
+
+            try self.populateElementsFromChunks(values, items_per_chunk, len_full_chunks, remainder);
+            return values;
+        }
+
+        fn populateElementsFromChunks(
+            self: *Self,
+            dest: []ST.Element.Type,
+            items_per_chunk: usize,
+            len_full_chunks: usize,
+            remainder: usize,
+        ) !void {
+            for (0..len_full_chunks) |chunk_idx| {
+                const chunk_gindex = elementChildGindex(chunk_idx * items_per_chunk);
+                const leaf_node = try self.getChildNode(chunk_gindex);
+
+                for (0..items_per_chunk) |i| {
+                    try ST.Element.tree.toValuePacked(
+                        leaf_node,
+                        self.pool,
+                        i,
+                        &dest[chunk_idx * items_per_chunk + i],
+                    );
+                }
+            }
+
+            if (remainder > 0) {
+                const chunk_gindex = elementChildGindex(len_full_chunks * items_per_chunk);
+                const leaf_node = try self.getChildNode(chunk_gindex);
+
+                for (0..remainder) |i| {
+                    try ST.Element.tree.toValuePacked(
+                        leaf_node,
+                        self.pool,
+                        i,
+                        &dest[len_full_chunks * items_per_chunk + i],
+                    );
+                }
             }
         }
 
@@ -205,6 +406,141 @@ pub fn TreeView(comptime ST: type) type {
                     data.deinit(self.pool);
                 }
             }
+        }
+
+        /// Append an element to the end of the list, updating the cached length.
+        pub fn push(self: *Self, value: Element) !void {
+            if (comptime !is_list_view) {
+                @compileError("push can only be used with List types");
+            }
+
+            const length = try self.getLength();
+            if (length >= ST.limit) {
+                return error.LengthOverLimit;
+            }
+
+            try self.setElement(length, value);
+            try self.updateListLength(length + 1);
+        }
+
+        /// Return a new view containing all elements up to and including `index`.
+        /// Only available for list views.
+        pub fn sliceTo(self: *Self, index: usize) !Self {
+            comptime {
+                if (!is_list_view) {
+                    @compileError("sliceTo can only be used with List types");
+                }
+            }
+
+            try self.commit();
+
+            const length = try self.getLength();
+            if (length == 0 or index >= length - 1) {
+                return try Self.init(self.allocator, self.pool, self.data.root);
+            }
+
+            const new_length = index + 1;
+            if (new_length > ST.limit) {
+                return error.LengthOverLimit;
+            }
+            const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
+            const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, is_list_view);
+
+            var new_root: Node.Id = undefined;
+            if (comptime is_basic_array_view) {
+                const items_per_chunk = itemsPerChunk(ST.Element);
+                const chunk_index = index / items_per_chunk;
+                const chunk_offset = index % items_per_chunk;
+                const chunk_node = try Node.Id.getNodeAtDepth(self.data.root, self.pool, chunk_depth, chunk_index);
+
+                var chunk_bytes = chunk_node.getRoot(self.pool).*;
+                const keep_bytes = (chunk_offset + 1) * ST.Element.fixed_size;
+                if (keep_bytes < BYTES_PER_CHUNK) {
+                    @memset(chunk_bytes[keep_bytes..], 0);
+                }
+
+                const truncated_chunk_node = try self.pool.createLeaf(&chunk_bytes, false);
+                var chunk_inserted = false;
+                // Drop the temporary truncated chunk leaf unless we swap it into the tree
+                defer if (!chunk_inserted) self.pool.unref(truncated_chunk_node);
+
+                new_root = try Node.Id.setNodeAtDepth(self.data.root, self.pool, chunk_depth, chunk_index, truncated_chunk_node);
+                chunk_inserted = true;
+
+                new_root = try Node.Id.truncateAfterIndex(new_root, self.pool, chunk_depth, chunk_index);
+            } else {
+                new_root = try Node.Id.truncateAfterIndex(self.data.root, self.pool, chunk_depth, index);
+            }
+
+            const length_node = try self.pool.createLeafFromUint(@intCast(new_length), false);
+            var length_inserted = false;
+            // Drop the temporary length leaf unless we attach it to the new branch
+            defer if (!length_inserted) self.pool.unref(length_node);
+            new_root = try Node.Id.setNode(new_root, self.pool, listLengthGindex(), length_node);
+            length_inserted = true;
+
+            errdefer self.pool.unref(new_root);
+            const new_data = try Data.init(self.allocator, self.pool, new_root);
+            return Self{
+                .allocator = self.allocator,
+                .pool = self.pool,
+                .data = new_data,
+            };
+        }
+
+        /// Return a new view containing all elements from `index` to the end.
+        /// Only available for list views of composite types.
+        /// Basic list slicing would require per-element extraction and repacking since multiple elements are tightly packed within each chunk.
+        pub fn sliceFrom(self: *Self, index: usize) !Self {
+            comptime {
+                if (!is_list_view or is_basic_array_view) {
+                    @compileError("sliceFrom can only be used with List of composite types");
+                }
+            }
+
+            try self.commit();
+
+            const length = try self.getLength();
+            if (index == 0) {
+                return try Self.init(self.allocator, self.pool, self.data.root);
+            }
+
+            const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
+            const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, is_list_view);
+            const target_length = if (index >= length) 0 else length - index;
+
+            var chunk_root_inserted = target_length == 0;
+            var chunk_root: ?Node.Id = null;
+            // Only release the chunk root when (a) we actually built a temporary subtree and
+            // (b) the new branch never adopted it.
+            defer if (chunk_root != null and !chunk_root_inserted) self.pool.unref(chunk_root.?);
+
+            if (target_length == 0) {
+                chunk_root = @enumFromInt(base_chunk_depth);
+            } else {
+                const nodes = try self.allocator.alloc(Node.Id, target_length);
+                defer self.allocator.free(nodes);
+                try self.data.root.getNodesAtDepth(self.pool, chunk_depth, index, nodes);
+
+                chunk_root = try Node.fillWithContents(self.pool, nodes, base_chunk_depth, false);
+            }
+
+            const length_node = try self.pool.createLeafFromUint(@intCast(target_length), false);
+            var length_inserted = false;
+            // Drop the temporary length leaf unless we attach it to the new branch
+            defer if (!length_inserted) self.pool.unref(length_node);
+
+            const new_root = try self.pool.createBranch(chunk_root.?, length_node, false);
+            length_inserted = true;
+            chunk_root_inserted = true;
+
+            errdefer self.pool.unref(new_root);
+            const new_data = try Data.init(self.allocator, self.pool, new_root);
+            return Self{
+                .allocator = self.allocator,
+                .pool = self.pool,
+                .data = new_data,
+            };
         }
 
         pub fn Field(comptime field_name: []const u8) type {
