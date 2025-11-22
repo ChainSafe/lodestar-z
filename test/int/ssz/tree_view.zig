@@ -401,6 +401,44 @@ test "TreeView list push enforces limit" {
     try std.testing.expectEqual(@as(usize, 2), try view.getLength());
 }
 
+// Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listBasic/tree.test.ts#L180-L203
+test "TreeView basic list getAllElements reflects pushes" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const list_limit = 32;
+    const Uint64 = ssz.UintType(64);
+    const ListType = ssz.FixedListType(Uint64, list_limit);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    var expected: [list_limit]u64 = undefined;
+    for (&expected, 0..) |*slot, idx| {
+        slot.* = @intCast(idx);
+    }
+
+    for (expected, 0..) |value, idx| {
+        try view.push(value);
+        try std.testing.expectEqual(value, try view.getElement(idx));
+    }
+
+    try std.testing.expectError(error.LengthOverLimit, view.push(@intCast(list_limit)));
+
+    for (expected, 0..) |value, idx| {
+        try std.testing.expectEqual(value, try view.getElement(idx));
+    }
+
+    try view.commit();
+    const filled = try view.getAllElementsAlloc(allocator);
+    defer allocator.free(filled);
+    try std.testing.expectEqualSlices(u64, expected[0..], filled);
+}
+
 test "TreeView composite list sliceTo truncates elements" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 512);
@@ -477,6 +515,79 @@ test "TreeView composite list sliceFrom returns suffix" {
     try std.testing.expectEqual(@as(usize, 0), try empty_suffix.getLength());
 }
 
+// Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listComposite/tree.test.ts#L209-L229
+test "TreeView composite list sliceFrom handles signed indexes" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const ListType = ssz.FixedListType(Checkpoint, 1024);
+    const list_length = 16;
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+
+    var values: [list_length]Checkpoint.Type = undefined;
+    for (&values, 0..) |*value, idx| {
+        value.* = Checkpoint.Type{
+            .epoch = @intCast(idx),
+            .root = [_]u8{@as(u8, @intCast(idx))} ** 32,
+        };
+    }
+    try list.appendSlice(allocator, values[0..list_length]);
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    const min_index: i32 = -@as(i32, list_length) - 1;
+    const max_index: i32 = @as(i32, list_length) + 1;
+    const signed_len = std.math.cast(i32, list_length) orelse @panic("slice length exceeds i32 range");
+
+    var i = min_index;
+    while (i < max_index) : (i += 1) {
+        var start_i32 = i;
+        if (start_i32 < 0) {
+            start_i32 = signed_len + start_i32;
+        }
+        start_i32 = std.math.clamp(start_i32, 0, signed_len);
+        const start_index: usize = @intCast(start_i32);
+        const expected_len = list_length - start_index;
+
+        {
+            var sliced = try view.sliceFrom(start_index);
+            defer sliced.deinit();
+
+            try std.testing.expectEqual(expected_len, try sliced.getLength());
+
+            var actual: ListType.Type = .empty;
+            defer actual.deinit(allocator);
+            try ListType.tree.toValue(allocator, sliced.data.root, &pool, &actual);
+
+            var expected: ListType.Type = .empty;
+            defer expected.deinit(allocator);
+            try expected.appendSlice(allocator, values[start_index..list_length]);
+
+            try std.testing.expectEqual(expected_len, actual.items.len);
+            try std.testing.expectEqual(expected_len, expected.items.len);
+
+            for (expected.items, 0..) |item, idx_item| {
+                try std.testing.expectEqual(item.epoch, actual.items[idx_item].epoch);
+                try std.testing.expectEqualSlices(u8, &item.root, &actual.items[idx_item].root);
+            }
+
+            const expected_node = try ListType.tree.fromValue(allocator, &pool, &expected);
+            var expected_root: [32]u8 = expected_node.getRoot(&pool).*;
+            defer pool.unref(expected_node);
+
+            var actual_root: [32]u8 = undefined;
+            try sliced.hashTreeRoot(&actual_root);
+
+            try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+        }
+    }
+}
+
 test "TreeView composite list push appends element" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 512);
@@ -545,6 +656,143 @@ test "TreeView list sliceTo returns original when truncation unnecessary" {
     try sliced.hashTreeRoot(&actual_root);
 
     try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}
+
+// Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listComposite/tree.test.ts#L182-L207
+test "TreeView composite list sliceTo matches incremental snapshots" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 2048);
+    defer pool.deinit();
+
+    const ListType = ssz.FixedListType(Checkpoint, 1024);
+    const total_values: usize = 16;
+
+    var values: [total_values]Checkpoint.Type = undefined;
+    for (&values, 0..) |*value, idx| {
+        value.* = Checkpoint.Type{
+            .epoch = @intCast(idx + 1),
+            .root = [_]u8{@as(u8, @intCast(idx + 1))} ** 32,
+        };
+    }
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, values[0..]);
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    try view.commit();
+
+    // The TypeScript test also exercises index -1 to capture the empty snapshot. Since the Zig API
+    // uses unsigned indexes, we exercise the zero-length case by operating on an empty view in other
+    // tests and cover the incremental prefixes here.
+    var i: usize = 0;
+    while (i < total_values) : (i += 1) {
+        var sliced = try view.sliceTo(i);
+        defer sliced.deinit();
+
+        const expected_len = i + 1;
+        try std.testing.expectEqual(expected_len, try sliced.getLength());
+
+        var actual: ListType.Type = .empty;
+        defer actual.deinit(allocator);
+        try ListType.tree.toValue(allocator, sliced.data.root, &pool, &actual);
+
+        var expected: ListType.Type = .empty;
+        defer expected.deinit(allocator);
+        try expected.appendSlice(allocator, values[0..expected_len]);
+
+        try std.testing.expectEqual(expected_len, actual.items.len);
+        for (expected.items, 0..) |item, idx_item| {
+            try std.testing.expectEqual(item.epoch, actual.items[idx_item].epoch);
+            try std.testing.expectEqualSlices(u8, &item.root, &actual.items[idx_item].root);
+        }
+
+        var expected_root: [32]u8 = undefined;
+        try ListType.hashTreeRoot(allocator, &expected, &expected_root);
+
+        var actual_root: [32]u8 = undefined;
+        try sliced.hashTreeRoot(&actual_root);
+
+        try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+
+        const serialized_len = ListType.serializedSize(&expected);
+        const expected_bytes = try allocator.alloc(u8, serialized_len);
+        defer allocator.free(expected_bytes);
+        const actual_bytes = try allocator.alloc(u8, serialized_len);
+        defer allocator.free(actual_bytes);
+
+        _ = ListType.serializeIntoBytes(&expected, expected_bytes);
+        _ = ListType.serializeIntoBytes(&actual, actual_bytes);
+
+        try std.testing.expectEqualSlices(u8, expected_bytes, actual_bytes);
+    }
+}
+
+// Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listBasic/tree.test.ts#L219-L247
+test "TreeView basic list sliceTo matches incremental snapshots" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 2048);
+    defer pool.deinit();
+
+    const Uint64 = ssz.UintType(64);
+    const ListType = ssz.FixedListType(Uint64, 1024);
+    const total_values: usize = 16;
+
+    var base_values: [total_values]u64 = undefined;
+    for (&base_values, 0..) |*value, idx| {
+        value.* = @intCast(idx);
+    }
+
+    var empty_list: ListType.Type = .empty;
+    defer empty_list.deinit(allocator);
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &empty_list);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    for (base_values) |value| {
+        try view.push(value);
+    }
+    try view.commit();
+
+    for (base_values, 0..) |_, idx| {
+        var sliced = try view.sliceTo(idx);
+        defer sliced.deinit();
+
+        const expected_len = idx + 1;
+        try std.testing.expectEqual(expected_len, try sliced.getLength());
+
+        var expected: ListType.Type = .empty;
+        defer expected.deinit(allocator);
+        try expected.appendSlice(allocator, base_values[0..expected_len]);
+
+        var actual: ListType.Type = .empty;
+        defer actual.deinit(allocator);
+        try ListType.tree.toValue(allocator, sliced.data.root, &pool, &actual);
+
+        try std.testing.expectEqual(expected_len, actual.items.len);
+        try std.testing.expectEqualSlices(u64, expected.items, actual.items);
+
+        const serialized_len = ListType.serializedSize(&expected);
+        const expected_bytes = try allocator.alloc(u8, serialized_len);
+        defer allocator.free(expected_bytes);
+        const actual_bytes = try allocator.alloc(u8, serialized_len);
+        defer allocator.free(actual_bytes);
+
+        _ = ListType.serializeIntoBytes(&expected, expected_bytes);
+        _ = ListType.serializeIntoBytes(&actual, actual_bytes);
+        try std.testing.expectEqualSlices(u8, expected_bytes, actual_bytes);
+
+        var expected_root: [32]u8 = undefined;
+        try ListType.hashTreeRoot(allocator, &expected, &expected_root);
+
+        var actual_root: [32]u8 = undefined;
+        try sliced.hashTreeRoot(&actual_root);
+
+        try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+    }
 }
 
 test "TreeView list sliceTo truncates tail elements" {

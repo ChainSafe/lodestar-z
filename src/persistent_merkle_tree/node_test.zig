@@ -411,3 +411,91 @@ test "hashing sanity check" {
 
     try std.testing.expectEqualSlices(u8, zero2.getRoot(p), branch2.getRoot(p));
 }
+
+// Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/persistent-merkle-tree/test/unit/tree/zeroAfterIndex.test.ts#L4-L39
+test "truncateAfterIndex matches zeroAfterIndex test suite" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 8192);
+    defer pool.deinit();
+    const p = &pool;
+
+    const max_test_depth: usize = 6;
+
+    for (0..max_test_depth) |depth_usize| {
+        const depth: Depth = @intCast(depth_usize);
+        const max_length = @as(usize, 1) << @intCast(depth);
+
+        for (0..max_length) |length| {
+            if (length == 0) continue;
+
+            var leaves = try allocator.alloc(Node.Id, length);
+            defer allocator.free(leaves);
+
+            var roots_at_index = try allocator.alloc(Node.Id, length);
+            defer allocator.free(roots_at_index);
+            defer {
+                for (roots_at_index) |root_id| {
+                    pool.unref(root_id);
+                }
+            }
+
+            var root: Node.Id = @enumFromInt(depth);
+            try pool.ref(root);
+            defer pool.unref(root);
+
+            for (0..length) |i| {
+                var hash = [_]u8{0} ** 32;
+                const fill_value: u8 = @intCast(i + 16);
+                @memset(hash[0..], fill_value);
+
+                const leaf = try pool.createLeaf(&hash, false);
+                leaves[i] = leaf;
+
+                const gindex = Gindex.fromDepth(depth, i);
+                const new_root = try root.setNode(p, gindex, leaf);
+                try pool.ref(new_root);
+                pool.unref(root);
+                root = new_root;
+
+                roots_at_index[i] = new_root;
+                try pool.ref(roots_at_index[i]);
+            }
+
+            for (0..length) |idx| {
+                const naive_root = try treeZeroAfterIndexNaive(p, allocator, depth, leaves, length, idx);
+                defer pool.unref(naive_root);
+
+                const truncated_root = try Node.Id.truncateAfterIndex(root, p, depth, idx);
+                defer pool.unref(truncated_root);
+
+                const expected_hash = roots_at_index[idx].getRoot(p);
+                try std.testing.expectEqualSlices(u8, expected_hash, naive_root.getRoot(p));
+                try std.testing.expectEqualSlices(u8, expected_hash, truncated_root.getRoot(p));
+            }
+        }
+    }
+}
+
+fn treeZeroAfterIndexNaive(
+    pool: *Node.Pool,
+    allocator: std.mem.Allocator,
+    depth: Depth,
+    leaves: []const Node.Id,
+    length: usize,
+    index: usize,
+) !Node.Id {
+    std.debug.assert(length <= leaves.len);
+    std.debug.assert(index < length);
+
+    var contents = try allocator.alloc(Node.Id, length);
+    defer allocator.free(contents);
+
+    for (0..length) |i| {
+        contents[i] = if (i <= index)
+            leaves[i]
+        else
+            @enumFromInt(0);
+    }
+
+    return try Node.fillWithContents(pool, contents, depth, true);
+}

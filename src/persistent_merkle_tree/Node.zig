@@ -275,6 +275,14 @@ pub const Pool = struct {
             }
             out[i] = self.createUnsafe(states);
             states[@intFromEnum(out[i])] = State.branch_lazy.initRefCount(i == 0);
+
+            // Initialize left/right children to zero.
+            //
+            // The node is marked as `branch_lazy`, so `unref` will attempt to traverse its children during cleanup.
+            // If an error occurs before the node is fully constructed and `free` is called, stale values in `left`/`right`
+            // could lead to accessing invalid memory. Setting them to zero ensures safe cleanup.
+            self.nodes.items(.left)[@intFromEnum(out[i])] = @enumFromInt(0);
+            self.nodes.items(.right)[@intFromEnum(out[i])] = @enumFromInt(0);
         }
         return allocated;
     }
@@ -759,10 +767,10 @@ pub const Id = enum(u32) {
         }
 
         const max_length = @as(Gindex.Uint, 1) << depth;
-        if (index >= max_length) {
-            return Error.InvalidLength;
-        }
-        if (index + 1 >= max_length) {
+        if (index >= max_length - 1) {
+            if (index >= max_length) {
+                return Error.InvalidLength;
+            }
             return root_node;
         }
 

@@ -2,7 +2,6 @@ const std = @import("std");
 const math = std.math;
 const hashing = @import("hashing");
 const Depth = hashing.Depth;
-const user_max_depth = hashing.user_max_depth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("type/type_kind.zig").isBasicType;
@@ -12,9 +11,9 @@ const BYTES_PER_CHUNK = type_root.BYTES_PER_CHUNK;
 const itemsPerChunk = type_root.itemsPerChunk;
 const chunkCount = type_root.chunkCount;
 const chunkDepth = type_root.chunkDepth;
-const ListLengthUint = std.meta.Int(.unsigned, @intCast(user_max_depth + 1));
+const ListLengthUint = hashing.GindexUint;
 // A sentinel value indicating that the list length cache is unset.
-const list_length_unset = math.maxInt(ListLengthUint);
+const list_length_unset = hashing.max_depth;
 
 pub const Data = struct {
     root: Node.Id,
@@ -105,7 +104,7 @@ pub fn TreeView(comptime ST: type) type {
 
         const Self = @This();
 
-        /// Compile-time information about which variant this TreeView is
+        /// Which variant this TreeView is
         const is_container_view = ST.kind == TypeKind.container;
         const is_list_view = ST.kind == TypeKind.list;
         const is_vector_view = ST.kind == TypeKind.vector;
@@ -167,6 +166,8 @@ pub fn TreeView(comptime ST: type) type {
             return child_data;
         }
 
+        /// Prefetch up to `chunk_count` chunk leaves into the cache so repeated reads from
+        /// basic arrays avoid re-traversing the tree.
         fn ensureChunkPrefetch(self: *Self, chunk_count: usize, items_per_chunk: usize) !void {
             comptime {
                 if (!is_basic_array_view) {
@@ -226,10 +227,10 @@ pub fn TreeView(comptime ST: type) type {
             return Gindex.fromDepth(1, 1);
         }
 
-        inline fn chunksRootGindex() Gindex {
+        inline fn listChunksRootGindex() Gindex {
             comptime {
                 if (!is_list_view) {
-                    @compileError("chunksRootGindex can only be used with List types");
+                    @compileError("listChunksRootGindex can only be used with List types");
                 }
             }
             return Gindex.fromDepth(1, 0);
@@ -247,7 +248,7 @@ pub fn TreeView(comptime ST: type) type {
 
             const length_node = try self.pool.createLeafFromUint(@intCast(new_length), false);
             var inserted = false;
-            defer if (!inserted) self.pool.unref(length_node);
+            defer if (!inserted) self.pool.unref(length_node); // only drop if we never attach it to the tree
 
             const gindex = listLengthGindex();
             const opt_old = try self.data.children_nodes.fetchPut(gindex, length_node);
@@ -265,6 +266,7 @@ pub fn TreeView(comptime ST: type) type {
 
             if (comptime is_basic_array_view) {
                 const chunk_count = chunkCount(new_length, ST.Element);
+                // If the list shrank, discard prefetched chunks that fall beyond the new length
                 if (self.data.prefetched_chunk_count > chunk_count) {
                     self.data.prefetched_chunk_count = chunk_count;
                 }
@@ -346,12 +348,10 @@ pub fn TreeView(comptime ST: type) type {
             len_full_chunks: usize,
             remainder: usize,
         ) !void {
-            // Process full chunks
             for (0..len_full_chunks) |chunk_idx| {
                 const chunk_gindex = elementChildGindex(chunk_idx * items_per_chunk);
                 const leaf_node = try self.getChildNode(chunk_gindex);
 
-                // Read all items from this chunk
                 for (0..items_per_chunk) |i| {
                     try ST.Element.tree.toValuePacked(
                         leaf_node,
@@ -362,7 +362,6 @@ pub fn TreeView(comptime ST: type) type {
                 }
             }
 
-            // Process partial last chunk if needed
             if (remainder > 0) {
                 const chunk_gindex = elementChildGindex(len_full_chunks * items_per_chunk);
                 const leaf_node = try self.getChildNode(chunk_gindex);
@@ -433,6 +432,8 @@ pub fn TreeView(comptime ST: type) type {
             try self.updateListLength(length + 1);
         }
 
+        /// Return a new view containing all elements up to and including `index`.
+        /// Only available for list views.
         pub fn sliceTo(self: *Self, index: usize) !Self {
             comptime {
                 if (!is_list_view) {
@@ -448,6 +449,9 @@ pub fn TreeView(comptime ST: type) type {
             }
 
             const new_length = index + 1;
+            if (new_length > ST.limit) {
+                return error.LengthOverLimit;
+            }
             const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
             const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, is_list_view);
 
@@ -466,6 +470,7 @@ pub fn TreeView(comptime ST: type) type {
 
                 const truncated_chunk_node = try self.pool.createLeaf(&chunk_bytes, false);
                 var chunk_inserted = false;
+                // Drop the temporary truncated chunk leaf unless we swap it into the tree
                 defer if (!chunk_inserted) self.pool.unref(truncated_chunk_node);
 
                 new_root = try Node.Id.setNodeAtDepth(self.data.root, self.pool, chunk_depth, chunk_index, truncated_chunk_node);
@@ -478,6 +483,7 @@ pub fn TreeView(comptime ST: type) type {
 
             const length_node = try self.pool.createLeafFromUint(@intCast(new_length), false);
             var length_inserted = false;
+            // Drop the temporary length leaf unless we attach it to the new branch
             defer if (!length_inserted) self.pool.unref(length_node);
             new_root = try Node.Id.setNode(new_root, self.pool, listLengthGindex(), length_node);
             length_inserted = true;
@@ -491,6 +497,9 @@ pub fn TreeView(comptime ST: type) type {
             };
         }
 
+        /// Return a new view containing all elements from `index` to the end.
+        /// Only available for list views of composite types because basic lists
+        /// reuse chunk nodes and would need per-element truncation instead of slicing.
         pub fn sliceFrom(self: *Self, index: usize) !Self {
             comptime {
                 if (!is_list_view or is_basic_array_view) {
@@ -510,20 +519,27 @@ pub fn TreeView(comptime ST: type) type {
             const target_length = if (index >= length) 0 else length - index;
 
             var chunk_root_inserted = target_length == 0;
+            var chunk_root_ready = false;
             var chunk_root: Node.Id = undefined;
+            // Only release the chunk root when (a) we actually built a temporary subtree and
+            // (b) the new branch never adopted it.
+            defer if (chunk_root_ready and !chunk_root_inserted) self.pool.unref(chunk_root);
+
             if (target_length == 0) {
                 chunk_root = @enumFromInt(base_chunk_depth);
+                chunk_root_ready = true;
             } else {
                 const nodes = try self.allocator.alloc(Node.Id, target_length);
                 defer self.allocator.free(nodes);
                 try self.data.root.getNodesAtDepth(self.pool, chunk_depth, index, nodes);
 
                 chunk_root = try Node.fillWithContents(self.pool, nodes, base_chunk_depth, false);
+                chunk_root_ready = true;
             }
-            defer if (!chunk_root_inserted) self.pool.unref(chunk_root);
 
             const length_node = try self.pool.createLeafFromUint(@intCast(target_length), false);
             var length_inserted = false;
+            // Drop the temporary length leaf unless we attach it to the new branch
             defer if (!length_inserted) self.pool.unref(length_node);
 
             const new_root = try self.pool.createBranch(chunk_root, length_node, false);
