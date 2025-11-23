@@ -8,6 +8,16 @@ const max_depth = @import("hashing").max_depth;
 const Depth = @import("hashing").Depth;
 const Gindex = @import("gindex.zig").Gindex;
 
+/// A Merkle tree node identifier.
+/// - Creation (`create*`) yields a brand-new node with refcount = 1 owned by the caller.
+/// - Borrowing helpers (no suffix) reuse caller refs; they may `ref` internally but never `unref`.
+/// - Retrieval helpers (`get*`) return borrowed `Id`s without changing refcounts.
+/// - `Transfer` helpers take ownership and automatically `unref` the inputs once attached.
+/// - Live nodes must always have at least one owning reference; refcount 0 immediately releases the
+///   node back to the pool free list and makes the identifier unusable.
+/// Callers should `ref` when extending lifetimes and `unref` when relinquishing ownership unless
+/// they explicitly use a `Transfer` variant.
+
 hash: [32]u8,
 left: Id,
 right: Id,
