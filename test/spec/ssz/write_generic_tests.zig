@@ -1,8 +1,6 @@
 const std = @import("std");
 const spec_test_options = @import("spec_test_options");
 
-const SKIPPED_TEST_DIR_NAMES = .{ "basic_progressive_list", "compatible_unions", "progressive_bitlist", "progressive_containers" };
-
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
@@ -39,21 +37,9 @@ pub fn main() !void {
 
     const generic_tests_dir = try std.fs.cwd().openDir(generic_tests_dir_name, .{ .iterate = true });
     var generic_tests_dir_it = generic_tests_dir.iterate();
-    outer: while (try generic_tests_dir_it.next()) |g_test_entry| {
-        switch (g_test_entry.kind) {
-            .directory => {},
-            else => {
-                continue;
-            },
-        }
-
+    while (try generic_tests_dir_it.next()) |g_test_entry| {
+        if (g_test_entry.kind != .directory) continue;
         const test_dir_name = g_test_entry.name;
-        inline for (SKIPPED_TEST_DIR_NAMES) |skipped_test_dir_name| {
-            if (std.mem.eql(u8, test_dir_name, skipped_test_dir_name)) {
-                std.debug.print("TODO: implement {s} test \n", .{test_dir_name});
-                continue :outer;
-            }
-        }
 
         const valid_tests_dir_name = try std.fs.path.join(allocator, &[_][]const u8{
             generic_tests_dir_name,
@@ -65,21 +51,9 @@ pub fn main() !void {
         const valid_tests_dir = try std.fs.cwd().openDir(valid_tests_dir_name, .{ .iterate = true });
         var valid_tests_dir_it = valid_tests_dir.iterate();
         while (try valid_tests_dir_it.next()) |valid_test_entry| {
-            switch (valid_test_entry.kind) {
-                .directory => {},
-                else => {
-                    continue;
-                },
-            }
-
+            if (valid_test_entry.kind != .directory) continue;
             const test_name = valid_test_entry.name;
-            // TODO: https://github.com/ChainSafe/lodestar-z/issues/98
-            if (std.mem.startsWith(u8, test_name, "Progressive")) {
-                continue;
-            }
-            const type_name = getTypeName(test_dir_name, test_name);
-
-            try writeValidTest(writer, test_name, test_dir_name, type_name);
+            try writeValidTest(writer, test_name, test_dir_name, getTypeName(test_dir_name, test_name));
         }
 
         const invalid_tests_dir_name = try std.fs.path.join(allocator, &[_][]const u8{
@@ -92,18 +66,8 @@ pub fn main() !void {
         const invalid_tests_dir = try std.fs.cwd().openDir(invalid_tests_dir_name, .{ .iterate = true });
         var invalid_tests_dir_it = invalid_tests_dir.iterate();
         while (try invalid_tests_dir_it.next()) |invalid_test_entry| {
-            switch (invalid_test_entry.kind) {
-                .directory => {},
-                else => {
-                    continue;
-                },
-            }
-
+            if (invalid_test_entry.kind != .directory) continue;
             const test_name = invalid_test_entry.name;
-            // TODO: https://github.com/ChainSafe/lodestar-z/issues/98
-            if (std.mem.startsWith(u8, test_name, "Progressive")) {
-                continue;
-            }
             const type_name = getTypeName(test_dir_name, test_name);
 
             // we must skip some invalid types (that would have gotten caught at compile time)
@@ -119,21 +83,46 @@ pub fn main() !void {
 fn getTypeName(test_dir_name: []const u8, test_name: []const u8) []const u8 {
     if (std.mem.eql(u8, test_dir_name, "boolean")) {
         return "boolean";
-    } else if (std.mem.eql(u8, test_dir_name, "basic_vector")) {
-        var split_it = std.mem.splitScalar(u8, test_name, '_');
-        _ = split_it.next();
-        _ = split_it.next();
-        _ = split_it.next();
-        return test_name[0 .. (split_it.index orelse (split_it.buffer.len + 1)) - 1];
-    } else if (std.mem.eql(u8, test_dir_name, "containers")) {
+    }
+    if (std.mem.eql(u8, test_dir_name, "progressive_bitlist")) {
+        return "progbitlist";
+    }
+    if (std.mem.eql(u8, test_dir_name, "containers")) {
         var split_it = std.mem.splitScalar(u8, test_name, '_');
         return split_it.first();
-    } else {
+    }
+    if (std.mem.eql(u8, test_dir_name, "basic_progressive_list")) {
         var split_it = std.mem.splitScalar(u8, test_name, '_');
         _ = split_it.next();
         _ = split_it.next();
         return test_name[0 .. (split_it.index orelse (split_it.buffer.len + 1)) - 1];
     }
+    if (std.mem.eql(u8, test_dir_name, "progressive_containers")) {
+        if (std.mem.indexOf(u8, test_name, "TestStruct")) |idx| {
+            return test_name[0 .. idx + "TestStruct".len];
+        }
+        if (std.mem.indexOf(u8, test_name, "Struct")) |idx| {
+            return test_name[0 .. idx + "Struct".len];
+        }
+        return test_name;
+    }
+    if (std.mem.eql(u8, test_dir_name, "compatible_unions")) {
+        if (std.mem.startsWith(u8, test_name, "CompatibleUnionABCA_")) return "CompatibleUnionABCA";
+        if (std.mem.startsWith(u8, test_name, "CompatibleUnionBC_")) return "CompatibleUnionBC";
+        if (std.mem.startsWith(u8, test_name, "CompatibleUnionA_")) return "CompatibleUnionA";
+        return test_name;
+    }
+    if (std.mem.eql(u8, test_dir_name, "basic_vector")) {
+        var split_it = std.mem.splitScalar(u8, test_name, '_');
+        _ = split_it.next();
+        _ = split_it.next();
+        _ = split_it.next();
+        return test_name[0 .. (split_it.index orelse (split_it.buffer.len + 1)) - 1];
+    }
+    var split_it = std.mem.splitScalar(u8, test_name, '_');
+    _ = split_it.next();
+    _ = split_it.next();
+    return test_name[0 .. (split_it.index orelse (split_it.buffer.len + 1)) - 1];
 }
 
 /// Assumes the following global decls
