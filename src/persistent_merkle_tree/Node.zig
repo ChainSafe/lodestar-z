@@ -251,6 +251,15 @@ pub const Pool = struct {
         return node_id;
     }
 
+    /// Creates a branch node and transfers ownership of `left_id` and `right_id` to it.
+    /// The caller must no longer retain references to the child nodes after this call.
+    pub fn createBranchTransfer(self: *Pool, left_id: Id, right_id: Id) Error!Id {
+        const node_id = try self.createBranch(left_id, right_id);
+        self.unref(left_id);
+        self.unref(right_id);
+        return node_id;
+    }
+
     /// Allocates nodes into the pool.
     /// Nodes allocated here are expected to be attached via `rebind` and start with a refcount of zero.
     /// Return true if pool had to allocate more memory, false otherwise
@@ -534,12 +543,24 @@ pub const Id = enum(u32) {
         return path_parents[0];
     }
 
+    pub fn setNodeTransfer(root_node: Id, pool: *Pool, gindex: Gindex, node_id: Id) Error!Id {
+        const new_root = try root_node.setNode(pool, gindex, node_id);
+        pool.unref(node_id);
+        return new_root;
+    }
+
     pub fn setNodeAtDepth(root_node: Id, pool: *Pool, depth: Depth, index: usize, node_id: Id) Error!Id {
         return try root_node.setNode(
             pool,
             Gindex.fromDepth(depth, index),
             node_id,
         );
+    }
+
+    pub fn setNodeAtDepthTransfer(root_node: Id, pool: *Pool, depth: Depth, index: usize, node_id: Id) Error!Id {
+        const new_root = try root_node.setNodeAtDepth(pool, depth, index, node_id);
+        pool.unref(node_id);
+        return new_root;
     }
 
     /// Get multiple nodes in a single traversal
@@ -989,6 +1010,12 @@ pub const Id = enum(u32) {
         return node_id;
     }
 
+    pub fn setNodesTransfer(root_node: Id, pool: *Pool, gindices: []const Gindex, nodes: []Id) Error!Id {
+        const new_root = try root_node.setNodes(pool, gindices, nodes);
+        for (nodes) |child| pool.unref(child);
+        return new_root;
+    }
+
     /// Apply `setNodes` over a sorted list of gindices that may span multiple depths by batching
     /// contiguous segments with the same path length.
     pub fn setNodesGrouped(root_node: Id, pool: *Pool, gindices: []const Gindex, nodes: []Id) Error!Id {
@@ -1013,6 +1040,12 @@ pub const Id = enum(u32) {
         }
 
         return root;
+    }
+
+    pub fn setNodesGroupedTransfer(root_node: Id, pool: *Pool, gindices: []const Gindex, nodes: []Id) Error!Id {
+        const new_root = try root_node.setNodesGrouped(pool, gindices, nodes);
+        for (nodes) |child| pool.unref(child);
+        return new_root;
     }
 };
 
@@ -1100,8 +1133,8 @@ pub fn fillToLength(pool: *Pool, leaf: Id, depth: Depth, length: usize) Error!Id
 
 /// Fill a view with the specified contents, returning the new root node id.
 ///
-/// Note: contents is mutated
-pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth) !Id {
+/// Note: contents is mutated and the nodes in it are consumed (unrefed).
+pub fn fillWithContentsTransfer(pool: *Pool, contents: []Id, depth: Depth) !Id {
     if (contents.len == 0) {
         return @enumFromInt(depth);
     }
@@ -1117,20 +1150,22 @@ pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth) !Id {
         while (i < count - 1) : (i += 2) {
             const left = contents[i];
             const right = contents[i + 1];
-            contents[i / 2] = try pool.createBranch(left, right);
-            pool.unref(left);
-            pool.unref(right);
+            contents[i / 2] = try pool.createBranchTransfer(left, right);
         }
 
         // if the count is odd, we need to add a zero node
         if (i != count) {
             const left = contents[i];
-            contents[i / 2] = try pool.createBranch(left, @enumFromInt(depth - d));
-            pool.unref(left);
+            contents[i / 2] = try pool.createBranchTransfer(left, @enumFromInt(depth - d));
         }
 
         count = (count + 1) / 2;
     }
 
     return contents[0];
+}
+
+/// Deprecated wrapper retained for callers that still use the non-transfer name.
+pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth) !Id {
+    return fillWithContentsTransfer(pool, contents, depth);
 }

@@ -477,12 +477,13 @@ pub fn BitListType(comptime _limit: comptime_int) type {
 
                     nodes[i] = try pool.createLeaf(&leaf_buf);
                 }
-                const chunks_root = try Node.fillWithContents(pool, nodes, chunk_depth);
+                const chunks_root = try Node.fillWithContentsTransfer(pool, nodes, chunk_depth);
+                errdefer pool.unref(chunks_root);
+
                 const len_node = try pool.createLeafFromUint(value.bit_len);
-                const root = try pool.createBranch(chunks_root, len_node);
-                pool.unref(chunks_root);
-                pool.unref(len_node);
-                return root;
+                errdefer pool.unref(len_node);
+
+                return try pool.createBranchTransfer(chunks_root, len_node);
             }
         };
 

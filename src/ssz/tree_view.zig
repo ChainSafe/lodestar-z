@@ -477,8 +477,8 @@ pub fn TreeView(comptime ST: type) type {
             }
 
             const length_node = try self.pool.createLeafFromUint(@intCast(new_length));
-            defer self.pool.unref(length_node);
-            const final_root = try Node.Id.setNode(new_root, self.pool, listLengthGindex(), length_node);
+            errdefer self.pool.unref(length_node);
+            const final_root = try Node.Id.setNodeTransfer(new_root, self.pool, listLengthGindex(), length_node);
             self.pool.unref(new_root);
             new_root = final_root;
 
@@ -527,13 +527,14 @@ pub fn TreeView(comptime ST: type) type {
                     try self.pool.ref(node);
                 }
 
-                chunk_root = try Node.fillWithContents(self.pool, nodes, base_chunk_depth);
+                chunk_root = try Node.fillWithContentsTransfer(self.pool, nodes, base_chunk_depth);
             }
 
             const length_node = try self.pool.createLeafFromUint(@intCast(target_length));
-            defer self.pool.unref(length_node);
+            errdefer self.pool.unref(length_node);
 
-            const new_root = try self.pool.createBranch(chunk_root.?, length_node);
+            const new_root = try self.pool.createBranchTransfer(chunk_root.?, length_node);
+            chunk_root = null;
 
             errdefer self.pool.unref(new_root);
             const new_data = try Data.init(self.allocator, self.pool, new_root);

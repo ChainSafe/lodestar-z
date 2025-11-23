@@ -97,14 +97,10 @@ pub fn createNodeFromSingleProof(
         const sibling_id = try pool.createLeaf(&witness);
         errdefer pool.unref(sibling_id);
 
-        const new_node_id = try if ((index_value & 1) == 0)
-            pool.createBranch(node_id, sibling_id)
+        node_id = try if ((index_value & 1) == 0)
+            pool.createBranchTransfer(node_id, sibling_id)
         else
-            pool.createBranch(sibling_id, node_id);
-
-        pool.unref(node_id);
-        pool.unref(sibling_id);
-        node_id = new_node_id;
+            pool.createBranchTransfer(sibling_id, node_id);
 
         index_value >>= 1;
     }

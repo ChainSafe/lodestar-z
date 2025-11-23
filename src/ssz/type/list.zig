@@ -274,12 +274,13 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                         nodes[i] = try Element.tree.fromValue(pool, &value.items[i]);
                     }
                 }
-                const chunks_root = try Node.fillWithContents(pool, nodes, chunk_depth);
+                const chunks_root = try Node.fillWithContentsTransfer(pool, nodes, chunk_depth);
+                errdefer pool.unref(chunks_root);
+
                 const len_node = try pool.createLeafFromUint(len);
-                const root = try pool.createBranch(chunks_root, len_node);
-                pool.unref(chunks_root);
-                pool.unref(len_node);
-                return root;
+                errdefer pool.unref(len_node);
+
+                return try pool.createBranchTransfer(chunks_root, len_node);
             }
         };
     };
@@ -510,12 +511,13 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                 for (0..chunk_count) |i| {
                     nodes[i] = try Element.tree.fromValue(allocator, pool, &value.items[i]);
                 }
-                const chunks_root = try Node.fillWithContents(pool, nodes, chunk_depth);
+                const chunks_root = try Node.fillWithContentsTransfer(pool, nodes, chunk_depth);
+                errdefer pool.unref(chunks_root);
+
                 const len_node = try pool.createLeafFromUint(len);
-                const root = try pool.createBranch(chunks_root, len_node);
-                pool.unref(chunks_root);
-                pool.unref(len_node);
-                return root;
+                errdefer pool.unref(len_node);
+
+                return try pool.createBranchTransfer(chunks_root, len_node);
             }
         };
 

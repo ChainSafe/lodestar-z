@@ -116,5 +116,5 @@ fn createTree(allocator: std.mem.Allocator, depth: u6, length: usize) !Node.Id {
     for (0..leaves.len) |i| {
         leaves[i] = try pool.createLeafFromUint(i);
     }
-    return try Node.fillWithContents(&pool, leaves, depth);
+    return try Node.fillWithContentsTransfer(&pool, leaves, depth);
 }
