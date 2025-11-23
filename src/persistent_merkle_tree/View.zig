@@ -188,6 +188,7 @@ pub const Id = enum(u32) {
     pub fn setNode(self: View.Id, pool: *Pool, gindex: Gindex, node: Node.Id) Node.Error!void {
         const view = &pool.views.items[@intFromEnum(self)];
         const new_root = try view.root_node.setNode(pool.node_pool, gindex, node);
+        defer pool.node_pool.unref(new_root);
 
         if (self.getParent(pool)) |parent| {
             // if the view has a parent, update the parent, which will in turn update self and self's children
@@ -209,6 +210,7 @@ pub const Id = enum(u32) {
     pub fn setNodeAtDepth(self: View.Id, pool: *Pool, depth: Depth, index: usize, node: Node.Id) Node.Error!void {
         const view = &pool.views.items[@intFromEnum(self)];
         const new_root = try view.root_node.setNodeAtDepth(pool.node_pool, depth, index, node);
+        defer pool.node_pool.unref(new_root);
 
         if (self.getParent(pool)) |parent| {
             // if the view has a parent, update the parent, which will in turn update self and self's children
@@ -230,6 +232,7 @@ pub const Id = enum(u32) {
     pub fn setNodesAtDepth(self: View.Id, pool: *Pool, depth: Depth, indices: []usize, nodes: []Node.Id) Node.Error!void {
         const view = &pool.views.items[@intFromEnum(self)];
         const new_root = try view.root_node.setNodesAtDepth(pool.node_pool, depth, indices, nodes);
+        defer pool.node_pool.unref(new_root);
 
         if (self.getParent(pool)) |parent| {
             // if the view has a parent, update the parent, which will in turn update self and self's children

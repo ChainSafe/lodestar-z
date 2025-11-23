@@ -243,7 +243,6 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                     return try pool.createBranch(
                         @enumFromInt(chunk_depth),
                         @enumFromInt(0),
-                        false,
                     );
                 }
 
@@ -268,18 +267,19 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                         }
                         next += to_write;
 
-                        nodes[i] = try pool.createLeaf(&leaf_buf, false);
+                        nodes[i] = try pool.createLeaf(&leaf_buf);
                     }
                 } else {
                     for (0..chunk_count) |i| {
                         nodes[i] = try Element.tree.fromValue(pool, &value.items[i]);
                     }
                 }
-                return try pool.createBranch(
-                    try Node.fillWithContents(pool, nodes, chunk_depth, false),
-                    try pool.createLeafFromUint(len, false),
-                    false,
-                );
+                const chunks_root = try Node.fillWithContents(pool, nodes, chunk_depth);
+                const len_node = try pool.createLeafFromUint(len);
+                const root = try pool.createBranch(chunks_root, len_node);
+                pool.unref(chunks_root);
+                pool.unref(len_node);
+                return root;
             }
         };
     };
@@ -502,7 +502,6 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                     return try pool.createBranch(
                         @enumFromInt(chunk_depth),
                         @enumFromInt(0),
-                        false,
                     );
                 }
 
@@ -511,11 +510,12 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                 for (0..chunk_count) |i| {
                     nodes[i] = try Element.tree.fromValue(allocator, pool, &value.items[i]);
                 }
-                return try pool.createBranch(
-                    try Node.fillWithContents(pool, nodes, chunk_depth, false),
-                    try pool.createLeafFromUint(len, false),
-                    false,
-                );
+                const chunks_root = try Node.fillWithContents(pool, nodes, chunk_depth);
+                const len_node = try pool.createLeafFromUint(len);
+                const root = try pool.createBranch(chunks_root, len_node);
+                pool.unref(chunks_root);
+                pool.unref(len_node);
+                return root;
             }
         };
 

@@ -90,10 +90,6 @@ pub const State = enum(u32) {
         node.* = @enumFromInt(@intFromEnum(node.*) | @intFromEnum(branch_computed));
     }
 
-    pub inline fn initRefCount(node: State, should_ref: bool) State {
-        return @enumFromInt(@intFromEnum(node) | @intFromBool(should_ref));
-    }
-
     pub inline fn getRefCount(node: State) u32 {
         return @intFromEnum(node) & max_ref_count;
     }
@@ -217,22 +213,23 @@ pub const Pool = struct {
         return count;
     }
 
-    pub fn createLeaf(self: *Pool, hash: *const [32]u8, should_ref: bool) Allocator.Error!Id {
+    pub fn createLeaf(self: *Pool, hash: *const [32]u8) Error!Id {
         const node_id = try self.create();
 
         self.nodes.items(.hash)[@intFromEnum(node_id)] = hash.*;
-        self.nodes.items(.state)[@intFromEnum(node_id)] = State.leaf.initRefCount(should_ref);
+        self.nodes.items(.state)[@intFromEnum(node_id)] = State.leaf;
+        _ = try self.nodes.items(.state)[@intFromEnum(node_id)].incRefCount();
 
         return node_id;
     }
 
-    pub fn createLeafFromUint(self: *Pool, uint: u256, should_ref: bool) Allocator.Error!Id {
+    pub fn createLeafFromUint(self: *Pool, uint: u256) Error!Id {
         var hash: [32]u8 = undefined;
         std.mem.writeInt(u256, &hash, uint, .little);
-        return self.createLeaf(&hash, should_ref);
+        return self.createLeaf(&hash);
     }
 
-    pub fn createBranch(self: *Pool, left_id: Id, right_id: Id, should_ref: bool) Error!Id {
+    pub fn createBranch(self: *Pool, left_id: Id, right_id: Id) Error!Id {
         std.debug.assert(@intFromEnum(left_id) < self.nodes.len);
         std.debug.assert(@intFromEnum(right_id) < self.nodes.len);
 
@@ -245,7 +242,8 @@ pub const Pool = struct {
 
         self.nodes.items(.left)[@intFromEnum(node_id)] = left_id;
         self.nodes.items(.right)[@intFromEnum(node_id)] = right_id;
-        states[@intFromEnum(node_id)] = State.branch_lazy.initRefCount(should_ref);
+        states[@intFromEnum(node_id)] = State.branch_lazy;
+        _ = try states[@intFromEnum(node_id)].incRefCount();
 
         try self.refUnsafe(left_id, states);
         try self.refUnsafe(right_id, states);
@@ -254,12 +252,9 @@ pub const Pool = struct {
     }
 
     /// Allocates nodes into the pool.
-    ///
-    /// Note: Only the first node (`out[0]`) is pre-refed.
-    ///
-    /// Nodes allocated here are expected to be attached via `rebind`
+    /// Nodes allocated here are expected to be attached via `rebind` and start with a refcount of zero.
     /// Return true if pool had to allocate more memory, false otherwise
-    pub fn alloc(self: *Pool, out: []Id) Allocator.Error!bool {
+    pub fn alloc(self: *Pool, out: []Id) Error!bool {
         var states = self.nodes.items(.state);
         var allocated: bool = false;
         for (0..out.len) |i| {
@@ -274,7 +269,8 @@ pub const Pool = struct {
                 allocated = true;
             }
             out[i] = self.createUnsafe(states);
-            states[@intFromEnum(out[i])] = State.branch_lazy.initRefCount(i == 0);
+            states[@intFromEnum(out[i])] = State.branch_lazy;
+            _ = try states[@intFromEnum(out[i])].incRefCount();
 
             // Initialize left/right children to zero.
             //
@@ -532,6 +528,8 @@ pub const Id = enum(u32) {
             path_lefts,
             path_rights,
         );
+
+        for (path_parents[1..]) |p| pool.unref(p);
 
         return path_parents[0];
     }
@@ -826,6 +824,7 @@ pub const Id = enum(u32) {
         }
 
         try pool.rebind(path_parents, path_lefts, path_rights);
+        for (path_parents[1..]) |p| pool.unref(p);
         return path_parents[0];
     }
 
@@ -864,7 +863,7 @@ pub const Id = enum(u32) {
             if (node_id != root_node) pool.unref(node_id);
             // orphaned nodes were unrefed along the way through unfinalized_parents_buf
             // path_parents_buf may or maynot be part of the in-progress new tree, there is no issue to double unref()
-            pool.free(&path_parents_buf);
+            pool.free(path_parents_buf[0..path_len]);
         }
 
         // The shared depth between the previous and current index
@@ -965,6 +964,15 @@ pub const Id = enum(u32) {
                 path_lefts_buf[next_d_offset..path_len],
                 path_rights_buf[next_d_offset..path_len],
             );
+
+            for (path_parents_buf[next_d_offset + 1 .. path_len]) |p| {
+                pool.unref(p);
+            }
+
+            if (node_id != root_node) {
+                pool.unref(node_id);
+            }
+
             // unref prev parents if it's not part of the new tree
             // can only unref after the rebind
             for (next_d_offset..path_len) |bit_i| {
@@ -998,7 +1006,9 @@ pub const Id = enum(u32) {
                 group_end += 1;
             }
 
-            root = try setNodes(root, pool, gindices[group_start..group_end], nodes[group_start..group_end]);
+            const new_root = try setNodes(root, pool, gindices[group_start..group_end], nodes[group_start..group_end]);
+            if (root != root_node) pool.unref(root);
+            root = new_root;
             group_start = group_end;
         }
 
@@ -1007,28 +1017,26 @@ pub const Id = enum(u32) {
 };
 
 /// Fill a view to the specified depth, returning the new root node id.
-pub fn fillToDepth(pool: *Pool, bottom: Id, depth: Depth, should_ref: bool) Error!Id {
+pub fn fillToDepth(pool: *Pool, bottom: Id, depth: Depth) Error!Id {
     var d = depth;
     var node = bottom;
     while (d > 0) : (d -= 1) {
-        node = try pool.createBranch(node, node, false);
-    }
-
-    if (should_ref) {
-        try pool.ref(node);
+        const new_node = try pool.createBranch(node, node);
+        if (node != bottom) pool.unref(node);
+        node = new_node;
     }
     return node;
 }
 
 /// Fill a view to the specified length and depth, returning the new root node id.
-pub fn fillToLength(pool: *Pool, leaf: Id, depth: Depth, length: usize, should_ref: bool) Error!Id {
+pub fn fillToLength(pool: *Pool, leaf: Id, depth: Depth, length: usize) Error!Id {
     const max_length = @as(Gindex.Uint, 1) << depth;
     if (length > max_length) {
         return Error.InvalidLength;
     }
 
     // fill a full view to the specified depth
-    var node_id = try fillToDepth(pool, leaf, depth, should_ref);
+    var node_id = try fillToDepth(pool, leaf, depth);
 
     // if the requested length is the same as the max length, return the node
     if (length == max_length) {
@@ -1084,16 +1092,16 @@ pub fn fillToLength(pool: *Pool, leaf: Id, depth: Depth, length: usize, should_r
         path_rights,
     );
 
-    if (should_ref) {
-        try pool.ref(path_parents[0]);
-    }
+    for (path_parents[1..]) |p| pool.unref(p);
+    pool.unref(node_id);
+
     return path_parents[0];
 }
 
 /// Fill a view with the specified contents, returning the new root node id.
 ///
 /// Note: contents is mutated
-pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth, should_ref: bool) !Id {
+pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth) !Id {
     if (contents.len == 0) {
         return @enumFromInt(depth);
     }
@@ -1107,19 +1115,22 @@ pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth, should_ref: b
     while (d > 0) : (d -= 1) {
         var i: usize = 0;
         while (i < count - 1) : (i += 2) {
-            contents[i / 2] = try pool.createBranch(contents[i], contents[i + 1], false);
+            const left = contents[i];
+            const right = contents[i + 1];
+            contents[i / 2] = try pool.createBranch(left, right);
+            pool.unref(left);
+            pool.unref(right);
         }
 
         // if the count is odd, we need to add a zero node
         if (i != count) {
-            contents[i / 2] = try pool.createBranch(contents[i], @enumFromInt(depth - d), false);
+            const left = contents[i];
+            contents[i / 2] = try pool.createBranch(left, @enumFromInt(depth - d));
+            pool.unref(left);
         }
 
         count = (count + 1) / 2;
     }
 
-    if (should_ref) {
-        try pool.ref(contents[0]);
-    }
     return contents[0];
 }

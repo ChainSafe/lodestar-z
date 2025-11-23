@@ -74,7 +74,7 @@ const SetNodeRandomly = struct {
         _ = allocator;
         for (0..self.num_iterations) |_| {
             const index = self.random.uintLessThanBiased(usize, self.length);
-            const leaf = pool.createLeafFromUint(index, false) catch unreachable;
+            const leaf = pool.createLeafFromUint(index) catch unreachable;
             const new_node = self.root.setNodeAtDepth(&pool, self.depth, index, leaf) catch unreachable;
             pool.ref(new_node) catch unreachable;
             pool.unref(self.root.*);
@@ -114,7 +114,7 @@ fn createTree(allocator: std.mem.Allocator, depth: u6, length: usize) !Node.Id {
     defer allocator.free(leaves);
 
     for (0..leaves.len) |i| {
-        leaves[i] = try pool.createLeafFromUint(i, false);
+        leaves[i] = try pool.createLeafFromUint(i);
     }
-    return try Node.fillWithContents(&pool, leaves, depth, true);
+    return try Node.fillWithContents(&pool, leaves, depth);
 }

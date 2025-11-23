@@ -150,7 +150,7 @@ pub fn FixedContainerType(comptime ST: type) type {
                     const field_value = &@field(value, field.name);
                     nodes[i] = try field.type.tree.fromValue(pool, field_value);
                 }
-                return try Node.fillWithContents(pool, &nodes, chunk_depth, false);
+                return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }
 
             pub fn serializeIntoBytes(value: Node.Id, pool: *Node.Pool, out: []u8) !usize {
@@ -552,7 +552,7 @@ pub fn VariableContainerType(comptime ST: type) type {
                         nodes[i] = try field.type.tree.fromValue(allocator, pool, field_value);
                     }
                 }
-                return try Node.fillWithContents(pool, &nodes, chunk_depth, false);
+                return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }
         };
 

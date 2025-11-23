@@ -89,23 +89,25 @@ pub fn createNodeFromSingleProof(
         return error.InvalidWitnessLength;
     }
 
-    var node_id = try pool.createLeaf(&leaf, false);
+    var node_id = try pool.createLeaf(&leaf);
     errdefer pool.unref(node_id);
     var index_value: GindexUint = @intFromEnum(gindex);
 
     for (witnesses) |witness| {
-        const sibling_id = try pool.createLeaf(&witness, false);
+        const sibling_id = try pool.createLeaf(&witness);
         errdefer pool.unref(sibling_id);
 
-        node_id = try if ((index_value & 1) == 0)
-            pool.createBranch(node_id, sibling_id, false)
+        const new_node_id = try if ((index_value & 1) == 0)
+            pool.createBranch(node_id, sibling_id)
         else
-            pool.createBranch(sibling_id, node_id, false);
+            pool.createBranch(sibling_id, node_id);
+
+        pool.unref(node_id);
+        pool.unref(sibling_id);
+        node_id = new_node_id;
 
         index_value >>= 1;
     }
 
-    // Raise the reference count so callers own the result.
-    try pool.ref(node_id);
     return node_id;
 }

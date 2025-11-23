@@ -51,6 +51,15 @@ pub const Data = struct {
     /// This also deinits all child Data recursively.
     pub fn deinit(self: *Data, pool: *Node.Pool) void {
         pool.unref(self.root);
+
+        var it = self.changed.iterator();
+        while (it.next()) |entry| {
+            const gindex = entry.key_ptr.*;
+            if (self.children_nodes.get(gindex)) |node| {
+                pool.unref(node);
+            }
+        }
+
         self.children_nodes.deinit();
         var value_iter = self.children_data.valueIterator();
         while (value_iter.next()) |child_data| {
@@ -237,17 +246,14 @@ pub fn TreeView(comptime ST: type) type {
                 return error.LengthOverLimit;
             }
 
-            const length_node = try self.pool.createLeafFromUint(@intCast(new_length), false);
-            var inserted = false;
-            defer if (!inserted) self.pool.unref(length_node); // only drop if we never attach it to the tree
+            const length_node = try self.pool.createLeafFromUint(@intCast(new_length));
+            errdefer self.pool.unref(length_node);
 
             const gindex = listLengthGindex();
+            const was_changed = self.data.changed.contains(gindex);
             const opt_old = try self.data.children_nodes.fetchPut(gindex, length_node);
-            inserted = true;
             if (opt_old) |old_entry| {
-                // Multiple local mutations before commit() leave our cloned nodes with
-                // refcount 0. Only free those; tree-owned nodes keep a positive refcount.
-                if (old_entry.value.getState(self.pool).getRefCount() == 0) {
+                if (was_changed) {
                     self.pool.unref(old_entry.value);
                 }
             }
@@ -377,6 +383,7 @@ pub fn TreeView(comptime ST: type) type {
                 @compileError("setElement can only be used with vector or list types");
             }
             const child_gindex = elementChildGindex(index);
+            const was_changed = self.data.changed.contains(child_gindex);
             try self.data.changed.put(child_gindex, {});
             if (comptime isBasicType(ST.Element)) {
                 const child_node = try self.getChildNode(child_gindex);
@@ -390,9 +397,7 @@ pub fn TreeView(comptime ST: type) type {
                     ),
                 );
                 if (opt_old_node) |old_node| {
-                    // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
-                    // Tree-owned nodes already have a refcount, so skip unref in that case.
-                    if (old_node.value.getState(self.pool).getRefCount() == 0) {
+                    if (was_changed) {
                         self.pool.unref(old_node.value);
                     }
                 }
@@ -459,28 +464,27 @@ pub fn TreeView(comptime ST: type) type {
                     @memset(chunk_bytes[keep_bytes..], 0);
                 }
 
-                const truncated_chunk_node = try self.pool.createLeaf(&chunk_bytes, false);
-                var chunk_inserted = false;
-                // Drop the temporary truncated chunk leaf unless we swap it into the tree
-                defer if (!chunk_inserted) self.pool.unref(truncated_chunk_node);
+                const truncated_chunk_node = try self.pool.createLeaf(&chunk_bytes);
+                defer self.pool.unref(truncated_chunk_node);
 
                 new_root = try Node.Id.setNodeAtDepth(self.data.root, self.pool, chunk_depth, chunk_index, truncated_chunk_node);
-                chunk_inserted = true;
 
-                new_root = try Node.Id.truncateAfterIndex(new_root, self.pool, chunk_depth, chunk_index);
+                const truncated_root = try Node.Id.truncateAfterIndex(new_root, self.pool, chunk_depth, chunk_index);
+                self.pool.unref(new_root);
+                new_root = truncated_root;
             } else {
                 new_root = try Node.Id.truncateAfterIndex(self.data.root, self.pool, chunk_depth, index);
             }
 
-            const length_node = try self.pool.createLeafFromUint(@intCast(new_length), false);
-            var length_inserted = false;
-            // Drop the temporary length leaf unless we attach it to the new branch
-            defer if (!length_inserted) self.pool.unref(length_node);
-            new_root = try Node.Id.setNode(new_root, self.pool, listLengthGindex(), length_node);
-            length_inserted = true;
+            const length_node = try self.pool.createLeafFromUint(@intCast(new_length));
+            defer self.pool.unref(length_node);
+            const final_root = try Node.Id.setNode(new_root, self.pool, listLengthGindex(), length_node);
+            self.pool.unref(new_root);
+            new_root = final_root;
 
             errdefer self.pool.unref(new_root);
             const new_data = try Data.init(self.allocator, self.pool, new_root);
+            self.pool.unref(new_root);
             return Self{
                 .allocator = self.allocator,
                 .pool = self.pool,
@@ -509,11 +513,8 @@ pub fn TreeView(comptime ST: type) type {
             const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, is_list_view);
             const target_length = if (index >= length) 0 else length - index;
 
-            var chunk_root_inserted = target_length == 0;
             var chunk_root: ?Node.Id = null;
-            // Only release the chunk root when (a) we actually built a temporary subtree and
-            // (b) the new branch never adopted it.
-            defer if (chunk_root != null and !chunk_root_inserted) self.pool.unref(chunk_root.?);
+            defer if (chunk_root != null) self.pool.unref(chunk_root.?);
 
             if (target_length == 0) {
                 chunk_root = @enumFromInt(base_chunk_depth);
@@ -522,20 +523,21 @@ pub fn TreeView(comptime ST: type) type {
                 defer self.allocator.free(nodes);
                 try self.data.root.getNodesAtDepth(self.pool, chunk_depth, index, nodes);
 
-                chunk_root = try Node.fillWithContents(self.pool, nodes, base_chunk_depth, false);
+                for (nodes) |node| {
+                    try self.pool.ref(node);
+                }
+
+                chunk_root = try Node.fillWithContents(self.pool, nodes, base_chunk_depth);
             }
 
-            const length_node = try self.pool.createLeafFromUint(@intCast(target_length), false);
-            var length_inserted = false;
-            // Drop the temporary length leaf unless we attach it to the new branch
-            defer if (!length_inserted) self.pool.unref(length_node);
+            const length_node = try self.pool.createLeafFromUint(@intCast(target_length));
+            defer self.pool.unref(length_node);
 
-            const new_root = try self.pool.createBranch(chunk_root.?, length_node, false);
-            length_inserted = true;
-            chunk_root_inserted = true;
+            const new_root = try self.pool.createBranch(chunk_root.?, length_node);
 
             errdefer self.pool.unref(new_root);
             const new_data = try Data.init(self.allocator, self.pool, new_root);
+            self.pool.unref(new_root);
             return Self{
                 .allocator = self.allocator,
                 .pool = self.pool,
@@ -591,6 +593,7 @@ pub fn TreeView(comptime ST: type) type {
             const field_index = comptime ST.getFieldIndex(field_name);
             const ChildST = ST.getFieldType(field_name);
             const child_gindex = Gindex.fromDepth(ST.chunk_depth, field_index);
+            const was_changed = self.data.changed.contains(child_gindex);
             try self.data.changed.put(child_gindex, {});
             if (comptime isBasicType(ChildST)) {
                 const opt_old_node = try self.data.children_nodes.fetchPut(
@@ -601,9 +604,7 @@ pub fn TreeView(comptime ST: type) type {
                     ),
                 );
                 if (opt_old_node) |old_node| {
-                    // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
-                    // Tree-owned nodes already have a refcount, so skip unref in that case.
-                    if (old_node.value.getState(self.pool).getRefCount() == 0) {
+                    if (was_changed) {
                         self.pool.unref(old_node.value);
                     }
                 }

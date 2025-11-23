@@ -58,12 +58,17 @@ test "Pool" {
     const hash1: [32]u8 = [_]u8{1} ** 32;
     const hash2: [32]u8 = [_]u8{2} ** 32;
 
-    const leaf1_id = try pool.createLeaf(&hash1, false);
-    const leaf2_id = try pool.createLeaf(&hash2, false);
+    const leaf1_id = try pool.createLeaf(&hash1);
+    const leaf2_id = try pool.createLeaf(&hash2);
 
-    const branch1_id = try pool.createBranch(leaf1_id, leaf2_id, false);
-    const branch2_id = try pool.createBranch(branch1_id, @enumFromInt(0), false);
-    const branch3_id = try pool.createBranch(leaf2_id, @enumFromInt(0), false);
+    const branch1_id = try pool.createBranch(leaf1_id, leaf2_id);
+    pool.unref(leaf1_id);
+
+    const branch2_id = try pool.createBranch(branch1_id, @enumFromInt(0));
+    pool.unref(branch1_id);
+
+    const branch3_id = try pool.createBranch(leaf2_id, @enumFromInt(0));
+    pool.unref(leaf2_id);
 
     // unrefing branch2 should unref all linked nodes except branch3 and leaf2 which is still refed by branch3
     pool.unref(branch2_id);
@@ -94,7 +99,7 @@ test "Pool - automatic capacity growth beyond pre-heat" {
     const p = &pool;
 
     var ids: [50]Node.Id = undefined;
-    for (0..50) |i| ids[i] = try pool.createLeafFromUint(@intCast(i), true);
+    for (0..50) |i| ids[i] = try pool.createLeafFromUint(@intCast(i));
 
     // The backing ArrayList should have grown to accommodate all 50 leaves
     try std.testing.expect(pool.nodes.len >= max_depth + 50);
@@ -122,11 +127,68 @@ test "Node free-list re-uses the lowest recently-freed Id first" {
     var pool = try Node.Pool.init(std.testing.allocator, 2);
     defer pool.deinit();
 
-    const n1 = try pool.createLeafFromUint(1, true);
+    const n1 = try pool.createLeafFromUint(1);
     pool.unref(n1); // n1 is back on the freelist
-    const n2 = try pool.createLeafFromUint(2, true);
+    const n2 = try pool.createLeafFromUint(2);
 
     try std.testing.expectEqual(n1, n2); // should recycle the same Id
+}
+
+test "createBranch updates child refcounts and releases them on unref" {
+    var pool = try Node.Pool.init(std.testing.allocator, 8);
+    defer pool.deinit();
+    const p = &pool;
+
+    const left = try pool.createLeafFromUint(1);
+    const right = try pool.createLeafFromUint(2);
+    try pool.ref(left);
+    try pool.ref(right);
+
+    const left_before = left.getState(p).getRefCount();
+    const right_before = right.getState(p).getRefCount();
+
+    const branch = try pool.createBranch(left, right);
+    try std.testing.expectEqual(left_before + 1, left.getState(p).getRefCount());
+    try std.testing.expectEqual(right_before + 1, right.getState(p).getRefCount());
+
+    pool.unref(branch);
+    try std.testing.expectEqual(left_before, left.getState(p).getRefCount());
+    try std.testing.expectEqual(right_before, right.getState(p).getRefCount());
+
+    pool.unref(left);
+    pool.unref(right);
+}
+
+test "fillWithContents releases intermediate nodes after unref" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 64);
+    defer pool.deinit();
+
+    const chunk_count = 8;
+    const depth: Depth = 3;
+
+    var workspace = try allocator.alloc(Node.Id, chunk_count);
+    defer allocator.free(workspace);
+    var original_leaves = try allocator.alloc(Node.Id, chunk_count);
+    defer allocator.free(original_leaves);
+
+    for (0..chunk_count) |i| {
+        const leaf = try pool.createLeafFromUint(@intCast(i + 1));
+        try pool.ref(leaf);
+        workspace[i] = leaf;
+        original_leaves[i] = leaf;
+    }
+
+    const before = pool.getNodesInUse();
+    const root = try Node.fillWithContents(&pool, workspace, depth);
+    try std.testing.expect(pool.getNodesInUse() > before);
+
+    pool.unref(root);
+    try std.testing.expectEqual(before, pool.getNodesInUse());
+
+    for (original_leaves) |leaf| {
+        pool.unref(leaf);
+    }
 }
 
 test "Navigation - invalid node access is rejected" {
@@ -136,7 +198,7 @@ test "Navigation - invalid node access is rejected" {
     const p = &pool;
 
     // A freshly‑minted leaf has no children
-    const leaf = try pool.createLeafFromUint(42, true);
+    const leaf = try pool.createLeafFromUint(42);
     try std.testing.expectError(Node.Error.InvalidNode, leaf.getLeft(p));
     try std.testing.expectError(Node.Error.InvalidNode, leaf.getRight(p));
 
@@ -176,7 +238,7 @@ test "get/setNode" {
 
     try std.testing.expectEqual(@as(Node.Id, @enumFromInt(0)), try zero3.getNode(p, Gindex.fromDepth(3, 0)));
 
-    const leaf = try pool.createLeafFromUint(42, true);
+    const leaf = try pool.createLeafFromUint(42);
     const new_node = try zero3.setNode(p, Gindex.fromDepth(3, 0), leaf);
 
     try std.testing.expectEqual(leaf, try new_node.getNode(p, Gindex.fromDepth(3, 0)));
@@ -188,13 +250,13 @@ test "setNodes for checkpoint tree" {
     defer pool.deinit();
     const p = &pool;
 
-    const epoch_node = try pool.createLeafFromUint(42, true);
+    const epoch_node = try pool.createLeafFromUint(42);
     const root = [_]u8{0} ** 32;
-    const root_node = try pool.createLeaf(&root, true);
-    const parent = try pool.createBranch(epoch_node, root_node, true);
+    const root_node = try pool.createLeaf(&root);
+    const parent = try pool.createBranch(epoch_node, root_node);
 
-    const new_epoch_node = try pool.createLeafFromUint(100, true);
-    const new_root_node = try pool.createLeaf(&root, true);
+    const new_epoch_node = try pool.createLeafFromUint(100);
+    const new_root_node = try pool.createLeaf(&root);
 
     var new_nodes = [_]Node.Id{ new_epoch_node, new_root_node };
     const new_parent = try parent.setNodes(p, &[_]Gindex{ Gindex.fromUint(2), Gindex.fromUint(3) }, &new_nodes);
@@ -214,11 +276,11 @@ test "Depth helpers - round-trip setNodesAtDepth / getNodesAtDepth" {
     const p = &pool;
 
     // A ‘blank’ root: branch of two depth‑1 zero‑nodes ensures proper navigation
-    const root = try pool.createBranch(@enumFromInt(1), @enumFromInt(1), true);
+    const root = try pool.createBranch(@enumFromInt(1), @enumFromInt(1));
 
     // Four leaves to be inserted at depth 2 (gindexes 4-7)
     var leaves: [4]Node.Id = undefined;
-    for (0..4) |i| leaves[i] = try pool.createLeafFromUint(@intCast(i + 100), true);
+    for (0..4) |i| leaves[i] = try pool.createLeafFromUint(@intCast(i + 100));
 
     const indices = [_]usize{ 0, 1, 2, 3 };
     const depth: u8 = 2;
@@ -322,7 +384,7 @@ test "setNodesAtDepth, setNodes vs setNode multiple times" {
         for (tc.gindexes, 0..) |gindex, i| {
             gindexes[i] = Gindex.fromUint(@intCast(gindex));
             indexes[i] = gindex - @intFromEnum(base_gindex);
-            const leaf = try pool.createLeafFromUint(@intCast(gindex), true);
+            const leaf = try pool.createLeafFromUint(@intCast(gindex));
             leaves[i] = leaf;
             root_ok = try root_ok.setNode(p, gindexes[i], leaf);
         }
@@ -364,12 +426,12 @@ test "truncateAfterIndex zeros nodes after index" {
     var original_leaves = try allocator.alloc(Node.Id, max_length);
     defer allocator.free(original_leaves);
     for (0..max_length) |i| {
-        const leaf = try pool.createLeafFromUint(@intCast(i + 1), false);
+        const leaf = try pool.createLeafFromUint(@intCast(i + 1));
         leaves[i] = leaf;
         original_leaves[i] = leaf;
     }
 
-    const base_root = try Node.fillWithContents(p, leaves, depth, true);
+    const base_root = try Node.fillWithContents(p, leaves, depth);
     defer p.unref(base_root);
 
     const out_leaves = try allocator.alloc(Node.Id, max_length);
@@ -399,14 +461,14 @@ test "hashing sanity check" {
     defer pool.deinit();
     const p = &pool;
 
-    const leaf = try pool.createLeafFromUint(0, false);
+    const leaf = try pool.createLeafFromUint(0);
     const zero0: Node.Id = @enumFromInt(0);
 
     // sanity check that a manually zeroed node is actually zero
     try std.testing.expectEqualSlices(u8, zero0.getRoot(p), leaf.getRoot(p));
 
-    const branch1 = try pool.createBranch(leaf, leaf, false);
-    const branch2 = try pool.createBranch(branch1, branch1, false);
+    const branch1 = try pool.createBranch(leaf, leaf);
+    const branch2 = try pool.createBranch(branch1, branch1);
     const zero2: Node.Id = @enumFromInt(2);
 
     try std.testing.expectEqualSlices(u8, zero2.getRoot(p), branch2.getRoot(p));
@@ -448,12 +510,11 @@ test "truncateAfterIndex matches zeroAfterIndex test suite" {
                 const fill_value: u8 = @intCast(i + 16);
                 @memset(hash[0..], fill_value);
 
-                const leaf = try pool.createLeaf(&hash, false);
+                const leaf = try pool.createLeaf(&hash);
                 leaves[i] = leaf;
 
                 const gindex = Gindex.fromDepth(depth, i);
                 const new_root = try root.setNode(p, gindex, leaf);
-                try pool.ref(new_root);
                 pool.unref(root);
                 root = new_root;
 
@@ -491,11 +552,13 @@ fn treeZeroAfterIndexNaive(
     defer allocator.free(contents);
 
     for (0..length) |i| {
-        contents[i] = if (i <= index)
-            leaves[i]
-        else
-            @enumFromInt(0);
+        if (i <= index) {
+            contents[i] = leaves[i];
+            try pool.ref(contents[i]);
+        } else {
+            contents[i] = @enumFromInt(0);
+        }
     }
 
-    return try Node.fillWithContents(pool, contents, depth, true);
+    return try Node.fillWithContents(pool, contents, depth);
 }
