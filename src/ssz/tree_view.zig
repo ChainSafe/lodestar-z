@@ -484,6 +484,7 @@ pub fn TreeView(comptime ST: type) type {
             length_inserted = true;
 
             const new_data = try Data.init(self.allocator, self.pool, new_root);
+            self.pool.unref(new_root);
             new_root_owned = false;
             return Self{
                 .allocator = self.allocator,
