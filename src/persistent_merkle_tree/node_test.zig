@@ -180,7 +180,7 @@ test "fillWithContents releases intermediate nodes after unref" {
     }
 
     const before = pool.getNodesInUse();
-    const root = try Node.fillWithContents(&pool, workspace, depth);
+    const root = try Node.fillWithContentsTransfer(&pool, workspace, depth);
     try std.testing.expect(pool.getNodesInUse() > before);
 
     pool.unref(root);
@@ -431,7 +431,7 @@ test "truncateAfterIndex zeros nodes after index" {
         original_leaves[i] = leaf;
     }
 
-    const base_root = try Node.fillWithContents(p, leaves, depth);
+    const base_root = try Node.fillWithContentsTransfer(p, leaves, depth);
     defer p.unref(base_root);
 
     const out_leaves = try allocator.alloc(Node.Id, max_length);
@@ -560,5 +560,5 @@ fn treeZeroAfterIndexNaive(
         }
     }
 
-    return try Node.fillWithContents(pool, contents, depth);
+    return try Node.fillWithContentsTransfer(pool, contents, depth);
 }

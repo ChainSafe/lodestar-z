@@ -152,7 +152,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
                         nodes[i] = try Element.tree.fromValue(pool, &value[i]);
                     }
                 }
-                return try Node.fillWithContents(pool, &nodes, chunk_depth);
+                return try Node.fillWithContentsTransfer(pool, &nodes, chunk_depth);
             }
         };
 
@@ -317,7 +317,7 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
                 for (0..chunk_count) |i| {
                     nodes[i] = try Element.tree.fromValue(allocator, pool, &value[i]);
                 }
-                return try Node.fillWithContents(pool, &nodes, chunk_depth);
+                return try Node.fillWithContentsTransfer(pool, &nodes, chunk_depth);
             }
         };
 

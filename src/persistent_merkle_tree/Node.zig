@@ -9,15 +9,15 @@ const Depth = @import("hashing").Depth;
 const Gindex = @import("gindex.zig").Gindex;
 
 /// A Merkle tree node identifier.
-/// - Creation (`create*`) yields a brand-new node with refcount = 1 owned by the caller.
-/// - Borrowing helpers (no suffix) reuse caller refs; they may `ref` internally but never `unref`.
-/// - Retrieval helpers (`get*`) return borrowed `Id`s without changing refcounts.
-/// - `Transfer` helpers take ownership and automatically `unref` the inputs once attached.
+/// The design principles for managing node lifetimes are as follows:
 /// - Live nodes must always have at least one owning reference; refcount 0 immediately releases the
 ///   node back to the pool free list and makes the identifier unusable.
+/// - Creation (`create*`/`alloc`) functions yield a brand-new node with refcount = 1 owned by the caller.
+/// - Updating without `Transfer` suffix functions reuse caller refs; they may `ref` new internal references but never `unref` former refs.
+/// - Retrieval (`get*`) functions return borrowed `Id`s without changing refcounts.
+/// - `Transfer` suffix functions take ownership and automatically `unref` the inputs once attached.
 /// Callers should `ref` when extending lifetimes and `unref` when relinquishing ownership unless
 /// they explicitly use a `Transfer` variant.
-
 hash: [32]u8,
 left: Id,
 right: Id,
@@ -271,7 +271,9 @@ pub const Pool = struct {
     }
 
     /// Allocates nodes into the pool.
-    /// Nodes allocated here are expected to be attached via `rebind` and start with a refcount of zero.
+    /// Nodes allocated here are returned with refcount = 1 owned by the caller.
+    /// Callers must either attach them via `rebind` (transferring ownership to parents) or `free`
+    /// them on failure paths to drop that reference.
     /// Return true if pool had to allocate more memory, false otherwise
     pub fn alloc(self: *Pool, out: []Id) Error!bool {
         var states = self.nodes.items(.state);
@@ -1173,9 +1175,4 @@ pub fn fillWithContentsTransfer(pool: *Pool, contents: []Id, depth: Depth) !Id {
     }
 
     return contents[0];
-}
-
-/// Deprecated wrapper retained for callers that still use the non-transfer name.
-pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth) !Id {
-    return fillWithContentsTransfer(pool, contents, depth);
 }

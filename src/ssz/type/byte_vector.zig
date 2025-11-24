@@ -109,7 +109,7 @@ pub fn ByteVectorType(comptime _length: comptime_int) type {
 
                     nodes[i] = try pool.createLeaf(&leaf_buf);
                 }
-                return try Node.fillWithContents(pool, &nodes, chunk_depth);
+                return try Node.fillWithContentsTransfer(pool, &nodes, chunk_depth);
             }
         };
 
