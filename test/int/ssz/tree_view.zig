@@ -685,9 +685,6 @@ test "TreeView composite list sliceTo matches incremental snapshots" {
 
     try view.commit();
 
-    // The TypeScript test also exercises index -1 to capture the empty snapshot. Since the Zig API
-    // uses unsigned indexes, we exercise the zero-length case by operating on an empty view in other
-    // tests and cover the incremental prefixes here.
     var i: usize = 0;
     while (i < total_values) : (i += 1) {
         var sliced = try view.sliceTo(i);
