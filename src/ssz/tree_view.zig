@@ -5,6 +5,7 @@ const Depth = hashing.Depth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("type/type_kind.zig").isBasicType;
+const isFixedType = @import("type/type_kind.zig").isFixedType;
 const TypeKind = @import("type/type_kind.zig").TypeKind;
 const type_root = @import("type/root.zig");
 const BYTES_PER_CHUNK = type_root.BYTES_PER_CHUNK;
@@ -617,6 +618,160 @@ pub fn TreeView(comptime ST: type) type {
                     data.deinit(self.pool);
                 }
             }
+        }
+
+        inline fn materializeValue(self: *Self, out: *ST.Type) !void {
+            if (comptime !isFixedType(ST)) {
+                try ST.tree.toValue(self.allocator, self.data.root, self.pool, out);
+            } else {
+                try ST.tree.toValue(self.data.root, self.pool, out);
+            }
+        }
+
+        inline fn deinitValue(self: *Self, value: *ST.Type) void {
+            if (!@hasDecl(ST, "deinit")) {
+                return;
+            }
+
+            @call(
+                .auto,
+                ST.deinit,
+                switch (@typeInfo(@TypeOf(ST.deinit))) {
+                    .@"fn" => |info| switch (info.params.len) {
+                        2 => .{ self.allocator, value },
+                        1 => .{value},
+                        else => @compileError("ST.deinit must accept 1 or 2 parameters"),
+                    },
+                    else => @compileError("ST.deinit must be a function"),
+                },
+            );
+        }
+
+        inline fn valueSerializedSize(value: *ST.Type) usize {
+            if (@hasDecl(ST, "serializedSize")) {
+                return ST.serializedSize(value);
+            }
+
+            if (@hasDecl(ST, "fixed_size")) {
+                return ST.fixed_size;
+            }
+
+            @compileError("SSZ type is missing serializedSize/fixed_size definitions");
+        }
+
+        inline fn deserializeValue(self: *Self, data: []const u8, out: *ST.Type) !void {
+            comptime {
+                if (!@hasDecl(ST, "deserializeFromBytes")) {
+                    @compileError("SSZ type is missing deserializeFromBytes");
+                }
+            }
+
+            try @call(
+                .auto,
+                ST.deserializeFromBytes,
+                switch (@typeInfo(@TypeOf(ST.deserializeFromBytes))) {
+                    .@"fn" => |info| switch (info.params.len) {
+                        3 => .{ self.allocator, data, out },
+                        2 => .{ data, out },
+                        else => @compileError("ST.deserializeFromBytes must accept 2 or 3 parameters"),
+                    },
+                    else => @compileError("ST.deserializeFromBytes must be a function"),
+                },
+            );
+        }
+
+        inline fn rootFromValue(self: *Self, value: *const ST.Type) !Node.Id {
+            return @call(
+                .auto,
+                ST.tree.fromValue,
+                switch (@typeInfo(@TypeOf(ST.tree.fromValue))) {
+                    .@"fn" => |info| switch (info.params.len) {
+                        2 => .{ self.pool, value },
+                        3 => .{ self.allocator, self.pool, value },
+                        else => @compileError("ST.tree.fromValue must accept 2 or 3 parameters"),
+                    },
+                    else => @compileError("ST.tree.fromValue must be a function"),
+                },
+            );
+        }
+
+        /// Return the number of bytes required to serialize this view.
+        pub fn serializedSize(self: *Self) !usize {
+            try self.commit();
+            var value: ST.Type = ST.default_value;
+            try self.materializeValue(&value);
+            defer self.deinitValue(&value);
+            return valueSerializedSize(&value);
+        }
+
+        /// Serialize the view into a caller-provided buffer and return the number of bytes written.
+        pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
+            try self.commit();
+            var value: ST.Type = ST.default_value;
+            try self.materializeValue(&value);
+            defer self.deinitValue(&value);
+
+            const required = valueSerializedSize(&value);
+            if (out.len < required) {
+                return error.InvalidSize;
+            }
+
+            return ST.serializeIntoBytes(&value, out);
+        }
+
+        /// Allocate a fresh buffer, serialize the view into it, and return the owned slice.
+        pub fn serializeAlloc(self: *Self, allocator: std.mem.Allocator) ![]u8 {
+            try self.commit();
+            var value: ST.Type = ST.default_value;
+            try self.materializeValue(&value);
+            defer self.deinitValue(&value);
+
+            const required = valueSerializedSize(&value);
+            const buffer = try allocator.alloc(u8, required);
+            errdefer allocator.free(buffer);
+
+            const written = ST.serializeIntoBytes(&value, buffer);
+            std.debug.assert(written == required);
+            return buffer;
+        }
+
+        /// Replace the view's backing tree with data deserialized from SSZ bytes.
+        pub fn deserialize(self: *Self, data: []const u8) !void {
+            var value: ST.Type = ST.default_value;
+            defer self.deinitValue(&value);
+            try self.deserializeValue(data, &value);
+
+            const new_root = try self.rootFromValue(&value);
+            var root_attached = false;
+            defer if (!root_attached) self.pool.unref(new_root);
+
+            const new_data = try Data.init(self.allocator, self.pool, new_root);
+            root_attached = true;
+
+            var old_data = self.data;
+            self.data = new_data;
+            old_data.deinit(self.pool);
+        }
+
+        /// Clone this view. When `dont_transfer_cache` is false, caches move to the clone and this view resets.
+        pub fn clone(self: *Self, dont_transfer_cache: bool) !Self {
+            if (dont_transfer_cache) {
+                const data = try Data.init(self.allocator, self.pool, self.data.root);
+                return Self{
+                    .allocator = self.allocator,
+                    .pool = self.pool,
+                    .data = data,
+                };
+            }
+
+            const moved_data = self.data;
+            const refreshed = try Data.init(self.allocator, self.pool, moved_data.root);
+            self.data = refreshed;
+            return Self{
+                .allocator = self.allocator,
+                .pool = self.pool,
+                .data = moved_data,
+            };
         }
     };
 }

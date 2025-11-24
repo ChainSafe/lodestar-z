@@ -401,6 +401,433 @@ test "TreeView list push enforces limit" {
     try std.testing.expectEqual(@as(usize, 2), try view.getLength());
 }
 
+test "TreeView serializeIntoBytes matches container serialization" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    const base: Checkpoint.Type = .{
+        .epoch = 7,
+        .root = [_]u8{9} ** 32,
+    };
+
+    const root_node = try Checkpoint.tree.fromValue(&pool, &base);
+    var view = try ssz.TreeView(Checkpoint).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    try view.setField("epoch", 12);
+    try view.commit();
+
+    var expected: Checkpoint.Type = undefined;
+    try Checkpoint.tree.toValue(view.data.root, &pool, &expected);
+
+    var expected_buf: [Checkpoint.fixed_size]u8 = undefined;
+    _ = Checkpoint.serializeIntoBytes(&expected, &expected_buf);
+
+    var actual_buf: [Checkpoint.fixed_size]u8 = undefined;
+    const written = try view.serializeIntoBytes(actual_buf[0..Checkpoint.fixed_size]);
+    try std.testing.expectEqual(@as(usize, Checkpoint.fixed_size), written);
+    try std.testing.expectEqualSlices(u8, &expected_buf, &actual_buf);
+
+    var short_buf: [Checkpoint.fixed_size - 1]u8 = undefined;
+    try std.testing.expectError(error.InvalidSize, view.serializeIntoBytes(short_buf[0..]));
+}
+
+test "TreeView serializeAlloc matches list serialization" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    const Uint16 = ssz.UintType(16);
+    const ListType = ssz.FixedListType(Uint16, 32);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &[_]u16{ 11, 22, 33, 44 });
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    try view.push(@as(u16, 55));
+    try view.setElement(1, 99);
+    try view.commit();
+
+    var expected: ListType.Type = .empty;
+    defer expected.deinit(allocator);
+    try ListType.tree.toValue(allocator, view.data.root, &pool, &expected);
+
+    const expected_size = ListType.serializedSize(&expected);
+    const expected_buf = try allocator.alloc(u8, expected_size);
+    defer allocator.free(expected_buf);
+    _ = ListType.serializeIntoBytes(&expected, expected_buf);
+
+    const serialized = try view.serializeAlloc(allocator);
+    defer allocator.free(serialized);
+
+    try std.testing.expectEqual(expected_size, serialized.len);
+    try std.testing.expectEqualSlices(u8, expected_buf, serialized);
+}
+
+test "TreeView deserialize updates container view" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    var base: Checkpoint.Type = .{
+        .epoch = 1,
+        .root = [_]u8{0} ** 32,
+    };
+    const base_root = try Checkpoint.tree.fromValue(&pool, &base);
+    var view = try ssz.TreeView(Checkpoint).init(allocator, &pool, base_root);
+    defer view.deinit();
+
+    const new_checkpoint: Checkpoint.Type = .{
+        .epoch = 777,
+        .root = [_]u8{0xaa} ** 32,
+    };
+
+    var serialized: [Checkpoint.fixed_size]u8 = undefined;
+    _ = Checkpoint.serializeIntoBytes(&new_checkpoint, &serialized);
+
+    try view.deserialize(&serialized);
+
+    try std.testing.expectEqual(new_checkpoint.epoch, try view.getField("epoch"));
+
+    const root_view = try view.getField("root");
+    const RootView = ssz.TreeView(Checkpoint).Field("root");
+    var actual_root = [_]u8{0} ** 32;
+    try RootView.SszType.tree.toValue(root_view.data.root, &pool, actual_root[0..]);
+    try std.testing.expectEqualSlices(u8, new_checkpoint.root[0..], actual_root[0..]);
+
+    var roundtrip: [Checkpoint.fixed_size]u8 = undefined;
+    const written = try view.serializeIntoBytes(roundtrip[0..]);
+    try std.testing.expectEqual(@as(usize, Checkpoint.fixed_size), written);
+    try std.testing.expectEqualSlices(u8, &serialized, &roundtrip);
+
+    try view.commit();
+    var expected_root: [32]u8 = undefined;
+    try Checkpoint.hashTreeRoot(&new_checkpoint, &expected_root);
+    var actual_htr: [32]u8 = undefined;
+    try view.hashTreeRoot(&actual_htr);
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_htr);
+}
+
+test "TreeView deserialize resets list state" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    const Uint16 = ssz.UintType(16);
+    const ListType = ssz.FixedListType(Uint16, 32);
+
+    var base: ListType.Type = .empty;
+    defer base.deinit(allocator);
+    const base_root = try ListType.tree.fromValue(allocator, &pool, &base);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, base_root);
+    defer view.deinit();
+
+    var desired: ListType.Type = .empty;
+    defer desired.deinit(allocator);
+    try desired.appendSlice(allocator, &[_]u16{ 5, 6, 7 });
+
+    const serialized_size = ListType.serializedSize(&desired);
+    const buf = try allocator.alloc(u8, serialized_size);
+    defer allocator.free(buf);
+    _ = ListType.serializeIntoBytes(&desired, buf);
+
+    try view.deserialize(buf);
+
+    try std.testing.expectEqual(@as(usize, 3), try view.getLength());
+    try std.testing.expectEqual(@as(u16, 5), try view.getElement(0));
+    try std.testing.expectEqual(@as(u16, 7), try view.getElement(2));
+
+    const serialized = try view.serializeAlloc(allocator);
+    defer allocator.free(serialized);
+    try std.testing.expectEqualSlices(u8, buf, serialized);
+}
+
+// Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/container/tree.test.ts#L102-L113
+test "TreeView clone drops container caches" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const base: Checkpoint.Type = .{
+        .epoch = 1,
+        .root = [_]u8{3} ** 32,
+    };
+    const root_node = try Checkpoint.tree.fromValue(&pool, &base);
+    var view = try ssz.TreeView(Checkpoint).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    const before = try view.serializeAlloc(allocator);
+    defer allocator.free(before);
+
+    try view.setField("epoch", base.epoch + 100);
+
+    var clone_view = try view.clone(false);
+    defer clone_view.deinit();
+
+    const after = try view.serializeAlloc(allocator);
+    defer allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+}
+
+// Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listBasic/tree.test.ts#L204-L216
+test "TreeView clone drops basic list caches" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint64 = ssz.UintType(64);
+    const ListType = ssz.FixedListType(Uint64, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    const before = try view.serializeAlloc(allocator);
+    defer allocator.free(before);
+
+    try view.push(11);
+    try view.push(22);
+
+    var clone_view = try view.clone(false);
+    defer clone_view.deinit();
+
+    const after = try view.serializeAlloc(allocator);
+    defer allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+}
+
+// Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listComposite/tree.test.ts#L148-L165
+test "TreeView clone drops composite list caches" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    const RootBytes = ssz.ByteVectorType(32);
+    const ListType = ssz.FixedListType(RootBytes, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    const before = try view.serializeAlloc(allocator);
+    defer allocator.free(before);
+
+    const slot = try view.getLength();
+    _ = slot;
+    const element_bytes = [_]u8{0xaa} ** 32;
+    const element_node = try RootBytes.tree.fromValue(&pool, &element_bytes);
+    var element_view = try ssz.TreeView(RootBytes).init(allocator, &pool, element_node);
+    errdefer element_view.deinit();
+    try view.push(element_view);
+
+    var clone_view = try view.clone(false);
+    defer clone_view.deinit();
+
+    const after = try view.serializeAlloc(allocator);
+    defer allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+}
+
+test "TreeView clone without cache transfer preserves original mutations" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint64 = ssz.UintType(64);
+    const ListType = ssz.FixedListType(Uint64, 8);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    const before = try view.serializeAlloc(allocator);
+    defer allocator.free(before);
+
+    try view.push(99);
+    var expected_list: ListType.Type = .empty;
+    defer expected_list.deinit(allocator);
+    try expected_list.append(allocator, 99);
+    const mutated_size = ListType.serializedSize(&expected_list);
+    const mutated_bytes = try allocator.alloc(u8, mutated_size);
+    defer allocator.free(mutated_bytes);
+    _ = ListType.serializeIntoBytes(&expected_list, mutated_bytes);
+
+    var clone_view = try view.clone(true);
+    defer clone_view.deinit();
+
+    const after = try view.serializeAlloc(allocator);
+    defer allocator.free(after);
+    try std.testing.expectEqualSlices(u8, mutated_bytes, after);
+
+    const clone_bytes = try clone_view.serializeAlloc(allocator);
+    defer allocator.free(clone_bytes);
+    try std.testing.expectEqualSlices(u8, before, clone_bytes);
+}
+
+// Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listBasic/tree.test.ts#L208-L240
+test "TreeView basic list sliceTo preserves serialization" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    const Uint8 = ssz.UintType(8);
+    const ListType = ssz.FixedListType(Uint8, 100);
+
+    var canonical: ListType.Type = .empty;
+    defer canonical.deinit(allocator);
+
+    const snapshot_count = 16;
+    var serialized_snapshots: [snapshot_count]?[]u8 = [_]?[]u8{null} ** snapshot_count;
+    defer {
+        for (serialized_snapshots) |maybe_buf| {
+            if (maybe_buf) |buf| allocator.free(buf);
+        }
+    }
+    var root_snapshots: [snapshot_count][32]u8 = undefined;
+
+    for (0..snapshot_count) |i| {
+        try canonical.append(allocator, @intCast(i));
+
+        const size = ListType.serializedSize(&canonical);
+        const buf = try allocator.alloc(u8, size);
+        errdefer allocator.free(buf);
+        _ = ListType.serializeIntoBytes(&canonical, buf);
+        serialized_snapshots[i] = buf;
+
+        try ListType.hashTreeRoot(allocator, &canonical, &root_snapshots[i]);
+    }
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &canonical);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    for (0..snapshot_count) |i| {
+        var sliced = try view.sliceTo(i);
+        defer sliced.deinit();
+
+        const serialized = try sliced.serializeAlloc(allocator);
+        defer allocator.free(serialized);
+        try std.testing.expectEqualSlices(u8, serialized_snapshots[i].?, serialized);
+
+        var root: [32]u8 = undefined;
+        try sliced.hashTreeRoot(&root);
+        try std.testing.expectEqualSlices(u8, &root_snapshots[i], &root);
+    }
+}
+
+// Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listComposite/tree.test.ts#L158-L215
+test "TreeView composite list sliceTo preserves serialization" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const RootBytes = ssz.ByteVectorType(32);
+    const ListType = ssz.FixedListType(RootBytes, 64);
+
+    var canonical: ListType.Type = .empty;
+    defer canonical.deinit(allocator);
+
+    const snapshot_count = 16;
+    var serialized_snapshots: [snapshot_count]?[]u8 = [_]?[]u8{null} ** snapshot_count;
+    defer {
+        for (serialized_snapshots) |maybe_buf| {
+            if (maybe_buf) |buf| allocator.free(buf);
+        }
+    }
+    var root_snapshots: [snapshot_count][32]u8 = undefined;
+
+    for (0..snapshot_count) |i| {
+        const fill: u8 = @intCast(0x10 + i);
+        const slot = try canonical.addOne(allocator);
+        slot.* = [_]u8{fill} ** 32;
+
+        const size = ListType.serializedSize(&canonical);
+        const buf = try allocator.alloc(u8, size);
+        errdefer allocator.free(buf);
+        _ = ListType.serializeIntoBytes(&canonical, buf);
+        serialized_snapshots[i] = buf;
+
+        try ListType.hashTreeRoot(allocator, &canonical, &root_snapshots[i]);
+    }
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &canonical);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    for (0..snapshot_count) |i| {
+        var sliced = try view.sliceTo(i);
+        defer sliced.deinit();
+
+        const serialized = try sliced.serializeAlloc(allocator);
+        defer allocator.free(serialized);
+        try std.testing.expectEqualSlices(u8, serialized_snapshots[i].?, serialized);
+
+        var root: [32]u8 = undefined;
+        try sliced.hashTreeRoot(&root);
+        try std.testing.expectEqualSlices(u8, &root_snapshots[i], &root);
+    }
+}
+
+test "TreeView composite list sliceFrom matches serialization" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const RootBytes = ssz.ByteVectorType(32);
+    const ListType = ssz.FixedListType(RootBytes, 32);
+
+    var canonical: ListType.Type = .empty;
+    defer canonical.deinit(allocator);
+
+    const total = 12;
+    for (0..total) |i| {
+        const fill: u8 = @intCast(i);
+        const slot = try canonical.addOne(allocator);
+        slot.* = [_]u8{fill} ** 32;
+    }
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &canonical);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    for (0..total + 3) |start| {
+        var expected: ListType.Type = .empty;
+        defer expected.deinit(allocator);
+        if (start < canonical.items.len) {
+            try expected.appendSlice(allocator, canonical.items[start..]);
+        }
+
+        const expected_size = ListType.serializedSize(&expected);
+        const expected_buf = try allocator.alloc(u8, expected_size);
+        defer allocator.free(expected_buf);
+        _ = ListType.serializeIntoBytes(&expected, expected_buf);
+
+        var expected_root: [32]u8 = undefined;
+        try ListType.hashTreeRoot(allocator, &expected, &expected_root);
+
+        var sliced = try view.sliceFrom(start);
+        defer sliced.deinit();
+        const serialized = try sliced.serializeAlloc(allocator);
+        defer allocator.free(serialized);
+        try std.testing.expectEqualSlices(u8, expected_buf, serialized);
+
+        var actual_root: [32]u8 = undefined;
+        try sliced.hashTreeRoot(&actual_root);
+        try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+    }
+}
+
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listBasic/tree.test.ts#L180-L203
 test "TreeView basic list getAllElements reflects pushes" {
     const allocator = std.testing.allocator;
