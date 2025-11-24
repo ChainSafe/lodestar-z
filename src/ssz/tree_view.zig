@@ -447,6 +447,8 @@ pub fn TreeView(comptime ST: type) type {
             const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, is_list_view);
 
             var new_root: Node.Id = undefined;
+            var new_root_owned = false;
+            errdefer if (new_root_owned) self.pool.unref(new_root);
             if (comptime is_basic_array_view) {
                 const items_per_chunk = itemsPerChunk(ST.Element);
                 const chunk_index = index / items_per_chunk;
@@ -466,10 +468,12 @@ pub fn TreeView(comptime ST: type) type {
 
                 new_root = try Node.Id.setNodeAtDepth(self.data.root, self.pool, chunk_depth, chunk_index, truncated_chunk_node);
                 chunk_inserted = true;
+                new_root_owned = true;
 
                 new_root = try Node.Id.truncateAfterIndex(new_root, self.pool, chunk_depth, chunk_index);
             } else {
                 new_root = try Node.Id.truncateAfterIndex(self.data.root, self.pool, chunk_depth, index);
+                new_root_owned = true;
             }
 
             const length_node = try self.pool.createLeafFromUint(@intCast(new_length), false);
@@ -479,8 +483,8 @@ pub fn TreeView(comptime ST: type) type {
             new_root = try Node.Id.setNode(new_root, self.pool, listLengthGindex(), length_node);
             length_inserted = true;
 
-            errdefer self.pool.unref(new_root);
             const new_data = try Data.init(self.allocator, self.pool, new_root);
+            new_root_owned = false;
             return Self{
                 .allocator = self.allocator,
                 .pool = self.pool,
