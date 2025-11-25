@@ -251,10 +251,10 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
                         @memcpy(leaf_buf[0..bytes_to_copy], value.data[start_idx..][0..bytes_to_copy]);
                     }
 
-                    nodes[i] = try pool.createLeaf(&leaf_buf, false);
+                    nodes[i] = try pool.createLeaf(&leaf_buf);
                 }
 
-                return try Node.fillWithContents(pool, &nodes, chunk_depth, false);
+                return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }
         };
 
