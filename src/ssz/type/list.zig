@@ -9,6 +9,8 @@ const merkleize = @import("hashing").merkleize;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
+const chunk = @import("chunk.zig");
+const chunkDepth = chunk.chunkDepth;
 
 pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
     comptime {
@@ -208,15 +210,16 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
 
-                try node.getNodesAtDepth(pool, chunk_depth + 1, 0, nodes);
+                try node.getNodesAtDepth(pool, chunkDepth(u8, chunk_depth, true), 0, nodes);
 
                 try out.resize(allocator, len);
                 @memset(out.items, Element.default_value);
                 if (comptime isBasicType(Element)) {
+                    const items_per_chunk = chunk.itemsPerChunk(Element);
                     // tightly packed list
                     for (0..len) |i| {
                         try Element.tree.toValuePacked(
-                            nodes[i * Element.fixed_size / 32],
+                            nodes[i / items_per_chunk],
                             pool,
                             i,
                             &out.items[i],
@@ -247,7 +250,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
                 if (comptime isBasicType(Element)) {
-                    const items_per_chunk = 32 / Element.fixed_size;
+                    const items_per_chunk = chunk.itemsPerChunk(Element);
                     var next: usize = 0; // index in value.items
 
                     for (0..chunk_count) |i| {
@@ -478,7 +481,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
 
-                try node.getNodesAtDepth(pool, chunk_depth + 1, 0, nodes);
+                try node.getNodesAtDepth(pool, chunkDepth(u8, chunk_depth, true), 0, nodes);
 
                 try out.resize(allocator, len);
                 @memset(out.items, Element.default_value);
