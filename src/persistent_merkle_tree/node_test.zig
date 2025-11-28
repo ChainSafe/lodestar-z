@@ -95,14 +95,16 @@ test "Pool - automatic capacity growth beyond pre-heat" {
     var ids: [50]Node.Id = undefined;
     for (0..50) |i| {
         ids[i] = try pool.createLeafFromUint(@intCast(i));
-        try pool.ref(ids[i]);
     }
 
     // The backing ArrayList should have grown to accommodate all 50 leaves
     try std.testing.expect(pool.nodes.len >= max_depth + 50);
 
-    // All allocated leaves must still be live
-    for (ids) |id| try std.testing.expect(!id.getState(p).isFree());
+    // All allocated leaves must still be live, then unref
+    for (ids) |id| {
+        try std.testing.expect(!id.getState(p).isFree());
+        pool.unref(id);
+    }
 }
 
 test "All zero hashes (depth>0) point both children to the previous depth" {
@@ -125,12 +127,12 @@ test "Node free-list re-uses the lowest recently-freed Id first" {
     defer pool.deinit();
 
     const n1 = try pool.createLeafFromUint(1);
-    try pool.ref(n1);
     pool.unref(n1); // n1 is back on the freelist
     const n2 = try pool.createLeafFromUint(2);
-    try pool.ref(n2);
 
     try std.testing.expectEqual(n1, n2); // should recycle the same Id
+
+    pool.unref(n2);
 }
 
 test "Navigation - invalid node access is rejected" {
@@ -141,7 +143,6 @@ test "Navigation - invalid node access is rejected" {
 
     // A freshly‑minted leaf has no children
     const leaf = try pool.createLeafFromUint(42);
-    try pool.ref(leaf);
     try std.testing.expectError(Node.Error.InvalidNode, leaf.getLeft(p));
     try std.testing.expectError(Node.Error.InvalidNode, leaf.getRight(p));
 
@@ -149,6 +150,7 @@ test "Navigation - invalid node access is rejected" {
     const zero0: Node.Id = @enumFromInt(0);
     try std.testing.expectError(Node.Error.InvalidNode, zero0.getLeft(p));
     try std.testing.expectError(Node.Error.InvalidNode, zero0.getRight(p));
+    pool.unref(leaf);
 }
 
 test "alloc returns a set of unique nodes" {
@@ -182,11 +184,11 @@ test "get/setNode" {
     try std.testing.expectEqual(@as(Node.Id, @enumFromInt(0)), try zero3.getNode(p, Gindex.fromDepth(3, 0)));
 
     const leaf = try pool.createLeafFromUint(42);
-    try pool.ref(leaf);
     const new_node = try zero3.setNode(p, Gindex.fromDepth(3, 0), leaf);
-    try pool.ref(new_node);
 
     try std.testing.expectEqual(leaf, try new_node.getNode(p, Gindex.fromDepth(3, 0)));
+
+    pool.unref(new_node);
 }
 
 test "setNodes for checkpoint tree" {
@@ -196,17 +198,13 @@ test "setNodes for checkpoint tree" {
     const p = &pool;
 
     const epoch_node = try pool.createLeafFromUint(42);
-    try pool.ref(epoch_node);
     const root = [_]u8{0} ** 32;
     const root_node = try pool.createLeaf(&root);
-    try pool.ref(root_node);
     const parent = try pool.createBranch(epoch_node, root_node);
     try pool.ref(parent);
 
     const new_epoch_node = try pool.createLeafFromUint(100);
-    try pool.ref(new_epoch_node);
     const new_root_node = try pool.createLeaf(&root);
-    try pool.ref(new_root_node);
 
     var new_nodes = [_]Node.Id{ new_epoch_node, new_root_node };
     const new_parent = try parent.setNodes(p, &[_]Gindex{ Gindex.fromUint(2), Gindex.fromUint(3) }, &new_nodes);
@@ -218,6 +216,9 @@ test "setNodes for checkpoint tree" {
     try new_parent.getNodesAtDepth(p, 1, 0, &out);
     try std.testing.expectEqual(new_epoch_node, out[0]);
     try std.testing.expectEqual(new_root_node, out[1]);
+
+    pool.unref(parent);
+    pool.unref(new_parent);
 }
 
 test "Depth helpers - round-trip setNodesAtDepth / getNodesAtDepth" {
@@ -228,20 +229,17 @@ test "Depth helpers - round-trip setNodesAtDepth / getNodesAtDepth" {
 
     // A ‘blank’ root: branch of two depth‑1 zero‑nodes ensures proper navigation
     const root = try pool.createBranch(@enumFromInt(1), @enumFromInt(1));
-    try pool.ref(root);
 
     // Four leaves to be inserted at depth 2 (gindexes 4-7)
     var leaves: [4]Node.Id = undefined;
     for (0..4) |i| {
         leaves[i] = try pool.createLeafFromUint(@intCast(i + 100));
-        try pool.ref(leaves[i]);
     }
 
     const indices = [_]usize{ 0, 1, 2, 3 };
     const depth: u8 = 2;
 
     const new_root = try root.setNodesAtDepth(p, depth, &indices, &leaves);
-    try pool.ref(new_root);
 
     // Verify individual look‑ups
     for (indices, 0..) |idx, i| {
@@ -253,6 +251,9 @@ test "Depth helpers - round-trip setNodesAtDepth / getNodesAtDepth" {
     var out: [4]Node.Id = undefined;
     try new_root.getNodesAtDepth(p, depth, 0, &out);
     for (0..4) |i| try std.testing.expectEqual(leaves[i], out[i]);
+
+    pool.unref(root);
+    pool.unref(new_root);
 }
 
 const TestCase = struct {
@@ -341,22 +342,23 @@ test "setNodesAtDepth, setNodes vs setNode multiple times" {
             gindexes[i] = Gindex.fromUint(@intCast(gindex));
             indexes[i] = gindex - @intFromEnum(base_gindex);
             const leaf = try pool.createLeafFromUint(@intCast(gindex));
-            try pool.ref(leaf);
             leaves[i] = leaf;
+            const old_root_ok = root_ok;
             root_ok = try root_ok.setNode(p, gindexes[i], leaf);
-            try pool.ref(root_ok);
+            // Unref the old root after setNode creates a new one
+            if (old_root_ok != @as(Node.Id, @enumFromInt(depth))) {
+                pool.unref(old_root_ok);
+            }
         }
 
         var old_nodes = pool.getNodesInUse();
         root = try root.setNodesAtDepth(p, depth, indexes, leaves);
-        try pool.ref(root);
         if (tc.new_nodes) |n| {
             const new_nodes = pool.getNodesInUse() - old_nodes;
             try std.testing.expectEqual(n, new_nodes);
         }
         old_nodes = pool.getNodesInUse();
         root2 = try root.setNodes(p, gindexes, leaves);
-        try pool.ref(root2);
         if (tc.new_nodes) |n| {
             const new_nodes = pool.getNodesInUse() - old_nodes;
             try std.testing.expectEqual(n, new_nodes);
@@ -369,6 +371,10 @@ test "setNodesAtDepth, setNodes vs setNode multiple times" {
 
         const hash2 = root2.getRoot(p);
         try std.testing.expectEqualSlices(u8, hash_ok, hash2);
+
+        pool.unref(root_ok);
+        pool.unref(root);
+        pool.unref(root2);
     }
 }
 
@@ -389,4 +395,6 @@ test "hashing sanity check" {
     const zero2: Node.Id = @enumFromInt(2);
 
     try std.testing.expectEqualSlices(u8, zero2.getRoot(p), branch2.getRoot(p));
+
+    pool.unref(branch2);
 }

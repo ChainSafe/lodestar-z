@@ -44,7 +44,6 @@ test "single proof roundtrip" {
     const left = try pool.createBranch(leaf0, leaf1);
     const right = try pool.createBranch(leaf2, leaf3);
     const root = try pool.createBranch(left, right);
-    try pool.ref(root);
     defer pool.unref(root);
 
     const gindex = Gindex.fromDepth(2, 2);
@@ -77,7 +76,6 @@ test "single proof root matches across leaves" {
 
     var next_value: u8 = 1;
     const raw_root = try buildFullTree(&pool, build_depth, &next_value);
-    try pool.ref(raw_root);
     defer pool.unref(raw_root);
 
     const expected_root = raw_root.getRoot(&pool).*;
@@ -107,7 +105,6 @@ test "single proof invalid navigation" {
 
     const leaf_hash = makeLeaf(42);
     const root = try pool.createLeaf(&leaf_hash);
-    try pool.ref(root);
     defer pool.unref(root);
 
     const gindex = Gindex.fromDepth(3, 0);
@@ -121,7 +118,6 @@ test "single proof invalid gindex" {
 
     const leaf_hash = makeLeaf(9);
     const root = try pool.createLeaf(&leaf_hash);
-    try pool.ref(root);
     defer pool.unref(root);
 
     const zero_gindex: Gindex = @enumFromInt(0);
