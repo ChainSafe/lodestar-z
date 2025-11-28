@@ -252,7 +252,7 @@ pub const Pool = struct {
         self.nodes.items(.hash)[@intFromEnum(node_id)] = hash.*;
         self.nodes.items(.state)[@intFromEnum(node_id)] = State.leaf.initRefCount();
         if (comptime leak_enabled) {
-            self.leak_detector.track(@intFromEnum(node_id), @src(), 1);
+            self.leak_detector.track(@intFromEnum(node_id), @src(), 0);
         }
         return node_id;
     }
@@ -275,7 +275,7 @@ pub const Pool = struct {
         self.nodes.items(.right)[@intFromEnum(node_id)] = right_id;
         states[@intFromEnum(node_id)] = State.branch_lazy.initRefCount();
         if (comptime leak_enabled) {
-            self.leak_detector.track(@intFromEnum(node_id), @src(), 1);
+            self.leak_detector.track(@intFromEnum(node_id), @src(), 0);
         }
         try self.refUnsafe(left_id, states);
         try self.refUnsafe(right_id, states);
@@ -303,6 +303,9 @@ pub const Pool = struct {
             }
             out[i] = self.createUnsafe(states);
             states[@intFromEnum(out[i])] = State.branch_lazy.initRefCount();
+            if (comptime leak_enabled) {
+                self.leak_detector.track(@intFromEnum(out[i]), @src(), 0);
+            }
         }
         return allocated;
     }
@@ -379,8 +382,23 @@ pub const Pool = struct {
                 current = stack[sp];
                 continue;
             };
-            // Continue if the the node is out of bounds or free or a zero node
-            if (@intFromEnum(id) >= self.nodes.len or states[@intFromEnum(id)].isFree() or states[@intFromEnum(id)].isZero()) {
+            // Continue if the the node is out of bounds
+            if (@intFromEnum(id) >= self.nodes.len) {
+                current = null;
+                continue;
+            }
+            // Detect unref on already-freed node (indicates a bug in ref counting)
+            // Must check isFree() before isZero() because freed nodes have node_type bits = 0
+            const is_free = states[@intFromEnum(id)].isFree();
+            if (is_free) {
+                if (comptime leak_enabled) {
+                    self.leak_detector.recordUnrefAfterFree(@intFromEnum(id), @src());
+                }
+                current = null;
+                continue;
+            }
+            // Continue if zero node (zero nodes are not ref counted)
+            if (states[@intFromEnum(id)].isZero()) {
                 current = null;
                 continue;
             }

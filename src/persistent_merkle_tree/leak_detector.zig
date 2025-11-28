@@ -132,6 +132,25 @@ pub fn close(self: *Self, node_id: NodeId) void {
     }
 }
 
+/// Called when unref is attempted on an already-freed node
+/// This is called from Node.unref when it detects isFree() is true
+pub fn recordUnrefAfterFree(self: *Self, node_id: NodeId, src: std.builtin.SourceLocation) void {
+    if (self.level == .disabled) return;
+    if (self.records.getPtr(node_id)) |rec| {
+        std.debug.print("\nUNREF AFTER FREE DETECTED: node_id={d}\n  Allocated at {s}:{d} in {s}\n", .{
+            rec.node_id, rec.alloc_src.file, rec.alloc_src.line, rec.alloc_src.fn_name,
+        });
+        std.debug.print("  Unref attempted at {s}:{d} in {s}\n", .{ src.file, src.line, src.fn_name });
+        std.debug.print("  Event history:\n", .{});
+        for (rec.events.items) |ev| {
+            std.debug.print("    {s} at {s}:{d} in {s} (refcount={d})\n", .{
+                @tagName(ev.event_type), ev.src.file, ev.src.line, ev.src.fn_name, ev.refcount,
+            });
+        }
+        @panic("Unref after free detected in persistent merkle tree");
+    }
+}
+
 pub fn reportLeaks(self: *Self) void {
     var it = self.records.valueIterator();
     var found = false;
