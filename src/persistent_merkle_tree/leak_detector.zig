@@ -89,12 +89,21 @@ fn shouldSample(self: *Self) bool {
 }
 
 pub fn track(self: *Self, node_id: NodeId, src: std.builtin.SourceLocation, refcount: u32) void {
-    if (!self.shouldSample()) return;
+    const sampled = self.shouldSample();
 
-    // If there's an existing record (node was freed and reallocated), free its events first
+    // Always clear stale record when node is reused, even if not sampled
+    // This prevents old freed=true from masking leaks in the new lifetime
     if (self.records.getPtr(node_id)) |old_rec| {
         old_rec.events.deinit(self.allocator);
+        if (!sampled) {
+            // Not sampled this time - remove stale record entirely
+            _ = self.records.remove(node_id);
+            _ = self.sampled_nodes.remove(node_id);
+            return;
+        }
     }
+
+    if (!sampled) return;
 
     self.records.put(self.allocator, node_id, TrackRecord{
         .node_id = node_id,
