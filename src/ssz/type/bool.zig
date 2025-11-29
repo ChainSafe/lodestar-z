@@ -68,7 +68,7 @@ pub fn BoolType() type {
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 const byte: u8 = if (value.*) 1 else 0;
-                return try pool.createLeafFromUint(byte, false);
+                return try pool.createLeafFromUint(byte);
             }
 
             pub fn toValuePacked(node: Node.Id, pool: *Node.Pool, index: usize, out: *Type) !void {
@@ -82,7 +82,7 @@ pub fn BoolType() type {
                 var new_leaf: [32]u8 = hash.*;
                 const offset = index % 32;
                 new_leaf[offset] = if (value.*) 1 else 0;
-                return try pool.createLeaf(&new_leaf, false);
+                return try pool.createLeaf(&new_leaf);
             }
         };
 

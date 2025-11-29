@@ -70,7 +70,7 @@ pub fn UintType(comptime bits: comptime_int) type {
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 var new_leaf: [32]u8 = [_]u8{0} ** 32;
                 std.mem.writeInt(Type, new_leaf[0..bytes], value.*, .little);
-                return try pool.createLeaf(&new_leaf, false);
+                return try pool.createLeaf(&new_leaf);
             }
 
             pub fn toValuePacked(node: Node.Id, pool: *Node.Pool, index: usize, out: *Type) !void {
@@ -84,7 +84,7 @@ pub fn UintType(comptime bits: comptime_int) type {
                 var new_leaf: [32]u8 = hash.*;
                 const offset = (index * bytes) % 32;
                 std.mem.writeInt(Type, new_leaf[offset..][0..bytes], value.*, .little);
-                return try pool.createLeaf(&new_leaf, false);
+                return try pool.createLeaf(&new_leaf);
             }
         };
 

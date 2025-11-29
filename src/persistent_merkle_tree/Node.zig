@@ -7,6 +7,22 @@ const getZeroHash = @import("hashing").getZeroHash;
 const max_depth = @import("hashing").max_depth;
 const Depth = @import("hashing").Depth;
 const Gindex = @import("gindex.zig").Gindex;
+const build_options = @import("build_options");
+const LeakDetector = @import("leak_detector.zig");
+
+const leak_level: LeakDetector.Level = blk: {
+    const level_str = build_options.leak_detection_level;
+    if (std.mem.eql(u8, level_str, "paranoid")) {
+        break :blk .paranoid;
+    } else if (std.mem.eql(u8, level_str, "advanced")) {
+        break :blk .advanced;
+    } else if (std.mem.eql(u8, level_str, "simple")) {
+        break :blk .simple;
+    } else {
+        break :blk .disabled;
+    }
+};
+const leak_enabled = leak_level != .disabled;
 
 hash: [32]u8,
 left: Id,
@@ -90,8 +106,8 @@ pub const State = enum(u32) {
         node.* = @enumFromInt(@intFromEnum(node.*) | @intFromEnum(branch_computed));
     }
 
-    pub inline fn initRefCount(node: State, should_ref: bool) State {
-        return @enumFromInt(@intFromEnum(node) | @intFromBool(should_ref));
+    pub inline fn initRefCount(node: State) State {
+        return node;
     }
 
     pub inline fn getRefCount(node: State) u32 {
@@ -119,9 +135,12 @@ pub const State = enum(u32) {
 
 /// Stores nodes in a memory pool
 pub const Pool = struct {
+    const LeakDetectorField = if (leak_enabled) *LeakDetector else void;
+
     allocator: Allocator,
     nodes: std.MultiArrayList(Node).Slice,
     next_free_node: Id,
+    leak_detector: LeakDetectorField = if (leak_enabled) undefined else {},
 
     pub const free_bit: u32 = 0x80000000;
     pub const max_ref_count: u32 = 0x7FFFFFFF;
@@ -156,10 +175,21 @@ pub const Pool = struct {
 
         try pool.preheat(pool_size);
 
+        if (comptime leak_enabled) {
+            const detector = try allocator.create(LeakDetector);
+            detector.* = LeakDetector.init(allocator, .{ .level = leak_level });
+            pool.leak_detector = detector;
+        }
+
         return pool;
     }
 
     pub fn deinit(self: *Pool) void {
+        if (comptime leak_enabled) {
+            self.leak_detector.reportLeaks();
+            self.leak_detector.deinit();
+            self.allocator.destroy(self.leak_detector);
+        }
         self.nodes.deinit(self.allocator);
         self.* = undefined;
     }
@@ -217,48 +247,46 @@ pub const Pool = struct {
         return count;
     }
 
-    pub fn createLeaf(self: *Pool, hash: *const [32]u8, should_ref: bool) Allocator.Error!Id {
+    pub fn createLeaf(self: *Pool, hash: *const [32]u8) Allocator.Error!Id {
         const node_id = try self.create();
-
         self.nodes.items(.hash)[@intFromEnum(node_id)] = hash.*;
-        self.nodes.items(.state)[@intFromEnum(node_id)] = State.leaf.initRefCount(should_ref);
-
+        self.nodes.items(.state)[@intFromEnum(node_id)] = State.leaf.initRefCount();
+        if (comptime leak_enabled) {
+            self.leak_detector.track(@intFromEnum(node_id), @src(), 0);
+        }
         return node_id;
     }
 
-    pub fn createLeafFromUint(self: *Pool, uint: u256, should_ref: bool) Allocator.Error!Id {
+    pub fn createLeafFromUint(self: *Pool, uint: u256) Allocator.Error!Id {
         var hash: [32]u8 = undefined;
         std.mem.writeInt(u256, &hash, uint, .little);
-        return self.createLeaf(&hash, should_ref);
+        return self.createLeaf(&hash);
     }
 
-    pub fn createBranch(self: *Pool, left_id: Id, right_id: Id, should_ref: bool) Error!Id {
+    pub fn createBranch(self: *Pool, left_id: Id, right_id: Id) Error!Id {
         std.debug.assert(@intFromEnum(left_id) < self.nodes.len);
         std.debug.assert(@intFromEnum(right_id) < self.nodes.len);
 
         const node_id = try self.create();
-
         const states = self.nodes.items(.state);
-
         std.debug.assert(!states[@intFromEnum(left_id)].isFree());
         std.debug.assert(!states[@intFromEnum(right_id)].isFree());
-
         self.nodes.items(.left)[@intFromEnum(node_id)] = left_id;
         self.nodes.items(.right)[@intFromEnum(node_id)] = right_id;
-        states[@intFromEnum(node_id)] = State.branch_lazy.initRefCount(should_ref);
-
+        states[@intFromEnum(node_id)] = State.branch_lazy.initRefCount();
+        if (comptime leak_enabled) {
+            self.leak_detector.track(@intFromEnum(node_id), @src(), 0);
+        }
         try self.refUnsafe(left_id, states);
         try self.refUnsafe(right_id, states);
-
         return node_id;
     }
 
     /// Allocates nodes into the pool.
     ///
-    /// Note: Only the first node (`out[0]`) is pre-refed.
-    ///
-    /// Nodes allocated here are expected to be attached via `rebind`
-    /// Return true if pool had to allocate more memory, false otherwise
+    /// All nodes are allocated with refcount=0.
+    /// Nodes allocated here are expected to be attached via `rebind`.
+    /// Return true if pool had to allocate more memory, false otherwise.
     pub fn alloc(self: *Pool, out: []Id) Allocator.Error!bool {
         var states = self.nodes.items(.state);
         var allocated: bool = false;
@@ -274,7 +302,10 @@ pub const Pool = struct {
                 allocated = true;
             }
             out[i] = self.createUnsafe(states);
-            states[@intFromEnum(out[i])] = State.branch_lazy.initRefCount(i == 0);
+            states[@intFromEnum(out[i])] = State.branch_lazy.initRefCount();
+            if (comptime leak_enabled) {
+                self.leak_detector.track(@intFromEnum(out[i]), @src(), 0);
+            }
         }
         return allocated;
     }
@@ -326,20 +357,19 @@ pub const Pool = struct {
 
     // Assumes `node_id` to be in bounds and not free
     fn refUnsafe(self: *Pool, node_id: Id, states: []Node.State) Error!void {
-        _ = self;
-
         if (states[@intFromEnum(node_id)].isZero()) {
             return;
         }
-
-        _ = try states[@intFromEnum(node_id)].incRefCount();
+        const new_ref = try states[@intFromEnum(node_id)].incRefCount();
+        if (comptime leak_enabled) {
+            self.leak_detector.record(@intFromEnum(node_id), .ref, @src(), new_ref);
+        }
     }
 
     pub fn unref(self: *Pool, node_id: Id) void {
         const states = self.nodes.items(.state);
         const lefts = self.nodes.items(.left);
         const rights = self.nodes.items(.right);
-
         var stack: [max_depth]Id = undefined;
         var current: ?Id = node_id;
         var sp: Depth = 0;
@@ -352,22 +382,36 @@ pub const Pool = struct {
                 current = stack[sp];
                 continue;
             };
-
-            // Continue if the the node is out of bounds or free or a zero node
-            if (@intFromEnum(id) >= self.nodes.len or states[@intFromEnum(id)].isFree() or states[@intFromEnum(id)].isZero()) {
+            // Continue if the the node is out of bounds
+            if (@intFromEnum(id) >= self.nodes.len) {
                 current = null;
                 continue;
             }
-
+            // Detect unref on already-freed node (indicates a bug in ref counting)
+            // Must check isFree() before isZero() because freed nodes have node_type bits = 0
+            const is_free = states[@intFromEnum(id)].isFree();
+            if (is_free) {
+                if (comptime leak_enabled) {
+                    self.leak_detector.recordUnrefAfterFree(@intFromEnum(id), @src());
+                }
+                current = null;
+                continue;
+            }
+            // Continue if zero node (zero nodes are not ref counted)
+            if (states[@intFromEnum(id)].isZero()) {
+                current = null;
+                continue;
+            }
             // Decrement the reference count
             const ref_count = states[@intFromEnum(id)].decRefCount();
-
+            if (comptime leak_enabled) {
+                self.leak_detector.record(@intFromEnum(id), .unref, @src(), ref_count);
+            }
             // If the reference count is not zero, continue
             if (ref_count != 0) {
                 current = null;
                 continue;
             }
-
             // If the node is a branch, push its children onto the stack
             if (states[@intFromEnum(id)].isBranch()) {
                 stack[sp] = rights[@intFromEnum(id)];
@@ -376,10 +420,12 @@ pub const Pool = struct {
             } else {
                 current = null;
             }
-
             // Return the node to the free list
             states[@intFromEnum(id)] = State.initNextFree(self.next_free_node);
             self.next_free_node = id;
+            if (comptime leak_enabled) {
+                self.leak_detector.close(@intFromEnum(id));
+            }
         }
     }
 };
@@ -901,28 +947,25 @@ pub const Id = enum(u32) {
 };
 
 /// Fill a view to the specified depth, returning the new root node id.
-pub fn fillToDepth(pool: *Pool, bottom: Id, depth: Depth, should_ref: bool) Error!Id {
+pub fn fillToDepth(pool: *Pool, bottom: Id, depth: Depth) Error!Id {
     var d = depth;
     var node = bottom;
     while (d > 0) : (d -= 1) {
-        node = try pool.createBranch(node, node, false);
+        node = try pool.createBranch(node, node);
     }
 
-    if (should_ref) {
-        try pool.ref(node);
-    }
     return node;
 }
 
 /// Fill a view to the specified length and depth, returning the new root node id.
-pub fn fillToLength(pool: *Pool, leaf: Id, depth: Depth, length: usize, should_ref: bool) Error!Id {
+pub fn fillToLength(pool: *Pool, leaf: Id, depth: Depth, length: usize) Error!Id {
     const max_length = @as(Gindex.Uint, 1) << depth;
     if (length > max_length) {
         return Error.InvalidLength;
     }
 
     // fill a full view to the specified depth
-    var node_id = try fillToDepth(pool, leaf, depth, should_ref);
+    var node_id = try fillToDepth(pool, leaf, depth);
 
     // if the requested length is the same as the max length, return the node
     if (length == max_length) {
@@ -978,16 +1021,13 @@ pub fn fillToLength(pool: *Pool, leaf: Id, depth: Depth, length: usize, should_r
         path_rights,
     );
 
-    if (should_ref) {
-        try pool.ref(path_parents[0]);
-    }
     return path_parents[0];
 }
 
 /// Fill a view with the specified contents, returning the new root node id.
 ///
 /// Note: contents is mutated
-pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth, should_ref: bool) !Id {
+pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth) !Id {
     if (contents.len == 0) {
         return @enumFromInt(depth);
     }
@@ -1001,19 +1041,16 @@ pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth, should_ref: b
     while (d > 0) : (d -= 1) {
         var i: usize = 0;
         while (i < count - 1) : (i += 2) {
-            contents[i / 2] = try pool.createBranch(contents[i], contents[i + 1], false);
+            contents[i / 2] = try pool.createBranch(contents[i], contents[i + 1]);
         }
 
         // if the count is odd, we need to add a zero node
         if (i != count) {
-            contents[i / 2] = try pool.createBranch(contents[i], @enumFromInt(depth - d), false);
+            contents[i / 2] = try pool.createBranch(contents[i], @enumFromInt(depth - d));
         }
 
         count = (count + 1) / 2;
     }
 
-    if (should_ref) {
-        try pool.ref(contents[0]);
-    }
     return contents[0];
 }

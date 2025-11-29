@@ -11,6 +11,9 @@ pub fn build(b: *std.Build) void {
     options_build_options.addOption(?u8, "zero_hash_max_depth", option_zero_hash_max_depth);
     const option_preset = b.option([]const u8, "preset", "") orelse "mainnet";
     options_build_options.addOption([]const u8, "preset", option_preset);
+    const default_leak_level: []const u8 = if (optimize == .Debug) "paranoid" else "disabled";
+    const option_leak_detection_level = b.option([]const u8, "leak_detection_level", "Leak detection level: disabled, simple, advanced, paranoid") orelse default_leak_level;
+    options_build_options.addOption([]const u8, "leak_detection_level", option_leak_detection_level);
     const options_module_build_options = options_build_options.createModule();
 
     const options_spec_test_options = b.addOptions();
