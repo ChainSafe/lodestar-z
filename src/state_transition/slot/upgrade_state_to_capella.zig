@@ -71,7 +71,9 @@ pub fn upgradeStateToCapella(allocator: Allocator, cached_state: *CachedBeaconSt
     capella_latest_execution_payload_header.gas_limit = bellatrix_latest_execution_payload_header.gas_limit;
     capella_latest_execution_payload_header.gas_used = bellatrix_latest_execution_payload_header.gas_used;
     capella_latest_execution_payload_header.timestamp = bellatrix_latest_execution_payload_header.timestamp;
-    capella_latest_execution_payload_header.extra_data = bellatrix_latest_execution_payload_header.extra_data;
+    // Clone extra_data because bellatrix_state will be deinit after upgrade,
+    // and capella state needs its own copy of the dynamically allocated data
+    capella_latest_execution_payload_header.extra_data = try bellatrix_latest_execution_payload_header.extra_data.clone(allocator);
     capella_latest_execution_payload_header.base_fee_per_gas = bellatrix_latest_execution_payload_header.base_fee_per_gas;
     capella_latest_execution_payload_header.block_hash = bellatrix_latest_execution_payload_header.block_hash;
     capella_latest_execution_payload_header.transactions_root = bellatrix_latest_execution_payload_header.transactions_root;

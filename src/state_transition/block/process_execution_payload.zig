@@ -96,7 +96,11 @@ pub fn processExecutionPayload(
     }
 
     const payload_header = switch (body) {
-        .regular => |b| try b.executionPayload().toPayloadHeader(allocator),
+        .regular => |b| blk: {
+            // Free the old extra_data before setting new header (toPayloadHeader clones extra_data)
+            state.deinitLatestExecutionPayloadHeaderExtraData(allocator);
+            break :blk try b.executionPayload().toPayloadHeader(allocator);
+        },
         .blinded => |b| b.executionPayloadHeader(),
     };
 
