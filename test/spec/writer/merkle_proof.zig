@@ -52,10 +52,10 @@ pub fn writeTest(
         test_suite_name,
         test_case_name,
 
+        @tagName(fork),
         @tagName(handler),
         test_suite_name,
         test_case_name,
-        @tagName(fork),
 
         @tagName(fork),
     });

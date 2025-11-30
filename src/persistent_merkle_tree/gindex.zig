@@ -102,6 +102,24 @@ pub const Gindex = enum(GindexUint) {
             }
         }.lessThan);
     }
+
+    /// Concatenate multiple Generalized Indices.
+    /// Given generalized indices i1 for A -> B, i2 for B -> C, ..., i_n for Y -> Z,
+    /// returns the generalized index for A -> Z.
+    ///
+    pub fn concat(gindices: []const Gindex) Gindex {
+        if (gindices.len == 0) {
+            return Gindex.fromUint(1); // Root gindex
+        }
+
+        var result = gindices[0];
+        for (gindices[1..]) |gindex| {
+            const path_len = gindex.pathLen();
+            const gindex_path = @intFromEnum(gindex) & ((@as(GindexUint, 1) << @intCast(path_len)) - 1);
+            result = @enumFromInt((@intFromEnum(result) << @intCast(path_len)) | gindex_path);
+        }
+        return result;
+    }
 };
 
 test {
@@ -114,4 +132,41 @@ test {
     const b: Gindex = @enumFromInt(10);
     try std.testing.expectEqualSlices(u1, &[_]u1{ 0, 1, 0 }, b.toPathBits(&bits));
     try std.testing.expectEqual(@as(Gindex.Path, @enumFromInt(2)), b.toPath());
+}
+
+test "concat gindices" {
+    // [2, 3] -> 5
+    const case1: []const Gindex = &.{ Gindex.fromUint(2), Gindex.fromUint(3) };
+    try std.testing.expectEqual(@as(GindexUint, 5), @intFromEnum(Gindex.concat(case1)));
+
+    // [31, 3] -> 63
+    const case2: []const Gindex = &.{ Gindex.fromUint(31), Gindex.fromUint(3) };
+    try std.testing.expectEqual(@as(GindexUint, 63), @intFromEnum(Gindex.concat(case2)));
+
+    // [31, 6] -> 126
+    const case3: []const Gindex = &.{ Gindex.fromUint(31), Gindex.fromUint(6) };
+    try std.testing.expectEqual(@as(GindexUint, 126), @intFromEnum(Gindex.concat(case3)));
+
+    const empty: []const Gindex = &.{};
+    try std.testing.expectEqual(@as(GindexUint, 1), @intFromEnum(Gindex.concat(empty)));
+
+    const single: []const Gindex = &.{Gindex.fromUint(42)};
+    try std.testing.expectEqual(@as(GindexUint, 42), @intFromEnum(Gindex.concat(single)));
+
+    // [1, 5] -> 5
+    const with_root: []const Gindex = &.{ Gindex.fromUint(1), Gindex.fromUint(5) };
+    try std.testing.expectEqual(@as(GindexUint, 5), @intFromEnum(Gindex.concat(with_root)));
+
+    // [5, 1] -> 5
+    const root_suffix: []const Gindex = &.{ Gindex.fromUint(5), Gindex.fromUint(1) };
+    try std.testing.expectEqual(@as(GindexUint, 5), @intFromEnum(Gindex.concat(root_suffix)));
+
+    // [2, 2, 2] -> 8 (going left 3 times from root)
+    const three_lefts: []const Gindex = &.{ Gindex.fromUint(2), Gindex.fromUint(2), Gindex.fromUint(2) };
+    try std.testing.expectEqual(@as(GindexUint, 8), @intFromEnum(Gindex.concat(three_lefts)));
+
+    // [3, 3, 3] -> 15 (going right 3 times from root)
+    // concat(3, 3) = 7, concat(7, 3) = 15
+    const three_rights: []const Gindex = &.{ Gindex.fromUint(3), Gindex.fromUint(3), Gindex.fromUint(3) };
+    try std.testing.expectEqual(@as(GindexUint, 15), @intFromEnum(Gindex.concat(three_rights)));
 }

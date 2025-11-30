@@ -1,10 +1,10 @@
 const std = @import("std");
 const ct = @import("consensus_types");
 const ForkSeq = @import("config").ForkSeq;
-const preset_mod = @import("preset");
 const test_case = @import("../test_case.zig");
 const loadSszValue = test_case.loadSszSnappyValue;
 const hex = @import("hex");
+const ssz = @import("ssz");
 
 const pmt = @import("persistent_merkle_tree");
 const proof = pmt.proof;
@@ -21,7 +21,7 @@ pub const Handler = enum {
 
 const MerkleProof = struct {
     leaf: [66]u8,
-    leaf_index: u64,
+    leaf_gindex: Gindex,
     branch: [][66]u8,
 
     pub fn deinit(self: *MerkleProof, allocator: std.mem.Allocator) void {
@@ -83,7 +83,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
         }
 
         fn process(self: *Self) !void {
-            const actual_leaf_index: u64 = @intCast(preset_mod.KZG_COMMITMENT_GINDEX0);
+            const gindex = ssz.getPathGindex(BeaconBlockBody, "blob_kzg_commitments.0");
             var actual_leaf: [32]u8 = undefined;
             try KzgCommitment.hashTreeRoot(&self.body.blob_kzg_commitments.items[0], &actual_leaf);
 
@@ -91,16 +91,15 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             defer pool.deinit();
 
             const root_node = try BeaconBlockBody.tree.fromValue(self.allocator, &pool, &self.body);
-            const gindex = Gindex.fromUint(@as(Gindex.Uint, actual_leaf_index));
 
             var single_proof = try pmt.proof.createSingleProof(self.allocator, &pool, root_node, gindex);
             defer single_proof.deinit(self.allocator);
-            self.actual_proof = try buildActualProof(self.allocator, actual_leaf_index, &actual_leaf, single_proof.witnesses);
+            self.actual_proof = try buildActualProof(self.allocator, gindex, &actual_leaf, single_proof.witnesses);
         }
 
         fn buildActualProof(
             allocator: std.mem.Allocator,
-            leaf_index: u64,
+            leaf_gindex: Gindex,
             leaf_bytes: *const [32]u8,
             witnesses: [][32]u8,
         ) !MerkleProof {
@@ -113,7 +112,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
             return .{
                 .leaf = try hex.rootToHex(leaf_bytes),
-                .leaf_index = leaf_index,
+                .leaf_gindex = leaf_gindex,
                 .branch = branch,
             };
         }
@@ -122,7 +121,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             expected: *const MerkleProof,
             actual: *const MerkleProof,
         ) !void {
-            try std.testing.expectEqual(expected.leaf_index, actual.leaf_index);
+            try std.testing.expectEqual(expected.leaf_gindex, actual.leaf_gindex);
             try std.testing.expectEqualSlices(u8, expected.leaf[0..66], actual.leaf[0..66]);
             try std.testing.expectEqual(expected.branch.len, actual.branch.len);
             for (expected.branch, 0..) |expected_witness, i| {
@@ -144,7 +143,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             var branch: std.ArrayListUnmanaged([66]u8) = .empty;
             errdefer branch.deinit(allocator);
             var leaf: ?[66]u8 = null;
-            var leaf_index: ?u64 = null;
+            var leaf_gindex: ?Gindex = null;
 
             var iter = std.mem.tokenizeScalar(u8, contents, '\n');
             const quote = "'\"";
@@ -157,7 +156,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                     leaf = value_slice[0..66].*;
                 } else if (std.mem.startsWith(u8, line, "leaf_index: ")) {
                     const value_slice = std.mem.trim(u8, line["leaf_index: ".len..], quote);
-                    leaf_index = try std.fmt.parseInt(u64, value_slice, 10);
+                    leaf_gindex = Gindex.fromUint(try std.fmt.parseInt(Gindex.Uint, value_slice, 10));
                 } else if (std.mem.startsWith(u8, line, "- ")) {
                     const value_slice = std.mem.trim(u8, line[2..], quote);
                     std.debug.assert(value_slice.len == 66);
@@ -166,19 +165,18 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 }
             }
 
-            if (leaf == null or leaf_index == null) {
+            if (leaf == null or leaf_gindex == null) {
                 return error.InvalidProof;
             }
 
-            const gindex = Gindex.fromUint(@as(Gindex.Uint, leaf_index.?));
-            const expected_branch_len: usize = @intCast(gindex.pathLen());
+            const expected_branch_len: usize = @intCast(leaf_gindex.?.pathLen());
             if (branch.items.len != expected_branch_len) {
                 return error.InvalidProof;
             }
 
             return .{
                 .leaf = leaf.?,
-                .leaf_index = leaf_index.?,
+                .leaf_gindex = leaf_gindex.?,
                 .branch = try branch.toOwnedSlice(allocator),
             };
         }
