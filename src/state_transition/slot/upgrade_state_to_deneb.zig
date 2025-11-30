@@ -36,7 +36,9 @@ pub fn upgradeStateToDeneb(allocator: Allocator, cached_state: *CachedBeaconStat
     deneb_latest_execution_payload_header.gas_limit = capella_latest_execution_payload_header.gas_limit;
     deneb_latest_execution_payload_header.gas_used = capella_latest_execution_payload_header.gas_used;
     deneb_latest_execution_payload_header.timestamp = capella_latest_execution_payload_header.timestamp;
-    deneb_latest_execution_payload_header.extra_data = capella_latest_execution_payload_header.extra_data;
+    // Clone extra_data because capella_state will be deinit after upgrade,
+    // and deneb state needs its own copy of the dynamically allocated data
+    deneb_latest_execution_payload_header.extra_data = try capella_latest_execution_payload_header.extra_data.clone(allocator);
     deneb_latest_execution_payload_header.base_fee_per_gas = capella_latest_execution_payload_header.base_fee_per_gas;
     deneb_latest_execution_payload_header.block_hash = capella_latest_execution_payload_header.block_hash;
     deneb_latest_execution_payload_header.transactions_root = capella_latest_execution_payload_header.transactions_root;
