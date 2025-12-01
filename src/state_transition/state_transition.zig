@@ -158,7 +158,8 @@ pub fn stateTransition(
         return error.InvalidBlockSignature;
     }
 
-    try metrics.initializeMetrics(.{});
+    try metrics.initializeMetrics(allocator, .{});
+    defer metrics.deinitMetrics(&metrics.metrics);
 
     //  // Note: time only on success
     //  const processBlockTimer = metrics?.processBlockTime.startTimer();
