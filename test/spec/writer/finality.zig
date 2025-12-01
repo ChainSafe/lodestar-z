@@ -1,15 +1,13 @@
 const std = @import("std");
-const spec_test_options = @import("spec_test_options");
 const ForkSeq = @import("config").ForkSeq;
-const Preset = @import("preset").Preset;
 
-/// Random tests use the same format as sanity/blocks tests
+/// Finality tests use the same format as sanity/blocks tests
 pub const Handler = enum {
-    random,
+    finality,
 
     pub fn suiteName(self: Handler) []const u8 {
         _ = self;
-        return "random/pyspec_tests";
+        return "finality/pyspec_tests";
     }
 };
 
@@ -31,11 +29,11 @@ pub const header =
 ;
 
 const test_template =
-    \\test "{s} random {s} {s}" {{
+    \\test "{s} finality {s} {s}" {{
     \\    const test_dir_name = try std.fs.path.join(allocator, &[_][]const u8{{
     \\        spec_test_options.spec_test_out_dir,
     \\        spec_test_options.spec_test_version,
-    \\        @tagName(active_preset) ++ "/tests/" ++ @tagName(active_preset) ++ "/{s}/random/{s}/pyspec_tests/{s}",
+    \\        @tagName(active_preset) ++ "/tests/" ++ @tagName(active_preset) ++ "/{s}/finality/{s}/pyspec_tests/{s}",
     \\    }});
     \\    defer allocator.free(test_dir_name);
     \\    const test_dir = std.fs.cwd().openDir(test_dir_name, .{{}}) catch return error.SkipZigTest;

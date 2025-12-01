@@ -22,6 +22,7 @@ const supported_test_runners = [_]RunnerKind{
     .fork,
     .transition,
     .random,
+    .finality,
 };
 
 fn TestWriter(comptime kind: RunnerKind) type {
@@ -34,6 +35,7 @@ fn TestWriter(comptime kind: RunnerKind) type {
         .fork => @import("./writer/fork.zig"),
         .transition => @import("./writer/transition.zig"),
         .random => @import("./writer/random.zig"),
+        .finality => @import("./writer/finality.zig"),
         else => @compileError("Unsupported test runner"),
     };
 }
