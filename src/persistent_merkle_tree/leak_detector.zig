@@ -89,13 +89,9 @@ pub fn track(self: *Self, node_id: NodeId, src: std.builtin.SourceLocation, refc
 
     // Always clear stale record when node is reused, even if not sampled
     // This prevents old freed=true from masking leaks in the new lifetime
-    if (self.records.getPtr(node_id)) |old_rec| {
+    if (self.records.fetchRemove(node_id)) |old_kv| {
+        var old_rec = old_kv.value;
         old_rec.events.deinit(self.allocator);
-        if (!sampled) {
-            // Not sampled this time - remove stale record entirely
-            _ = self.records.remove(node_id);
-            return;
-        }
     }
 
     if (!sampled) return;
