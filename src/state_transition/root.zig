@@ -82,7 +82,7 @@ pub const SignedBlock = @import("./types/block.zig").SignedBlock;
 pub const Block = @import("./types/block.zig").Block;
 pub const SignedBeaconBlock = @import("./types/beacon_block.zig").SignedBeaconBlock;
 pub const Attestations = @import("./types/attestation.zig").Attestations;
-pub const fulu_helpers = @import("./utils/fulu_helpers.zig");
+pub const processProposerLookahead = @import("./utils/process_proposer_lookahead.zig");
 
 test {
     testing.refAllDecls(@This());

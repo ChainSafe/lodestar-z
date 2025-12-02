@@ -795,7 +795,7 @@ pub const BeaconStateAllForks = union(enum) {
                 );
 
                 // Initialize proposer_lookahead
-                const initializeProposerLookahead = @import("../utils/fulu_helpers.zig").initializeProposerLookahead;
+                const initializeProposerLookahead = @import("../utils/process_proposer_lookahead.zig").initializeProposerLookahead;
                 try initializeProposerLookahead(
                     allocator,
                     &wrapped_state,
