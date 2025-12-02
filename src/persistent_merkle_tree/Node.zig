@@ -10,18 +10,8 @@ const Gindex = @import("gindex.zig").Gindex;
 const build_options = @import("build_options");
 const LeakDetector = @import("leak_detector.zig");
 
-const leak_level: LeakDetector.Level = blk: {
-    const level_str = build_options.leak_detection_level;
-    if (std.mem.eql(u8, level_str, "paranoid")) {
-        break :blk .paranoid;
-    } else if (std.mem.eql(u8, level_str, "advanced")) {
-        break :blk .advanced;
-    } else if (std.mem.eql(u8, level_str, "simple")) {
-        break :blk .simple;
-    } else {
-        break :blk .disabled;
-    }
-};
+const leak_level: LeakDetector.Level =
+    std.meta.stringToEnum(LeakDetector.Level, build_options.leak_detection_level) orelse .disabled;
 const leak_enabled = leak_level != .disabled;
 
 hash: [32]u8,

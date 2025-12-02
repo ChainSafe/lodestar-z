@@ -41,8 +41,6 @@ records: std.AutoHashMapUnmanaged(NodeId, TrackRecord),
 sampling_counter: u32,
 /// Sampling interval (1 means track all, 128 means track 1 in 128)
 sampling_interval: u32,
-/// Track which node_ids are being sampled (for ref/unref tracking)
-sampled_nodes: std.AutoHashMapUnmanaged(NodeId, void),
 
 const Self = @This();
 
@@ -63,7 +61,6 @@ pub fn init(allocator: std.mem.Allocator, options: Options) Self {
         .records = .{},
         .sampling_counter = 0,
         .sampling_interval = actual_interval,
-        .sampled_nodes = .{},
     };
 }
 
@@ -73,7 +70,6 @@ pub fn deinit(self: *Self) void {
         rec.events.deinit(self.allocator);
     }
     self.records.deinit(self.allocator);
-    self.sampled_nodes.deinit(self.allocator);
 }
 
 /// Check if this allocation should be sampled
@@ -98,30 +94,29 @@ pub fn track(self: *Self, node_id: NodeId, src: std.builtin.SourceLocation, refc
         if (!sampled) {
             // Not sampled this time - remove stale record entirely
             _ = self.records.remove(node_id);
-            _ = self.sampled_nodes.remove(node_id);
             return;
         }
     }
 
     if (!sampled) return;
 
-    self.records.put(self.allocator, node_id, TrackRecord{
+    var new_rec = TrackRecord{
         .node_id = node_id,
         .alloc_src = src,
         .events = .{},
         .freed = false,
-    }) catch |err| {
+    };
+
+    new_rec.events.append(self.allocator, Event{ .event_type = .alloc, .src = src, .refcount = refcount }) catch |err| {
+        log.err("failed to append alloc event for node {d}: {}", .{ node_id, err });
+        return;
+    };
+
+    self.records.put(self.allocator, node_id, new_rec) catch |err| {
+        new_rec.events.deinit(self.allocator);
         log.err("failed to track node {d}: {}", .{ node_id, err });
         return;
     };
-    self.sampled_nodes.put(self.allocator, node_id, {}) catch |err| {
-        log.err("failed to add sampled node {d}: {}", .{ node_id, err });
-    };
-    if (self.records.getPtr(node_id)) |rec| {
-        rec.events.append(self.allocator, Event{ .event_type = .alloc, .src = src, .refcount = refcount }) catch |err| {
-            log.err("failed to append alloc event for node {d}: {}", .{ node_id, err });
-        };
-    }
 }
 
 pub fn record(self: *Self, node_id: NodeId, event_type: EventType, src: std.builtin.SourceLocation, refcount: u32) void {
