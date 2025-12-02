@@ -96,14 +96,10 @@ pub fn processExecutionPayload(
         return error.InvalidExecutionPayload;
     }
 
-    const payload_header = switch (body) {
-        .regular => |b| try b.executionPayload().toPayloadHeader(allocator),
-        .blinded => |b| blk: {
-            var cloned_header: ExecutionPayloadHeader = undefined;
-            try b.executionPayloadHeader().clone(allocator, &cloned_header);
-            break :blk cloned_header;
-        },
-    };
-
-    state.setLatestExecutionPayloadHeader(allocator, payload_header);
+    var payload_header = state.latestExecutionPayloadHeader();
+    payload_header.deinit(allocator);
+    switch (body) {
+        .regular => |b| try b.executionPayload().toPayloadHeader(allocator, &payload_header),
+        .blinded => |b| try b.executionPayloadHeader().clone(allocator, &payload_header),
+    }
 }
