@@ -303,6 +303,32 @@ pub const ExecutionPayloadHeader = union(enum) {
             inline .deneb, .electra => |payload_header| payload_header.excess_blob_gas,
         };
     }
+
+    pub fn clone(self: *const ExecutionPayloadHeader, allocator: Allocator, out: *ExecutionPayloadHeader) !void {
+        switch (self.*) {
+            .bellatrix => |header| {
+                try types.bellatrix.ExecutionPayloadHeader.clone(allocator, header, @constCast(out.bellatrix));
+            },
+            .capella => |header| {
+                try types.capella.ExecutionPayloadHeader.clone(allocator, header, @constCast(out.capella));
+            },
+            .deneb => |header| {
+                try types.deneb.ExecutionPayloadHeader.clone(allocator, header, @constCast(out.deneb));
+            },
+            .electra => |header| {
+                try types.electra.ExecutionPayloadHeader.clone(allocator, header, @constCast(out.electra));
+            },
+        }
+    }
+
+    pub fn deinit(self: *const ExecutionPayloadHeader, allocator: Allocator) void {
+        switch (self.*) {
+            .bellatrix => |header| @constCast(header).extra_data.deinit(allocator),
+            .capella => |header| @constCast(header).extra_data.deinit(allocator),
+            .deneb => |header| @constCast(header).extra_data.deinit(allocator),
+            .electra => |header| @constCast(header).extra_data.deinit(allocator),
+        }
+    }
 };
 
 /// Converts some basic fields of ExecutionPayload to ExecutionPayloadHeader.

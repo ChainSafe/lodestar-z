@@ -46,7 +46,7 @@ pub fn upgradeStateToDeneb(allocator: Allocator, cached_state: *CachedBeaconStat
     deneb_latest_execution_payload_header.excess_blob_gas = 0;
     deneb_latest_execution_payload_header.blob_gas_used = 0;
 
-    state.setLatestExecutionPayloadHeader(.{
+    state.setLatestExecutionPayloadHeader(allocator, .{
         .deneb = &deneb_latest_execution_payload_header,
     });
 }

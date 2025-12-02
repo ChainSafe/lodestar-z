@@ -7,6 +7,7 @@ const ForkSeq = @import("config").ForkSeq;
 const SignedBlock = @import("../types/block.zig").SignedBlock;
 const Body = @import("../types/block.zig").Body;
 const ExecutionPayloadStatus = @import("../state_transition.zig").ExecutionPayloadStatus;
+const ExecutionPayloadHeader = @import("../types/execution_payload.zig").ExecutionPayloadHeader;
 const SignedBlindedBeaconBlock = @import("../types/beacon_block.zig").SignedBlindedBeaconBlock;
 const BlockExternalData = @import("../state_transition.zig").BlockExternalData;
 const BeaconConfig = @import("config").BeaconConfig;
@@ -96,13 +97,13 @@ pub fn processExecutionPayload(
     }
 
     const payload_header = switch (body) {
-        .regular => |b| blk: {
-            // Free the old extra_data before setting new header (toPayloadHeader clones extra_data)
-            state.deinitLatestExecutionPayloadHeaderExtraData(allocator);
-            break :blk try b.executionPayload().toPayloadHeader(allocator);
+        .regular => |b| try b.executionPayload().toPayloadHeader(allocator),
+        .blinded => |b| blk: {
+            var cloned_header: ExecutionPayloadHeader = undefined;
+            try b.executionPayloadHeader().clone(allocator, &cloned_header);
+            break :blk cloned_header;
         },
-        .blinded => |b| b.executionPayloadHeader(),
     };
 
-    state.setLatestExecutionPayloadHeader(payload_header);
+    state.setLatestExecutionPayloadHeader(allocator, payload_header);
 }

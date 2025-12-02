@@ -577,14 +577,10 @@ pub const BeaconStateAllForks = union(enum) {
         };
     }
 
-    pub fn deinitLatestExecutionPayloadHeaderExtraData(self: *BeaconStateAllForks, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .phase0, .altair => {},
-            inline .bellatrix, .capella, .deneb, .electra => |state| state.latest_execution_payload_header.extra_data.deinit(allocator),
-        }
-    }
+    pub fn setLatestExecutionPayloadHeader(self: *BeaconStateAllForks, allocator: std.mem.Allocator, header: ExecutionPayloadHeader) void {
+        const current_header = self.latestExecutionPayloadHeader();
+        current_header.deinit(allocator);
 
-    pub fn setLatestExecutionPayloadHeader(self: *BeaconStateAllForks, header: ExecutionPayloadHeader) void {
         switch (self.*) {
             .bellatrix => |state| state.latest_execution_payload_header = header.bellatrix.*,
             .capella => |state| state.latest_execution_payload_header = header.capella.*,
