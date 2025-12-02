@@ -88,4 +88,5 @@ test {
     testing.refAllDecls(seed);
     testing.refAllDecls(state_transition);
     testing.refAllDecls(EpochShuffling);
+    testing.refAllDecls(@import("./utils/snappy.zig"));
 }
