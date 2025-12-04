@@ -4,7 +4,7 @@ const m = @import("metrics");
 const CachedBeaconStateAllForks = @import("cache/state_cache.zig").CachedBeaconStateAllForks;
 
 // defaults to noop metrics, making this safe to use whether or not initializeMetrics is called
-pub var metrics = m.initializeNoop(Metrics);
+pub var state_transition = m.initializeNoop(Metrics);
 
 pub const StateCloneSource = enum {
     stateTransition,
@@ -44,7 +44,7 @@ pub const ProposerRewardType = enum {
 };
 
 const SourceLabel = struct { source: StateCloneSource };
-const HashTreeRootLabel = struct { source: StateHashTreeRootSource };
+pub const HashTreeRootLabel = struct { source: StateHashTreeRootSource };
 const EpochTransitionStepLabel = struct { step: EpochTransitionStep };
 const ProposerRewardLabel = struct { type: ProposerRewardType };
 
@@ -88,7 +88,7 @@ pub const Metrics = struct {
 ///
 /// Meant to be called once on application startup.
 pub fn initializeMetrics(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
-    metrics = .{
+    state_transition = .{
         .epoch_transition = Metrics.EpochTransition.init(
             "lodestar_stfn_epoch_transition_seconds",
             .{ .help = "Time to process a single epoch transition in seconds" },
@@ -277,9 +277,9 @@ pub fn startTimerLabeled(hist: anytype, labels: anytype) LabeledObserver(@TypeOf
 }
 
 /// Specialized use of `startTimerLabeled` for the epoch transition steps.
-pub fn startTimerEpochTransitionStep(labels: EpochTransitionStepLabel) LabeledObserver(@TypeOf(&metrics.epoch_transition_step), @TypeOf(labels)) {
+pub fn startTimerEpochTransitionStep(labels: EpochTransitionStepLabel) LabeledObserver(@TypeOf(&state_transition.epoch_transition_step), @TypeOf(labels)) {
     return .{
-        .hist = &metrics.epoch_transition_step,
+        .hist = &state_transition.epoch_transition_step,
         .labels = labels,
         .timer = std.time.Timer.start() catch unreachable,
     };
