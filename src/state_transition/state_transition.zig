@@ -71,14 +71,13 @@ pub fn processSlots(
 
         const next_slot = try state.slot() + 1;
         if (next_slot % preset.SLOTS_PER_EPOCH == 0) {
-            // TODO(bing): metrics
-            // const epochTransitionTimer = metrics?.epochTransitionTime.startTimer();
-            //
-
-            var epoch_transition_timer = metrics.startTimer(&metrics.metrics.epoch_transition);
+            var epoch_transition_timer = metrics.startTimer(&metrics.state_transition.epoch_transition);
             defer _ = epoch_transition_timer.stopAndObserve();
-            // TODO(bing): metrics: time beforeProcessEpoch
+
+            var before_process_epoch_timer = metrics.startTimerEpochTransitionStep(.{ .step = .before_process_epoch });
             var epoch_transition_cache = try EpochTransitionCache.init(allocator, post_state);
+            _ = try before_process_epoch_timer.stopAndObserve();
+
             defer {
                 epoch_transition_cache.deinit();
                 allocator.destroy(epoch_transition_cache);
@@ -88,8 +87,9 @@ pub fn processSlots(
 
             try state.setSlot(next_slot);
 
+            var after_process_epoch_timer = metrics.startTimerEpochTransitionStep(.{ .step = .after_process_epoch });
             try post_state.epoch_cache_ref.get().afterProcessEpoch(post_state, epoch_transition_cache);
-            // post_state.commit
+            _ = try after_process_epoch_timer.stopAndObserve();
 
             const state_epoch = computeEpochAtSlot(next_slot);
 
@@ -159,11 +159,10 @@ pub fn stateTransition(
     }
 
     try metrics.initializeMetrics(allocator, .{});
-    defer metrics.deinitMetrics(&metrics.metrics);
+    defer metrics.deinitMetrics(&metrics.state_transition);
 
     //  // Note: time only on success
-    //  const processBlockTimer = metrics?.processBlockTime.startTimer();
-    //
+    var process_block_timer = metrics.startTimer(&metrics.state_transition.process_block);
     try processBlock(
         allocator,
         post_state,
@@ -174,6 +173,7 @@ pub fn stateTransition(
         },
         .{ .verify_signature = opts.verify_signatures },
     );
+    _ = process_block_timer.stopAndObserve();
     //
     // TODO(bing): commit
     //  const processBlockCommitTimer = metrics?.processBlockCommitTime.startTimer();
@@ -189,11 +189,13 @@ pub fn stateTransition(
 
     // Verify state root
     if (opts.verify_state_root) {
-        //    const hashTreeRootTimer = metrics?.stateHashTreeRootTime.startTimer({
-        //      source: StateHashTreeRootSource.stateTransition,
-        //    });
+        var hash_tree_root_timer = metrics.startTimerLabeled(
+            &metrics.state_transition.state_hash_tree_root,
+            metrics.HashTreeRootLabel{ .source = .state_transition },
+        );
+
         const post_state_root = try post_state.state.hashTreeRoot();
-        //    hashTreeRootTimer?.();
+        _ = try hash_tree_root_timer.stopAndObserve();
 
         const block_state_root = switch (block) {
             .regular => |b| b.stateRoot(),
