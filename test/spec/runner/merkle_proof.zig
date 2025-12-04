@@ -83,9 +83,18 @@ pub fn TestCase(comptime fork: ForkSeq) type {
         }
 
         fn process(self: *Self) !void {
-            const gindex = ssz.getPathGindex(BeaconBlockBody, "blob_kzg_commitments.0");
+            const is_fulu = fork == .fulu;
+            const gindex = if (is_fulu)
+                ssz.getPathGindex(BeaconBlockBody, "blob_kzg_commitments")
+            else
+                ssz.getPathGindex(BeaconBlockBody, "blob_kzg_commitments.0");
+
             var actual_leaf: [32]u8 = undefined;
-            try KzgCommitment.hashTreeRoot(&self.body.blob_kzg_commitments.items[0], &actual_leaf);
+            if (is_fulu) {
+                try ct.deneb.BlobKzgCommitments.hashTreeRoot(self.allocator, &self.body.blob_kzg_commitments, &actual_leaf);
+            } else {
+                try KzgCommitment.hashTreeRoot(&self.body.blob_kzg_commitments.items[0], &actual_leaf);
+            }
 
             var pool = try Node.Pool.init(self.allocator, 2048);
             defer pool.deinit();
