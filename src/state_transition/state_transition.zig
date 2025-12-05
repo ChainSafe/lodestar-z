@@ -42,6 +42,9 @@ const upgradeStateToFulu = @import("slot/upgrade_state_to_fulu.zig").upgradeStat
 
 const SignedBlock = @import("types/block.zig").SignedBlock;
 
+// Expose writeMetrics to the application
+pub const writeMetrics = metrics.write;
+
 pub const ExecutionPayloadStatus = enum(u8) {
     pre_merge,
     invalid,
@@ -146,10 +149,7 @@ pub fn stateTransition(
         allocator.destroy(post_state);
     }
 
-    //TODO(bing): metrics
-    //if (metrics) {
-    //  onStateCloneMetrics(postState, metrics, StateCloneSource.stateTransition);
-    //}
+    try metrics.onStateClone(post_state, &metrics.state_transition, .stateTransition);
 
     try processSlots(allocator, post_state, block_slot, .{});
 
@@ -157,9 +157,6 @@ pub fn stateTransition(
     if (opts.verify_proposer and !try verifyProposerSignature(post_state, signed_block)) {
         return error.InvalidBlockSignature;
     }
-
-    try metrics.initializeMetrics(allocator, .{});
-    defer metrics.deinitMetrics(&metrics.state_transition);
 
     //  // Note: time only on success
     var process_block_timer = metrics.startTimer(&metrics.state_transition.process_block);
@@ -180,12 +177,7 @@ pub fn stateTransition(
     //  postState.commit();
     //  processBlockCommitTimer?.();
 
-    //  // Note: time only on success. Include processBlock and commit
-    //  processBlockTimer?.();
-    // TODO(bing): metrics
-    //  if (metrics) {
-    //    onPostStateMetrics(postState, metrics);
-    //  }
+    metrics.onPostState(post_state, metrics);
 
     // Verify state root
     if (opts.verify_state_root) {

@@ -285,15 +285,51 @@ pub fn startTimerEpochTransitionStep(labels: EpochTransitionStepLabel) LabeledOb
     };
 }
 
-// TODO: hook into CachedBeaconStateAllForks once cloned count and nodesPopulated caches are exposed.
-pub fn onStateCloneMetrics(state: *CachedBeaconStateAllForks, collected: *Metrics, source: StateCloneSource) void {
-    _ = state;
-    _ = collected;
-    _ = source;
+pub fn onStateClone(state: *CachedBeaconStateAllForks, metrics: *Metrics, source: StateCloneSource) !void {
+    try if (state.state.balances().items.len > 0)
+        metrics.pre_state_balances_nodes_populated_hit.incr(.{ .source = source })
+    else
+        metrics.pre_state_balances_nodes_populated_miss.incr(.{ .source = source });
+
+    try if (state.state.validators().items.len > 0)
+        metrics.pre_state_validators_nodes_populated_hit.incr(.{ .source = source })
+    else
+        metrics.pre_state_validators_nodes_populated_miss.incr(.{ .source = source });
 }
 
-// TODO: hook into CachedBeaconStateAllForks once nodesPopulated caches are exposed.
-pub fn onPostStateMetrics(state: *CachedBeaconStateAllForks, collected: *Metrics) void {
-    _ = state;
-    _ = collected;
+pub fn onPostState(state: *CachedBeaconStateAllForks, metrics: *Metrics) void {
+    if (state.state.balances().items.len > 0)
+        metrics.post_state_balances_nodes_populated_hit.incr()
+    else
+        metrics.post_state_balances_nodes_populated_miss.incr();
+
+    if (state.state.validators().items.len > 0)
+        metrics.post_state_validators_nodes_populated_hit.incr()
+    else
+        metrics.post_state_validators_nodes_populated_miss.incr();
+}
+
+/// Writes all metrics to `writer`.
+pub fn write(writer: anytype) !void {
+    try state_transition.epoch_transition.write(writer);
+    try state_transition.epoch_transition_commit.write(writer);
+    try state_transition.epoch_transition_step.write(writer);
+    try state_transition.process_block.write(writer);
+    try state_transition.process_block_commit.write(writer);
+    try state_transition.state_hash_tree_root.write(writer);
+    try state_transition.num_effective_balance_updates.write(writer);
+    try state_transition.validators_in_activation_queue.write(writer);
+    try state_transition.validators_in_exit_queue.write(writer);
+    try state_transition.pre_state_balances_nodes_populated_miss.write(writer);
+    try state_transition.pre_state_balances_nodes_populated_hit.write(writer);
+    try state_transition.pre_state_validators_nodes_populated_miss.write(writer);
+    try state_transition.pre_state_validators_nodes_populated_hit.write(writer);
+    try state_transition.pre_state_cloned_count.write(writer);
+    try state_transition.post_state_balances_nodes_populated_hit.write(writer);
+    try state_transition.post_state_validators_nodes_populated_hit.write(writer);
+    try state_transition.post_state_validators_nodes_populated_miss.write(writer);
+    try state_transition.new_seen_attesters_per_block.write(writer);
+    try state_transition.new_seen_attesters_effective_balance_per_block.write(writer);
+    try state_transition.attestations_per_block.write(writer);
+    try state_transition.proposer_rewards.write(writer);
 }

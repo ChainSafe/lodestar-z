@@ -154,6 +154,29 @@ pub fn build(b: *std.Build) void {
     const tls_run_exe_download_era_files = b.step("run:download_era_files", "Run the download_era_files executable");
     tls_run_exe_download_era_files.dependOn(&run_exe_download_era_files.step);
 
+    const module_metrics_example = b.createModule(.{
+        .root_source_file = b.path("examples/collect_stf_metrics.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("metrics_example"), module_metrics_example) catch @panic("OOM");
+
+    const exe_metrics_example = b.addExecutable(.{
+        .name = "metrics_example",
+        .root_module = module_metrics_example,
+    });
+
+    const install_exe_metrics_example = b.addInstallArtifact(exe_metrics_example, .{});
+
+    const tls_install_exe_metrics_example = b.step("build-exe:metrics_example", "Install the metrics_example executable");
+    tls_install_exe_metrics_example.dependOn(&install_exe_metrics_example.step);
+    b.getInstallStep().dependOn(&install_exe_metrics_example.step);
+
+    const run_exe_metrics_example = b.addRunArtifact(exe_metrics_example);
+    if (b.args) |args| run_exe_metrics_example.addArgs(args);
+    const tls_run_exe_metrics_example = b.step("run:metrics_example", "Run the metrics_example executable");
+    tls_run_exe_metrics_example.dependOn(&run_exe_metrics_example.step);
+
     const module_download_spec_tests = b.createModule(.{
         .root_source_file = b.path("test/spec/download_spec_tests.zig"),
         .target = target,
@@ -588,6 +611,20 @@ pub fn build(b: *std.Build) void {
     tls_run_test_download_era_files.dependOn(&run_test_download_era_files.step);
     tls_run_test.dependOn(&run_test_download_era_files.step);
 
+    const test_metrics_example = b.addTest(.{
+        .name = "metrics_example",
+        .root_module = module_metrics_example,
+        .filters = b.option([][]const u8, "metrics_example.filters", "metrics_example test filters") orelse &[_][]const u8{},
+    });
+    const install_test_metrics_example = b.addInstallArtifact(test_metrics_example, .{});
+    const tls_install_test_metrics_example = b.step("build-test:metrics_example", "Install the metrics_example test");
+    tls_install_test_metrics_example.dependOn(&install_test_metrics_example.step);
+
+    const run_test_metrics_example = b.addRunArtifact(test_metrics_example);
+    const tls_run_test_metrics_example = b.step("test:metrics_example", "Run the metrics_example test");
+    tls_run_test_metrics_example.dependOn(&run_test_metrics_example.step);
+    tls_run_test.dependOn(&run_test_metrics_example.step);
+
     const test_download_spec_tests = b.addTest(.{
         .name = "download_spec_tests",
         .root_module = module_download_spec_tests,
@@ -907,6 +944,9 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
 
     module_download_era_files.addImport("download_era_options", options_module_download_era_options);
+
+    module_metrics_example.addImport("state_transition", module_state_transition);
+    module_metrics_example.addImport("consensus_types", module_consensus_types);
 
     module_download_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
 
