@@ -35,8 +35,7 @@ pub const EpochProcessingFn = enum {
     historical_summaries_update,
     pending_deposits,
     pending_consolidations,
-    // TODO: fulu
-    // proposer_lookahead,
+    proposer_lookahead,
 
     pub fn suiteName(self: EpochProcessingFn) []const u8 {
         return @tagName(self) ++ "/pyspec_tests";
@@ -125,8 +124,11 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
                 .historical_summaries_update => try state_transition.processHistoricalSummariesUpdate(allocator, pre, epoch_transition_cache),
                 .pending_deposits => try state_transition.processPendingDeposits(allocator, pre, epoch_transition_cache),
                 .pending_consolidations => try state_transition.processPendingConsolidations(allocator, pre, epoch_transition_cache),
-                // TODO: fulu
-                // .proposer_lookahead => {},
+                .proposer_lookahead => {
+                    const epoch_cache = pre.getEpochCache();
+                    const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
+                    try state_transition.processProposerLookahead(allocator, pre.state, &effective_balance_increments);
+                },
             }
         }
     };
