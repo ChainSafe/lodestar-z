@@ -17,37 +17,50 @@ pub const ExecutionPayload = union(enum) {
         };
     }
 
+    /// Converts ExecutionPayload to an owned ExecutionPayloadHeader.
+    pub fn toPayloadHeader(self: *const ExecutionPayload, allocator: Allocator) !ExecutionPayloadHeader {
+        var header: ExecutionPayloadHeader = undefined;
+        try self.createPayloadHeader(allocator, &header);
+        return header;
+    }
+
     /// Converts ExecutionPayload to ExecutionPayloadHeader.
-    /// The caller provides the output union pointing at the destination storage.
-    /// The caller owns the resulting extra_data and must free it via `deinit` when appropriate.
-    pub fn toPayloadHeader(self: *const ExecutionPayload, allocator: Allocator, out: *ExecutionPayloadHeader) !void {
+    pub fn createPayloadHeader(self: *const ExecutionPayload, allocator: Allocator, out: *ExecutionPayloadHeader) !void {
         switch (self.*) {
             .bellatrix => |payload| {
-                const header = @constCast(out.bellatrix);
+                const header = try allocator.create(types.bellatrix.ExecutionPayloadHeader.Type);
+                errdefer allocator.destroy(header);
+                out.* = .{ .bellatrix = header };
                 try toExecutionPayloadHeader(allocator, types.bellatrix.ExecutionPayloadHeader.Type, payload, header);
-                errdefer types.bellatrix.ExecutionPayloadHeader.deinit(allocator, @constCast(header));
+                errdefer out.deinit(allocator);
                 try types.bellatrix.Transactions.hashTreeRoot(allocator, &payload.transactions, &header.transactions_root);
             },
             .capella => |payload| {
-                const header = @constCast(out.capella);
+                const header = try allocator.create(types.capella.ExecutionPayloadHeader.Type);
+                errdefer allocator.destroy(header);
+                out.* = .{ .capella = header };
                 try toExecutionPayloadHeader(allocator, types.capella.ExecutionPayloadHeader.Type, payload, header);
-                errdefer types.capella.ExecutionPayloadHeader.deinit(allocator, @constCast(header));
+                errdefer out.deinit(allocator);
                 try types.bellatrix.Transactions.hashTreeRoot(allocator, &payload.transactions, &header.transactions_root);
                 try types.capella.Withdrawals.hashTreeRoot(allocator, &payload.withdrawals, &header.withdrawals_root);
             },
             .deneb => |payload| {
-                const header = @constCast(out.deneb);
+                const header = try allocator.create(types.deneb.ExecutionPayloadHeader.Type);
+                errdefer allocator.destroy(header);
+                out.* = .{ .deneb = header };
                 try toExecutionPayloadHeader(allocator, types.deneb.ExecutionPayloadHeader.Type, payload, header);
-                errdefer types.deneb.ExecutionPayloadHeader.deinit(allocator, @constCast(header));
+                errdefer out.deinit(allocator);
                 try types.bellatrix.Transactions.hashTreeRoot(allocator, &payload.transactions, &header.transactions_root);
                 try types.capella.Withdrawals.hashTreeRoot(allocator, &payload.withdrawals, &header.withdrawals_root);
                 header.blob_gas_used = payload.blob_gas_used;
                 header.excess_blob_gas = payload.excess_blob_gas;
             },
             .electra => |payload| {
-                const header = @constCast(out.electra);
+                const header = try allocator.create(types.electra.ExecutionPayloadHeader.Type);
+                errdefer allocator.destroy(header);
+                out.* = .{ .electra = header };
                 try toExecutionPayloadHeader(allocator, types.electra.ExecutionPayloadHeader.Type, payload, header);
-                errdefer types.electra.ExecutionPayloadHeader.deinit(allocator, @constCast(header));
+                errdefer out.deinit(allocator);
                 try types.bellatrix.Transactions.hashTreeRoot(allocator, &payload.transactions, &header.transactions_root);
                 try types.capella.Withdrawals.hashTreeRoot(allocator, &payload.withdrawals, &header.withdrawals_root);
                 header.blob_gas_used = payload.blob_gas_used;
@@ -283,16 +296,28 @@ pub const ExecutionPayloadHeader = union(enum) {
     pub fn clone(self: *const ExecutionPayloadHeader, allocator: Allocator, out: *ExecutionPayloadHeader) !void {
         switch (self.*) {
             .bellatrix => |header| {
-                try types.bellatrix.ExecutionPayloadHeader.clone(allocator, header, @constCast(out.bellatrix));
+                const cloned_header = try allocator.create(types.bellatrix.ExecutionPayloadHeader.Type);
+                errdefer allocator.destroy(cloned_header);
+                out.* = .{ .bellatrix = cloned_header };
+                try types.bellatrix.ExecutionPayloadHeader.clone(allocator, header, cloned_header);
             },
             .capella => |header| {
-                try types.capella.ExecutionPayloadHeader.clone(allocator, header, @constCast(out.capella));
+                const cloned_header = try allocator.create(types.capella.ExecutionPayloadHeader.Type);
+                errdefer allocator.destroy(cloned_header);
+                out.* = .{ .capella = cloned_header };
+                try types.capella.ExecutionPayloadHeader.clone(allocator, header, cloned_header);
             },
             .deneb => |header| {
-                try types.deneb.ExecutionPayloadHeader.clone(allocator, header, @constCast(out.deneb));
+                const cloned_header = try allocator.create(types.deneb.ExecutionPayloadHeader.Type);
+                errdefer allocator.destroy(cloned_header);
+                out.* = .{ .deneb = cloned_header };
+                try types.deneb.ExecutionPayloadHeader.clone(allocator, header, cloned_header);
             },
             .electra => |header| {
-                try types.electra.ExecutionPayloadHeader.clone(allocator, header, @constCast(out.electra));
+                const cloned_header = try allocator.create(types.electra.ExecutionPayloadHeader.Type);
+                errdefer allocator.destroy(cloned_header);
+                out.* = .{ .electra = cloned_header };
+                try types.electra.ExecutionPayloadHeader.clone(allocator, header, cloned_header);
             },
         }
     }
@@ -303,6 +328,15 @@ pub const ExecutionPayloadHeader = union(enum) {
             .capella => |header| types.capella.ExecutionPayloadHeader.deinit(allocator, @constCast(header)),
             .deneb => |header| types.deneb.ExecutionPayloadHeader.deinit(allocator, @constCast(header)),
             .electra => |header| types.electra.ExecutionPayloadHeader.deinit(allocator, @constCast(header)),
+        }
+    }
+
+    pub fn destroy(self: *const ExecutionPayloadHeader, allocator: Allocator) void {
+        switch (self.*) {
+            .bellatrix => |header| allocator.destroy(@constCast(header)),
+            .capella => |header| allocator.destroy(@constCast(header)),
+            .deneb => |header| allocator.destroy(@constCast(header)),
+            .electra => |header| allocator.destroy(@constCast(header)),
         }
     }
 };
@@ -354,8 +388,14 @@ test "electra - sanity" {
     const electra_payload: ExecutionPayload = .{ .electra = &payload };
     var header_out = types.electra.ExecutionPayloadHeader.default_value;
     var header: ExecutionPayloadHeader = .{ .electra = &header_out };
-    try electra_payload.toPayloadHeader(std.testing.allocator, &header);
+    try electra_payload.createPayloadHeader(std.testing.allocator, &header);
+    defer std.testing.allocator.destroy(header.electra);
     defer header.deinit(std.testing.allocator);
     _ = header.getGasUsed();
     try std.testing.expect(header.electra.block_number == payload.block_number);
+
+    var owned_header = try electra_payload.toPayloadHeader(std.testing.allocator);
+    defer owned_header.destroy(std.testing.allocator);
+    defer owned_header.deinit(std.testing.allocator);
+    try std.testing.expect(owned_header.electra.block_number == payload.block_number);
 }

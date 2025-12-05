@@ -577,7 +577,12 @@ pub const BeaconStateAllForks = union(enum) {
         };
     }
 
-    pub fn setLatestExecutionPayloadHeader(self: *BeaconStateAllForks, header: ExecutionPayloadHeader) void {
+    // `header` ownership is transferred to BeaconState and will be deinit when state is deinit
+    // caller must guarantee that `header` is properly initialized and allocated/cloned with `allocator` and no longer used after this call
+    pub fn setLatestExecutionPayloadHeader(self: *BeaconStateAllForks, allocator: Allocator, header: ExecutionPayloadHeader) void {
+        const current_header = self.latestExecutionPayloadHeader();
+        current_header.deinit(allocator);
+
         switch (self.*) {
             .bellatrix => |state| state.latest_execution_payload_header = header.bellatrix.*,
             .capella => |state| state.latest_execution_payload_header = header.capella.*,
