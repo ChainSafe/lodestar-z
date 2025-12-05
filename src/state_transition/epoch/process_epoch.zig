@@ -89,10 +89,10 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
     }
 
     if (state.isFulu()) {
-        // timer = metrics.startTimerEpochTransitionStep(.{ .step = .process_proposer_lookahead });
+        timer = metrics.startTimerEpochTransitionStep(.{ .step = .process_proposer_lookahead });
         const epoch_cache = cached_state.getEpochCache();
         const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
         try processProposerLookahead(allocator, state, &effective_balance_increments);
-        // _ = try timer.stopAndObserve();
+        _ = try timer.stopAndObserve();
     }
 }
