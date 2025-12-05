@@ -72,8 +72,7 @@ pub fn processEffectiveBalanceUpdates(cached_state: *CachedBeaconStateAllForks, 
                         epoch_cache.previous_target_unslashed_balance_increments += new_effective_balance_increment;
                         epoch_cache.previous_target_unslashed_balance_increments -= effective_balance_increment;
                     }
-
-                    // currentTargetUnslashedBalanceIncrements is transfered to previousTargetUnslashedBalanceIncrements in afterEpochTransitionCache
+                    // currentTargetUnslashedBalanceIncrements is transferred to previousTargetUnslashedBalanceIncrements in afterEpochTransitionCache
                     // at epoch transition of next epoch (in EpochTransitionCache), prevTargetUnslStake is calculated based on newEffectiveBalanceIncrement
                     if (current_epoch_participation[i] & TIMELY_TARGET == TIMELY_TARGET) {
                         // Use += then -= to avoid underflow when new_effective_balance_increment < effective_balance_increment
