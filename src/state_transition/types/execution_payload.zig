@@ -25,20 +25,20 @@ pub const ExecutionPayload = union(enum) {
             .bellatrix => |payload| {
                 const header = @constCast(out.bellatrix);
                 try toExecutionPayloadHeader(allocator, types.bellatrix.ExecutionPayloadHeader.Type, payload, header);
-                errdefer header.extra_data.deinit(allocator);
+                errdefer types.bellatrix.ExecutionPayloadHeader.deinit(allocator, @constCast(header));
                 try types.bellatrix.Transactions.hashTreeRoot(allocator, &payload.transactions, &header.transactions_root);
             },
             .capella => |payload| {
                 const header = @constCast(out.capella);
                 try toExecutionPayloadHeader(allocator, types.capella.ExecutionPayloadHeader.Type, payload, header);
-                errdefer header.extra_data.deinit(allocator);
+                errdefer types.capella.ExecutionPayloadHeader.deinit(allocator, @constCast(header));
                 try types.bellatrix.Transactions.hashTreeRoot(allocator, &payload.transactions, &header.transactions_root);
                 try types.capella.Withdrawals.hashTreeRoot(allocator, &payload.withdrawals, &header.withdrawals_root);
             },
             .deneb => |payload| {
                 const header = @constCast(out.deneb);
                 try toExecutionPayloadHeader(allocator, types.deneb.ExecutionPayloadHeader.Type, payload, header);
-                errdefer header.extra_data.deinit(allocator);
+                errdefer types.deneb.ExecutionPayloadHeader.deinit(allocator, @constCast(header));
                 try types.bellatrix.Transactions.hashTreeRoot(allocator, &payload.transactions, &header.transactions_root);
                 try types.capella.Withdrawals.hashTreeRoot(allocator, &payload.withdrawals, &header.withdrawals_root);
                 header.blob_gas_used = payload.blob_gas_used;
@@ -47,7 +47,7 @@ pub const ExecutionPayload = union(enum) {
             .electra => |payload| {
                 const header = @constCast(out.electra);
                 try toExecutionPayloadHeader(allocator, types.electra.ExecutionPayloadHeader.Type, payload, header);
-                errdefer header.extra_data.deinit(allocator);
+                errdefer types.electra.ExecutionPayloadHeader.deinit(allocator, @constCast(header));
                 try types.bellatrix.Transactions.hashTreeRoot(allocator, &payload.transactions, &header.transactions_root);
                 try types.capella.Withdrawals.hashTreeRoot(allocator, &payload.withdrawals, &header.withdrawals_root);
                 header.blob_gas_used = payload.blob_gas_used;
@@ -299,10 +299,10 @@ pub const ExecutionPayloadHeader = union(enum) {
 
     pub fn deinit(self: *const ExecutionPayloadHeader, allocator: Allocator) void {
         switch (self.*) {
-            .bellatrix => |header| @constCast(header).extra_data.deinit(allocator),
-            .capella => |header| @constCast(header).extra_data.deinit(allocator),
-            .deneb => |header| @constCast(header).extra_data.deinit(allocator),
-            .electra => |header| @constCast(header).extra_data.deinit(allocator),
+            .bellatrix => |header| types.bellatrix.ExecutionPayloadHeader.deinit(allocator, @constCast(header)),
+            .capella => |header| types.capella.ExecutionPayloadHeader.deinit(allocator, @constCast(header)),
+            .deneb => |header| types.deneb.ExecutionPayloadHeader.deinit(allocator, @constCast(header)),
+            .electra => |header| types.electra.ExecutionPayloadHeader.deinit(allocator, @constCast(header)),
         }
     }
 };

@@ -78,7 +78,7 @@ pub fn upgradeStateToCapella(allocator: Allocator, cached_state: *CachedBeaconSt
     // new in capella
     capella_latest_execution_payload_header.withdrawals_root = [_]u8{0} ** 32;
 
-    state.setLatestExecutionPayloadHeader(allocator, .{
+    state.setLatestExecutionPayloadHeader(.{
         .capella = &capella_latest_execution_payload_header,
     });
 }

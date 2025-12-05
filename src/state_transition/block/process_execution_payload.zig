@@ -96,8 +96,12 @@ pub fn processExecutionPayload(
         return error.InvalidExecutionPayload;
     }
 
+    // `deinit` old latestExecutionPayloadHeader to avoid memory leak(e.g. extra_data)
     var payload_header = state.latestExecutionPayloadHeader();
     payload_header.deinit(allocator);
+
+    // ownership is transferred to BeaconState and will be deinit when state is deinit
+    // `toPayloadHeader` and `clone` do deep copy of dynamically allocated data(e.g. extra_data)
     switch (body) {
         .regular => |b| try b.executionPayload().toPayloadHeader(allocator, &payload_header),
         .blinded => |b| try b.executionPayloadHeader().clone(allocator, &payload_header),

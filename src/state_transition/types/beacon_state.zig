@@ -577,10 +577,7 @@ pub const BeaconStateAllForks = union(enum) {
         };
     }
 
-    pub fn setLatestExecutionPayloadHeader(self: *BeaconStateAllForks, _: std.mem.Allocator, header: ExecutionPayloadHeader) void {
-        // const current_header = self.latestExecutionPayloadHeader();
-        // current_header.deinit(allocator);
-
+    pub fn setLatestExecutionPayloadHeader(self: *BeaconStateAllForks, header: ExecutionPayloadHeader) void {
         switch (self.*) {
             .bellatrix => |state| state.latest_execution_payload_header = header.bellatrix.*,
             .capella => |state| state.latest_execution_payload_header = header.capella.*,
