@@ -34,11 +34,6 @@
                 .default = "mainnet",
                 .type = "string",
             },
-            .leak_detection_level = .{
-                .default = "disabled",
-                .type = "string",
-                .description = "Leak detection level: disabled, simple, advanced, paranoid",
-            },
         },
         .spec_test_options = .{
             .spec_test_url = .{
