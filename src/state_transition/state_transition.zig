@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
+const metrics = @import("metrics.zig");
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -69,11 +70,13 @@ pub fn processSlotsWithTransientCache(
         try processSlot(allocator, post_state);
 
         if ((state.slot() + 1) % preset.SLOTS_PER_EPOCH == 0) {
-            // TODO(bing): metrics
-            // const epochTransitionTimer = metrics?.epochTransitionTime.startTimer();
+            var epoch_transition_timer = metrics.startTimer(&metrics.state_transition.epoch_transition);
+            defer _ = epoch_transition_timer.stopAndObserve();
 
-            // TODO(bing): metrics: time beforeProcessEpoch
+            var before_process_epoch_timer = metrics.startTimerEpochTransitionStep(.{ .step = .before_process_epoch });
             var epoch_transition_cache = try EpochTransitionCache.init(allocator, post_state);
+            _ = try before_process_epoch_timer.stopAndObserve();
+
             defer {
                 epoch_transition_cache.deinit();
                 allocator.destroy(epoch_transition_cache);
@@ -83,8 +86,9 @@ pub fn processSlotsWithTransientCache(
 
             state.slotPtr().* += 1;
 
+            var after_process_epoch_timer = metrics.startTimerEpochTransitionStep(.{ .step = .after_process_epoch });
             try post_state.epoch_cache_ref.get().afterProcessEpoch(post_state, epoch_transition_cache);
-            // post_state.commit
+            _ = try after_process_epoch_timer.stopAndObserve();
 
             const state_epoch = computeEpochAtSlot(state.slot());
 
@@ -110,8 +114,6 @@ pub fn processSlotsWithTransientCache(
         } else {
             state.slotPtr().* += 1;
         }
-
-        //epochTransitionTimer
     }
 }
 
@@ -153,9 +155,11 @@ pub fn stateTransition(
         return error.InvalidBlockSignature;
     }
 
+    try metrics.initializeMetrics(allocator, .{});
+    defer metrics.deinitMetrics(&metrics.state_transition);
+
     //  // Note: time only on success
-    //  const processBlockTimer = metrics?.processBlockTime.startTimer();
-    //
+    var process_block_timer = metrics.startTimer(&metrics.state_transition.process_block);
     try processBlock(
         allocator,
         post_state,
@@ -166,6 +170,7 @@ pub fn stateTransition(
         },
         .{ .verify_signature = opts.verify_signatures },
     );
+    _ = process_block_timer.stopAndObserve();
     //
     // TODO(bing): commit
     //  const processBlockCommitTimer = metrics?.processBlockCommitTime.startTimer();
@@ -181,12 +186,13 @@ pub fn stateTransition(
 
     // Verify state root
     if (opts.verify_state_root) {
+        var hash_tree_root_timer = metrics.startTimerLabeled(
+            &metrics.state_transition.state_hash_tree_root,
+            metrics.HashTreeRootLabel{ .source = .state_transition },
+        );
         var post_state_root: [32]u8 = undefined;
-        //    const hashTreeRootTimer = metrics?.stateHashTreeRootTime.startTimer({
-        //      source: StateHashTreeRootSource.stateTransition,
-        //    });
         try post_state.state.hashTreeRoot(allocator, &post_state_root);
-        //    hashTreeRootTimer?.();
+        _ = try hash_tree_root_timer.stopAndObserve();
 
         const block_state_root = switch (block) {
             .regular => |b| b.stateRoot(),
