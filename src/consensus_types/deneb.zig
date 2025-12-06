@@ -20,6 +20,7 @@ pub const HistoricalBatch = phase0.HistoricalBatch;
 pub const DepositMessage = phase0.DepositMessage;
 pub const DepositData = phase0.DepositData;
 pub const BeaconBlockHeader = phase0.BeaconBlockHeader;
+pub const SignedBeaconBlockHeader = phase0.SignedBeaconBlockHeader;
 pub const SigningData = phase0.SigningData;
 pub const ProposerSlashing = phase0.ProposerSlashing;
 pub const AttesterSlashing = phase0.AttesterSlashing;
@@ -37,7 +38,6 @@ pub const AttesterSlashings = phase0.AttesterSlashings;
 pub const Attestations = phase0.Attestations;
 pub const Deposits = phase0.Deposits;
 pub const VoluntaryExits = phase0.VoluntaryExits;
-pub const SignedBeaconBlockHeader = phase0.SignedBeaconBlockHeader;
 
 pub const SyncAggregate = altair.SyncAggregate;
 pub const SyncCommittee = altair.SyncCommittee;
