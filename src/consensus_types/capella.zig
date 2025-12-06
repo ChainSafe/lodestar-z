@@ -36,6 +36,7 @@ pub const AttesterSlashings = phase0.AttesterSlashings;
 pub const Attestations = phase0.Attestations;
 pub const Deposits = phase0.Deposits;
 pub const VoluntaryExits = phase0.VoluntaryExits;
+pub const SignedBeaconBlockHeader = phase0.SignedBeaconBlockHeader;
 
 pub const SyncAggregate = altair.SyncAggregate;
 pub const SyncCommittee = altair.SyncCommittee;
@@ -195,11 +196,6 @@ pub const BlindedBeaconBlock = ssz.VariableContainerType(struct {
 
 pub const SignedBlindedBeaconBlock = ssz.VariableContainerType(struct {
     message: BlindedBeaconBlock,
-    signature: p.BLSSignature,
-});
-
-pub const SignedBeaconBlockHeader = ssz.FixedContainerType(struct {
-    message: BeaconBlockHeader,
     signature: p.BLSSignature,
 });
 
