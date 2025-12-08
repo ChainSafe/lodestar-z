@@ -82,8 +82,13 @@ pub fn FixedContainerType(comptime ST: type) type {
         /// out is a pointer to any types that contains all fields of Type.
         /// Caller owns the memory.
         pub fn clone(value: *const Type, out: anytype) !void {
-            inline for (fields) |field| {
-                @field(out, field.name) = @field(value, field.name);
+            const OutType = @TypeOf(out.*);
+            if (OutType == Type) {
+                out.* = value.*;
+            } else {
+                inline for (fields) |field| {
+                    @field(out, field.name) = @field(value, field.name);
+                }
             }
         }
 

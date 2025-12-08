@@ -11,6 +11,10 @@ const merkleize = @import("hashing").merkleize;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
 const ArrayTreeView = @import("../tree_view.zig").ArrayTreeView;
+const FixedContainerType = @import("container.zig").FixedContainerType;
+const VariableContainerType = @import("container.zig").VariableContainerType;
+const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
+const FixedListType = @import("list.zig").FixedListType;
 
 pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
     comptime {
@@ -54,8 +58,15 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
             try merkleize(@ptrCast(&chunks), chunk_depth, out);
         }
 
-        pub fn clone(value: *const Type, out: *Type) !void {
-            out.* = value.*;
+        pub fn clone(value: *const Type, out: anytype) !void {
+            const OutType = @TypeOf(out.*);
+            if (OutType == Type) {
+                out.* = value.*;
+            } else {
+                inline for (value, 0..) |*element, i| {
+                    try Element.clone(element, &out[i]);
+                }
+            }
         }
 
         pub fn serializeIntoBytes(value: *const Type, out: []u8) usize {
@@ -228,8 +239,10 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
             try merkleize(@ptrCast(&chunks), chunk_depth, out);
         }
 
-        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
-            for (0..length) |i| try Element.clone(allocator, &value[i], &out[i]);
+        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: anytype) !void {
+            for (value, 0..) |*element, i| {
+                try Element.clone(allocator, element, &out[i]);
+            }
         }
 
         pub fn serializedSize(value: *const Type) usize {
@@ -363,29 +376,60 @@ test "vector - sanity" {
     try Bytes32.deserializeFromBytes(&b0_buf, &b0);
 }
 
-test "clone" {
+test "clone FixedVectorType" {
+    const Checkpoint = FixedContainerType(struct {
+        epoch: UintType(8),
+        root: ByteVectorType(32),
+    });
+    const CheckpointVector = FixedVectorType(Checkpoint, 4);
+    var vector: CheckpointVector.Type = CheckpointVector.default_value;
+    vector[0].epoch = 42;
+
+    var cloned: CheckpointVector.Type = undefined;
+    try CheckpointVector.clone(&vector, &cloned);
+    try std.testing.expect(&vector != &cloned);
+    try std.testing.expect(CheckpointVector.equals(&vector, &cloned));
+
+    // clone into another type
+    const CheckpointHex = FixedContainerType(struct {
+        epoch: UintType(8),
+        root: ByteVectorType(32),
+        root_hex: ByteVectorType(64),
+    });
+    const CheckpointHexVector = FixedVectorType(CheckpointHex, 4);
+    var cloned2: CheckpointHexVector.Type = undefined;
+    try CheckpointVector.clone(&vector, &cloned2);
+    try std.testing.expect(cloned2[0].epoch == 42);
+}
+
+test "clone VariableVectorType" {
     const allocator = std.testing.allocator;
-    const BoolVectorFixed = FixedVectorType(BoolType(), 8);
-    var bvf: BoolVectorFixed.Type = BoolVectorFixed.default_value;
+    const FieldA = FixedListType(UintType(8), 32);
+    const Foo = VariableContainerType(struct {
+        a: FieldA,
+    });
+    const FooVector = VariableVectorType(Foo, 4);
+    var foo_vector: FooVector.Type = FooVector.default_value;
+    defer FooVector.deinit(allocator, &foo_vector);
+    try foo_vector[0].a.append(allocator, 100);
 
-    var cloned: BoolVectorFixed.Type = undefined;
-    try BoolVectorFixed.clone(&bvf, &cloned);
-    try expectEqualRoots(BoolVectorFixed, bvf, cloned);
-    try expectEqualSerialized(BoolVectorFixed, bvf, cloned);
+    var cloned: FooVector.Type = undefined;
+    defer FooVector.deinit(allocator, &cloned);
+    try FooVector.clone(allocator, &foo_vector, &cloned);
+    try std.testing.expect(&foo_vector != &cloned);
+    try std.testing.expect(FooVector.equals(&foo_vector, &cloned));
+    try std.testing.expect(cloned[0].a.items.len == 1);
+    try std.testing.expect(cloned[0].a.items[0] == 100);
 
-    try std.testing.expect(&bvf != &cloned);
-    try std.testing.expect(std.mem.eql(bool, bvf[0..], cloned[0..]));
-
-    const limit = 16;
-    const BitList = BitListType(limit);
-    const bl = BitList.default_value;
-    const BoolVectorVariable = VariableVectorType(BitList, 8);
-    var bvv: BoolVectorVariable.Type = BoolVectorVariable.default_value;
-    bvv[0] = bl;
-
-    var cloned_v: BoolVectorVariable.Type = undefined;
-    try BoolVectorVariable.clone(allocator, &bvv, &cloned_v);
-    try std.testing.expect(&bvv != &cloned_v);
-    try expectEqualRootsAlloc(BoolVectorVariable, allocator, bvv, cloned_v);
-    try expectEqualSerializedAlloc(BoolVectorVariable, allocator, bvv, cloned_v);
+    // clone into another type
+    const Bar = VariableContainerType(struct {
+        a: FieldA,
+        b: UintType(8),
+    });
+    const BarVector = VariableVectorType(Bar, 4);
+    var cloned2: BarVector.Type = undefined;
+    defer BarVector.deinit(allocator, &cloned2);
+    try FooVector.clone(allocator, &foo_vector, &cloned2);
+    try std.testing.expect(cloned2[0].a.items.len == 1);
+    try std.testing.expect(cloned2[0].a.items[0] == 100);
 }
