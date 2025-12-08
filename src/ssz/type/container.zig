@@ -658,11 +658,11 @@ test "ContainerType - sanity" {
 
 test "clone FixedContainerType" {
     const Checkpoint = FixedContainerType(struct {
-        slot: UintType(8),
+        epoch: UintType(8),
         root: ByteVectorType(32),
     });
     const CheckpointHex = FixedContainerType(struct {
-        slot: UintType(8),
+        epoch: UintType(8),
         root: ByteVectorType(32),
         root_hex: ByteVectorType(64),
     });
@@ -678,7 +678,7 @@ test "clone FixedContainerType" {
     var cloned2: CheckpointHex.Type = undefined;
     cloned2.root_hex = ByteVectorType(64).default_value;
     try Checkpoint.clone(&c, &cloned2);
-    try std.testing.expect(cloned2.slot == c.slot);
+    try std.testing.expect(cloned2.epoch == c.epoch);
     try std.testing.expectEqualSlices(u8, &cloned2.root, &c.root);
     try std.testing.expectEqualSlices(u8, &cloned2.root_hex, &ByteVectorType(64).default_value);
 }
