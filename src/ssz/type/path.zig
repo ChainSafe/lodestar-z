@@ -19,7 +19,7 @@ pub const PathItem = struct {
 
 pub fn getPathItem(comptime ST: type, comptime path_str_item: []const u8) PathItem {
     switch (ST.kind) {
-        .uint, .bool => @compileError("Invalid path"),
+        .uint, .bool, .compatible_union => @compileError("Invalid path"),
         .vector => {
             const element_index = std.fmt.parseInt(usize, path_str_item, 10) catch @compileError("Invalid index");
             if (element_index >= ST.length) {
@@ -59,7 +59,27 @@ pub fn getPathItem(comptime ST: type, comptime path_str_item: []const u8) PathIt
                 },
             };
         },
-        .container => {
+        .progressive_list, .progressive_bit_list => {
+            if (std.mem.eql(u8, path_str_item, "length")) {
+                return .{
+                    .ST = ST,
+                    .item_type = .length,
+                };
+            }
+
+            const element_index = std.fmt.parseInt(usize, path_str_item, 10) catch @compileError("Invalid index");
+
+            return .{
+                .ST = ST,
+                .item_type = .{
+                    .child = .{
+                        .index = element_index,
+                        .ST = ST.Element,
+                    },
+                },
+            };
+        },
+        .container, .progressive_container => {
             const field_index = ST.getFieldIndex(path_str_item);
             return .{
                 .ST = ST,

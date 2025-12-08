@@ -253,13 +253,13 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
                     nodes[field_idx] = try field.type.tree.fromValue(pool, field_value);
                 }
 
-                const content_tree = try progressive.fillWithContents(allocator, pool, &nodes, false);
+                const content_tree = try progressive.fillWithContents(allocator, pool, &nodes);
 
                 // Mix in active_fields
                 const active_fields_packed = comptime packActiveFields(active_fields);
-                const active_fields_node = try pool.createLeaf(&active_fields_packed, false);
+                const active_fields_node = try pool.createLeaf(&active_fields_packed);
 
-                return try pool.createBranch(content_tree, active_fields_node, false);
+                return try pool.createBranch(content_tree, active_fields_node);
             }
         };
 
@@ -691,13 +691,13 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                     }
                 }
 
-                const content_tree = try progressive.fillWithContents(allocator, pool, nodes, false);
+                const content_tree = try progressive.fillWithContents(allocator, pool, nodes);
 
                 // Mix in active_fields
                 const active_fields_packed = comptime packActiveFields(active_fields);
-                const active_fields_node = try pool.createLeaf(&active_fields_packed, false);
+                const active_fields_node = try pool.createLeaf(&active_fields_packed);
 
-                return try pool.createBranch(content_tree, active_fields_node, false);
+                return try pool.createBranch(content_tree, active_fields_node);
             }
         };
 

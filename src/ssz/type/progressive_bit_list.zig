@@ -309,8 +309,7 @@ pub fn ProgressiveBitListType() type {
                 if (chunk_count == 0) {
                     return try pool.createBranch(
                         @enumFromInt(0),
-                        try pool.createLeafFromUint(0, false),
-                        false,
+                        try pool.createLeafFromUint(0),
                     );
                 }
                 const byte_length = (value.bit_len + 7) / 8;
@@ -330,15 +329,14 @@ pub fn ProgressiveBitListType() type {
                         @memcpy(leaf_buf[0..bytes_to_copy], value.data.items[start_idx..][0..bytes_to_copy]);
                     }
 
-                    nodes[i] = try pool.createLeaf(&leaf_buf, false);
+                    nodes[i] = try pool.createLeaf(&leaf_buf);
                 }
 
-                const contents_tree = try progressive.fillWithContents(allocator, pool, nodes, false);
-                const length_leaf = try pool.createLeafFromUint(value.bit_len, false);
+                const contents_tree = try progressive.fillWithContents(allocator, pool, nodes);
+                const length_leaf = try pool.createLeafFromUint(value.bit_len);
                 return try pool.createBranch(
                     contents_tree,
                     length_leaf,
-                    false,
                 );
             }
         };

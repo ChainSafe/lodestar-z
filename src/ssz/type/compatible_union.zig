@@ -438,9 +438,9 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
 
                         // Mix in selector: create branch with data on left, selector on right
                         const selector_bytes = selectorPadded(value.selector);
-                        const selector_node = try pool.createLeaf(&selector_bytes, false);
+                        const selector_node = try pool.createLeaf(&selector_bytes);
 
-                        return try pool.createBranch(data_tree, selector_node, false);
+                        return try pool.createBranch(data_tree, selector_node);
                     }
                 }
 

@@ -218,8 +218,7 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 if (chunk_count == 0) {
                     return try pool.createBranch(
                         @enumFromInt(0),
-                        try pool.createLeafFromUint(0, false),
-                        false,
+                        try pool.createLeafFromUint(0),
                     );
                 }
 
@@ -242,7 +241,7 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                         }
                         next += to_write;
 
-                        nodes[i] = try pool.createLeaf(&leaf_buf, false);
+                        nodes[i] = try pool.createLeaf(&leaf_buf);
                     }
                 } else {
                     for (0..chunk_count) |i| {
@@ -250,12 +249,11 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                     }
                 }
 
-                const contents_tree = try progressive.fillWithContents(allocator, pool, nodes, false);
-                const length_leaf = try pool.createLeafFromUint(len, false);
+                const contents_tree = try progressive.fillWithContents(allocator, pool, nodes);
+                const length_leaf = try pool.createLeafFromUint(len);
                 const result = try pool.createBranch(
                     contents_tree,
                     length_leaf,
-                    false,
                 );
                 return result;
             }
@@ -452,8 +450,7 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
                 if (chunk_count == 0) {
                     return try pool.createBranch(
                         @enumFromInt(0),
-                        try pool.createLeafFromUint(0, false),
-                        false,
+                        try pool.createLeafFromUint(0),
                     );
                 }
 
@@ -464,9 +461,8 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
                 }
 
                 return try pool.createBranch(
-                    try progressive.fillWithContents(allocator, pool, nodes, false),
-                    try pool.createLeafFromUint(len, false),
-                    false,
+                    try progressive.fillWithContents(allocator, pool, nodes),
+                    try pool.createLeafFromUint(len),
                 );
             }
         };

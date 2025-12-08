@@ -139,7 +139,7 @@ pub fn getNodes(pool: *Node.Pool, root: Node.Id, out: []Node.Id) !void {
     }
 }
 
-pub fn fillWithContents(allocator: std.mem.Allocator, pool: *Node.Pool, nodes: []Node.Id, should_ref: bool) !Node.Id {
+pub fn fillWithContents(allocator: std.mem.Allocator, pool: *Node.Pool, nodes: []Node.Id) !Node.Id {
     const subtree_count = subtreeIndex(nodes.len);
     var n: Node.Id = @enumFromInt(0);
 
@@ -157,8 +157,8 @@ pub fn fillWithContents(allocator: std.mem.Allocator, pool: *Node.Pool, nodes: [
         const l = subtree_starts.items[subtree_i];
         const subtree_length = @min(subtreeLength(subtree_i), nodes.len - l);
 
-        const subtree_root = try Node.fillWithContents(pool, nodes[l .. l + subtree_length], subtree_depth, false);
-        n = try pool.createBranch(n, subtree_root, should_ref);
+        const subtree_root = try Node.fillWithContents(pool, nodes[l .. l + subtree_length], subtree_depth);
+        n = try pool.createBranch(n, subtree_root);
     }
 
     return n;
