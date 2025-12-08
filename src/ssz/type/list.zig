@@ -252,7 +252,6 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                     return try pool.createBranch(
                         @enumFromInt(chunk_depth),
                         @enumFromInt(0),
-                        false,
                     );
                 }
 
@@ -277,7 +276,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                         }
                         next += to_write;
 
-                        nodes[i] = try pool.createLeaf(&leaf_buf, false);
+                        nodes[i] = try pool.createLeaf(&leaf_buf);
                     }
                 } else {
                     for (0..chunk_count) |i| {
@@ -289,9 +288,8 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                     }
                 }
                 return try pool.createBranch(
-                    try Node.fillWithContents(pool, nodes, chunk_depth, false),
-                    try pool.createLeafFromUint(len, false),
-                    false,
+                    try Node.fillWithContents(pool, nodes, chunk_depth),
+                    try pool.createLeafFromUint(len),
                 );
             }
         };
@@ -515,7 +513,6 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                     return try pool.createBranch(
                         @enumFromInt(chunk_depth),
                         @enumFromInt(0),
-                        false,
                     );
                 }
 
@@ -525,9 +522,8 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                     nodes[i] = try Element.tree.fromValue(allocator, pool, &value.items[i]);
                 }
                 return try pool.createBranch(
-                    try Node.fillWithContents(pool, nodes, chunk_depth, false),
-                    try pool.createLeafFromUint(len, false),
-                    false,
+                    try Node.fillWithContents(pool, nodes, chunk_depth),
+                    try pool.createLeafFromUint(len),
                 );
             }
         };

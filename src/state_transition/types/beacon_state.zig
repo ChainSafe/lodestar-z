@@ -10,6 +10,7 @@ const BeaconStateBellatrix = types.bellatrix.BeaconState.Type;
 const BeaconStateCapella = types.capella.BeaconState.Type;
 const BeaconStateDeneb = types.deneb.BeaconState.Type;
 const BeaconStateElectra = types.electra.BeaconState.Type;
+const BeaconStateFulu = types.fulu.BeaconState.Type;
 const ExecutionPayloadHeader = @import("./execution_payload.zig").ExecutionPayloadHeader;
 const Root = types.primitive.Root.Type;
 const Fork = types.phase0.Fork.Type;
@@ -29,7 +30,9 @@ const PendingConsolidation = types.electra.PendingConsolidation.Type;
 const Bytes32 = types.primitive.Bytes32.Type;
 const Gwei = types.primitive.Gwei.Type;
 const Epoch = types.primitive.Epoch.Type;
+const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const ForkSeq = @import("config").ForkSeq;
+const isFixedType = @import("ssz").isFixedType;
 
 /// wrapper for all BeaconState types across forks so that we don't have to do switch/case for all methods
 /// right now this works with regular types
@@ -41,6 +44,7 @@ pub const BeaconStateAllForks = union(enum) {
     capella: *BeaconStateCapella,
     deneb: *BeaconStateDeneb,
     electra: *BeaconStateElectra,
+    fulu: *BeaconStateFulu,
 
     pub fn init(f: ForkSeq, state_any: anytype) !@This() {
         var state: @This() = undefined;
@@ -75,6 +79,11 @@ pub const BeaconStateAllForks = union(enum) {
                 const T = types.electra.BeaconState;
                 const src: *T.Type = @ptrCast(@alignCast(state_any));
                 state = .{ .electra = src };
+            },
+            .fulu => {
+                const T = types.fulu.BeaconState;
+                const src: *T.Type = @ptrCast(@alignCast(state_any));
+                state = .{ .fulu = src };
             },
         }
 
@@ -136,6 +145,12 @@ pub const BeaconStateAllForks = union(enum) {
                 out.* = .{ .electra = cloned_state };
                 try types.electra.BeaconState.clone(allocator, state, cloned_state);
             },
+            .fulu => |state| {
+                const cloned_state = try allocator.create(BeaconStateFulu);
+                errdefer allocator.destroy(cloned_state);
+                out.* = .{ .fulu = cloned_state };
+                try types.fulu.BeaconState.clone(allocator, state, cloned_state);
+            },
         }
 
         return out;
@@ -149,6 +164,7 @@ pub const BeaconStateAllForks = union(enum) {
             .capella => |state| try types.capella.BeaconState.hashTreeRoot(allocator, state, out),
             .deneb => |state| try types.deneb.BeaconState.hashTreeRoot(allocator, state, out),
             .electra => |state| try types.electra.BeaconState.hashTreeRoot(allocator, state, out),
+            .fulu => |state| try types.fulu.BeaconState.hashTreeRoot(allocator, state, out),
         };
     }
 
@@ -178,6 +194,10 @@ pub const BeaconStateAllForks = union(enum) {
                 types.electra.BeaconState.deinit(allocator, state);
                 allocator.destroy(state);
             },
+            .fulu => |state| {
+                types.fulu.BeaconState.deinit(allocator, state);
+                allocator.destroy(state);
+            },
         }
     }
 
@@ -189,6 +209,7 @@ pub const BeaconStateAllForks = union(enum) {
             .capella => .capella,
             .deneb => .deneb,
             .electra => .electra,
+            .fulu => .fulu,
         };
     }
 
@@ -304,6 +325,27 @@ pub const BeaconStateAllForks = union(enum) {
         };
     }
 
+    pub fn isFulu(self: *const BeaconStateAllForks) bool {
+        return switch (self.*) {
+            .fulu => true,
+            else => false,
+        };
+    }
+
+    pub fn isPreFulu(self: *const BeaconStateAllForks) bool {
+        return switch (self.*) {
+            .phase0, .altair, .bellatrix, .capella, .deneb, .electra => true,
+            else => false,
+        };
+    }
+
+    pub fn isPostFulu(self: *const BeaconStateAllForks) bool {
+        return switch (self.*) {
+            inline .phase0, .altair, .bellatrix, .capella, .deneb, .electra => false,
+            else => true,
+        };
+    }
+
     pub fn genesisTime(self: *const BeaconStateAllForks) u64 {
         return switch (self.*) {
             inline else => |state| state.genesis_time,
@@ -331,6 +373,12 @@ pub const BeaconStateAllForks = union(enum) {
     pub fn fork(self: *const BeaconStateAllForks) Fork {
         return switch (self.*) {
             inline else => |state| state.fork,
+        };
+    }
+
+    pub fn forkPtr(self: *const BeaconStateAllForks) *Fork {
+        return switch (self.*) {
+            inline else => |state| &state.fork,
         };
     }
 
@@ -430,6 +478,9 @@ pub const BeaconStateAllForks = union(enum) {
     pub fn rotateEpochPendingAttestations(self: *BeaconStateAllForks, allocator: Allocator) void {
         switch (self.*) {
             .phase0 => |state| {
+                for (state.previous_epoch_attestations.items) |*attestation| {
+                    types.phase0.PendingAttestation.deinit(allocator, attestation);
+                }
                 state.previous_epoch_attestations.deinit(allocator);
                 state.previous_epoch_attestations = state.current_epoch_attestations;
                 state.current_epoch_attestations = types.phase0.EpochAttestations.default_value;
@@ -441,7 +492,7 @@ pub const BeaconStateAllForks = union(enum) {
     pub fn previousEpochParticipations(self: *const BeaconStateAllForks) *std.ArrayListUnmanaged(u8) {
         return switch (self.*) {
             .phase0 => @panic("previous_epoch_participation is not available in phase0"),
-            inline .altair, .bellatrix, .capella, .deneb, .electra => |state| &state.previous_epoch_participation,
+            inline .altair, .bellatrix, .capella, .deneb, .electra, .fulu => |state| &state.previous_epoch_participation,
         };
     }
 
@@ -521,16 +572,23 @@ pub const BeaconStateAllForks = union(enum) {
             .capella => |state| .{ .capella = &state.latest_execution_payload_header },
             .deneb => |state| .{ .deneb = &state.latest_execution_payload_header },
             .electra => |state| .{ .electra = &state.latest_execution_payload_header },
+            .fulu => |state| .{ .electra = &state.latest_execution_payload_header },
             else => panic("latest_execution_payload_header is not available in {}", .{self}),
         };
     }
 
-    pub fn setLatestExecutionPayloadHeader(self: *BeaconStateAllForks, header: *const ExecutionPayloadHeader) void {
+    // `header` ownership is transferred to BeaconState and will be deinit when state is deinit
+    // caller must guarantee that `header` is properly initialized and allocated/cloned with `allocator` and no longer used after this call
+    pub fn setLatestExecutionPayloadHeader(self: *BeaconStateAllForks, allocator: Allocator, header: ExecutionPayloadHeader) void {
+        const current_header = self.latestExecutionPayloadHeader();
+        current_header.deinit(allocator);
+
         switch (self.*) {
-            .bellatrix => |state| state.latest_execution_payload_header = header.*.bellatrix.*,
-            .capella => |state| state.latest_execution_payload_header = header.*.capella.*,
-            .deneb => |state| state.latest_execution_payload_header = header.*.deneb.*,
-            .electra => |state| state.latest_execution_payload_header = header.*.electra.*,
+            .bellatrix => |state| state.latest_execution_payload_header = header.bellatrix.*,
+            .capella => |state| state.latest_execution_payload_header = header.capella.*,
+            .deneb => |state| state.latest_execution_payload_header = header.deneb.*,
+            .electra => |state| state.latest_execution_payload_header = header.electra.*,
+            .fulu => |state| state.latest_execution_payload_header = header.electra.*,
             else => panic("latest_execution_payload_header is not available in {}", .{self}),
         }
     }
@@ -600,26 +658,35 @@ pub const BeaconStateAllForks = union(enum) {
 
     pub fn pendingDeposits(self: *const BeaconStateAllForks) *std.ArrayListUnmanaged(PendingDeposit) {
         return switch (self.*) {
-            .electra => |state| &state.pending_deposits,
+            inline .electra, .fulu => |state| &state.pending_deposits,
             else => panic("pending_deposits is not available in {}", .{self}),
         };
     }
 
     pub fn pendingPartialWithdrawals(self: *const BeaconStateAllForks) *std.ArrayListUnmanaged(PendingPartialWithdrawal) {
         return switch (self.*) {
-            .electra => |state| &state.pending_partial_withdrawals,
+            inline .electra, .fulu => |state| &state.pending_partial_withdrawals,
             else => panic("pending_partial_withdrawals is not available in {}", .{self}),
         };
     }
 
     pub fn pendingConsolidations(self: *const BeaconStateAllForks) *std.ArrayListUnmanaged(PendingConsolidation) {
         return switch (self.*) {
-            .electra => |state| &state.pending_consolidations,
+            inline .electra, .fulu => |state| &state.pending_consolidations,
             else => panic("pending_consolidations is not available in {}", .{self}),
         };
     }
 
-    /// Copies ct fields of `BeaconState` from type `F` to type `T`, provided they have the same field name.
+    /// Get proposer_lookahead
+    /// Returns a slice of ValidatorIndex with length (MIN_SEED_LOOKAHEAD + 1) * SLOTS_PER_EPOCH
+    pub fn proposerLookahead(self: *const BeaconStateAllForks) []ValidatorIndex {
+        return switch (self.*) {
+            .fulu => |state| &state.proposer_lookahead,
+            else => panic("proposer_lookahead is not available in {}", .{self}),
+        };
+    }
+
+    /// Copies fields of `BeaconState` from type `F` to type `T`, provided they have the same field name.
     fn populateFields(
         comptime F: type,
         comptime T: type,
@@ -627,10 +694,21 @@ pub const BeaconStateAllForks = union(enum) {
         state: *F.Type,
     ) !*T.Type {
         var upgraded = try allocator.create(T.Type);
+        errdefer allocator.destroy(upgraded);
         upgraded.* = T.default_value;
-        inline for (@typeInfo(F).@"struct".fields) |f| {
+        inline for (F.fields) |f| {
             if (@hasField(T.Type, f.name)) {
-                f.type.clone(allocator, &@field(state, f.name), &@field(upgraded, f.name));
+                if (comptime isFixedType(f.type)) {
+                    try f.type.clone(&@field(state, f.name), &@field(upgraded, f.name));
+                } else {
+                    if (@TypeOf(@field(upgraded, f.name)) != @TypeOf(f.type.default_value)) {
+                        // 2 BeaconState of prev_fork and cur_fork has same field name but different types
+                        // for example latest_execution_payload_header changed from Bellatrix to Capella
+                    } else {
+                        @field(upgraded, f.name) = f.type.default_value;
+                        try f.type.clone(allocator, &@field(state, f.name), &@field(upgraded, f.name));
+                    }
+                }
             }
         }
 
@@ -638,11 +716,9 @@ pub const BeaconStateAllForks = union(enum) {
     }
 
     /// Upgrade `self` from a certain fork to the next.
-    ///
     /// Allocates a new `state` of the next fork, clones all fields of the current `state` to it and assigns `self` to it.
-    /// Destroys the old `state`.
-    ///
     /// Caller must make sure an upgrade is needed by checking BeaconConfig then free upgraded state.
+    /// Caller needs to deinit the old state
     pub fn upgradeUnsafe(self: *BeaconStateAllForks, allocator: std.mem.Allocator) !*BeaconStateAllForks {
         switch (self.*) {
             .phase0 => |state| {
@@ -654,7 +730,6 @@ pub const BeaconStateAllForks = union(enum) {
                         state,
                     ),
                 };
-                allocator.destroy(state);
                 return self;
             },
             .altair => |state| {
@@ -666,7 +741,6 @@ pub const BeaconStateAllForks = union(enum) {
                         state,
                     ),
                 };
-                allocator.destroy(state);
                 return self;
             },
             .bellatrix => |state| {
@@ -678,7 +752,6 @@ pub const BeaconStateAllForks = union(enum) {
                         state,
                     ),
                 };
-                allocator.destroy(state);
                 return self;
             },
             .capella => |state| {
@@ -690,7 +763,6 @@ pub const BeaconStateAllForks = union(enum) {
                         state,
                     ),
                 };
-                allocator.destroy(state);
                 return self;
             },
             .deneb => |state| {
@@ -702,11 +774,21 @@ pub const BeaconStateAllForks = union(enum) {
                         state,
                     ),
                 };
-                allocator.destroy(state);
                 return self;
             },
-            .electra => |_| {
-                @panic("upgrade state from electra to fulu unimplemented");
+            .electra => |state| {
+                self.* = .{
+                    .fulu = try populateFields(
+                        types.electra.BeaconState,
+                        types.fulu.BeaconState,
+                        allocator,
+                        state,
+                    ),
+                };
+                return self;
+            },
+            .fulu => {
+                @panic("upgrade state from fulu to glaos unimplemented");
             },
         }
     }
@@ -757,9 +839,42 @@ test "upgrade state - sanity" {
     phase0_state.* = types.phase0.BeaconState.default_value;
 
     var phase0 = BeaconStateAllForks{ .phase0 = phase0_state };
+    const old_phase0_state = phase0.phase0;
+    defer {
+        types.phase0.BeaconState.deinit(allocator, old_phase0_state);
+        allocator.destroy(old_phase0_state);
+    }
+
     var altair = try phase0.upgradeUnsafe(allocator);
-    const bellatrix = try altair.upgradeUnsafe(allocator);
-    const capella = try bellatrix.upgradeUnsafe(allocator);
+    const old_altair_state = altair.altair;
+    defer {
+        types.altair.BeaconState.deinit(allocator, old_altair_state);
+        allocator.destroy(old_altair_state);
+    }
+
+    var bellatrix = try altair.upgradeUnsafe(allocator);
+    const old_bellatrix_state = bellatrix.bellatrix;
+    defer {
+        types.bellatrix.BeaconState.deinit(allocator, old_bellatrix_state);
+        allocator.destroy(old_bellatrix_state);
+    }
+
+    var capella = try bellatrix.upgradeUnsafe(allocator);
+    const old_capella_state = capella.capella;
+    defer {
+        types.capella.BeaconState.deinit(allocator, old_capella_state);
+        allocator.destroy(old_capella_state);
+    }
+
     var deneb = try capella.upgradeUnsafe(allocator);
-    defer deneb.deinit(allocator);
+    const old_deneb_state = deneb.deneb;
+    defer {
+        types.deneb.BeaconState.deinit(allocator, old_deneb_state);
+        allocator.destroy(old_deneb_state);
+    }
+
+    var electra = try deneb.upgradeUnsafe(allocator);
+    defer electra.deinit(allocator);
+
+    // TODO: fulu
 }

@@ -30,4 +30,7 @@ test "View" {
     // setting the parent updates the child
     try view_1.setNode(p, Gindex.fromDepth(3, 0), @enumFromInt(0));
     try std.testing.expectEqual(@as(Node.Id, @enumFromInt(0)), view_2.getRootNode(p));
+
+    pool.destroy(view_2);
+    pool.destroy(view_1);
 }

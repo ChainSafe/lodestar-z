@@ -771,6 +771,7 @@ pub fn build(b: *std.Build) void {
     module_int.addImport("constants", module_constants);
     module_int.addImport("hex", module_hex);
     module_int.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_int.addImport("blst", dep_blst.module("blst"));
 
     module_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
     module_spec_tests.addImport("consensus_types", module_consensus_types);
@@ -780,6 +781,8 @@ pub fn build(b: *std.Build) void {
     module_spec_tests.addImport("state_transition", module_state_transition);
     module_spec_tests.addImport("ssz", module_ssz);
     module_spec_tests.addImport("blst", dep_blst.module("blst"));
+    module_spec_tests.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_spec_tests.addImport("hex", module_hex);
 
     module_ssz_generic_spec_tests.addImport("hex", module_hex);
     module_ssz_generic_spec_tests.addImport("snappy", dep_snappy.module("snappy"));

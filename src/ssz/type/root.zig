@@ -30,6 +30,8 @@ pub const VariableVectorType = @import("vector.zig").VariableVectorType;
 pub const FixedContainerType = @import("container.zig").FixedContainerType;
 pub const VariableContainerType = @import("container.zig").VariableContainerType;
 
+pub const getPathGindex = @import("path.zig").getPathGindex;
+
 pub const BYTES_PER_CHUNK: usize = 32;
 
 pub const FixedProgressiveContainerType = @import("progressive_container.zig").FixedProgressiveContainerType;
@@ -66,6 +68,7 @@ test {
     _ = @import("container.zig");
     _ = @import("progressive_container.zig");
     _ = @import("compatible_union.zig");
+    _ = @import("path.zig");
 }
 
 const std = @import("std");

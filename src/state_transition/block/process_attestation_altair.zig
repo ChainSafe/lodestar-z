@@ -114,7 +114,7 @@ pub fn processAttestationsAltair(allocator: Allocator, cached_state: *const Cach
         const proposer_reward_numerator = total_increments * epoch_cache.base_reward_per_increment;
         proposer_reward += @divFloor(proposer_reward_numerator, PROPOSER_REWARD_DOMINATOR);
     }
-    increaseBalance(state, try epoch_cache.getBeaconProposer(state_slot), proposer_reward);
+    increaseBalance(state, try cached_state.getBeaconProposer(state_slot), proposer_reward);
 }
 
 pub fn getAttestationParticipationStatus(state: *const BeaconStateAllForks, data: types.phase0.AttestationData.Type, inclusion_delay: u64, current_epoch: Epoch, root_cache: *RootCache) !u8 {

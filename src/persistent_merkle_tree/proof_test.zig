@@ -16,12 +16,12 @@ fn buildFullTree(pool: *Node.Pool, depth: usize, next_value: *u8) Node.Error!Nod
     if (depth == 0) {
         const leaf_hash = makeLeaf(next_value.*);
         next_value.* +%= 1;
-        return pool.createLeaf(&leaf_hash, false);
+        return pool.createLeaf(&leaf_hash);
     }
 
     const left = try buildFullTree(pool, depth - 1, next_value);
     const right = try buildFullTree(pool, depth - 1, next_value);
-    return pool.createBranch(left, right, false);
+    return pool.createBranch(left, right);
 }
 
 // Verifies a proof for gindex 6 (depth 2, index 2) reconstructs the original root.
@@ -36,14 +36,14 @@ test "single proof roundtrip" {
         makeLeaf(4),
     };
 
-    const leaf0 = try pool.createLeaf(&leaf_hashes[0], false);
-    const leaf1 = try pool.createLeaf(&leaf_hashes[1], false);
-    const leaf2 = try pool.createLeaf(&leaf_hashes[2], false);
-    const leaf3 = try pool.createLeaf(&leaf_hashes[3], false);
+    const leaf0 = try pool.createLeaf(&leaf_hashes[0]);
+    const leaf1 = try pool.createLeaf(&leaf_hashes[1]);
+    const leaf2 = try pool.createLeaf(&leaf_hashes[2]);
+    const leaf3 = try pool.createLeaf(&leaf_hashes[3]);
 
-    const left = try pool.createBranch(leaf0, leaf1, false);
-    const right = try pool.createBranch(leaf2, leaf3, false);
-    const root = try pool.createBranch(left, right, true);
+    const left = try pool.createBranch(leaf0, leaf1);
+    const right = try pool.createBranch(leaf2, leaf3);
+    const root = try pool.createBranch(left, right);
     defer pool.unref(root);
 
     const gindex = Gindex.fromDepth(2, 2);
@@ -76,7 +76,6 @@ test "single proof root matches across leaves" {
 
     var next_value: u8 = 1;
     const raw_root = try buildFullTree(&pool, build_depth, &next_value);
-    try pool.ref(raw_root);
     defer pool.unref(raw_root);
 
     const expected_root = raw_root.getRoot(&pool).*;
@@ -105,7 +104,7 @@ test "single proof invalid navigation" {
     defer pool.deinit();
 
     const leaf_hash = makeLeaf(42);
-    const root = try pool.createLeaf(&leaf_hash, true);
+    const root = try pool.createLeaf(&leaf_hash);
     defer pool.unref(root);
 
     const gindex = Gindex.fromDepth(3, 0);
@@ -118,7 +117,7 @@ test "single proof invalid gindex" {
     defer pool.deinit();
 
     const leaf_hash = makeLeaf(9);
-    const root = try pool.createLeaf(&leaf_hash, true);
+    const root = try pool.createLeaf(&leaf_hash);
     defer pool.unref(root);
 
     const zero_gindex: Gindex = @enumFromInt(0);

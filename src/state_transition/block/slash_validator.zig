@@ -46,7 +46,7 @@ pub fn slashValidator(
         .phase0 => preset.MIN_SLASHING_PENALTY_QUOTIENT,
         .altair => preset.MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR,
         .bellatrix, .capella, .deneb => preset.MIN_SLASHING_PENALTY_QUOTIENT_BELLATRIX,
-        .electra => preset.MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA,
+        .electra, .fulu => preset.MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA,
     };
 
     decreaseBalance(state, slashed_index, @divFloor(effective_balance, min_slashing_penalty_quotient));
@@ -54,7 +54,7 @@ pub fn slashValidator(
     // apply proposer and whistleblower rewards
     // TODO(ct): define WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA
     const whistleblower_reward = switch (state.*) {
-        .electra => @divFloor(effective_balance, preset.WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA),
+        .electra, .fulu => @divFloor(effective_balance, preset.WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA),
         else => @divFloor(effective_balance, preset.WHISTLEBLOWER_REWARD_QUOTIENT),
     };
 
@@ -63,7 +63,7 @@ pub fn slashValidator(
         else => @divFloor(whistleblower_reward * c.PROPOSER_WEIGHT, c.WEIGHT_DENOMINATOR),
     };
 
-    const proposer_index = try epoch_cache.getBeaconProposer(state.slot());
+    const proposer_index = try cached_state.getBeaconProposer(state.slot());
 
     if (whistle_blower_index) |_whistle_blower_index| {
         increaseBalance(state, proposer_index, proposer_reward);

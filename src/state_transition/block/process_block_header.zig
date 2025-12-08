@@ -12,7 +12,6 @@ const Block = @import("../types/block.zig").Block;
 
 pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, block: Block) !void {
     const state = cached_state.state;
-    const epoch_cache = cached_state.getEpochCache();
     const slot = state.slot();
 
     // verify that the slots match
@@ -26,7 +25,7 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaco
     }
 
     // verify that proposer index is the correct index
-    const proposer_index = try epoch_cache.getBeaconProposer(slot);
+    const proposer_index = try cached_state.getBeaconProposer(slot);
     if (block.proposerIndex() != proposer_index) {
         return error.BlockProposerIndexMismatch;
     }

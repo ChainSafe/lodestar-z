@@ -9,6 +9,8 @@ pub const capella = @import("capella.zig");
 pub const deneb = @import("deneb.zig");
 pub const electra = @import("electra.zig");
 
+pub const fulu = @import("fulu.zig");
+
 test {
     testing.refAllDecls(primitive);
     testing.refAllDecls(phase0);
@@ -17,6 +19,7 @@ test {
     testing.refAllDecls(capella);
     testing.refAllDecls(deneb);
     testing.refAllDecls(electra);
+    testing.refAllDecls(fulu);
 }
 
 const src = blk: {

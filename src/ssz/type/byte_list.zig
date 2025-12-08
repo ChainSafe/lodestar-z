@@ -142,11 +142,11 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
                     return try pool.createBranch(
                         @enumFromInt(chunk_depth),
                         @enumFromInt(0),
-                        false,
                     );
                 }
 
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
+                defer allocator.free(nodes);
                 for (0..chunk_count) |i| {
                     var leaf_buf = [_]u8{0} ** 32;
                     const start_idx = i * 32;
@@ -160,12 +160,11 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
                         @memcpy(leaf_buf[0..bytes_to_copy], value.items[start_idx..][0..bytes_to_copy]);
                     }
 
-                    nodes[i] = try pool.createLeaf(&leaf_buf, false);
+                    nodes[i] = try pool.createLeaf(&leaf_buf);
                 }
                 return try pool.createBranch(
-                    try Node.fillWithContents(pool, nodes[0..chunk_count], chunk_depth, false),
-                    try pool.createLeafFromUint(value.items.len, false),
-                    false,
+                    try Node.fillWithContents(pool, nodes[0..chunk_count], chunk_depth),
+                    try pool.createLeafFromUint(value.items.len),
                 );
             }
         };

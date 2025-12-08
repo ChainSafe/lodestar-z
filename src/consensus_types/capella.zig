@@ -19,6 +19,7 @@ pub const HistoricalBatch = phase0.HistoricalBatch;
 pub const DepositMessage = phase0.DepositMessage;
 pub const DepositData = phase0.DepositData;
 pub const BeaconBlockHeader = phase0.BeaconBlockHeader;
+pub const SignedBeaconBlockHeader = phase0.SignedBeaconBlockHeader;
 pub const SigningData = phase0.SigningData;
 pub const ProposerSlashing = phase0.ProposerSlashing;
 pub const AttesterSlashing = phase0.AttesterSlashing;
@@ -198,10 +199,7 @@ pub const SignedBlindedBeaconBlock = ssz.VariableContainerType(struct {
     signature: p.BLSSignature,
 });
 
-pub const SignedBeaconBlockHeader = ssz.FixedContainerType(struct {
-    message: BeaconBlockHeader,
-    signature: p.BLSSignature,
-});
+pub const HistoricalSummaries = ssz.FixedListType(HistoricalSummary, preset.HISTORICAL_ROOTS_LIMIT);
 
 pub const BeaconState = ssz.VariableContainerType(struct {
     genesis_time: p.Uint64,
@@ -211,27 +209,27 @@ pub const BeaconState = ssz.VariableContainerType(struct {
     latest_block_header: BeaconBlockHeader,
     block_roots: HistoricalBlockRoots,
     state_roots: HistoricalStateRoots,
-    historical_roots: ssz.FixedListType(p.Root, preset.HISTORICAL_ROOTS_LIMIT),
+    historical_roots: phase0.HistoricalRoots,
     eth1_data: Eth1Data,
     eth1_data_votes: phase0.Eth1DataVotes,
     eth1_deposit_index: p.Uint64,
-    validators: ssz.FixedListType(Validator, preset.VALIDATOR_REGISTRY_LIMIT),
-    balances: ssz.FixedListType(p.Gwei, preset.VALIDATOR_REGISTRY_LIMIT),
-    randao_mixes: ssz.FixedVectorType(p.Bytes32, preset.EPOCHS_PER_HISTORICAL_VECTOR),
-    slashings: ssz.FixedVectorType(p.Gwei, preset.EPOCHS_PER_SLASHINGS_VECTOR),
-    previous_epoch_participation: ssz.FixedListType(p.Uint8, preset.VALIDATOR_REGISTRY_LIMIT),
-    current_epoch_participation: ssz.FixedListType(p.Uint8, preset.VALIDATOR_REGISTRY_LIMIT),
-    justification_bits: ssz.BitVectorType(c.JUSTIFICATION_BITS_LENGTH),
+    validators: phase0.Validators,
+    balances: phase0.Balances,
+    randao_mixes: phase0.RandaoMixes,
+    slashings: phase0.Slashings,
+    previous_epoch_participation: altair.EpochParticipation,
+    current_epoch_participation: altair.EpochParticipation,
+    justification_bits: phase0.JustificationBits,
     previous_justified_checkpoint: Checkpoint,
     current_justified_checkpoint: Checkpoint,
     finalized_checkpoint: Checkpoint,
-    inactivity_scores: ssz.FixedListType(p.Uint64, preset.VALIDATOR_REGISTRY_LIMIT),
+    inactivity_scores: altair.InactivityScores,
     current_sync_committee: SyncCommittee,
     next_sync_committee: SyncCommittee,
     latest_execution_payload_header: ExecutionPayloadHeader,
     next_withdrawal_index: p.WithdrawalIndex,
     next_withdrawal_validator_index: p.ValidatorIndex,
-    historical_summaries: ssz.FixedListType(HistoricalSummary, preset.HISTORICAL_ROOTS_LIMIT),
+    historical_summaries: HistoricalSummaries,
 });
 
 pub const SignedBeaconBlock = ssz.VariableContainerType(struct {

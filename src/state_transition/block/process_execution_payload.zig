@@ -7,6 +7,7 @@ const ForkSeq = @import("config").ForkSeq;
 const SignedBlock = @import("../types/block.zig").SignedBlock;
 const Body = @import("../types/block.zig").Body;
 const ExecutionPayloadStatus = @import("../state_transition.zig").ExecutionPayloadStatus;
+const ExecutionPayloadHeader = @import("../types/execution_payload.zig").ExecutionPayloadHeader;
 const SignedBlindedBeaconBlock = @import("../types/beacon_block.zig").SignedBlindedBeaconBlock;
 const BlockExternalData = @import("../state_transition.zig").BlockExternalData;
 const BeaconConfig = @import("config").BeaconConfig;
@@ -95,10 +96,12 @@ pub fn processExecutionPayload(
         return error.InvalidExecutionPayload;
     }
 
-    const payload_header = switch (body) {
-        .regular => |b| try b.executionPayload().toPayloadHeader(allocator),
-        .blinded => |b| b.executionPayloadHeader(),
-    };
+    var payload_header: ExecutionPayloadHeader = undefined;
+    switch (body) {
+        .regular => |b| try b.executionPayload().createPayloadHeader(allocator, &payload_header),
+        .blinded => |b| try b.executionPayloadHeader().clone(allocator, &payload_header),
+    }
+    defer payload_header.destroy(allocator);
 
-    state.setLatestExecutionPayloadHeader(&payload_header);
+    state.setLatestExecutionPayloadHeader(allocator, payload_header);
 }

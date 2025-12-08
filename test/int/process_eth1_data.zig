@@ -4,10 +4,8 @@ test "process eth1 data - sanity" {
     var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
     defer test_state.deinit();
 
-    const beacon_block: types.electra.SignedBeaconBlock.Type = types.electra.SignedBeaconBlock.default_value;
-    const signed_beacon_block = SignedBeaconBlock{ .electra = &beacon_block };
-    const block = SignedBlock{ .regular = signed_beacon_block };
-    try processEth1Data(allocator, test_state.cached_state, block.message().beaconBlockBody().eth1Data());
+    const block = types.electra.BeaconBlock.default_value;
+    try processEth1Data(allocator, test_state.cached_state, &block.body.eth1_data);
 }
 
 const std = @import("std");

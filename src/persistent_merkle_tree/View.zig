@@ -93,8 +93,11 @@ pub const Pool = struct {
 
     pub fn destroy(self: *Pool, view_id: View.Id) void {
         const view = &self.views.items[@intFromEnum(view_id)];
-        // delink the view from its children
-        _ = self.parent_views.remove(view_id);
+        // delink the view from its children and deinit the children hashmap
+        if (self.parent_views.fetchRemove(view_id)) |kv| {
+            var children = kv.value;
+            children.deinit();
+        }
         // delink the view from its parent
         if (view.parent) |parent| {
             if (self.parent_views.getPtr(parent.root_view)) |children| {

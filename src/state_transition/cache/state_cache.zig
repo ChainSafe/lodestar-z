@@ -77,6 +77,36 @@ pub const CachedBeaconStateAllForks = struct {
     // TODO: implement getCachedBeaconState
     // this is used to create a CachedBeaconStateAllForks based on a tree and an exising CachedBeaconStateAllForks at fork transition
     // implement this once we switch to TreeView
+
+    /// Gets the beacon proposer index for a given slot.
+    /// For the Fulu fork, this uses `proposer_lookahead` from the state.
+    /// For earlier forks, this uses `EpochCache.getBeaconProposer()`.
+    pub fn getBeaconProposer(self: *const CachedBeaconStateAllForks, slot: types.primitive.Slot.Type) !ValidatorIndex {
+        const preset_import = @import("preset").preset;
+        const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
+
+        // For Fulu, use proposer_lookahead from state
+        if (self.state.isFulu()) {
+            const current_epoch = computeEpochAtSlot(self.state.slot());
+            const slot_epoch = computeEpochAtSlot(slot);
+
+            // proposer_lookahead covers current_epoch through current_epoch + MIN_SEED_LOOKAHEAD
+            const lookahead_start_epoch = current_epoch;
+            const lookahead_end_epoch = current_epoch + preset_import.MIN_SEED_LOOKAHEAD;
+
+            if (slot_epoch < lookahead_start_epoch or slot_epoch > lookahead_end_epoch) {
+                return error.SlotOutsideProposerLookahead;
+            }
+
+            const proposer_lookahead = self.state.proposerLookahead();
+            const epoch_offset = slot_epoch - lookahead_start_epoch;
+            const slot_in_epoch = slot % preset_import.SLOTS_PER_EPOCH;
+            const index = epoch_offset * preset_import.SLOTS_PER_EPOCH + slot_in_epoch;
+
+            return proposer_lookahead[index];
+        }
+        return self.getEpochCache().getBeaconProposer(slot);
+    }
 };
 
 test "CachedBeaconStateAllForks.clone()" {
