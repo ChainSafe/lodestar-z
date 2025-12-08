@@ -79,6 +79,11 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
         ///
         /// Caller owns the memory.
         pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: anytype) !void {
+            comptime {
+                const OutInfo = @typeInfo(@TypeOf(out));
+                std.debug.assert(OutInfo == .pointer);
+            }
+
             try out.resize(allocator, value.items.len);
 
             for (value.items, 0..) |v, i| {
@@ -329,6 +334,11 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
         /// Clones the underlying `ArrayList`.
         /// Caller owns the memory.
         pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: anytype) !void {
+            comptime {
+                const OutInfo = @typeInfo(@TypeOf(out));
+                std.debug.assert(OutInfo == .pointer);
+            }
+
             try out.resize(allocator, value.items.len);
             for (0..value.items.len) |i|
                 try Element.clone(allocator, &value.items[i], &out.items[i]);

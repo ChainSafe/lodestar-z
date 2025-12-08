@@ -59,6 +59,12 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
         }
 
         pub fn clone(value: *const Type, out: anytype) !void {
+            comptime {
+                const OutInfo = @typeInfo(@TypeOf(out.*));
+                std.debug.assert(OutInfo == .array);
+                std.debug.assert(OutInfo.array.len == length);
+            }
+
             const OutType = @TypeOf(out.*);
             if (OutType == Type) {
                 out.* = value.*;
@@ -240,6 +246,12 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
         }
 
         pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: anytype) !void {
+            comptime {
+                const OutInfo = @typeInfo(@TypeOf(out.*));
+                std.debug.assert(OutInfo == .array);
+                std.debug.assert(OutInfo.array.len == length);
+            }
+
             for (value, 0..) |*element, i| {
                 try Element.clone(allocator, element, &out[i]);
             }

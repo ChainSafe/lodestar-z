@@ -83,6 +83,10 @@ pub fn FixedContainerType(comptime ST: type) type {
         /// Caller owns the memory.
         pub fn clone(value: *const Type, out: anytype) !void {
             const OutType = @TypeOf(out.*);
+            comptime {
+                const OutInfo = @typeInfo(@TypeOf(out));
+                std.debug.assert(OutInfo == .pointer);
+            }
             if (OutType == Type) {
                 out.* = value.*;
             } else {
@@ -360,6 +364,11 @@ pub fn VariableContainerType(comptime ST: type) type {
             value: *const Type,
             out: anytype,
         ) !void {
+            comptime {
+                const OutInfo = @typeInfo(@TypeOf(out));
+                std.debug.assert(OutInfo == .pointer);
+            }
+
             inline for (fields) |field| {
                 if (comptime isFixedType(field.type)) {
                     try field.type.clone(&@field(value, field.name), &@field(out, field.name));
