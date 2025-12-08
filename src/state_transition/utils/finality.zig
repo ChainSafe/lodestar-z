@@ -2,12 +2,14 @@ const std = @import("std");
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const preset = @import("preset").preset;
 const MIN_EPOCHS_TO_INACTIVITY_PENALTY = preset.MIN_EPOCHS_TO_INACTIVITY_PENALTY;
+const computePreviousEpoch = @import("./epoch.zig").computePreviousEpoch;
 
 pub fn getFinalityDelay(cached_state: *const CachedBeaconStateAllForks) u64 {
-    std.debug.assert(cached_state.getEpochCache().epoch > 0);
-    std.debug.assert(cached_state.getEpochCache().epoch >= cached_state.state.finalizedCheckpoint().epoch + 1);
+    const previous_epoch = computePreviousEpoch(cached_state.getEpochCache().epoch);
+    std.debug.assert(previous_epoch >= cached_state.state.finalizedCheckpoint().epoch);
+
     // previous_epoch = epoch - 1
-    return cached_state.getEpochCache().epoch - 1 - cached_state.state.finalizedCheckpoint().epoch;
+    return previous_epoch - cached_state.state.finalizedCheckpoint().epoch;
 }
 
 /// If the chain has not been finalized for >4 epochs, the chain enters an "inactivity leak" mode,

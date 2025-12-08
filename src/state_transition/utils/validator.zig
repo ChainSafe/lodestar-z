@@ -22,10 +22,11 @@ pub fn isSlashableValidator(validator: *const Validator, epoch: Epoch) bool {
 }
 
 pub fn getActiveValidatorIndices(allocator: Allocator, state: *const BeaconStateAllForks, epoch: Epoch) !std.ArrayList(ValidatorIndex) {
-    const indices = std.ArrayList(ValidatorIndex).init(allocator);
+    var indices = std.ArrayList(ValidatorIndex).init(allocator);
 
-    for (0..state.validators().items.len) |i| {
-        const validator = state.validators[i];
+    const validators = state.validators();
+    for (0..validators.items.len) |i| {
+        const validator = &validators.items[i];
         if (isActiveValidator(validator, epoch)) {
             try indices.append(@intCast(i));
         }

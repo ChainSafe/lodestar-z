@@ -33,6 +33,7 @@ pub const BYTES_PER_CHUNK: usize = chunk.BYTES_PER_CHUNK;
 pub const itemsPerChunk = chunk.itemsPerChunk;
 pub const chunkCount = chunk.chunkCount;
 pub const chunkDepth = chunk.chunkDepth;
+pub const getPathGindex = @import("path.zig").getPathGindex;
 
 test {
     _ = @import("bool.zig");
@@ -44,6 +45,7 @@ test {
     _ = @import("byte_vector.zig");
     _ = @import("list.zig");
     _ = @import("container.zig");
+    _ = @import("path.zig");
 }
 
 const std = @import("std");

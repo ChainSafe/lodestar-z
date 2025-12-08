@@ -25,6 +25,7 @@ pub const processInactivityUpdates = @import("./epoch/process_inactivity_updates
 pub const processRegistryUpdates = @import("./epoch/process_registry_updates.zig").processRegistryUpdates;
 pub const processSlashings = @import("./epoch/process_slashings.zig").processSlashings;
 pub const processRewardsAndPenalties = @import("./epoch/process_rewards_and_penalties.zig").processRewardsAndPenalties;
+pub const getRewardsAndPenalties = @import("./epoch/process_rewards_and_penalties.zig").getRewardsAndPenalties;
 pub const processEth1DataReset = @import("./epoch/process_eth1_data_reset.zig").processEth1DataReset;
 pub const processPendingDeposits = @import("./epoch/process_pending_deposits.zig").processPendingDeposits;
 pub const processPendingConsolidations = @import("./epoch/process_pending_consolidations.zig").processPendingConsolidations;
@@ -37,6 +38,13 @@ pub const processParticipationRecordUpdates = @import("./epoch/process_participa
 pub const processParticipationFlagUpdates = @import("./epoch/process_participation_flag_updates.zig").processParticipationFlagUpdates;
 pub const processSyncCommitteeUpdates = @import("./epoch/process_sync_committee_updates.zig").processSyncCommitteeUpdates;
 pub const getNextSyncCommitteeIndices = @import("./utils/sync_committee.zig").getNextSyncCommitteeIndices;
+
+pub const upgradeStateToAltair = @import("./slot/upgrade_state_to_altair.zig").upgradeStateToAltair;
+pub const upgradeStateToBellatrix = @import("./slot/upgrade_state_to_bellatrix.zig").upgradeStateToBellatrix;
+pub const upgradeStateToCapella = @import("./slot/upgrade_state_to_capella.zig").upgradeStateToCapella;
+pub const upgradeStateToDeneb = @import("./slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
+pub const upgradeStateToElectra = @import("./slot/upgrade_state_to_electra.zig").upgradeStateToElectra;
+pub const upgradeStateToFulu = @import("./slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
 
 // Block
 pub const processBlockHeader = @import("./block/process_block_header.zig").processBlockHeader;
@@ -75,6 +83,7 @@ pub const SignedBlock = @import("./types/block.zig").SignedBlock;
 pub const Block = @import("./types/block.zig").Block;
 pub const SignedBeaconBlock = @import("./types/beacon_block.zig").SignedBeaconBlock;
 pub const Attestations = @import("./types/attestation.zig").Attestations;
+pub const processProposerLookahead = @import("./utils/process_proposer_lookahead.zig");
 
 test {
     testing.refAllDecls(@This());

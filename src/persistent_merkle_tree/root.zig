@@ -14,4 +14,5 @@ test {
     testing.refAllDeclsRecursive(@This());
     testing.refAllDecls(@import("node_test.zig"));
     testing.refAllDecls(@import("proof_test.zig"));
+    testing.refAllDecls(@import("view_test.zig"));
 }

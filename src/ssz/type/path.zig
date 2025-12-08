@@ -1,5 +1,8 @@
 const std = @import("std");
 const isFixedType = @import("type_kind.zig").isFixedType;
+const isBasicType = @import("type_kind.zig").isBasicType;
+const Gindex = @import("persistent_merkle_tree").Gindex;
+const BYTES_PER_CHUNK = @import("root.zig").BYTES_PER_CHUNK;
 
 const PathItemType = union(enum) {
     child: struct {
@@ -131,11 +134,50 @@ pub fn PathType(comptime ST: type, comptime path_str: []const u8) type {
     }
 }
 
+/// Get the gindex for a field/element relative to the parent type.
+fn getFieldGindex(comptime item: PathItem) Gindex {
+    const ST = item.ST;
+    switch (item.item_type) {
+        .child => |child| {
+            switch (ST.kind) {
+                .container => {
+                    return Gindex.fromDepth(ST.chunk_depth, child.index);
+                },
+                .vector, .list => {
+                    // Lists have an extra depth level for the length mixin
+                    const depth = ST.chunk_depth + @as(u8, if (ST.kind == .list) 1 else 0);
+                    const chunk_index = if (comptime isBasicType(ST.Element))
+                        child.index / (BYTES_PER_CHUNK / ST.Element.fixed_size)
+                    else
+                        child.index;
+                    return Gindex.fromDepth(depth, chunk_index);
+                },
+                else => @compileError("Cannot get field gindex for basic types"),
+            }
+        },
+        .length => {
+            // Length node is at gindex 3 (right child of root in list structure)
+            return Gindex.fromDepth(1, 1);
+        },
+    }
+}
+
+/// Get the gindex for a path relative to the root of the type.
+pub fn getPathGindex(comptime ST: type, comptime path_str: []const u8) Gindex {
+    const items = getPathItems(ST, path_str);
+    var gindices: [items.len + 1]Gindex = undefined;
+    gindices[0] = Gindex.fromUint(1); // root
+
+    inline for (items, 0..) |item, i| {
+        gindices[i + 1] = getFieldGindex(item);
+    }
+
+    return Gindex.concat(&gindices);
+}
+
 const types = @import("root.zig");
 
-test {
-    // std.testing.refAllDecls(@This());
-
+test "PathType" {
     const Root = types.ByteVectorType(32);
     const Checkpoint = types.FixedContainerType(struct {
         slot: types.UintType(64),
@@ -143,8 +185,30 @@ test {
     });
 
     _ = PathType(Checkpoint, "slot");
-    // _ = getPath(Checkpoint, "root");
-    // _ = getPath(Checkpoint, "root.31");
-    // _ = getPath(Root, "0");
-    // _ = getOffset(Checkpoint, "root.20");
+}
+
+test "getPathGindex" {
+    const Root = types.ByteVectorType(32);
+    const Checkpoint = types.FixedContainerType(struct {
+        epoch: types.UintType(64),
+        root: Root,
+    });
+
+    try std.testing.expectEqual(@as(Gindex.Uint, 2), @intFromEnum(getPathGindex(Checkpoint, "epoch")));
+    try std.testing.expectEqual(@as(Gindex.Uint, 3), @intFromEnum(getPathGindex(Checkpoint, "root")));
+
+    const BeaconState = types.FixedContainerType(struct {
+        slot: types.UintType(64),
+        finalized_checkpoint: Checkpoint,
+    });
+
+    try std.testing.expectEqual(@as(Gindex.Uint, 7), @intFromEnum(getPathGindex(BeaconState, "finalized_checkpoint.root")));
+
+    const Balances = types.FixedListType(types.UintType(64), 4);
+    const SimpleState = types.VariableContainerType(struct {
+        slot: types.UintType(64),
+        balances: Balances,
+    });
+
+    try std.testing.expectEqual(@as(Gindex.Uint, 6), @intFromEnum(getPathGindex(SimpleState, "balances.0")));
 }

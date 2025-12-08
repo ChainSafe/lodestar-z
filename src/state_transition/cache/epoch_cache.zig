@@ -23,6 +23,7 @@ const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllF
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
+const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
 const computeActivationExitEpoch = @import("../utils/epoch.zig").computeActivationExitEpoch;
 const getEffectiveBalanceIncrementsWithLen = @import("./effective_balance_increments.zig").getEffectiveBalanceIncrementsWithLen;
 const getTotalSlashingsByIncrement = @import("../epoch/process_slashings.zig").getTotalSlashingsByIncrement;
@@ -481,6 +482,9 @@ pub const EpochCache = struct {
         return @intCast((committees_since_epoch_start + committee_index) % c.ATTESTATION_SUBNET_COUNT);
     }
 
+    /// Gets the beacon proposer for a slot. This is for pre-Fulu forks only.
+    /// NOTE: For the Fulu fork, use `CachedBeaconStateAllForks.getBeaconProposer()` instead,
+    /// which properly accesses `proposer_lookahead` from the state.
     pub fn getBeaconProposer(self: *const EpochCache, slot: Slot) !ValidatorIndex {
         const epoch = computeEpochAtSlot(slot);
         if (epoch != self.epoch) return error.NotCurrentEpoch;
@@ -624,7 +628,7 @@ pub const EpochCache = struct {
     }
 
     pub fn getShufflingAtEpochOrNull(self: *const EpochCache, epoch: Epoch) ?*const EpochShuffling {
-        const previous_epoch = if (self.epoch == GENESIS_EPOCH) GENESIS_EPOCH else self.epoch - 1;
+        const previous_epoch = computePreviousEpoch(self.epoch);
         const shuffling = if (epoch == previous_epoch)
             self.getPreviousShuffling()
         else if (epoch == self.epoch) self.getCurrentShuffling() else if (epoch == self.epoch + 1)

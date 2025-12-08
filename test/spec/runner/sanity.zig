@@ -10,6 +10,8 @@ const test_case = @import("../test_case.zig");
 const loadSszValue = test_case.loadSszSnappyValue;
 const expectEqualBeaconStates = test_case.expectEqualBeaconStates;
 const TestCaseUtils = test_case.TestCaseUtils;
+const loadBlsSetting = test_case.loadBlsSetting;
+const BlsSetting = test_case.BlsSetting;
 
 /// https://github.com/ethereum/consensus-specs/blob/master/tests/formats/sanity/README.md
 pub const Handler = enum {
@@ -100,6 +102,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
         // a null post state means the test is expected to fail
         post: ?BeaconStateAllForks,
         blocks: []SignedBeaconBlock.Type,
+        bls_setting: BlsSetting,
 
         const Self = @This();
 
@@ -118,6 +121,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
                 .pre = undefined,
                 .post = undefined,
                 .blocks = undefined,
+                .bls_setting = loadBlsSetting(allocator, dir),
             };
 
             // load pre state
@@ -135,8 +139,10 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
             // Parse YAML for blocks_count (simplified; assume "blocks_count: N")
             const blocks_count_str = std.mem.trim(u8, meta_content, " \n{}");
             const blocks_count = if (std.mem.indexOf(u8, blocks_count_str, "blocks_count: ")) |start| blk: {
-                const num_str = blocks_count_str[start + "blocks_count: ".len ..];
-                break :blk std.fmt.parseInt(usize, std.mem.trim(u8, num_str, " "), 10) catch 1;
+                const num_start = start + "blocks_count: ".len;
+                const num_str = blocks_count_str[num_start..];
+                const end = std.mem.indexOf(u8, num_str, ",") orelse num_str.len;
+                break :blk std.fmt.parseInt(usize, std.mem.trim(u8, num_str[0..end], " "), 10) catch 1;
             } else 1;
 
             // load blocks
@@ -171,6 +177,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
         }
 
         pub fn process(self: *Self) !*CachedBeaconStateAllForks {
+            const verify = self.bls_setting.verify();
             var post_state: *CachedBeaconStateAllForks = self.pre.cached_state;
             for (self.blocks, 0..) |*block, i| {
                 const signed_block = @unionInit(state_transition.SignedBeaconBlock, @tagName(fork), block);
@@ -184,7 +191,10 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
                     }
                     const new_post_state = try state_transition.state_transition.stateTransition(self.pre.allocator, post_state, .{
                         .regular = signed_block,
-                    }, .{});
+                    }, .{
+                        .verify_signatures = verify,
+                        .verify_proposer = verify,
+                    });
 
                     // don't deinit the initial pre state, we do it in deinit()
                     const to_destroy = post_state;

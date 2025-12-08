@@ -34,7 +34,7 @@ pub fn isExecutionEnabled(state: *const BeaconStateAllForks, block: Block) bool 
                 .bellatrix => |bd| !types.bellatrix.ExecutionPayload.equals(&bd.execution_payload, &types.bellatrix.ExecutionPayload.default_value),
                 .capella => |bd| !types.capella.ExecutionPayload.equals(&bd.execution_payload, &types.capella.ExecutionPayload.default_value),
                 .deneb => |bd| !types.deneb.ExecutionPayload.equals(&bd.execution_payload, &types.deneb.ExecutionPayload.default_value),
-                .electra => |bd| !types.electra.ExecutionPayload.equals(&bd.execution_payload, &types.electra.ExecutionPayload.default_value),
+                .electra, .fulu => |bd| !types.electra.ExecutionPayload.equals(&bd.execution_payload, &types.electra.ExecutionPayload.default_value),
             };
         },
     }
@@ -61,6 +61,7 @@ pub fn isMergeTransitionComplete(state: *const BeaconStateAllForks) bool {
         .capella => |s| !types.capella.ExecutionPayloadHeader.equals(&s.latest_execution_payload_header, &types.capella.ExecutionPayloadHeader.default_value),
         .deneb => |s| !types.deneb.ExecutionPayloadHeader.equals(&s.latest_execution_payload_header, &types.deneb.ExecutionPayloadHeader.default_value),
         .electra => |s| !types.electra.ExecutionPayloadHeader.equals(&s.latest_execution_payload_header, &types.electra.ExecutionPayloadHeader.default_value),
+        .fulu => |s| !types.electra.ExecutionPayloadHeader.equals(&s.latest_execution_payload_header, &types.electra.ExecutionPayloadHeader.default_value),
         else => false,
     };
 }

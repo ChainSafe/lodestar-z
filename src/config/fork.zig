@@ -3,7 +3,7 @@ const types = @import("consensus_types");
 const Epoch = types.primitive.Epoch.Type;
 const Version = types.primitive.Version.Type;
 
-pub const TOTAL_FORKS = 6;
+pub const TOTAL_FORKS = 7;
 
 pub const ForkSeq = enum(u8) {
     phase0 = 0,
@@ -12,7 +12,7 @@ pub const ForkSeq = enum(u8) {
     capella = 3,
     deneb = 4,
     electra = 5,
-    // TODO: fulu
+    fulu = 6,
 
     pub fn forkName(self: ForkSeq) []const u8 {
         return @tagName(self);
@@ -68,6 +68,13 @@ pub const ForkSeq = enum(u8) {
             else => true,
         };
     }
+
+    pub fn isPostFulu(self: ForkSeq) bool {
+        return switch (self) {
+            inline .phase0, .altair, .bellatrix, .capella, .deneb, .electra => false,
+            else => true,
+        };
+    }
 };
 
 pub fn forkSeqByForkName(fork_name: []const u8) ForkSeq {
@@ -96,6 +103,7 @@ test "fork - forkName" {
     try std.testing.expectEqualSlices(u8, "capella", ForkSeq.capella.forkName());
     try std.testing.expectEqualSlices(u8, "deneb", ForkSeq.deneb.forkName());
     try std.testing.expectEqualSlices(u8, "electra", ForkSeq.electra.forkName());
+    try std.testing.expectEqualSlices(u8, "fulu", ForkSeq.fulu.forkName());
 }
 
 test "fork - forkSeqByForkName" {
@@ -105,4 +113,5 @@ test "fork - forkSeqByForkName" {
     try std.testing.expect(ForkSeq.capella == forkSeqByForkName("capella"));
     try std.testing.expect(ForkSeq.deneb == forkSeqByForkName("deneb"));
     try std.testing.expect(ForkSeq.electra == forkSeqByForkName("electra"));
+    try std.testing.expect(ForkSeq.fulu == forkSeqByForkName("fulu"));
 }

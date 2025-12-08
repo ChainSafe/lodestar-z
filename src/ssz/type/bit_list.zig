@@ -456,7 +456,6 @@ pub fn BitListType(comptime _limit: comptime_int) type {
                     return try pool.createBranch(
                         @enumFromInt(chunk_depth),
                         @enumFromInt(0),
-                        false,
                     );
                 }
                 const byte_length = (value.bit_len + 7) / 8;
@@ -476,12 +475,11 @@ pub fn BitListType(comptime _limit: comptime_int) type {
                         @memcpy(leaf_buf[0..bytes_to_copy], value.data.items[start_idx..][0..bytes_to_copy]);
                     }
 
-                    nodes[i] = try pool.createLeaf(&leaf_buf, false);
+                    nodes[i] = try pool.createLeaf(&leaf_buf);
                 }
                 return try pool.createBranch(
-                    try Node.fillWithContents(pool, nodes, chunk_depth, false),
-                    try pool.createLeafFromUint(value.bit_len, false),
-                    false,
+                    try Node.fillWithContents(pool, nodes, chunk_depth),
+                    try pool.createLeafFromUint(value.bit_len),
                 );
             }
         };

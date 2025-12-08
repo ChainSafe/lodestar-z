@@ -82,6 +82,14 @@ pub const BeaconConfig = struct {
             .prev_fork_seq = ForkSeq.deneb,
         };
 
+        const fulu = ForkInfo{
+            .fork_seq = ForkSeq.fulu,
+            .epoch = chain_config.FULU_FORK_EPOCH,
+            .version = chain_config.FULU_FORK_VERSION,
+            .prev_version = chain_config.ELECTRA_FORK_VERSION,
+            .prev_fork_seq = ForkSeq.electra,
+        };
+
         const forks_ascending_epoch_order = [_]ForkInfo{
             phase0,
             altair,
@@ -89,8 +97,10 @@ pub const BeaconConfig = struct {
             capella,
             deneb,
             electra,
+            fulu,
         };
         const forks_descending_epoch_order = [_]ForkInfo{
+            fulu,
             electra,
             deneb,
             capella,
@@ -170,7 +180,7 @@ pub const BeaconConfig = struct {
         const fork = self.forkInfoAtEpoch(epoch).fork_seq;
         return switch (fork) {
             .deneb => self.chain.MAX_BLOBS_PER_BLOCK,
-            .electra => self.chain.MAX_BLOBS_PER_BLOCK_ELECTRA,
+            .electra, .fulu => self.chain.MAX_BLOBS_PER_BLOCK_ELECTRA,
             else =>
             // For forks before Deneb, we assume no blobs
             0,

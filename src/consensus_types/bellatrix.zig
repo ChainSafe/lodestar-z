@@ -18,6 +18,7 @@ pub const HistoricalBatch = phase0.HistoricalBatch;
 pub const DepositMessage = phase0.DepositMessage;
 pub const DepositData = phase0.DepositData;
 pub const BeaconBlockHeader = phase0.BeaconBlockHeader;
+pub const SignedBeaconBlockHeader = phase0.SignedBeaconBlockHeader;
 pub const SigningData = phase0.SigningData;
 pub const ProposerSlashing = phase0.ProposerSlashing;
 pub const AttesterSlashing = phase0.AttesterSlashing;
@@ -112,11 +113,6 @@ pub const BeaconBlock = ssz.VariableContainerType(struct {
     parent_root: p.Root,
     state_root: p.Root,
     body: BeaconBlockBody,
-});
-
-pub const SignedBeaconBlockHeader = ssz.FixedContainerType(struct {
-    message: BeaconBlockHeader,
-    signature: p.BLSSignature,
 });
 
 pub const BlindedBeaconBlockBody = ssz.VariableContainerType(struct {

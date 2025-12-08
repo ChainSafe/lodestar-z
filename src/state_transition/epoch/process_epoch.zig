@@ -18,6 +18,7 @@ const processHistoricalRootsUpdate = @import("./process_historical_roots_update.
 const processParticipationRecordUpdates = @import("./process_participation_record_updates.zig").processParticipationRecordUpdates;
 const processParticipationFlagUpdates = @import("./process_participation_flag_updates.zig").processParticipationFlagUpdates;
 const processSyncCommitteeUpdates = @import("./process_sync_committee_updates.zig").processSyncCommitteeUpdates;
+const processProposerLookahead = @import("../utils/process_proposer_lookahead.zig").processProposerLookahead;
 
 // TODO: add metrics
 pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconStateAllForks, cache: *EpochTransitionCache) !void {
@@ -64,6 +65,9 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
         try processSyncCommitteeUpdates(allocator, cached_state);
     }
 
-    // TODO(fulu)
-    // processProposerLookahead(fork, state);
+    if (state.isFulu()) {
+        const epoch_cache = cached_state.getEpochCache();
+        const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
+        try processProposerLookahead(allocator, state, &effective_balance_increments);
+    }
 }

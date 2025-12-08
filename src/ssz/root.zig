@@ -34,6 +34,8 @@ pub const VariableVectorType = types.VariableVectorType;
 pub const FixedContainerType = types.FixedContainerType;
 pub const VariableContainerType = types.VariableContainerType;
 
+pub const getPathGindex = types.getPathGindex;
+
 const hasher = @import("hasher.zig");
 pub const Hasher = hasher.Hasher;
 pub const HasherData = hasher.HasherData;

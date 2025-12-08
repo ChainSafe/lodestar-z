@@ -74,7 +74,7 @@ pub fn processSyncAggregate(
 
     const sync_participant_reward = epoch_cache.sync_participant_reward;
     const sync_proposer_reward = epoch_cache.sync_proposer_reward;
-    const proposer_index = try epoch_cache.getBeaconProposer(state.slot());
+    const proposer_index = try cached_state.getBeaconProposer(state.slot());
     const balances = state.balances();
     var proposer_balance = balances.items[proposer_index];
 

@@ -5,6 +5,7 @@ const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllF
 const getNextSyncCommittee = @import("../utils/sync_committee.zig").getNextSyncCommittee;
 const SyncCommitteeInfo = @import("../utils/sync_committee.zig").SyncCommitteeInfo;
 const sumTargetUnslashedBalanceIncrements = @import("../utils/target_unslashed_balance.zig").sumTargetUnslashedBalanceIncrements;
+const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
 const types = @import("consensus_types");
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const RootCache = @import("../utils/root_cache.zig").RootCache;
@@ -52,7 +53,7 @@ pub fn upgradeStateToAltair(allocator: Allocator, cached_state: *CachedBeaconSta
     try cached_state.epoch_cache_ref.get().setSyncCommitteesIndexed(sync_committee_info.indices.items);
     try translateParticipation(allocator, cached_state, phase0_state.previous_epoch_attestations);
 
-    const previous_epoch = epoch_cache.epoch - 1;
+    const previous_epoch = computePreviousEpoch(epoch_cache.epoch);
     epoch_cache.previous_target_unslashed_balance_increments = sumTargetUnslashedBalanceIncrements(state.previousEpochParticipations().items, previous_epoch, state.validators().items);
 }
 
