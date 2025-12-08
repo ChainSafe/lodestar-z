@@ -381,12 +381,12 @@ test "truncateAfterIndex zeros nodes after index" {
     var original_leaves = try allocator.alloc(Node.Id, max_length);
     defer allocator.free(original_leaves);
     for (0..max_length) |i| {
-        const leaf = try pool.createLeafFromUint(@intCast(i + 1), false);
+        const leaf = try pool.createLeafFromUint(@intCast(i + 1));
         leaves[i] = leaf;
         original_leaves[i] = leaf;
     }
 
-    const base_root = try Node.fillWithContents(p, leaves, depth, true);
+    const base_root = try Node.fillWithContents(p, leaves, depth);
     defer p.unref(base_root);
 
     const out_leaves = try allocator.alloc(Node.Id, max_length);
@@ -466,7 +466,7 @@ test "truncateAfterIndex matches zeroAfterIndex test suite" {
                 const fill_value: u8 = @intCast(i + 16);
                 @memset(hash[0..], fill_value);
 
-                const leaf = try pool.createLeaf(&hash, false);
+                const leaf = try pool.createLeaf(&hash);
                 leaves[i] = leaf;
 
                 const gindex = Gindex.fromDepth(depth, i);
@@ -515,5 +515,5 @@ fn treeZeroAfterIndexNaive(
             @enumFromInt(0);
     }
 
-    return try Node.fillWithContents(pool, contents, depth, true);
+    return try Node.fillWithContents(pool, contents, depth);
 }
