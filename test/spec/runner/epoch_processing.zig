@@ -125,9 +125,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
                 .pending_deposits => try state_transition.processPendingDeposits(allocator, pre, epoch_transition_cache),
                 .pending_consolidations => try state_transition.processPendingConsolidations(allocator, pre, epoch_transition_cache),
                 .proposer_lookahead => {
-                    const epoch_cache = pre.getEpochCache();
-                    const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
-                    try state_transition.processProposerLookahead(allocator, pre.state, &effective_balance_increments);
+                    try state_transition.processProposerLookahead(allocator, pre, epoch_transition_cache);
                 },
             }
         }

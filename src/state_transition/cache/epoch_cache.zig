@@ -639,6 +639,13 @@ pub const EpochCache = struct {
         return shuffling;
     }
 
+    /// Returns the active validator indices for the given epoch from the cached shuffling.
+    /// Returns null if the epoch is not covered by the cached shufflings.
+    pub fn getActiveIndicesAtEpoch(self: *const EpochCache, epoch: Epoch) ?[]const ValidatorIndex {
+        const shuffling = self.getShufflingAtEpochOrNull(epoch) orelse return null;
+        return shuffling.active_indices;
+    }
+
     /// Note: The range of slots a validator has to perform duties is off by one.
     /// The previous slot wording means that if your validator is in a sync committee for a period that runs from slot
     /// 100 to 200,then you would actually produce signatures in slot 99 - 199.

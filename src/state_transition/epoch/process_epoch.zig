@@ -66,8 +66,6 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
     }
 
     if (state.isFulu()) {
-        const epoch_cache = cached_state.getEpochCache();
-        const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
-        try processProposerLookahead(allocator, state, &effective_balance_increments);
+        try processProposerLookahead(allocator, cached_state, cache);
     }
 }
