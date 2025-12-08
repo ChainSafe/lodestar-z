@@ -237,7 +237,7 @@ pub fn TreeView(comptime ST: type) type {
                 return error.LengthOverLimit;
             }
 
-            const length_node = try self.pool.createLeafFromUint(@intCast(new_length), false);
+            const length_node = try self.pool.createLeafFromUint(@intCast(new_length));
             var inserted = false;
             defer if (!inserted) self.pool.unref(length_node); // only drop if we never attach it to the tree
 
@@ -446,9 +446,8 @@ pub fn TreeView(comptime ST: type) type {
             const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
             const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, is_list_view);
 
-            var new_root: Node.Id = undefined;
-            var new_root_owned = false;
-            errdefer if (new_root_owned) self.pool.unref(new_root);
+            var new_root: ?Node.Id = null;
+            defer if (new_root) |id| self.pool.unref(id);
             if (comptime is_basic_array_view) {
                 const items_per_chunk = itemsPerChunk(ST.Element);
                 const chunk_index = index / items_per_chunk;
@@ -461,31 +460,26 @@ pub fn TreeView(comptime ST: type) type {
                     @memset(chunk_bytes[keep_bytes..], 0);
                 }
 
-                const truncated_chunk_node = try self.pool.createLeaf(&chunk_bytes, false);
-                var chunk_inserted = false;
-                // Drop the temporary truncated chunk leaf unless we swap it into the tree
-                defer if (!chunk_inserted) self.pool.unref(truncated_chunk_node);
-
-                new_root = try Node.Id.setNodeAtDepth(self.data.root, self.pool, chunk_depth, chunk_index, truncated_chunk_node);
-                chunk_inserted = true;
-                new_root_owned = true;
-
-                new_root = try Node.Id.truncateAfterIndex(new_root, self.pool, chunk_depth, chunk_index);
+                var truncated_chunk_node: ?Node.Id = try self.pool.createLeaf(&chunk_bytes);
+                defer if (truncated_chunk_node) |id| self.pool.unref(id);
+                const updated = try Node.Id.setNodeAtDepth(self.data.root, self.pool, chunk_depth, chunk_index, truncated_chunk_node.?);
+                truncated_chunk_node = null;
+                new_root = try Node.Id.truncateAfterIndex(updated, self.pool, chunk_depth, chunk_index);
             } else {
                 new_root = try Node.Id.truncateAfterIndex(self.data.root, self.pool, chunk_depth, index);
-                new_root_owned = true;
             }
 
-            const length_node = try self.pool.createLeafFromUint(@intCast(new_length), false);
-            var length_inserted = false;
-            // Drop the temporary length leaf unless we attach it to the new branch
-            defer if (!length_inserted) self.pool.unref(length_node);
-            new_root = try Node.Id.setNode(new_root, self.pool, listLengthGindex(), length_node);
-            length_inserted = true;
+            var length_node: ?Node.Id = try self.pool.createLeafFromUint(@intCast(new_length));
+            defer if (length_node) |id| self.pool.unref(id);
+            const with_length = try Node.Id.setNode(new_root.?, self.pool, listLengthGindex(), length_node.?);
+            length_node = null;
 
-            const new_data = try Data.init(self.allocator, self.pool, new_root);
-            self.pool.unref(new_root);
-            new_root_owned = false;
+            // Ensure the truncated tree has all branch hashes computed before handing it out.
+            _ = with_length.getRoot(self.pool);
+
+            new_root = with_length;
+            const new_data = try Data.init(self.allocator, self.pool, with_length);
+            new_root = null;
             return Self{
                 .allocator = self.allocator,
                 .pool = self.pool,
@@ -514,11 +508,8 @@ pub fn TreeView(comptime ST: type) type {
             const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, is_list_view);
             const target_length = if (index >= length) 0 else length - index;
 
-            var chunk_root_inserted = target_length == 0;
             var chunk_root: ?Node.Id = null;
-            // Only release the chunk root when (a) we actually built a temporary subtree and
-            // (b) the new branch never adopted it.
-            defer if (chunk_root != null and !chunk_root_inserted) self.pool.unref(chunk_root.?);
+            defer if (chunk_root) |id| self.pool.unref(id);
 
             if (target_length == 0) {
                 chunk_root = @enumFromInt(base_chunk_depth);
@@ -527,20 +518,20 @@ pub fn TreeView(comptime ST: type) type {
                 defer self.allocator.free(nodes);
                 try self.data.root.getNodesAtDepth(self.pool, chunk_depth, index, nodes);
 
-                chunk_root = try Node.fillWithContents(self.pool, nodes, base_chunk_depth, false);
+                chunk_root = try Node.fillWithContents(self.pool, nodes, base_chunk_depth);
             }
 
-            const length_node = try self.pool.createLeafFromUint(@intCast(target_length), false);
-            var length_inserted = false;
-            // Drop the temporary length leaf unless we attach it to the new branch
-            defer if (!length_inserted) self.pool.unref(length_node);
+            var length_node: ?Node.Id = try self.pool.createLeafFromUint(@intCast(target_length));
+            defer if (length_node) |id| self.pool.unref(id);
 
-            const new_root = try self.pool.createBranch(chunk_root.?, length_node, false);
-            length_inserted = true;
-            chunk_root_inserted = true;
+            const new_root = try self.pool.createBranch(chunk_root.?, length_node.?);
+            length_node = null;
+            chunk_root = null;
 
-            errdefer self.pool.unref(new_root);
+            var root_handle: ?Node.Id = new_root;
+            defer if (root_handle) |id| self.pool.unref(id);
             const new_data = try Data.init(self.allocator, self.pool, new_root);
+            root_handle = null;
             return Self{
                 .allocator = self.allocator,
                 .pool = self.pool,
