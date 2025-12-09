@@ -1,20 +1,22 @@
 const std = @import("std");
 const math = std.math;
+
+const Gindex = @import("persistent_merkle_tree").Gindex;
 const hashing = @import("hashing");
 const Depth = hashing.Depth;
+const ListLengthUint = hashing.GindexUint;
+const list_length_unset = hashing.max_depth;
 const Node = @import("persistent_merkle_tree").Node;
-const Gindex = @import("persistent_merkle_tree").Gindex;
-const isBasicType = @import("type/type_kind.zig").isBasicType;
-const TypeKind = @import("type/type_kind.zig").TypeKind;
+
 const type_root = @import("type/root.zig");
 const BYTES_PER_CHUNK = type_root.BYTES_PER_CHUNK;
 const itemsPerChunk = type_root.itemsPerChunk;
 const chunkCount = type_root.chunkCount;
 const chunkDepth = type_root.chunkDepth;
-const ListLengthUint = hashing.GindexUint;
-// A sentinel value indicating that the list length cache is unset.
-const list_length_unset = hashing.max_depth;
+const isBasicType = @import("type/type_kind.zig").isBasicType;
+const TypeKind = @import("type/type_kind.zig").TypeKind;
 
+// A sentinel value indicating that the list length cache is unset.
 pub const Data = struct {
     root: Node.Id,
 
@@ -132,10 +134,13 @@ pub fn TreeView(comptime ST: type) type {
             out.* = self.data.root.getRoot(self.pool).*;
         }
 
-        /// Get (and cache) the length of the list. Only available for List types.
+        /// Get the length of the array. For Vector returns compile-time constant, for List reads from tree.
         pub fn getLength(self: *Self) !usize {
-            if (comptime !is_list_view) {
-                @compileError("getLength can only be used with List types");
+            if (comptime !is_array_view) {
+                @compileError("getLength can only be used with Vector or List types");
+            }
+            if (comptime is_vector_view) {
+                return ST.length;
             }
             if (self.data.list_length != list_length_unset) {
                 return @intCast(self.data.list_length);
