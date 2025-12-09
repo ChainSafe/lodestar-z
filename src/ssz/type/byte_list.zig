@@ -25,6 +25,7 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
         }
     }
     return struct {
+        const Self = @This();
         pub const kind = TypeKind.list;
         pub const Element: type = UintType(8);
         pub const limit: usize = _limit;
@@ -121,7 +122,7 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
 
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
-                try node.getNodesAtDepth(pool, chunkDepth(u8, chunk_depth, true), 0, nodes);
+                try node.getNodesAtDepth(pool, chunkDepth(u8, chunk_depth, Self), 0, nodes);
 
                 try out.resize(allocator, len);
                 for (0..chunk_count) |i| {

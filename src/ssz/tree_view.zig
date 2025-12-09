@@ -106,12 +106,8 @@ pub fn TreeView(comptime ST: type) type {
 
         const Self = @This();
 
-        /// Which variant this TreeView is
-        const is_container_view = ST.kind == TypeKind.container;
-        const is_list_view = ST.kind == TypeKind.list;
-        const is_vector_view = ST.kind == TypeKind.vector;
-        const is_array_view = is_list_view or is_vector_view;
-        const is_basic_array_view = is_array_view and @hasDecl(ST, "Element") and isBasicType(ST.Element);
+        const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
+        const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, ST);
 
         pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, root: Node.Id) !Self {
             return Self{
@@ -136,10 +132,10 @@ pub fn TreeView(comptime ST: type) type {
 
         /// Get the length of the array. For Vector returns compile-time constant, for List reads from tree.
         pub fn getLength(self: *Self) !usize {
-            if (comptime !is_array_view) {
+            if (comptime ST.kind != .list and ST.kind != .vector) {
                 @compileError("getLength can only be used with Vector or List types");
             }
-            if (comptime is_vector_view) {
+            if (comptime ST.kind == .vector) {
                 return ST.length;
             }
             if (self.data.list_length != list_length_unset) {
@@ -175,8 +171,11 @@ pub fn TreeView(comptime ST: type) type {
         /// basic arrays avoid re-traversing the tree.
         fn ensureChunkPrefetch(self: *Self, chunk_count: usize, items_per_chunk: usize) !void {
             comptime {
-                if (!is_basic_array_view) {
-                    @compileError("ensureChunkPrefetch can only be used with basic array views");
+                if (ST.kind != .list and ST.kind != .vector) {
+                    @compileError("ensureChunkPrefetch can only be used with Vector/List types");
+                }
+                if (!(@hasDecl(ST, "Element") and isBasicType(ST.Element))) {
+                    @compileError("ensureChunkPrefetch can only be used with basic element types");
                 }
             }
 
@@ -185,9 +184,6 @@ pub fn TreeView(comptime ST: type) type {
 
             const start_index = self.data.prefetched_chunk_count;
             const remaining = chunk_count - start_index;
-
-            const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
-            const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, is_list_view);
 
             const nodes = try self.allocator.alloc(Node.Id, remaining);
             defer self.allocator.free(nodes);
@@ -212,10 +208,8 @@ pub fn TreeView(comptime ST: type) type {
             TreeView(ST.Element);
 
         inline fn elementChildGindex(index: usize) Gindex {
-            const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
             return Gindex.fromDepth(
-                // Lists mix in their length at one extra depth level.
-                chunkDepth(Depth, base_chunk_depth, is_list_view),
+                chunk_depth,
                 if (comptime isBasicType(ST.Element)) blk: {
                     const per_chunk = itemsPerChunk(ST.Element);
                     break :blk index / per_chunk;
@@ -225,7 +219,7 @@ pub fn TreeView(comptime ST: type) type {
 
         inline fn listLengthGindex() Gindex {
             comptime {
-                if (!is_list_view) {
+                if (ST.kind != .list) {
                     @compileError("listLengthGindex can only be used with List types");
                 }
             }
@@ -234,7 +228,7 @@ pub fn TreeView(comptime ST: type) type {
 
         fn updateListLength(self: *Self, new_length: usize) !void {
             comptime {
-                if (!is_list_view) {
+                if (ST.kind != .list) {
                     @compileError("updateListLength can only be used with List types");
                 }
             }
@@ -260,7 +254,7 @@ pub fn TreeView(comptime ST: type) type {
             try self.data.changed.put(gindex, {});
             self.data.list_length = @intCast(new_length);
 
-            if (comptime is_basic_array_view) {
+            if (comptime @hasDecl(ST, "Element") and isBasicType(ST.Element)) {
                 const chunk_count = chunkCount(new_length, ST.Element);
                 // If the list shrank, discard prefetched chunks that fall beyond the new length
                 if (self.data.prefetched_chunk_count > chunk_count) {
@@ -298,11 +292,16 @@ pub fn TreeView(comptime ST: type) type {
         /// Allocate and return all elements as an array. Only available for basic array types (Vector/List of basic types).
         /// Returns a slice that must be freed by the caller.
         pub fn getAllElementsAlloc(self: *Self, allocator: std.mem.Allocator) ![]ST.Element.Type {
-            if (!comptime is_basic_array_view) {
-                @compileError("getAllElementsAlloc can only be used with Vector/List of basic types");
+            comptime {
+                if (ST.kind != .list and ST.kind != .vector) {
+                    @compileError("getAllElementsAlloc can only be used with Vector/List types");
+                }
+                if (!(@hasDecl(ST, "Element") and isBasicType(ST.Element))) {
+                    @compileError("getAllElementsAlloc can only be used with basic element types");
+                }
             }
 
-            const length = if (comptime is_list_view) try self.getLength() else ST.length;
+            const length = try self.getLength();
             const values = try allocator.alloc(ST.Element.Type, length);
             errdefer allocator.free(values);
 
@@ -311,11 +310,16 @@ pub fn TreeView(comptime ST: type) type {
 
         /// Populate a caller-provided buffer with all elements and return it.
         pub fn getAllElements(self: *Self, values: []ST.Element.Type) ![]ST.Element.Type {
-            if (!comptime is_basic_array_view) {
-                @compileError("getAllElements can only be used with Vector/List of basic types");
+            comptime {
+                if (ST.kind != .list and ST.kind != .vector) {
+                    @compileError("getAllElements can only be used with Vector/List types");
+                }
+                if (!(@hasDecl(ST, "Element") and isBasicType(ST.Element))) {
+                    @compileError("getAllElements can only be used with basic element types");
+                }
             }
 
-            const length = if (comptime is_list_view) try self.getLength() else ST.length;
+            const length = try self.getLength();
             if (values.len != length) {
                 return error.InvalidSize;
             }
@@ -415,7 +419,7 @@ pub fn TreeView(comptime ST: type) type {
 
         /// Append an element to the end of the list, updating the cached length.
         pub fn push(self: *Self, value: Element) !void {
-            if (comptime !is_list_view) {
+            if (comptime ST.kind != .list) {
                 @compileError("push can only be used with List types");
             }
 
@@ -432,7 +436,7 @@ pub fn TreeView(comptime ST: type) type {
         /// Only available for list views.
         pub fn sliceTo(self: *Self, index: usize) !Self {
             comptime {
-                if (!is_list_view) {
+                if (ST.kind != .list) {
                     @compileError("sliceTo can only be used with List types");
                 }
             }
@@ -448,12 +452,10 @@ pub fn TreeView(comptime ST: type) type {
             if (new_length > ST.limit) {
                 return error.LengthOverLimit;
             }
-            const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
-            const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, is_list_view);
 
             var new_root: ?Node.Id = null;
             defer if (new_root) |id| self.pool.unref(id);
-            if (comptime is_basic_array_view) {
+            if (comptime @hasDecl(ST, "Element") and isBasicType(ST.Element)) {
                 const items_per_chunk = itemsPerChunk(ST.Element);
                 const chunk_index = index / items_per_chunk;
                 const chunk_offset = index % items_per_chunk;
@@ -497,7 +499,10 @@ pub fn TreeView(comptime ST: type) type {
         /// Basic list slicing would require per-element extraction and repacking since multiple elements are tightly packed within each chunk.
         pub fn sliceFrom(self: *Self, index: usize) !Self {
             comptime {
-                if (!is_list_view or is_basic_array_view) {
+                if (ST.kind != .list) {
+                    @compileError("sliceFrom can only be used with List types");
+                }
+                if (@hasDecl(ST, "Element") and isBasicType(ST.Element)) {
                     @compileError("sliceFrom can only be used with List of composite types");
                 }
             }
@@ -509,8 +514,6 @@ pub fn TreeView(comptime ST: type) type {
                 return try Self.init(self.allocator, self.pool, self.data.root);
             }
 
-            const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
-            const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, is_list_view);
             const target_length = if (index >= length) 0 else length - index;
 
             var chunk_root: ?Node.Id = null;

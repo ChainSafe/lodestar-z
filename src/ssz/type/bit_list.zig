@@ -245,6 +245,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         }
     }
     return struct {
+        const Self = @This();
         pub const kind = TypeKind.list;
         pub const Element: type = BoolType();
         pub const limit: usize = _limit;
@@ -433,7 +434,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
 
-                try node.getNodesAtDepth(pool, chunkDepth(u8, chunk_depth, true), 0, nodes);
+                try node.getNodesAtDepth(pool, chunkDepth(u8, chunk_depth, Self), 0, nodes);
 
                 try out.resize(allocator, bit_len);
                 for (0..chunk_count) |i| {
