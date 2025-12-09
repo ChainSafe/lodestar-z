@@ -177,7 +177,7 @@ pub fn stateTransition(
     //  postState.commit();
     //  processBlockCommitTimer?.();
 
-    metrics.onPostState(post_state, metrics);
+    metrics.onPostState(post_state, &metrics.state_transition);
 
     // Verify state root
     if (opts.verify_state_root) {
