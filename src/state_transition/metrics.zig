@@ -43,7 +43,7 @@ pub const ProposerRewardType = enum {
     slashing,
 };
 
-const SourceLabel = struct { source: StateCloneSource };
+const StateCloneSourceLabel = struct { source: StateCloneSource };
 pub const HashTreeRootLabel = struct { source: StateHashTreeRootSource };
 const EpochTransitionStepLabel = struct { step: EpochTransitionStep };
 const ProposerRewardLabel = struct { type: ProposerRewardType };
@@ -79,7 +79,7 @@ pub const Metrics = struct {
     const ProcessBlockCommit = m.Histogram(f32, &.{ 0.005, 0.01, 0.02, 0.05, 0.1, 1 });
     const StateHashTreeRootTime = m.HistogramVec(f32, HashTreeRootLabel, &.{ 0.05, 0.1, 0.2, 0.5, 1, 1.5 });
     const CountGauge = m.Gauge(u64);
-    const GaugeVecSource = m.GaugeVec(u64, SourceLabel);
+    const GaugeVecSource = m.GaugeVec(u64, StateCloneSourceLabel);
     const PreStateClonedCount = m.Histogram(u32, &.{ 1, 2, 5, 10, 50, 250 });
     const ProposerRewardsGauge = m.GaugeVec(u64, ProposerRewardLabel);
 };
