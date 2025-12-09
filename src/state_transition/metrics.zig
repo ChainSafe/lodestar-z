@@ -7,8 +7,8 @@ const CachedBeaconStateAllForks = @import("cache/state_cache.zig").CachedBeaconS
 pub var state_transition = m.initializeNoop(Metrics);
 
 pub const StateCloneSource = enum {
-    stateTransition,
-    processSlots,
+    state_transition,
+    process_slots,
 };
 
 pub const StateHashTreeRootSource = enum {
