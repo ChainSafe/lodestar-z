@@ -237,12 +237,12 @@ pub fn TreeView(comptime ST: type) type {
             }
 
             const length_node = try self.pool.createLeafFromUint(@intCast(new_length));
-            var inserted = false;
-            defer if (!inserted) self.pool.unref(length_node); // only drop if we never attach it to the tree
-
             const gindex = listLengthGindex();
-            const opt_old = try self.data.children_nodes.fetchPut(gindex, length_node);
-            inserted = true;
+            const opt_old = blk: {
+                // unref only if fetchPut fails; once inserted, node is tree-owned and won't be unref'd even if later code errors
+                errdefer self.pool.unref(length_node);
+                break :blk try self.data.children_nodes.fetchPut(gindex, length_node);
+            };
             if (opt_old) |old_entry| {
                 // Multiple local mutations before commit() leave our cloned nodes with
                 // refcount 0. Only free those; tree-owned nodes keep a positive refcount.
