@@ -148,7 +148,7 @@ pub fn stateTransition(
         allocator.destroy(post_state);
     }
 
-    try metrics.onStateClone(post_state, &metrics.state_transition, .stateTransition);
+    try metrics.onStateClone(post_state, &metrics.state_transition, .state_transition);
 
     try processSlotsWithTransientCache(allocator, post_state, block_slot, .{});
 
