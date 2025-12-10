@@ -149,3 +149,86 @@ test "TreeView list element roundtrip" {
     try std.testing.expectEqual(roundtrip.items.len, expected_list.items.len);
     try std.testing.expectEqualSlices(u32, expected_list.items, roundtrip.items);
 }
+
+test "TreeView list getElementReadonly basic type" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const ListType = ssz.FixedListType(Uint32, 16);
+
+    const base_values = [_]u32{ 5, 15, 25, 35, 45 };
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &base_values);
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ssz.TreeView(ListType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    for (0..5) |i| {
+        const expected: u32 = @intCast(base_values[i]);
+        try std.testing.expectEqual(expected, try view.getElement(i));
+        try std.testing.expectEqual(expected, try view.getElementReadonly(i));
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), view.data.changed.count());
+}
+
+test "TreeView vector getElementReadonly basic type" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 128);
+    defer pool.deinit();
+
+    const Uint64 = ssz.UintType(64);
+    const VectorType = ssz.FixedVectorType(Uint64, 4);
+
+    const original: VectorType.Type = [_]u64{ 11, 22, 33, 44 };
+
+    const root_node = try VectorType.tree.fromValue(&pool, &original);
+    var view = try ssz.TreeView(VectorType).init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    for (0..4) |i| {
+        const expected: u64 = original[i];
+        try std.testing.expectEqual(expected, try view.getElement(i));
+        try std.testing.expectEqual(expected, try view.getElementReadonly(i));
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), view.data.changed.count());
+}
+
+test "TreeView list of containers getElementReadonly marks changed correctly" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const ContainerType = ssz.FixedContainerType(struct {
+        a: ssz.UintType(64),
+        b: ssz.UintType(64),
+    });
+    const ListType = ssz.FixedListType(ContainerType, 4);
+    const ListView = ssz.TreeView(ListType);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    for (0..4) |i| {
+        try list.append(allocator, .{ .a = @intCast(i), .b = @intCast(i) });
+    }
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ListView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    _ = try view.getElementReadonly(0);
+    _ = try view.getElementReadonly(1);
+    try std.testing.expectEqual(@as(usize, 0), view.data.changed.count());
+
+    _ = try view.getElement(2);
+    try std.testing.expectEqual(@as(usize, 1), view.data.changed.count());
+
+    _ = try view.getElement(3);
+    try std.testing.expectEqual(@as(usize, 2), view.data.changed.count());
+}
