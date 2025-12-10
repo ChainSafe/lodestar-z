@@ -3,6 +3,7 @@ const Depth = @import("hashing").Depth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("type/type_kind.zig").isBasicType;
+const isViewMutable = @import("type/type_kind.zig").isViewMutable;
 const BYTES_PER_CHUNK = @import("type/root.zig").BYTES_PER_CHUNK;
 
 pub const Data = struct {
@@ -141,6 +142,30 @@ pub fn TreeView(comptime ST: type) type {
             );
         }
 
+        /// Get an element by index for read-only access.
+        /// Does NOT mark the element as changed - modifications to the returned
+        /// composite view will not be committed to the parent tree.
+        /// For basic types, this is equivalent to `getElement`.
+        pub fn getElementReadonly(self: *Self, index: usize) !Element {
+            if (ST.kind != .vector and ST.kind != .list) {
+                @compileError("getElementReadonly can only be used with vector or list types");
+            }
+            const child_gindex = elementChildGindex(index);
+            if (comptime isBasicType(ST.Element)) {
+                var value: ST.Element.Type = undefined;
+                const child_node = try self.getChildNode(child_gindex);
+                try ST.Element.tree.toValuePacked(child_node, self.pool, index, &value);
+                return value;
+            } else {
+                const child_data = try self.getChildData(child_gindex);
+                return TreeView(ST.Element){
+                    .allocator = self.allocator,
+                    .pool = self.pool,
+                    .data = child_data,
+                };
+            }
+        }
+
         /// Get an element by index. If the element is a basic type, returns the value directly.
         /// Caller borrows a copy of the value so there is no need to deinit it.
         pub fn getElement(self: *Self, index: usize) !Element {
@@ -156,8 +181,9 @@ pub fn TreeView(comptime ST: type) type {
             } else {
                 const child_data = try self.getChildData(child_gindex);
 
-                // TODO only update changed if the subview is mutable
-                try self.data.changed.put(child_gindex, {});
+                if (comptime isViewMutable(ST.Element)) {
+                    try self.data.changed.put(child_gindex, {});
+                }
 
                 return TreeView(ST.Element){
                     .allocator = self.allocator,
@@ -233,8 +259,9 @@ pub fn TreeView(comptime ST: type) type {
             } else {
                 const child_data = try self.getChildData(child_gindex);
 
-                // TODO only update changed if the subview is mutable
-                try self.data.changed.put(child_gindex, {});
+                if (comptime isViewMutable(ChildST)) {
+                    try self.data.changed.put(child_gindex, {});
+                }
 
                 return TreeView(ChildST){
                     .allocator = self.allocator,
