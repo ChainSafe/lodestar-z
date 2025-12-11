@@ -1,7 +1,10 @@
 const std = @import("std");
 const types = @import("consensus_types");
 const Epoch = types.primitive.Epoch.Type;
+const Slot = types.primitive.Slot.Type;
 const Version = types.primitive.Version.Type;
+const ChainConfig = @import("./chain/chain_config.zig").ChainConfig;
+const preset = @import("preset").preset;
 
 pub const TOTAL_FORKS = 7;
 
@@ -95,6 +98,30 @@ pub const ForkInfo = struct {
     prev_version: Version,
     prev_fork_seq: ForkSeq,
 };
+
+/// Read slot from raw BeaconState SSZ bytes (offset 40)
+pub fn slotFromStateBytes(state_bytes: []const u8) ?Slot {
+    if (state_bytes.len < 48) return null;
+    return std.mem.readInt(u64, state_bytes[40..48], .little);
+}
+
+/// Read slot from raw SignedBeaconBlock SSZ bytes (offset 100)
+pub fn slotFromBlockBytes(block_bytes: []const u8) ?Slot {
+    if (block_bytes.len < 108) return null;
+    return std.mem.readInt(u64, block_bytes[100..108], .little);
+}
+
+/// Determine ForkSeq from slot using chain config
+pub fn forkSeqAtSlot(chain_config: ChainConfig, slot: Slot) ForkSeq {
+    const epoch = slot / preset.SLOTS_PER_EPOCH;
+    if (epoch >= chain_config.FULU_FORK_EPOCH) return .fulu;
+    if (epoch >= chain_config.ELECTRA_FORK_EPOCH) return .electra;
+    if (epoch >= chain_config.DENEB_FORK_EPOCH) return .deneb;
+    if (epoch >= chain_config.CAPELLA_FORK_EPOCH) return .capella;
+    if (epoch >= chain_config.BELLATRIX_FORK_EPOCH) return .bellatrix;
+    if (epoch >= chain_config.ALTAIR_FORK_EPOCH) return .altair;
+    return .phase0;
+}
 
 test "fork - forkName" {
     try std.testing.expectEqualSlices(u8, "phase0", ForkSeq.phase0.forkName());
