@@ -141,10 +141,14 @@ pub fn TreeView(comptime ST: type) type {
             );
         }
 
-        /// Get an element by index for modification. If the element is a basic type, returns the value directly.
-        /// For composite types, returns a mutable TreeView that should be passed back via setElement.
-        /// Note: For composite types, this method adds an extra ref on the returned data's root node.
-        /// If you call this but don't call setElement afterwards, you must manually call pool.unref(element.data.root).
+        /// Get an element by index for modification.
+        /// If the element is a basic type, returns the value directly.
+        /// For composite types, returns a mutable TreeView that should be passed back
+        /// via setElement.
+        ///
+        /// Note: For composite types, this method adds an extra ref on the returned
+        /// data's root node. If you call this but don't call setElement afterwards,
+        /// you must manually call `pool.unref(element.data.root)`.
         /// If you only need read access, use `getElementReadonly` instead.
         pub fn getElement(self: *Self, index: usize) !Element {
             if (ST.kind != .vector and ST.kind != .list) {
@@ -221,10 +225,14 @@ pub fn TreeView(comptime ST: type) type {
             }
         }
 
-        /// Get a field by name for modification. If the field is a basic type, returns the value directly.
-        /// For composite types, returns a mutable TreeView that should be passed back via setField.
-        /// Note: For composite types, this method adds an extra ref on the returned data's root node.
-        /// If you call this but don't call setField afterwards, you must manually call pool.unref(field.data.root).
+        /// Get a field by name for modification.
+        /// If the field is a basic type, returns the value directly.
+        /// For composite types, returns a mutable TreeView that should be passed back
+        /// via setField.
+        ///
+        /// Note: For composite types, this method adds an extra ref on the returned
+        /// data's root node. If you call this but don't call setField afterwards,
+        /// you must manually call `pool.unref(field.data.root)`.
         /// If you only need read access, use `getFieldReadonly` instead.
         pub fn getField(self: *Self, comptime field_name: []const u8) !Field(field_name) {
             if (comptime ST.kind != .container) {
