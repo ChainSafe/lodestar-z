@@ -126,8 +126,6 @@ pub fn ContainerTreeView(comptime ST: type) type {
     const BaseView = BaseTreeView(ST);
 
     return struct {
-        allocator: std.mem.Allocator,
-        pool: *Node.Pool,
         base_view: BaseView,
         pub const SszType: type = ST;
 
@@ -135,8 +133,6 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
         pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, root: Node.Id) !Self {
             return .{
-                .allocator = allocator,
-                .pool = pool,
                 .base_view = try BaseView.init(allocator, pool, root),
             };
         }
@@ -175,7 +171,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             if (comptime isBasicType(ChildST)) {
                 var value: ChildST.Type = undefined;
                 const child_node = try self.base_view.getChildNode(child_gindex);
-                try ChildST.tree.toValue(child_node, self.pool, &value);
+                try ChildST.tree.toValue(child_node, self.base_view.pool, &value);
                 return value;
             } else {
                 const child_data = try self.base_view.getChildData(child_gindex);
@@ -184,11 +180,9 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 try self.base_view.data.changed.put(child_gindex, {});
 
                 return .{
-                    .allocator = self.allocator,
-                    .pool = self.pool,
                     .base_view = .{
-                        .allocator = self.allocator,
-                        .pool = self.pool,
+                        .allocator = self.base_view.allocator,
+                        .pool = self.base_view.pool,
                         .data = child_data,
                     },
                 };
@@ -211,15 +205,15 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 const opt_old_node = try self.base_view.data.children_nodes.fetchPut(
                     child_gindex,
                     try ChildST.tree.fromValue(
-                        self.pool,
+                        self.base_view.pool,
                         &value,
                     ),
                 );
                 if (opt_old_node) |old_node| {
                     // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
                     // Tree-owned nodes already have a refcount, so skip unref in that case.
-                    if (old_node.value.getState(self.pool).getRefCount() == 0) {
-                        self.pool.unref(old_node.value);
+                    if (old_node.value.getState(self.base_view.pool).getRefCount() == 0) {
+                        self.base_view.pool.unref(old_node.value);
                     }
                 }
             } else {
@@ -229,7 +223,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 );
                 if (opt_old_data) |old_data_value| {
                     var data = @constCast(&old_data_value.value);
-                    data.deinit(self.pool);
+                    data.deinit(self.base_view.pool);
                 }
             }
         }
@@ -240,8 +234,6 @@ pub fn ArrayTreeView(comptime ST: type) type {
     const BaseView = BaseTreeView(ST);
 
     return struct {
-        allocator: std.mem.Allocator,
-        pool: *Node.Pool,
         base_view: BaseView,
         pub const SszType: type = ST;
 
@@ -249,8 +241,6 @@ pub fn ArrayTreeView(comptime ST: type) type {
 
         pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, root: Node.Id) !Self {
             return .{
-                .allocator = allocator,
-                .pool = pool,
                 .base_view = try BaseView.init(allocator, pool, root),
             };
         }
@@ -293,18 +283,20 @@ pub fn ArrayTreeView(comptime ST: type) type {
             if (comptime isBasicType(ST.Element)) {
                 var value: ST.Element.Type = undefined;
                 const child_node = try self.base_view.getChildNode(child_gindex);
-                try ST.Element.tree.toValuePacked(child_node, self.pool, index, &value);
+                try ST.Element.tree.toValuePacked(child_node, self.base_view.pool, index, &value);
                 return value;
             } else {
-                const child_data = try self.getChildData(child_gindex);
+                const child_data = try self.base_view.getChildData(child_gindex);
 
                 // TODO only update changed if the subview is mutable
                 try self.base_view.data.changed.put(child_gindex, {});
 
-                return ST.Element.TreeView{
-                    .allocator = self.allocator,
-                    .pool = self.pool,
-                    .data = child_data,
+                return .{
+                    .base_view = .{
+                        .allocator = self.base_view.allocator,
+                        .pool = self.base_view.pool,
+                        .data = child_data,
+                    },
                 };
             }
         }
@@ -325,7 +317,7 @@ pub fn ArrayTreeView(comptime ST: type) type {
                     child_gindex,
                     try ST.Element.tree.fromValuePacked(
                         child_node,
-                        self.pool,
+                        self.base_view.pool,
                         index,
                         &value,
                     ),
@@ -333,8 +325,8 @@ pub fn ArrayTreeView(comptime ST: type) type {
                 if (opt_old_node) |old_node| {
                     // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
                     // Tree-owned nodes already have a refcount, so skip unref in that case.
-                    if (old_node.value.getState(self.pool).getRefCount() == 0) {
-                        self.pool.unref(old_node.value);
+                    if (old_node.value.getState(self.base_view.pool).getRefCount() == 0) {
+                        self.base_view.pool.unref(old_node.value);
                     }
                 }
             } else {
@@ -344,7 +336,7 @@ pub fn ArrayTreeView(comptime ST: type) type {
                 );
                 if (opt_old_data) |old_data_value| {
                     var data: *Data = @constCast(&old_data_value.value);
-                    data.deinit(self.pool);
+                    data.deinit(self.base_view.pool);
                 }
             }
         }
