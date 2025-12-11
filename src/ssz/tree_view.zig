@@ -185,7 +185,6 @@ pub fn ContainerTreeView(comptime ST: type) type {
             if (comptime isBasicType(ChildST)) {
                 return ChildST.Type;
             } else {
-                // return TreeView(ChildST);
                 return ChildST.TreeView;
             }
         }
