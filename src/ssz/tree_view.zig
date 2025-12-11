@@ -122,6 +122,21 @@ pub fn TreeView(comptime ST: type) type {
         }
 
         pub fn commit(self: *Self) !void {
+            if (comptime ST.kind == .list) {
+                const gindex = listLengthGindex();
+                if (self.data.changed.contains(gindex)) {
+                    const length_node = try self.pool.createLeafFromUint(self.data.list_length);
+                    const opt_old = blk: {
+                        errdefer self.pool.unref(length_node);
+                        break :blk try self.data.children_nodes.fetchPut(gindex, length_node);
+                    };
+                    if (opt_old) |old_entry| {
+                        if (old_entry.value.getState(self.pool).getRefCount() == 0) {
+                            self.pool.unref(old_entry.value);
+                        }
+                    }
+                }
+            }
             try self.data.commit(self.allocator, self.pool);
         }
 
@@ -236,31 +251,10 @@ pub fn TreeView(comptime ST: type) type {
                 return error.LengthOverLimit;
             }
 
-            const length_node = try self.pool.createLeafFromUint(@intCast(new_length));
-            const gindex = listLengthGindex();
-            const opt_old = blk: {
-                // unref only if fetchPut fails; once inserted, node is tree-owned and won't be unref'd even if later code errors
-                errdefer self.pool.unref(length_node);
-                break :blk try self.data.children_nodes.fetchPut(gindex, length_node);
-            };
-            if (opt_old) |old_entry| {
-                // Multiple local mutations before commit() leave our cloned nodes with
-                // refcount 0. Only free those; tree-owned nodes keep a positive refcount.
-                if (old_entry.value.getState(self.pool).getRefCount() == 0) {
-                    self.pool.unref(old_entry.value);
-                }
-            }
-
-            try self.data.changed.put(gindex, {});
+            // Only update the cached length and mark as changed.
+            // The actual length node is created lazily in commit().
+            try self.data.changed.put(listLengthGindex(), {});
             self.data.list_length = @intCast(new_length);
-
-            if (comptime @hasDecl(ST, "Element") and isBasicType(ST.Element)) {
-                const chunk_count = chunkCount(new_length, ST.Element);
-                // If the list shrank, discard prefetched chunks that fall beyond the new length
-                if (self.data.prefetched_chunk_count > chunk_count) {
-                    self.data.prefetched_chunk_count = chunk_count;
-                }
-            }
         }
 
         /// Get an element by index. If the element is a basic type, returns the value directly.
@@ -289,6 +283,7 @@ pub fn TreeView(comptime ST: type) type {
             }
         }
 
+        // TODO: add Readonly version of this function
         /// Allocate and return all elements as an array. Only available for basic array types (Vector/List of basic types).
         /// Returns a slice that must be freed by the caller.
         pub fn getAllElementsAlloc(self: *Self, allocator: std.mem.Allocator) ![]ST.Element.Type {
@@ -308,6 +303,7 @@ pub fn TreeView(comptime ST: type) type {
             return try self.getAllElements(values);
         }
 
+        // TODO: add Readonly version of this function
         /// Populate a caller-provided buffer with all elements and return it.
         pub fn getAllElements(self: *Self, values: []ST.Element.Type) ![]ST.Element.Type {
             comptime {
