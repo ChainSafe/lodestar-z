@@ -24,6 +24,9 @@
         .zbench = .{
             .url = "git+https://github.com/hendriknielaender/zBench#d8c7dd485306b88b757d52005614ebcb0a336942",
         },
+        .metrics = .{
+            .url = "git+https://github.com/karlseguin/metrics.zig.git#2b584b6209871b7215706028988169599451dc0d",
+        },
     },
     .options_modules = .{
         .build_options = .{
@@ -92,10 +95,17 @@
                 .preset,
                 .constants,
                 .hex,
+                .metrics,
             },
         },
     },
     .executables = .{
+        .metrics_example = .{
+            .root_module = .{
+                .root_source_file = "examples/collect_stf_metrics.zig",
+                .imports = .{ .state_transition, .consensus_types },
+            },
+        },
         .download_spec_tests = .{
             .root_module = .{
                 .root_source_file = "test/spec/download_spec_tests.zig",
