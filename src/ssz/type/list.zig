@@ -9,6 +9,7 @@ const merkleize = @import("hashing").merkleize;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
+const ArrayTreeView = @import("../tree_view.zig").ArrayTreeView;
 
 pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
     comptime {
@@ -24,6 +25,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
         pub const Element: type = ST;
         pub const limit: usize = _limit;
         pub const Type: type = std.ArrayListUnmanaged(Element.Type);
+        pub const TreeView: type = ArrayTreeView(@This());
         pub const min_size: usize = 0;
         pub const max_size: usize = Element.fixed_size * limit;
         pub const max_chunk_count: usize = if (isBasicType(Element)) std.math.divCeil(usize, max_size, 32) catch unreachable else limit;

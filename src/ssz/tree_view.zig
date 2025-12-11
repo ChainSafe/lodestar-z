@@ -69,12 +69,7 @@ pub const Data = struct {
 
 /// A treeview provides a view into a merkle tree of a given SSZ type.
 /// It maintains and takes ownership recursively of a Data struct, which caches nodes and child Data.
-pub fn TreeView(comptime ST: type) type {
-    comptime {
-        if (isBasicType(ST)) {
-            @compileError("TreeView cannot be used with basic types");
-        }
-    }
+pub fn BaseTreeView(comptime ST: type) type {
     return struct {
         allocator: std.mem.Allocator,
         pool: *Node.Pool,
@@ -124,11 +119,158 @@ pub fn TreeView(comptime ST: type) type {
             gop.value_ptr.* = child_data;
             return child_data;
         }
+    };
+}
+
+pub fn ContainerTreeView(comptime ST: type) type {
+    const BaseView = BaseTreeView(ST);
+
+    return struct {
+        allocator: std.mem.Allocator,
+        pool: *Node.Pool,
+        base_view: BaseView,
+        pub const SszType: type = ST;
+
+        const Self = @This();
+
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, root: Node.Id) !Self {
+            return .{
+                .allocator = allocator,
+                .pool = pool,
+                .base_view = try BaseView.init(allocator, pool, root),
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.base_view.deinit();
+        }
+
+        pub fn commit(self: *Self) !void {
+            try self.base_view.commit();
+        }
+
+        pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
+            try self.base_view.hashTreeRoot(out);
+        }
+
+        pub fn Field(comptime field_name: []const u8) type {
+            const ChildST = ST.getFieldType(field_name);
+            if (comptime isBasicType(ChildST)) {
+                return ChildST.Type;
+            } else {
+                // return TreeView(ChildST);
+                return ChildST.TreeView;
+            }
+        }
+
+        /// Get a field by name. If the field is a basic type, returns the value directly.
+        /// Caller borrows a copy of the value so there is no need to deinit it.
+        pub fn get(self: *Self, comptime field_name: []const u8) !Field(field_name) {
+            if (comptime ST.kind != .container) {
+                @compileError("getField can only be used with container types");
+            }
+            const field_index = comptime ST.getFieldIndex(field_name);
+            const ChildST = ST.getFieldType(field_name);
+            const child_gindex = Gindex.fromDepth(ST.chunk_depth, field_index);
+            if (comptime isBasicType(ChildST)) {
+                var value: ChildST.Type = undefined;
+                const child_node = try self.base_view.getChildNode(child_gindex);
+                try ChildST.tree.toValue(child_node, self.pool, &value);
+                return value;
+            } else {
+                const child_data = try self.base_view.getChildData(child_gindex);
+
+                // TODO only update changed if the subview is mutable
+                try self.base_view.data.changed.put(child_gindex, {});
+
+                return .{
+                    .allocator = self.allocator,
+                    .pool = self.pool,
+                    .base_view = .{
+                        .allocator = self.allocator,
+                        .pool = self.pool,
+                        .data = child_data,
+                    },
+                };
+            }
+        }
+
+        /// Set a field by name. If the field is a basic type, pass the value directly.
+        /// If the field is a complex type, pass a TreeView of the corresponding type.
+        /// The caller transfers ownership of the `value` TreeView to this parent view.
+        /// The existing TreeView, if any, will be deinited by this function.
+        pub fn set(self: *Self, comptime field_name: []const u8, value: Field(field_name)) !void {
+            if (comptime ST.kind != .container) {
+                @compileError("setField can only be used with container types");
+            }
+            const field_index = comptime ST.getFieldIndex(field_name);
+            const ChildST = ST.getFieldType(field_name);
+            const child_gindex = Gindex.fromDepth(ST.chunk_depth, field_index);
+            try self.base_view.data.changed.put(child_gindex, {});
+            if (comptime isBasicType(ChildST)) {
+                const opt_old_node = try self.base_view.data.children_nodes.fetchPut(
+                    child_gindex,
+                    try ChildST.tree.fromValue(
+                        self.pool,
+                        &value,
+                    ),
+                );
+                if (opt_old_node) |old_node| {
+                    // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
+                    // Tree-owned nodes already have a refcount, so skip unref in that case.
+                    if (old_node.value.getState(self.pool).getRefCount() == 0) {
+                        self.pool.unref(old_node.value);
+                    }
+                }
+            } else {
+                const opt_old_data = try self.base_view.data.children_data.fetchPut(
+                    child_gindex,
+                    value.base_view.data,
+                );
+                if (opt_old_data) |old_data_value| {
+                    var data = @constCast(&old_data_value.value);
+                    data.deinit(self.pool);
+                }
+            }
+        }
+    };
+}
+
+pub fn ArrayTreeView(comptime ST: type) type {
+    const BaseView = BaseTreeView(ST);
+
+    return struct {
+        allocator: std.mem.Allocator,
+        pool: *Node.Pool,
+        base_view: BaseView,
+        pub const SszType: type = ST;
+
+        const Self = @This();
+
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, root: Node.Id) !Self {
+            return .{
+                .allocator = allocator,
+                .pool = pool,
+                .base_view = try BaseView.init(allocator, pool, root),
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.base_view.deinit();
+        }
+
+        pub fn commit(self: *Self) !void {
+            try self.base_view.commit();
+        }
+
+        pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
+            try self.base_view.hashTreeRoot(out);
+        }
 
         pub const Element: type = if (isBasicType(ST.Element))
             ST.Element.Type
         else
-            TreeView(ST.Element);
+            ST.Element.TreeView;
 
         inline fn elementChildGindex(index: usize) Gindex {
             return Gindex.fromDepth(
@@ -143,23 +285,23 @@ pub fn TreeView(comptime ST: type) type {
 
         /// Get an element by index. If the element is a basic type, returns the value directly.
         /// Caller borrows a copy of the value so there is no need to deinit it.
-        pub fn getElement(self: *Self, index: usize) !Element {
+        pub fn get(self: *Self, index: usize) !Element {
             if (ST.kind != .vector and ST.kind != .list) {
                 @compileError("getElement can only be used with vector or list types");
             }
             const child_gindex = elementChildGindex(index);
             if (comptime isBasicType(ST.Element)) {
                 var value: ST.Element.Type = undefined;
-                const child_node = try self.getChildNode(child_gindex);
+                const child_node = try self.base_view.getChildNode(child_gindex);
                 try ST.Element.tree.toValuePacked(child_node, self.pool, index, &value);
                 return value;
             } else {
                 const child_data = try self.getChildData(child_gindex);
 
                 // TODO only update changed if the subview is mutable
-                try self.data.changed.put(child_gindex, {});
+                try self.base_view.data.changed.put(child_gindex, {});
 
-                return TreeView(ST.Element){
+                return ST.Element.TreeView{
                     .allocator = self.allocator,
                     .pool = self.pool,
                     .data = child_data,
@@ -171,15 +313,15 @@ pub fn TreeView(comptime ST: type) type {
         /// If the element is a complex type, pass a TreeView of the corresponding type.
         /// The caller transfers ownership of the `value` TreeView to this parent view.
         /// The existing TreeView, if any, will be deinited by this function.
-        pub fn setElement(self: *Self, index: usize, value: Element) !void {
+        pub fn set(self: *Self, index: usize, value: Element) !void {
             if (ST.kind != .vector and ST.kind != .list) {
                 @compileError("setElement can only be used with vector or list types");
             }
             const child_gindex = elementChildGindex(index);
-            try self.data.changed.put(child_gindex, {});
+            try self.base_view.data.changed.put(child_gindex, {});
             if (comptime isBasicType(ST.Element)) {
-                const child_node = try self.getChildNode(child_gindex);
-                const opt_old_node = try self.data.children_nodes.fetchPut(
+                const child_node = try self.base_view.getChildNode(child_gindex);
+                const opt_old_node = try self.base_view.data.children_nodes.fetchPut(
                     child_gindex,
                     try ST.Element.tree.fromValuePacked(
                         child_node,
@@ -196,85 +338,9 @@ pub fn TreeView(comptime ST: type) type {
                     }
                 }
             } else {
-                const opt_old_data = try self.data.children_data.fetchPut(
+                const opt_old_data = try self.base_view.data.children_data.fetchPut(
                     child_gindex,
-                    value.data,
-                );
-                if (opt_old_data) |old_data_value| {
-                    var data: *Data = @constCast(&old_data_value.value);
-                    data.deinit(self.pool);
-                }
-            }
-        }
-
-        pub fn Field(comptime field_name: []const u8) type {
-            const ChildST = ST.getFieldType(field_name);
-            if (comptime isBasicType(ChildST)) {
-                return ChildST.Type;
-            } else {
-                return TreeView(ChildST);
-            }
-        }
-
-        /// Get a field by name. If the field is a basic type, returns the value directly.
-        /// Caller borrows a copy of the value so there is no need to deinit it.
-        pub fn getField(self: *Self, comptime field_name: []const u8) !Field(field_name) {
-            if (comptime ST.kind != .container) {
-                @compileError("getField can only be used with container types");
-            }
-            const field_index = comptime ST.getFieldIndex(field_name);
-            const ChildST = ST.getFieldType(field_name);
-            const child_gindex = Gindex.fromDepth(ST.chunk_depth, field_index);
-            if (comptime isBasicType(ChildST)) {
-                var value: ChildST.Type = undefined;
-                const child_node = try self.getChildNode(child_gindex);
-                try ChildST.tree.toValue(child_node, self.pool, &value);
-                return value;
-            } else {
-                const child_data = try self.getChildData(child_gindex);
-
-                // TODO only update changed if the subview is mutable
-                try self.data.changed.put(child_gindex, {});
-
-                return TreeView(ChildST){
-                    .allocator = self.allocator,
-                    .pool = self.pool,
-                    .data = child_data,
-                };
-            }
-        }
-
-        /// Set a field by name. If the field is a basic type, pass the value directly.
-        /// If the field is a complex type, pass a TreeView of the corresponding type.
-        /// The caller transfers ownership of the `value` TreeView to this parent view.
-        /// The existing TreeView, if any, will be deinited by this function.
-        pub fn setField(self: *Self, comptime field_name: []const u8, value: Field(field_name)) !void {
-            if (comptime ST.kind != .container) {
-                @compileError("setField can only be used with container types");
-            }
-            const field_index = comptime ST.getFieldIndex(field_name);
-            const ChildST = ST.getFieldType(field_name);
-            const child_gindex = Gindex.fromDepth(ST.chunk_depth, field_index);
-            try self.data.changed.put(child_gindex, {});
-            if (comptime isBasicType(ChildST)) {
-                const opt_old_node = try self.data.children_nodes.fetchPut(
-                    child_gindex,
-                    try ChildST.tree.fromValue(
-                        self.pool,
-                        &value,
-                    ),
-                );
-                if (opt_old_node) |old_node| {
-                    // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
-                    // Tree-owned nodes already have a refcount, so skip unref in that case.
-                    if (old_node.value.getState(self.pool).getRefCount() == 0) {
-                        self.pool.unref(old_node.value);
-                    }
-                }
-            } else {
-                const opt_old_data = try self.data.children_data.fetchPut(
-                    child_gindex,
-                    value.data,
+                    value.base_view.data,
                 );
                 if (opt_old_data) |old_data_value| {
                     var data: *Data = @constCast(&old_data_value.value);

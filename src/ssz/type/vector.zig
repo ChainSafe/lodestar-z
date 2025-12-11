@@ -10,6 +10,7 @@ const OffsetIterator = @import("offsets.zig").OffsetIterator;
 const merkleize = @import("hashing").merkleize;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
+const ArrayTreeView = @import("../tree_view.zig").ArrayTreeView;
 
 pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
     comptime {
@@ -25,6 +26,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
         pub const Element: type = ST;
         pub const length: usize = _length;
         pub const Type: type = [length]Element.Type;
+        pub const TreeView: type = ArrayTreeView(@This());
         pub const fixed_size: usize = Element.fixed_size * length;
         pub const chunk_count: usize = if (isBasicType(Element)) std.math.divCeil(usize, fixed_size, 32) catch unreachable else length;
         pub const chunk_depth: u8 = maxChunksToDepth(chunk_count);

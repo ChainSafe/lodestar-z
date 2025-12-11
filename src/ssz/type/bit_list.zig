@@ -11,6 +11,7 @@ const merkleize = @import("hashing").merkleize;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
+const ArrayTreeView = @import("../tree_view.zig").ArrayTreeView;
 
 pub fn BitList(comptime limit: comptime_int) type {
     return struct {
@@ -247,6 +248,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         pub const Element: type = BoolType();
         pub const limit: usize = _limit;
         pub const Type: type = BitList(limit);
+        pub const TreeView: type = ArrayTreeView(@This());
         pub const min_size: usize = 1;
         pub const max_size: usize = std.math.divCeil(usize, limit + 1, 8) catch unreachable;
         pub const max_chunk_count: usize = std.math.divCeil(usize, limit, 256) catch unreachable;

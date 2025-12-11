@@ -12,6 +12,7 @@ const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const Depth = @import("persistent_merkle_tree").Depth;
+const ContainerTreeView = @import("../tree_view.zig").ContainerTreeView;
 
 pub fn FixedContainerType(comptime ST: type) type {
     const ssz_fields = switch (@typeInfo(ST)) {
@@ -54,6 +55,7 @@ pub fn FixedContainerType(comptime ST: type) type {
         pub const Fields: type = ST;
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
         pub const Type: type = T;
+        pub const TreeView: type = ContainerTreeView(@This());
         pub const fixed_size: usize = _fixed_size;
         pub const field_offsets: [fields.len]usize = _offsets;
         pub const chunk_count: usize = fields.len;
@@ -297,6 +299,7 @@ pub fn VariableContainerType(comptime ST: type) type {
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
         pub const Fields: type = ST;
         pub const Type: type = T;
+        pub const TreeView: type = ContainerTreeView(@This());
         pub const min_size: usize = _min_size;
         pub const max_size: usize = _max_size;
         pub const field_offsets: [fields.len]usize = _offsets;
