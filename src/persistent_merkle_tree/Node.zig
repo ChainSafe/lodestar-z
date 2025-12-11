@@ -267,6 +267,14 @@ pub const Pool = struct {
             }
             out[i] = self.createUnsafe(states);
             states[@intFromEnum(out[i])] = State.branch_lazy.initRefCount();
+
+            // Initialize left/right children to zero.
+            //
+            // The node is marked as `branch_lazy`, so `unref` will attempt to traverse its children during cleanup.
+            // If an error occurs before the node is fully constructed and `free` is called, stale values in `left`/`right`
+            // could lead to accessing invalid memory. Setting them to zero ensures safe cleanup.
+            self.nodes.items(.left)[@intFromEnum(out[i])] = @enumFromInt(0);
+            self.nodes.items(.right)[@intFromEnum(out[i])] = @enumFromInt(0);
         }
         return allocated;
     }
@@ -748,6 +756,80 @@ pub const Id = enum(u32) {
         return node_id;
     }
 
+    /// Zeroes every node strictly to the right of `index` at the provided `depth`.
+    pub fn truncateAfterIndex(root_node: Id, pool: *Pool, depth: Depth, index: usize) Error!Id {
+        if (depth == 0) {
+            return root_node;
+        }
+
+        const max_length = @as(Gindex.Uint, 1) << depth;
+        if (index >= max_length - 1) {
+            if (index >= max_length) {
+                return Error.InvalidLength;
+            }
+            return root_node;
+        }
+
+        const path_len = @as(usize, depth);
+
+        var path_lefts_buf: [max_depth]Id = undefined;
+        var path_rights_buf: [max_depth]Id = undefined;
+        var path_parents_buf: [max_depth]Id = undefined;
+
+        const path_lefts = path_lefts_buf[0..path_len];
+        const path_rights = path_rights_buf[0..path_len];
+        const path_parents = path_parents_buf[0..path_len];
+
+        _ = try pool.alloc(path_parents);
+        errdefer pool.free(path_parents);
+
+        const states = pool.nodes.items(.state);
+        const lefts = pool.nodes.items(.left);
+        const rights = pool.nodes.items(.right);
+
+        var node_id = root_node;
+
+        for (0..path_len - 1) |i| {
+            if (node_id.noChild(states[@intFromEnum(node_id)])) {
+                return Error.InvalidNode;
+            }
+
+            const depthi = path_len - i - 1;
+            const go_left = isLeftIndex(depthi, index);
+            if (go_left) {
+                path_lefts[i] = path_parents[i + 1];
+                const zero_depth: Depth = @intCast(depthi);
+                path_rights[i] = @enumFromInt(zero_depth);
+                node_id = lefts[@intFromEnum(node_id)];
+            } else {
+                path_lefts[i] = lefts[@intFromEnum(node_id)];
+                path_rights[i] = path_parents[i + 1];
+                node_id = rights[@intFromEnum(node_id)];
+            }
+        }
+
+        if (node_id.noChild(states[@intFromEnum(node_id)])) {
+            return Error.InvalidNode;
+        }
+
+        const go_left_last = isLeftIndex(0, index);
+        if (go_left_last) {
+            path_lefts[path_len - 1] = lefts[@intFromEnum(node_id)];
+            path_rights[path_len - 1] = @enumFromInt(0);
+        } else {
+            path_lefts[path_len - 1] = lefts[@intFromEnum(node_id)];
+            path_rights[path_len - 1] = rights[@intFromEnum(node_id)];
+        }
+
+        try pool.rebind(path_parents, path_lefts, path_rights);
+        return path_parents[0];
+    }
+
+    inline fn isLeftIndex(depthi: usize, index: usize) bool {
+        const mask: usize = @as(usize, 1) << @intCast(depthi);
+        return (index & mask) == 0;
+    }
+
     /// Set multiple nodes in batch, editing and traversing nodes strictly once.
     /// - gindexes MUST be sorted in ascending order beforehand.
     pub fn setNodes(root_node: Id, pool: *Pool, gindices: []const Gindex, nodes: []Id) Error!Id {
@@ -893,6 +975,30 @@ pub const Id = enum(u32) {
         }
 
         return node_id;
+    }
+
+    /// Apply `setNodes` over a sorted list of gindices that may span multiple depths by batching
+    /// contiguous segments with the same path length.
+    pub fn setNodesGrouped(root_node: Id, pool: *Pool, gindices: []const Gindex, nodes: []Id) Error!Id {
+        std.debug.assert(nodes.len == gindices.len);
+        if (gindices.len == 0) {
+            return root_node;
+        }
+
+        var root = root_node;
+        var group_start: usize = 0;
+        while (group_start < gindices.len) {
+            const group_depth = gindices[group_start].pathLen();
+            var group_end = group_start + 1;
+            while (group_end < gindices.len and gindices[group_end].pathLen() == group_depth) {
+                group_end += 1;
+            }
+
+            root = try setNodes(root, pool, gindices[group_start..group_end], nodes[group_start..group_end]);
+            group_start = group_end;
+        }
+
+        return root;
     }
 };
 
