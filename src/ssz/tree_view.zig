@@ -110,6 +110,7 @@ pub fn BaseTreeView(comptime ST: type) type {
         }
 
         fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
+            try self.data.changed.put(gindex, {});
             const opt_old_node = try self.data.children_nodes.fetchPut(
                 gindex,
                 node,
@@ -138,6 +139,7 @@ pub fn BaseTreeView(comptime ST: type) type {
         }
 
         fn setChildData(self: *Self, gindex: Gindex, data: Data) !void {
+            try self.data.changed.put(gindex, {});
             const opt_old_data = try self.data.children_data.fetchPut(
                 gindex,
                 data,
@@ -220,7 +222,6 @@ pub fn ContainerTreeView(comptime ST: type) type {
             const field_index = comptime ST.getFieldIndex(field_name);
             const ChildST = ST.getFieldType(field_name);
             const child_gindex = Gindex.fromDepth(ST.chunk_depth, field_index);
-            try self.base_view.data.changed.put(child_gindex, {});
             if (comptime isBasicType(ChildST)) {
                 try self.base_view.setChildNode(
                     child_gindex,
@@ -308,7 +309,6 @@ pub fn ArrayTreeView(comptime ST: type) type {
         /// The existing TreeView, if any, will be deinited by this function.
         pub fn set(self: *Self, index: usize, value: Element) !void {
             const child_gindex = elementChildGindex(index);
-            try self.base_view.data.changed.put(child_gindex, {});
             if (comptime isBasicType(ST.Element)) {
                 const child_node = try self.base_view.getChildNode(child_gindex);
                 try self.base_view.setChildNode(
