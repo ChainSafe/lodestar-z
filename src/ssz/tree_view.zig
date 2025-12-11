@@ -162,9 +162,6 @@ pub fn ContainerTreeView(comptime ST: type) type {
         /// Get a field by name. If the field is a basic type, returns the value directly.
         /// Caller borrows a copy of the value so there is no need to deinit it.
         pub fn get(self: *Self, comptime field_name: []const u8) !Field(field_name) {
-            if (comptime ST.kind != .container) {
-                @compileError("getField can only be used with container types");
-            }
             const field_index = comptime ST.getFieldIndex(field_name);
             const ChildST = ST.getFieldType(field_name);
             const child_gindex = Gindex.fromDepth(ST.chunk_depth, field_index);
@@ -194,9 +191,6 @@ pub fn ContainerTreeView(comptime ST: type) type {
         /// The caller transfers ownership of the `value` TreeView to this parent view.
         /// The existing TreeView, if any, will be deinited by this function.
         pub fn set(self: *Self, comptime field_name: []const u8, value: Field(field_name)) !void {
-            if (comptime ST.kind != .container) {
-                @compileError("setField can only be used with container types");
-            }
             const field_index = comptime ST.getFieldIndex(field_name);
             const ChildST = ST.getFieldType(field_name);
             const child_gindex = Gindex.fromDepth(ST.chunk_depth, field_index);
@@ -276,9 +270,6 @@ pub fn ArrayTreeView(comptime ST: type) type {
         /// Get an element by index. If the element is a basic type, returns the value directly.
         /// Caller borrows a copy of the value so there is no need to deinit it.
         pub fn get(self: *Self, index: usize) !Element {
-            if (ST.kind != .vector and ST.kind != .list) {
-                @compileError("getElement can only be used with vector or list types");
-            }
             const child_gindex = elementChildGindex(index);
             if (comptime isBasicType(ST.Element)) {
                 var value: ST.Element.Type = undefined;
@@ -306,9 +297,6 @@ pub fn ArrayTreeView(comptime ST: type) type {
         /// The caller transfers ownership of the `value` TreeView to this parent view.
         /// The existing TreeView, if any, will be deinited by this function.
         pub fn set(self: *Self, index: usize, value: Element) !void {
-            if (ST.kind != .vector and ST.kind != .list) {
-                @compileError("setElement can only be used with vector or list types");
-            }
             const child_gindex = elementChildGindex(index);
             try self.base_view.data.changed.put(child_gindex, {});
             if (comptime isBasicType(ST.Element)) {
