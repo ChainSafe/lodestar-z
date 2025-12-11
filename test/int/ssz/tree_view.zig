@@ -149,3 +149,101 @@ test "TreeView list element roundtrip" {
     try std.testing.expectEqual(roundtrip.items.len, expected_list.items.len);
     try std.testing.expectEqualSlices(u32, expected_list.items, roundtrip.items);
 }
+
+test "TreeView list of containers setElement twice then commit" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    const ContainerType = ssz.FixedContainerType(struct {
+        a: ssz.UintType(64),
+        b: ssz.UintType(64),
+    });
+    const ListType = ssz.FixedListType(ContainerType, 8);
+    const ListView = ssz.TreeView(ListType);
+    const ElemView = ListView.Element;
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.append(allocator, .{ .a = 1, .b = 2 });
+    try list.append(allocator, .{ .a = 3, .b = 4 });
+    try list.append(allocator, .{ .a = 5, .b = 6 });
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ListView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    const new_container0: ContainerType.Type = .{ .a = 100, .b = 200 };
+    const new_node0 = try ContainerType.tree.fromValue(&pool, &new_container0);
+    const new_view0 = try ElemView.init(allocator, &pool, new_node0);
+    try view.setElement(0, new_view0);
+
+    const new_container1: ContainerType.Type = .{ .a = 300, .b = 400 };
+    const new_node1 = try ContainerType.tree.fromValue(&pool, &new_container1);
+    const new_view1 = try ElemView.init(allocator, &pool, new_node1);
+    try view.setElement(1, new_view1);
+
+    try view.commit();
+
+    var expected_list: ListType.Type = .empty;
+    defer expected_list.deinit(allocator);
+    try expected_list.append(allocator, .{ .a = 100, .b = 200 });
+    try expected_list.append(allocator, .{ .a = 300, .b = 400 });
+    try expected_list.append(allocator, .{ .a = 5, .b = 6 });
+
+    var expected_root: [32]u8 = undefined;
+    try ListType.hashTreeRoot(allocator, &expected_list, &expected_root);
+
+    var actual_root: [32]u8 = undefined;
+    try view.hashTreeRoot(&actual_root);
+
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}
+
+test "TreeView list of containers getElement modify setElement" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    const ContainerType = ssz.FixedContainerType(struct {
+        a: ssz.UintType(64),
+        b: ssz.UintType(64),
+    });
+    const ListType = ssz.FixedListType(ContainerType, 8);
+    const ListView = ssz.TreeView(ListType);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.append(allocator, .{ .a = 1, .b = 2 });
+    try list.append(allocator, .{ .a = 3, .b = 4 });
+    try list.append(allocator, .{ .a = 5, .b = 6 });
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ListView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    var elem0 = try view.getElement(0);
+    try elem0.setField("a", 100);
+    try elem0.setField("b", 200);
+    try view.setElement(0, elem0);
+
+    var elem1 = try view.getElement(1);
+    try elem1.setField("a", 300);
+    try view.setElement(1, elem1);
+
+    try view.commit();
+
+    var expected_list: ListType.Type = .empty;
+    defer expected_list.deinit(allocator);
+    try expected_list.append(allocator, .{ .a = 100, .b = 200 });
+    try expected_list.append(allocator, .{ .a = 300, .b = 4 });
+    try expected_list.append(allocator, .{ .a = 5, .b = 6 });
+
+    var expected_root: [32]u8 = undefined;
+    try ListType.hashTreeRoot(allocator, &expected_list, &expected_root);
+
+    var actual_root: [32]u8 = undefined;
+    try view.hashTreeRoot(&actual_root);
+
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}

@@ -141,8 +141,11 @@ pub fn TreeView(comptime ST: type) type {
             );
         }
 
-        /// Get an element by index. If the element is a basic type, returns the value directly.
-        /// Caller borrows a copy of the value so there is no need to deinit it.
+        /// Get an element by index for modification. If the element is a basic type, returns the value directly.
+        /// For composite types, returns a mutable TreeView that should be passed back via setElement.
+        /// Note: For composite types, this method adds an extra ref on the returned data's root node.
+        /// If you call this but don't call setElement afterwards, you must manually call pool.unref(element.data.root).
+        /// If you only need read access, use `getElementReadonly` instead.
         pub fn getElement(self: *Self, index: usize) !Element {
             if (ST.kind != .vector and ST.kind != .list) {
                 @compileError("getElement can only be used with vector or list types");
@@ -155,6 +158,8 @@ pub fn TreeView(comptime ST: type) type {
                 return value;
             } else {
                 const child_data = try self.getChildData(child_gindex);
+
+                try self.pool.ref(child_data.root);
 
                 // TODO only update changed if the subview is mutable
                 try self.data.changed.put(child_gindex, {});
@@ -216,8 +221,11 @@ pub fn TreeView(comptime ST: type) type {
             }
         }
 
-        /// Get a field by name. If the field is a basic type, returns the value directly.
-        /// Caller borrows a copy of the value so there is no need to deinit it.
+        /// Get a field by name for modification. If the field is a basic type, returns the value directly.
+        /// For composite types, returns a mutable TreeView that should be passed back via setField.
+        /// Note: For composite types, this method adds an extra ref on the returned data's root node.
+        /// If you call this but don't call setField afterwards, you must manually call pool.unref(field.data.root).
+        /// If you only need read access, use `getFieldReadonly` instead.
         pub fn getField(self: *Self, comptime field_name: []const u8) !Field(field_name) {
             if (comptime ST.kind != .container) {
                 @compileError("getField can only be used with container types");
@@ -232,6 +240,8 @@ pub fn TreeView(comptime ST: type) type {
                 return value;
             } else {
                 const child_data = try self.getChildData(child_gindex);
+
+                try self.pool.ref(child_data.root);
 
                 // TODO only update changed if the subview is mutable
                 try self.data.changed.put(child_gindex, {});
