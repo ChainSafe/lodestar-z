@@ -1,44 +1,3 @@
-const std = @import("std");
-const zbench = @import("zbench");
-const state_transition = @import("state_transition");
-const types = @import("consensus_types");
-const config = @import("config");
-const preset = state_transition.preset;
-
-// printf "Date: %s\nKernel: %s\nCPU: %s\nCPUs: %s\nMemory: %sGi\n" "$(date)" "$(uname -sr)" "$(sysctl -n machdep.cpu.brand_string)" "$(sysctl -n hw.ncpu)" "$(echo "$(sysctl -n hw.memsize) / 1024 / 1024 / 1024" | bc)"
-// Date: Tue Dec  9 2025
-// Kernel: Darwin 25.1.0
-// CPU: Apple M3
-// CPUs: 8
-// Memory: 16Gi
-//
-// zbuild run bench_process_block -Doptimize=ReleaseFast
-//
-// benchmark              runs     total time     time/run (avg ± σ)     (min ... max)                p75        p99        p995
-// -----------------------------------------------------------------------------------------------------------------------------
-// process_block_header   61       2.653s         43.494ms ± 40.773ms    (26.787ms ... 306.582ms)     37.671ms   306.582ms  306.582ms
-// process_withdrawals    54       1.751s         32.434ms ± 10.277ms    (26.843ms ... 99.635ms)      32.642ms   99.635ms   99.635ms
-// process_execution_payl 48       1.556s         32.432ms ± 5.087ms     (26.721ms ... 44.789ms)      36.231ms   44.789ms   44.789ms
-// process_randao         64       2.076s         32.443ms ± 23.425ms    (27.134ms ... 212.965ms)     29.506ms   212.965ms  212.965ms
-// process_eth1_data      71       2.001s         28.192ms ± 1.228ms     (26.04ms ... 32.299ms)       28.856ms   32.299ms   32.299ms
-// process_operations     44       2.401s         54.581ms ± 33.324ms    (41.66ms ... 254.774ms)      51.213ms   254.774ms  254.774ms
-// process_sync_aggregate 67       2.086s         31.145ms ± 10.657ms    (26.877ms ... 111.953ms)     30.532ms   111.953ms  111.953ms
-
-const CachedBeaconStateAllForks = state_transition.CachedBeaconStateAllForks;
-const BeaconStateAllForks = state_transition.BeaconStateAllForks;
-const SignedBlock = state_transition.SignedBlock;
-const SignedBeaconBlock = state_transition.SignedBeaconBlock;
-const Body = state_transition.Body;
-const st_mod = @import("state_transition").state_transition;
-const stateTransition = st_mod.stateTransition;
-const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const PubkeyIndexMap = state_transition.PubkeyIndexMap(ValidatorIndex);
-const Withdrawals = types.capella.Withdrawals.Type;
-const WithdrawalsResult = state_transition.WithdrawalsResult;
-const BlockExternalData = state_transition.BlockExternalData;
-const BeaconState = types.fulu.BeaconState;
-const FuluSignedBeaconBlock = types.fulu.SignedBeaconBlock;
-
 // Benchmark for block processing (Fulu)
 // https://github.com/ethereum/consensus-specs/blob/master/specs/fulu/beacon-chain.md#block-processing
 //
@@ -57,295 +16,448 @@ const FuluSignedBeaconBlock = types.fulu.SignedBeaconBlock;
 // - process_operations
 // - process_sync_aggregate (post-Altair)
 
+// printf "Date: %s\nKernel: %s\nCPU: %s\nCPUs: %s\nMemory: %sGi\n" "$(date)" "$(uname -sr)" "$(sysctl -n machdep.cpu.brand_string)" "$(sysctl -n hw.ncpu)" "$(echo "$(sysctl -n hw.memsize) / 1024 / 1024 / 1024" | bc)"
+// Date: Tue Dec  9 2025
+// Kernel: Darwin 25.1.0
+// CPU: Apple M3
+// CPUs: 8
+// Memory: 16Gi
+//
+// zbuild run bench_process_block -Doptimize=ReleaseFast OR zbuild run bench_process_block -Doptimize=ReleaseFast -- /path/to/state.ssz /path/to/block.ssz
+//
+// State: slot=13180929, validators=2156873
+// benchmark              runs     total time     time/run (avg ± σ)     (min ... max)                p75        p99        p995
+// -----------------------------------------------------------------------------------------------------------------------------
+// block_header           50       1.515s         30.312ms ± 9.578ms     (26.488ms ... 94.892ms)      30.18ms    94.892ms   94.892ms
+// withdrawals            50       1.449s         28.99ms ± 2.556ms      (26.232ms ... 39.097ms)      29.447ms   39.097ms   39.097ms
+// execution_payload      50       1.745s         34.917ms ± 11.606ms    (26.696ms ... 93.451ms)      38.481ms   93.451ms   93.451ms
+// randao                 50       1.919s         38.384ms ± 5.864ms     (28.478ms ... 51.428ms)      41.875ms   51.428ms   51.428ms
+// randao_no_sig          50       1.69s          33.814ms ± 13.099ms    (27.682ms ... 104.232ms)     32.55ms    104.232ms  104.232ms
+// eth1_data              50       1.83s          36.601ms ± 33.016ms    (26.611ms ... 261.882ms)     32.772ms   261.882ms  261.882ms
+// operations             50       2.277s         45.545ms ± 6.849ms     (41.418ms ... 90.257ms)      46.806ms   90.257ms   90.257ms
+// operations_no_sig      50       1.535s         30.712ms ± 3.142ms     (27.777ms ... 44.238ms)      30.832ms   44.238ms   44.238ms
+// sync_aggregate         50       1.539s         30.795ms ± 2.939ms     (26.857ms ... 41.007ms)      31.772ms   41.007ms   41.007ms
+// sync_aggregate_no_sig  50       1.649s         32.984ms ± 25.843ms    (26.37ms ... 209.967ms)      30.63ms    209.967ms  209.967ms
+// process_block          50       2.39s          47.811ms ± 6.151ms     (43.82ms ... 73.096ms)       47.603ms   73.096ms   73.096ms
+// process_block_no_sig   50       1.657s         33.152ms ± 5.263ms     (29.143ms ... 60.873ms)      32.916ms   60.873ms   60.873ms
+// block(segments)        50       2.555s         51.112ms ± 8.533ms     (44.404ms ... 95.221ms)      53.978ms   95.221ms   95.221ms
+
+// Segmented block breakdown :
+// step                   runs     total time     time/run (avg)
+// ---------------------------------------------------------------------
+// block_total            50       1.041s         20.828ms
+// block_header           50       53.676ms        1.074ms
+// withdrawals            50       1.191ms        0.024ms
+// execution_payload      50       26.506ms        0.530ms
+// randao                 50       38.248ms        0.765ms
+// eth1_data              50       0.055ms        0.001ms
+// operations             50       852.513ms        17.050ms
+// sync_aggregate         50       69.058ms        1.381ms
+
+const std = @import("std");
+const zbench = @import("zbench");
+const state_transition = @import("state_transition");
+const types = @import("consensus_types");
+const config = @import("config");
+const preset = state_transition.preset;
+const ForkSeq = config.ForkSeq;
+const CachedBeaconStateAllForks = state_transition.CachedBeaconStateAllForks;
+const BeaconStateAllForks = state_transition.BeaconStateAllForks;
+const SignedBlock = state_transition.SignedBlock;
+const SignedBeaconBlock = state_transition.SignedBeaconBlock;
+const Body = state_transition.Body;
+const ValidatorIndex = types.primitive.ValidatorIndex.Type;
+const PubkeyIndexMap = state_transition.PubkeyIndexMap(ValidatorIndex);
+const Withdrawals = types.capella.Withdrawals.Type;
+const WithdrawalsResult = state_transition.WithdrawalsResult;
+const BlockExternalData = state_transition.BlockExternalData;
+
 const ProcessBlockHeaderBench = struct {
-    allocator: std.mem.Allocator,
     cached_state: *CachedBeaconStateAllForks,
     signed_block: SignedBlock,
 
     pub fn run(self: ProcessBlockHeaderBench, allocator: std.mem.Allocator) void {
-        _ = allocator;
-        const cloned = self.cached_state.clone(self.allocator) catch return;
+        const cloned = self.cached_state.clone(allocator) catch unreachable;
         defer {
             cloned.deinit();
-            self.allocator.destroy(cloned);
+            allocator.destroy(cloned);
         }
         const block = self.signed_block.message();
-        state_transition.processBlockHeader(self.allocator, cloned, block) catch return;
+        state_transition.processBlockHeader(allocator, cloned, block) catch unreachable;
     }
 };
 
 const ProcessWithdrawalsBench = struct {
-    allocator: std.mem.Allocator,
     cached_state: *CachedBeaconStateAllForks,
     signed_block: SignedBlock,
 
     pub fn run(self: ProcessWithdrawalsBench, allocator: std.mem.Allocator) void {
-        _ = allocator;
-        const cloned = self.cached_state.clone(self.allocator) catch return;
+        const cloned = self.cached_state.clone(allocator) catch unreachable;
         defer {
             cloned.deinit();
-            self.allocator.destroy(cloned);
+            allocator.destroy(cloned);
         }
 
-        // Compute expected withdrawals
         var withdrawals_result = WithdrawalsResult{
-            .withdrawals = Withdrawals.initCapacity(self.allocator, preset.MAX_WITHDRAWALS_PER_PAYLOAD) catch return,
+            .withdrawals = Withdrawals.initCapacity(allocator, preset.MAX_WITHDRAWALS_PER_PAYLOAD) catch unreachable,
         };
-        defer withdrawals_result.withdrawals.deinit(self.allocator);
+        defer withdrawals_result.withdrawals.deinit(allocator);
 
-        var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(self.allocator);
+        var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
         defer withdrawal_balances.deinit();
 
-        state_transition.getExpectedWithdrawals(self.allocator, &withdrawals_result, &withdrawal_balances, cloned) catch return;
+        state_transition.getExpectedWithdrawals(allocator, &withdrawals_result, &withdrawal_balances, cloned) catch unreachable;
 
-        // Get payload withdrawals root from block
         const block = self.signed_block.message();
         const beacon_body = block.beaconBlockBody();
         const payload_withdrawals_root: [32]u8 = switch (beacon_body) {
             .regular => |b| blk: {
                 const actual_withdrawals = b.executionPayload().getWithdrawals();
                 var root: [32]u8 = undefined;
-                types.capella.Withdrawals.hashTreeRoot(self.allocator, &actual_withdrawals, &root) catch {
-                    return;
-                };
+                types.capella.Withdrawals.hashTreeRoot(allocator, &actual_withdrawals, &root) catch unreachable;
                 break :blk root;
             },
             .blinded => |b| b.executionPayloadHeader().getWithdrawalsRoot(),
         };
 
-        state_transition.processWithdrawals(self.allocator, cloned, withdrawals_result, payload_withdrawals_root) catch return;
+        state_transition.processWithdrawals(allocator, cloned, withdrawals_result, payload_withdrawals_root) catch unreachable;
     }
 };
 
 const ProcessExecutionPayloadBench = struct {
-    allocator: std.mem.Allocator,
     cached_state: *CachedBeaconStateAllForks,
     body: Body,
 
     pub fn run(self: ProcessExecutionPayloadBench, allocator: std.mem.Allocator) void {
-        _ = allocator;
-        const cloned = self.cached_state.clone(self.allocator) catch return;
+        const cloned = self.cached_state.clone(allocator) catch unreachable;
         defer {
             cloned.deinit();
-            self.allocator.destroy(cloned);
+            allocator.destroy(cloned);
         }
-
-        const external_data = BlockExternalData{
-            .execution_payload_status = .valid,
-            .data_availability_status = .available,
-        };
-
-        state_transition.processExecutionPayload(self.allocator, cloned, self.body, external_data) catch return;
+        const external_data = BlockExternalData{ .execution_payload_status = .valid, .data_availability_status = .available };
+        state_transition.processExecutionPayload(allocator, cloned, self.body, external_data) catch unreachable;
     }
 };
 
-const ProcessRandaoBench = struct {
-    allocator: std.mem.Allocator,
-    cached_state: *CachedBeaconStateAllForks,
-    signed_block: SignedBlock,
+fn ProcessRandaoBench(comptime verify_sig: bool) type {
+    return struct {
+        cached_state: *CachedBeaconStateAllForks,
+        signed_block: SignedBlock,
 
-    pub fn run(self: ProcessRandaoBench, allocator: std.mem.Allocator) void {
-        _ = allocator;
-        const cloned = self.cached_state.clone(self.allocator) catch return;
-        defer {
-            cloned.deinit();
-            self.allocator.destroy(cloned);
+        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+            const cloned = self.cached_state.clone(allocator) catch unreachable;
+            defer {
+                cloned.deinit();
+                allocator.destroy(cloned);
+            }
+            const block = self.signed_block.message();
+            const body = block.beaconBlockBody();
+            state_transition.processRandao(cloned, body, block.proposerIndex(), verify_sig) catch unreachable;
         }
-        const block = self.signed_block.message();
-        const body = block.beaconBlockBody();
-        state_transition.processRandao(cloned, body, block.proposerIndex(), true) catch return;
-    }
-};
+    };
+}
 
 const ProcessEth1DataBench = struct {
-    allocator: std.mem.Allocator,
     cached_state: *CachedBeaconStateAllForks,
     signed_block: SignedBlock,
 
     pub fn run(self: ProcessEth1DataBench, allocator: std.mem.Allocator) void {
-        _ = allocator;
-        const cloned = self.cached_state.clone(self.allocator) catch return;
+        const cloned = self.cached_state.clone(allocator) catch unreachable;
         defer {
             cloned.deinit();
-            self.allocator.destroy(cloned);
+            allocator.destroy(cloned);
         }
         const block = self.signed_block.message();
         const body = block.beaconBlockBody();
-        state_transition.processEth1Data(self.allocator, cloned, body.eth1Data()) catch return;
+        state_transition.processEth1Data(allocator, cloned, body.eth1Data()) catch unreachable;
     }
 };
 
-const ProcessOperationsBench = struct {
-    allocator: std.mem.Allocator,
+fn ProcessOperationsBench(comptime verify_sig: bool) type {
+    return struct {
+        cached_state: *CachedBeaconStateAllForks,
+        signed_block: SignedBlock,
+
+        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+            const cloned = self.cached_state.clone(allocator) catch unreachable;
+            defer {
+                cloned.deinit();
+                allocator.destroy(cloned);
+            }
+            const block = self.signed_block.message();
+            const body = block.beaconBlockBody();
+            state_transition.processOperations(allocator, cloned, body, .{ .verify_signature = verify_sig }) catch unreachable;
+        }
+    };
+}
+
+fn ProcessSyncAggregateBench(comptime verify_sig: bool) type {
+    return struct {
+        cached_state: *CachedBeaconStateAllForks,
+        signed_block: SignedBlock,
+
+        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+            const cloned = self.cached_state.clone(allocator) catch unreachable;
+            defer {
+                cloned.deinit();
+                allocator.destroy(cloned);
+            }
+            const block = self.signed_block.message();
+            const body = block.beaconBlockBody();
+            state_transition.processSyncAggregate(allocator, cloned, body.syncAggregate(), verify_sig) catch unreachable;
+        }
+    };
+}
+
+fn ProcessBlockBench(comptime verify_sig: bool) type {
+    return struct {
+        cached_state: *CachedBeaconStateAllForks,
+        signed_block: SignedBlock,
+
+        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+            const cloned = self.cached_state.clone(allocator) catch unreachable;
+            defer {
+                cloned.deinit();
+                allocator.destroy(cloned);
+            }
+            const block = self.signed_block.message();
+            const external_data = BlockExternalData{ .execution_payload_status = .valid, .data_availability_status = .available };
+            state_transition.processBlock(allocator, cloned, block, external_data, .{ .verify_signature = verify_sig }) catch unreachable;
+        }
+    };
+}
+
+// segment benchmarks
+const Step = enum {
+    block_total,
+    block_header,
+    withdrawals,
+    execution_payload,
+    randao,
+    eth1_data,
+    operations,
+    sync_aggregate,
+};
+
+const step_count = std.enums.values(Step).len;
+var step_durations_ns: [step_count]u128 = [_]u128{0} ** step_count;
+var step_run_counts: [step_count]u64 = [_]u64{0} ** step_count;
+
+fn resetSegmentStats() void {
+    for (&step_durations_ns) |*v| v.* = 0;
+    for (&step_run_counts) |*v| v.* = 0;
+}
+
+fn recordSegment(step: Step, duration_ns: u64) void {
+    const idx = @intFromEnum(step);
+    step_durations_ns[idx] += duration_ns;
+    step_run_counts[idx] += 1;
+}
+
+fn elapsedSince(start: i128) u64 {
+    return @as(u64, @intCast(std.time.nanoTimestamp() - start));
+}
+
+fn printSegmentStats(stdout: anytype) !void {
+    try stdout.print("\nSegmented block breakdown :\n", .{});
+    try stdout.print("{s:<22} {s:<8} {s:<14} {s:<23}\n", .{ "step", "runs", "total time", "time/run (avg)" });
+    try stdout.print("{s:-<69}\n", .{""});
+    for (std.enums.values(Step)) |step| {
+        const idx = @intFromEnum(step);
+        const count = step_run_counts[idx];
+        if (count == 0) continue;
+        const total_ns = step_durations_ns[idx];
+        const avg_ns: u128 = total_ns / count;
+        const total_ms = @as(f64, @floatFromInt(total_ns)) / 1_000_000.0;
+        const avg_ms = @as(f64, @floatFromInt(avg_ns)) / 1_000_000.0;
+        if (total_ms >= 1000.0) {
+            try stdout.print("{s:<22} {d:<8} {d:.3}s         {d:.3}ms\n", .{ @tagName(step), count, total_ms / 1000.0, avg_ms });
+        } else {
+            try stdout.print("{s:<22} {d:<8} {d:.3}ms        {d:.3}ms\n", .{ @tagName(step), count, total_ms, avg_ms });
+        }
+    }
+    try stdout.print("\n", .{});
+}
+
+const ProcessBlockSegmentedBench = struct {
     cached_state: *CachedBeaconStateAllForks,
     signed_block: SignedBlock,
+    body: Body,
 
-    pub fn run(self: ProcessOperationsBench, allocator: std.mem.Allocator) void {
-        _ = allocator;
-        const cloned = self.cached_state.clone(self.allocator) catch return;
+    pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        const cloned = self.cached_state.clone(allocator) catch unreachable;
         defer {
             cloned.deinit();
-            self.allocator.destroy(cloned);
+            allocator.destroy(cloned);
         }
+
         const block = self.signed_block.message();
-        const body = block.beaconBlockBody();
-        state_transition.processOperations(self.allocator, cloned, body, .{ .verify_signature = true }) catch return;
+        const beacon_body = block.beaconBlockBody();
+        const state = cloned.state;
+
+        const block_start = std.time.nanoTimestamp();
+
+        const header_start = std.time.nanoTimestamp();
+        state_transition.processBlockHeader(allocator, cloned, block) catch unreachable;
+        recordSegment(.block_header, elapsedSince(header_start));
+
+        if (state.isPostCapella()) {
+            const withdrawals_start = std.time.nanoTimestamp();
+            var withdrawals_result = WithdrawalsResult{
+                .withdrawals = Withdrawals.initCapacity(allocator, preset.MAX_WITHDRAWALS_PER_PAYLOAD) catch unreachable,
+            };
+            defer withdrawals_result.withdrawals.deinit(allocator);
+            var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
+            defer withdrawal_balances.deinit();
+            state_transition.getExpectedWithdrawals(allocator, &withdrawals_result, &withdrawal_balances, cloned) catch unreachable;
+            const payload_withdrawals_root: [32]u8 = switch (beacon_body) {
+                .regular => |b| blk: {
+                    const actual_withdrawals = b.executionPayload().getWithdrawals();
+                    var root: [32]u8 = undefined;
+                    types.capella.Withdrawals.hashTreeRoot(allocator, &actual_withdrawals, &root) catch unreachable;
+                    break :blk root;
+                },
+                .blinded => |b| b.executionPayloadHeader().getWithdrawalsRoot(),
+            };
+            state_transition.processWithdrawals(allocator, cloned, withdrawals_result, payload_withdrawals_root) catch unreachable;
+            recordSegment(.withdrawals, elapsedSince(withdrawals_start));
+        }
+
+        if (state.isPostBellatrix()) {
+            const exec_start = std.time.nanoTimestamp();
+            const external_data = BlockExternalData{ .execution_payload_status = .valid, .data_availability_status = .available };
+            state_transition.processExecutionPayload(allocator, cloned, self.body, external_data) catch unreachable;
+            recordSegment(.execution_payload, elapsedSince(exec_start));
+        }
+
+        const randao_start = std.time.nanoTimestamp();
+        state_transition.processRandao(cloned, beacon_body, block.proposerIndex(), true) catch unreachable;
+        recordSegment(.randao, elapsedSince(randao_start));
+
+        const eth1_start = std.time.nanoTimestamp();
+        state_transition.processEth1Data(allocator, cloned, beacon_body.eth1Data()) catch unreachable;
+        recordSegment(.eth1_data, elapsedSince(eth1_start));
+
+        const ops_start = std.time.nanoTimestamp();
+        state_transition.processOperations(allocator, cloned, beacon_body, .{ .verify_signature = true }) catch unreachable;
+        recordSegment(.operations, elapsedSince(ops_start));
+
+        if (state.isPostAltair()) {
+            const sync_start = std.time.nanoTimestamp();
+            state_transition.processSyncAggregate(allocator, cloned, beacon_body.syncAggregate(), true) catch unreachable;
+            recordSegment(.sync_aggregate, elapsedSince(sync_start));
+        }
+
+        recordSegment(.block_total, elapsedSince(block_start));
     }
 };
 
-const ProcessSyncAggregateBench = struct {
-    allocator: std.mem.Allocator,
-    cached_state: *CachedBeaconStateAllForks,
-    signed_block: SignedBlock,
+fn loadState(comptime fork: ForkSeq, allocator: std.mem.Allocator, state_bytes: []const u8) !*BeaconStateAllForks {
+    const ForkTypes = @field(types, @tagName(fork));
+    const BeaconState = ForkTypes.BeaconState;
+    const state_data = try allocator.create(BeaconState.Type);
+    errdefer allocator.destroy(state_data);
+    state_data.* = BeaconState.default_value;
+    try BeaconState.deserializeFromBytes(allocator, state_bytes, state_data);
+    const beacon_state = try allocator.create(BeaconStateAllForks);
+    beacon_state.* = @unionInit(BeaconStateAllForks, @tagName(fork), state_data);
+    return beacon_state;
+}
 
-    pub fn run(self: ProcessSyncAggregateBench, allocator: std.mem.Allocator) void {
-        _ = allocator;
-        const cloned = self.cached_state.clone(self.allocator) catch return;
-        defer {
-            cloned.deinit();
-            self.allocator.destroy(cloned);
-        }
-        const block = self.signed_block.message();
-        const body = block.beaconBlockBody();
-        state_transition.processSyncAggregate(self.allocator, cloned, body.syncAggregate(), true) catch return;
-    }
-};
+fn loadBlock(comptime fork: ForkSeq, allocator: std.mem.Allocator, block_bytes: []const u8) !SignedBeaconBlock {
+    const ForkTypes = @field(types, @tagName(fork));
+    const SignedBeaconBlockType = ForkTypes.SignedBeaconBlock;
+    const block_data = try allocator.create(SignedBeaconBlockType.Type);
+    errdefer allocator.destroy(block_data);
+    block_data.* = SignedBeaconBlockType.default_value;
+    try SignedBeaconBlockType.deserializeFromBytes(allocator, block_bytes, block_data);
+    return @unionInit(SignedBeaconBlock, @tagName(fork), block_data);
+}
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
     const stdout = std.io.getStdOut().writer();
 
-    try stdout.print("Loading state and block from SSZ files...\n", .{});
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+    const state_path = if (args.len > 1) args[1] else "bench/state_transition/state.ssz";
+    const block_path = if (args.len > 2) args[2] else "bench/state_transition/block.ssz";
 
-    // Load state from SSZ
-    const state_file = try std.fs.cwd().openFile("bench/state_transition/state.ssz", .{});
+    const state_file = try std.fs.cwd().openFile(state_path, .{});
     defer state_file.close();
     const state_bytes = try state_file.readToEndAlloc(allocator, 10_000_000_000);
     defer allocator.free(state_bytes);
 
-    try stdout.print("State file loaded: {} bytes\n", .{state_bytes.len});
+    const chain_config = config.mainnet_chain_config;
+    const slot = config.slotFromStateBytes(state_bytes) orelse return error.InvalidStateBytes;
+    const detected_fork = config.forkSeqAtSlot(chain_config, slot);
+    try stdout.print("Detected fork: {s} (slot {})\n", .{ @tagName(detected_fork), slot });
 
-    const fulu_state = try allocator.create(BeaconState.Type);
-    fulu_state.* = BeaconState.default_value;
-    try BeaconState.deserializeFromBytes(allocator, state_bytes, fulu_state);
-
-    try stdout.print("State deserialized: slot={}, validators={}\n", .{ fulu_state.slot, fulu_state.validators.items.len });
-
-    // Load block from SSZ
-    const block_file = try std.fs.cwd().openFile("bench/state_transition/block.ssz", .{});
+    const block_file = try std.fs.cwd().openFile(block_path, .{});
     defer block_file.close();
     const block_bytes = try block_file.readToEndAlloc(allocator, 100_000_000);
     defer allocator.free(block_bytes);
 
-    try stdout.print("Block file loaded: {} bytes\n", .{block_bytes.len});
+    inline for (comptime std.enums.values(ForkSeq)) |fork| {
+        if (detected_fork == fork) return runBenchmark(fork, allocator, stdout, state_bytes, block_bytes, chain_config);
+    }
+}
 
-    const signed_block_data = try allocator.create(FuluSignedBeaconBlock.Type);
-    signed_block_data.* = FuluSignedBeaconBlock.default_value;
-    try FuluSignedBeaconBlock.deserializeFromBytes(allocator, block_bytes, signed_block_data);
+fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, stdout: anytype, state_bytes: []const u8, block_bytes: []const u8, chain_config: config.ChainConfig) !void {
+    const beacon_state = try loadState(fork, allocator, state_bytes);
+    const signed_beacon_block = try loadBlock(fork, allocator, block_bytes);
+    const block_slot = signed_beacon_block.beaconBlock().slot();
 
-    try stdout.print("Block deserialized: slot={}, proposer={}\n", .{ signed_block_data.message.slot, signed_block_data.message.proposer_index });
-
-    const block_body = &signed_block_data.message.body;
-    try stdout.print("Block contents: attestations={}\n", .{block_body.attestations.items.len});
-
-    // Create beacon state wrapper
-    const beacon_state = try allocator.create(BeaconStateAllForks);
-    beacon_state.* = .{ .fulu = fulu_state };
-
-    // Create cached state with mainnet config
-    const chain_config = config.mainnet_chain_config;
     const beacon_config = try config.BeaconConfig.init(allocator, chain_config, beacon_state.genesisValidatorsRoot());
-
     const pubkey_index_map = try PubkeyIndexMap.init(allocator);
     const index_pubkey_cache = try allocator.create(state_transition.Index2PubkeyCache);
     index_pubkey_cache.* = state_transition.Index2PubkeyCache.init(allocator);
-
     try state_transition.syncPubkeys(beacon_state.validators().items, pubkey_index_map, index_pubkey_cache);
 
-    const immutable_data = state_transition.EpochCacheImmutableData{
+    const cached_state = try CachedBeaconStateAllForks.createCachedBeaconState(allocator, beacon_state, .{
         .config = beacon_config,
         .index_to_pubkey = index_pubkey_cache,
         .pubkey_to_index = pubkey_index_map,
-    };
+    }, .{ .skip_sync_committee_cache = !comptime fork.isPostAltair(), .skip_sync_pubkeys = false });
 
-    const cached_state = try CachedBeaconStateAllForks.createCachedBeaconState(allocator, beacon_state, immutable_data, .{
-        .skip_sync_committee_cache = false,
-        .skip_sync_pubkeys = false,
-    });
+    try state_transition.state_transition.processSlotsWithTransientCache(allocator, cached_state, block_slot, .{});
+    try stdout.print("State: slot={}, validators={}\n", .{ cached_state.state.slot(), beacon_state.validators().items.len });
 
-    try stdout.print("Cached state created\n", .{});
-
-    // Advance state to block slot
-    const block_slot = signed_block_data.message.slot;
-    try stdout.print("Advancing state from slot {} to {}\n", .{ cached_state.state.slot(), block_slot });
-    try st_mod.processSlotsWithTransientCache(allocator, cached_state, block_slot, .{});
-    try stdout.print("State advanced to slot {}\n", .{cached_state.state.slot()});
-
-    // Create block wrappers
-    const signed_beacon_block = SignedBeaconBlock{ .fulu = signed_block_data };
     const signed_block = SignedBlock{ .regular = signed_beacon_block };
     const body = Body{ .regular = signed_beacon_block.beaconBlock().beaconBlockBody() };
 
-    try stdout.print("\nStarting process_block benchmarks...\n\n", .{});
-
-    var bench = zbench.Benchmark.init(allocator, .{});
+    var bench = zbench.Benchmark.init(allocator, .{
+        .iterations = 50,
+    });
     defer bench.deinit();
 
-    // process_block_header
-    const process_block_header_bench = ProcessBlockHeaderBench{
-        .allocator = allocator,
-        .cached_state = cached_state,
-        .signed_block = signed_block,
-    };
-    try bench.addParam("process_block_header", &process_block_header_bench, .{});
+    try bench.addParam("block_header", &ProcessBlockHeaderBench{ .cached_state = cached_state, .signed_block = signed_block }, .{});
 
-    // process_withdrawals
-    const process_withdrawals_bench = ProcessWithdrawalsBench{
-        .allocator = allocator,
-        .cached_state = cached_state,
-        .signed_block = signed_block,
-    };
-    try bench.addParam("process_withdrawals", &process_withdrawals_bench, .{});
+    if (comptime fork.isPostCapella()) {
+        try bench.addParam("withdrawals", &ProcessWithdrawalsBench{ .cached_state = cached_state, .signed_block = signed_block }, .{});
+    }
+    if (comptime fork.isPostBellatrix()) {
+        try bench.addParam("execution_payload", &ProcessExecutionPayloadBench{ .cached_state = cached_state, .body = body }, .{});
+    }
 
-    // process_execution_payload
-    const process_execution_payload_bench = ProcessExecutionPayloadBench{
-        .allocator = allocator,
-        .cached_state = cached_state,
-        .body = body,
-    };
-    try bench.addParam("process_execution_payload", &process_execution_payload_bench, .{});
+    try bench.addParam("randao", &ProcessRandaoBench(true){ .cached_state = cached_state, .signed_block = signed_block }, .{});
+    try bench.addParam("randao_no_sig", &ProcessRandaoBench(false){ .cached_state = cached_state, .signed_block = signed_block }, .{});
+    try bench.addParam("eth1_data", &ProcessEth1DataBench{ .cached_state = cached_state, .signed_block = signed_block }, .{});
+    try bench.addParam("operations", &ProcessOperationsBench(true){ .cached_state = cached_state, .signed_block = signed_block }, .{});
+    try bench.addParam("operations_no_sig", &ProcessOperationsBench(false){ .cached_state = cached_state, .signed_block = signed_block }, .{});
 
-    // process_randao
-    const process_randao_bench = ProcessRandaoBench{
-        .allocator = allocator,
-        .cached_state = cached_state,
-        .signed_block = signed_block,
-    };
-    try bench.addParam("process_randao", &process_randao_bench, .{});
+    if (comptime fork.isPostAltair()) {
+        try bench.addParam("sync_aggregate", &ProcessSyncAggregateBench(true){ .cached_state = cached_state, .signed_block = signed_block }, .{});
+        try bench.addParam("sync_aggregate_no_sig", &ProcessSyncAggregateBench(false){ .cached_state = cached_state, .signed_block = signed_block }, .{});
+    }
 
-    // process_eth1_data
-    const process_eth1_data_bench = ProcessEth1DataBench{
-        .allocator = allocator,
-        .cached_state = cached_state,
-        .signed_block = signed_block,
-    };
-    try bench.addParam("process_eth1_data", &process_eth1_data_bench, .{});
+    try bench.addParam("process_block", &ProcessBlockBench(true){ .cached_state = cached_state, .signed_block = signed_block }, .{});
+    try bench.addParam("process_block_no_sig", &ProcessBlockBench(false){ .cached_state = cached_state, .signed_block = signed_block }, .{});
 
-    // process_operations
-    const process_operations_bench = ProcessOperationsBench{
-        .allocator = allocator,
-        .cached_state = cached_state,
-        .signed_block = signed_block,
-    };
-    try bench.addParam("process_operations", &process_operations_bench, .{});
-
-    // process_sync_aggregate
-    const process_sync_aggregate_bench = ProcessSyncAggregateBench{
-        .allocator = allocator,
-        .cached_state = cached_state,
-        .signed_block = signed_block,
-    };
-    try bench.addParam("process_sync_aggregate", &process_sync_aggregate_bench, .{});
+    // Segmented benchmark (step-by-step timing)
+    resetSegmentStats();
+    try bench.addParam("block(segments)", &ProcessBlockSegmentedBench{ .cached_state = cached_state, .signed_block = signed_block, .body = body }, .{});
 
     try bench.run(stdout);
+    try printSegmentStats(stdout);
 }
