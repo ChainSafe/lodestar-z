@@ -67,7 +67,7 @@ pub const Data = struct {
     }
 };
 
-/// A treeview provides a view into a merkle tree of a given SSZ type.
+/// A base treeview provides a view into a merkle tree of a given SSZ type.
 /// It maintains and takes ownership recursively of a Data struct, which caches nodes and child Data.
 pub fn BaseTreeView(comptime ST: type) type {
     return struct {
@@ -109,6 +109,20 @@ pub fn BaseTreeView(comptime ST: type) type {
             return child_node;
         }
 
+        fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
+            const opt_old_node = try self.data.children_nodes.fetchPut(
+                gindex,
+                node,
+            );
+            if (opt_old_node) |old_node| {
+                // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
+                // Tree-owned nodes already have a refcount, so skip unref in that case.
+                if (old_node.value.getState(self.pool).getRefCount() == 0) {
+                    self.pool.unref(old_node.value);
+                }
+            }
+        }
+
         fn getChildData(self: *Self, gindex: Gindex) !Data {
             const gop = try self.data.children_data.getOrPut(gindex);
             if (gop.found_existing) {
@@ -117,11 +131,26 @@ pub fn BaseTreeView(comptime ST: type) type {
             const child_node = try self.getChildNode(gindex);
             const child_data = try Data.init(self.allocator, self.pool, child_node);
             gop.value_ptr.* = child_data;
+
+            // TODO only update changed if the subview is mutable
+            try self.data.changed.put(gindex, {});
             return child_data;
+        }
+
+        fn setChildData(self: *Self, gindex: Gindex, data: Data) !void {
+            const opt_old_data = try self.data.children_data.fetchPut(
+                gindex,
+                data,
+            );
+            if (opt_old_data) |old_data_value| {
+                var old_data = @constCast(&old_data_value.value);
+                old_data.deinit(self.pool);
+            }
         }
     };
 }
 
+/// TreeView of Container types
 pub fn ContainerTreeView(comptime ST: type) type {
     const BaseView = BaseTreeView(ST);
 
@@ -173,9 +202,6 @@ pub fn ContainerTreeView(comptime ST: type) type {
             } else {
                 const child_data = try self.base_view.getChildData(child_gindex);
 
-                // TODO only update changed if the subview is mutable
-                try self.base_view.data.changed.put(child_gindex, {});
-
                 return .{
                     .base_view = .{
                         .allocator = self.base_view.allocator,
@@ -196,34 +222,21 @@ pub fn ContainerTreeView(comptime ST: type) type {
             const child_gindex = Gindex.fromDepth(ST.chunk_depth, field_index);
             try self.base_view.data.changed.put(child_gindex, {});
             if (comptime isBasicType(ChildST)) {
-                const opt_old_node = try self.base_view.data.children_nodes.fetchPut(
+                try self.base_view.setChildNode(
                     child_gindex,
                     try ChildST.tree.fromValue(
                         self.base_view.pool,
                         &value,
                     ),
                 );
-                if (opt_old_node) |old_node| {
-                    // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
-                    // Tree-owned nodes already have a refcount, so skip unref in that case.
-                    if (old_node.value.getState(self.base_view.pool).getRefCount() == 0) {
-                        self.base_view.pool.unref(old_node.value);
-                    }
-                }
             } else {
-                const opt_old_data = try self.base_view.data.children_data.fetchPut(
-                    child_gindex,
-                    value.base_view.data,
-                );
-                if (opt_old_data) |old_data_value| {
-                    var data = @constCast(&old_data_value.value);
-                    data.deinit(self.base_view.pool);
-                }
+                try self.base_view.setChildData(child_gindex, value.base_view.data);
             }
         }
     };
 }
 
+/// TreeView of list and vector types
 pub fn ArrayTreeView(comptime ST: type) type {
     const BaseView = BaseTreeView(ST);
 
@@ -279,9 +292,6 @@ pub fn ArrayTreeView(comptime ST: type) type {
             } else {
                 const child_data = try self.base_view.getChildData(child_gindex);
 
-                // TODO only update changed if the subview is mutable
-                try self.base_view.data.changed.put(child_gindex, {});
-
                 return .{
                     .base_view = .{
                         .allocator = self.base_view.allocator,
@@ -301,7 +311,7 @@ pub fn ArrayTreeView(comptime ST: type) type {
             try self.base_view.data.changed.put(child_gindex, {});
             if (comptime isBasicType(ST.Element)) {
                 const child_node = try self.base_view.getChildNode(child_gindex);
-                const opt_old_node = try self.base_view.data.children_nodes.fetchPut(
+                try self.base_view.setChildNode(
                     child_gindex,
                     try ST.Element.tree.fromValuePacked(
                         child_node,
@@ -310,22 +320,8 @@ pub fn ArrayTreeView(comptime ST: type) type {
                         &value,
                     ),
                 );
-                if (opt_old_node) |old_node| {
-                    // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
-                    // Tree-owned nodes already have a refcount, so skip unref in that case.
-                    if (old_node.value.getState(self.base_view.pool).getRefCount() == 0) {
-                        self.base_view.pool.unref(old_node.value);
-                    }
-                }
             } else {
-                const opt_old_data = try self.base_view.data.children_data.fetchPut(
-                    child_gindex,
-                    value.base_view.data,
-                );
-                if (opt_old_data) |old_data_value| {
-                    var data: *Data = @constCast(&old_data_value.value);
-                    data.deinit(self.base_view.pool);
-                }
+                try self.base_view.setChildData(child_gindex, value.base_view.data);
             }
         }
     };
