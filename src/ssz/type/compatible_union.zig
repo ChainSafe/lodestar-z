@@ -233,7 +233,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
 
                     const data_ptr = &@field(value.data, field_name);
 
-                    if (comptime isFixedType(option_type) and option_type.kind != .progressive_container) {
+                    if (comptime isFixedType(option_type)) {
                         try option_type.hashTreeRoot(data_ptr, &data_root);
                     } else {
                         try option_type.hashTreeRoot(allocator, data_ptr, &data_root);
@@ -339,7 +339,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                     if (selector == option.@"0") {
                         const option_type = option.@"1";
 
-                        if (comptime isFixedType(option_type) and option_type.kind != .progressive_container) {
+                        if (comptime isFixedType(option_type)) {
                             try option_type.serialized.hashTreeRoot(data[1..], &data_root);
                         } else {
                             try option_type.serialized.hashTreeRoot(allocator, data[1..], &data_root);
@@ -430,7 +430,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
 
                         const data_ptr = &@field(value.data, field_name);
 
-                        if (comptime isFixedType(option_type) and option_type.kind != .progressive_container) {
+                        if (comptime isFixedType(option_type)) {
                             data_tree = try option_type.tree.fromValue(pool, data_ptr);
                         } else {
                             data_tree = try option_type.tree.fromValue(allocator, pool, data_ptr);
