@@ -152,8 +152,12 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
         /// Creates a new `FixedProgressiveContainerType` and clones all underlying fields in the container.
         ///
         /// Caller owns the memory.
-        pub fn clone(value: *const Type, out: *Type) !void {
+        pub fn clone(_: std.mem.Allocator, value: *const Type, out: *Type) !void {
             out.* = value.*;
+        }
+
+        pub fn serializedSize(_: *const Type) usize {
+            return fixed_size;
         }
 
         pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
@@ -181,7 +185,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             return i;
         }
 
-        pub fn deserializeFromBytes(data: []const u8, out: *Type) !void {
+        pub fn deserializeFromBytes(_: std.mem.Allocator, data: []const u8, out: *Type) !void {
             if (data.len != fixed_size) {
                 return error.InvalidSize;
             }
@@ -224,7 +228,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
         };
 
         pub const tree = struct {
-            pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
+            pub fn toValue(_: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var nodes: [chunk_count]Node.Id = undefined;
 
                 // Extract the active_fields mix-in node (get left child which is the content)
@@ -263,7 +267,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             }
         };
 
-        pub fn serializeIntoJson(writer: anytype, in: *const Type) !void {
+        pub fn serializeIntoJson(_: std.mem.Allocator, writer: anytype, in: *const Type) !void {
             try writer.beginObject();
             inline for (fields) |field| {
                 const field_value_ptr = &@field(in, field.name);
@@ -273,7 +277,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             try writer.endObject();
         }
 
-        pub fn deserializeFromJson(source: *std.json.Scanner, out: *Type) !void {
+        pub fn deserializeFromJson(_: std.mem.Allocator, source: *std.json.Scanner, out: *Type) !void {
             // start object token "{"
             switch (try source.next()) {
                 .object_begin => {},
@@ -788,13 +792,13 @@ test "ProgressiveContainerType " {
     _ = Circle.serializeIntoBytes(&circle, &circle_buf);
 
     // Test deserialization
+    const allocator = std.testing.allocator;
     var square2: Square.Type = undefined;
-    try Square.deserializeFromBytes(&square_buf, &square2);
+    try Square.deserializeFromBytes(allocator, &square_buf, &square2);
     try std.testing.expectEqual(square.side, square2.side);
     try std.testing.expectEqual(square.color, square2.color);
 
     // Test hash tree root - color should be at the same gindex for both
-    const allocator = std.testing.allocator;
     var square_root: [32]u8 = undefined;
     try Square.hashTreeRoot(allocator, &square, &square_root);
 
