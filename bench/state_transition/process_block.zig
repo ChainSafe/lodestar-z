@@ -1,4 +1,4 @@
-// Benchmark for block processing (works for any fork)
+//! Benchmark for block processing (works for any fork)
 // https://github.com/ethereum/consensus-specs/blob/master/specs/fulu/beacon-chain.md#block-processing //fulu specs
 //
 // Uses real mainnet state and block:
@@ -227,7 +227,7 @@ fn ProcessBlockBench(comptime verify_sig: bool) type {
     };
 }
 
-// segment benchmarks
+/// We segregate block processing into `Step`s for more insight into the perf of each part of the process.
 const Step = enum {
     block_total,
     block_header,
@@ -401,6 +401,7 @@ pub fn main() !void {
     inline for (comptime std.enums.values(ForkSeq)) |fork| {
         if (detected_fork == fork) return runBenchmark(fork, allocator, stdout, state_bytes, block_bytes, chain_config);
     }
+    return error.NoBenchmarkRan;
 }
 
 fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, stdout: anytype, state_bytes: []const u8, block_bytes: []const u8, chain_config: config.ChainConfig) !void {

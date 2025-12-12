@@ -1,4 +1,4 @@
-// Benchmark for epoch processing (works for any fork)
+//! Benchmark for epoch processing (works for any fork)
 // https://github.com/ethereum/consensus-specs/blob/master/specs/fulu/beacon-chain.md#epoch-processing // fulu spec
 //
 // Benchmarks all process_epoch operations per spec:
@@ -572,6 +572,7 @@ pub fn main() !void {
             return runBenchmark(fork, allocator, stdout, state_bytes, chain_config);
         }
     }
+    return error.NoBenchmarkRan;
 }
 
 fn runBenchmark(
@@ -612,7 +613,6 @@ fn runBenchmark(
     var bench = zbench.Benchmark.init(allocator, .{ .iterations = 50 });
     defer bench.deinit();
 
-    // All forks
     try bench.addParam("justification_finalization", &ProcessJustificationAndFinalizationBench{
         .cached_state = cached_state,
     }, .{});
@@ -624,7 +624,6 @@ fn runBenchmark(
         }, .{});
     }
 
-    // All forks
     try bench.addParam("rewards_and_penalties", &ProcessRewardsAndPenaltiesBench{
         .cached_state = cached_state,
     }, .{});
@@ -641,7 +640,6 @@ fn runBenchmark(
         .cached_state = cached_state,
     }, .{});
 
-    // Post-Electra
     if (comptime fork.isPostElectra()) {
         try bench.addParam("pending_deposits", &ProcessPendingDepositsBench{
             .cached_state = cached_state,
@@ -652,7 +650,6 @@ fn runBenchmark(
         }, .{});
     }
 
-    // All forks
     try bench.addParam("effective_balance_updates", &ProcessEffectiveBalanceUpdatesBench{
         .cached_state = cached_state,
     }, .{});
@@ -665,14 +662,12 @@ fn runBenchmark(
         .cached_state = cached_state,
     }, .{});
 
-    // Post-Capella
     if (comptime fork.isPostCapella()) {
         try bench.addParam("historical_summaries", &ProcessHistoricalSummariesUpdateBench{
             .cached_state = cached_state,
         }, .{});
     }
 
-    // Post-Altair
     if (comptime fork.isPostAltair()) {
         try bench.addParam("participation_flags", &ProcessParticipationFlagUpdatesBench{
             .cached_state = cached_state,
