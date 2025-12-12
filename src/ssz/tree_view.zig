@@ -99,7 +99,7 @@ pub fn BaseTreeView(comptime ST: type) type {
             out.* = self.data.root.getRoot(self.pool).*;
         }
 
-        fn getChildNode(self: *Self, gindex: Gindex) !Node.Id {
+        pub fn getChildNode(self: *Self, gindex: Gindex) !Node.Id {
             const gop = try self.data.children_nodes.getOrPut(gindex);
             if (gop.found_existing) {
                 return gop.value_ptr.*;
@@ -109,7 +109,7 @@ pub fn BaseTreeView(comptime ST: type) type {
             return child_node;
         }
 
-        fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
+        pub fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
             try self.data.changed.put(gindex, {});
             const opt_old_node = try self.data.children_nodes.fetchPut(
                 gindex,
@@ -124,7 +124,7 @@ pub fn BaseTreeView(comptime ST: type) type {
             }
         }
 
-        fn getChildData(self: *Self, gindex: Gindex) !Data {
+        pub fn getChildData(self: *Self, gindex: Gindex) !Data {
             const gop = try self.data.children_data.getOrPut(gindex);
             if (gop.found_existing) {
                 return gop.value_ptr.*;
@@ -138,7 +138,7 @@ pub fn BaseTreeView(comptime ST: type) type {
             return child_data;
         }
 
-        fn setChildData(self: *Self, gindex: Gindex, data: Data) !void {
+        pub fn setChildData(self: *Self, gindex: Gindex, data: Data) !void {
             try self.data.changed.put(gindex, {});
             const opt_old_data = try self.data.children_data.fetchPut(
                 gindex,
