@@ -6,21 +6,27 @@ const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("type/type_kind.zig").isBasicType;
 const BYTES_PER_CHUNK = @import("type/root.zig").BYTES_PER_CHUNK;
 
-pub const Data = struct {
+/// Represents the internal state of a tree view.
+///
+/// This struct manages the root node of the tree, caches child nodes and sub-data for efficient access,
+/// and tracks which child indices have been modified since the last commit.
+///
+/// It enables fast (re)access of children and batched updates to the merkle tree structure.
+pub const TreeViewData = struct {
     root: Node.Id,
 
     /// cached nodes for faster access of already-visited children
     children_nodes: std.AutoHashMapUnmanaged(Gindex, Node.Id),
 
     /// cached data for faster access of already-visited children
-    children_data: std.AutoHashMapUnmanaged(Gindex, Data),
+    children_data: std.AutoHashMapUnmanaged(Gindex, TreeViewData),
 
     /// whether the corresponding child node/data has changed since the last update of the root
     changed: std.AutoArrayHashMapUnmanaged(Gindex, void),
 
-    pub fn init(pool: *Node.Pool, root: Node.Id) !Data {
+    pub fn init(pool: *Node.Pool, root: Node.Id) !TreeViewData {
         try pool.ref(root);
-        return Data{
+        return TreeViewData{
             .root = root,
             .children_nodes = .empty,
             .children_data = .empty,
@@ -30,7 +36,7 @@ pub const Data = struct {
 
     /// Deinitialize the Data and free all associated resources.
     /// This also deinits all child Data recursively.
-    pub fn deinit(self: *Data, allocator: Allocator, pool: *Node.Pool) void {
+    pub fn deinit(self: *TreeViewData, allocator: Allocator, pool: *Node.Pool) void {
         pool.unref(self.root);
         self.children_nodes.deinit(allocator);
         var value_iter = self.children_data.valueIterator();
@@ -41,7 +47,7 @@ pub const Data = struct {
         self.changed.deinit(allocator);
     }
 
-    pub fn commit(self: *Data, allocator: Allocator, pool: *Node.Pool) !void {
+    pub fn commit(self: *TreeViewData, allocator: Allocator, pool: *Node.Pool) !void {
         const nodes = try allocator.alloc(Node.Id, self.changed.count());
         defer allocator.free(nodes);
 
@@ -68,105 +74,108 @@ pub const Data = struct {
     }
 };
 
-/// A BaseTreeView provides basic implementation for other TreeView
-/// It maintains and takes ownership recursively of a Data struct, which caches nodes and child Data.
-pub fn BaseTreeView() type {
-    return struct {
-        allocator: Allocator,
-        pool: *Node.Pool,
-        data: Data,
+/// Provides the foundational implementation for tree views.
+///
+/// `BaseTreeView` manages and owns a `TreeViewData` struct,
+/// enabling fast (re)access of children and batched updates to the merkle tree structure.
+///
+/// It supports operations such as get/set of child nodes and data, committing changes, computing hash tree roots.
+///
+/// This struct serves as the base for specialized tree views like `ContainerTreeView` and `ArrayTreeView`.
+pub const BaseTreeView = struct {
+    allocator: Allocator,
+    pool: *Node.Pool,
+    data: TreeViewData,
 
-        const Self = @This();
+    pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !BaseTreeView {
+        return BaseTreeView{
+            .allocator = allocator,
+            .pool = pool,
+            .data = try TreeViewData.init(pool, root),
+        };
+    }
 
-        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
-            return Self{
-                .allocator = allocator,
-                .pool = pool,
-                .data = try Data.init(pool, root),
-            };
+    pub fn deinit(self: *BaseTreeView) void {
+        self.data.deinit(self.allocator, self.pool);
+    }
+
+    pub fn commit(self: *BaseTreeView) !void {
+        try self.data.commit(self.allocator, self.pool);
+    }
+
+    pub fn hashTreeRoot(self: *BaseTreeView, out: *[32]u8) !void {
+        try self.commit();
+        out.* = self.data.root.getRoot(self.pool).*;
+    }
+
+    pub fn getChildNode(self: *BaseTreeView, gindex: Gindex) !Node.Id {
+        const gop = try self.data.children_nodes.getOrPut(self.allocator, gindex);
+        if (gop.found_existing) {
+            return gop.value_ptr.*;
         }
+        const child_node = try self.data.root.getNode(self.pool, gindex);
+        gop.value_ptr.* = child_node;
+        return child_node;
+    }
 
-        pub fn deinit(self: *Self) void {
-            self.data.deinit(self.allocator, self.pool);
-        }
-
-        pub fn commit(self: *Self) !void {
-            try self.data.commit(self.allocator, self.pool);
-        }
-
-        pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
-            try self.commit();
-            out.* = self.data.root.getRoot(self.pool).*;
-        }
-
-        pub fn getChildNode(self: *Self, gindex: Gindex) !Node.Id {
-            const gop = try self.data.children_nodes.getOrPut(self.allocator, gindex);
-            if (gop.found_existing) {
-                return gop.value_ptr.*;
-            }
-            const child_node = try self.data.root.getNode(self.pool, gindex);
-            gop.value_ptr.* = child_node;
-            return child_node;
-        }
-
-        pub fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
-            try self.data.changed.put(self.allocator, gindex, {});
-            const opt_old_node = try self.data.children_nodes.fetchPut(
-                self.allocator,
-                gindex,
-                node,
-            );
-            if (opt_old_node) |old_node| {
-                // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
-                // Tree-owned nodes already have a refcount, so skip unref in that case.
-                if (old_node.value.getState(self.pool).getRefCount() == 0) {
-                    self.pool.unref(old_node.value);
-                }
-            }
-        }
-
-        pub fn getChildData(self: *Self, gindex: Gindex) !Data {
-            const gop = try self.data.children_data.getOrPut(self.allocator, gindex);
-            if (gop.found_existing) {
-                return gop.value_ptr.*;
-            }
-            const child_node = try self.getChildNode(gindex);
-            const child_data = try Data.init(self.pool, child_node);
-            gop.value_ptr.* = child_data;
-
-            // TODO only update changed if the subview is mutable
-            try self.data.changed.put(self.allocator, gindex, {});
-            return child_data;
-        }
-
-        pub fn setChildData(self: *Self, gindex: Gindex, data: Data) !void {
-            try self.data.changed.put(self.allocator, gindex, {});
-            const opt_old_data = try self.data.children_data.fetchPut(
-                self.allocator,
-                gindex,
-                data,
-            );
-            if (opt_old_data) |old_data_value| {
-                var old_data = @constCast(&old_data_value.value);
-                old_data.deinit(self.allocator, self.pool);
+    pub fn setChildNode(self: *BaseTreeView, gindex: Gindex, node: Node.Id) !void {
+        try self.data.changed.put(self.allocator, gindex, {});
+        const opt_old_node = try self.data.children_nodes.fetchPut(
+            self.allocator,
+            gindex,
+            node,
+        );
+        if (opt_old_node) |old_node| {
+            // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
+            // Tree-owned nodes already have a refcount, so skip unref in that case.
+            if (old_node.value.getState(self.pool).getRefCount() == 0) {
+                self.pool.unref(old_node.value);
             }
         }
-    };
-}
+    }
 
-/// TreeView of Container types
+    pub fn getChildData(self: *BaseTreeView, gindex: Gindex) !TreeViewData {
+        const gop = try self.data.children_data.getOrPut(self.allocator, gindex);
+        if (gop.found_existing) {
+            return gop.value_ptr.*;
+        }
+        const child_node = try self.getChildNode(gindex);
+        const child_data = try TreeViewData.init(self.pool, child_node);
+        gop.value_ptr.* = child_data;
+
+        // TODO only update changed if the subview is mutable
+        try self.data.changed.put(self.allocator, gindex, {});
+        return child_data;
+    }
+
+    pub fn setChildData(self: *BaseTreeView, gindex: Gindex, data: TreeViewData) !void {
+        try self.data.changed.put(self.allocator, gindex, {});
+        const opt_old_data = try self.data.children_data.fetchPut(
+            self.allocator,
+            gindex,
+            data,
+        );
+        if (opt_old_data) |old_data_value| {
+            var old_data = @constCast(&old_data_value.value);
+            old_data.deinit(self.allocator, self.pool);
+        }
+    }
+};
+
+/// A specialized tree view for SSZ container types, enabling efficient access and modification of container fields, given a backing merkle tree.
+///
+/// This struct wraps a `BaseTreeView` and provides methods to get and set fields by name.
+///
+/// For basic-type fields, it returns or accepts values directly; for complex fields, it returns or accepts corresponding tree views.
 pub fn ContainerTreeView(comptime ST: type) type {
-    const BaseView = BaseTreeView();
-
     return struct {
-        base_view: BaseView,
-        pub const SszType: type = ST;
+        base_view: BaseTreeView,
 
         const Self = @This();
 
         pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
             return .{
-                .base_view = try BaseView.init(allocator, pool, root),
+                .base_view = try BaseTreeView.init(allocator, pool, root),
             };
         }
 
@@ -238,19 +247,20 @@ pub fn ContainerTreeView(comptime ST: type) type {
     };
 }
 
-/// TreeView of list and vector types
+/// A specialized tree view for SSZ list and vector types, enabling efficient access and modification of array elements, given a backing merkle tree.
+///
+/// This struct wraps a `BaseTreeView` and provides methods to get and set elements by index.
+///
+/// For basic-type elements, it returns or accepts values directly; for complex elements, it returns or accepts corresponding tree views.
 pub fn ArrayTreeView(comptime ST: type) type {
-    const BaseView = BaseTreeView();
-
     return struct {
-        base_view: BaseView,
-        pub const SszType: type = ST;
+        base_view: BaseTreeView,
 
         const Self = @This();
 
         pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
             return .{
-                .base_view = try BaseView.init(allocator, pool, root),
+                .base_view = try BaseTreeView.init(allocator, pool, root),
             };
         }
 
