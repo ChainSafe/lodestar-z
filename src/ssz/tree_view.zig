@@ -67,14 +67,13 @@ pub const Data = struct {
     }
 };
 
-/// A base treeview provides a view into a merkle tree of a given SSZ type.
+/// A BaseTreeView provides basic implementation for other TreeView
 /// It maintains and takes ownership recursively of a Data struct, which caches nodes and child Data.
-pub fn BaseTreeView(comptime ST: type) type {
+pub fn BaseTreeView() type {
     return struct {
         allocator: std.mem.Allocator,
         pool: *Node.Pool,
         data: Data,
-        pub const SszType: type = ST;
 
         const Self = @This();
 
@@ -154,7 +153,7 @@ pub fn BaseTreeView(comptime ST: type) type {
 
 /// TreeView of Container types
 pub fn ContainerTreeView(comptime ST: type) type {
-    const BaseView = BaseTreeView(ST);
+    const BaseView = BaseTreeView();
 
     return struct {
         base_view: BaseView,
@@ -238,7 +237,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
 /// TreeView of list and vector types
 pub fn ArrayTreeView(comptime ST: type) type {
-    const BaseView = BaseTreeView(ST);
+    const BaseView = BaseTreeView();
 
     return struct {
         base_view: BaseView,
