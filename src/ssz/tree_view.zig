@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const Depth = @import("hashing").Depth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
@@ -9,38 +10,38 @@ pub const Data = struct {
     root: Node.Id,
 
     /// cached nodes for faster access of already-visited children
-    children_nodes: std.AutoHashMap(Gindex, Node.Id),
+    children_nodes: std.AutoHashMapUnmanaged(Gindex, Node.Id),
 
     /// cached data for faster access of already-visited children
-    children_data: std.AutoHashMap(Gindex, Data),
+    children_data: std.AutoHashMapUnmanaged(Gindex, Data),
 
     /// whether the corresponding child node/data has changed since the last update of the root
-    changed: std.AutoArrayHashMap(Gindex, void),
+    changed: std.AutoArrayHashMapUnmanaged(Gindex, void),
 
-    pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, root: Node.Id) !Data {
+    pub fn init(pool: *Node.Pool, root: Node.Id) !Data {
         try pool.ref(root);
         return Data{
             .root = root,
-            .children_nodes = std.AutoHashMap(Gindex, Node.Id).init(allocator),
-            .children_data = std.AutoHashMap(Gindex, Data).init(allocator),
-            .changed = std.AutoArrayHashMap(Gindex, void).init(allocator),
+            .children_nodes = .empty,
+            .children_data = .empty,
+            .changed = .empty,
         };
     }
 
     /// Deinitialize the Data and free all associated resources.
     /// This also deinits all child Data recursively.
-    pub fn deinit(self: *Data, pool: *Node.Pool) void {
+    pub fn deinit(self: *Data, allocator: Allocator, pool: *Node.Pool) void {
         pool.unref(self.root);
-        self.children_nodes.deinit();
+        self.children_nodes.deinit(allocator);
         var value_iter = self.children_data.valueIterator();
         while (value_iter.next()) |child_data| {
-            child_data.deinit(pool);
+            child_data.deinit(allocator, pool);
         }
-        self.children_data.deinit();
-        self.changed.deinit();
+        self.children_data.deinit(allocator);
+        self.changed.deinit(allocator);
     }
 
-    pub fn commit(self: *Data, allocator: std.mem.Allocator, pool: *Node.Pool) !void {
+    pub fn commit(self: *Data, allocator: Allocator, pool: *Node.Pool) !void {
         const nodes = try allocator.alloc(Node.Id, self.changed.count());
         defer allocator.free(nodes);
 
@@ -71,22 +72,22 @@ pub const Data = struct {
 /// It maintains and takes ownership recursively of a Data struct, which caches nodes and child Data.
 pub fn BaseTreeView() type {
     return struct {
-        allocator: std.mem.Allocator,
+        allocator: Allocator,
         pool: *Node.Pool,
         data: Data,
 
         const Self = @This();
 
-        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, root: Node.Id) !Self {
+        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
             return Self{
                 .allocator = allocator,
                 .pool = pool,
-                .data = try Data.init(allocator, pool, root),
+                .data = try Data.init(pool, root),
             };
         }
 
         pub fn deinit(self: *Self) void {
-            self.data.deinit(self.pool);
+            self.data.deinit(self.allocator, self.pool);
         }
 
         pub fn commit(self: *Self) !void {
@@ -99,7 +100,7 @@ pub fn BaseTreeView() type {
         }
 
         pub fn getChildNode(self: *Self, gindex: Gindex) !Node.Id {
-            const gop = try self.data.children_nodes.getOrPut(gindex);
+            const gop = try self.data.children_nodes.getOrPut(self.allocator, gindex);
             if (gop.found_existing) {
                 return gop.value_ptr.*;
             }
@@ -109,8 +110,9 @@ pub fn BaseTreeView() type {
         }
 
         pub fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
-            try self.data.changed.put(gindex, {});
+            try self.data.changed.put(self.allocator, gindex, {});
             const opt_old_node = try self.data.children_nodes.fetchPut(
+                self.allocator,
                 gindex,
                 node,
             );
@@ -124,28 +126,29 @@ pub fn BaseTreeView() type {
         }
 
         pub fn getChildData(self: *Self, gindex: Gindex) !Data {
-            const gop = try self.data.children_data.getOrPut(gindex);
+            const gop = try self.data.children_data.getOrPut(self.allocator, gindex);
             if (gop.found_existing) {
                 return gop.value_ptr.*;
             }
             const child_node = try self.getChildNode(gindex);
-            const child_data = try Data.init(self.allocator, self.pool, child_node);
+            const child_data = try Data.init(self.pool, child_node);
             gop.value_ptr.* = child_data;
 
             // TODO only update changed if the subview is mutable
-            try self.data.changed.put(gindex, {});
+            try self.data.changed.put(self.allocator, gindex, {});
             return child_data;
         }
 
         pub fn setChildData(self: *Self, gindex: Gindex, data: Data) !void {
-            try self.data.changed.put(gindex, {});
+            try self.data.changed.put(self.allocator, gindex, {});
             const opt_old_data = try self.data.children_data.fetchPut(
+                self.allocator,
                 gindex,
                 data,
             );
             if (opt_old_data) |old_data_value| {
                 var old_data = @constCast(&old_data_value.value);
-                old_data.deinit(self.pool);
+                old_data.deinit(self.allocator, self.pool);
             }
         }
     };
@@ -161,7 +164,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
         const Self = @This();
 
-        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, root: Node.Id) !Self {
+        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
             return .{
                 .base_view = try BaseView.init(allocator, pool, root),
             };
@@ -245,7 +248,7 @@ pub fn ArrayTreeView(comptime ST: type) type {
 
         const Self = @This();
 
-        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, root: Node.Id) !Self {
+        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
             return .{
                 .base_view = try BaseView.init(allocator, pool, root),
             };
