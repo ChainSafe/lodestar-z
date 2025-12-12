@@ -171,6 +171,8 @@ pub fn ContainerTreeView(comptime ST: type) type {
     return struct {
         base_view: BaseTreeView,
 
+        pub const SszType = ST;
+
         const Self = @This();
 
         pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
@@ -255,6 +257,8 @@ pub fn ContainerTreeView(comptime ST: type) type {
 pub fn ArrayTreeView(comptime ST: type) type {
     return struct {
         base_view: BaseTreeView,
+
+        pub const SszType = ST;
 
         const Self = @This();
 
