@@ -11,8 +11,7 @@ const merkleize = @import("hashing").merkleize;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
-const chunk = @import("chunk.zig");
-const chunkDepth = chunk.chunkDepth;
+const ArrayTreeView = @import("../tree_view.zig").ArrayTreeView;
 
 pub fn isByteListType(ST: type) bool {
     return ST.kind == .list and ST.Element.kind == .uint and ST.Element.fixed_size == 1 and ST == ByteListType(ST.limit);
@@ -25,11 +24,11 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
         }
     }
     return struct {
-        const Self = @This();
         pub const kind = TypeKind.list;
         pub const Element: type = UintType(8);
         pub const limit: usize = _limit;
         pub const Type: type = std.ArrayListUnmanaged(Element.Type);
+        pub const TreeView: type = ArrayTreeView(@This());
         pub const min_size: usize = 0;
         pub const max_size: usize = Element.fixed_size * limit;
         pub const max_chunk_count: usize = std.math.divCeil(usize, max_size, 32) catch unreachable;
@@ -122,7 +121,7 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
 
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
-                try node.getNodesAtDepth(pool, chunkDepth(u8, chunk_depth, Self), 0, nodes);
+                try node.getNodesAtDepth(pool, chunk_depth + 1, 0, nodes);
 
                 try out.resize(allocator, len);
                 for (0..chunk_count) |i| {

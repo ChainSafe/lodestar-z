@@ -10,7 +10,7 @@ const OffsetIterator = @import("offsets.zig").OffsetIterator;
 const merkleize = @import("hashing").merkleize;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
-const chunk = @import("chunk.zig");
+const ArrayTreeView = @import("../tree_view.zig").ArrayTreeView;
 
 pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
     comptime {
@@ -26,6 +26,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
         pub const Element: type = ST;
         pub const length: usize = _length;
         pub const Type: type = [length]Element.Type;
+        pub const TreeView: type = ArrayTreeView(@This());
         pub const fixed_size: usize = Element.fixed_size * length;
         pub const chunk_count: usize = if (isBasicType(Element)) std.math.divCeil(usize, fixed_size, 32) catch unreachable else length;
         pub const chunk_depth: u8 = maxChunksToDepth(chunk_count);
@@ -111,11 +112,10 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
                 try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
 
                 if (comptime isBasicType(Element)) {
-                    const items_per_chunk = chunk.itemsPerChunk(Element);
-                    // tightly packed vector
+                    // tightly packed list
                     for (0..length) |i| {
                         try Element.tree.toValuePacked(
-                            nodes[i / items_per_chunk],
+                            nodes[i * Element.fixed_size / 32],
                             pool,
                             i,
                             &out[i],
@@ -136,7 +136,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
                 var nodes: [chunk_count]Node.Id = undefined;
 
                 if (comptime isBasicType(Element)) {
-                    const items_per_chunk = chunk.itemsPerChunk(Element);
+                    const items_per_chunk = 32 / Element.fixed_size;
                     var l: usize = 0;
                     for (0..chunk_count) |i| {
                         var leaf_buf = [_]u8{0} ** 32;

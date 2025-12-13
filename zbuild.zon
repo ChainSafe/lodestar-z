@@ -13,7 +13,7 @@
             .url = "git+https://github.com/chainsafe/blst-z#7c135f5049d99f603856a1c8728321cb69682788",
         },
         .hashtree = .{
-            .url = "git+https://github.com/chainsafe/hashtree-z#43a58b0fd4813515cda3d0ffc622125243a01c54",
+            .url = "git+https://github.com/chainsafe/hashtree-z#4ed9aebb6178662299ae799f6914499820ff0180",
         },
         .snappy = .{
             .url = "git+https://github.com/chainsafe/snappy.zig#ede2ad602ac9ffa506e3724a2bf5fc14c806187f",

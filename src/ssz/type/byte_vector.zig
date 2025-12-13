@@ -11,6 +11,7 @@ const merkleize = @import("hashing").merkleize;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Depth = @import("hashing").Depth;
 const Node = @import("persistent_merkle_tree").Node;
+const ArrayTreeView = @import("../tree_view.zig").ArrayTreeView;
 
 pub fn isByteVectorType(ST: type) bool {
     return ST.kind == .vector and ST.Element.kind == .uint and ST.Element.fixed_size == 1 and ST == ByteVectorType(ST.length);
@@ -27,6 +28,7 @@ pub fn ByteVectorType(comptime _length: comptime_int) type {
         pub const Element: type = UintType(8);
         pub const length: usize = _length;
         pub const Type: type = [length]Element.Type;
+        pub const TreeView: type = ArrayTreeView(@This());
         pub const fixed_size: usize = Element.fixed_size * length;
         pub const chunk_count: usize = std.math.divCeil(usize, fixed_size, 32) catch unreachable;
         pub const chunk_depth: Depth = maxChunksToDepth(chunk_count);

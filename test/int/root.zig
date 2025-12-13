@@ -16,6 +16,7 @@ const process_randao_mixes_reset = @import("./epoch/process_randao_mixes_reset.z
 const process_historical_summaries_update = @import("./epoch/process_historical_summaries_update.zig");
 const process_participation_flag_updates = @import("./epoch/process_participation_flag_updates.zig");
 const process_sync_committee_updates = @import("./epoch/process_sync_committee_updates.zig");
+const process_proposer_lookahead = @import("./epoch/process_proposer_lookahead.zig");
 const process_epoch = @import("./epoch/process_epoch.zig");
 
 const list_basic = @import("./ssz/list_basic.zig");
@@ -44,6 +45,7 @@ test {
     testing.refAllDecls(process_historical_summaries_update);
     testing.refAllDecls(process_participation_flag_updates);
     testing.refAllDecls(process_sync_committee_updates);
+    testing.refAllDecls(process_proposer_lookahead);
     testing.refAllDecls(process_epoch);
     testing.refAllDecls(epoch_transition_cache);
     testing.refAllDecls(state_transition);

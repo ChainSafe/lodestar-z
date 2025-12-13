@@ -1,6 +1,5 @@
 const Allocator = @import("std").mem.Allocator;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
 const ssz = @import("consensus_types");
 const initializeProposerLookahead = @import("../utils/process_proposer_lookahead.zig").initializeProposerLookahead;
 
@@ -12,8 +11,6 @@ pub fn upgradeStateToFulu(allocator: Allocator, cached_state: *CachedBeaconState
 
     const electra_state = state.electra;
     const previous_fork_version = electra_state.fork.current_version;
-
-    const pre_state = BeaconStateAllForks{ .electra = electra_state };
 
     defer {
         ssz.electra.BeaconState.deinit(allocator, electra_state);
@@ -29,11 +26,9 @@ pub fn upgradeStateToFulu(allocator: Allocator, cached_state: *CachedBeaconState
         .epoch = cached_state.getEpochCache().epoch,
     };
 
-    const effective_balance_increments = cached_state.getEpochCache().getEffectiveBalanceIncrements();
     try initializeProposerLookahead(
         allocator,
-        &pre_state,
-        &effective_balance_increments,
+        cached_state,
         &state.fulu.proposer_lookahead,
     );
 }

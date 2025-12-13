@@ -874,7 +874,12 @@ test "upgrade state - sanity" {
     }
 
     var electra = try deneb.upgradeUnsafe(allocator);
-    defer electra.deinit(allocator);
+    const old_electra_state = electra.electra;
+    defer {
+        types.electra.BeaconState.deinit(allocator, old_electra_state);
+        allocator.destroy(old_electra_state);
+    }
 
-    // TODO: fulu
+    var fulu = try electra.upgradeUnsafe(allocator);
+    defer fulu.deinit(allocator);
 }

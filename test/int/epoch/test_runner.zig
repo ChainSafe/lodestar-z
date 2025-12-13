@@ -8,6 +8,7 @@ pub const TestOpt = struct {
     alloc: bool = false,
     err_return: bool = false,
     void_return: bool = false,
+    fulu: bool = false,
 };
 
 pub fn TestRunner(process_epoch_fn: anytype, opt: TestOpt) type {
@@ -19,6 +20,10 @@ pub fn TestRunner(process_epoch_fn: anytype, opt: TestOpt) type {
             inline for (validator_count_arr) |validator_count| {
                 var test_state = try TestCachedBeaconStateAllForks.init(allocator, validator_count);
                 defer test_state.deinit();
+
+                if (opt.fulu) {
+                    try state_transition.upgradeStateToFulu(allocator, test_state.cached_state);
+                }
 
                 var epoch_transition_cache = try EpochTransitionCache.init(
                     allocator,
