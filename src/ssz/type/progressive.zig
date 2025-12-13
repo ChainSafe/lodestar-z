@@ -6,10 +6,6 @@ const Depth = @import("hashing").Depth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 
-pub const std_options = .{ .log_level = .debug };
-pub const log_scope_levels = &.{.{ .scope = .pgl, .level = .debug }};
-const log = std.log.scoped(.pgl);
-
 const base_count = 1;
 const scaling_factor = 4;
 
