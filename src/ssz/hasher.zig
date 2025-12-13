@@ -111,7 +111,11 @@ pub fn Hasher(comptime ST: type) type {
                         try h.merkleize(@ptrCast(scratch.chunks.items), ST.chunk_depth, out);
                     },
                     .progressive_container => {
-                        try ST.hashTreeRoot(scratch.getAllocator(), value, out);
+                        if (comptime isFixedType(ST)) {
+                            try ST.hashTreeRoot(value, out);
+                        } else {
+                            try ST.hashTreeRoot(scratch.getAllocator(), value, out);
+                        }
                     },
                     .compatible_union => {
                         try ST.hashTreeRoot(scratch.getAllocator(), value, out);

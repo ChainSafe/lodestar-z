@@ -52,6 +52,52 @@ pub fn subtreeDepth(subtree_i: usize) Depth {
     return @intCast(subtree_i * std.math.log2_int(usize, scaling_factor));
 }
 
+/// Comptime version of merkleizeChunks since we are not using allocator
+pub fn merkleizeChunksComptime(comptime chunk_count: usize, chunks: *const [chunk_count][32]u8, out: *[32]u8) !void {
+    if (chunk_count == 0) {
+        out.* = [_]u8{0} ** 32;
+        return;
+    }
+
+    const subtree_count = comptime subtreeIndex(chunk_count);
+    var subtree_roots: [subtree_count][32]u8 = undefined;
+
+    comptime var c_start: usize = 0;
+    comptime var c_subtree_length: usize = base_count;
+    inline for (0..subtree_count) |subtree_i| {
+        const c_len = chunk_count - c_start;
+        const subtree_length = c_subtree_length;
+        if (c_len <= subtree_length) {
+            var final_subtree_chunks: [subtree_length][32]u8 = undefined;
+            @memcpy(final_subtree_chunks[0..c_len], chunks[c_start..][0..c_len]);
+            @memset(final_subtree_chunks[c_len..], [_]u8{0} ** 32);
+
+            const depth = comptime subtreeDepth(subtree_i);
+            if (depth == 0) {
+                subtree_roots[subtree_i] = final_subtree_chunks[0];
+            } else {
+                try merkleize(@ptrCast(&final_subtree_chunks), depth, &subtree_roots[subtree_i]);
+            }
+        } else {
+            const depth = comptime subtreeDepth(subtree_i);
+            if (depth == 0) {
+                subtree_roots[subtree_i] = chunks[c_start];
+            } else {
+                try merkleize(@ptrCast(chunks[c_start..][0..subtree_length]), depth, &subtree_roots[subtree_i]);
+            }
+            c_start += subtree_length;
+            c_subtree_length *= scaling_factor;
+        }
+    }
+
+    out.* = [_]u8{0} ** 32;
+    comptime var st_i = subtree_count;
+    inline while (st_i > 0) {
+        st_i -= 1;
+        hashOne(out, out, &subtree_roots[st_i]);
+    }
+}
+
 pub fn merkleizeChunks(allocator: std.mem.Allocator, chunks: [][32]u8, out: *[32]u8) !void {
     if (chunks.len == 0) {
         out.* = [_]u8{0} ** 32;
@@ -137,6 +183,35 @@ pub fn getNodes(pool: *Node.Pool, root: Node.Id, out: []Node.Id) !void {
     if (!std.mem.eql(u8, &n.getRoot(pool).*, &[_]u8{0} ** 32)) {
         return error.InvalidTerminatorNode;
     }
+}
+
+pub fn fillWithContentsComptime(comptime node_count: usize, pool: *Node.Pool, nodes: *const [node_count]Node.Id) !Node.Id {
+    const subtree_count = comptime subtreeIndex(node_count);
+    var n: Node.Id = @enumFromInt(0);
+
+    // Compute subtree starts at comptime
+    comptime var subtree_starts: [subtree_count]usize = undefined;
+    comptime {
+        var pos: usize = 0;
+        for (0..subtree_count) |subtree_i| {
+            subtree_starts[subtree_i] = pos;
+            pos += @min(subtreeLength(subtree_i), node_count - pos);
+        }
+    }
+
+    // Process subtrees in reverse order
+    comptime var i: usize = 0;
+    inline while (i < subtree_count) : (i += 1) {
+        const subtree_i = subtree_count - 1 - i;
+        const st_depth = comptime subtreeDepth(subtree_i);
+        const l = comptime subtree_starts[subtree_i];
+        const st_length = comptime @min(subtreeLength(subtree_i), node_count - l);
+
+        const subtree_root = try Node.fillWithContents(pool, @constCast(nodes[l..][0..st_length]), st_depth);
+        n = try pool.createBranch(n, subtree_root);
+    }
+
+    return n;
 }
 
 pub fn fillWithContents(allocator: std.mem.Allocator, pool: *Node.Pool, nodes: []Node.Id) !Node.Id {

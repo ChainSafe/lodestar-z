@@ -152,7 +152,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
         /// Creates a new `FixedProgressiveContainerType` and clones all underlying fields in the container.
         ///
         /// Caller owns the memory.
-        pub fn clone(_: std.mem.Allocator, value: *const Type, out: *Type) !void {
+        pub fn clone(value: *const Type, out: *Type) !void {
             out.* = value.*;
         }
 
@@ -160,7 +160,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             return fixed_size;
         }
 
-        pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
+        pub fn hashTreeRoot(value: *const Type, out: *[32]u8) !void {
             var chunks: [chunk_count][32]u8 = undefined;
             @memset(&chunks, [_]u8{0} ** 32);
 
@@ -170,7 +170,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             }
 
             var temp_root: [32]u8 = undefined;
-            try progressive.merkleizeChunks(allocator, &chunks, &temp_root);
+            try progressive.merkleizeChunksComptime(chunk_count, &chunks, &temp_root);
 
             const active_fields_packed = comptime packActiveFields(active_fields);
             hashOne(out, &temp_root, &active_fields_packed);
@@ -208,7 +208,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
                 }
             }
 
-            pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
+            pub fn hashTreeRoot(data: []const u8, out: *[32]u8) !void {
                 var chunks: [chunk_count][32]u8 = undefined;
                 @memset(&chunks, [_]u8{0} ** 32);
 
@@ -220,7 +220,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
                 }
 
                 var temp_root: [32]u8 = undefined;
-                try progressive.merkleizeChunks(allocator, &chunks, &temp_root);
+                try progressive.merkleizeChunksComptime(chunk_count, &chunks, &temp_root);
 
                 const active_fields_packed = comptime packActiveFields(active_fields);
                 hashOne(out, &temp_root, &active_fields_packed);
@@ -228,7 +228,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
         };
 
         pub const tree = struct {
-            pub fn toValue(_: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
+            pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var nodes: [chunk_count]Node.Id = undefined;
 
                 // Extract the active_fields mix-in node (get left child which is the content)
@@ -243,7 +243,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
                 }
             }
 
-            pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 var nodes: [chunk_count]Node.Id = undefined;
 
                 // Initialize all nodes to zero
@@ -257,7 +257,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
                     nodes[field_idx] = try field.type.tree.fromValue(pool, field_value);
                 }
 
-                const content_tree = try progressive.fillWithContents(allocator, pool, &nodes);
+                const content_tree = try progressive.fillWithContentsComptime(chunk_count, pool, &nodes);
 
                 // Mix in active_fields
                 const active_fields_packed = comptime packActiveFields(active_fields);
@@ -792,7 +792,6 @@ test "ProgressiveContainerType " {
     _ = Circle.serializeIntoBytes(&circle, &circle_buf);
 
     // Test deserialization
-    const allocator = std.testing.allocator;
     var square2: Square.Type = undefined;
     try Square.deserializeFromBytes(&square_buf, &square2);
     try std.testing.expectEqual(square.side, square2.side);
@@ -800,10 +799,10 @@ test "ProgressiveContainerType " {
 
     // Test hash tree root - color should be at the same gindex for both
     var square_root: [32]u8 = undefined;
-    try Square.hashTreeRoot(allocator, &square, &square_root);
+    try Square.hashTreeRoot(&square, &square_root);
 
     var circle_root: [32]u8 = undefined;
-    try Circle.hashTreeRoot(allocator, &circle, &circle_root);
+    try Circle.hashTreeRoot(&circle, &circle_root);
 
     // The roots should be different since the structures are different
     try std.testing.expect(!std.mem.eql(u8, &square_root, &circle_root));
