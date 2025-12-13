@@ -1,6 +1,5 @@
 const std = @import("std");
 const merkleize = @import("hashing").merkleize;
-const mixInAux = @import("hashing").mixInAux;
 const hashOne = @import("hashing").hashOne;
 const Depth = @import("hashing").Depth;
 const Node = @import("persistent_merkle_tree").Node;
