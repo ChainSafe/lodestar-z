@@ -185,7 +185,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             return i;
         }
 
-        pub fn deserializeFromBytes(_: std.mem.Allocator, data: []const u8, out: *Type) !void {
+        pub fn deserializeFromBytes(data: []const u8, out: *Type) !void {
             if (data.len != fixed_size) {
                 return error.InvalidSize;
             }
@@ -267,7 +267,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             }
         };
 
-        pub fn serializeIntoJson(_: std.mem.Allocator, writer: anytype, in: *const Type) !void {
+        pub fn serializeIntoJson(writer: anytype, in: *const Type) !void {
             try writer.beginObject();
             inline for (fields) |field| {
                 const field_value_ptr = &@field(in, field.name);
@@ -277,7 +277,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             try writer.endObject();
         }
 
-        pub fn deserializeFromJson(_: std.mem.Allocator, source: *std.json.Scanner, out: *Type) !void {
+        pub fn deserializeFromJson(source: *std.json.Scanner, out: *Type) !void {
             // start object token "{"
             switch (try source.next()) {
                 .object_begin => {},
@@ -794,7 +794,7 @@ test "ProgressiveContainerType " {
     // Test deserialization
     const allocator = std.testing.allocator;
     var square2: Square.Type = undefined;
-    try Square.deserializeFromBytes(allocator, &square_buf, &square2);
+    try Square.deserializeFromBytes(&square_buf, &square2);
     try std.testing.expectEqual(square.side, square2.side);
     try std.testing.expectEqual(square.color, square2.color);
 

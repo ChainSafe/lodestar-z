@@ -233,7 +233,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
 
                     const data_ptr = &@field(value.data, field_name);
 
-                    if (comptime isFixedType(option_type)) {
+                    if (comptime isFixedType(option_type) and option_type.kind != .progressive_container) {
                         try option_type.hashTreeRoot(data_ptr, &data_root);
                     } else {
                         try option_type.hashTreeRoot(allocator, data_ptr, &data_root);
@@ -339,7 +339,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                     if (selector == option.@"0") {
                         const option_type = option.@"1";
 
-                        if (comptime isFixedType(option_type)) {
+                        if (comptime isFixedType(option_type) and option_type.kind != .progressive_container) {
                             try option_type.serialized.hashTreeRoot(data[1..], &data_root);
                         } else {
                             try option_type.serialized.hashTreeRoot(allocator, data[1..], &data_root);
@@ -407,7 +407,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                         out.data = @unionInit(@TypeOf(out.data), field_name, option_type.default_value);
                         const out_data_ptr = &@field(out.data, field_name);
 
-                        if (comptime isFixedType(option_type)) {
+                        if (comptime isFixedType(option_type) and option_type.kind != .progressive_container) {
                             try option_type.tree.toValue(data_node, pool, out_data_ptr);
                         } else {
                             try option_type.tree.toValue(allocator, data_node, pool, out_data_ptr);
@@ -430,7 +430,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
 
                         const data_ptr = &@field(value.data, field_name);
 
-                        if (comptime isFixedType(option_type)) {
+                        if (comptime isFixedType(option_type) and option_type.kind != .progressive_container) {
                             data_tree = try option_type.tree.fromValue(pool, data_ptr);
                         } else {
                             data_tree = try option_type.tree.fromValue(allocator, pool, data_ptr);

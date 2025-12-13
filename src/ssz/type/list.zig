@@ -12,9 +12,8 @@ const Node = @import("persistent_merkle_tree").Node;
 
 pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
     comptime {
-        // Accept fixed types OR types with fixed_size (like FixedProgressiveContainerType)
-        if (!isFixedType(ST) and !@hasDecl(ST, "fixed_size")) {
-            @compileError("ST must have fixed serialization size");
+        if (!isFixedType(ST)) {
+            @compileError("ST must be fixed type");
         }
         if (_limit <= 0) {
             @compileError("limit must be greater than 0");
@@ -64,7 +63,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                 _ = serializeIntoBytes(value, @ptrCast(chunks));
             } else {
                 for (value.items, 0..) |element, i| {
-                    if (comptime isFixedType(Element)) {
+                    if (comptime isFixedType(Element) and Element.kind != .progressive_container) {
                         try Element.hashTreeRoot(&element, &chunks[i]);
                     } else {
                         try Element.hashTreeRoot(allocator, &element, &chunks[i]);
@@ -200,7 +199,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                     @memcpy(@as([]u8, @ptrCast(chunks))[0..data.len], data);
                 } else {
                     for (0..len) |i| {
-                        if (comptime isFixedType(Element)) {
+                        if (comptime isFixedType(Element) and Element.kind != .progressive_container) {
                             try Element.serialized.hashTreeRoot(
                                 data[i * Element.fixed_size .. (i + 1) * Element.fixed_size],
                                 &chunks[i],
@@ -257,7 +256,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                     }
                 } else {
                     for (0..len) |i| {
-                        if (comptime isFixedType(Element)) {
+                        if (comptime isFixedType(Element) and Element.kind != .progressive_container) {
                             try Element.tree.toValue(
                                 nodes[i],
                                 pool,
@@ -310,7 +309,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                     }
                 } else {
                     for (0..chunk_count) |i| {
-                        if (comptime isFixedType(Element)) {
+                        if (comptime isFixedType(Element) and Element.kind != .progressive_container) {
                             nodes[i] = try Element.tree.fromValue(pool, &value.items[i]);
                         } else {
                             nodes[i] = try Element.tree.fromValue(allocator, pool, &value.items[i]);
