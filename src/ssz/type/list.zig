@@ -63,11 +63,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                 _ = serializeIntoBytes(value, @ptrCast(chunks));
             } else {
                 for (value.items, 0..) |element, i| {
-                    if (comptime isFixedType(Element)) {
-                        try Element.hashTreeRoot(&element, &chunks[i]);
-                    } else {
-                        try Element.hashTreeRoot(allocator, &element, &chunks[i]);
-                    }
+                    try Element.hashTreeRoot(&element, &chunks[i]);
                 }
             }
             try merkleize(@ptrCast(chunks), chunk_depth, out);
@@ -81,11 +77,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
             try out.resize(allocator, value.items.len);
 
             for (value.items, 0..) |v, i| {
-                if (comptime isFixedType(Element)) {
-                    try Element.clone(&v, &out.items[i]);
-                } else {
-                    try Element.clone(allocator, &v, &out.items[i]);
-                }
+                try Element.clone(&v, &out.items[i]);
             }
         }
 
@@ -110,29 +102,17 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
             try out.resize(allocator, len);
             @memset(out.items[0..len], Element.default_value);
             for (0..len) |i| {
-                if (comptime isFixedType(Element)) {
-                    try Element.deserializeFromBytes(
-                        data[i * Element.fixed_size .. (i + 1) * Element.fixed_size],
-                        &out.items[i],
-                    );
-                } else {
-                    try Element.deserializeFromBytes(
-                        allocator,
-                        data[i * Element.fixed_size .. (i + 1) * Element.fixed_size],
-                        &out.items[i],
-                    );
-                }
+                try Element.deserializeFromBytes(
+                    data[i * Element.fixed_size .. (i + 1) * Element.fixed_size],
+                    &out.items[i],
+                );
             }
         }
 
-        pub fn serializeIntoJson(allocator: std.mem.Allocator, writer: anytype, in: *const Type) !void {
+        pub fn serializeIntoJson(_: std.mem.Allocator, writer: anytype, in: *const Type) !void {
             try writer.beginArray();
             for (in.items) |element| {
-                if (comptime isFixedType(Element)) {
-                    try Element.serializeIntoJson(writer, &element);
-                } else {
-                    try Element.serializeIntoJson(allocator, writer, &element);
-                }
+                try Element.serializeIntoJson(writer, &element);
             }
             try writer.endArray();
         }
@@ -155,11 +135,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
 
                 _ = try out.addOne(allocator);
                 out.items[i] = Element.default_value;
-                if (comptime isFixedType(Element)) {
-                    try Element.deserializeFromJson(source, &out.items[i]);
-                } else {
-                    try Element.deserializeFromJson(allocator, source, &out.items[i]);
-                }
+                try Element.deserializeFromJson(source, &out.items[i]);
             }
             return error.invalidLength;
         }
@@ -199,18 +175,10 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                     @memcpy(@as([]u8, @ptrCast(chunks))[0..data.len], data);
                 } else {
                     for (0..len) |i| {
-                        if (comptime isFixedType(Element)) {
-                            try Element.serialized.hashTreeRoot(
-                                data[i * Element.fixed_size .. (i + 1) * Element.fixed_size],
-                                &chunks[i],
-                            );
-                        } else {
-                            try Element.serialized.hashTreeRoot(
-                                allocator,
-                                data[i * Element.fixed_size .. (i + 1) * Element.fixed_size],
-                                &chunks[i],
-                            );
-                        }
+                        try Element.serialized.hashTreeRoot(
+                            data[i * Element.fixed_size .. (i + 1) * Element.fixed_size],
+                            &chunks[i],
+                        );
                     }
                 }
                 try merkleize(@ptrCast(chunks), chunk_depth, out);
@@ -256,20 +224,11 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                     }
                 } else {
                     for (0..len) |i| {
-                        if (comptime isFixedType(Element)) {
-                            try Element.tree.toValue(
-                                nodes[i],
-                                pool,
-                                &out.items[i],
-                            );
-                        } else {
-                            try Element.tree.toValue(
-                                allocator,
-                                nodes[i],
-                                pool,
-                                &out.items[i],
-                            );
-                        }
+                        try Element.tree.toValue(
+                            nodes[i],
+                            pool,
+                            &out.items[i],
+                        );
                     }
                 }
             }
@@ -309,11 +268,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                     }
                 } else {
                     for (0..chunk_count) |i| {
-                        if (comptime isFixedType(Element)) {
-                            nodes[i] = try Element.tree.fromValue(pool, &value.items[i]);
-                        } else {
-                            nodes[i] = try Element.tree.fromValue(allocator, pool, &value.items[i]);
-                        }
+                        nodes[i] = try Element.tree.fromValue(pool, &value.items[i]);
                     }
                 }
                 return try pool.createBranch(
