@@ -198,6 +198,7 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
         pub const Element: type = ST;
         pub const length: usize = _length;
         pub const Type: type = [length]Element.Type;
+        pub const TreeView: type = ArrayTreeView(@This());
         pub const min_size: usize = Element.min_size * length + 4 * length;
         pub const max_size: usize = Element.max_size * length + 4 * length;
         pub const chunk_count: usize = length;
