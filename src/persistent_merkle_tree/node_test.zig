@@ -385,3 +385,180 @@ test "hashing sanity check" {
 
     try std.testing.expectEqualSlices(u8, zero2.getRoot(p), branch2.getRoot(p));
 }
+
+test "Pool serialization - basic round trip" {
+    const allocator = std.testing.allocator;
+
+    var pool = try Node.Pool.init(allocator, 10);
+
+    const hash1: [32]u8 = [_]u8{1} ** 32;
+    const hash2: [32]u8 = [_]u8{2} ** 32;
+    const hash3: [32]u8 = [_]u8{3} ** 32;
+
+    const leaf1_id = try pool.createLeaf(&hash1);
+    const leaf2_id = try pool.createLeaf(&hash2);
+    const leaf3_id = try pool.createLeaf(&hash3);
+    const branch1_id = try pool.createBranch(leaf1_id, leaf2_id);
+    const root_id = try pool.createBranch(branch1_id, leaf3_id);
+
+    const original_root_hash = root_id.getRoot(&pool).*;
+
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+    try pool.serialize(buffer.writer());
+
+    pool.unref(root_id);
+    pool.deinit();
+
+    var fbs = std.io.fixedBufferStream(buffer.items);
+    var restored_pool = try Node.Pool.deserialize(allocator, fbs.reader());
+    defer restored_pool.deinit();
+
+    const restored_root_hash = root_id.getRoot(&restored_pool).*;
+    try std.testing.expectEqualSlices(u8, &original_root_hash, &restored_root_hash);
+
+    try std.testing.expect(!leaf1_id.getState(&restored_pool).isFree());
+    try std.testing.expect(!leaf2_id.getState(&restored_pool).isFree());
+    try std.testing.expect(!leaf3_id.getState(&restored_pool).isFree());
+    try std.testing.expect(!branch1_id.getState(&restored_pool).isFree());
+    try std.testing.expect(!root_id.getState(&restored_pool).isFree());
+
+    restored_pool.unref(root_id);
+}
+
+test "Pool serialization - with free nodes" {
+    const allocator = std.testing.allocator;
+
+    var pool = try Node.Pool.init(allocator, 20);
+
+    const hash1: [32]u8 = [_]u8{1} ** 32;
+    const hash2: [32]u8 = [_]u8{2} ** 32;
+
+    const leaf1_id = try pool.createLeaf(&hash1);
+    const leaf2_id = try pool.createLeaf(&hash2);
+    const leaf3_id = try pool.createLeaf(&hash1);
+    const leaf4_id = try pool.createLeaf(&hash2);
+
+    const branch1_id = try pool.createBranch(leaf1_id, leaf2_id);
+    const branch2_id = try pool.createBranch(leaf3_id, leaf4_id);
+    const root_id = try pool.createBranch(branch1_id, branch2_id);
+
+    pool.unref(branch2_id);
+
+    try std.testing.expect(branch2_id.getState(&pool).isFree());
+    try std.testing.expect(leaf3_id.getState(&pool).isFree());
+    try std.testing.expect(leaf4_id.getState(&pool).isFree());
+    try std.testing.expect(!root_id.getState(&pool).isFree());
+
+    const original_root_hash = root_id.getRoot(&pool).*;
+    const original_next_free = pool.next_free_node;
+
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+    try pool.serialize(buffer.writer());
+
+    pool.unref(root_id);
+    pool.deinit();
+
+    var fbs = std.io.fixedBufferStream(buffer.items);
+    var restored_pool = try Node.Pool.deserialize(allocator, fbs.reader());
+    defer restored_pool.deinit();
+
+    const restored_root_hash = root_id.getRoot(&restored_pool).*;
+    try std.testing.expectEqualSlices(u8, &original_root_hash, &restored_root_hash);
+
+    try std.testing.expect(branch2_id.getState(&restored_pool).isFree());
+    try std.testing.expect(leaf3_id.getState(&restored_pool).isFree());
+    try std.testing.expect(leaf4_id.getState(&restored_pool).isFree());
+
+    try std.testing.expect(!root_id.getState(&restored_pool).isFree());
+    try std.testing.expect(!branch1_id.getState(&restored_pool).isFree());
+    try std.testing.expect(!leaf1_id.getState(&restored_pool).isFree());
+    try std.testing.expect(!leaf2_id.getState(&restored_pool).isFree());
+
+    try std.testing.expectEqual(original_next_free, restored_pool.next_free_node);
+
+    const new_leaf = try restored_pool.createLeaf(&hash1);
+    try std.testing.expect(!new_leaf.getState(&restored_pool).isFree());
+
+    restored_pool.unref(root_id);
+    restored_pool.unref(new_leaf);
+}
+
+test "Pool serialization - empty pool" {
+    const allocator = std.testing.allocator;
+
+    var pool = try Node.Pool.init(allocator, 10);
+
+    const original_next_free = pool.next_free_node;
+
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+    try pool.serialize(buffer.writer());
+
+    pool.deinit();
+
+    var fbs = std.io.fixedBufferStream(buffer.items);
+    var restored_pool = try Node.Pool.deserialize(allocator, fbs.reader());
+    defer restored_pool.deinit();
+
+    try std.testing.expectEqual(original_next_free, restored_pool.next_free_node);
+
+    const zero0: Node.Id = @enumFromInt(0);
+    try std.testing.expect(zero0.getState(&restored_pool).isZero());
+}
+
+test "Pool serialization - file header validation" {
+    const allocator = std.testing.allocator;
+
+    {
+        var bad_magic = [_]u8{0} ** 20;
+        var fbs = std.io.fixedBufferStream(&bad_magic);
+        const result = Node.Pool.deserialize(allocator, fbs.reader());
+        try std.testing.expectError(error.InvalidMagic, result);
+    }
+
+    {
+        var bad_version: [20]u8 = undefined;
+        @memset(&bad_version, 0);
+        @memcpy(bad_version[0..8], "LSMTPOOL");
+        std.mem.writeInt(u32, bad_version[8..12], 99, .little); // bad version
+        var fbs = std.io.fixedBufferStream(&bad_version);
+        const result = Node.Pool.deserialize(allocator, fbs.reader());
+        try std.testing.expectError(error.UnsupportedVersion, result);
+    }
+}
+
+test "Pool serialization - compression effectiveness" {
+    const allocator = std.testing.allocator;
+
+    var pool = try Node.Pool.init(allocator, 100);
+
+    const hash1: [32]u8 = [_]u8{1} ** 32;
+    const hash2: [32]u8 = [_]u8{2} ** 32;
+
+    const leaf1_id = try pool.createLeaf(&hash1);
+    const leaf2_id = try pool.createLeaf(&hash2);
+    const branch_id = try pool.createBranch(leaf1_id, leaf2_id);
+
+    const original_root_hash = branch_id.getRoot(&pool).*;
+
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+    try pool.serialize(buffer.writer());
+
+    const raw_size: usize = 24 + 100 * (32 + 4 + 4 + 4);
+    try std.testing.expect(buffer.items.len < raw_size);
+
+    pool.unref(branch_id);
+    pool.deinit();
+
+    var fbs = std.io.fixedBufferStream(buffer.items);
+    var restored_pool = try Node.Pool.deserialize(allocator, fbs.reader());
+    defer restored_pool.deinit();
+
+    const restored_root_hash = branch_id.getRoot(&restored_pool).*;
+    try std.testing.expectEqualSlices(u8, &original_root_hash, &restored_root_hash);
+
+    restored_pool.unref(branch_id);
+}

@@ -253,6 +253,8 @@ pub const Pool = struct {
     /// Return true if pool had to allocate more memory, false otherwise.
     pub fn alloc(self: *Pool, out: []Id) Allocator.Error!bool {
         var states = self.nodes.items(.state);
+        var lefts = self.nodes.items(.left);
+        var rights = self.nodes.items(.right);
         var allocated: bool = false;
         for (0..out.len) |i| {
             std.debug.assert(@intFromEnum(self.next_free_node) <= self.nodes.len);
@@ -263,10 +265,15 @@ pub const Pool = struct {
                 // errdefer self.free(out[0..i]);
 
                 states = self.nodes.items(.state);
+                lefts = self.nodes.items(.left);
+                rights = self.nodes.items(.right);
                 allocated = true;
             }
             out[i] = self.createUnsafe(states);
             states[@intFromEnum(out[i])] = State.branch_lazy.initRefCount();
+            // Initialize left/right to zero node to avoid garbage values
+            lefts[@intFromEnum(out[i])] = @enumFromInt(0);
+            rights[@intFromEnum(out[i])] = @enumFromInt(0);
         }
         return allocated;
     }
@@ -377,6 +384,149 @@ pub const Pool = struct {
             states[@intFromEnum(id)] = State.initNextFree(self.next_free_node);
             self.next_free_node = id;
         }
+    }
+
+    //
+    // File Layout:
+    // ┌──────────────────────────────────────────────────────────────┐
+    // │  HEADER (20 bytes, uncompressed)                            │
+    // │    offset 0:  magic [8]u8       = "LSMTPOOL"                │
+    // │    offset 8:  version u32       = 1                         │
+    // │    offset 12: next_free u32     = head of free list         │
+    // │    offset 16: total_slots u32   = number of nodes           │
+    // ├──────────────────────────────────────────────────────────────┤
+    // │  COMPRESSED BODY (zlib)                                     │
+    // │    - hash column:  N × 32 bytes                             │
+    // │    - left column:  N × 4 bytes                              │
+    // │    - right column: N × 4 bytes                              │
+    // │    - state column: N × 4 bytes                              │
+    // └──────────────────────────────────────────────────────────────┘
+    //
+    pub const FileHeader = extern struct {
+        magic: [8]u8 = MAGIC,
+        version: u32 = VERSION,
+        next_free: u32,
+        total_slots: u32,
+
+        // Must match `node_test.zig` header tests and the documented file layout above.
+        pub const MAGIC = "LSMTPOOL".*;
+        pub const VERSION: u32 = 1;
+
+        comptime {
+            std.debug.assert(@sizeOf(FileHeader) == 20);
+        }
+    };
+
+    pub const SerializeError = error{
+        WriteFailed,
+    } || Allocator.Error;
+
+    pub const DeserializeError = error{
+        InvalidMagic,
+        UnsupportedVersion,
+        ReadFailed,
+    } || Allocator.Error || Error;
+
+    fn zeroFreeNodes(self: *Pool) void {
+        const states = self.nodes.items(.state);
+        const hashes = self.nodes.items(.hash);
+        const lefts = self.nodes.items(.left);
+        const rights = self.nodes.items(.right);
+
+        var node_id = self.next_free_node;
+        while (@intFromEnum(node_id) < self.nodes.len) {
+            const i = @intFromEnum(node_id);
+            hashes[i] = std.mem.zeroes([32]u8);
+            lefts[i] = @enumFromInt(0);
+            rights[i] = @enumFromInt(0);
+            node_id = states[i].getNextFree();
+        }
+    }
+
+    pub fn serialize(self: *Pool, writer: anytype) SerializeError!void {
+        self.zeroFreeNodes();
+
+        const header = FileHeader{
+            .next_free = @intFromEnum(self.next_free_node),
+            .total_slots = @intCast(self.nodes.len),
+        };
+        writer.writeAll(std.mem.asBytes(&header)) catch return error.WriteFailed;
+
+        var compressor = std.compress.zlib.compressor(writer, .{ .level = .default }) catch
+            return error.WriteFailed;
+        const comp_writer = compressor.writer();
+
+        comp_writer.writeAll(std.mem.sliceAsBytes(self.nodes.items(.hash))) catch
+            return error.WriteFailed;
+        comp_writer.writeAll(std.mem.sliceAsBytes(self.nodes.items(.left))) catch
+            return error.WriteFailed;
+        comp_writer.writeAll(std.mem.sliceAsBytes(self.nodes.items(.right))) catch
+            return error.WriteFailed;
+        comp_writer.writeAll(std.mem.sliceAsBytes(self.nodes.items(.state))) catch
+            return error.WriteFailed;
+
+        compressor.finish() catch return error.WriteFailed;
+    }
+
+    pub fn deserialize(allocator: Allocator, reader: anytype) DeserializeError!Pool {
+        var header: FileHeader = undefined;
+        reader.readNoEof(std.mem.asBytes(&header)) catch return error.ReadFailed;
+
+        if (!std.mem.eql(u8, &header.magic, &FileHeader.MAGIC)) {
+            return error.InvalidMagic;
+        }
+
+        if (header.version != FileHeader.VERSION) {
+            return error.UnsupportedVersion;
+        }
+
+        var pool = try Pool.initEmpty(allocator, header.total_slots);
+        errdefer pool.deinit();
+
+        var decompressor = std.compress.zlib.decompressor(reader);
+        const decomp_reader = decompressor.reader();
+
+        decomp_reader.readNoEof(std.mem.sliceAsBytes(pool.nodes.items(.hash))) catch
+            return error.ReadFailed;
+        decomp_reader.readNoEof(std.mem.sliceAsBytes(pool.nodes.items(.left))) catch
+            return error.ReadFailed;
+        decomp_reader.readNoEof(std.mem.sliceAsBytes(pool.nodes.items(.right))) catch
+            return error.ReadFailed;
+        decomp_reader.readNoEof(std.mem.sliceAsBytes(pool.nodes.items(.state))) catch
+            return error.ReadFailed;
+
+        pool.next_free_node = @enumFromInt(header.next_free);
+
+        return pool;
+    }
+
+    fn initEmpty(allocator: Allocator, size: u32) Error!Pool {
+        var pool: Pool = .{
+            .allocator = allocator,
+            .nodes = undefined,
+            .next_free_node = @enumFromInt(0),
+        };
+
+        var nodes = std.MultiArrayList(Node).empty;
+        try nodes.resize(allocator, size);
+        pool.nodes = nodes.slice();
+
+        return pool;
+    }
+
+    pub fn saveToFile(self: *Pool, path: []const u8) !void {
+        const file = try std.fs.cwd().createFile(path, .{});
+        defer file.close();
+        var buffered = std.io.bufferedWriter(file.writer());
+        try self.serialize(buffered.writer());
+        try buffered.flush();
+    }
+
+    pub fn loadFromFile(allocator: Allocator, path: []const u8) !Pool {
+        const file = try std.fs.cwd().openFile(path, .{});
+        defer file.close();
+        var buffered = std.io.bufferedReader(file.reader());
+        return try Pool.deserialize(allocator, buffered.reader());
     }
 };
 
