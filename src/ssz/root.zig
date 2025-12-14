@@ -40,14 +40,14 @@ const hasher = @import("hasher.zig");
 pub const Hasher = hasher.Hasher;
 pub const HasherData = hasher.HasherData;
 
-const tree_view = @import("tree_view.zig");
+const tree_view = @import("tree_view/root.zig");
 pub const TreeViewData = tree_view.TreeViewData;
-pub const ArrayTreeViewData = tree_view.ArrayTreeViewData;
-pub const ListTreeViewData = tree_view.ListTreeViewData;
 pub const BaseTreeView = tree_view.BaseTreeView;
 pub const ContainerTreeView = tree_view.ContainerTreeView;
-pub const ArrayTreeView = tree_view.ArrayTreeView;
-pub const ListArrayTreeView = tree_view.ListArrayTreeView;
+pub const ArrayBasicTreeView = tree_view.ArrayBasicTreeView;
+pub const ArrayCompositeTreeView = tree_view.ArrayCompositeTreeView;
+pub const ListBasicTreeView = tree_view.ListBasicTreeView;
+pub const ListCompositeTreeView = tree_view.ListCompositeTreeView;
 
 test {
     testing.refAllDecls(@This());
