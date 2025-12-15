@@ -4,6 +4,7 @@ const testing = std.testing;
 pub const stateTransition = @import("state_transition.zig").stateTransition;
 
 pub const metrics = @import("metrics.zig");
+pub const server = @import("server.zig");
 
 pub const writeMetrics = metrics.write;
 
