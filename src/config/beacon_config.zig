@@ -1,5 +1,4 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const ForkData = types.phase0.ForkData.Type;
@@ -18,22 +17,16 @@ const TOTAL_FORKS = forks.TOTAL_FORKS;
 const forkSeqByForkName = forks.forkSeqByForkName;
 const mainnet_chain_config = @import("./chain/networks/mainnet.zig").mainnet_chain_config;
 
-// a domain type is 4 bytes, so we can use u32 as the key for hash map
-const DomainTypeKey = u32;
-const DomainByTypeHashMap = std.AutoHashMap(DomainTypeKey, [32]u8);
-const DomainByTypeByFork = std.ArrayList(DomainByTypeHashMap);
-
 pub const ChainConfig = @import("./chain/chain_config.zig").ChainConfig;
 
 pub const BeaconConfig = struct {
-    allocator: Allocator,
     chain: ChainConfig,
     forks_ascending_epoch_order: [TOTAL_FORKS]ForkInfo,
     forks_descending_epoch_order: [TOTAL_FORKS]ForkInfo,
     genesis_validator_root: Root,
-    domain_cache: DomainByTypeByFork,
+    domain_cache: DomainCache,
 
-    pub fn init(allocator: Allocator, chain_config: ChainConfig, genesis_validator_root: Root) !*BeaconConfig {
+    pub fn init(chain_config: ChainConfig, genesis_validator_root: Root) !BeaconConfig {
         const phase0 = ForkInfo{
             .fork_seq = ForkSeq.phase0,
             .epoch = 0,
@@ -109,30 +102,16 @@ pub const BeaconConfig = struct {
             phase0,
         };
 
-        var domain_cache = DomainByTypeByFork.init(allocator);
-        inline for (0..TOTAL_FORKS) |fork_seq| {
-            var domain_by_type = DomainByTypeHashMap.init(allocator);
-            const fork_info = forks_ascending_epoch_order[fork_seq];
-            inline for (ALL_DOMAINS) |domain_type| {
-                var domain: [32]u8 = undefined;
-                try computeDomain(domain_type, fork_info.version, genesis_validator_root, &domain);
-                const domain_type_key = getDomainTypeKey(&domain_type);
-                try domain_by_type.put(domain_type_key, domain);
-            }
-            try domain_cache.append(domain_by_type);
-        }
-
-        const beacon_config = try allocator.create(BeaconConfig);
-        beacon_config.* = BeaconConfig{
-            .allocator = allocator,
+        return BeaconConfig{
             .chain = chain_config,
             .forks_ascending_epoch_order = forks_ascending_epoch_order,
             .forks_descending_epoch_order = forks_descending_epoch_order,
             .genesis_validator_root = genesis_validator_root,
-            .domain_cache = domain_cache,
+            .domain_cache = try DomainCache.init(
+                forks_ascending_epoch_order,
+                genesis_validator_root,
+            ),
         };
-
-        return beacon_config;
     }
 
     pub fn deinit(self: *BeaconConfig) void {
@@ -207,15 +186,7 @@ pub const BeaconConfig = struct {
     }
 
     pub fn getDomainByForkSeq(self: *const BeaconConfig, fork_seq: ForkSeq, domain_type: DomainType) ![32]u8 {
-        if (@intFromEnum(fork_seq) >= TOTAL_FORKS) return error.ForkSeqOutOfRange;
-        var domain_by_type = self.domain_cache.items[@intFromEnum(fork_seq)];
-        const domain_type_key = getDomainTypeKey(&domain_type);
-        if (domain_by_type.get(domain_type_key)) |d| {
-            return d;
-        }
-
-        // all domain types are cached in initialization, if not fix the init() function instead
-        return error.DomainTypeNotFound;
+        return self.domain_cache.get(fork_seq, domain_type);
     }
 
     pub fn getDomainForVoluntaryExit(self: *const BeaconConfig, state_slot: Slot, message_slot: ?Slot) ![32]u8 {
@@ -230,6 +201,40 @@ pub const BeaconConfig = struct {
 
     // TODO: forkDigest2ForkName, forkDigest2ForkNameOption, forkName2ForkDigest, forkName2ForkDigestHex
     // may not need it for state-transition
+};
+
+/// Domain cache with precomputed domain values for all forks and all domain types.
+///
+/// Implementation note: uses a fixed-size 2D array for simplicity and performance.
+pub const DomainCache = struct {
+    inner: [TOTAL_FORKS][ALL_DOMAINS.len][32]u8,
+
+    pub fn init(forks_ascending_epoch_order: [TOTAL_FORKS]ForkInfo, genesis_validators_root: [32]u8) !DomainCache {
+        var cache = DomainCache{ .inner = undefined };
+        for (&cache.inner, 0..) |*fork_cache, fork_seq| {
+            for (fork_cache, 0..) |*domain_entry, domain_index| {
+                const domain_type = ALL_DOMAINS[domain_index];
+                try computeDomain(
+                    domain_type,
+                    forks_ascending_epoch_order[fork_seq].version,
+                    genesis_validators_root,
+                    domain_entry,
+                );
+            }
+        }
+        return cache;
+    }
+
+    pub fn get(self: *const DomainCache, fork_seq: ForkSeq, domain_type: DomainType) ![32]u8 {
+        if (@intFromEnum(fork_seq) >= TOTAL_FORKS) return error.ForkSeqOutOfRange;
+        const domain_index = std.mem.indexOfScalar(
+            u32,
+            @ptrCast(@alignCast(&ALL_DOMAINS)),
+            @bitCast(domain_type),
+        ) orelse return error.DomainTypeNotFound;
+
+        return self.inner[@intFromEnum(fork_seq)][domain_index];
+    }
 };
 
 fn computeDomain(domain_type: DomainType, fork_version: Version, genesis_validators_root: Root, out: *[32]u8) !void {
@@ -249,15 +254,9 @@ fn computeForkDataRoot(current_version: Version, genesis_validators_root: Root, 
     try types.phase0.ForkData.hashTreeRoot(&fork_data, out);
 }
 
-inline fn getDomainTypeKey(domain_type: *const DomainType) DomainTypeKey {
-    return std.mem.readInt(DomainTypeKey, domain_type, .little);
-}
-
 test "getDomain" {
-    const allocator = std.testing.allocator;
     const root = [_]u8{0} ** 32;
-    const beacon_config = try BeaconConfig.init(allocator, mainnet_chain_config, root);
-    defer beacon_config.deinit();
+    const beacon_config = try BeaconConfig.init(mainnet_chain_config, root);
 
     const domain = try beacon_config.getDomain(100, DOMAIN_VOLUNTARY_EXIT, null);
     const domain2 = try beacon_config.getDomain(100, DOMAIN_VOLUNTARY_EXIT, null);

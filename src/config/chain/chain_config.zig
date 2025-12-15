@@ -1,6 +1,4 @@
 const std = @import("std");
-const types = @import("consensus_types");
-const Epoch = types.primitive.Epoch.Type;
 const Preset = @import("preset").Preset;
 
 /// Run-time chain configuration
@@ -89,7 +87,7 @@ pub const ChainConfig = struct {
 };
 
 pub const BlobScheduleEntry = struct {
-    EPOCH: Epoch,
+    EPOCH: u64,
     MAX_BLOBS_PER_BLOCK: u64,
 };
 
