@@ -412,7 +412,10 @@ test "Pool serialization - basic round trip" {
 
     var fbs = std.io.fixedBufferStream(buffer.items);
     var restored_pool = try Node.Pool.deserialize(allocator, fbs.reader());
-    defer restored_pool.deinit();
+    defer {
+        restored_pool.unref(root_id);
+        restored_pool.deinit();
+    }
 
     const restored_root_hash = root_id.getRoot(&restored_pool).*;
     try std.testing.expectEqualSlices(u8, &original_root_hash, &restored_root_hash);
@@ -422,8 +425,6 @@ test "Pool serialization - basic round trip" {
     try std.testing.expect(!leaf3_id.getState(&restored_pool).isFree());
     try std.testing.expect(!branch1_id.getState(&restored_pool).isFree());
     try std.testing.expect(!root_id.getState(&restored_pool).isFree());
-
-    restored_pool.unref(root_id);
 }
 
 test "Pool serialization - with free nodes" {
@@ -462,7 +463,10 @@ test "Pool serialization - with free nodes" {
 
     var fbs = std.io.fixedBufferStream(buffer.items);
     var restored_pool = try Node.Pool.deserialize(allocator, fbs.reader());
-    defer restored_pool.deinit();
+    defer {
+        restored_pool.unref(root_id);
+        restored_pool.deinit();
+    }
 
     const restored_root_hash = root_id.getRoot(&restored_pool).*;
     try std.testing.expectEqualSlices(u8, &original_root_hash, &restored_root_hash);
@@ -479,10 +483,8 @@ test "Pool serialization - with free nodes" {
     try std.testing.expectEqual(original_next_free, restored_pool.next_free_node);
 
     const new_leaf = try restored_pool.createLeaf(&hash1);
+    defer restored_pool.unref(new_leaf);
     try std.testing.expect(!new_leaf.getState(&restored_pool).isFree());
-
-    restored_pool.unref(root_id);
-    restored_pool.unref(new_leaf);
 }
 
 test "Pool serialization - empty pool" {
@@ -522,7 +524,7 @@ test "Pool serialization - file header validation" {
         var bad_version: [20]u8 = undefined;
         @memset(&bad_version, 0);
         @memcpy(bad_version[0..8], "LSMTPOOL");
-        std.mem.writeInt(u32, bad_version[8..12], 99, .little); // bad version
+        std.mem.writeInt(u32, bad_version[8..12], 99, .little);
         var fbs = std.io.fixedBufferStream(&bad_version);
         const result = Node.Pool.deserialize(allocator, fbs.reader());
         try std.testing.expectError(error.UnsupportedVersion, result);
@@ -547,7 +549,7 @@ test "Pool serialization - compression effectiveness" {
     defer buffer.deinit();
     try pool.serialize(buffer.writer());
 
-    const raw_size: usize = 24 + 100 * (32 + 4 + 4 + 4);
+    const raw_size: usize = 20 + 100 * (32 + 4 + 4 + 4);
     try std.testing.expect(buffer.items.len < raw_size);
 
     pool.unref(branch_id);
@@ -555,10 +557,11 @@ test "Pool serialization - compression effectiveness" {
 
     var fbs = std.io.fixedBufferStream(buffer.items);
     var restored_pool = try Node.Pool.deserialize(allocator, fbs.reader());
-    defer restored_pool.deinit();
+    defer {
+        restored_pool.unref(branch_id);
+        restored_pool.deinit();
+    }
 
     const restored_root_hash = branch_id.getRoot(&restored_pool).*;
     try std.testing.expectEqualSlices(u8, &original_root_hash, &restored_root_hash);
-
-    restored_pool.unref(branch_id);
 }

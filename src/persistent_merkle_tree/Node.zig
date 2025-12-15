@@ -408,7 +408,6 @@ pub const Pool = struct {
         next_free: u32,
         total_slots: u32,
 
-        // Must match `node_test.zig` header tests and the documented file layout above.
         pub const MAGIC = "LSMTPOOL".*;
         pub const VERSION: u32 = 1;
 
@@ -427,6 +426,7 @@ pub const Pool = struct {
         ReadFailed,
     } || Allocator.Error || Error;
 
+    /// Clears stale data in free nodes to improve compression ratio.
     fn zeroFreeNodes(self: *Pool) void {
         const states = self.nodes.items(.state);
         const hashes = self.nodes.items(.hash);
