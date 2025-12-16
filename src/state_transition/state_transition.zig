@@ -73,10 +73,10 @@ pub fn processSlotsWithTransientCache(
         try processSlot(allocator, post_state);
 
         if ((state.slot() + 1) % preset.SLOTS_PER_EPOCH == 0) {
-            var epoch_transition_timer = metrics.startTimer(&metrics.state_transition.epoch_transition);
+            var epoch_transition_timer = metrics.epoch_transition.startTimer();
             defer _ = epoch_transition_timer.stopAndObserve();
 
-            var before_process_epoch_timer = metrics.startTimerEpochTransitionStep(.{ .step = .before_process_epoch });
+            var before_process_epoch_timer = metrics.epoch_transition_step.startTimer(.{ .step = .before_process_epoch });
             var epoch_transition_cache = try EpochTransitionCache.init(allocator, post_state);
             _ = try before_process_epoch_timer.stopAndObserve();
 
@@ -89,7 +89,7 @@ pub fn processSlotsWithTransientCache(
 
             state.slotPtr().* += 1;
 
-            var after_process_epoch_timer = metrics.startTimerEpochTransitionStep(.{ .step = .after_process_epoch });
+            var after_process_epoch_timer = metrics.epoch_transition_step.startTimer(.{ .step = .after_process_epoch });
             try post_state.epoch_cache_ref.get().afterProcessEpoch(post_state, epoch_transition_cache);
             _ = try after_process_epoch_timer.stopAndObserve();
 
