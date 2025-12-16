@@ -26,7 +26,7 @@ pub const BeaconConfig = struct {
     genesis_validator_root: Root,
     domain_cache: DomainCache,
 
-    pub fn init(chain_config: ChainConfig, genesis_validator_root: Root) !BeaconConfig {
+    pub fn init(self: *BeaconConfig, chain_config: ChainConfig, genesis_validator_root: Root) !void {
         const phase0 = ForkInfo{
             .fork_seq = ForkSeq.phase0,
             .epoch = 0,
@@ -102,16 +102,14 @@ pub const BeaconConfig = struct {
             phase0,
         };
 
-        return BeaconConfig{
-            .chain = chain_config,
-            .forks_ascending_epoch_order = forks_ascending_epoch_order,
-            .forks_descending_epoch_order = forks_descending_epoch_order,
-            .genesis_validator_root = genesis_validator_root,
-            .domain_cache = try DomainCache.init(
-                forks_ascending_epoch_order,
-                genesis_validator_root,
-            ),
-        };
+        self.chain = chain_config;
+        self.forks_ascending_epoch_order = forks_ascending_epoch_order;
+        self.forks_descending_epoch_order = forks_descending_epoch_order;
+        self.genesis_validator_root = genesis_validator_root;
+        try self.domain_cache.init(
+            forks_ascending_epoch_order,
+            genesis_validator_root,
+        );
     }
 
     pub fn deinit(self: *BeaconConfig) void {
@@ -209,9 +207,8 @@ pub const BeaconConfig = struct {
 pub const DomainCache = struct {
     inner: [TOTAL_FORKS][ALL_DOMAINS.len][32]u8,
 
-    pub fn init(forks_ascending_epoch_order: [TOTAL_FORKS]ForkInfo, genesis_validators_root: [32]u8) !DomainCache {
-        var cache = DomainCache{ .inner = undefined };
-        for (&cache.inner, 0..) |*fork_cache, fork_seq| {
+    pub fn init(self: *DomainCache, forks_ascending_epoch_order: [TOTAL_FORKS]ForkInfo, genesis_validators_root: [32]u8) !void {
+        for (&self.inner, 0..) |*fork_cache, fork_seq| {
             for (fork_cache, 0..) |*domain_entry, domain_index| {
                 const domain_type = ALL_DOMAINS[domain_index];
                 try computeDomain(
@@ -222,18 +219,16 @@ pub const DomainCache = struct {
                 );
             }
         }
-        return cache;
     }
 
     pub fn get(self: *const DomainCache, fork_seq: ForkSeq, domain_type: DomainType) ![32]u8 {
         if (@intFromEnum(fork_seq) >= TOTAL_FORKS) return error.ForkSeqOutOfRange;
-        const domain_index = std.mem.indexOfScalar(
-            u32,
-            @ptrCast(@alignCast(&ALL_DOMAINS)),
-            @bitCast(domain_type),
-        ) orelse return error.DomainTypeNotFound;
-
-        return self.inner[@intFromEnum(fork_seq)][domain_index];
+        inline for (ALL_DOMAINS, 0..) |d, i| {
+            if (std.mem.eql(u8, &d, &domain_type)) {
+                return self.inner[@intFromEnum(fork_seq)][i];
+            }
+        }
+        return error.DomainTypeNotFound;
     }
 };
 
@@ -256,7 +251,8 @@ fn computeForkDataRoot(current_version: Version, genesis_validators_root: Root, 
 
 test "getDomain" {
     const root = [_]u8{0} ** 32;
-    const beacon_config = try BeaconConfig.init(mainnet_chain_config, root);
+    var beacon_config: BeaconConfig = undefined;
+    try beacon_config.init(mainnet_chain_config, root);
 
     const domain = try beacon_config.getDomain(100, DOMAIN_VOLUNTARY_EXIT, null);
     const domain2 = try beacon_config.getDomain(100, DOMAIN_VOLUNTARY_EXIT, null);

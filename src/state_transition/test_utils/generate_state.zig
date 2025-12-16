@@ -172,7 +172,7 @@ pub const TestCachedBeaconStateAllForks = struct {
         index_pubkey_cache.* = Index2PubkeyCache.init(allocator);
         const chain_config = getConfig(active_chain_config, fork, fork_epoch);
         const config = try allocator.create(BeaconConfig);
-        config.* = try BeaconConfig.init(chain_config, owned_state.genesisValidatorsRoot());
+        try config.init(chain_config, owned_state.genesisValidatorsRoot());
 
         try syncPubkeys(owned_state.validators().items, pubkey_index_map, index_pubkey_cache);
 
