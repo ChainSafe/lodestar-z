@@ -62,6 +62,7 @@ pub fn runStf(_: *MetricsHandler, _: *httpz.Request, _: *httpz.Response) !void {
             .verify_state_root = false,
         },
     );
+
     defer post_state.deinit();
 }
 
@@ -69,7 +70,6 @@ pub fn runStf(_: *MetricsHandler, _: *httpz.Request, _: *httpz.Response) !void {
 fn getMetrics(_: *MetricsHandler, _: *httpz.Request, res: *httpz.Response) !void {
     res.content_type = .TEXT;
     const writer = res.writer();
-
     try state_transition.writeMetrics(writer);
 }
 
