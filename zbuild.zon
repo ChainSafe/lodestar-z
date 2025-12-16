@@ -121,6 +121,7 @@
                 .hex,
                 .persistent_merkle_tree,
                 .metrics,
+                .metrics_mod,
             },
         },
         .metrics_mod = .{

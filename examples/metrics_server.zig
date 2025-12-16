@@ -11,7 +11,7 @@ pub fn main() !void {
     defer state_transition.metrics.deinitMetrics(&state_transition.metrics.state_transition);
 
     // blocks
-    try metrics.serve(allocator, 8008);
+    try metrics.server.serve(allocator, 8008);
 }
 
 const std = @import("std");

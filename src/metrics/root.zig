@@ -1,86 +1,82 @@
-const MetricsHandler = struct {
-    allocator: std.mem.Allocator,
-};
+pub const server = @import("server.zig");
 
-pub fn serve(
-    allocator: std.mem.Allocator,
-    port: u16,
-) !void {
-    var handler = MetricsHandler{
-        .allocator = allocator,
+/// An observer for tracking time.
+pub fn Observer(comptime H: type) type {
+    return struct {
+        hist: H,
+        timer: ?std.time.Timer = null,
+
+        pub fn init(hist: anytype) Observer(@TypeOf(hist)) {
+            std.debug.assert(@typeInfo(@TypeOf(hist)) == .pointer);
+            return .{
+                .hist = hist,
+            };
+        }
+
+        pub fn startTimer(self: *@This()) *@This() {
+            self.timer = std.time.Timer.start() catch unreachable;
+            return self;
+        }
+
+        /// Stops the internal `timer` and calls `observe` on the internal `hist` to record time elapsed.
+        pub fn stopAndObserve(obs: *@This()) f32 {
+            const ns = obs.timer.?.read();
+            const secs = @as(f32, @floatFromInt(ns)) / 1e9;
+            obs.hist.observe(secs);
+            return secs;
+        }
     };
-    const address = "0.0.0.0";
-    var server = try httpz.Server(*MetricsHandler).init(
-        allocator,
-        .{ .port = port, .address = address, .thread_pool = .{ .count = 1 } },
-        &handler,
-    );
-    defer {
-        server.stop();
-        server.deinit();
-    }
-    var router = try server.router(.{});
-    router.get("/metrics", getMetrics, .{});
-    //TODO: this is here just for convenience to test metrics. Remove when not needed
-    router.get("/run-stf", runStf, .{});
-
-    std.log.info("Listening at {s}/{d}", .{ address, port });
-    try server.listen(); // blocks
 }
 
-pub fn spawnMetrics(gpa_allocator: std.mem.Allocator, port: u16) !std.Thread {
-    const thread = try std.Thread.spawn(.{}, serve, .{ gpa_allocator, port });
-    return thread;
+/// A labeled observer for tracking time.
+pub fn LabeledObserver(comptime H: type, comptime L: type) type {
+    return struct {
+        hist: H,
+        labels: ?L = null,
+        timer: ?std.time.Timer = null,
+
+        pub fn init(hist: anytype) LabeledObserver(@TypeOf(hist), L) {
+            std.debug.assert(@typeInfo(@TypeOf(hist)) == .pointer);
+            return .{ .hist = hist };
+        }
+
+        pub fn startTimer(self: *@This(), labels: L) *@This() {
+            self.timer = std.time.Timer.start() catch unreachable;
+            self.labels = labels;
+            return self;
+        }
+
+        /// Stops the internal `timer` and calls `observe` on the internal `hist` to record time elapsed.
+        ///
+        /// Assumes that `startTimer` has been called.
+        pub fn stopAndObserve(obs: *@This()) !f32 {
+            std.debug.assert(obs.timer != null);
+            std.debug.assert(obs.labels != null);
+            const ns = obs.timer.?.read();
+            const secs = @as(f32, @floatFromInt(ns)) / 1e9;
+            try obs.hist.observe(obs.labels.?, secs);
+            return secs;
+        }
+    };
 }
 
-//TODO: this is here just for convenience to test metrics. Remove when not needed
-///
-/// Convenience endpoint to simulate a state transition run to collect metrics.
-pub fn runStf(_: *MetricsHandler, _: *httpz.Request, _: *httpz.Response) !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-
-    var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
-    defer test_state.deinit();
-    const electra_block_ptr = try allocator.create(types.electra.SignedBeaconBlock.Type);
-    try generateElectraBlock(allocator, test_state.cached_state, electra_block_ptr);
-    defer {
-        types.electra.SignedBeaconBlock.deinit(allocator, electra_block_ptr);
-        allocator.destroy(electra_block_ptr);
-    }
-
-    const signed_beacon_block = SignedBeaconBlock{ .electra = electra_block_ptr };
-    const signed_block = SignedBlock{ .regular = signed_beacon_block };
-
-    const post_state = try state_transition.stateTransition(
-        allocator,
-        test_state.cached_state,
-        signed_block,
-        .{
-            .verify_signatures = false,
-            .verify_proposer = false,
-            .verify_state_root = false,
-        },
-    );
-
-    defer post_state.deinit();
+/// Initializes a `std.time.Timer` and returns an `Observer`.
+pub fn startTimer(hist: anytype) Observer(@TypeOf(hist)) {
+    std.debug.assert(@typeInfo(@TypeOf(hist)) == .pointer);
+    return .{
+        .hist = hist,
+        .timer = std.time.Timer.start() catch unreachable,
+    };
 }
 
-/// Endpoint to write all state transition metrics to the server.
-fn getMetrics(_: *MetricsHandler, _: *httpz.Request, res: *httpz.Response) !void {
-    res.content_type = .TEXT;
-    const writer = res.writer();
-    try state_transition.writeMetrics(writer);
+/// Initializes a `std.time.Timer` and returns a `LabeledObserver`.
+pub fn startTimerLabeled(hist: anytype, labels: anytype) LabeledObserver(@TypeOf(hist), @TypeOf(labels)) {
+    std.debug.assert(@typeInfo(@TypeOf(hist)) == .pointer);
+    var obs = LabeledObserver(@TypeOf(hist), @TypeOf(labels)).init(hist);
+    _ = obs.startTimer(labels);
+    return obs;
 }
 
 const std = @import("std");
-const httpz = @import("httpz");
-const types = @import("consensus_types");
-const state_transition = @import("state_transition");
 
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
-const generateElectraBlock = state_transition.test_utils.generateElectraBlock;
-
-const SignedBeaconBlock = state_transition.state_transition.SignedBeaconBlock;
-const CachedBeaconStateAllForks = state_transition.CachedBeaconStateAllForks;
-const SignedBlock = state_transition.SignedBlock;
+const m = @import("metrics");
