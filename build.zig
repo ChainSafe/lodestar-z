@@ -120,28 +120,12 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("state_transition"), module_state_transition) catch @panic("OOM");
 
-    const module_metrics_example = b.createModule(.{
-        .root_source_file = b.path("examples/collect_stf_metrics.zig"),
+    const module_metrics_mod = b.createModule(.{
+        .root_source_file = b.path("src/metrics/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("metrics_example"), module_metrics_example) catch @panic("OOM");
-
-    const exe_metrics_example = b.addExecutable(.{
-        .name = "metrics_example",
-        .root_module = module_metrics_example,
-    });
-
-    const install_exe_metrics_example = b.addInstallArtifact(exe_metrics_example, .{});
-
-    const tls_install_exe_metrics_example = b.step("build-exe:metrics_example", "Install the metrics_example executable");
-    tls_install_exe_metrics_example.dependOn(&install_exe_metrics_example.step);
-    b.getInstallStep().dependOn(&install_exe_metrics_example.step);
-
-    const run_exe_metrics_example = b.addRunArtifact(exe_metrics_example);
-    if (b.args) |args| run_exe_metrics_example.addArgs(args);
-    const tls_run_exe_metrics_example = b.step("run:metrics_example", "Run the metrics_example executable");
-    tls_run_exe_metrics_example.dependOn(&run_exe_metrics_example.step);
+    b.modules.put(b.dupe("metrics_mod"), module_metrics_mod) catch @panic("OOM");
 
     const module_metrics_server = b.createModule(.{
         .root_source_file = b.path("examples/metrics_server.zig"),
@@ -524,19 +508,19 @@ pub fn build(b: *std.Build) void {
     tls_run_test_state_transition.dependOn(&run_test_state_transition.step);
     tls_run_test.dependOn(&run_test_state_transition.step);
 
-    const test_metrics_example = b.addTest(.{
-        .name = "metrics_example",
-        .root_module = module_metrics_example,
-        .filters = b.option([][]const u8, "metrics_example.filters", "metrics_example test filters") orelse &[_][]const u8{},
+    const test_metrics_mod = b.addTest(.{
+        .name = "metrics_mod",
+        .root_module = module_metrics_mod,
+        .filters = b.option([][]const u8, "metrics_mod.filters", "metrics_mod test filters") orelse &[_][]const u8{},
     });
-    const install_test_metrics_example = b.addInstallArtifact(test_metrics_example, .{});
-    const tls_install_test_metrics_example = b.step("build-test:metrics_example", "Install the metrics_example test");
-    tls_install_test_metrics_example.dependOn(&install_test_metrics_example.step);
+    const install_test_metrics_mod = b.addInstallArtifact(test_metrics_mod, .{});
+    const tls_install_test_metrics_mod = b.step("build-test:metrics_mod", "Install the metrics_mod test");
+    tls_install_test_metrics_mod.dependOn(&install_test_metrics_mod.step);
 
-    const run_test_metrics_example = b.addRunArtifact(test_metrics_example);
-    const tls_run_test_metrics_example = b.step("test:metrics_example", "Run the metrics_example test");
-    tls_run_test_metrics_example.dependOn(&run_test_metrics_example.step);
-    tls_run_test.dependOn(&run_test_metrics_example.step);
+    const run_test_metrics_mod = b.addRunArtifact(test_metrics_mod);
+    const tls_run_test_metrics_mod = b.step("test:metrics_mod", "Run the metrics_mod test");
+    tls_run_test_metrics_mod.dependOn(&run_test_metrics_mod.step);
+    tls_run_test.dependOn(&run_test_metrics_mod.step);
 
     const test_metrics_server = b.addTest(.{
         .name = "metrics_server",
@@ -812,13 +796,15 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("constants", module_constants);
     module_state_transition.addImport("hex", module_hex);
     module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
-    module_state_transition.addImport("httpz", dep_httpz.module("httpz"));
 
-    module_metrics_example.addImport("state_transition", module_state_transition);
-    module_metrics_example.addImport("consensus_types", module_consensus_types);
+    module_metrics_mod.addImport("state_transition", module_state_transition);
+    module_metrics_mod.addImport("consensus_types", module_consensus_types);
+    module_metrics_mod.addImport("httpz", dep_httpz.module("httpz"));
+    module_metrics_mod.addImport("metrics", dep_metrics.module("metrics"));
 
-    module_metrics_server.addImport("state_transition", module_state_transition);
+    module_metrics_server.addImport("metrics_mod", module_metrics_mod);
     module_metrics_server.addImport("consensus_types", module_consensus_types);
+    module_metrics_server.addImport("state_transition", module_state_transition);
 
     module_download_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
 
