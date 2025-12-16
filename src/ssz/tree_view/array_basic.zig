@@ -27,6 +27,7 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
 
     return struct {
         base_view: BaseTreeView,
+        prefetched_chunk_count: ?usize = null,
 
         pub const SszType = ST;
         pub const Element = ST.Element.Type;
@@ -42,6 +43,7 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
         pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
             return Self{
                 .base_view = try BaseTreeView.init(allocator, pool, root),
+                .prefetched_chunk_count = null,
             };
         }
 
@@ -55,7 +57,7 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
 
         pub fn clearCache(self: *Self) void {
             self.base_view.data.clearChildrenNodesCache(self.base_view.pool);
-            self.base_view.data.prefetched_chunk_count = null;
+            self.prefetched_chunk_count = null;
             self.base_view.data.changed.clearRetainingCapacity();
         }
 
@@ -74,11 +76,11 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
         }
 
         pub fn getAll(self: *Self, allocator: Allocator) ![]Element {
-            return try Chunks.getAll(&self.base_view, allocator, length);
+            return try Chunks.getAll(&self.base_view, allocator, length, &self.prefetched_chunk_count);
         }
 
         pub fn getAllInto(self: *Self, values: []Element) ![]Element {
-            return try Chunks.getAllInto(&self.base_view, length, values);
+            return try Chunks.getAllInto(&self.base_view, length, values, &self.prefetched_chunk_count);
         }
     };
 }
