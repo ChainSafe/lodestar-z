@@ -9,9 +9,10 @@ pub fn serve(
     var handler = MetricsHandler{
         .allocator = allocator,
     };
+    const address = "0.0.0.0";
     var server = try httpz.Server(*MetricsHandler).init(
         allocator,
-        .{ .port = port, .address = "0.0.0.0", .thread_pool = .{ .count = 1 } },
+        .{ .port = port, .address = address, .thread_pool = .{ .count = 1 } },
         &handler,
     );
     defer {
@@ -23,6 +24,7 @@ pub fn serve(
     //TODO: this is here just for convenience to test metrics. Remove when not needed
     router.get("/run-stf", runStf, .{});
 
+    std.log.info("Listening at {s}/{d}", .{ address, port });
     try server.listen(); // blocks
 }
 
@@ -74,8 +76,8 @@ fn getMetrics(_: *MetricsHandler, _: *httpz.Request, res: *httpz.Response) !void
 const std = @import("std");
 const httpz = @import("httpz");
 const types = @import("consensus_types");
+const state_transition = @import("state_transition");
 
-const state_transition = @import("root.zig");
 const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
 const generateElectraBlock = state_transition.test_utils.generateElectraBlock;
 
