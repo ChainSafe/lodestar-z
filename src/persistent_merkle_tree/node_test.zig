@@ -411,7 +411,8 @@ test "Pool serialization - basic round trip" {
     pool.deinit();
 
     var fbs = std.io.fixedBufferStream(buffer.items);
-    var restored_pool = try Node.Pool.deserialize(allocator, fbs.reader());
+    const header = try Node.Pool.readHeader(fbs.reader());
+    var restored_pool = try Node.Pool.deserialize(allocator, fbs.reader(), header);
     defer {
         restored_pool.unref(root_id);
         restored_pool.deinit();
@@ -462,7 +463,8 @@ test "Pool serialization - with free nodes" {
     pool.deinit();
 
     var fbs = std.io.fixedBufferStream(buffer.items);
-    var restored_pool = try Node.Pool.deserialize(allocator, fbs.reader());
+    const header = try Node.Pool.readHeader(fbs.reader());
+    var restored_pool = try Node.Pool.deserialize(allocator, fbs.reader(), header);
     defer {
         restored_pool.unref(root_id);
         restored_pool.deinit();
@@ -501,7 +503,8 @@ test "Pool serialization - empty pool" {
     pool.deinit();
 
     var fbs = std.io.fixedBufferStream(buffer.items);
-    var restored_pool = try Node.Pool.deserialize(allocator, fbs.reader());
+    const header = try Node.Pool.readHeader(fbs.reader());
+    var restored_pool = try Node.Pool.deserialize(allocator, fbs.reader(), header);
     defer restored_pool.deinit();
 
     try std.testing.expectEqual(original_next_free, restored_pool.next_free_node);
@@ -511,22 +514,20 @@ test "Pool serialization - empty pool" {
 }
 
 test "Pool serialization - file header validation" {
-    const allocator = std.testing.allocator;
-
     {
-        var bad_magic = [_]u8{0} ** 20;
+        var bad_magic = [_]u8{0} ** 24;
         var fbs = std.io.fixedBufferStream(&bad_magic);
-        const result = Node.Pool.deserialize(allocator, fbs.reader());
+        const result = Node.Pool.readHeader(fbs.reader());
         try std.testing.expectError(error.InvalidMagic, result);
     }
 
     {
-        var bad_version: [20]u8 = undefined;
+        var bad_version: [24]u8 = undefined;
         @memset(&bad_version, 0);
         @memcpy(bad_version[0..8], "LSMTPOOL");
         std.mem.writeInt(u32, bad_version[8..12], 99, .little);
         var fbs = std.io.fixedBufferStream(&bad_version);
-        const result = Node.Pool.deserialize(allocator, fbs.reader());
+        const result = Node.Pool.readHeader(fbs.reader());
         try std.testing.expectError(error.UnsupportedVersion, result);
     }
 }
@@ -556,7 +557,8 @@ test "Pool serialization - compression effectiveness" {
     pool.deinit();
 
     var fbs = std.io.fixedBufferStream(buffer.items);
-    var restored_pool = try Node.Pool.deserialize(allocator, fbs.reader());
+    const header = try Node.Pool.readHeader(fbs.reader());
+    var restored_pool = try Node.Pool.deserialize(allocator, fbs.reader(), header);
     defer {
         restored_pool.unref(branch_id);
         restored_pool.deinit();
