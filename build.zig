@@ -927,6 +927,7 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("constants", module_constants);
     module_state_transition.addImport("hex", module_hex);
     module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
+    module_state_transition.addImport("metrics_mod", module_metrics_mod);
 
     module_metrics_mod.addImport("state_transition", module_state_transition);
     module_metrics_mod.addImport("consensus_types", module_consensus_types);

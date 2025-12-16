@@ -120,6 +120,7 @@
                 .constants,
                 .hex,
                 .metrics,
+                .metrics_mod,
             },
         },
         .metrics_mod = .{
