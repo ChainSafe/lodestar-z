@@ -28,14 +28,6 @@ fn selectorPadded(selector: u8) [32]u8 {
     return result;
 }
 
-/// A union value containing a selector and data
-fn UnionValue(comptime options: anytype) type {
-    return struct {
-        selector: u8,
-        data: UnionDataType(options),
-    };
-}
-
 /// Creates a tag enum for the union
 fn UnionTagType(comptime options: anytype) type {
     const fields_count = options.len;
@@ -47,13 +39,13 @@ fn UnionTagType(comptime options: anytype) type {
 
         enum_fields[i] = .{
             .name = name,
-            .value = i, // Must use index, not selector!
+            .value = selector, // Use selector value directly
         };
     }
 
     return @Type(.{
         .@"enum" = .{
-            .tag_type = std.math.IntFittingRange(0, fields_count - 1),
+            .tag_type = u8,
             .fields = &enum_fields,
             .decls = &[_]std.builtin.Type.Declaration{},
             .is_exhaustive = true,
@@ -116,7 +108,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
         }
     }
 
-    const ValueType = UnionValue(options);
+    const ValueType = UnionDataType(options);
 
     // Calculate min and max sizes
     comptime var _min_size: usize = std.math.maxInt(usize);
@@ -126,13 +118,19 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
         const option_type = option.@"1";
         const option_min = if (@hasDecl(option_type, "min_size")) option_type.min_size else option_type.fixed_size;
         const option_max = if (@hasDecl(option_type, "max_size")) option_type.max_size else option_type.fixed_size;
-        _min_size = @min(_min_size, option_min + 1);
+        _min_size = @min(_min_size, option_min);
         // Handle unbounded types (max_size == maxInt(usize))
         if (option_max == std.math.maxInt(usize)) {
             _max_size = std.math.maxInt(usize);
         } else {
-            _max_size = @max(_max_size, option_max + 1);
+            _max_size = @max(_max_size, option_max);
         }
+    }
+
+    // Add 1 byte for the selector
+    _min_size += 1;
+    if (_max_size != std.math.maxInt(usize)) {
+        _max_size += 1;
     }
 
     return struct {
@@ -148,11 +146,13 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
             const first_type = options[0].@"1";
             const field_name = std.fmt.comptimePrint("option_{d}", .{first_selector});
 
-            break :blk .{
-                .selector = first_selector,
-                .data = @unionInit(UnionDataType(options), field_name, first_type.default_value),
-            };
+            break :blk @unionInit(Type, field_name, first_type.default_value);
         };
+
+        /// Get the selector value from a union value
+        pub fn getSelector(value: *const Type) u8 {
+            return @intFromEnum(std.meta.activeTag(value.*));
+        }
 
         /// Check if a selector is valid
         pub fn isValidSelectorValue(selector: u8) bool {
@@ -165,29 +165,32 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
         }
 
         pub fn equals(a: *const Type, b: *const Type) bool {
-            if (a.selector != b.selector) {
+            const a_selector = getSelector(a);
+            const b_selector = getSelector(b);
+            if (a_selector != b_selector) {
                 return false;
             }
 
             // Compare data based on selector
             inline for (options) |option| {
-                if (a.selector == option.@"0") {
+                if (a_selector == option.@"0") {
                     const option_type = option.@"1";
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
-                    return option_type.equals(&@field(a.data, field_name), &@field(b.data, field_name));
+                    return option_type.equals(&@field(a.*, field_name), &@field(b.*, field_name));
                 }
             }
             return false;
         }
 
         pub fn deinit(allocator: std.mem.Allocator, value: *Type) void {
+            const selector = getSelector(value);
             inline for (options) |option| {
-                if (value.selector == option.@"0") {
+                if (selector == option.@"0") {
                     const option_type = option.@"1";
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
                     if (!comptime isFixedType(option_type)) {
-                        const data_ptr = &@field(value.data, field_name);
+                        const data_ptr = &@field(value.*, field_name);
                         option_type.deinit(allocator, data_ptr);
                     }
                     return;
@@ -200,16 +203,16 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
             value: *const Type,
             out: *Type,
         ) !void {
-            out.selector = value.selector;
+            const selector = getSelector(value);
 
             inline for (options) |option| {
-                if (value.selector == option.@"0") {
+                if (selector == option.@"0") {
                     const option_type = option.@"1";
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                    const value_data_ptr = &@field(value.data, field_name);
-                    out.data = @unionInit(@TypeOf(out.data), field_name, option_type.default_value);
-                    const out_data_ptr = &@field(out.data, field_name);
+                    const value_data_ptr = &@field(value.*, field_name);
+                    out.* = @unionInit(Type, field_name, option_type.default_value);
+                    const out_data_ptr = &@field(out.*, field_name);
                     if (comptime isFixedType(option_type)) {
                         try option_type.clone(value_data_ptr, out_data_ptr);
                     } else {
@@ -224,14 +227,15 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
         /// Hash tree root: mix_in_selector(hash_tree_root(data), selector)
         pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
             var data_root: [32]u8 = undefined;
+            const selector = getSelector(value);
 
             // Hash the data based on selector
             inline for (options) |option| {
-                if (value.selector == option.@"0") {
+                if (selector == option.@"0") {
                     const option_type = option.@"1";
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                    const data_ptr = &@field(value.data, field_name);
+                    const data_ptr = &@field(value.*, field_name);
 
                     if (comptime isFixedType(option_type)) {
                         try option_type.hashTreeRoot(data_ptr, &data_root);
@@ -240,7 +244,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                     }
 
                     // Mix in selector: hash(data_root, selector_padded)
-                    const selector_bytes = selectorPadded(value.selector);
+                    const selector_bytes = selectorPadded(selector);
                     hashOne(out, &data_root, &selector_bytes);
                     return;
                 }
@@ -251,16 +255,17 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
 
         pub fn serializedSize(value: *const Type) usize {
             var size: usize = 1; // selector byte
+            const selector = getSelector(value);
 
             inline for (options) |option| {
-                if (value.selector == option.@"0") {
+                if (selector == option.@"0") {
                     const option_type = option.@"1";
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
                     if (comptime isFixedType(option_type)) {
                         size += option_type.fixed_size;
                     } else {
-                        const data_ptr = &@field(value.data, field_name);
+                        const data_ptr = &@field(value.*, field_name);
                         size += option_type.serializedSize(data_ptr);
                     }
                     return size;
@@ -272,15 +277,16 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
 
         /// Serialize: selector (1 byte) + serialize(data)
         pub fn serializeIntoBytes(value: *const Type, out: []u8) usize {
-            out[0] = value.selector;
+            const selector = getSelector(value);
+            out[0] = selector;
 
             inline for (options) |option| {
-                if (value.selector == option.@"0") {
+                if (selector == option.@"0") {
                     const option_type = option.@"1";
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
                     // Access the union field properly using the active tag
-                    const data_ref = &@field(value.data, field_name);
+                    const data_ref = &@field(value.*, field_name);
                     const bytes_written = option_type.serializeIntoBytes(data_ref, out[1..]);
                     return 1 + bytes_written;
                 }
@@ -292,7 +298,6 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
         /// Deserialize: read selector, then deserialize data using selected type
         pub fn deserializeFromBytes(allocator: std.mem.Allocator, data: []const u8, out: *Type) !void {
             const selector = try validateAndExtractSelector(data, options);
-            out.selector = selector;
 
             // Deserialize data based on selector
             inline for (options) |option| {
@@ -300,8 +305,8 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                     const option_type = option.@"1";
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                    out.data = @unionInit(@TypeOf(out.data), field_name, option_type.default_value);
-                    const out_data_ptr = &@field(out.data, field_name);
+                    out.* = @unionInit(Type, field_name, option_type.default_value);
+                    const out_data_ptr = &@field(out.*, field_name);
 
                     if (comptime isFixedType(option_type)) {
                         try option_type.deserializeFromBytes(data[1..], out_data_ptr);
@@ -356,19 +361,20 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
 
         /// JSON format: {"selector": "number", "data": type_json}
         pub fn serializeIntoJson(allocator: std.mem.Allocator, writer: anytype, value: *const Type) !void {
+            const selector = getSelector(value);
             try writer.beginObject();
 
             try writer.objectField("selector");
-            try writer.print("\"{d}\"", .{value.selector});
+            try writer.print("\"{d}\"", .{selector});
 
             try writer.objectField("data");
 
             inline for (options) |option| {
-                if (value.selector == option.@"0") {
+                if (selector == option.@"0") {
                     const option_type = option.@"1";
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                    const data_ptr = &@field(value.data, field_name);
+                    const data_ptr = &@field(value.*, field_name);
 
                     if (comptime isFixedType(option_type)) {
                         try option_type.serializeIntoJson(writer, data_ptr);
@@ -393,7 +399,6 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                 if (!isValidSelector(selector) or !isValidSelectorValue(selector)) {
                     return error.InvalidSelector;
                 }
-                out.selector = selector;
 
                 // Get data from left child
                 const data_node = try node.getLeft(pool);
@@ -404,8 +409,8 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                         const option_type = option.@"1";
                         const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                        out.data = @unionInit(@TypeOf(out.data), field_name, option_type.default_value);
-                        const out_data_ptr = &@field(out.data, field_name);
+                        out.* = @unionInit(Type, field_name, option_type.default_value);
+                        const out_data_ptr = &@field(out.*, field_name);
 
                         if (comptime isFixedType(option_type)) {
                             try option_type.tree.toValue(data_node, pool, out_data_ptr);
@@ -421,14 +426,15 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
 
             pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
                 var data_tree: Node.Id = undefined;
+                const selector = getSelector(value);
 
                 // Create tree for data based on selector
                 inline for (options) |option| {
-                    if (value.selector == option.@"0") {
+                    if (selector == option.@"0") {
                         const option_type = option.@"1";
                         const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                        const data_ptr = &@field(value.data, field_name);
+                        const data_ptr = &@field(value.*, field_name);
 
                         if (comptime isFixedType(option_type)) {
                             data_tree = try option_type.tree.fromValue(pool, data_ptr);
@@ -437,7 +443,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                         }
 
                         // Mix in selector: create branch with data on left, selector on right
-                        const selector_bytes = selectorPadded(value.selector);
+                        const selector_bytes = selectorPadded(selector);
                         const selector_node = try pool.createLeaf(&selector_bytes);
 
                         return try pool.createBranch(data_tree, selector_node);
@@ -472,7 +478,6 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
             if (!isValidSelector(selector) or !isValidSelectorValue(selector)) {
                 return error.InvalidSelector;
             }
-            out.selector = selector;
 
             // Read "data" field
             const data_key = switch (try source.next()) {
@@ -490,8 +495,8 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                     const option_type = option.@"1";
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                    out.data = @unionInit(@TypeOf(out.data), field_name, option_type.default_value);
-                    const out_data_ptr = &@field(out.data, field_name);
+                    out.* = @unionInit(Type, field_name, option_type.default_value);
+                    const out_data_ptr = &@field(out.*, field_name);
 
                     if (comptime isFixedType(option_type)) {
                         try option_type.deserializeFromJson(source, out_data_ptr);
@@ -534,10 +539,7 @@ test "CompatibleUnion - basic square and circle" {
     square_data.side = 10;
     square_data.color = 5;
 
-    var square_value: Shape.Type = .{
-        .selector = 1,
-        .data = @unionInit(@TypeOf(Shape.default_value.data), "option_1", square_data),
-    };
+    var square_value: Shape.Type = @unionInit(Shape.Type, "option_1", square_data);
 
     // Test serialization
     var buf: [256]u8 = undefined;
@@ -550,9 +552,9 @@ test "CompatibleUnion - basic square and circle" {
     var deserialized: Shape.Type = undefined;
     try Shape.deserializeFromBytes(std.testing.allocator, buf[0..size], &deserialized);
 
-    try std.testing.expectEqual(@as(u8, 1), deserialized.selector);
-    try std.testing.expectEqual(@as(u16, 10), deserialized.data.option_1.side);
-    try std.testing.expectEqual(@as(u8, 5), deserialized.data.option_1.color);
+    try std.testing.expectEqual(@as(u8, 1), Shape.getSelector(&deserialized));
+    try std.testing.expectEqual(@as(u16, 10), deserialized.option_1.side);
+    try std.testing.expectEqual(@as(u8, 5), deserialized.option_1.color);
 }
 
 test "CompatibleUnion - hash tree root with selector mix-in" {
@@ -568,10 +570,7 @@ test "CompatibleUnion - hash tree root with selector mix-in" {
     var square_data = Square.default_value;
     square_data.side = 10;
 
-    var square_value: Shape.Type = .{
-        .selector = 1,
-        .data = @unionInit(@TypeOf(Shape.default_value.data), "option_1", square_data),
-    };
+    var square_value: Shape.Type = @unionInit(Shape.Type, "option_1", square_data);
 
     var root: [32]u8 = undefined;
     try Shape.hashTreeRoot(std.testing.allocator, &square_value, &root);

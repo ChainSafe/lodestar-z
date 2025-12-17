@@ -23,7 +23,6 @@ pub fn parseYaml(comptime ST: type, allocator: Allocator, y: yaml.Yaml, out: *ST
         y.docs.items[0] = map.get("selector").?;
         const selector_str = try y.parse(allocator, []const u8);
         const selector = try std.fmt.parseInt(u8, selector_str, 10);
-        out.selector = selector;
 
         // Parse data field based on selector
         y.docs.items[0] = map.get("data").?;
@@ -34,8 +33,8 @@ pub fn parseYaml(comptime ST: type, allocator: Allocator, y: yaml.Yaml, out: *ST
                 const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option_selector});
 
                 // Initialize union field and parse in-place to avoid intermediate copy
-                out.data = @unionInit(@TypeOf(out.data), field_name, option_type.default_value);
-                try parseYaml(option_type, allocator, y, &@field(out.data, field_name));
+                out.* = @unionInit(ST.Type, field_name, option_type.default_value);
+                try parseYaml(option_type, allocator, y, &@field(out.*, field_name));
 
                 return;
             }
