@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const isBasicType = @import("type/type_kind.zig").isBasicType;
+const isFixedType = @import("type/type_kind.zig").isFixedType;
 const isBitListType = @import("type/bit_list.zig").isBitListType;
 const h = @import("hashing");
 
@@ -20,7 +21,7 @@ pub fn Hasher(comptime ST: type) type {
                         return try HasherData.initCapacity(allocator, hasher_size, children);
                     }
                 },
-                .container => {
+                .container, .progressive_container => {
                     const hasher_size = if (ST.chunk_count % 2 == 1) ST.chunk_count + 1 else ST.chunk_count;
                     var children = try allocator.alloc(HasherData, ST.fields.len);
                     inline for (ST.fields, 0..) |field, i| {
@@ -32,7 +33,7 @@ pub fn Hasher(comptime ST: type) type {
                     }
                     return try HasherData.initCapacity(allocator, hasher_size, children);
                 },
-                .list => {
+                .list, .progressive_list, .progressive_bit_list => {
                     // we don't preallocate here since we need the length
                     const hasher_size = 0;
                     if (comptime isBasicType(ST.Element)) {
@@ -42,6 +43,9 @@ pub fn Hasher(comptime ST: type) type {
                         children[0] = try Hasher(ST.Element).init(allocator);
                         return try HasherData.initCapacity(allocator, hasher_size, children);
                     }
+                },
+                .compatible_union => {
+                    return try HasherData.initCapacity(allocator, 0, null);
                 },
                 else => unreachable,
             }
@@ -61,6 +65,9 @@ pub fn Hasher(comptime ST: type) type {
                 }
             } else {
                 switch (ST.kind) {
+                    .progressive_list, .progressive_bit_list => {
+                        try ST.hashTreeRoot(scratch.getAllocator(), value, out);
+                    },
                     .list => {
                         const chunk_count = ST.chunkCount(value);
                         const hasher_size = if (chunk_count % 2 == 1) chunk_count + 1 else chunk_count;
@@ -103,6 +110,16 @@ pub fn Hasher(comptime ST: type) type {
                         }
                         try h.merkleize(@ptrCast(scratch.chunks.items), ST.chunk_depth, out);
                     },
+                    .progressive_container => {
+                        if (comptime isFixedType(ST)) {
+                            try ST.hashTreeRoot(value, out);
+                        } else {
+                            try ST.hashTreeRoot(scratch.getAllocator(), value, out);
+                        }
+                    },
+                    .compatible_union => {
+                        try ST.hashTreeRoot(scratch.getAllocator(), value, out);
+                    },
                     else => unreachable,
                 }
             }
@@ -132,5 +149,9 @@ pub const HasherData = struct {
             allocator.free(children);
         }
         self.chunks.deinit();
+    }
+
+    pub fn getAllocator(self: *HasherData) std.mem.Allocator {
+        return self.chunks.allocator;
     }
 };

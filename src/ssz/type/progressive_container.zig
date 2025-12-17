@@ -1,31 +1,105 @@
 const std = @import("std");
-const expectEqualRootsAlloc = @import("test_utils.zig").expectEqualRootsAlloc;
-const expectEqualSerializedAlloc = @import("test_utils.zig").expectEqualSerializedAlloc;
 const TypeKind = @import("type_kind.zig").TypeKind;
-
 const isFixedType = @import("type_kind.zig").isFixedType;
 const isBasicType = @import("type_kind.zig").isBasicType;
-
-const merkleize = @import("hashing").merkleize;
-const maxChunksToDepth = @import("hashing").maxChunksToDepth;
-
+const progressive = @import("progressive.zig");
+const hashOne = @import("hashing").hashOne;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const Depth = @import("persistent_merkle_tree").Depth;
-const ContainerTreeView = @import("../tree_view.zig").ContainerTreeView;
 
-pub fn FixedContainerType(comptime ST: type) type {
+/// Pack active_fields bitvector into a 32-byte array (limited to 256 bits)
+fn packActiveFields(comptime active_fields: []const u1) [32]u8 {
+    var result = [_]u8{0} ** 32;
+    for (active_fields, 0..) |bit, i| {
+        if (bit == 1) {
+            result[i / 8] |= @as(u8, 1) << @as(u3, @intCast(i % 8));
+        }
+    }
+    return result;
+}
+
+/// Validates active_fields configuration at comptime
+fn validateActiveFields(comptime active_fields: []const u1, comptime field_count: usize) void {
+    // active_fields must not be empty
+    if (active_fields.len == 0) {
+        @compileError("active_fields cannot be empty");
+    }
+
+    // active_fields must not exceed 256 bits
+    if (active_fields.len > 256) {
+        @compileError("active_fields cannot exceed 256 entries");
+    }
+
+    // active_fields must not end in 0
+    if (active_fields[active_fields.len - 1] == 0) {
+        @compileError("active_fields cannot end in 0");
+    }
+
+    // count of 1s in active_fields must equal field_count
+    var count: usize = 0;
+    for (active_fields) |bit| {
+        if (bit == 1) count += 1;
+    }
+    if (count != field_count) {
+        @compileError("count of 1s in active_fields must equal number of fields");
+    }
+}
+
+/// Returns the merkle tree index (position in active_fields) for the nth field
+fn getActiveFieldIndex(comptime active_fields: []const u1, comptime n: usize) usize {
+    var count: usize = 0;
+    for (active_fields, 0..) |bit, i| {
+        if (bit == 1) {
+            if (count == n) {
+                return i;
+            }
+            count += 1;
+        }
+    }
+    @compileError("field index out of range");
+}
+
+/// Creates a progressive container type with only fixed-size fields.
+///
+/// Parameters:
+///   - ST: A struct type containing only fixed-size SSZ fields
+///   - active_fields: Bitvector indicating field positions in the Merkle tree
+///
+/// The active_fields bitvector determines where each field is placed in the Merkle tree.
+/// A '1' at position i means that position is occupied; fields are assigned to positions
+/// with '1' bits in order.
+///
+/// Example:
+/// ```zig
+/// const MyType = FixedProgressiveContainerType(struct {
+///     field_a: UintType(8),
+///     field_b: UintType(16),
+/// }, &[_]u1{ 1, 0, 1 });
+/// // field_a is at position 0, field_b is at position 2
+/// ```
+pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: []const u1) type {
     const ssz_fields = switch (@typeInfo(ST)) {
         .@"struct" => |s| s.fields,
         else => @compileError("Expected a struct type."),
     };
+
+    // Validate active_fields configuration
+    comptime validateActiveFields(active_fields, ssz_fields.len);
+
+    // Validate that container has at least one field
+    comptime {
+        if (ssz_fields.len == 0) {
+            @compileError("ProgressiveContainer with no fields is illegal");
+        }
+    }
 
     comptime var native_fields: [ssz_fields.len]std.builtin.Type.StructField = undefined;
     comptime var _offsets: [ssz_fields.len]usize = undefined;
     comptime var _fixed_size: usize = 0;
     inline for (ssz_fields, 0..) |field, i| {
         if (!comptime isFixedType(field.type)) {
-            @compileError("FixedContainerType must only contain fixed fields");
+            @compileError("FixedProgressiveContainerType must only contain fixed fields");
         }
 
         native_fields[i] = .{
@@ -44,22 +118,19 @@ pub fn FixedContainerType(comptime ST: type) type {
             .layout = .auto,
             .backing_integer = null,
             .fields = native_fields[0..],
-            // TODO: do we need to assign this value?
             .decls = &[_]std.builtin.Type.Declaration{},
             .is_tuple = false,
         },
     });
 
     return struct {
-        pub const kind = TypeKind.container;
+        pub const kind = TypeKind.progressive_container;
         pub const Fields: type = ST;
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
         pub const Type: type = T;
-        pub const TreeView: type = ContainerTreeView(@This());
         pub const fixed_size: usize = _fixed_size;
         pub const field_offsets: [fields.len]usize = _offsets;
-        pub const chunk_count: usize = fields.len;
-        pub const chunk_depth: Depth = maxChunksToDepth(chunk_count);
+        pub const chunk_count: usize = active_fields.len;
 
         pub const default_value: Type = blk: {
             var out: Type = undefined;
@@ -78,19 +149,31 @@ pub fn FixedContainerType(comptime ST: type) type {
             return true;
         }
 
-        /// Creates a new `FixedContainerType` and clones all underlying fields in the container.
+        /// Creates a new `FixedProgressiveContainerType` and clones all underlying fields in the container.
         ///
         /// Caller owns the memory.
         pub fn clone(value: *const Type, out: *Type) !void {
             out.* = value.*;
         }
 
+        pub fn serializedSize(_: *const Type) usize {
+            return fixed_size;
+        }
+
         pub fn hashTreeRoot(value: *const Type, out: *[32]u8) !void {
-            var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
+            var chunks: [chunk_count][32]u8 = undefined;
+            @memset(&chunks, [_]u8{0} ** 32);
+
             inline for (fields, 0..) |field, i| {
-                try field.type.hashTreeRoot(&@field(value, field.name), &chunks[i]);
+                const field_idx = comptime getActiveFieldIndex(active_fields, i);
+                try field.type.hashTreeRoot(&@field(value, field.name), &chunks[field_idx]);
             }
-            try merkleize(@ptrCast(&chunks), chunk_depth, out);
+
+            var temp_root: [32]u8 = undefined;
+            try progressive.merkleizeChunksComptime(chunk_count, &chunks, &temp_root);
+
+            const active_fields_packed = comptime packActiveFields(active_fields);
+            hashOne(out, &temp_root, &active_fields_packed);
         }
 
         pub fn serializeIntoBytes(value: *const Type, out: []u8) usize {
@@ -126,53 +209,61 @@ pub fn FixedContainerType(comptime ST: type) type {
             }
 
             pub fn hashTreeRoot(data: []const u8, out: *[32]u8) !void {
-                var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
+                var chunks: [chunk_count][32]u8 = undefined;
+                @memset(&chunks, [_]u8{0} ** 32);
+
                 var i: usize = 0;
                 inline for (fields, 0..) |field, field_i| {
-                    try field.type.serialized.hashTreeRoot(data[i .. i + field.type.fixed_size], &chunks[field_i]);
+                    const field_idx = comptime getActiveFieldIndex(active_fields, field_i);
+                    try field.type.serialized.hashTreeRoot(data[i .. i + field.type.fixed_size], &chunks[field_idx]);
                     i += field.type.fixed_size;
                 }
-                try merkleize(@ptrCast(&chunks), chunk_depth, out);
+
+                var temp_root: [32]u8 = undefined;
+                try progressive.merkleizeChunksComptime(chunk_count, &chunks, &temp_root);
+
+                const active_fields_packed = comptime packActiveFields(active_fields);
+                hashOne(out, &temp_root, &active_fields_packed);
             }
         };
 
         pub const tree = struct {
             pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var nodes: [chunk_count]Node.Id = undefined;
-                try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
+
+                // Extract the active_fields mix-in node (get left child which is the content)
+                const content_node = try node.getLeft(pool);
+
+                try progressive.getNodes(pool, content_node, &nodes);
+
                 inline for (fields, 0..) |field, i| {
-                    const child_node = nodes[i];
+                    const field_idx = comptime getActiveFieldIndex(active_fields, i);
+                    const child_node = nodes[field_idx];
                     try field.type.tree.toValue(child_node, pool, &@field(out, field.name));
                 }
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 var nodes: [chunk_count]Node.Id = undefined;
+
+                // Initialize all nodes to zero
+                for (&nodes) |*node| {
+                    node.* = @enumFromInt(0);
+                }
+
                 inline for (fields, 0..) |field, i| {
+                    const field_idx = comptime getActiveFieldIndex(active_fields, i);
                     const field_value = &@field(value, field.name);
-                    nodes[i] = try field.type.tree.fromValue(pool, field_value);
+                    nodes[field_idx] = try field.type.tree.fromValue(pool, field_value);
                 }
-                return try Node.fillWithContents(pool, &nodes, chunk_depth);
-            }
 
-            pub fn serializeIntoBytes(value: Node.Id, pool: *Node.Pool, out: []u8) !usize {
-                var i: usize = 0;
-                inline for (fields) |field| {
-                    const field_value_ptr = &@field(value, field.name);
-                    i += try field.type.tree.serializeIntoBytes(field_value_ptr, pool, out[i..]);
-                }
-                return i;
-            }
+                const content_tree = try progressive.fillWithContentsComptime(chunk_count, pool, &nodes);
 
-            pub fn deserializeFromBytes(data: []const u8, pool: *Node.Pool, out: *Node.Id) !void {
-                if (data.len != fixed_size) {
-                    return error.InvalidSize;
-                }
-                var i: usize = 0;
-                inline for (fields) |field| {
-                    try field.type.tree.deserializeFromBytes(data[i .. i + field.type.fixed_size], pool, &@field(out, field.name));
-                    i += field.type.fixed_size;
-                }
+                // Mix in active_fields
+                const active_fields_packed = comptime packActiveFields(active_fields);
+                const active_fields_node = try pool.createLeaf(&active_fields_packed);
+
+                return try pool.createBranch(content_tree, active_fields_node);
             }
         };
 
@@ -235,17 +326,28 @@ pub fn FixedContainerType(comptime ST: type) type {
         }
 
         pub fn getFieldGindex(comptime name: []const u8) Gindex {
-            const field_index = getFieldIndex(name);
-            return comptime Gindex.fromDepth(chunk_depth, field_index);
+            const field_i = getFieldIndex(name);
+            const field_idx = comptime getActiveFieldIndex(active_fields, field_i);
+            return comptime progressive.chunkGindex(field_idx);
         }
     };
 }
 
-pub fn VariableContainerType(comptime ST: type) type {
+pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_fields: []const u1) type {
     const ssz_fields = switch (@typeInfo(ST)) {
         .@"struct" => |s| s.fields,
         else => @compileError("Expected a struct type."),
     };
+
+    // Validate active_fields configuration
+    comptime validateActiveFields(active_fields, ssz_fields.len);
+
+    // Validate that container has at least one field
+    comptime {
+        if (ssz_fields.len == 0) {
+            @compileError("ProgressiveContainer with no fields is illegal");
+        }
+    }
 
     comptime var native_fields: [ssz_fields.len]std.builtin.Type.StructField = undefined;
     comptime var _offsets: [ssz_fields.len]usize = undefined;
@@ -284,7 +386,7 @@ pub fn VariableContainerType(comptime ST: type) type {
 
     comptime {
         if (_fixed_count == ssz_fields.len) {
-            @compileError("expected at least one fixed field type");
+            @compileError("expected at least one variable field type");
         }
     }
 
@@ -295,25 +397,22 @@ pub fn VariableContainerType(comptime ST: type) type {
             .layout = .auto,
             .backing_integer = null,
             .fields = native_fields[0..],
-            // TODO: do we need to assign this value?
             .decls = &[_]std.builtin.Type.Declaration{},
             .is_tuple = false,
         },
     });
 
     return struct {
-        pub const kind = TypeKind.container;
+        pub const kind = TypeKind.progressive_container;
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
         pub const Fields: type = ST;
         pub const Type: type = T;
-        pub const TreeView: type = ContainerTreeView(@This());
         pub const min_size: usize = _min_size;
         pub const max_size: usize = _max_size;
         pub const field_offsets: [fields.len]usize = _offsets;
         pub const fixed_end: usize = _fixed_end;
         pub const fixed_count: usize = _fixed_count;
-        pub const chunk_count: usize = fields.len;
-        pub const chunk_depth: u8 = maxChunksToDepth(chunk_count);
+        pub const chunk_count: usize = active_fields.len;
 
         pub const default_value: Type = blk: {
             var out: Type = undefined;
@@ -341,18 +440,27 @@ pub fn VariableContainerType(comptime ST: type) type {
         }
 
         pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
-            var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
+            const chunks = try allocator.alloc([32]u8, chunk_count);
+            defer allocator.free(chunks);
+            @memset(chunks, [_]u8{0} ** 32);
+
             inline for (fields, 0..) |field, i| {
+                const field_idx = comptime getActiveFieldIndex(active_fields, i);
                 if (comptime isFixedType(field.type)) {
-                    try field.type.hashTreeRoot(&@field(value, field.name), &chunks[i]);
+                    try field.type.hashTreeRoot(&@field(value, field.name), &chunks[field_idx]);
                 } else {
-                    try field.type.hashTreeRoot(allocator, &@field(value, field.name), &chunks[i]);
+                    try field.type.hashTreeRoot(allocator, &@field(value, field.name), &chunks[field_idx]);
                 }
             }
-            try merkleize(@ptrCast(&chunks), chunk_depth, out);
+
+            var temp_root: [32]u8 = undefined;
+            try progressive.merkleizeChunks(allocator, chunks, &temp_root);
+
+            const active_fields_packed = comptime packActiveFields(active_fields);
+            hashOne(out, &temp_root, &active_fields_packed);
         }
 
-        /// Creates a new `VariableContainerType` and clones all underlying fields in the container.
+        /// Creates a new `VariableProgressiveContainerType` and clones all underlying fields in the container.
         ///
         /// Caller owns the memory.
         pub fn clone(
@@ -444,8 +552,9 @@ pub fn VariableContainerType(comptime ST: type) type {
         }
 
         pub fn getFieldGindex(comptime name: []const u8) Gindex {
-            const field_index = getFieldIndex(name);
-            return comptime Gindex.fromDepth(chunk_depth, field_index);
+            const field_i = getFieldIndex(name);
+            const field_idx = comptime getActiveFieldIndex(active_fields, field_i);
+            return comptime progressive.chunkGindex(field_idx);
         }
 
         // Returns the bytes ranges of all fields, both variable and fixed size.
@@ -516,34 +625,49 @@ pub fn VariableContainerType(comptime ST: type) type {
             }
 
             pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
-                var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
+                const chunks = try allocator.alloc([32]u8, chunk_count);
+                defer allocator.free(chunks);
+                @memset(chunks, [_]u8{0} ** 32);
+
                 const ranges = try readFieldRanges(data);
 
                 inline for (fields, 0..) |field, i| {
+                    const field_idx = comptime getActiveFieldIndex(active_fields, i);
                     if (comptime isFixedType(field.type)) {
                         try field.type.serialized.hashTreeRoot(
                             data[ranges[i][0]..ranges[i][1]],
-                            &chunks[i],
+                            &chunks[field_idx],
                         );
                     } else {
                         try field.type.serialized.hashTreeRoot(
                             allocator,
                             data[ranges[i][0]..ranges[i][1]],
-                            &chunks[i],
+                            &chunks[field_idx],
                         );
                     }
                 }
 
-                try merkleize(@ptrCast(&chunks), chunk_depth, out);
+                var temp_root: [32]u8 = undefined;
+                try progressive.merkleizeChunks(allocator, chunks, &temp_root);
+
+                const active_fields_packed = comptime packActiveFields(active_fields);
+                hashOne(out, &temp_root, &active_fields_packed);
             }
         };
 
         pub const tree = struct {
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
-                var nodes: [chunk_count]Node.Id = undefined;
-                try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
+                const nodes = try allocator.alloc(Node.Id, chunk_count);
+                defer allocator.free(nodes);
+
+                // Extract the active_fields mix-in node (get left child which is the content)
+                const content_node = try node.getLeft(pool);
+
+                try progressive.getNodes(pool, content_node, nodes);
+
                 inline for (fields, 0..) |field, i| {
-                    const child_node = nodes[i];
+                    const field_idx = comptime getActiveFieldIndex(active_fields, i);
+                    const child_node = nodes[field_idx];
                     if (comptime isFixedType(field.type)) {
                         try field.type.tree.toValue(child_node, pool, &@field(out, field.name));
                     } else {
@@ -553,16 +677,31 @@ pub fn VariableContainerType(comptime ST: type) type {
             }
 
             pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                const nodes = try allocator.alloc(Node.Id, chunk_count);
+                defer allocator.free(nodes);
+
+                // Initialize all nodes to zero
+                for (nodes) |*node| {
+                    node.* = @enumFromInt(0);
+                }
+
                 inline for (fields, 0..) |field, i| {
+                    const field_idx = comptime getActiveFieldIndex(active_fields, i);
                     const field_value = &@field(value, field.name);
                     if (comptime isFixedType(field.type)) {
-                        nodes[i] = try field.type.tree.fromValue(pool, field_value);
+                        nodes[field_idx] = try field.type.tree.fromValue(pool, field_value);
                     } else {
-                        nodes[i] = try field.type.tree.fromValue(allocator, pool, field_value);
+                        nodes[field_idx] = try field.type.tree.fromValue(allocator, pool, field_value);
                     }
                 }
-                return try Node.fillWithContents(pool, &nodes, chunk_depth);
+
+                const content_tree = try progressive.fillWithContents(allocator, pool, nodes);
+
+                // Mix in active_fields
+                const active_fields_packed = comptime packActiveFields(active_fields);
+                const active_fields_node = try pool.createLeaf(&active_fields_packed);
+
+                return try pool.createBranch(content_tree, active_fields_node);
             }
         };
 
@@ -624,26 +763,59 @@ const BoolType = @import("bool.zig").BoolType;
 const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 const FixedListType = @import("list.zig").FixedListType;
 
-test "ContainerType - sanity" {
-    // create a fixed container type and instance and round-trip serialize
-    const Checkpoint = FixedContainerType(struct {
-        slot: UintType(8),
-        root: ByteVectorType(32),
-    });
+test "ProgressiveContainerType " {
+    // Square with active_fields=[1, 0, 1]
+    const Square = FixedProgressiveContainerType(struct {
+        side: UintType(16),
+        color: UintType(8),
+    }, &[_]u1{ 1, 0, 1 });
 
-    var c: Checkpoint.Type = undefined;
-    var c_buf: [Checkpoint.fixed_size]u8 = undefined;
+    // Circle with active_fields=[0, 1, 1]
+    const Circle = FixedProgressiveContainerType(struct {
+        radius: UintType(16),
+        color: UintType(8),
+    }, &[_]u1{ 0, 1, 1 });
 
-    _ = Checkpoint.serializeIntoBytes(&c, &c_buf);
-    try Checkpoint.deserializeFromBytes(&c_buf, &c);
+    var square: Square.Type = undefined;
+    square.side = 10;
+    square.color = 5;
 
-    // create a variable container type and instance and round-trip serialize
+    var circle: Circle.Type = undefined;
+    circle.radius = 7;
+    circle.color = 5;
+
+    // Test that both serialize correctly
+    var square_buf: [Square.fixed_size]u8 = undefined;
+    _ = Square.serializeIntoBytes(&square, &square_buf);
+
+    var circle_buf: [Circle.fixed_size]u8 = undefined;
+    _ = Circle.serializeIntoBytes(&circle, &circle_buf);
+
+    // Test deserialization
+    var square2: Square.Type = undefined;
+    try Square.deserializeFromBytes(&square_buf, &square2);
+    try std.testing.expectEqual(square.side, square2.side);
+    try std.testing.expectEqual(square.color, square2.color);
+
+    // Test hash tree root - color should be at the same gindex for both
+    var square_root: [32]u8 = undefined;
+    try Square.hashTreeRoot(&square, &square_root);
+
+    var circle_root: [32]u8 = undefined;
+    try Circle.hashTreeRoot(&circle, &circle_root);
+
+    // The roots should be different since the structures are different
+    try std.testing.expect(!std.mem.eql(u8, &square_root, &circle_root));
+}
+
+test "ProgressiveContainerType - variable" {
     const allocator = std.testing.allocator;
-    const Foo = VariableContainerType(struct {
+    const Foo = VariableProgressiveContainerType(struct {
         a: FixedListType(UintType(8), 32),
         b: FixedListType(UintType(8), 32),
         c: FixedListType(UintType(8), 32),
-    });
+    }, &[_]u1{ 1, 1, 0, 1 });
+
     var f: Foo.Type = undefined;
     f.a = try std.ArrayListUnmanaged(u8).initCapacity(allocator, 10);
     f.b = try std.ArrayListUnmanaged(u8).initCapacity(allocator, 10);
@@ -658,34 +830,8 @@ test "ContainerType - sanity" {
     const f_buf = try allocator.alloc(u8, Foo.serializedSize(&f));
     defer allocator.free(f_buf);
     _ = Foo.serializeIntoBytes(&f, f_buf);
-    try Foo.deserializeFromBytes(allocator, f_buf, &f);
-}
 
-test "clone" {
-    const allocator = std.testing.allocator;
-    const Checkpoint = FixedContainerType(struct {
-        slot: UintType(8),
-        root: ByteVectorType(32),
-    });
-
-    var c: Checkpoint.Type = Checkpoint.default_value;
-
-    var cloned: Checkpoint.Type = undefined;
-    try Checkpoint.clone(&c, &cloned);
-    try std.testing.expect(&cloned != &c);
-    const Foo = VariableContainerType(struct {
-        a: FixedListType(UintType(8), 32),
-        b: FixedListType(UintType(8), 32),
-        c: FixedListType(UintType(8), 32),
-    });
-    var f = Foo.default_value;
-    defer Foo.deinit(allocator, &f);
-    var cloned_f: Foo.Type = undefined;
-    try Foo.clone(allocator, &f, &cloned_f);
-    defer Foo.deinit(allocator, &cloned_f);
-    try std.testing.expect(&cloned_f != &f);
-
-    try expectEqualRootsAlloc(Foo, allocator, f, cloned_f);
-    try expectEqualSerializedAlloc(Foo, allocator, f, cloned_f);
-    // TODO(bing): test equals when ready
+    var f2: Foo.Type = Foo.default_value;
+    try Foo.deserializeFromBytes(allocator, f_buf, &f2);
+    defer Foo.deinit(allocator, &f2);
 }
