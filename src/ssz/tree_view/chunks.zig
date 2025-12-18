@@ -47,18 +47,16 @@ pub fn BasicPackedChunks(
             base_view: *BaseTreeView,
             allocator: Allocator,
             len: usize,
-            prefetched_chunk_count: *?usize,
         ) ![]Element {
             const values = try allocator.alloc(Element, len);
             errdefer allocator.free(values);
-            return try getAllInto(base_view, len, values, prefetched_chunk_count);
+            return try getAllInto(base_view, len, values);
         }
 
         pub fn getAllInto(
             base_view: *BaseTreeView,
             len: usize,
             values: []Element,
-            prefetched_chunk_count: *?usize,
         ) ![]Element {
             if (values.len != len) return error.InvalidSize;
             if (len == 0) return values;
@@ -67,7 +65,7 @@ pub fn BasicPackedChunks(
             const remainder = len % items_per_chunk;
             const chunk_count = len_full_chunks + @intFromBool(remainder != 0);
 
-            try populateAllNodes(base_view, chunk_count, prefetched_chunk_count);
+            try populateAllNodes(base_view, chunk_count);
 
             for (0..len_full_chunks) |chunk_idx| {
                 const leaf_node = try base_view.getChildNode(Gindex.fromDepth(chunk_depth, chunk_idx));
@@ -96,9 +94,8 @@ pub fn BasicPackedChunks(
             return values;
         }
 
-        fn populateAllNodes(base_view: *BaseTreeView, chunk_count: usize, prefetched_chunk_count: *?usize) !void {
+        fn populateAllNodes(base_view: *BaseTreeView, chunk_count: usize) !void {
             if (chunk_count == 0) return;
-            if (prefetched_chunk_count.* != null) return;
 
             const nodes = try base_view.allocator.alloc(Node.Id, chunk_count);
             defer base_view.allocator.free(nodes);
@@ -112,8 +109,6 @@ pub fn BasicPackedChunks(
                     gop.value_ptr.* = node;
                 }
             }
-
-            prefetched_chunk_count.* = chunk_count;
         }
     };
 }

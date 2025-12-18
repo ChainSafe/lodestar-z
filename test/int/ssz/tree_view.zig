@@ -7,5 +7,8 @@ const list_composite = @import("./tree_view/list_composite.zig");
 
 test {
     const testing = std.testing;
-    testing.refAllDecls(@This());
+    testing.refAllDecls(container);
+    testing.refAllDecls(vector_basic);
+    testing.refAllDecls(list_basic);
+    testing.refAllDecls(list_composite);
 }

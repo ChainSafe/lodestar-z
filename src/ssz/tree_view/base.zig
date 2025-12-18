@@ -83,7 +83,7 @@ pub const TreeViewData = struct {
             }
         }
 
-        const new_root = try self.root.setNodes(pool, gindices, nodes);
+        const new_root = try self.root.setNodesGrouped(pool, gindices, nodes);
         try pool.ref(new_root);
         pool.unref(self.root);
         self.root = new_root;

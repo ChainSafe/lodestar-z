@@ -2,7 +2,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const hashing = @import("hashing");
 const Depth = hashing.Depth;
-const ListLengthUint = hashing.GindexUint;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
@@ -29,8 +28,6 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
     return struct {
         base_view: BaseTreeView,
-        list_length_cache: ?ListLengthUint = null,
-        prefetched_chunk_count: ?usize = null,
 
         pub const SszType = ST;
         pub const Element = ST.Element.Type;
@@ -40,36 +37,11 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
         const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, ST);
         const items_per_chunk: usize = itemsPerChunk(ST.Element);
-        const list_length_gindex: Gindex = Gindex.fromDepth(1, 1);
         const Chunks = BasicPackedChunks(ST, chunk_depth, items_per_chunk);
-
-        const dirty_mask: ListLengthUint = @as(ListLengthUint, 1) << (@bitSizeOf(ListLengthUint) - 1);
-
-        comptime {
-            const max_len: usize = (@as(usize, 1) << (@bitSizeOf(ListLengthUint) - 1)) - 1;
-            if (ST.limit > max_len) {
-                @compileError("ListBasicTreeView list length does not fit (limit too large for dirty-bit encoding)");
-            }
-        }
-
-        inline fn isDirtyLength(cached: ListLengthUint) bool {
-            return (cached & dirty_mask) != 0;
-        }
-
-        inline fn stripDirtyLength(cached: ListLengthUint) ListLengthUint {
-            return cached & ~dirty_mask;
-        }
-
-        inline fn tagDirtyLength(length_value: ListLengthUint) ListLengthUint {
-            std.debug.assert((length_value & dirty_mask) == 0);
-            return length_value | dirty_mask;
-        }
 
         pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
             return Self{
                 .base_view = try BaseTreeView.init(allocator, pool, root),
-                .list_length_cache = null,
-                .prefetched_chunk_count = null,
             };
         }
 
@@ -79,35 +51,11 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
         pub fn commit(self: *Self) !void {
             try self.base_view.commit();
-
-            if (self.list_length_cache) |cached| {
-                if (!isDirtyLength(cached)) return;
-                const new_length = stripDirtyLength(cached);
-                const root_with_length = blk: {
-                    const length_node = try self.base_view.pool.createLeafFromUint(new_length);
-                    errdefer self.base_view.pool.unref(length_node);
-                    break :blk try Node.Id.setNode(
-                        self.base_view.data.root,
-                        self.base_view.pool,
-                        list_length_gindex,
-                        length_node,
-                    );
-                };
-                errdefer self.base_view.pool.unref(root_with_length);
-
-                try self.base_view.pool.ref(root_with_length);
-                self.base_view.pool.unref(self.base_view.data.root);
-                self.base_view.data.root = root_with_length;
-
-                self.list_length_cache = new_length;
-            }
         }
 
         pub fn clearCache(self: *Self) void {
             self.base_view.data.clearChildrenNodesCache(self.base_view.pool);
-            self.prefetched_chunk_count = null;
             self.base_view.data.changed.clearRetainingCapacity();
-            self.list_length_cache = null;
         }
 
         pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
@@ -116,12 +64,9 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         }
 
         pub fn length(self: *Self) !usize {
-            if (self.list_length_cache) |cached_len| {
-                return @intCast(stripDirtyLength(cached_len));
-            }
-            const tree_len = try ST.tree.length(self.base_view.data.root, self.base_view.pool);
-            self.list_length_cache = @intCast(tree_len);
-            return tree_len;
+            const length_node = try self.base_view.getChildNode(@enumFromInt(3));
+            const length_chunk = length_node.getRoot(self.base_view.pool);
+            return std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
         }
 
         pub fn get(self: *Self, index: usize) !Element {
@@ -139,12 +84,12 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         /// Caller must free the returned slice.
         pub fn getAll(self: *Self, allocator: Allocator) ![]Element {
             const list_length = try self.length();
-            return try Chunks.getAll(&self.base_view, allocator, list_length, &self.prefetched_chunk_count);
+            return try Chunks.getAll(&self.base_view, allocator, list_length);
         }
 
         pub fn getAllInto(self: *Self, values: []Element) ![]Element {
             const list_length = try self.length();
-            return try Chunks.getAllInto(&self.base_view, list_length, values, &self.prefetched_chunk_count);
+            return try Chunks.getAllInto(&self.base_view, list_length, values);
         }
 
         pub fn push(self: *Self, value: Element) !void {
@@ -192,16 +137,16 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             defer if (updated) |id| self.base_view.pool.unref(id);
             truncated_chunk_node = null;
 
-            var new_root: ?Node.Id = try Node.Id.truncateAfterIndex(updated, self.base_view.pool, chunk_depth, chunk_index);
+            var new_root: ?Node.Id = try Node.Id.truncateAfterIndex(updated.?, self.base_view.pool, chunk_depth, chunk_index);
             defer if (new_root) |id| self.base_view.pool.unref(id);
             updated = null;
 
             var length_node: ?Node.Id = try self.base_view.pool.createLeafFromUint(@intCast(new_length));
             defer if (length_node) |id| self.base_view.pool.unref(id);
-            const root_with_length = try Node.Id.setNode(new_root.?, self.base_view.pool, list_length_gindex, length_node.?);
+            const root_with_length = try Node.Id.setNode(new_root.?, self.base_view.pool, @enumFromInt(3), length_node.?);
             errdefer self.base_view.pool.unref(root_with_length);
-            length_node = null;
 
+            length_node = null;
             new_root = null;
 
             return try Self.init(self.base_view.allocator, self.base_view.pool, root_with_length);
@@ -211,7 +156,9 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             if (new_length > ST.limit) {
                 return error.LengthOverLimit;
             }
-            self.list_length_cache = tagDirtyLength(@intCast(new_length));
+            const length_node = try self.base_view.pool.createLeafFromUint(@intCast(new_length));
+            errdefer self.base_view.pool.unref(length_node);
+            try self.base_view.setChildNode(@enumFromInt(3), length_node);
         }
     };
 }

@@ -976,6 +976,35 @@ pub const Id = enum(u32) {
 
         return node_id;
     }
+
+    /// Set multiple nodes in batch where gindices may be at different depths.
+    ///
+    /// This groups updates by `gindex.pathLen()` (i.e. depth) and applies each group via `setNodes()`.
+    /// - gindices MUST be sorted in ascending order beforehand.
+    pub fn setNodesGrouped(root_node: Id, pool: *Pool, gindices: []const Gindex, nodes: []Id) Error!Id {
+        std.debug.assert(nodes.len == gindices.len);
+        if (gindices.len == 0) {
+            return root_node;
+        }
+
+        var node_id = root_node;
+        var start: usize = 0;
+        while (start < gindices.len) {
+            const depth = gindices[start].pathLen();
+            var end: usize = start + 1;
+            while (end < gindices.len and gindices[end].pathLen() == depth) : (end += 1) {}
+
+            const prev = node_id;
+            const next = try Id.setNodes(prev, pool, gindices[start..end], nodes[start..end]);
+            if (prev != root_node and prev != next) {
+                pool.unref(prev);
+            }
+            node_id = next;
+            start = end;
+        }
+
+        return node_id;
+    }
 };
 
 /// Fill a view to the specified depth, returning the new root node id.
