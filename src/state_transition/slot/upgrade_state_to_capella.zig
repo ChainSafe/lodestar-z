@@ -60,23 +60,7 @@ pub fn upgradeStateToCapella(allocator: Allocator, cached_state: *CachedBeaconSt
 
     var capella_latest_execution_payload_header = ssz.capella.ExecutionPayloadHeader.default_value;
     const bellatrix_latest_execution_payload_header = bellatrix_state.latest_execution_payload_header;
-
-    capella_latest_execution_payload_header.parent_hash = bellatrix_latest_execution_payload_header.parent_hash;
-    capella_latest_execution_payload_header.fee_recipient = bellatrix_latest_execution_payload_header.fee_recipient;
-    capella_latest_execution_payload_header.state_root = bellatrix_latest_execution_payload_header.state_root;
-    capella_latest_execution_payload_header.receipts_root = bellatrix_latest_execution_payload_header.receipts_root;
-    capella_latest_execution_payload_header.logs_bloom = bellatrix_latest_execution_payload_header.logs_bloom;
-    capella_latest_execution_payload_header.prev_randao = bellatrix_latest_execution_payload_header.prev_randao;
-    capella_latest_execution_payload_header.block_number = bellatrix_latest_execution_payload_header.block_number;
-    capella_latest_execution_payload_header.gas_limit = bellatrix_latest_execution_payload_header.gas_limit;
-    capella_latest_execution_payload_header.gas_used = bellatrix_latest_execution_payload_header.gas_used;
-    capella_latest_execution_payload_header.timestamp = bellatrix_latest_execution_payload_header.timestamp;
-    // Clone extra_data because bellatrix_state will be deinit after upgrade,
-    // and capella state needs its own copy of the dynamically allocated data
-    capella_latest_execution_payload_header.extra_data = try bellatrix_latest_execution_payload_header.extra_data.clone(allocator);
-    capella_latest_execution_payload_header.base_fee_per_gas = bellatrix_latest_execution_payload_header.base_fee_per_gas;
-    capella_latest_execution_payload_header.block_hash = bellatrix_latest_execution_payload_header.block_hash;
-    capella_latest_execution_payload_header.transactions_root = bellatrix_latest_execution_payload_header.transactions_root;
+    try ssz.bellatrix.ExecutionPayloadHeader.clone(allocator, &bellatrix_latest_execution_payload_header, &capella_latest_execution_payload_header);
     // new in capella
     capella_latest_execution_payload_header.withdrawals_root = [_]u8{0} ** 32;
 
