@@ -42,9 +42,6 @@ const upgradeStateToFulu = @import("slot/upgrade_state_to_fulu.zig").upgradeStat
 
 const SignedBlock = @import("types/block.zig").SignedBlock;
 
-// Expose writeMetrics to the application
-pub const writeMetrics = metrics.write;
-
 pub const ExecutionPayloadStatus = enum(u8) {
     pre_merge,
     invalid,
