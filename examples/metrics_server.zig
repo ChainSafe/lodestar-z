@@ -1,5 +1,8 @@
 //! Simple example to show collection of metrics using metrics.zig.
 //!
+//! In an actual workload for Lodestar, metrics are scraped on a node process via bindings.
+//! The metrics are written and published by native zig code which runs the state transition.
+//!
 //! Run with `zig build run:metrics_server`
 
 //TODO: Set up prometheus?
