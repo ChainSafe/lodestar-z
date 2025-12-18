@@ -5,7 +5,6 @@
 //!
 //! Run with `zig build run:metrics_server`
 
-//TODO: Set up prometheus?
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
