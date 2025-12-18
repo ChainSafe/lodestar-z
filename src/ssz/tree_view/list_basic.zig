@@ -101,6 +101,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         }
 
         /// Return a new view containing all elements up to and including `index`.
+        /// Caller must call `deinit()` on the returned view to avoid memory leaks.
         pub fn sliceTo(self: *Self, index: usize) !Self {
             try self.commit();
 

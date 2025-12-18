@@ -92,6 +92,11 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             return error.NotImplemented;
         }
 
+        /// Appends an element to the end of the list.
+        ///
+        /// Ownership of the `value` TreeView is transferred to the list view.
+        /// The caller must not deinitialize or otherwise use `value` after calling this method,
+        /// as it is now owned by the list.
         pub fn push(self: *Self, value: Element) !void {
             const list_length = try self.length();
             if (list_length >= ST.limit) {
@@ -103,6 +108,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         }
 
         /// Return a new view containing all elements up to and including `index`.
+        /// The caller **must** call `deinit()` on the returned view to avoid memory leaks.
         pub fn sliceTo(self: *Self, index: usize) !Self {
             try self.commit();
 
@@ -130,6 +136,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         }
 
         /// Return a new view containing all elements from `index` to the end.
+        /// The returned view must be deinitialized by the caller using `deinit()` to avoid memory leaks.
         pub fn sliceFrom(self: *Self, index: usize) !Self {
             try self.commit();
 
