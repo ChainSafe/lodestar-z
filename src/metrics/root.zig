@@ -19,7 +19,10 @@ pub fn Observer(comptime H: type) type {
         }
 
         /// Stops the internal `timer` and calls `observe` on the internal `hist` to record time elapsed.
+        ///
+        /// Assumes that `startTimer` has been called.
         pub fn stopAndObserve(obs: *@This()) f32 {
+            std.debug.assert(obs.timer != null);
             const ns = obs.timer.?.read();
             const secs = @as(f32, @floatFromInt(ns)) / 1e9;
             obs.hist.observe(secs);
