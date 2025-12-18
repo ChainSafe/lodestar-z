@@ -121,6 +121,12 @@ pub const BaseTreeView = struct {
         try self.data.commit(self.allocator, self.pool);
     }
 
+    pub fn clearCache(self: *BaseTreeView) void {
+        self.data.clearChildrenNodesCache(self.pool);
+        self.data.clearChildrenDataCache(self.allocator, self.pool);
+        self.data.changed.clearRetainingCapacity();
+    }
+
     pub fn hashTreeRoot(self: *BaseTreeView, out: *[32]u8) !void {
         try self.commit();
         out.* = self.data.root.getRoot(self.pool).*;

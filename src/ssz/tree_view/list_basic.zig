@@ -54,8 +54,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         }
 
         pub fn clearCache(self: *Self) void {
-            self.base_view.data.clearChildrenNodesCache(self.base_view.pool);
-            self.base_view.data.changed.clearRetainingCapacity();
+            self.base_view.clearCache();
         }
 
         pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
