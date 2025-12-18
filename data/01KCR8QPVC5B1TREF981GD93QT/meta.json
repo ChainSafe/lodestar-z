@@ -1,0 +1,17 @@
+{
+	"ulid": "01KCR8QPVC5B1TREF981GD93QT",
+	"minTime": 1766035151618,
+	"maxTime": 1766037600000,
+	"stats": {
+		"numSamples": 11154,
+		"numSeries": 176,
+		"numChunks": 182
+	},
+	"compaction": {
+		"level": 1,
+		"sources": [
+			"01KCR8QPVC5B1TREF981GD93QT"
+		]
+	},
+	"version": 1
+}
