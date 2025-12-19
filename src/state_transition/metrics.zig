@@ -10,7 +10,7 @@ const LabeledObserver = metrics_mod.LabeledObserver;
 
 const CachedBeaconStateAllForks = @import("cache/state_cache.zig").CachedBeaconStateAllForks;
 
-// defaults to noop metrics, making this safe to use whether or not initializeMetrics is called
+/// Defaults to noop metrics, making this safe to use whether or not `initializeMetrics` is called.
 pub var state_transition = m.initializeNoop(Metrics);
 
 pub const StateCloneSource = enum {
@@ -27,7 +27,7 @@ pub const StateHashTreeRootSource = enum {
     compute_new_state_root,
 };
 
-pub const EpochTransitionStep = enum {
+pub const EpochTransitionStepKind = enum {
     before_process_epoch,
     after_process_epoch,
     final_process_epoch,
@@ -44,7 +44,7 @@ pub const EpochTransitionStep = enum {
     process_proposer_lookahead,
 };
 
-pub const ProposerRewardType = enum {
+pub const ProposerRewardKind = enum {
     attestation,
     sync_aggregate,
     slashing,
@@ -52,19 +52,20 @@ pub const ProposerRewardType = enum {
 
 const StateCloneSourceLabel = struct { source: StateCloneSource };
 pub const HashTreeRootLabel = struct { source: StateHashTreeRootSource };
-const EpochTransitionStepLabel = struct { step: EpochTransitionStep };
-const ProposerRewardLabel = struct { type: ProposerRewardType };
+const EpochTransitionStepLabel = struct { step: EpochTransitionStepKind };
+const ProposerRewardLabel = struct { kind: ProposerRewardKind };
 
 pub var epoch_transition = Observer(Metrics.EpochTransition).init(&state_transition.epoch_transition);
-pub var epoch_transition_step = LabeledObserver(Metrics.EpochTransitionStepTime, EpochTransitionStepLabel).init(&state_transition.epoch_transition_step);
+pub var epoch_transition_step = LabeledObserver(Metrics.EpochTransitionStep, EpochTransitionStepLabel).init(&state_transition.epoch_transition_step);
+pub var state_hash_tree_root = LabeledObserver(Metrics.StateHashTreeRoot, HashTreeRootLabel).init(&state_transition.state_hash_tree_root);
 
 pub const Metrics = struct {
     epoch_transition: EpochTransition,
     epoch_transition_commit: EpochTransitionCommit,
-    epoch_transition_step: EpochTransitionStepTime,
+    epoch_transition_step: EpochTransitionStep,
     process_block: ProcessBlock,
     process_block_commit: ProcessBlockCommit,
-    state_hash_tree_root: StateHashTreeRootTime,
+    state_hash_tree_root: StateHashTreeRoot,
     num_effective_balance_updates: CountGauge,
     validators_in_activation_queue: CountGauge,
     validators_in_exit_queue: CountGauge,
@@ -84,10 +85,10 @@ pub const Metrics = struct {
 
     const EpochTransition = m.Histogram(f32, &.{ 0.2, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 10 });
     const EpochTransitionCommit = m.Histogram(f32, &.{ 0.01, 0.05, 0.1, 0.2, 0.5, 0.75, 1 });
-    const EpochTransitionStepTime = m.HistogramVec(f32, EpochTransitionStepLabel, &.{ 0.01, 0.05, 0.1, 0.2, 0.5, 0.75, 1 });
+    const EpochTransitionStep = m.HistogramVec(f32, EpochTransitionStepLabel, &.{ 0.01, 0.05, 0.1, 0.2, 0.5, 0.75, 1 });
     const ProcessBlock = m.Histogram(f32, &.{ 0.005, 0.01, 0.02, 0.05, 0.1, 1 });
     const ProcessBlockCommit = m.Histogram(f32, &.{ 0.005, 0.01, 0.02, 0.05, 0.1, 1 });
-    const StateHashTreeRootTime = m.HistogramVec(f32, HashTreeRootLabel, &.{ 0.05, 0.1, 0.2, 0.5, 1, 1.5 });
+    const StateHashTreeRoot = m.HistogramVec(f32, HashTreeRootLabel, &.{ 0.05, 0.1, 0.2, 0.5, 1, 1.5 });
     const CountGauge = m.Gauge(u64);
     const GaugeVecSource = m.GaugeVec(u64, StateCloneSourceLabel);
     const PreStateClonedCount = m.Histogram(u32, &.{ 1, 2, 5, 10, 50, 250 });
@@ -109,7 +110,7 @@ pub fn initializeMetrics(allocator: Allocator, comptime opts: m.RegistryOpts) !v
             .{ .help = "Time to call commit after process a single epoch transition in seconds" },
             opts,
         ),
-        .epoch_transition_step = try Metrics.EpochTransitionStepTime.init(
+        .epoch_transition_step = try Metrics.EpochTransitionStep.init(
             allocator,
             "lodestar_stfn_epoch_transition_step_seconds",
             .{ .help = "Time to call each step of epoch transition in seconds" },
@@ -125,7 +126,7 @@ pub fn initializeMetrics(allocator: Allocator, comptime opts: m.RegistryOpts) !v
             .{ .help = "Time to call commit after process a single block in seconds" },
             opts,
         ),
-        .state_hash_tree_root = try Metrics.StateHashTreeRootTime.init(
+        .state_hash_tree_root = try Metrics.StateHashTreeRoot.init(
             allocator,
             "lodestar_stfn_hash_tree_root_seconds",
             .{ .help = "Time to compute the hash tree root of a post state in seconds" },
