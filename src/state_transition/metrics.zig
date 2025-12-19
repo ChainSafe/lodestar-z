@@ -58,7 +58,7 @@ pub var epoch_transition = Observer(Metrics.EpochTransition).init(&state_transit
 pub var epoch_transition_step = LabeledObserver(Metrics.EpochTransitionStep, EpochTransitionStepLabel).init(&state_transition.epoch_transition_step);
 pub var state_hash_tree_root = LabeledObserver(Metrics.StateHashTreeRoot, HashTreeRootLabel).init(&state_transition.state_hash_tree_root);
 
-pub const Metrics = struct {
+const Metrics = struct {
     epoch_transition: EpochTransition,
     epoch_transition_commit: EpochTransitionCommit,
     epoch_transition_step: EpochTransitionStep,
