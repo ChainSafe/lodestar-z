@@ -9,6 +9,7 @@ const hexLenFromBytes = @import("hex").hexLenFromBytes;
 const bytesToHex = @import("hex").bytesToHex;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
+const ArrayBasicTreeView = @import("../tree_view/root.zig").ArrayBasicTreeView;
 
 pub fn BitVector(comptime _length: comptime_int) type {
     const byte_len = std.math.divCeil(usize, _length, 8) catch unreachable;
@@ -166,6 +167,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
         pub const length: usize = _length;
         pub const byte_length = std.math.divCeil(usize, length, 8) catch unreachable;
         pub const Type: type = BitVector(length);
+        pub const TreeView: type = ArrayBasicTreeView(@This());
         pub const fixed_size: usize = byte_length;
         pub const chunk_count: usize = std.math.divCeil(usize, fixed_size, 32) catch unreachable;
         pub const chunk_depth: u8 = maxChunksToDepth(chunk_count);

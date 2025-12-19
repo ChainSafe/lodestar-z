@@ -171,7 +171,8 @@ pub const TestCachedBeaconStateAllForks = struct {
         errdefer allocator.destroy(index_pubkey_cache);
         index_pubkey_cache.* = Index2PubkeyCache.init(allocator);
         const chain_config = getConfig(active_chain_config, fork, fork_epoch);
-        const config = try BeaconConfig.init(allocator, chain_config, owned_state.genesisValidatorsRoot());
+        const config = try allocator.create(BeaconConfig);
+        try config.init(chain_config, owned_state.genesisValidatorsRoot());
 
         try syncPubkeys(owned_state.validators().items, pubkey_index_map, index_pubkey_cache);
 
@@ -196,7 +197,7 @@ pub const TestCachedBeaconStateAllForks = struct {
     }
 
     pub fn deinit(self: *TestCachedBeaconStateAllForks) void {
-        self.config.deinit();
+        self.allocator.destroy(self.config);
         self.pubkey_index_map.deinit();
         self.index_pubkey_cache.deinit();
         self.allocator.destroy(self.index_pubkey_cache);

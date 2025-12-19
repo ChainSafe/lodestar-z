@@ -170,7 +170,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
 
     // read expected value
 
-    var value_expected = try allocator.create(ST.Type);
+    const value_expected = try allocator.create(ST.Type);
     value_expected.* = ST.default_value;
     try parseYaml(ST, allocator, value_yaml, value_expected);
 
@@ -201,7 +201,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     {
         try ST.serialized.validate(serialized_expected);
 
-        var value_actual = try allocator.create(ST.Type);
+        const value_actual = try allocator.create(ST.Type);
         value_actual.* = ST.default_value;
 
         if (comptime ssz.isFixedType(ST)) {
@@ -209,7 +209,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
         } else {
             try ST.deserializeFromBytes(allocator, serialized_expected, value_actual);
         }
-        try std.testing.expectEqualDeep(&value_expected, &value_actual);
+        try std.testing.expect(ST.equals(value_expected, value_actual));
     }
 
     // test serialization - value to json
@@ -231,7 +231,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
 
     // test deserialization - json to value
     {
-        var value_actual = try allocator.create(ST.Type);
+        const value_actual = try allocator.create(ST.Type);
         value_actual.* = ST.default_value;
 
         var scanner = std.json.Scanner.initCompleteInput(allocator, expected_json.items);
@@ -243,9 +243,6 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
             try ST.deserializeFromJson(allocator, &scanner, value_actual);
         }
 
-        try std.testing.expectEqualDeep(&value_expected, &value_actual);
-
-        // test equals function
         try std.testing.expect(ST.equals(value_expected, value_actual));
     }
 
@@ -294,7 +291,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     } else {
         try ST.tree.toValue(allocator, node, &pool, value_from_tree);
     }
-    try std.testing.expectEqualDeep(value_expected, value_from_tree);
+    try std.testing.expect(ST.equals(value_expected, value_from_tree));
 }
 
 pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir) !void {
