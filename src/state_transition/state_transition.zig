@@ -170,13 +170,10 @@ pub fn stateTransition(
 
     // Verify state root
     if (opts.verify_state_root) {
-        var hash_tree_root_timer = metrics.startTimerLabeled(
-            &metrics.state_transition.state_hash_tree_root,
-            metrics.HashTreeRootLabel{ .source = .state_transition },
-        );
+        var timer = metrics.state_hash_tree_root.startTimer(.{ .source = .state_transition });
         var post_state_root: [32]u8 = undefined;
         try post_state.state.hashTreeRoot(allocator, &post_state_root);
-        _ = try hash_tree_root_timer.stopAndObserve();
+        _ = try timer.stopAndObserve();
 
         const block_state_root = switch (block) {
             .regular => |b| b.stateRoot(),
