@@ -156,7 +156,7 @@ pub fn stateTransition(
     }
 
     //  // Note: time only on success
-    var process_block_timer = metrics.startTimer(&metrics.state_transition.process_block);
+    var process_block_timer = metrics.process_block.startTimer();
     try processBlock(
         allocator,
         post_state,

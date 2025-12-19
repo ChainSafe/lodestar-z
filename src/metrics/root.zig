@@ -63,25 +63,6 @@ pub fn LabeledObserver(comptime H: type, comptime L: type) type {
     };
 }
 
-/// Initializes a `std.time.Timer` and returns an `Observer`.
-/// Suitable for one-time use of `Observer`.
-pub fn startTimer(hist: anytype) Observer(@TypeOf(hist)) {
-    std.debug.assert(@typeInfo(@TypeOf(hist)) == .pointer);
-    return .{
-        .hist = hist,
-        .timer = std.time.Timer.start() catch unreachable,
-    };
-}
-
-/// Initializes a `std.time.Timer` and returns a `LabeledObserver`.
-/// Suitable for one-time use of `LabeledObserver`.
-pub fn startTimerLabeled(hist: anytype, labels: anytype) LabeledObserver(@TypeOf(hist), @TypeOf(labels)) {
-    std.debug.assert(@typeInfo(@TypeOf(hist)) == .pointer);
-    var obs = LabeledObserver(@TypeOf(hist), @TypeOf(labels)).init(hist);
-    _ = obs.startTimer(labels);
-    return obs;
-}
-
 const std = @import("std");
 
 const m = @import("metrics");
