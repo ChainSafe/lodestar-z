@@ -1,6 +1,5 @@
 const std = @import("std");
 const metrics = @import("../metrics.zig");
-const state_transition_metrics = @import("../metrics.zig").state_transition_metrics;
 
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const ForkSeq = @import("config").ForkSeq;
