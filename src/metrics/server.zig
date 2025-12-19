@@ -70,7 +70,7 @@ pub fn runStf(_: *MetricsHandler, _: *httpz.Request, _: *httpz.Response) !void {
 fn getMetrics(_: *MetricsHandler, _: *httpz.Request, res: *httpz.Response) !void {
     res.content_type = .TEXT;
     const writer = res.writer();
-    try state_transition.writeMetrics(writer);
+    try state_transition.metrics.write(writer);
 }
 
 const std = @import("std");

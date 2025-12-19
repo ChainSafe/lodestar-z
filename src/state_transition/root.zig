@@ -4,7 +4,6 @@ const testing = std.testing;
 pub const stateTransition = @import("state_transition.zig").stateTransition;
 
 pub const metrics = @import("metrics.zig");
-pub const writeMetrics = metrics.write;
 
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
 pub const BeaconBlock = @import("./types/beacon_block.zig").BeaconBlock;
