@@ -145,7 +145,7 @@ pub fn stateTransition(
         allocator.destroy(post_state);
     }
 
-    try metrics.onStateClone(post_state, &metrics.state_transition, .state_transition);
+    try metrics.state_transition.onStateClone(post_state, .state_transition);
 
     try processSlotsWithTransientCache(allocator, post_state, block_slot, .{});
 
@@ -168,7 +168,7 @@ pub fn stateTransition(
     );
     _ = process_block_timer.stopAndObserve();
 
-    metrics.onPostState(post_state, &metrics.state_transition);
+    metrics.state_transition.onPostState(post_state);
 
     // Verify state root
     if (opts.verify_state_root) {
