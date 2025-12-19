@@ -11,7 +11,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     try state_transition.metrics.initializeMetrics(allocator, .{});
-    defer state_transition.metrics.deinitMetrics(&state_transition.metrics.state_transition);
+    defer state_transition.metrics.state_transition.deinit();
 
     // blocks
     try serve(allocator, 8008);
