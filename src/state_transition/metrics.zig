@@ -2,9 +2,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const m = @import("metrics");
 
-const metrics_mod = @import("metrics_mod");
-const Observer = metrics_mod.Observer;
-const LabeledObserver = metrics_mod.LabeledObserver;
+const metrics_ext = @import("metrics_ext");
+const Observer = metrics_ext.Observer;
+const LabeledObserver = metrics_ext.LabeledObserver;
 
 const CachedBeaconStateAllForks = @import("cache/state_cache.zig").CachedBeaconStateAllForks;
 
