@@ -1,5 +1,3 @@
-pub const server = @import("server.zig");
-
 /// An observer for tracking time.
 pub fn Observer(comptime H: type) type {
     return struct {
