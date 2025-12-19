@@ -168,11 +168,6 @@ pub fn stateTransition(
         .{ .verify_signature = opts.verify_signatures },
     );
     _ = process_block_timer.stopAndObserve();
-    //
-    // TODO(bing): commit
-    //  const processBlockCommitTimer = metrics?.processBlockCommitTime.startTimer();
-    //  postState.commit();
-    //  processBlockCommitTimer?.();
 
     metrics.onPostState(post_state, &metrics.state_transition);
 
