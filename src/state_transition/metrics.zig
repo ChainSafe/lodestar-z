@@ -116,6 +116,16 @@ const Metrics = struct {
         else
             self.post_state_validators_nodes_populated_miss.incr();
     }
+    /// Deinitializes all `HistogramVec` and `GaugeVec` metrics for state transition.
+    pub fn deinit(self: *Metrics) void {
+        self.epoch_transition_step.deinit();
+        self.state_hash_tree_root.deinit();
+        self.pre_state_balances_nodes_populated_miss.deinit();
+        self.pre_state_balances_nodes_populated_hit.deinit();
+        self.pre_state_validators_nodes_populated_miss.deinit();
+        self.pre_state_validators_nodes_populated_hit.deinit();
+        self.proposer_rewards.deinit();
+    }
 };
 
 /// Initializes all metrics for state transition. Requires an allocator for `GaugeVec` and `HistogramVec` metrics.
@@ -241,17 +251,6 @@ pub fn initializeMetrics(allocator: Allocator, comptime opts: m.RegistryOpts) !v
             opts,
         ),
     };
-}
-
-/// Deinitializes all `HistogramVec` and `GaugeVec` metrics for state transition.
-pub fn deinitMetrics(current: *Metrics) void {
-    current.epoch_transition_step.deinit();
-    current.state_hash_tree_root.deinit();
-    current.pre_state_balances_nodes_populated_miss.deinit();
-    current.pre_state_balances_nodes_populated_hit.deinit();
-    current.pre_state_validators_nodes_populated_miss.deinit();
-    current.pre_state_validators_nodes_populated_hit.deinit();
-    current.proposer_rewards.deinit();
 }
 
 /// Writes all metrics to `writer`.
