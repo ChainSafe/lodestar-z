@@ -92,6 +92,30 @@ const Metrics = struct {
     const GaugeVecSource = m.GaugeVec(u64, StateCloneSourceLabel);
     const PreStateClonedCount = m.Histogram(u32, &.{ 1, 2, 5, 10, 50, 250 });
     const ProposerRewardsGauge = m.GaugeVec(u64, ProposerRewardLabel);
+
+    pub fn onStateClone(self: *Metrics, state: *CachedBeaconStateAllForks, source: StateCloneSource) !void {
+        try if (state.state.balances().items.len > 0)
+            self.pre_state_balances_nodes_populated_hit.incr(.{ .source = source })
+        else
+            self.pre_state_balances_nodes_populated_miss.incr(.{ .source = source });
+
+        try if (state.state.validators().items.len > 0)
+            self.pre_state_validators_nodes_populated_hit.incr(.{ .source = source })
+        else
+            self.pre_state_validators_nodes_populated_miss.incr(.{ .source = source });
+    }
+
+    pub fn onPostState(self: *Metrics, state: *CachedBeaconStateAllForks) void {
+        if (state.state.balances().items.len > 0)
+            self.post_state_balances_nodes_populated_hit.incr()
+        else
+            self.post_state_balances_nodes_populated_miss.incr();
+
+        if (state.state.validators().items.len > 0)
+            self.post_state_validators_nodes_populated_hit.incr()
+        else
+            self.post_state_validators_nodes_populated_miss.incr();
+    }
 };
 
 /// Initializes all metrics for state transition. Requires an allocator for `GaugeVec` and `HistogramVec` metrics.
@@ -228,30 +252,6 @@ pub fn deinitMetrics(current: *Metrics) void {
     current.pre_state_validators_nodes_populated_miss.deinit();
     current.pre_state_validators_nodes_populated_hit.deinit();
     current.proposer_rewards.deinit();
-}
-
-pub fn onStateClone(state: *CachedBeaconStateAllForks, metrics: *Metrics, source: StateCloneSource) !void {
-    try if (state.state.balances().items.len > 0)
-        metrics.pre_state_balances_nodes_populated_hit.incr(.{ .source = source })
-    else
-        metrics.pre_state_balances_nodes_populated_miss.incr(.{ .source = source });
-
-    try if (state.state.validators().items.len > 0)
-        metrics.pre_state_validators_nodes_populated_hit.incr(.{ .source = source })
-    else
-        metrics.pre_state_validators_nodes_populated_miss.incr(.{ .source = source });
-}
-
-pub fn onPostState(state: *CachedBeaconStateAllForks, metrics: *Metrics) void {
-    if (state.state.balances().items.len > 0)
-        metrics.post_state_balances_nodes_populated_hit.incr()
-    else
-        metrics.post_state_balances_nodes_populated_miss.incr();
-
-    if (state.state.validators().items.len > 0)
-        metrics.post_state_validators_nodes_populated_hit.incr()
-    else
-        metrics.post_state_validators_nodes_populated_miss.incr();
 }
 
 /// Writes all metrics to `writer`.
