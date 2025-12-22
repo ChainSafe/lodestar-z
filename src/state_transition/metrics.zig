@@ -8,7 +8,7 @@ const LabeledObserver = metrics_ext.LabeledObserver;
 
 const CachedBeaconStateAllForks = @import("cache/state_cache.zig").CachedBeaconStateAllForks;
 
-/// Defaults to noop metrics, making this safe to use whether or not `initializeMetrics` is called.
+/// Defaults to noop metrics, making this safe to use whether or not `metrics.init` is called.
 pub var state_transition = m.initializeNoop(Metrics);
 
 pub const StateCloneSource = enum {
@@ -131,7 +131,7 @@ const Metrics = struct {
 /// Initializes all metrics for state transition. Requires an allocator for `GaugeVec` and `HistogramVec` metrics.
 ///
 /// Meant to be called once on application startup.
-pub fn initializeMetrics(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
+pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
     state_transition = .{
         .epoch_transition = Metrics.EpochTransition.init(
             "lodestar_stfn_epoch_transition_seconds",
