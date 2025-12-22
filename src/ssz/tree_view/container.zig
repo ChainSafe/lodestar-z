@@ -117,6 +117,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                         nodes[changed_idx] = child_node;
                         indices[changed_idx] = i;
                         self.original_nodes[i] = child_node;
+                        changed_idx += 1;
                     } else {
                         var child_view = self.child_data[i] orelse return error.MissingChildView;
                         try child_view.commit();
@@ -128,10 +129,10 @@ pub fn ContainerTreeView(comptime ST: type) type {
                             nodes[changed_idx] = child_view.root;
                             self.original_nodes[i] = child_view.root;
                             indices[changed_idx] = i;
+                            changed_idx += 1;
                         }
                         // else child_view is not changed
                     }
-                    changed_idx += 1;
                 }
             }
 
