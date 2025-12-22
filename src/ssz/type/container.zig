@@ -12,7 +12,7 @@ const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const Depth = @import("persistent_merkle_tree").Depth;
-const ContainerTreeView = @import("../tree_view/root.zig").ContainerTreeView;
+const ContainerTreeView = @import("../tree_view/root.zig").ContainerTreeView2;
 
 pub fn FixedContainerType(comptime ST: type) type {
     const ssz_fields = switch (@typeInfo(ST)) {
