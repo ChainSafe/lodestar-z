@@ -667,7 +667,7 @@ test "resize" {
     try std.testing.expect(b.data.items[0] == 13);
 }
 
-// Tests ported from TypeScript ssz packages/ssz/test/unit/byType/bitList/valid.test.ts
+// Refer to https://github.com/ChainSafe/ssz/blob/f5ed0b457333749b5c3f49fa5eafa096a725f033/packages/ssz/test/unit/byType/bitList/valid.test.ts#L44-L69
 test "BitListType - padding bit test cases" {
     const allocator = std.testing.allocator;
 
@@ -708,6 +708,7 @@ test "BitListType - padding bit test cases" {
     }
 }
 
+// Refer to https://github.com/ChainSafe/ssz/blob/f5ed0b457333749b5c3f49fa5eafa096a725f033/packages/ssz/test/unit/byType/bitList/valid.test.ts#L5-L41
 test "BitListType - tree roundtrip" {
     const allocator = std.testing.allocator;
 
