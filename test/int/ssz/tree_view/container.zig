@@ -25,7 +25,7 @@ test "TreeView container field roundtrip" {
     // get field "root"
     var root_view = try cp_view.get("root");
     var root = [_]u8{0} ** 32;
-    const RootView = Checkpoint.TreeView.Field("root");
+    const RootView = @typeInfo(Checkpoint.TreeView.Field("root")).pointer.child;
     try RootView.SszType.tree.toValue(root_view.base_view.data.root, &pool, root[0..]);
     try std.testing.expectEqualSlices(u8, ([_]u8{1} ** 32)[0..], root[0..]);
 

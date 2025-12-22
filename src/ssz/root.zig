@@ -44,7 +44,6 @@ const tree_view = @import("tree_view/root.zig");
 pub const TreeViewData = tree_view.TreeViewData;
 pub const BaseTreeView = tree_view.BaseTreeView;
 pub const ContainerTreeView = tree_view.ContainerTreeView;
-pub const ContainerTreeView2 = tree_view.ContainerTreeView2;
 pub const ArrayBasicTreeView = tree_view.ArrayBasicTreeView;
 pub const ArrayCompositeTreeView = tree_view.ArrayCompositeTreeView;
 pub const ListBasicTreeView = tree_view.ListBasicTreeView;
