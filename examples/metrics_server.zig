@@ -10,7 +10,7 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
-    try state_transition.metrics.initializeMetrics(allocator, .{});
+    try state_transition.metrics.init(allocator, .{});
     defer state_transition.metrics.state_transition.deinit();
 
     // blocks
