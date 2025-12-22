@@ -49,7 +49,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
         child_data: TreeViewData,
         root: Node.Id,
         /// whether the corresponding child node/data has changed since the last update of the root
-        changed: [ST.chunk_count]bool,
+        changed: std.AutoArrayHashMapUnmanaged(usize, void),
         // TODO: track original_nodes like ts
         pub const SszType = ST;
 
@@ -66,7 +66,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 .pool = pool,
                 .child_data = child_data,
                 .root = root,
-                .changed = .{false} ** ST.chunk_count,
+                .changed = .empty,
             };
         }
 
@@ -84,19 +84,13 @@ pub fn ContainerTreeView(comptime ST: type) type {
                         @constCast(child).deinit();
                     }
                     self.child_data[i] = null;
-                    self.changed[i] = false;
                 }
             }
+            self.changed.deinit(self.allocator);
         }
 
         pub fn commit(self: *Self) !void {
-            var changed_count: usize = 0;
-            for (self.changed) |c| {
-                if (c) {
-                    changed_count += 1;
-                }
-            }
-            if (changed_count == 0) {
+            if (self.changed.count() == 0) {
                 return;
             }
 
@@ -105,7 +99,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
             var changed_idx: usize = 0;
             inline for (ST.fields, 0..) |field, i| {
-                if (self.changed[i]) {
+                if (self.changed.get(i) != null) {
                     const ChildST = ST.getFieldType(field.name);
                     if (comptime isBasicType(ChildST)) {
                         const child_node = self.child_data[i] orelse return error.MissingChildNode;
@@ -124,14 +118,13 @@ pub fn ContainerTreeView(comptime ST: type) type {
             if (changed_idx == 0) {
                 return;
             }
-            const new_root = try self.root.setNodesAtDepth(self.pool, ST.chunk_depth, indices[0..changed_count], nodes[0..changed_count]);
+
+            const new_root = try self.root.setNodesAtDepth(self.pool, ST.chunk_depth, indices[0..changed_idx], nodes[0..changed_idx]);
             try self.pool.ref(new_root);
             self.pool.unref(self.root);
             self.root = new_root;
 
-            inline for (self.changed, 0..) |_, i| {
-                self.changed[i] = false;
-            }
+            self.changed.clearRetainingCapacity();
         }
 
         pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
@@ -168,7 +161,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 }
             } else {
                 // TODO only update changed if the subview is mutable
-                self.changed[field_index] = true;
+                try self.changed.put(self.allocator, field_index, {});
 
                 const existing_ptr = &self.child_data[field_index];
                 if (existing_ptr.*) |*child_view| {
@@ -189,7 +182,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
         pub fn set(self: *Self, comptime field_name: []const u8, value: Field(field_name)) !void {
             const field_index = comptime ST.getFieldIndex(field_name);
             const ChildST = ST.getFieldType(field_name);
-            self.changed[field_index] = true;
+            try self.changed.put(self.allocator, field_index, {});
 
             if (comptime isBasicType(ChildST)) {
                 const existing = self.child_data[field_index];
