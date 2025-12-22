@@ -43,11 +43,13 @@ pub fn ContainerTreeView(comptime ST: type) type {
     });
 
     return struct {
+        /// required fields
         allocator: Allocator,
         pool: *Node.Pool,
+        root: Node.Id,
+        /// specific fields for this TreeView
         /// a tuple of either Optional(Value) for basic type or Optional(ChildTreeView) for composite type
         child_data: TreeViewData,
-        root: Node.Id,
         /// whether the corresponding child node/data has changed since the last update of the root
         changed: std.AutoArrayHashMapUnmanaged(usize, void),
         original_nodes: [ST.chunk_count]?Node.Id,
@@ -118,14 +120,16 @@ pub fn ContainerTreeView(comptime ST: type) type {
                     } else {
                         var child_view = self.child_data[i] orelse return error.MissingChildView;
                         try child_view.commit();
-                        if (self.original_nodes[i]) |orig_node| {
-                            if (orig_node != child_view.root) {
-                                nodes[changed_idx] = child_view.root;
-                                self.original_nodes[i] = child_view.root;
-                                indices[changed_idx] = i;
-                            }
-                            // else child_view is not changed
+                        // TODO: enable this if we can enforce all TreeView to have "root" field
+                        const child_changed = if (self.original_nodes[i]) |orig_node| blk: {
+                            break :blk orig_node != child_view.root;
+                        } else true;
+                        if (child_changed) {
+                            nodes[changed_idx] = child_view.root;
+                            self.original_nodes[i] = child_view.root;
+                            indices[changed_idx] = i;
                         }
+                        // else child_view is not changed
                     }
                     changed_idx += 1;
                 }
@@ -177,16 +181,15 @@ pub fn ContainerTreeView(comptime ST: type) type {
                     return value;
                 }
             } else {
-                // TODO only update changed if the subview is mutable
                 try self.changed.put(self.allocator, field_index, {});
 
                 const existing_ptr = &self.child_data[field_index];
                 if (existing_ptr.*) |*child_view| {
                     return child_view;
                 } else {
-                    // TODO: also track this node in original_nodes like ts
                     const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
                     self.original_nodes[field_index] = node;
+                    // should TreeView.init() returns pointers?
                     existing_ptr.* = try ChildST.TreeView.init(self.allocator, self.pool, node);
                     return &existing_ptr.*.?;
                 }
