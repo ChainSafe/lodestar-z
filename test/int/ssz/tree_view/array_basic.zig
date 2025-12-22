@@ -110,3 +110,114 @@ test "TreeView vector getAllAlloc repeat reflects updates" {
     values[3] = 99;
     try std.testing.expectEqualSlices(u32, values[0..], second);
 }
+
+// Tests ported from TypeScript ssz packages/ssz/test/unit/byType/vector/tree.test.ts
+test "ArrayBasicTreeView - serialize (uint64 vector)" {
+    const allocator = std.testing.allocator;
+
+    const Uint64 = ssz.UintType(64);
+    const VecU64Type = ssz.FixedVectorType(Uint64, 4);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const TestCase = struct {
+        id: []const u8,
+        values: [4]u64,
+        expected_serialized: []const u8,
+        expected_root: [32]u8,
+    };
+
+    const test_cases = [_]TestCase{
+        .{
+            .id = "4 values",
+            .values = [4]u64{ 100000, 200000, 300000, 400000 },
+            // 0xa086010000000000400d030000000000e093040000000000801a060000000000
+            .expected_serialized = &[_]u8{ 0xa0, 0x86, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x0d, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0x93, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00 },
+            // For VectorBasic, the root is the same as the serialized bytes (fits in one chunk)
+            .expected_root = [_]u8{ 0xa0, 0x86, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x0d, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0x93, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00 },
+        },
+    };
+
+    for (test_cases) |tc| {
+        const value = tc.values;
+
+        var value_serialized: [VecU64Type.fixed_size]u8 = undefined;
+        _ = VecU64Type.serializeIntoBytes(&value, &value_serialized);
+
+        const tree_node = try VecU64Type.tree.fromValue(&pool, &value);
+        var view = try VecU64Type.TreeView.init(allocator, &pool, tree_node);
+        defer view.deinit();
+
+        const view_serialized = try view.serialize();
+        defer allocator.free(view_serialized);
+
+        try std.testing.expectEqualSlices(u8, tc.expected_serialized, view_serialized);
+        try std.testing.expectEqualSlices(u8, &value_serialized, view_serialized);
+
+        const view_size = view.serializedSize();
+        try std.testing.expectEqual(tc.expected_serialized.len, view_size);
+
+        var hash_root: [32]u8 = undefined;
+        try view.hashTreeRoot(&hash_root);
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
+    }
+}
+
+test "ArrayBasicTreeView - serialize (uint8 vector)" {
+    const allocator = std.testing.allocator;
+
+    const Uint8 = ssz.UintType(8);
+    const VecU8Type = ssz.FixedVectorType(Uint8, 8);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const value = [8]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+
+    var value_serialized: [VecU8Type.fixed_size]u8 = undefined;
+    _ = VecU8Type.serializeIntoBytes(&value, &value_serialized);
+
+    const tree_node = try VecU8Type.tree.fromValue(&pool, &value);
+    var view = try VecU8Type.TreeView.init(allocator, &pool, tree_node);
+    defer view.deinit();
+
+    const view_serialized = try view.serialize();
+    defer allocator.free(view_serialized);
+
+    try std.testing.expectEqualSlices(u8, &value, view_serialized);
+
+    const view_size = view.serializedSize();
+    try std.testing.expectEqual(@as(usize, 8), view_size);
+}
+
+test "ArrayBasicTreeView - get and set" {
+    const allocator = std.testing.allocator;
+
+    const Uint64 = ssz.UintType(64);
+    const VecU64Type = ssz.FixedVectorType(Uint64, 4);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const value = [4]u64{ 100, 200, 300, 400 };
+    const tree_node = try VecU64Type.tree.fromValue(&pool, &value);
+    var view = try VecU64Type.TreeView.init(allocator, &pool, tree_node);
+    defer view.deinit();
+
+    try std.testing.expectEqual(@as(u64, 100), try view.get(0));
+    try std.testing.expectEqual(@as(u64, 200), try view.get(1));
+    try std.testing.expectEqual(@as(u64, 300), try view.get(2));
+    try std.testing.expectEqual(@as(u64, 400), try view.get(3));
+
+    try view.set(1, 999);
+    try std.testing.expectEqual(@as(u64, 999), try view.get(1));
+
+    const serialized = try view.serialize();
+    defer allocator.free(serialized);
+
+    const expected = [4]u64{ 100, 999, 300, 400 };
+    var expected_serialized: [VecU64Type.fixed_size]u8 = undefined;
+    _ = VecU64Type.serializeIntoBytes(&expected, &expected_serialized);
+    try std.testing.expectEqualSlices(u8, &expected_serialized, serialized);
+}

@@ -84,6 +84,16 @@ pub fn BoolType() type {
                 new_leaf[offset] = if (value.*) 1 else 0;
                 return try pool.createLeaf(&new_leaf);
             }
+
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) usize {
+                const hash = node.getRoot(pool);
+                out[0] = hash[0];
+                return fixed_size;
+            }
+
+            pub fn serializedSize(_: Node.Id, _: *Node.Pool) usize {
+                return fixed_size;
+            }
         };
 
         pub fn serializeIntoJson(writer: anytype, in: *const Type) !void {

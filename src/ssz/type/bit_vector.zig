@@ -258,6 +258,25 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
 
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }
+
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                var nodes: [chunk_count]Node.Id = undefined;
+                try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
+
+                for (0..chunk_count) |i| {
+                    const start_idx = i * 32;
+                    const remaining_bytes = byte_length - start_idx;
+                    const bytes_to_copy = @min(remaining_bytes, 32);
+                    if (bytes_to_copy > 0) {
+                        @memcpy(out[start_idx..][0..bytes_to_copy], nodes[i].getRoot(pool)[0..bytes_to_copy]);
+                    }
+                }
+                return fixed_size;
+            }
+
+            pub fn serializedSize(_: Node.Id, _: *Node.Pool) usize {
+                return fixed_size;
+            }
         };
 
         pub fn serializeIntoJson(writer: anytype, in: *const Type) !void {
@@ -366,4 +385,57 @@ test "clone" {
 
     try expectEqualRoots(Bits, b, cloned);
     try expectEqualSerialized(Bits, b, cloned);
+}
+
+// Tests ported from TypeScript ssz packages/ssz/test/unit/byType/bitVector/valid.test.ts
+test "BitVectorType - tree roundtrip 128 bits" {
+    const allocator = std.testing.allocator;
+
+    const Bits = BitVectorType(128);
+
+    const TestCase = struct {
+        id: []const u8,
+        serialized: [16]u8,
+        expected_root: [32]u8,
+    };
+
+    const test_cases = [_]TestCase{
+        .{
+            .id = "empty (one bit set)",
+            .serialized = [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 },
+            // root is padded serialized (16 bytes -> 32 bytes)
+            .expected_root = [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+        },
+        .{
+            .id = "some value",
+            .serialized = [_]u8{ 0xb5, 0x5b, 0x85, 0x92, 0xbc, 0xac, 0x47, 0x59, 0x06, 0x63, 0x14, 0x81, 0xbb, 0xc7, 0x46, 0xbc },
+            .expected_root = [_]u8{ 0xb5, 0x5b, 0x85, 0x92, 0xbc, 0xac, 0x47, 0x59, 0x06, 0x63, 0x14, 0x81, 0xbb, 0xc7, 0x46, 0xbc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+        },
+    };
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    for (test_cases) |tc| {
+        var value: Bits.Type = undefined;
+        try Bits.deserializeFromBytes(&tc.serialized, &value);
+
+        const tree_node = try Bits.tree.fromValue(&pool, &value);
+
+        var value_from_tree: Bits.Type = undefined;
+        try Bits.tree.toValue(tree_node, &pool, &value_from_tree);
+
+        try std.testing.expect(Bits.equals(&value, &value_from_tree));
+
+        const tree_size = Bits.tree.serializedSize(tree_node, &pool);
+        try std.testing.expectEqual(tc.serialized.len, tree_size);
+
+        var tree_serialized: [Bits.fixed_size]u8 = undefined;
+        _ = try Bits.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
+        try std.testing.expectEqualSlices(u8, &tc.serialized, &tree_serialized);
+
+        var hash_root: [32]u8 = undefined;
+        try Bits.hashTreeRoot(&value, &hash_root);
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
+    }
 }

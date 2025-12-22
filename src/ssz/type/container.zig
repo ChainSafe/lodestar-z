@@ -155,24 +155,20 @@ pub fn FixedContainerType(comptime ST: type) type {
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }
 
-            pub fn serializeIntoBytes(value: Node.Id, pool: *Node.Pool, out: []u8) !usize {
-                var i: usize = 0;
-                inline for (fields) |field| {
-                    const field_value_ptr = &@field(value, field.name);
-                    i += try field.type.tree.serializeIntoBytes(field_value_ptr, pool, out[i..]);
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                var nodes: [chunk_count]Node.Id = undefined;
+                try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
+
+                var offset: usize = 0;
+                inline for (fields, 0..) |field, i| {
+                    const result = field.type.tree.serializeIntoBytes(nodes[i], pool, out[offset..]);
+                    offset += if (@typeInfo(@TypeOf(result)) == .error_union) try result else result;
                 }
-                return i;
+                return offset;
             }
 
-            pub fn deserializeFromBytes(data: []const u8, pool: *Node.Pool, out: *Node.Id) !void {
-                if (data.len != fixed_size) {
-                    return error.InvalidSize;
-                }
-                var i: usize = 0;
-                inline for (fields) |field| {
-                    try field.type.tree.deserializeFromBytes(data[i .. i + field.type.fixed_size], pool, &@field(out, field.name));
-                    i += field.type.fixed_size;
-                }
+            pub fn serializedSize(_: Node.Id, _: *Node.Pool) usize {
+                return fixed_size;
             }
         };
 
@@ -556,6 +552,41 @@ pub fn VariableContainerType(comptime ST: type) type {
                     }
                 }
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
+            }
+
+            pub fn serializeIntoBytes(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                var nodes: [chunk_count]Node.Id = undefined;
+                try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
+
+                var fixed_index: usize = 0;
+                var variable_index: usize = fixed_end;
+
+                inline for (fields, 0..) |field, i| {
+                    if (comptime isFixedType(field.type)) {
+                        const result = field.type.tree.serializeIntoBytes(nodes[i], pool, out[fixed_index..]);
+                        fixed_index += if (@typeInfo(@TypeOf(result)) == .error_union) try result else result;
+                    } else {
+                        std.mem.writeInt(u32, out[fixed_index..][0..4], @intCast(variable_index), .little);
+                        fixed_index += 4;
+                        variable_index += try field.type.tree.serializeIntoBytes(allocator, nodes[i], pool, out[variable_index..]);
+                    }
+                }
+                return variable_index;
+            }
+
+            pub fn serializedSize(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool) !usize {
+                var nodes: [chunk_count]Node.Id = undefined;
+                try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
+
+                var total_size: usize = 0;
+                inline for (fields, 0..) |field, i| {
+                    if (comptime isFixedType(field.type)) {
+                        total_size += field.type.fixed_size;
+                    } else {
+                        total_size += 4 + try field.type.tree.serializedSize(allocator, nodes[i], pool);
+                    }
+                }
+                return total_size;
             }
         };
 

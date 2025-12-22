@@ -86,6 +86,16 @@ pub fn UintType(comptime bits: comptime_int) type {
                 std.mem.writeInt(Type, new_leaf[offset..][0..bytes], value.*, .little);
                 return try pool.createLeaf(&new_leaf);
             }
+
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) usize {
+                const hash = node.getRoot(pool);
+                @memcpy(out[0..fixed_size], hash[0..fixed_size]);
+                return fixed_size;
+            }
+
+            pub fn serializedSize(_: Node.Id, _: *Node.Pool) usize {
+                return fixed_size;
+            }
         };
 
         pub fn serializeIntoJson(writer: anytype, in: *const Type) !void {

@@ -159,6 +159,32 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
                 }
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }
+
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                var nodes: [chunk_count]Node.Id = undefined;
+                try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
+
+                if (comptime isBasicType(Element)) {
+                    for (0..chunk_count) |i| {
+                        const start_idx = i * 32;
+                        const remaining_bytes = fixed_size - start_idx;
+                        const bytes_to_copy = @min(remaining_bytes, 32);
+                        if (bytes_to_copy > 0) {
+                            @memcpy(out[start_idx..][0..bytes_to_copy], nodes[i].getRoot(pool)[0..bytes_to_copy]);
+                        }
+                    }
+                } else {
+                    var offset: usize = 0;
+                    for (0..length) |i| {
+                        offset += try Element.tree.serializeIntoBytes(nodes[i], pool, out[offset..]);
+                    }
+                }
+                return fixed_size;
+            }
+
+            pub fn serializedSize(_: Node.Id, _: *Node.Pool) usize {
+                return fixed_size;
+            }
         };
 
         pub fn serializeIntoJson(writer: anytype, in: *const Type) !void {
@@ -327,6 +353,32 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
                     nodes[i] = try Element.tree.fromValue(allocator, pool, &value[i]);
                 }
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
+            }
+
+            pub fn serializeIntoBytes(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                var nodes: [chunk_count]Node.Id = undefined;
+                try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
+
+                const fixed_end = length * 4;
+                var variable_index = fixed_end;
+
+                for (0..length) |i| {
+                    std.mem.writeInt(u32, out[i * 4 ..][0..4], @intCast(variable_index), .little);
+                    variable_index += try Element.tree.serializeIntoBytes(allocator, nodes[i], pool, out[variable_index..]);
+                }
+
+                return variable_index;
+            }
+
+            pub fn serializedSize(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool) !usize {
+                var nodes: [chunk_count]Node.Id = undefined;
+                try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
+
+                var total_size: usize = length * 4; // Offsets
+                for (0..length) |i| {
+                    total_size += try Element.tree.serializedSize(allocator, nodes[i], pool);
+                }
+                return total_size;
             }
         };
 

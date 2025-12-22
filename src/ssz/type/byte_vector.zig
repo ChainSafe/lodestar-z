@@ -113,6 +113,24 @@ pub fn ByteVectorType(comptime _length: comptime_int) type {
                 }
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }
+
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                var nodes: [chunk_count]Node.Id = undefined;
+                try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
+                for (0..chunk_count) |i| {
+                    const start_idx = i * 32;
+                    const remaining_bytes = length - start_idx;
+                    const bytes_to_copy = @min(remaining_bytes, 32);
+                    if (bytes_to_copy > 0) {
+                        @memcpy(out[start_idx..][0..bytes_to_copy], nodes[i].getRoot(pool)[0..bytes_to_copy]);
+                    }
+                }
+                return fixed_size;
+            }
+
+            pub fn serializedSize(_: Node.Id, _: *Node.Pool) usize {
+                return fixed_size;
+            }
         };
 
         pub fn serializeIntoJson(writer: anytype, in: *const Type) !void {

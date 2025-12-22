@@ -112,3 +112,128 @@ test "TreeView vector composite clearCache does not break subsequent commits" {
     try VectorType.hashTreeRoot(&expected, &expected_root);
     try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
 }
+
+// Tests ported from TypeScript ssz packages/ssz/test/unit/byType/vector/tree.test.ts
+test "ArrayCompositeTreeView - serialize (ByteVector32 vector)" {
+    const allocator = std.testing.allocator;
+
+    const Root32 = ssz.ByteVectorType(32);
+    const VecRootsType = ssz.FixedVectorType(Root32, 4);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const value = [4][32]u8{
+        [_]u8{0xaa} ** 32,
+        [_]u8{0xbb} ** 32,
+        [_]u8{0xcc} ** 32,
+        [_]u8{0xdd} ** 32,
+    };
+
+    var value_serialized: [VecRootsType.fixed_size]u8 = undefined;
+    _ = VecRootsType.serializeIntoBytes(&value, &value_serialized);
+
+    const tree_node = try VecRootsType.tree.fromValue(&pool, &value);
+    var view = try VecRootsType.TreeView.init(allocator, &pool, tree_node);
+    defer view.deinit();
+
+    const view_serialized = try view.serialize();
+    defer allocator.free(view_serialized);
+
+    try std.testing.expectEqualSlices(u8, &value_serialized, view_serialized);
+
+    const view_size = try view.serializedSize();
+    try std.testing.expectEqual(@as(usize, 128), view_size);
+
+    try std.testing.expectEqualSlices(u8, &value[0], view_serialized[0..32]);
+    try std.testing.expectEqualSlices(u8, &value[1], view_serialized[32..64]);
+    try std.testing.expectEqualSlices(u8, &value[2], view_serialized[64..96]);
+    try std.testing.expectEqualSlices(u8, &value[3], view_serialized[96..128]);
+}
+
+test "ArrayCompositeTreeView - serialize (Container vector)" {
+    const allocator = std.testing.allocator;
+
+    const Uint64 = ssz.UintType(64);
+    const TestContainer = ssz.FixedContainerType(struct {
+        a: ssz.UintType(64),
+        b: ssz.UintType(64),
+    });
+    _ = Uint64;
+    const VecContainerType = ssz.FixedVectorType(TestContainer, 4);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const value = [4]TestContainer.Type{
+        .{ .a = 0, .b = 0 },
+        .{ .a = 123456, .b = 654321 },
+        .{ .a = 234567, .b = 765432 },
+        .{ .a = 345678, .b = 876543 },
+    };
+
+    var value_serialized: [VecContainerType.fixed_size]u8 = undefined;
+    _ = VecContainerType.serializeIntoBytes(&value, &value_serialized);
+
+    const tree_node = try VecContainerType.tree.fromValue(&pool, &value);
+    var view = try VecContainerType.TreeView.init(allocator, &pool, tree_node);
+    defer view.deinit();
+
+    const view_serialized = try view.serialize();
+    defer allocator.free(view_serialized);
+
+    try std.testing.expectEqualSlices(u8, &value_serialized, view_serialized);
+
+    // 0x0000000000000000000000000000000040e2010000000000f1fb0900000000004794030000000000f8ad0b00000000004e46050000000000ff5f0d0000000000
+    const expected = [_]u8{
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x40, 0xe2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf1, 0xfb, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x47, 0x94, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0xad, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x4e, 0x46, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x5f, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    try std.testing.expectEqualSlices(u8, &expected, view_serialized);
+
+    var hash_root: [32]u8 = undefined;
+    try view.hashTreeRoot(&hash_root);
+    // 0xb1a797eb50654748ba239010edccea7b46b55bf740730b700684f48b0c478372
+    const expected_root = [_]u8{ 0xb1, 0xa7, 0x97, 0xeb, 0x50, 0x65, 0x47, 0x48, 0xba, 0x23, 0x90, 0x10, 0xed, 0xcc, 0xea, 0x7b, 0x46, 0xb5, 0x5b, 0xf7, 0x40, 0x73, 0x0b, 0x70, 0x06, 0x84, 0xf4, 0x8b, 0x0c, 0x47, 0x83, 0x72 };
+    try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
+}
+
+test "ArrayCompositeTreeView - get and set" {
+    const allocator = std.testing.allocator;
+
+    const Root32 = ssz.ByteVectorType(32);
+    const VecRootsType = ssz.FixedVectorType(Root32, 4);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const value = [4][32]u8{
+        [_]u8{0xaa} ** 32,
+        [_]u8{0xbb} ** 32,
+        [_]u8{0xcc} ** 32,
+        [_]u8{0xdd} ** 32,
+    };
+
+    const tree_node = try VecRootsType.tree.fromValue(&pool, &value);
+    var view = try VecRootsType.TreeView.init(allocator, &pool, tree_node);
+    defer view.deinit();
+
+    var elem0 = try view.get(0);
+    defer elem0.deinit();
+    const bytes0 = try elem0.serialize();
+    defer allocator.free(bytes0);
+    try std.testing.expectEqualSlices(u8, &value[0], bytes0);
+
+    const new_val = [_]u8{0xff} ** 32;
+    const new_node = try Root32.tree.fromValue(&pool, &new_val);
+    const new_elem = try Root32.TreeView.init(allocator, &pool, new_node);
+    try view.set(1, new_elem);
+
+    var elem1 = try view.get(1);
+    defer elem1.deinit();
+    const bytes1 = try elem1.serialize();
+    defer allocator.free(bytes1);
+    try std.testing.expectEqualSlices(u8, &new_val, bytes1);
+}

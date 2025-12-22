@@ -169,6 +169,32 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
                     try pool.createLeafFromUint(value.items.len),
                 );
             }
+
+            pub fn serializeIntoBytes(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                const len = try length(node, pool);
+                const chunk_count = (len + 31) / 32;
+                if (chunk_count == 0) {
+                    return 0;
+                }
+
+                const nodes = try allocator.alloc(Node.Id, chunk_count);
+                defer allocator.free(nodes);
+                try node.getNodesAtDepth(pool, chunk_depth + 1, 0, nodes);
+
+                for (0..chunk_count) |i| {
+                    const start_idx = i * 32;
+                    const remaining_bytes = len - start_idx;
+                    const bytes_to_copy = @min(remaining_bytes, 32);
+                    if (bytes_to_copy > 0) {
+                        @memcpy(out[start_idx..][0..bytes_to_copy], nodes[i].getRoot(pool)[0..bytes_to_copy]);
+                    }
+                }
+                return len;
+            }
+
+            pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {
+                return try length(node, pool);
+            }
         };
 
         pub fn deserializeFromBytes(allocator: std.mem.Allocator, data: []const u8, out: *Type) !void {
