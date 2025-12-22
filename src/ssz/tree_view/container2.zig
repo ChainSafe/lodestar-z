@@ -45,12 +45,12 @@ pub fn ContainerTreeView(comptime ST: type) type {
     return struct {
         allocator: Allocator,
         pool: *Node.Pool,
-        /// a tuple of either Optional(Node.Id) for basic type or Optional(ChildTreeView) for composite type
+        /// a tuple of either Optional(Value) for basic type or Optional(ChildTreeView) for composite type
         child_data: TreeViewData,
         root: Node.Id,
         /// whether the corresponding child node/data has changed since the last update of the root
         changed: std.AutoArrayHashMapUnmanaged(usize, void),
-        // TODO: track original_nodes like ts
+        original_nodes: [ST.chunk_count]?Node.Id,
         pub const SszType = ST;
 
         const Self = @This();
@@ -61,10 +61,15 @@ pub fn ContainerTreeView(comptime ST: type) type {
             inline for (child_data, 0..) |_, i| {
                 child_data[i] = null;
             }
+            var original_nodes: [ST.chunk_count]?Node.Id = undefined;
+            inline for (original_nodes, 0..) |_, i| {
+                original_nodes[i] = null;
+            }
             return .{
                 .allocator = allocator,
                 .pool = pool,
                 .child_data = child_data,
+                .original_nodes = original_nodes,
                 .root = root,
                 .changed = .empty,
             };
@@ -86,6 +91,10 @@ pub fn ContainerTreeView(comptime ST: type) type {
                     self.child_data[i] = null;
                 }
             }
+            inline for (0..ST.chunk_count) |i| {
+                // these nodes are unref by root
+                self.original_nodes[i] = null;
+            }
             self.changed.deinit(self.allocator);
         }
 
@@ -105,11 +114,18 @@ pub fn ContainerTreeView(comptime ST: type) type {
                         const child_node = self.child_data[i] orelse return error.MissingChildNode;
                         nodes[changed_idx] = child_node;
                         indices[changed_idx] = i;
+                        self.original_nodes[i] = child_node;
                     } else {
                         var child_view = self.child_data[i] orelse return error.MissingChildView;
                         try child_view.commit();
-                        nodes[changed_idx] = child_view.root;
-                        indices[changed_idx] = i;
+                        if (self.original_nodes[i]) |orig_node| {
+                            if (orig_node != child_view.root) {
+                                nodes[changed_idx] = child_view.root;
+                                self.original_nodes[i] = child_view.root;
+                                indices[changed_idx] = i;
+                            }
+                            // else child_view is not changed
+                        }
                     }
                     changed_idx += 1;
                 }
@@ -157,6 +173,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                     const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
                     self.child_data[field_index] = node;
                     try ChildST.tree.toValue(node, self.pool, &value);
+                    self.original_nodes[field_index] = node;
                     return value;
                 }
             } else {
@@ -169,6 +186,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 } else {
                     // TODO: also track this node in original_nodes like ts
                     const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
+                    self.original_nodes[field_index] = node;
                     existing_ptr.* = try ChildST.TreeView.init(self.allocator, self.pool, node);
                     return &existing_ptr.*.?;
                 }
@@ -201,7 +219,9 @@ pub fn ContainerTreeView(comptime ST: type) type {
             } else {
                 const existing_ptr = &self.child_data[field_index];
                 if (existing_ptr.*) |*old_view| {
-                    old_view.deinit();
+                    if (old_view != value) {
+                        old_view.deinit();
+                    }
                 }
 
                 existing_ptr.* = value.*;
@@ -235,7 +255,7 @@ test "ContainerTreeView2" {
     try foo_view.commit();
     try std.testing.expectEqual(1230, try foo_view.get("a"));
 
-    // // test hashTreeRoot()
+    // test hashTreeRoot()
     var value_root: [32]u8 = undefined;
     var expected_foo_value: Foo.Type = .{ .a = 1230, .b = 456 };
     try Foo.hashTreeRoot(&expected_foo_value, &value_root);
