@@ -53,11 +53,6 @@ const HashTreeRootLabel = struct { source: StateHashTreeRootSource };
 const EpochTransitionStepLabel = struct { step: EpochTransitionStepKind };
 const ProposerRewardLabel = struct { kind: ProposerRewardKind };
 
-pub var process_block = Observer(Metrics.ProcessBlock).init(&state_transition.process_block);
-pub var epoch_transition = Observer(Metrics.EpochTransition).init(&state_transition.epoch_transition);
-pub var epoch_transition_step = LabeledObserver(Metrics.EpochTransitionStep, EpochTransitionStepLabel).init(&state_transition.epoch_transition_step);
-pub var state_hash_tree_root = LabeledObserver(Metrics.StateHashTreeRoot, HashTreeRootLabel).init(&state_transition.state_hash_tree_root);
-
 const Metrics = struct {
     epoch_transition: EpochTransition,
     epoch_transition_commit: EpochTransitionCommit,
