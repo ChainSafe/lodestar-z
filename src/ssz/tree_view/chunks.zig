@@ -8,8 +8,6 @@ const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 
 const tree_view_root = @import("root.zig");
-const BaseTreeView = tree_view_root.BaseTreeView;
-const TreeViewData = tree_view_root.TreeViewData;
 
 /// Shared helpers for basic element types packed into chunks.
 pub fn BasicPackedChunks(
@@ -47,7 +45,7 @@ pub fn BasicPackedChunks(
 
         pub fn deinit(self: *Self) void {
             self.pool.unref(self.root);
-            self.clearChildrenNodesCache(self.pool);
+            self.clearChildrenNodesCache();
             self.children_nodes.deinit(self.allocator);
             self.changed.deinit(self.allocator);
         }
@@ -196,12 +194,12 @@ pub fn BasicPackedChunks(
             }
         }
 
-        pub fn clearChildrenNodesCache(self: *Self, pool: *Node.Pool) void {
+        pub fn clearChildrenNodesCache(self: *Self) void {
             var value_iter = self.children_nodes.valueIterator();
             while (value_iter.next()) |node_id_ptr| {
                 const node_id = node_id_ptr.*;
-                if (node_id.getState(pool).getRefCount() == 0) {
-                    pool.unref(node_id);
+                if (node_id.getState(self.pool).getRefCount() == 0) {
+                    self.pool.unref(node_id);
                 }
             }
             self.children_nodes.clearRetainingCapacity();
@@ -215,31 +213,154 @@ pub fn CompositeChunks(
     comptime chunk_depth: Depth,
 ) type {
     return struct {
-        pub const Element = ST.Element.TreeView;
+        /// required fields
+        allocator: Allocator,
+        pool: *Node.Pool,
+        root: Node.Id,
 
-        pub fn get(base_view: *BaseTreeView, index: usize) !Element {
-            const child_data = try base_view.getChildData(Gindex.fromDepth(chunk_depth, index));
-            return .{
-                .base_view = .{
-                    .allocator = base_view.allocator,
-                    .pool = base_view.pool,
-                    .data = child_data,
-                },
+        /// cached nodes for faster access of already-visited children
+        children_nodes: std.AutoHashMapUnmanaged(Gindex, Node.Id),
+
+        /// cached data for faster access of already-visited children
+        children_data: std.AutoHashMapUnmanaged(Gindex, ElementPtr),
+
+        /// whether the corresponding child node/data has changed since the last update of the root
+        changed: std.AutoArrayHashMapUnmanaged(Gindex, void),
+
+        const Element = ST.Element.TreeView;
+        pub const ElementPtr = *Element;
+
+        const Self = @This();
+
+        pub fn init(self: *Self, allocator: Allocator, pool: *Node.Pool, root: Node.Id) !void {
+            try pool.ref(root);
+            errdefer pool.unref(root);
+            self.* = .{
+                .allocator = allocator,
+                .pool = pool,
+                .root = root,
+                .children_nodes = .empty,
+                .children_data = .empty,
+                .changed = .empty,
             };
         }
 
-        pub fn set(base_view: *BaseTreeView, index: usize, value: Element) !void {
+        /// Deinitialize the Data and free all associated resources.
+        /// This also deinits all child Data recursively.
+        pub fn deinit(self: *Self) void {
+            self.pool.unref(self.root);
+            self.clearChildrenNodesCache();
+            self.children_nodes.deinit(self.allocator);
+            self.clearChildrenDataCache();
+            self.children_data.deinit(self.allocator);
+            self.changed.deinit(self.allocator);
+        }
+
+        pub fn commit(self: *Self) !void {
+            if (self.changed.count() == 0) {
+                return;
+            }
+
+            const nodes = try self.allocator.alloc(Node.Id, self.changed.count());
+            defer self.allocator.free(nodes);
+
+            const gindices = self.changed.keys();
+            Gindex.sortAsc(gindices);
+
+            for (gindices, 0..) |gindex, i| {
+                if (self.children_data.get(gindex)) |child_ptr| {
+                    // TODO: compare with child_nodes to avoid unnecessary rebind
+                    try child_ptr.commit();
+                    nodes[i] = child_ptr.getRoot();
+                } else if (self.children_nodes.get(gindex)) |child_node| {
+                    nodes[i] = child_node;
+                } else {
+                    return error.ChildNotFound;
+                }
+            }
+
+            const new_root = try self.root.setNodesGrouped(self.pool, gindices, nodes);
+            try self.pool.ref(new_root);
+            self.pool.unref(self.root);
+            self.root = new_root;
+
+            self.changed.clearRetainingCapacity();
+        }
+
+        pub fn get(self: *Self, index: usize) !ElementPtr {
             const gindex = Gindex.fromDepth(chunk_depth, index);
-            try base_view.data.changed.put(base_view.allocator, gindex, {});
-            const opt_old_data = try base_view.data.children_data.fetchPut(
-                base_view.allocator,
+            const gop = try self.children_data.getOrPut(self.allocator, gindex);
+            if (gop.found_existing) {
+                return gop.value_ptr.*;
+            }
+            const child_node = try self.getChildNode(gindex);
+            const child_ptr = try Element.init(self.pool, child_node);
+            gop.value_ptr.* = child_ptr;
+
+            // TODO only update changed if the subview is mutable
+            try self.changed.put(self.allocator, gindex, {});
+            return child_ptr;
+        }
+
+        pub fn set(self: *Self, index: usize, value: ElementPtr) !void {
+            const gindex = Gindex.fromDepth(chunk_depth, index);
+            try self.changed.put(self.allocator, gindex, {});
+            const opt_old_data = try self.children_data.fetchPut(
+                self.allocator,
                 gindex,
-                value.base_view.data,
+                value,
             );
             if (opt_old_data) |old_data_value| {
-                var data_ptr: *TreeViewData = @constCast(&old_data_value.value);
-                data_ptr.deinit(base_view.allocator, base_view.pool);
+                var child_ptr: ElementPtr = @constCast(&old_data_value.value.*);
+                if (child_ptr != value) {
+                    child_ptr.deinit();
+                }
             }
+        }
+
+        pub fn getChildNode(self: *Self, gindex: Gindex) !Node.Id {
+            const gop = try self.children_nodes.getOrPut(self.allocator, gindex);
+            if (gop.found_existing) {
+                return gop.value_ptr.*;
+            }
+            const child_node = try self.root.getNode(self.pool, gindex);
+            gop.value_ptr.* = child_node;
+            return child_node;
+        }
+
+        pub fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
+            try self.changed.put(self.allocator, gindex, {});
+            const opt_old_node = try self.children_nodes.fetchPut(
+                self.allocator,
+                gindex,
+                node,
+            );
+            if (opt_old_node) |old_node| {
+                // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
+                // Tree-owned nodes already have a refcount, so skip unref in that case.
+                if (old_node.value.getState(self.pool).getRefCount() == 0) {
+                    self.pool.unref(old_node.value);
+                }
+            }
+        }
+
+        pub fn clearChildrenNodesCache(self: *Self) void {
+            var value_iter = self.children_nodes.valueIterator();
+            while (value_iter.next()) |node_id_ptr| {
+                const node_id = node_id_ptr.*;
+                if (node_id.getState(self.pool).getRefCount() == 0) {
+                    self.pool.unref(node_id);
+                }
+            }
+            self.children_nodes.clearRetainingCapacity();
+        }
+
+        pub fn clearChildrenDataCache(self: *Self) void {
+            var value_iter = self.children_data.valueIterator();
+            while (value_iter.next()) |child_ptr| {
+                child_ptr.*.deinit();
+            }
+            self.children_data.clearRetainingCapacity();
         }
     };
 }
