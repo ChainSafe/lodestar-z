@@ -18,43 +18,102 @@ pub fn BasicPackedChunks(
     comptime items_per_chunk: usize,
 ) type {
     return struct {
+        /// required fields
+        allocator: Allocator,
+        pool: *Node.Pool,
+        root: Node.Id,
+
+        /// cached nodes for faster access of already-visited children
+        children_nodes: std.AutoHashMapUnmanaged(Gindex, Node.Id),
+
+        /// whether the corresponding child node/data has changed since the last update of the root
+        changed: std.AutoArrayHashMapUnmanaged(Gindex, void),
+
         pub const Element = ST.Element.Type;
 
-        pub fn get(base_view: *BaseTreeView, index: usize) !Element {
+        const Self = @This();
+
+        pub fn init(self: *Self, allocator: Allocator, pool: *Node.Pool, root: Node.Id) !void {
+            try pool.ref(root);
+            errdefer pool.unref(root);
+            self.* = .{
+                .allocator = allocator,
+                .pool = pool,
+                .root = root,
+                .children_nodes = .empty,
+                .changed = .empty,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.pool.unref(self.root);
+            self.clearChildrenNodesCache(self.pool);
+            self.children_nodes.deinit(self.allocator);
+            self.changed.deinit(self.allocator);
+        }
+
+        pub fn commit(self: *Self) !void {
+            if (self.changed.count() == 0) {
+                return;
+            }
+
+            const nodes = try self.allocator.alloc(Node.Id, self.changed.count());
+            defer self.allocator.free(nodes);
+
+            const gindices = self.changed.keys();
+            Gindex.sortAsc(gindices);
+
+            for (gindices, 0..) |gindex, i| {
+                if (self.children_nodes.get(gindex)) |child_node| {
+                    nodes[i] = child_node;
+                } else {
+                    return error.ChildNotFound;
+                }
+            }
+
+            const new_root = try self.root.setNodesGrouped(self.pool, gindices, nodes);
+            try self.pool.ref(new_root);
+            self.pool.unref(self.root);
+            self.root = new_root;
+
+            self.changed.clearRetainingCapacity();
+        }
+
+        pub fn get(self: *Self, index: usize) !Element {
             var value: Element = undefined;
-            const child_node = try base_view.getChildNode(Gindex.fromDepth(chunk_depth, index / items_per_chunk));
-            try ST.Element.tree.toValuePacked(child_node, base_view.pool, index, &value);
+            const child_node = try self.getChildNode(Gindex.fromDepth(chunk_depth, index / items_per_chunk));
+            try ST.Element.tree.toValuePacked(child_node, self.pool, index, &value);
             return value;
         }
 
-        pub fn set(base_view: *BaseTreeView, index: usize, value: Element) !void {
+        pub fn set(self: *Self, index: usize, value: Element) !void {
             const gindex = Gindex.fromDepth(chunk_depth, index / items_per_chunk);
-            try base_view.data.changed.put(base_view.allocator, gindex, {});
-            const child_node = try base_view.getChildNode(gindex);
-            const opt_old_node = try base_view.data.children_nodes.fetchPut(
-                base_view.allocator,
+            try self.changed.put(self.allocator, gindex, {});
+            const child_node = try self.getChildNode(gindex);
+            const opt_old_node = try self.children_nodes.fetchPut(
+                self.allocator,
                 gindex,
-                try ST.Element.tree.fromValuePacked(child_node, base_view.pool, index, &value),
+                try ST.Element.tree.fromValuePacked(child_node, self.pool, index, &value),
             );
             if (opt_old_node) |old_node| {
-                if (old_node.value.getState(base_view.pool).getRefCount() == 0) {
-                    base_view.pool.unref(old_node.value);
+                if (old_node.value.getState(self.pool).getRefCount() == 0) {
+                    self.pool.unref(old_node.value);
                 }
             }
         }
 
         pub fn getAll(
-            base_view: *BaseTreeView,
+            self: *Self,
             allocator: Allocator,
             len: usize,
         ) ![]Element {
             const values = try allocator.alloc(Element, len);
             errdefer allocator.free(values);
-            return try getAllInto(base_view, len, values);
+            return try getAllInto(self, len, values);
         }
 
         pub fn getAllInto(
-            base_view: *BaseTreeView,
+            self: *Self,
             len: usize,
             values: []Element,
         ) ![]Element {
@@ -65,14 +124,14 @@ pub fn BasicPackedChunks(
             const remainder = len % items_per_chunk;
             const chunk_count = len_full_chunks + @intFromBool(remainder != 0);
 
-            try populateAllNodes(base_view, chunk_count);
+            try populateAllNodes(self, chunk_count);
 
             for (0..len_full_chunks) |chunk_idx| {
-                const leaf_node = try base_view.getChildNode(Gindex.fromDepth(chunk_depth, chunk_idx));
+                const leaf_node = try self.getChildNode(Gindex.fromDepth(chunk_depth, chunk_idx));
                 for (0..items_per_chunk) |i| {
                     try ST.Element.tree.toValuePacked(
                         leaf_node,
-                        base_view.pool,
+                        self.pool,
                         i,
                         &values[chunk_idx * items_per_chunk + i],
                     );
@@ -80,11 +139,11 @@ pub fn BasicPackedChunks(
             }
 
             if (remainder > 0) {
-                const leaf_node = try base_view.getChildNode(Gindex.fromDepth(chunk_depth, len_full_chunks));
+                const leaf_node = try self.getChildNode(Gindex.fromDepth(chunk_depth, len_full_chunks));
                 for (0..remainder) |i| {
                     try ST.Element.tree.toValuePacked(
                         leaf_node,
-                        base_view.pool,
+                        self.pool,
                         i,
                         &values[len_full_chunks * items_per_chunk + i],
                     );
@@ -94,21 +153,58 @@ pub fn BasicPackedChunks(
             return values;
         }
 
-        fn populateAllNodes(base_view: *BaseTreeView, chunk_count: usize) !void {
+        fn populateAllNodes(self: *Self, chunk_count: usize) !void {
             if (chunk_count == 0) return;
 
-            const nodes = try base_view.allocator.alloc(Node.Id, chunk_count);
-            defer base_view.allocator.free(nodes);
+            const nodes = try self.allocator.alloc(Node.Id, chunk_count);
+            defer self.allocator.free(nodes);
 
-            try base_view.data.root.getNodesAtDepth(base_view.pool, chunk_depth, 0, nodes);
+            try self.root.getNodesAtDepth(self.pool, chunk_depth, 0, nodes);
 
             for (nodes, 0..) |node, chunk_idx| {
                 const gindex = Gindex.fromDepth(chunk_depth, chunk_idx);
-                const gop = try base_view.data.children_nodes.getOrPut(base_view.allocator, gindex);
+                const gop = try self.children_nodes.getOrPut(self.allocator, gindex);
                 if (!gop.found_existing) {
                     gop.value_ptr.* = node;
                 }
             }
+        }
+
+        pub fn getChildNode(self: *Self, gindex: Gindex) !Node.Id {
+            const gop = try self.children_nodes.getOrPut(self.allocator, gindex);
+            if (gop.found_existing) {
+                return gop.value_ptr.*;
+            }
+            const child_node = try self.root.getNode(self.pool, gindex);
+            gop.value_ptr.* = child_node;
+            return child_node;
+        }
+
+        fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
+            try self.changed.put(self.allocator, gindex, {});
+            const opt_old_node = try self.children_nodes.fetchPut(
+                self.allocator,
+                gindex,
+                node,
+            );
+            if (opt_old_node) |old_node| {
+                // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
+                // Tree-owned nodes already have a refcount, so skip unref in that case.
+                if (old_node.value.getState(self.pool).getRefCount() == 0) {
+                    self.pool.unref(old_node.value);
+                }
+            }
+        }
+
+        pub fn clearChildrenNodesCache(self: *Self, pool: *Node.Pool) void {
+            var value_iter = self.children_nodes.valueIterator();
+            while (value_iter.next()) |node_id_ptr| {
+                const node_id = node_id_ptr.*;
+                if (node_id.getState(pool).getRefCount() == 0) {
+                    pool.unref(node_id);
+                }
+            }
+            self.children_nodes.clearRetainingCapacity();
         }
     };
 }

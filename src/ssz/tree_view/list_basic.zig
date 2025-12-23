@@ -5,6 +5,8 @@ const Depth = hashing.Depth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
+const UintType = @import("../type/uint.zig").UintType;
+const FixedListType = @import("../type/list.zig").FixedListType;
 
 const type_root = @import("../type/root.zig");
 const BYTES_PER_CHUNK = type_root.BYTES_PER_CHUNK;
@@ -27,8 +29,9 @@ pub fn ListBasicTreeView(comptime ST: type) type {
     }
 
     return struct {
-        base_view: BaseTreeView,
-
+        /// required fields are delegated to BasicPackedChunks: allocator, pool, root
+        allocator: Allocator,
+        chunks: Chunks,
         pub const SszType = ST;
         pub const Element = ST.Element.Type;
 
@@ -39,56 +42,62 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         const items_per_chunk: usize = itemsPerChunk(ST.Element);
         const Chunks = BasicPackedChunks(ST, chunk_depth, items_per_chunk);
 
-        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
-            return Self{
-                .base_view = try BaseTreeView.init(allocator, pool, root),
-            };
+        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
+            const ptr = try allocator.create(Self);
+            try Chunks.init(&ptr.chunks, allocator, pool, root);
+            ptr.allocator = allocator;
+            return ptr;
         }
 
         pub fn deinit(self: *Self) void {
-            self.base_view.deinit();
+            self.chunks.deinit();
+            self.allocator.destroy(self);
         }
 
         pub fn commit(self: *Self) !void {
-            try self.base_view.commit();
+            try self.chunks.commit();
         }
 
         pub fn clearCache(self: *Self) void {
-            self.base_view.clearCache();
+            self.chunks.clearCache();
         }
 
         pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
             try self.commit();
-            out.* = self.base_view.data.root.getRoot(self.base_view.pool).*;
+            out.* = self.chunks.root.getRoot(self.chunks.pool).*;
+        }
+
+        pub fn getRoot(self: *const Self) Node.Id {
+            return self.chunks.root;
         }
 
         pub fn length(self: *Self) !usize {
-            const length_node = try self.base_view.getChildNode(@enumFromInt(3));
-            const length_chunk = length_node.getRoot(self.base_view.pool);
+            const length_node = try self.chunks.getChildNode(@enumFromInt(3));
+            const length_chunk = length_node.getRoot(self.chunks.pool);
             return std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
         }
 
         pub fn get(self: *Self, index: usize) !Element {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
-            return try Chunks.get(&self.base_view, index);
+            return try Chunks.get(&self.chunks, index);
         }
 
         pub fn set(self: *Self, index: usize, value: Element) !void {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
-            try Chunks.set(&self.base_view, index, value);
+            try Chunks.set(&self.chunks, index, value);
         }
 
         /// Caller must free the returned slice.
         pub fn getAll(self: *Self, allocator: Allocator) ![]Element {
             const list_length = try self.length();
-            return try Chunks.getAll(&self.base_view, allocator, list_length);
+            return try Chunks.getAll(&self.chunks, allocator, list_length);
         }
 
         pub fn getAllInto(self: *Self, values: []Element) ![]Element {
             const list_length = try self.length();
-            return try Chunks.getAllInto(&self.base_view, list_length, values);
+            return try Chunks.getAllInto(&self.chunks, list_length, values);
         }
 
         pub fn push(self: *Self, value: Element) !void {
@@ -107,7 +116,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
             const list_length = try self.length();
             if (list_length == 0 or index >= list_length - 1) {
-                return try Self.init(self.base_view.allocator, self.base_view.pool, self.base_view.data.root);
+                return try Self.init(self.chunks.allocator, self.chunks.pool, self.chunks.data.root);
             }
 
             const new_length = index + 1;
@@ -117,48 +126,96 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
             const chunk_index = index / items_per_chunk;
             const chunk_offset = index % items_per_chunk;
-            const chunk_node = try Node.Id.getNodeAtDepth(self.base_view.data.root, self.base_view.pool, chunk_depth, chunk_index);
+            const chunk_node = try Node.Id.getNodeAtDepth(self.chunks.data.root, self.chunks.pool, chunk_depth, chunk_index);
 
-            var chunk_bytes = chunk_node.getRoot(self.base_view.pool).*;
+            var chunk_bytes = chunk_node.getRoot(self.chunks.pool).*;
             const keep_bytes = (chunk_offset + 1) * ST.Element.fixed_size;
             if (keep_bytes < BYTES_PER_CHUNK) {
                 @memset(chunk_bytes[keep_bytes..], 0);
             }
 
-            var truncated_chunk_node: ?Node.Id = try self.base_view.pool.createLeaf(&chunk_bytes);
-            defer if (truncated_chunk_node) |id| self.base_view.pool.unref(id);
+            var truncated_chunk_node: ?Node.Id = try self.chunks.pool.createLeaf(&chunk_bytes);
+            defer if (truncated_chunk_node) |id| self.chunks.pool.unref(id);
             var updated: ?Node.Id = try Node.Id.setNodeAtDepth(
-                self.base_view.data.root,
-                self.base_view.pool,
+                self.chunks.data.root,
+                self.chunks.pool,
                 chunk_depth,
                 chunk_index,
                 truncated_chunk_node.?,
             );
-            defer if (updated) |id| self.base_view.pool.unref(id);
+            defer if (updated) |id| self.chunks.pool.unref(id);
             truncated_chunk_node = null;
 
-            var new_root: ?Node.Id = try Node.Id.truncateAfterIndex(updated.?, self.base_view.pool, chunk_depth, chunk_index);
-            defer if (new_root) |id| self.base_view.pool.unref(id);
+            var new_root: ?Node.Id = try Node.Id.truncateAfterIndex(updated.?, self.chunks.pool, chunk_depth, chunk_index);
+            defer if (new_root) |id| self.chunks.pool.unref(id);
             updated = null;
 
-            var length_node: ?Node.Id = try self.base_view.pool.createLeafFromUint(@intCast(new_length));
-            defer if (length_node) |id| self.base_view.pool.unref(id);
-            const root_with_length = try Node.Id.setNode(new_root.?, self.base_view.pool, @enumFromInt(3), length_node.?);
-            errdefer self.base_view.pool.unref(root_with_length);
+            var length_node: ?Node.Id = try self.chunks.pool.createLeafFromUint(@intCast(new_length));
+            defer if (length_node) |id| self.chunks.pool.unref(id);
+            const root_with_length = try Node.Id.setNode(new_root.?, self.chunks.pool, @enumFromInt(3), length_node.?);
+            errdefer self.chunks.pool.unref(root_with_length);
 
             length_node = null;
             new_root = null;
 
-            return try Self.init(self.base_view.allocator, self.base_view.pool, root_with_length);
+            return try Self.init(self.chunks.allocator, self.chunks.pool, root_with_length);
         }
 
         fn updateListLength(self: *Self, new_length: usize) !void {
             if (new_length > ST.limit) {
                 return error.LengthOverLimit;
             }
-            const length_node = try self.base_view.pool.createLeafFromUint(@intCast(new_length));
-            errdefer self.base_view.pool.unref(length_node);
-            try self.base_view.setChildNode(@enumFromInt(3), length_node);
+            const length_node = try self.chunks.pool.createLeafFromUint(@intCast(new_length));
+            errdefer self.chunks.pool.unref(length_node);
+            try self.chunks.setChildNode(@enumFromInt(3), length_node);
         }
     };
+}
+
+test "TreeView list element roundtrip" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint32 = UintType(32);
+    const ListType = FixedListType(Uint32, 16);
+
+    const base_values = [_]u32{ 5, 15, 25, 35, 45 };
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &base_values);
+
+    var expected_list: ListType.Type = .empty;
+    defer expected_list.deinit(allocator);
+    try expected_list.appendSlice(allocator, &base_values);
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    try std.testing.expectEqual(@as(u32, 5), try view.get(0));
+    try std.testing.expectEqual(@as(u32, 45), try view.get(4));
+
+    try view.set(2, 99);
+    try view.set(4, 123);
+
+    try view.commit();
+
+    expected_list.items[2] = 99;
+    expected_list.items[4] = 123;
+
+    var expected_root: [32]u8 = undefined;
+    try ListType.hashTreeRoot(allocator, &expected_list, &expected_root);
+
+    var actual_root: [32]u8 = undefined;
+    try view.hashTreeRoot(&actual_root);
+
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+
+    var roundtrip: ListType.Type = .empty;
+    defer roundtrip.deinit(allocator);
+    try ListType.tree.toValue(allocator, view.getRoot(), &pool, &roundtrip);
+    try std.testing.expectEqual(roundtrip.items.len, expected_list.items.len);
+    try std.testing.expectEqualSlices(u32, expected_list.items, roundtrip.items);
 }
