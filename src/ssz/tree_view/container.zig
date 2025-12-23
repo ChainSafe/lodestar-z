@@ -116,13 +116,12 @@ pub fn ContainerTreeView(comptime ST: type) type {
                     } else {
                         var child_view = self.child_data[i] orelse return error.MissingChildView;
                         try child_view.commit();
-                        // TODO: enable this if we can enforce all TreeView to have "root" field
                         const child_changed = if (self.original_nodes[i]) |orig_node| blk: {
-                            break :blk orig_node != child_view.root;
+                            break :blk orig_node != child_view.getRoot();
                         } else true;
                         if (child_changed) {
-                            nodes[changed_idx] = child_view.root;
-                            self.original_nodes[i] = child_view.root;
+                            nodes[changed_idx] = child_view.getRoot();
+                            self.original_nodes[i] = child_view.getRoot();
                             indices[changed_idx] = i;
                             changed_idx += 1;
                         }
@@ -141,6 +140,10 @@ pub fn ContainerTreeView(comptime ST: type) type {
             self.root = new_root;
 
             self.changed.clearRetainingCapacity();
+        }
+
+        pub fn getRoot(self: *const Self) Node.Id {
+            return self.root;
         }
 
         pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
