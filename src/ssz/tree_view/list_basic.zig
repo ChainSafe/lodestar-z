@@ -29,7 +29,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
     }
 
     return struct {
-        /// required fields are delegated to BasicPackedChunks: allocator, pool, root
+        /// required fields are delegated to BasicPackedChunks: pool, root
         allocator: Allocator,
         chunks: Chunks,
         pub const SszType = ST;
@@ -80,24 +80,24 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         pub fn get(self: *Self, index: usize) !Element {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
-            return try Chunks.get(&self.chunks, index);
+            return self.chunks.get(index);
         }
 
         pub fn set(self: *Self, index: usize, value: Element) !void {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
-            try Chunks.set(&self.chunks, index, value);
+            try self.chunks.set(index, value);
         }
 
         /// Caller must free the returned slice.
-        pub fn getAll(self: *Self, allocator: Allocator) ![]Element {
+        pub fn getAll(self: *Self) ![]Element {
             const list_length = try self.length();
-            return try Chunks.getAll(&self.chunks, allocator, list_length);
+            return try self.chunks.getAll(self.allocator, list_length);
         }
 
         pub fn getAllInto(self: *Self, values: []Element) ![]Element {
             const list_length = try self.length();
-            return try Chunks.getAllInto(&self.chunks, list_length, values);
+            return self.chunks.getAllInto(list_length, values);
         }
 
         pub fn push(self: *Self, value: Element) !void {
