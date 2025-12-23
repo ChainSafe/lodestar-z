@@ -22,12 +22,12 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 },
             }) else @Type(.{
                 .optional = .{
-                    .child = field.type.TreeView,
+                    .child = *field.type.TreeView,
                 },
             }),
             .default_value_ptr = null,
             .is_comptime = false,
-            .alignment = if (isBasicType(field.type)) @alignOf(Node.Id) else @alignOf(field.type.TreeView),
+            .alignment = if (isBasicType(field.type)) @alignOf(Node.Id) else @alignOf(*field.type.TreeView),
         };
     }
 
@@ -57,37 +57,32 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
         const Self = @This();
 
-        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
+        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
             try pool.ref(root);
-            var child_data: TreeViewData = undefined;
-            inline for (child_data, 0..) |_, i| {
-                child_data[i] = null;
-            }
-            var original_nodes: [ST.chunk_count]?Node.Id = undefined;
-            inline for (original_nodes, 0..) |_, i| {
-                original_nodes[i] = null;
-            }
-            return .{
+            errdefer pool.unref(root);
+
+            const ptr = try allocator.create(Self);
+            ptr.* = .{
                 .allocator = allocator,
                 .pool = pool,
-                .child_data = child_data,
-                .original_nodes = original_nodes,
+                .child_data = .{null} ** ST.chunk_count,
+                .original_nodes = .{null} ** ST.chunk_count,
                 .root = root,
                 .changed = .empty,
             };
+            return ptr;
         }
 
         pub fn deinit(self: *Self) void {
+            self.clearChildrenDataCache();
             self.pool.unref(self.root);
-            self.clearChildrenDataCache(self.pool);
+            self.allocator.destroy(self);
         }
 
-        pub fn clearChildrenDataCache(self: *Self, pool: *Node.Pool) void {
+        pub fn clearChildrenDataCache(self: *Self) void {
             inline for (self.child_data, 0..) |child_opt, i| {
-                if (child_opt) |*child| {
-                    if (@TypeOf(child.*) == Node.Id) {
-                        pool.unref(child.*);
-                    } else {
+                if (child_opt) |child| {
+                    if (@TypeOf(child) != Node.Id) {
                         @constCast(child).deinit();
                     }
                     self.child_data[i] = null;
@@ -158,7 +153,6 @@ pub fn ContainerTreeView(comptime ST: type) type {
             if (comptime isBasicType(ChildST)) {
                 return ChildST.Type;
             } else {
-                // this pointer means caller can mutate the child view
                 return *ChildST.TreeView;
             }
         }
@@ -184,15 +178,14 @@ pub fn ContainerTreeView(comptime ST: type) type {
             } else {
                 try self.changed.put(self.allocator, field_index, {});
 
-                const existing_ptr = &self.child_data[field_index];
-                if (existing_ptr.*) |*child_view| {
-                    return child_view;
+                const existing_ptr = self.child_data[field_index];
+                if (existing_ptr) |child_view_ptr| {
+                    return child_view_ptr;
                 } else {
                     const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
                     self.original_nodes[field_index] = node;
-                    // should TreeView.init() returns pointers?
-                    existing_ptr.* = try ChildST.TreeView.init(self.allocator, self.pool, node);
-                    return &existing_ptr.*.?;
+                    self.child_data[field_index] = try ChildST.TreeView.init(self.allocator, self.pool, node);
+                    return self.child_data[field_index].?;
                 }
             }
         }
@@ -221,20 +214,20 @@ pub fn ContainerTreeView(comptime ST: type) type {
                     &value,
                 );
             } else {
-                const existing_ptr = &self.child_data[field_index];
-                if (existing_ptr.*) |*old_view| {
-                    if (old_view != value) {
-                        old_view.deinit();
+                const existing_ptr = self.child_data[field_index];
+                if (existing_ptr) |old_ptr| {
+                    if (old_ptr != value) {
+                        old_ptr.deinit();
                     }
                 }
 
-                existing_ptr.* = value.*;
+                self.child_data[field_index] = value;
             }
         }
     };
 }
 
-test "ContainerTreeView2" {
+test "ContainerTreeView" {
     const Foo = FixedContainerType(struct {
         a: UintType(64),
         b: UintType(64),
@@ -301,9 +294,9 @@ test "ContainerTreeView2" {
     try std.testing.expectEqualSlices(u8, value_root[0..], view_root[0..]);
 
     const cloned_foo_view_node = try Foo.tree.fromValue(&pool, &expected_foo_value);
-    var cloned_foo_view = try ContainerTreeView(Foo).init(std.testing.allocator, &pool, cloned_foo_view_node);
+    const cloned_foo_view = try ContainerTreeView(Foo).init(std.testing.allocator, &pool, cloned_foo_view_node);
     // do not deinit cloned_foo_view, it will be transferred
-    try bar_view.set("foo", &cloned_foo_view);
+    try bar_view.set("foo", cloned_foo_view);
     try bar_view.hashTreeRoot(&view_root);
     try std.testing.expectEqualSlices(u8, value_root[0..], view_root[0..]);
 }
