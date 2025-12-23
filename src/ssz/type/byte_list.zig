@@ -12,6 +12,8 @@ const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
 const ListBasicTreeView = @import("../tree_view/root.zig").ListBasicTreeView;
+const ListBasicTreeViewViewStorePOC = @import("../tree_view/root.zig").ListBasicTreeViewViewStorePOC;
+const build_options = @import("build_options");
 
 pub fn isByteListType(ST: type) bool {
     return ST.kind == .list and ST.Element.kind == .uint and ST.Element.fixed_size == 1 and ST == ByteListType(ST.limit);
@@ -28,7 +30,10 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
         pub const Element: type = UintType(8);
         pub const limit: usize = _limit;
         pub const Type: type = std.ArrayListUnmanaged(Element.Type);
-        pub const TreeView: type = ListBasicTreeView(@This());
+        pub const TreeView: type = if (build_options.container_viewstore_poc)
+            ListBasicTreeViewViewStorePOC(@This())
+        else
+            ListBasicTreeView(@This());
         pub const min_size: usize = 0;
         pub const max_size: usize = Element.fixed_size * limit;
         pub const max_chunk_count: usize = std.math.divCeil(usize, max_size, 32) catch unreachable;

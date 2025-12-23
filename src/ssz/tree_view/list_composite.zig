@@ -47,6 +47,10 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             self.base_view.deinit();
         }
 
+        pub fn rootNodeId(self: *const Self) Node.Id {
+            return self.base_view.data.root;
+        }
+
         pub fn commit(self: *Self) !void {
             try self.base_view.commit();
         }

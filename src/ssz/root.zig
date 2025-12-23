@@ -48,6 +48,11 @@ pub const ArrayBasicTreeView = tree_view.ArrayBasicTreeView;
 pub const ArrayCompositeTreeView = tree_view.ArrayCompositeTreeView;
 pub const ListBasicTreeView = tree_view.ListBasicTreeView;
 pub const ListCompositeTreeView = tree_view.ListCompositeTreeView;
+pub const ContainerTreeViewViewStorePOC = tree_view.ContainerTreeViewViewStorePOC;
+pub const ArrayBasicTreeViewViewStorePOC = tree_view.ArrayBasicTreeViewViewStorePOC;
+pub const ArrayCompositeTreeViewViewStorePOC = tree_view.ArrayCompositeTreeViewViewStorePOC;
+pub const ListBasicTreeViewViewStorePOC = tree_view.ListBasicTreeViewViewStorePOC;
+pub const ListCompositeTreeViewViewStorePOC = tree_view.ListCompositeTreeViewViewStorePOC;
 
 test {
     testing.refAllDecls(@This());

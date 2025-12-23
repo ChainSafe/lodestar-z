@@ -1,6 +1,7 @@
 const std = @import("std");
 const ssz = @import("ssz");
 const Node = @import("persistent_merkle_tree").Node;
+const build_options = @import("build_options");
 
 const Checkpoint = ssz.FixedContainerType(struct {
     epoch: ssz.UintType(64),
@@ -36,7 +37,7 @@ test "TreeView composite list sliceTo truncates elements" {
 
     var roundtrip: ListType.Type = .empty;
     defer roundtrip.deinit(allocator);
-    try ListType.tree.toValue(allocator, sliced.base_view.data.root, &pool, &roundtrip);
+    try ListType.tree.toValue(allocator, sliced.rootNodeId(), &pool, &roundtrip);
 
     try std.testing.expectEqual(@as(usize, 2), roundtrip.items.len);
     try std.testing.expectEqual(checkpoints[0].epoch, roundtrip.items[0].epoch);
@@ -72,7 +73,7 @@ test "TreeView composite list sliceFrom returns suffix" {
 
     var roundtrip: ListType.Type = .empty;
     defer roundtrip.deinit(allocator);
-    try ListType.tree.toValue(allocator, suffix.base_view.data.root, &pool, &roundtrip);
+    try ListType.tree.toValue(allocator, suffix.rootNodeId(), &pool, &roundtrip);
 
     try std.testing.expectEqual(@as(usize, 2), roundtrip.items.len);
     try std.testing.expectEqual(checkpoints[2].epoch, roundtrip.items[0].epoch);
@@ -130,7 +131,7 @@ test "TreeView composite list sliceFrom handles boundary conditions" {
 
             var actual: ListType.Type = .empty;
             defer actual.deinit(allocator);
-            try ListType.tree.toValue(allocator, sliced.base_view.data.root, &pool, &actual);
+            try ListType.tree.toValue(allocator, sliced.rootNodeId(), &pool, &actual);
 
             var expected: ListType.Type = .empty;
             defer expected.deinit(allocator);
@@ -188,7 +189,7 @@ test "TreeView composite list push appends element" {
 
     var roundtrip: ListType.Type = .empty;
     defer roundtrip.deinit(allocator);
-    try ListType.tree.toValue(allocator, view.base_view.data.root, &pool, &roundtrip);
+    try ListType.tree.toValue(allocator, view.rootNodeId(), &pool, &roundtrip);
 
     try std.testing.expectEqual(@as(usize, 2), roundtrip.items.len);
     try std.testing.expectEqual(next_checkpoint.epoch, roundtrip.items[1].epoch);
@@ -355,7 +356,7 @@ test "TreeView list of list commits inner length updates" {
     // Roundtrip and verify nested lengths and values.
     var roundtrip: OuterListType.Type = .empty;
     defer OuterListType.deinit(allocator, &roundtrip);
-    try OuterListType.tree.toValue(allocator, outer_view.base_view.data.root, &pool, &roundtrip);
+    try OuterListType.tree.toValue(allocator, outer_view.rootNodeId(), &pool, &roundtrip);
 
     try std.testing.expectEqual(@as(usize, 1), roundtrip.items.len);
     try std.testing.expectEqual(@as(usize, 2), roundtrip.items[0].items.len);
@@ -368,6 +369,90 @@ test "TreeView list of list commits inner length updates" {
     try std.testing.expectEqual(@as(u32, 10), roundtrip.items[0].items[0].vec[1]);
 
     try std.testing.expectEqual(@as(u32, 33), roundtrip.items[0].items[1].id);
+}
+
+test "TreeView composite list ViewStore POC borrowed element mutation" {
+    if (!build_options.container_viewstore_poc) return;
+
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    const ListType = ssz.FixedListType(Checkpoint, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+
+    const checkpoints = [_]Checkpoint.Type{
+        .{ .epoch = 1, .root = [_]u8{1} ** 32 },
+        .{ .epoch = 2, .root = [_]u8{2} ** 32 },
+    };
+    try list.appendSlice(allocator, &checkpoints);
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+
+    const ListPOCView = ssz.ListCompositeTreeViewViewStorePOC(ListType);
+    var view = try ListPOCView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    var e1 = try view.get(1);
+    defer e1.deinit();
+    try e1.set("epoch", @as(u64, 99));
+
+    try view.commit();
+
+    var expected: ListType.Type = .empty;
+    defer expected.deinit(allocator);
+    const expected_checkpoints = [_]Checkpoint.Type{
+        checkpoints[0],
+        .{ .epoch = 99, .root = checkpoints[1].root },
+    };
+    try expected.appendSlice(allocator, &expected_checkpoints);
+
+    var expected_root: [32]u8 = undefined;
+    try ListType.hashTreeRoot(allocator, &expected, &expected_root);
+    var actual_root: [32]u8 = undefined;
+    try view.hashTreeRoot(&actual_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}
+
+test "TreeView composite list ViewStore POC sliceFrom matches expected root" {
+    if (!build_options.container_viewstore_poc) return;
+
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const ListType = ssz.FixedListType(Checkpoint, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+
+    const checkpoints = [_]Checkpoint.Type{
+        .{ .epoch = 5, .root = [_]u8{5} ** 32 },
+        .{ .epoch = 6, .root = [_]u8{6} ** 32 },
+        .{ .epoch = 7, .root = [_]u8{7} ** 32 },
+        .{ .epoch = 8, .root = [_]u8{8} ** 32 },
+    };
+    try list.appendSlice(allocator, &checkpoints);
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    const ListPOCView = ssz.ListCompositeTreeViewViewStorePOC(ListType);
+    var view = try ListPOCView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    var suffix = try view.sliceFrom(2);
+    defer suffix.deinit();
+
+    var expected: ListType.Type = .empty;
+    defer expected.deinit(allocator);
+    try expected.appendSlice(allocator, checkpoints[2..4]);
+
+    var expected_root: [32]u8 = undefined;
+    try ListType.hashTreeRoot(allocator, &expected, &expected_root);
+    var actual_root: [32]u8 = undefined;
+    try suffix.hashTreeRoot(&actual_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
 }
 
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listComposite/tree.test.ts#L182-L207
@@ -407,7 +492,7 @@ test "TreeView composite list sliceTo matches incremental snapshots" {
 
         var actual: ListType.Type = .empty;
         defer actual.deinit(allocator);
-        try ListType.tree.toValue(allocator, sliced.base_view.data.root, &pool, &actual);
+        try ListType.tree.toValue(allocator, sliced.rootNodeId(), &pool, &actual);
 
         var expected: ListType.Type = .empty;
         defer expected.deinit(allocator);

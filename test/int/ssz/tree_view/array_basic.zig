@@ -1,6 +1,7 @@
 const std = @import("std");
 const ssz = @import("ssz");
 const Node = @import("persistent_merkle_tree").Node;
+const build_options = @import("build_options");
 
 test "TreeView vector element roundtrip" {
     const allocator = std.testing.allocator;
@@ -37,7 +38,7 @@ test "TreeView vector element roundtrip" {
     try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
 
     var roundtrip: VectorType.Type = undefined;
-    try VectorType.tree.toValue(view.base_view.data.root, &pool, &roundtrip);
+    try VectorType.tree.toValue(view.rootNodeId(), &pool, &roundtrip);
     try std.testing.expectEqualSlices(u64, &expected, &roundtrip);
 }
 
@@ -109,4 +110,39 @@ test "TreeView vector getAllAlloc repeat reflects updates" {
     defer allocator.free(second);
     values[3] = 99;
     try std.testing.expectEqualSlices(u32, values[0..], second);
+}
+
+test "TreeView vector prefetch POC updates metadata" {
+    if (!build_options.container_viewstore_poc) return;
+
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const VectorType = ssz.FixedVectorType(Uint32, 8);
+
+    const values = [_]u32{ 9, 8, 7, 6, 5, 4, 3, 2 };
+    const root_node = try VectorType.tree.fromValue(&pool, &values);
+
+    const VecPOCView = ssz.ArrayBasicTreeViewViewStorePOC(VectorType);
+    var view = try VecPOCView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    try std.testing.expectEqual(@as(?usize, null), view.prefetchedCount());
+
+    const out = try allocator.alloc(u32, values.len);
+    defer allocator.free(out);
+
+    _ = try view.getAllInto(out);
+    try std.testing.expectEqual(@as(?usize, 1), view.prefetchedCount());
+    try std.testing.expectEqualSlices(u32, values[0..], out);
+
+    _ = try view.getAllInto(out);
+    try std.testing.expectEqual(@as(?usize, 1), view.prefetchedCount());
+
+    view.invalidatePrefetch();
+    try std.testing.expectEqual(@as(?usize, null), view.prefetchedCount());
+    _ = try view.getAllInto(out);
+    try std.testing.expectEqual(@as(?usize, 1), view.prefetchedCount());
 }
