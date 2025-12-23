@@ -71,12 +71,15 @@ pub fn processSlots(
 
         const next_slot = try state.slot() + 1;
         if (next_slot % preset.SLOTS_PER_EPOCH == 0) {
-            var epoch_transition_timer = metrics.epoch_transition.startTimer();
-            defer _ = epoch_transition_timer.stopAndObserve();
+            var epoch_transition_timer = try metrics.state_transition.epoch_transition.time();
+            defer metrics.state_transition.epoch_transition.observeElapsed(&epoch_transition_timer);
 
-            var before_process_epoch_timer = metrics.epoch_transition_step.startTimer(.{ .step = .before_process_epoch });
+            var before_process_epoch_timer = try metrics.state_transition.epoch_transition_step.time();
             var epoch_transition_cache = try EpochTransitionCache.init(allocator, post_state);
-            _ = try before_process_epoch_timer.stopAndObserve();
+            try metrics.state_transition.epoch_transition_step.observeElapsed(
+                &before_process_epoch_timer,
+                .{ .step = .before_process_epoch },
+            );
 
             defer {
                 epoch_transition_cache.deinit();
@@ -87,9 +90,9 @@ pub fn processSlots(
 
             try state.setSlot(next_slot);
 
-            var after_process_epoch_timer = metrics.epoch_transition_step.startTimer(.{ .step = .after_process_epoch });
+            var after_process_epoch_timer = try metrics.state_transition.epoch_transition_step.time();
             try post_state.epoch_cache_ref.get().afterProcessEpoch(post_state, epoch_transition_cache);
-            _ = try after_process_epoch_timer.stopAndObserve();
+            try metrics.state_transition.epoch_transition_step.observeElapsed(&after_process_epoch_timer, .{ .step = .after_process_epoch });
 
             const state_epoch = computeEpochAtSlot(next_slot);
 
@@ -156,7 +159,7 @@ pub fn stateTransition(
     }
 
     //  // Note: time only on success
-    var process_block_timer = metrics.process_block.startTimer();
+    var process_block_timer = try metrics.state_transition.process_block.time();
     try processBlock(
         allocator,
         post_state,
@@ -167,15 +170,15 @@ pub fn stateTransition(
         },
         .{ .verify_signature = opts.verify_signatures },
     );
-    _ = process_block_timer.stopAndObserve();
+    metrics.state_transition.process_block.observeElapsed(&process_block_timer);
 
     metrics.state_transition.onPostState(post_state);
 
     // Verify state root
     if (opts.verify_state_root) {
-        var timer = metrics.state_hash_tree_root.startTimer(.{ .source = .state_transition });
+        var timer = try metrics.state_transition.state_hash_tree_root.time();
         const post_state_root = try post_state.state.hashTreeRoot();
-        _ = try timer.stopAndObserve();
+        try metrics.state_transition.state_hash_tree_root.observeElapsed(&timer, .{ .source = .compute_new_state_root });
 
         const block_state_root = switch (block) {
             .regular => |b| b.stateRoot(),
