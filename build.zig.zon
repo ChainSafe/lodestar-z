@@ -27,8 +27,8 @@
             .hash = "zbench-0.10.0-YTdc714iAQDO4lTHMnIljYHPZ5v_sNTsw75vAmO1pyT-",
         },
         .metrics = .{
-            .url = "git+https://github.com/karlseguin/metrics.zig.git#2b584b6209871b7215706028988169599451dc0d",
-            .hash = "metrics-0.0.0-W7G4eCG0AQCQXidzvV5kx4l0smr_WCw-8JLIwS_OHYoW",
+            .url = "git+https://github.com/karlseguin/metrics.zig.git#5f5420c98378a873a4bf816d69772c8f708a2273",
+            .hash = "metrics-0.0.0-W7G4eHzVAQBMD2Iz5KUoKTssfqAloxCVd7xdG0gt1j5w",
         },
         .httpz = .{
             .url = "git+https://github.com/karlseguin/http.zig.git#2924ead41db9e1986db3b4909a82185c576f6361",

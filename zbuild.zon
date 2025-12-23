@@ -25,7 +25,7 @@
             .url = "git+https://github.com/hendriknielaender/zBench#d8c7dd485306b88b757d52005614ebcb0a336942",
         },
         .metrics = .{
-            .url = "git+https://github.com/karlseguin/metrics.zig.git#2b584b6209871b7215706028988169599451dc0d",
+            .url = "git+https://github.com/karlseguin/metrics.zig.git#5f5420c98378a873a4bf816d69772c8f708a2273",
         },
         .httpz = .{
             .url = "git+https://github.com/karlseguin/http.zig.git#2924ead41db9e1986db3b4909a82185c576f6361",
