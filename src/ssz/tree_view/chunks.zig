@@ -294,7 +294,7 @@ pub fn CompositeChunks(
                 return gop.value_ptr.*;
             }
             const child_node = try self.getChildNode(gindex);
-            const child_ptr = try Element.init(self.pool, child_node);
+            const child_ptr = try Element.init(self.allocator, self.pool, child_node);
             gop.value_ptr.* = child_ptr;
 
             // TODO only update changed if the subview is mutable
