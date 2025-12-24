@@ -111,12 +111,12 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
         /// Return a new view containing all elements up to and including `index`.
         /// Caller must call `deinit()` on the returned view to avoid memory leaks.
-        pub fn sliceTo(self: *Self, index: usize) !Self {
+        pub fn sliceTo(self: *Self, index: usize) !*Self {
             try self.commit();
 
             const list_length = try self.length();
             if (list_length == 0 or index >= list_length - 1) {
-                return try Self.init(self.chunks.allocator, self.chunks.pool, self.chunks.data.root);
+                return try Self.init(self.chunks.allocator, self.chunks.pool, self.chunks.root);
             }
 
             const new_length = index + 1;
@@ -126,7 +126,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
             const chunk_index = index / items_per_chunk;
             const chunk_offset = index % items_per_chunk;
-            const chunk_node = try Node.Id.getNodeAtDepth(self.chunks.data.root, self.chunks.pool, chunk_depth, chunk_index);
+            const chunk_node = try Node.Id.getNodeAtDepth(self.chunks.root, self.chunks.pool, chunk_depth, chunk_index);
 
             var chunk_bytes = chunk_node.getRoot(self.chunks.pool).*;
             const keep_bytes = (chunk_offset + 1) * ST.Element.fixed_size;
@@ -137,7 +137,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             var truncated_chunk_node: ?Node.Id = try self.chunks.pool.createLeaf(&chunk_bytes);
             defer if (truncated_chunk_node) |id| self.chunks.pool.unref(id);
             var updated: ?Node.Id = try Node.Id.setNodeAtDepth(
-                self.chunks.data.root,
+                self.chunks.root,
                 self.chunks.pool,
                 chunk_depth,
                 chunk_index,

@@ -77,6 +77,11 @@ pub fn BasicPackedChunks(
             self.changed.clearRetainingCapacity();
         }
 
+        pub fn clearCache(self: *Self) void {
+            self.clearChildrenNodesCache();
+            self.changed.clearRetainingCapacity();
+        }
+
         pub fn get(self: *Self, index: usize) !Element {
             var value: Element = undefined;
             const child_node = try self.getChildNode(Gindex.fromDepth(chunk_depth, index / items_per_chunk));
@@ -172,7 +177,7 @@ pub fn BasicPackedChunks(
             return getChildNodeOrTraverse(self, gindex);
         }
 
-        fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
+        pub fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
             try setChildNodeUnrefOld(self, gindex, node);
         }
 
@@ -259,6 +264,12 @@ pub fn CompositeChunks(
             self.pool.unref(self.root);
             self.root = new_root;
 
+            self.changed.clearRetainingCapacity();
+        }
+
+        pub fn clearCache(self: *Self) void {
+            self.clearChildrenNodesCache();
+            self.clearChildrenDataCache();
             self.changed.clearRetainingCapacity();
         }
 

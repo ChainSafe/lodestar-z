@@ -120,12 +120,12 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
         /// Return a new view containing all elements up to and including `index`.
         /// The caller **must** call `deinit()` on the returned view to avoid memory leaks.
-        pub fn sliceTo(self: *Self, index: usize) !Self {
+        pub fn sliceTo(self: *Self, index: usize) !*Self {
             try self.commit();
 
             const list_length = try self.length();
             if (list_length == 0 or index >= list_length - 1) {
-                return try Self.init(self.chunks.allocator, self.chunks.pool, self.chunks.data.root);
+                return try Self.init(self.chunks.allocator, self.chunks.pool, self.chunks.root);
             }
 
             const new_length = index + 1;
@@ -148,12 +148,12 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
         /// Return a new view containing all elements from `index` to the end.
         /// The returned view must be deinitialized by the caller using `deinit()` to avoid memory leaks.
-        pub fn sliceFrom(self: *Self, index: usize) !Self {
+        pub fn sliceFrom(self: *Self, index: usize) !*Self {
             try self.commit();
 
             const list_length = try self.length();
             if (index == 0) {
-                return try Self.init(self.chunks.allocator, self.chunks.pool, self.chunks.data.root);
+                return try Self.init(self.chunks.allocator, self.chunks.pool, self.chunks.root);
             }
 
             const target_length = if (index >= list_length) 0 else list_length - index;
@@ -166,7 +166,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             } else {
                 const nodes = try self.chunks.allocator.alloc(Node.Id, target_length);
                 defer self.chunks.allocator.free(nodes);
-                try self.chunks.data.root.getNodesAtDepth(self.chunks.pool, chunk_depth, index, nodes);
+                try self.chunks.root.getNodesAtDepth(self.chunks.pool, chunk_depth, index, nodes);
 
                 chunk_root = try Node.fillWithContents(self.chunks.pool, nodes, base_chunk_depth);
             }
