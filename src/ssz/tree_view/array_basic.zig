@@ -10,8 +10,8 @@ const type_root = @import("../type/root.zig");
 const itemsPerChunk = type_root.itemsPerChunk;
 const chunkDepth = type_root.chunkDepth;
 
-const BaseTreeView = @import("root.zig").BaseTreeView;
 const BasicPackedChunks = @import("chunks.zig").BasicPackedChunks;
+const assertTreeViewType = @import("assert.zig").assertTreeViewType;
 
 /// A specialized tree view for SSZ vector types with basic element types.
 /// Elements are packed into chunks (multiple elements per leaf node).
@@ -25,8 +25,7 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
         }
     }
 
-    return struct {
-        /// required fields are delegated to BasicPackedChunks: pool, root
+    const TreeView = struct {
         allocator: Allocator,
         chunks: Chunks,
 
@@ -88,4 +87,7 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
             return try self.chunks.getAllInto(length, values);
         }
     };
+
+    assertTreeViewType(TreeView);
+    return TreeView;
 }

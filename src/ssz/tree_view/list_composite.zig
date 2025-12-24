@@ -11,6 +11,7 @@ const chunkDepth = type_root.chunkDepth;
 
 const tree_view_root = @import("root.zig");
 const CompositeChunks = @import("chunks.zig").CompositeChunks;
+const assertTreeViewType = @import("assert.zig").assertTreeViewType;
 
 /// A specialized tree view for SSZ list types with composite element types.
 /// Each element occupies its own subtree.
@@ -22,10 +23,10 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         if (!@hasDecl(ST, "Element") or isBasicType(ST.Element)) {
             @compileError("ListCompositeTreeView can only be used with List of composite element types");
         }
+        assertTreeViewType(ST.Element.TreeView);
     }
 
-    return struct {
-        /// required fields are delegated to BasicPackedChunks: pool, root
+    const TreeView = struct {
         allocator: Allocator,
         chunks: Chunks,
 
@@ -187,4 +188,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             try self.chunks.setChildNode(@enumFromInt(3), length_node);
         }
     };
+
+    assertTreeViewType(TreeView);
+    return TreeView;
 }

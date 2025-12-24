@@ -5,12 +5,13 @@ const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
 const FixedContainerType = @import("../type/container.zig").FixedContainerType;
 const UintType = @import("../type/uint.zig").UintType;
+const assertTreeViewType = @import("./assert.zig").assertTreeViewType;
 
 /// A specialized tree view for SSZ container types, enabling efficient access and modification of container fields, given a backing merkle tree.
 ///
-/// This struct stores a tuples of either child TreeView or basic type and provides methods to get and set fields by name.
+/// This struct stores a tuples of either reference to child TreeView or basic type and provides methods to get and set fields by name.
 ///
-/// For basic-type fields, it returns or accepts values directly; for complex fields, it returns or accepts corresponding tree views.
+/// For basic-type fields, it returns or accepts values directly; for complex fields, it returns or accepts corresponding tree view references.
 pub fn ContainerTreeView(comptime ST: type) type {
     comptime var opt_treeview_fields: [ST.fields.len]std.builtin.Type.StructField = undefined;
     inline for (ST.fields, 0..) |field, i| {
@@ -20,11 +21,14 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 .optional = .{
                     .child = Node.Id,
                 },
-            }) else @Type(.{
-                .optional = .{
-                    .child = *field.type.TreeView,
-                },
-            }),
+            }) else blk: {
+                assertTreeViewType(field.type.TreeView);
+                break :blk @Type(.{
+                    .optional = .{
+                        .child = *field.type.TreeView,
+                    },
+                });
+            },
             .default_value_ptr = null,
             .is_comptime = false,
             .alignment = if (isBasicType(field.type)) @alignOf(Node.Id) else @alignOf(*field.type.TreeView),
@@ -42,11 +46,11 @@ pub fn ContainerTreeView(comptime ST: type) type {
         },
     });
 
-    return struct {
-        /// required fields
+    const TreeView = struct {
         allocator: Allocator,
         pool: *Node.Pool,
         root: Node.Id,
+
         /// specific fields for this TreeView
         /// a tuple of either Optional(Value) for basic type or Optional(ChildTreeView) for composite type
         child_data: TreeViewData,
@@ -228,6 +232,9 @@ pub fn ContainerTreeView(comptime ST: type) type {
             }
         }
     };
+
+    assertTreeViewType(TreeView);
+    return TreeView;
 }
 
 test "ContainerTreeView" {

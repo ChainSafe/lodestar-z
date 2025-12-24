@@ -16,7 +16,6 @@ pub fn BasicPackedChunks(
     comptime items_per_chunk: usize,
 ) type {
     return struct {
-        /// required fields
         allocator: Allocator,
         pool: *Node.Pool,
         root: Node.Id,
@@ -193,7 +192,6 @@ pub fn CompositeChunks(
     comptime chunk_depth: Depth,
 ) type {
     return struct {
-        /// required fields
         allocator: Allocator,
         pool: *Node.Pool,
         root: Node.Id,
