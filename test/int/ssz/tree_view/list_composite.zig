@@ -36,7 +36,7 @@ test "TreeView composite list sliceTo truncates elements" {
 
     var roundtrip: ListType.Type = .empty;
     defer roundtrip.deinit(allocator);
-    try ListType.tree.toValue(allocator, sliced.base_view.data.root, &pool, &roundtrip);
+    try ListType.tree.toValue(allocator, sliced.getRoot(), &pool, &roundtrip);
 
     try std.testing.expectEqual(@as(usize, 2), roundtrip.items.len);
     try std.testing.expectEqual(checkpoints[0].epoch, roundtrip.items[0].epoch);
@@ -72,7 +72,7 @@ test "TreeView composite list sliceFrom returns suffix" {
 
     var roundtrip: ListType.Type = .empty;
     defer roundtrip.deinit(allocator);
-    try ListType.tree.toValue(allocator, suffix.base_view.data.root, &pool, &roundtrip);
+    try ListType.tree.toValue(allocator, suffix.getRoot(), &pool, &roundtrip);
 
     try std.testing.expectEqual(@as(usize, 2), roundtrip.items.len);
     try std.testing.expectEqual(checkpoints[2].epoch, roundtrip.items[0].epoch);
@@ -130,7 +130,7 @@ test "TreeView composite list sliceFrom handles boundary conditions" {
 
             var actual: ListType.Type = .empty;
             defer actual.deinit(allocator);
-            try ListType.tree.toValue(allocator, sliced.base_view.data.root, &pool, &actual);
+            try ListType.tree.toValue(allocator, sliced.getRoot(), &pool, &actual);
 
             var expected: ListType.Type = .empty;
             defer expected.deinit(allocator);
@@ -188,7 +188,7 @@ test "TreeView composite list push appends element" {
 
     var roundtrip: ListType.Type = .empty;
     defer roundtrip.deinit(allocator);
-    try ListType.tree.toValue(allocator, view.base_view.data.root, &pool, &roundtrip);
+    try ListType.tree.toValue(allocator, view.getRoot(), &pool, &roundtrip);
 
     try std.testing.expectEqual(@as(usize, 2), roundtrip.items.len);
     try std.testing.expectEqual(next_checkpoint.epoch, roundtrip.items[1].epoch);
@@ -228,9 +228,9 @@ test "TreeView list of list commits inner length updates" {
     var e1_value: InnerElement.Type = InnerElement.default_value;
     defer InnerElement.deinit(allocator, &e1_value);
     const e1_root = try InnerElement.tree.fromValue(allocator, &pool, &e1_value);
-    var e1_view: ?InnerElement.TreeView = try InnerElement.TreeView.init(allocator, &pool, e1_root);
-    defer if (e1_view) |*view| view.deinit();
-    const e1 = &e1_view.?;
+    var e1_view: ?*InnerElement.TreeView = try InnerElement.TreeView.init(allocator, &pool, e1_root);
+    defer if (e1_view) |view| view.deinit();
+    const e1 = e1_view.?;
 
     try e1.set("id", @as(u32, 11));
 
@@ -238,15 +238,15 @@ test "TreeView list of list commits inner length updates" {
     var payload_value: Bytes.Type = Bytes.default_value;
     defer payload_value.deinit(allocator);
     const payload_root = try Bytes.tree.fromValue(allocator, &pool, &payload_value);
-    var payload_view: ?Bytes.TreeView = try Bytes.TreeView.init(allocator, &pool, payload_root);
-    defer if (payload_view) |*view| view.deinit();
-    const payload = &payload_view.?;
+    var payload_view: ?*Bytes.TreeView = try Bytes.TreeView.init(allocator, &pool, payload_root);
+    defer if (payload_view) |view| view.deinit();
+    const payload = payload_view.?;
 
     try payload.push(@as(u8, 0xAA));
     try payload.push(@as(u8, 0xAB));
     try payload.set(1, @as(u8, 0xAC));
     {
-        const all = try payload.getAll(allocator);
+        const all = try payload.getAll();
         defer allocator.free(all);
         try std.testing.expectEqualSlices(u8, &[_]u8{ 0xAA, 0xAC }, all);
 
@@ -261,15 +261,15 @@ test "TreeView list of list commits inner length updates" {
     var numbers_value: Numbers.Type = .empty;
     defer numbers_value.deinit(allocator);
     const numbers_root = try Numbers.tree.fromValue(allocator, &pool, &numbers_value);
-    var numbers_view: ?Numbers.TreeView = try Numbers.TreeView.init(allocator, &pool, numbers_root);
-    defer if (numbers_view) |*view| view.deinit();
-    const numbers = &numbers_view.?;
+    var numbers_view: ?*Numbers.TreeView = try Numbers.TreeView.init(allocator, &pool, numbers_root);
+    defer if (numbers_view) |view| view.deinit();
+    const numbers = numbers_view.?;
 
     try numbers.push(@as(u32, 1));
     try numbers.push(@as(u32, 2));
     try numbers.set(0, @as(u32, 3));
     {
-        const all = try numbers.getAll(allocator);
+        const all = try numbers.getAll();
         defer allocator.free(all);
         try std.testing.expectEqual(@as(usize, 2), all.len);
         try std.testing.expectEqual(@as(u32, 3), all[0]);
@@ -286,14 +286,14 @@ test "TreeView list of list commits inner length updates" {
 
     var vec_value: Vec2.Type = [_]u32{ 0, 0 };
     const vec_root = try Vec2.tree.fromValue(&pool, &vec_value);
-    var vec_view: ?Vec2.TreeView = try Vec2.TreeView.init(allocator, &pool, vec_root);
-    defer if (vec_view) |*view| view.deinit();
-    const vec = &vec_view.?;
+    var vec_view: ?*Vec2.TreeView = try Vec2.TreeView.init(allocator, &pool, vec_root);
+    defer if (vec_view) |view| view.deinit();
+    const vec = vec_view.?;
 
     try vec.set(0, @as(u32, 9));
     try vec.set(1, @as(u32, 10));
     {
-        const all = try vec.getAll(allocator);
+        const all = try vec.getAll();
         defer allocator.free(all);
         try std.testing.expectEqual(@as(usize, 2), all.len);
         try std.testing.expectEqual(@as(u32, 9), all[0]);
@@ -314,18 +314,18 @@ test "TreeView list of list commits inner length updates" {
     var e2_value: InnerElement.Type = InnerElement.default_value;
     defer InnerElement.deinit(allocator, &e2_value);
     const e2_root = try InnerElement.tree.fromValue(allocator, &pool, &e2_value);
-    var e2_view: ?InnerElement.TreeView = try InnerElement.TreeView.init(allocator, &pool, e2_root);
-    defer if (e2_view) |*view| view.deinit();
-    const e2 = &e2_view.?;
+    var e2_view: ?*InnerElement.TreeView = try InnerElement.TreeView.init(allocator, &pool, e2_root);
+    defer if (e2_view) |view| view.deinit();
+    const e2 = e2_view.?;
 
     try e2.set("id", @as(u32, 22));
 
     var e2_payload_value: Bytes.Type = Bytes.default_value;
     defer e2_payload_value.deinit(allocator);
     const e2_payload_root = try Bytes.tree.fromValue(allocator, &pool, &e2_payload_value);
-    var e2_payload_view: ?Bytes.TreeView = try Bytes.TreeView.init(allocator, &pool, e2_payload_root);
-    defer if (e2_payload_view) |*view| view.deinit();
-    const e2_payload = &e2_payload_view.?;
+    var e2_payload_view: ?*Bytes.TreeView = try Bytes.TreeView.init(allocator, &pool, e2_payload_root);
+    defer if (e2_payload_view) |view| view.deinit();
+    const e2_payload = e2_payload_view.?;
     try e2_payload.push(@as(u8, 0xBB));
     try e2.set("payload", e2_payload_view.?);
     e2_payload_view = null;
@@ -337,9 +337,9 @@ test "TreeView list of list commits inner length updates" {
         var e3_value: InnerElement.Type = InnerElement.default_value;
         defer InnerElement.deinit(allocator, &e3_value);
         const e3_root = try InnerElement.tree.fromValue(allocator, &pool, &e3_value);
-        var e3_view: ?InnerElement.TreeView = try InnerElement.TreeView.init(allocator, &pool, e3_root);
-        defer if (e3_view) |*view| view.deinit();
-        const e3 = &e3_view.?;
+        var e3_view: ?*InnerElement.TreeView = try InnerElement.TreeView.init(allocator, &pool, e3_root);
+        defer if (e3_view) |view| view.deinit();
+        const e3 = e3_view.?;
         try e3.set("id", @as(u32, 33));
         try inner_view.set(1, e3_view.?);
         e3_view = null;
@@ -355,7 +355,7 @@ test "TreeView list of list commits inner length updates" {
     // Roundtrip and verify nested lengths and values.
     var roundtrip: OuterListType.Type = .empty;
     defer OuterListType.deinit(allocator, &roundtrip);
-    try OuterListType.tree.toValue(allocator, outer_view.base_view.data.root, &pool, &roundtrip);
+    try OuterListType.tree.toValue(allocator, outer_view.getRoot(), &pool, &roundtrip);
 
     try std.testing.expectEqual(@as(usize, 1), roundtrip.items.len);
     try std.testing.expectEqual(@as(usize, 2), roundtrip.items[0].items.len);
@@ -407,7 +407,7 @@ test "TreeView composite list sliceTo matches incremental snapshots" {
 
         var actual: ListType.Type = .empty;
         defer actual.deinit(allocator);
-        try ListType.tree.toValue(allocator, sliced.base_view.data.root, &pool, &actual);
+        try ListType.tree.toValue(allocator, sliced.getRoot(), &pool, &actual);
 
         var expected: ListType.Type = .empty;
         defer expected.deinit(allocator);

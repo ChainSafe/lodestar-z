@@ -5,8 +5,6 @@ const Depth = hashing.Depth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
-const UintType = @import("../type/uint.zig").UintType;
-const FixedVectorType = @import("../type/vector.zig").FixedVectorType;
 
 const type_root = @import("../type/root.zig");
 const itemsPerChunk = type_root.itemsPerChunk;
@@ -90,43 +88,4 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
             return try self.chunks.getAllInto(length, values);
         }
     };
-}
-
-test "TreeView vector element roundtrip" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 128);
-    defer pool.deinit();
-
-    const Uint64 = UintType(64);
-    const VectorType = FixedVectorType(Uint64, 4);
-
-    const original: VectorType.Type = [_]u64{ 11, 22, 33, 44 };
-
-    const root_node = try VectorType.tree.fromValue(&pool, &original);
-    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
-    defer view.deinit();
-
-    try std.testing.expectEqual(@as(u64, 11), try view.get(0));
-    try std.testing.expectEqual(@as(u64, 44), try view.get(3));
-
-    try view.set(1, 77);
-    try view.set(2, 88);
-
-    try view.commit();
-
-    var expected = original;
-    expected[1] = 77;
-    expected[2] = 88;
-
-    var expected_root: [32]u8 = undefined;
-    try VectorType.hashTreeRoot(&expected, &expected_root);
-
-    var actual_root: [32]u8 = undefined;
-    try view.hashTreeRoot(&actual_root);
-
-    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
-
-    var roundtrip: VectorType.Type = undefined;
-    try VectorType.tree.toValue(view.getRoot(), &pool, &roundtrip);
-    try std.testing.expectEqualSlices(u64, &expected, &roundtrip);
 }

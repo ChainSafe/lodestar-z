@@ -5,8 +5,6 @@ const Depth = hashing.Depth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
-const UintType = @import("../type/uint.zig").UintType;
-const FixedListType = @import("../type/list.zig").FixedListType;
 
 const type_root = @import("../type/root.zig");
 const BYTES_PER_CHUNK = type_root.BYTES_PER_CHUNK;
@@ -170,52 +168,4 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             try self.chunks.setChildNode(@enumFromInt(3), length_node);
         }
     };
-}
-
-test "TreeView list element roundtrip" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
-    defer pool.deinit();
-
-    const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
-
-    const base_values = [_]u32{ 5, 15, 25, 35, 45 };
-
-    var list: ListType.Type = .empty;
-    defer list.deinit(allocator);
-    try list.appendSlice(allocator, &base_values);
-
-    var expected_list: ListType.Type = .empty;
-    defer expected_list.deinit(allocator);
-    try expected_list.appendSlice(allocator, &base_values);
-
-    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
-    defer view.deinit();
-
-    try std.testing.expectEqual(@as(u32, 5), try view.get(0));
-    try std.testing.expectEqual(@as(u32, 45), try view.get(4));
-
-    try view.set(2, 99);
-    try view.set(4, 123);
-
-    try view.commit();
-
-    expected_list.items[2] = 99;
-    expected_list.items[4] = 123;
-
-    var expected_root: [32]u8 = undefined;
-    try ListType.hashTreeRoot(allocator, &expected_list, &expected_root);
-
-    var actual_root: [32]u8 = undefined;
-    try view.hashTreeRoot(&actual_root);
-
-    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
-
-    var roundtrip: ListType.Type = .empty;
-    defer roundtrip.deinit(allocator);
-    try ListType.tree.toValue(allocator, view.getRoot(), &pool, &roundtrip);
-    try std.testing.expectEqual(roundtrip.items.len, expected_list.items.len);
-    try std.testing.expectEqualSlices(u32, expected_list.items, roundtrip.items);
 }

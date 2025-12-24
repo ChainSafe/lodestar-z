@@ -24,14 +24,14 @@ test "TreeView vector composite element set/get/commit" {
 
     const e0_view = try view.get(0);
     var e0_value: Inner.Type = undefined;
-    try Inner.tree.toValue(e0_view.base_view.data.root, &pool, &e0_value);
+    try Inner.tree.toValue(e0_view.getRoot(), &pool, &e0_value);
     try std.testing.expectEqual(@as(u32, 1), e0_value.a);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 1, 1, 1 }, e0_value.b[0..]);
 
     const replacement: Inner.Type = .{ .a = 9, .b = [_]u8{ 9, 9, 9, 9 } };
     const replacement_root = try Inner.tree.fromValue(&pool, &replacement);
-    var replacement_view: ?Inner.TreeView = try Inner.TreeView.init(allocator, &pool, replacement_root);
-    defer if (replacement_view) |*v| v.deinit();
+    var replacement_view: ?*Inner.TreeView = try Inner.TreeView.init(allocator, &pool, replacement_root);
+    defer if (replacement_view) |v| v.deinit();
     try view.set(1, replacement_view.?);
     replacement_view = null;
 
@@ -46,7 +46,7 @@ test "TreeView vector composite element set/get/commit" {
     try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
 
     var roundtrip: VectorType.Type = undefined;
-    try VectorType.tree.toValue(view.base_view.data.root, &pool, &roundtrip);
+    try VectorType.tree.toValue(view.getRoot(), &pool, &roundtrip);
     try std.testing.expectEqual(@as(u32, 1), roundtrip[0].a);
     try std.testing.expectEqual(@as(u32, 9), roundtrip[1].a);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 9, 9, 9, 9 }, roundtrip[1].b[0..]);
@@ -69,8 +69,8 @@ test "TreeView vector composite index bounds" {
 
     const replacement: Inner.Type = .{ .x = 3 };
     const replacement_root = try Inner.tree.fromValue(&pool, &replacement);
-    var replacement_view: ?Inner.TreeView = try Inner.TreeView.init(allocator, &pool, replacement_root);
-    defer if (replacement_view) |*v| v.deinit();
+    const replacement_view: ?*Inner.TreeView = try Inner.TreeView.init(allocator, &pool, replacement_root);
+    defer if (replacement_view) |v| v.deinit();
     try std.testing.expectError(error.IndexOutOfBounds, view.set(2, replacement_view.?));
 }
 
@@ -99,8 +99,8 @@ test "TreeView vector composite clearCache does not break subsequent commits" {
 
     const replacement: Inner.Type = .{ .id = 1, .vec = [_]u32{ 0, 9 } };
     const replacement_root = try Inner.tree.fromValue(&pool, &replacement);
-    var replacement_view: ?Inner.TreeView = try Inner.TreeView.init(allocator, &pool, replacement_root);
-    defer if (replacement_view) |*v| v.deinit();
+    var replacement_view: ?*Inner.TreeView = try Inner.TreeView.init(allocator, &pool, replacement_root);
+    defer if (replacement_view) |v| v.deinit();
     try view.set(0, replacement_view.?);
     replacement_view = null;
 

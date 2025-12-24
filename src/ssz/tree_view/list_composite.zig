@@ -5,10 +5,6 @@ const Depth = hashing.Depth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
-const FixedListType = @import("../type/list.zig").FixedListType;
-const FixedContainerType = @import("../type/container.zig").FixedContainerType;
-const UintType = @import("../type/uint.zig").UintType;
-const ByteVectorType = @import("../type/byte_vector.zig").ByteVectorType;
 
 const type_root = @import("../type/root.zig");
 const chunkDepth = type_root.chunkDepth;
@@ -191,47 +187,4 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             try self.chunks.setChildNode(@enumFromInt(3), length_node);
         }
     };
-}
-
-test "TreeView composite list push appends element" {
-    const Checkpoint = FixedContainerType(struct {
-        epoch: UintType(64),
-        root: ByteVectorType(32),
-    });
-
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 512);
-    defer pool.deinit();
-
-    const ListType = FixedListType(Checkpoint, 8);
-
-    var list: ListType.Type = .empty;
-    defer list.deinit(allocator);
-
-    const first = Checkpoint.Type{ .epoch = 9, .root = [_]u8{9} ** 32 };
-    try list.append(allocator, first);
-
-    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
-    defer view.deinit();
-
-    const next_checkpoint = Checkpoint.Type{ .epoch = 10, .root = [_]u8{10} ** 32 };
-    const next_node = try Checkpoint.tree.fromValue(&pool, &next_checkpoint);
-    var element_view = try Checkpoint.TreeView.init(allocator, &pool, next_node);
-    var transferred = false;
-    defer if (!transferred) element_view.deinit();
-
-    try view.push(element_view);
-    transferred = true;
-
-    try std.testing.expectEqual(@as(usize, 2), try view.length());
-
-    try view.commit();
-
-    var roundtrip: ListType.Type = .empty;
-    defer roundtrip.deinit(allocator);
-    try ListType.tree.toValue(allocator, view.getRoot(), &pool, &roundtrip);
-
-    try std.testing.expectEqual(@as(usize, 2), roundtrip.items.len);
-    try std.testing.expectEqual(next_checkpoint.epoch, roundtrip.items[1].epoch);
 }
