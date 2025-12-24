@@ -19,7 +19,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             .name = std.fmt.comptimePrint("{}", .{i}),
             .type = if (isBasicType(field.type)) @Type(.{
                 .optional = .{
-                    .child = Node.Id,
+                    .child = field.type.Type,
                 },
             }) else blk: {
                 assertTreeViewType(field.type.TreeView);
@@ -31,7 +31,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             },
             .default_value_ptr = null,
             .is_comptime = false,
-            .alignment = if (isBasicType(field.type)) @alignOf(Node.Id) else @alignOf(*field.type.TreeView),
+            .alignment = if (isBasicType(field.type)) @alignOf(field.type.Type) else @alignOf(*field.type.TreeView),
         };
     }
 
@@ -86,7 +86,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
         pub fn clearChildrenDataCache(self: *Self) void {
             inline for (self.child_data, 0..) |child_opt, i| {
                 if (child_opt) |child| {
-                    if (@TypeOf(child) != Node.Id) {
+                    if (!comptime isBasicType(ST.fields[i].type)) {
                         @constCast(child).deinit();
                     }
                     self.child_data[i] = null;
@@ -112,7 +112,11 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 if (self.changed.get(i) != null) {
                     const ChildST = ST.getFieldType(field.name);
                     if (comptime isBasicType(ChildST)) {
-                        const child_node = self.child_data[i] orelse return error.MissingChildNode;
+                        const child_value = self.child_data[i] orelse return error.MissingChildValue;
+                        const child_node = try ChildST.tree.fromValue(
+                            self.pool,
+                            &child_value,
+                        );
                         nodes[changed_idx] = child_node;
                         indices[changed_idx] = i;
                         self.original_nodes[i] = child_node;
@@ -170,17 +174,16 @@ pub fn ContainerTreeView(comptime ST: type) type {
             const field_index = comptime ST.getFieldIndex(field_name);
             const ChildST = ST.getFieldType(field_name);
             if (comptime isBasicType(ChildST)) {
-                var value: ChildST.Type = undefined;
                 const existing = self.child_data[field_index];
-                if (existing) |child_node| {
-                    try ChildST.tree.toValue(child_node, self.pool, &value);
-                    return value;
+                if (existing) |child_value| {
+                    return child_value;
                 } else {
                     const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
-                    self.child_data[field_index] = node;
-                    try ChildST.tree.toValue(node, self.pool, &value);
+                    var child_value: ChildST.Type = undefined;
+                    try ChildST.tree.toValue(node, self.pool, &child_value);
                     self.original_nodes[field_index] = node;
-                    return value;
+                    self.child_data[field_index] = child_value;
+                    return child_value;
                 }
             } else {
                 try self.changed.put(self.allocator, field_index, {});
@@ -208,18 +211,13 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
             if (comptime isBasicType(ChildST)) {
                 const existing = self.child_data[field_index];
-                if (existing) |old_node| {
-                    // Multiple set() calls before commit() leave our previous temp nodes cached with refcount 0.
-                    // Tree-owned nodes already have a refcount, so skip unref in that case.
-                    if (old_node.getState(self.pool).getRefCount() == 0) {
-                        self.pool.unref(old_node);
+                if (existing) |child_value| {
+                    if (child_value == value) {
+                        return;
                     }
                 }
 
-                self.child_data[field_index] = try ChildST.tree.fromValue(
-                    self.pool,
-                    &value,
-                );
+                self.child_data[field_index] = value;
             } else {
                 const existing_ptr = self.child_data[field_index];
                 if (existing_ptr) |old_ptr| {
