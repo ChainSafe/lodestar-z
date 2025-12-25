@@ -96,7 +96,6 @@ const httpz = @import("httpz");
 
 const std = @import("std");
 const state_transition = @import("state_transition");
-const metrics = @import("metrics_ext");
 const types = @import("consensus_types");
 
 const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
