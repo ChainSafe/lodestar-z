@@ -120,13 +120,6 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("state_transition"), module_state_transition) catch @panic("OOM");
 
-    const module_metrics_ext = b.createModule(.{
-        .root_source_file = b.path("src/metrics/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    b.modules.put(b.dupe("metrics_ext"), module_metrics_ext) catch @panic("OOM");
-
     const module_metrics_server = b.createModule(.{
         .root_source_file = b.path("examples/metrics_server.zig"),
         .target = target,
@@ -508,20 +501,6 @@ pub fn build(b: *std.Build) void {
     tls_run_test_state_transition.dependOn(&run_test_state_transition.step);
     tls_run_test.dependOn(&run_test_state_transition.step);
 
-    const test_metrics_ext = b.addTest(.{
-        .name = "metrics_ext",
-        .root_module = module_metrics_ext,
-        .filters = b.option([][]const u8, "metrics_ext.filters", "metrics_ext test filters") orelse &[_][]const u8{},
-    });
-    const install_test_metrics_ext = b.addInstallArtifact(test_metrics_ext, .{});
-    const tls_install_test_metrics_ext = b.step("build-test:metrics_ext", "Install the metrics_ext test");
-    tls_install_test_metrics_ext.dependOn(&install_test_metrics_ext.step);
-
-    const run_test_metrics_ext = b.addRunArtifact(test_metrics_ext);
-    const tls_run_test_metrics_ext = b.step("test:metrics_ext", "Run the metrics_ext test");
-    tls_run_test_metrics_ext.dependOn(&run_test_metrics_ext.step);
-    tls_run_test.dependOn(&run_test_metrics_ext.step);
-
     const test_metrics_server = b.addTest(.{
         .name = "metrics_server",
         .root_module = module_metrics_server,
@@ -796,13 +775,7 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("constants", module_constants);
     module_state_transition.addImport("hex", module_hex);
     module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
-    module_state_transition.addImport("metrics_ext", module_metrics_ext);
 
-    module_metrics_ext.addImport("state_transition", module_state_transition);
-    module_metrics_ext.addImport("consensus_types", module_consensus_types);
-    module_metrics_ext.addImport("metrics", dep_metrics.module("metrics"));
-
-    module_metrics_server.addImport("metrics_ext", module_metrics_ext);
     module_metrics_server.addImport("consensus_types", module_consensus_types);
     module_metrics_server.addImport("state_transition", module_state_transition);
     module_metrics_server.addImport("httpz", dep_httpz.module("httpz"));

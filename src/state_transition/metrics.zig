@@ -2,10 +2,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const m = @import("metrics");
 
-const metrics_ext = @import("metrics_ext");
-const Observer = metrics_ext.Observer;
-const LabeledObserver = metrics_ext.LabeledObserver;
-
 const CachedBeaconStateAllForks = @import("cache/state_cache.zig").CachedBeaconStateAllForks;
 
 /// Defaults to noop metrics, making this safe to use whether or not `metrics.init` is called.
@@ -246,6 +242,32 @@ pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
             opts,
         ),
     };
+}
+
+/// Useful for conversion to seconds during isolated uses of `observe` that requires timing.
+/// Prometheus recommends that time coding be in seconds.
+///
+/// See for example: https://prometheus.io/docs/instrumenting/writing_clientlibs/#gauge
+pub fn readSeconds(timer: *std.time.Timer) f32 {
+    return @floatFromInt(timer.read() / std.time.ns_per_s);
+}
+
+/// Observe a value in seconds for the `epoch_transition` histogram.
+pub fn observeEpochTransition(ns: u64) !void {
+    try state_transition.epoch_transition.observe(
+        @floatFromInt(ns / std.time.ns_per_s),
+    );
+}
+
+/// Observe a value in seconds for the `epoch_transition_step` labelled histogram.
+pub fn observeEpochTransitionStep(
+    labels: EpochTransitionStepLabel,
+    ns: u64,
+) !void {
+    try state_transition.epoch_transition_step.observe(
+        labels,
+        @floatFromInt(ns / std.time.ns_per_s),
+    );
 }
 
 /// Writes all metrics to `writer`.

@@ -1,5 +1,7 @@
 const std = @import("std");
+const Timer = std.time.Timer;
 const metrics = @import("../metrics.zig");
+const observeEpochTransitionStep = metrics.observeEpochTransitionStep;
 
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
 const ForkSeq = @import("config").ForkSeq;
@@ -25,45 +27,45 @@ const processProposerLookahead = @import("./process_proposer_lookahead.zig").pro
 pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconStateAllForks, cache: *EpochTransitionCache) !void {
     const state = cached_state.state;
 
-    var timer = try metrics.state_transition.epoch_transition_step.time();
+    var timer = try Timer.start();
     try processJustificationAndFinalization(cached_state, cache);
-    try metrics.state_transition.epoch_transition_step.observeElapsed(&timer, .{ .step = .process_justification_and_finalization });
+    try observeEpochTransitionStep(.{ .step = .process_justification_and_finalization }, timer.read());
 
     if (state.isPostAltair()) {
-        timer = try metrics.state_transition.epoch_transition_step.time();
+        timer = try Timer.start();
         try processInactivityUpdates(cached_state, cache);
-        try metrics.state_transition.epoch_transition_step.observeElapsed(&timer, .{ .step = .process_inactivity_updates });
+        try observeEpochTransitionStep(.{ .step = .process_inactivity_updates }, timer.read());
     }
 
-    timer = try metrics.state_transition.epoch_transition_step.time();
+    timer = try Timer.start();
     try processRegistryUpdates(cached_state, cache);
-    try metrics.state_transition.epoch_transition_step.observeElapsed(&timer, .{ .step = .process_registry_updates });
+    try observeEpochTransitionStep(.{ .step = .process_inactivity_updates }, timer.read());
 
     // TODO(bing): In lodestar-ts we accumulate slashing penalties and only update in processRewardsAndPenalties. Do the same?
-    timer = try metrics.state_transition.epoch_transition_step.time();
+    timer = try Timer.start();
     try processSlashings(allocator, cached_state, cache);
-    try metrics.state_transition.epoch_transition_step.observeElapsed(&timer, .{ .step = .process_slashings });
+    try observeEpochTransitionStep(.{ .step = .process_slashings }, timer.read());
 
-    timer = try metrics.state_transition.epoch_transition_step.time();
+    timer = try Timer.start();
     try processRewardsAndPenalties(allocator, cached_state, cache);
-    try metrics.state_transition.epoch_transition_step.observeElapsed(&timer, .{ .step = .process_rewards_and_penalties });
+    try observeEpochTransitionStep(.{ .step = .process_rewards_and_penalties }, timer.read());
 
     processEth1DataReset(allocator, cached_state, cache);
 
     if (state.isPostElectra()) {
-        timer = try metrics.state_transition.epoch_transition_step.time();
+        timer = try Timer.start();
         try processPendingDeposits(allocator, cached_state, cache);
-        try metrics.state_transition.epoch_transition_step.observeElapsed(&timer, .{ .step = .process_pending_deposits });
+        try observeEpochTransitionStep(.{ .step = .process_pending_deposits }, timer.read());
 
-        timer = try metrics.state_transition.epoch_transition_step.time();
+        timer = try Timer.start();
         try processPendingConsolidations(allocator, cached_state, cache);
-        try metrics.state_transition.epoch_transition_step.observeElapsed(&timer, .{ .step = .process_pending_consolidations });
+        try observeEpochTransitionStep(.{ .step = .process_pending_consolidations }, timer.read());
     }
 
     // const numUpdate = processEffectiveBalanceUpdates(fork, state, cache);
-    timer = try metrics.state_transition.epoch_transition_step.time();
+    timer = try Timer.start();
     _ = try processEffectiveBalanceUpdates(cached_state, cache);
-    try metrics.state_transition.epoch_transition_step.observeElapsed(&timer, .{ .step = .process_effective_balance_updates });
+    try observeEpochTransitionStep(.{ .step = .process_effective_balance_updates }, timer.read());
 
     processSlashingsReset(cached_state, cache);
     processRandaoMixesReset(cached_state, cache);
@@ -77,20 +79,20 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
     if (state.isPhase0()) {
         processParticipationRecordUpdates(allocator, cached_state);
     } else {
-        timer = try metrics.state_transition.epoch_transition_step.time();
+        timer = try Timer.start();
         try processParticipationFlagUpdates(allocator, cached_state);
-        try metrics.state_transition.epoch_transition_step.observeElapsed(&timer, .{ .step = .process_participation_flag_updates });
+        try observeEpochTransitionStep(.{ .step = .process_participation_flag_updates }, timer.read());
     }
 
     if (state.isPostAltair()) {
-        timer = try metrics.state_transition.epoch_transition_step.time();
+        timer = try Timer.start();
         try processSyncCommitteeUpdates(allocator, cached_state);
-        try metrics.state_transition.epoch_transition_step.observeElapsed(&timer, .{ .step = .process_sync_committee_updates });
+        try observeEpochTransitionStep(.{ .step = .process_sync_committee_updates }, timer.read());
     }
 
     if (state.isFulu()) {
-        timer = try metrics.state_transition.epoch_transition_step.time();
+        timer = try Timer.start();
         try processProposerLookahead(allocator, cached_state, cache);
-        try metrics.state_transition.epoch_transition_step.observeElapsed(&timer, .{ .step = .process_proposer_lookahead });
+        try observeEpochTransitionStep(.{ .step = .process_proposer_lookahead }, timer.read());
     }
 }
