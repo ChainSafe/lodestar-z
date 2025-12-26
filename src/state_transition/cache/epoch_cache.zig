@@ -84,11 +84,9 @@ pub const EpochCache = struct {
 
     proposers: [preset.SLOTS_PER_EPOCH]ValidatorIndex,
 
-    proposer_prev_epoch: ?[preset.SLOTS_PER_EPOCH]ValidatorIndex,
+    proposers_prev_epoch: ?[preset.SLOTS_PER_EPOCH]ValidatorIndex,
 
-    // TODO: may not need this
-    // proposers_next_epoch: not needed after EIP-7917
-    // the below is not needed if we compute the next epoch shuffling eagerly
+    // TODO: the below is not needed if we compute the next epoch shuffling eagerly
     // previous_decision_root
     // current_decision_root
     // next_decision_root
@@ -295,7 +293,7 @@ pub const EpochCache = struct {
             .index_to_pubkey = index_to_pubkey,
             .proposers = proposers,
             // On first epoch, set to null to prevent unnecessary work since this is only used for metrics
-            .proposer_prev_epoch = null,
+            .proposers_prev_epoch = null,
             .previous_shuffling = try EpochShufflingRc.init(allocator, previous_shuffling),
             .current_shuffling = try EpochShufflingRc.init(allocator, current_shuffling),
             .next_shuffling = try EpochShufflingRc.init(allocator, next_shuffling),
@@ -346,7 +344,7 @@ pub const EpochCache = struct {
             .index_to_pubkey = self.index_to_pubkey,
             // Immutable data
             .proposers = self.proposers,
-            .proposer_prev_epoch = self.proposer_prev_epoch,
+            .proposers_prev_epoch = self.proposers_prev_epoch,
             // reuse the same instances, increase reference count
             .previous_shuffling = self.previous_shuffling.acquire(),
             .current_shuffling = self.current_shuffling.acquire(),
@@ -448,6 +446,30 @@ pub const EpochCache = struct {
         self.current_target_unslashed_balance_increments = 0;
         self.epoch = computeEpochAtSlot(state.slot());
         self.sync_period = computeSyncPeriodAtEpoch(self.epoch);
+    }
+
+    /// At fork boundary, this runs post-fork logic and after `upgradeState*`.
+    pub fn finalProcessEpoch(self: *EpochCache, cached_state: *const CachedBeaconStateAllForks) !void {
+        const state = cached_state.state;
+
+        // Post-Fulu, EIP-7917 introduced the `proposer_lookahead`
+        // field which we already processed in `processProposerLookahead`.
+        // Proposers are to be computed pre-fulu.
+        if (self.epoch >= self.config.chain.FULU_FORK_EPOCH) {
+            self.proposers = state.proposerLookahead()[0..preset.SLOTS_PER_EPOCH].*;
+        } else {
+            var upcoming_proposer_seed: [32]u8 = undefined;
+            try getSeed(state, self.epoch, c.DOMAIN_BEACON_PROPOSER, &upcoming_proposer_seed);
+            try computeProposers(
+                self.allocator,
+                self.config.forkSeqAtEpoch(self.epoch),
+                upcoming_proposer_seed,
+                self.epoch,
+                self.current_shuffling.get().active_indices,
+                self.effective_balance_increment.get(),
+                &self.proposers,
+            );
+        }
     }
 
     pub fn beforeEpochTransition(self: *EpochCache) !void {

@@ -107,6 +107,8 @@ pub fn processSlotsWithTransientCache(
             if (state_epoch == config.chain.FULU_FORK_EPOCH) {
                 try upgradeStateToFulu(allocator, post_state);
             }
+
+            try post_state.epoch_cache_ref.get().finalProcessEpoch(post_state);
         } else {
             state.slotPtr().* += 1;
         }
