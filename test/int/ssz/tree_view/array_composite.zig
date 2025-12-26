@@ -22,7 +22,8 @@ test "TreeView vector composite element set/get/commit" {
     var view = try VectorType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
-    const e0_view = try view.get(0);
+    var e0_view = try view.get(0);
+    defer e0_view.deinit();
     var e0_value: Inner.Type = undefined;
     try Inner.tree.toValue(e0_view.base_view.data.root, &pool, &e0_value);
     try std.testing.expectEqual(@as(u32, 1), e0_value.a);
@@ -33,7 +34,6 @@ test "TreeView vector composite element set/get/commit" {
     var replacement_view: ?Inner.TreeView = try Inner.TreeView.init(allocator, &pool, replacement_root);
     defer if (replacement_view) |*v| v.deinit();
     try view.set(1, replacement_view.?);
-    replacement_view = null;
 
     try view.commit();
 
@@ -102,7 +102,6 @@ test "TreeView vector composite clearCache does not break subsequent commits" {
     var replacement_view: ?Inner.TreeView = try Inner.TreeView.init(allocator, &pool, replacement_root);
     defer if (replacement_view) |*v| v.deinit();
     try view.set(0, replacement_view.?);
-    replacement_view = null;
 
     var actual_root: [32]u8 = undefined;
     try view.hashTreeRoot(&actual_root);

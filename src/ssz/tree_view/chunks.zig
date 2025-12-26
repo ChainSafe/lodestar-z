@@ -9,7 +9,6 @@ const Gindex = @import("persistent_merkle_tree").Gindex;
 
 const tree_view_root = @import("root.zig");
 const BaseTreeView = tree_view_root.BaseTreeView;
-const TreeViewData = tree_view_root.TreeViewData;
 
 /// Shared helpers for basic element types packed into chunks.
 pub fn BasicPackedChunks(
@@ -124,26 +123,17 @@ pub fn CompositeChunks(
         pub fn get(base_view: *BaseTreeView, index: usize) !Element {
             const child_data = try base_view.getChildData(Gindex.fromDepth(chunk_depth, index));
             return .{
-                .base_view = .{
-                    .allocator = base_view.allocator,
-                    .pool = base_view.pool,
-                    .data = child_data,
-                },
+                .base_view = BaseTreeView.initFromData(
+                    base_view.allocator,
+                    base_view.pool,
+                    child_data,
+                ),
             };
         }
 
         pub fn set(base_view: *BaseTreeView, index: usize, value: Element) !void {
             const gindex = Gindex.fromDepth(chunk_depth, index);
-            try base_view.data.changed.put(base_view.allocator, gindex, {});
-            const opt_old_data = try base_view.data.children_data.fetchPut(
-                base_view.allocator,
-                gindex,
-                value.base_view.data,
-            );
-            if (opt_old_data) |old_data_value| {
-                var data_ptr: *TreeViewData = @constCast(&old_data_value.value);
-                data_ptr.deinit(base_view.allocator, base_view.pool);
-            }
+            try base_view.setChildData(gindex, value.base_view.data);
         }
     };
 }
