@@ -9,6 +9,8 @@ pub fn build(b: *std.Build) void {
     const options_build_options = b.addOptions();
     const option_zero_hash_max_depth = b.option(u8, "zero_hash_max_depth", "");
     options_build_options.addOption(?u8, "zero_hash_max_depth", option_zero_hash_max_depth);
+    const option_container_viewstore_poc = b.option(bool, "container_viewstore_poc", "") orelse true;
+    options_build_options.addOption(bool, "container_viewstore_poc", option_container_viewstore_poc);
     const option_preset = b.option([]const u8, "preset", "") orelse "mainnet";
     options_build_options.addOption([]const u8, "preset", option_preset);
     const options_module_build_options = options_build_options.createModule();

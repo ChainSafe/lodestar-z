@@ -1,6 +1,7 @@
 const std = @import("std");
 const ssz = @import("ssz");
 const Node = @import("persistent_merkle_tree").Node;
+const build_options = @import("build_options");
 
 test "TreeView list element roundtrip" {
     const allocator = std.testing.allocator;
@@ -45,7 +46,7 @@ test "TreeView list element roundtrip" {
 
     var roundtrip: ListType.Type = .empty;
     defer roundtrip.deinit(allocator);
-    try ListType.tree.toValue(allocator, view.base_view.data.root, &pool, &roundtrip);
+    try ListType.tree.toValue(allocator, view.rootNodeId(), &pool, &roundtrip);
     try std.testing.expectEqual(roundtrip.items.len, expected_list.items.len);
     try std.testing.expectEqualSlices(u32, expected_list.items, roundtrip.items);
 }
@@ -340,7 +341,7 @@ test "TreeView basic list sliceTo matches incremental snapshots" {
 
         var actual: ListType.Type = .empty;
         defer actual.deinit(allocator);
-        try ListType.tree.toValue(allocator, sliced.base_view.data.root, &pool, &actual);
+        try ListType.tree.toValue(allocator, sliced.rootNodeId(), &pool, &actual);
 
         try std.testing.expectEqual(expected_len, actual.items.len);
         try std.testing.expectEqualSlices(u64, expected.items, actual.items);
@@ -405,5 +406,48 @@ test "TreeView list sliceTo truncates tail elements" {
     var actual_root: [32]u8 = undefined;
     try sliced.hashTreeRoot(&actual_root);
 
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}
+
+test "TreeView basic list ViewStore POC get/set/push/getAll" {
+    if (!build_options.container_viewstore_poc) return;
+
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const ListType = ssz.FixedListType(Uint32, 32);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &[_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9 });
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+
+    const ListPOCView = ssz.ListBasicTreeViewViewStorePOC(ListType);
+    var view = try ListPOCView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    try std.testing.expectEqual(@as(usize, 9), try view.length());
+    try std.testing.expectEqual(@as(u32, 1), try view.get(0));
+    try std.testing.expectEqual(@as(u32, 9), try view.get(8));
+
+    try view.set(3, @as(u32, 99));
+    try view.push(@as(u32, 10));
+    try view.commit();
+
+    var expected: ListType.Type = .empty;
+    defer expected.deinit(allocator);
+    try expected.appendSlice(allocator, &[_]u32{ 1, 2, 3, 99, 5, 6, 7, 8, 9, 10 });
+
+    const all = try view.getAll(allocator);
+    defer allocator.free(all);
+    try std.testing.expectEqualSlices(u32, expected.items, all);
+
+    var expected_root: [32]u8 = undefined;
+    try ListType.hashTreeRoot(allocator, &expected, &expected_root);
+    var actual_root: [32]u8 = undefined;
+    try view.hashTreeRoot(&actual_root);
     try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
 }

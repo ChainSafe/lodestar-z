@@ -30,6 +30,10 @@
             .zero_hash_max_depth = .{
                 .type = "u8",
             },
+            .container_viewstore_poc = .{
+                .default = true,
+                .type = "bool",
+            },
             .preset = .{
                 .default = "mainnet",
                 .type = "string",
