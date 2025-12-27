@@ -4,7 +4,6 @@ const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
 const tree_view_root = @import("root.zig");
-const TreeViewData = tree_view_root.TreeViewData;
 const BaseTreeView = tree_view_root.BaseTreeView;
 
 /// A specialized tree view for SSZ container types, enabling efficient access and modification of container fields, given a backing merkle tree.
@@ -60,13 +59,12 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 return value;
             } else {
                 const child_data = try self.base_view.getChildData(child_gindex);
-
                 return .{
-                    .base_view = .{
-                        .allocator = self.base_view.allocator,
-                        .pool = self.base_view.pool,
-                        .data = child_data,
-                    },
+                    .base_view = BaseTreeView.initFromData(
+                        self.base_view.allocator,
+                        self.base_view.pool,
+                        child_data,
+                    ),
                 };
             }
         }

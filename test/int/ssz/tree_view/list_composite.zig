@@ -176,11 +176,9 @@ test "TreeView composite list push appends element" {
     const next_checkpoint = Checkpoint.Type{ .epoch = 10, .root = [_]u8{10} ** 32 };
     const next_node = try Checkpoint.tree.fromValue(&pool, &next_checkpoint);
     var element_view = try Checkpoint.TreeView.init(allocator, &pool, next_node);
-    var transferred = false;
-    defer if (!transferred) element_view.deinit();
+    defer element_view.deinit();
 
     try view.push(element_view);
-    transferred = true;
 
     try std.testing.expectEqual(@as(usize, 2), try view.length());
 
@@ -222,8 +220,7 @@ test "TreeView list of list commits inner length updates" {
     defer InnerListType.deinit(allocator, &inner_value);
     const inner_root = try InnerListType.tree.fromValue(allocator, &pool, &inner_value);
     var inner_view = try InnerListType.TreeView.init(allocator, &pool, inner_root);
-    var transferred = false;
-    defer if (!transferred) inner_view.deinit();
+    defer inner_view.deinit();
 
     var e1_value: InnerElement.Type = InnerElement.default_value;
     defer InnerElement.deinit(allocator, &e1_value);
@@ -256,7 +253,6 @@ test "TreeView list of list commits inner length updates" {
     }
 
     try e1.set("payload", payload_view.?);
-    payload_view = null;
 
     var numbers_value: Numbers.Type = .empty;
     defer numbers_value.deinit(allocator);
@@ -282,7 +278,6 @@ test "TreeView list of list commits inner length updates" {
     }
 
     try e1.set("numbers", numbers_view.?);
-    numbers_view = null;
 
     var vec_value: Vec2.Type = [_]u32{ 0, 0 };
     const vec_root = try Vec2.tree.fromValue(&pool, &vec_value);
@@ -306,10 +301,8 @@ test "TreeView list of list commits inner length updates" {
     }
 
     try e1.set("vec", vec_view.?);
-    vec_view = null;
 
     try inner_view.push(e1_view.?);
-    e1_view = null;
 
     var e2_value: InnerElement.Type = InnerElement.default_value;
     defer InnerElement.deinit(allocator, &e2_value);
@@ -328,10 +321,8 @@ test "TreeView list of list commits inner length updates" {
     const e2_payload = &e2_payload_view.?;
     try e2_payload.push(@as(u8, 0xBB));
     try e2.set("payload", e2_payload_view.?);
-    e2_payload_view = null;
 
     try inner_view.push(e2_view.?);
-    e2_view = null;
 
     {
         var e3_value: InnerElement.Type = InnerElement.default_value;
@@ -342,13 +333,11 @@ test "TreeView list of list commits inner length updates" {
         const e3 = &e3_view.?;
         try e3.set("id", @as(u32, 33));
         try inner_view.set(1, e3_view.?);
-        e3_view = null;
     }
 
     try std.testing.expectEqual(@as(usize, 2), try inner_view.length());
 
     try outer_view.push(inner_view);
-    transferred = true;
 
     try outer_view.commit();
 
