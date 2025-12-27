@@ -489,12 +489,13 @@ test "ListCompositeTreeView - serialize (ByteVector32 list)" {
         var view = try ListRootsType.TreeView.init(allocator, &pool, tree_node);
         defer view.deinit();
 
-        const view_serialized = try view.serialize();
+        const view_size = try view.serializedSize();
+        const view_serialized = try allocator.alloc(u8, view_size);
         defer allocator.free(view_serialized);
+        const written = try view.serializeIntoBytes(view_serialized);
+        try std.testing.expectEqual(view_size, written);
 
         try std.testing.expectEqualSlices(u8, value_serialized, view_serialized);
-
-        const view_size = try view.serializedSize();
         try std.testing.expectEqual(value_serialized.len, view_size);
 
         var hash_root: [32]u8 = undefined;
@@ -564,8 +565,11 @@ test "ListCompositeTreeView - serialize (Container list)" {
         var view = try ListContainerType.TreeView.init(allocator, &pool, tree_node);
         defer view.deinit();
 
-        const view_serialized = try view.serialize();
+        const view_size = try view.serializedSize();
+        const view_serialized = try allocator.alloc(u8, view_size);
         defer allocator.free(view_serialized);
+        const written = try view.serializeIntoBytes(view_serialized);
+        try std.testing.expectEqual(view_size, written);
 
         try std.testing.expectEqualSlices(u8, tc.expected_serialized, view_serialized);
         try std.testing.expectEqualSlices(u8, value_serialized, view_serialized);
@@ -605,8 +609,11 @@ test "ListCompositeTreeView - push and serialize" {
     const len = try view.length();
     try std.testing.expectEqual(@as(usize, 2), len);
 
-    const serialized = try view.serialize();
+    const size = try view.serializedSize();
+    const serialized = try allocator.alloc(u8, size);
     defer allocator.free(serialized);
+    const written = try view.serializeIntoBytes(serialized);
+    try std.testing.expectEqual(size, written);
 
     try std.testing.expectEqual(@as(usize, 64), serialized.len);
     try std.testing.expectEqualSlices(u8, &val1, serialized[0..32]);

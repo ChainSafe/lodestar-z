@@ -264,11 +264,12 @@ test "ContainerTreeView - serialize (basic fields)" {
         var view = try TestContainer.TreeView.init(allocator, &pool, tree_node);
         defer view.deinit();
 
-        const view_serialized = try view.serialize();
-        defer allocator.free(view_serialized);
+        var view_serialized: [TestContainer.fixed_size]u8 = undefined;
+        const written = try view.serializeIntoBytes(&view_serialized);
+        try std.testing.expectEqual(view_serialized.len, written);
 
-        try std.testing.expectEqualSlices(u8, tc.expected_serialized, view_serialized);
-        try std.testing.expectEqualSlices(u8, &value_serialized, view_serialized);
+        try std.testing.expectEqualSlices(u8, tc.expected_serialized, &view_serialized);
+        try std.testing.expectEqualSlices(u8, &value_serialized, &view_serialized);
 
         const view_size = try view.serializedSize();
         try std.testing.expectEqual(tc.expected_serialized.len, view_size);
@@ -303,13 +304,14 @@ test "ContainerTreeView - get and set basic fields" {
     try view.set("a", 999);
     try std.testing.expectEqual(@as(u64, 999), try view.get("a"));
 
-    const serialized = try view.serialize();
-    defer allocator.free(serialized);
+    var serialized: [TestContainer.fixed_size]u8 = undefined;
+    const written = try view.serializeIntoBytes(&serialized);
+    try std.testing.expectEqual(serialized.len, written);
 
     const expected: TestContainer.Type = .{ .a = 999, .b = 200 };
     var expected_serialized: [TestContainer.fixed_size]u8 = undefined;
     _ = TestContainer.serializeIntoBytes(&expected, &expected_serialized);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, serialized);
+    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
 }
 
 test "ContainerTreeView - serialize (with nested list)" {
@@ -340,8 +342,11 @@ test "ContainerTreeView - serialize (with nested list)" {
     var view = try TestContainer.TreeView.init(allocator, &pool, tree_node);
     defer view.deinit();
 
-    const view_serialized = try view.serialize();
+    const view_size = try view.serializedSize();
+    const view_serialized = try allocator.alloc(u8, view_size);
     defer allocator.free(view_serialized);
+    const written = try view.serializeIntoBytes(view_serialized);
+    try std.testing.expectEqual(view_size, written);
 
     // Expected: offset (4 bytes) + b (8 bytes) + empty list data (0 bytes)
     // 0x0c0000000000000000000000

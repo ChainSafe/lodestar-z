@@ -137,10 +137,11 @@ test "ArrayCompositeTreeView - serialize (ByteVector32 vector)" {
     var view = try VecRootsType.TreeView.init(allocator, &pool, tree_node);
     defer view.deinit();
 
-    const view_serialized = try view.serialize();
-    defer allocator.free(view_serialized);
+    var view_serialized: [VecRootsType.fixed_size]u8 = undefined;
+    const written = try view.serializeIntoBytes(&view_serialized);
+    try std.testing.expectEqual(view_serialized.len, written);
 
-    try std.testing.expectEqualSlices(u8, &value_serialized, view_serialized);
+    try std.testing.expectEqualSlices(u8, &value_serialized, &view_serialized);
 
     const view_size = try view.serializedSize();
     try std.testing.expectEqual(@as(usize, 128), view_size);
@@ -179,10 +180,11 @@ test "ArrayCompositeTreeView - serialize (Container vector)" {
     var view = try VecContainerType.TreeView.init(allocator, &pool, tree_node);
     defer view.deinit();
 
-    const view_serialized = try view.serialize();
-    defer allocator.free(view_serialized);
+    var view_serialized: [VecContainerType.fixed_size]u8 = undefined;
+    const written = try view.serializeIntoBytes(&view_serialized);
+    try std.testing.expectEqual(view_serialized.len, written);
 
-    try std.testing.expectEqualSlices(u8, &value_serialized, view_serialized);
+    try std.testing.expectEqualSlices(u8, &value_serialized, &view_serialized);
 
     // 0x0000000000000000000000000000000040e2010000000000f1fb0900000000004794030000000000f8ad0b00000000004e46050000000000ff5f0d0000000000
     const expected = [_]u8{
@@ -191,7 +193,7 @@ test "ArrayCompositeTreeView - serialize (Container vector)" {
         0x47, 0x94, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0xad, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x4e, 0x46, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x5f, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
-    try std.testing.expectEqualSlices(u8, &expected, view_serialized);
+    try std.testing.expectEqualSlices(u8, &expected, &view_serialized);
 
     var hash_root: [32]u8 = undefined;
     try view.hashTreeRoot(&hash_root);
@@ -222,9 +224,10 @@ test "ArrayCompositeTreeView - get and set" {
 
     var elem0 = try view.get(0);
     defer elem0.deinit();
-    const bytes0 = try elem0.serialize();
-    defer allocator.free(bytes0);
-    try std.testing.expectEqualSlices(u8, &value[0], bytes0);
+    var bytes0: [Root32.fixed_size]u8 = undefined;
+    const bytes0_written = try elem0.serializeIntoBytes(&bytes0);
+    try std.testing.expectEqual(bytes0.len, bytes0_written);
+    try std.testing.expectEqualSlices(u8, &value[0], &bytes0);
 
     const new_val = [_]u8{0xff} ** 32;
     const new_node = try Root32.tree.fromValue(&pool, &new_val);
@@ -233,7 +236,8 @@ test "ArrayCompositeTreeView - get and set" {
 
     var elem1 = try view.get(1);
     defer elem1.deinit();
-    const bytes1 = try elem1.serialize();
-    defer allocator.free(bytes1);
-    try std.testing.expectEqualSlices(u8, &new_val, bytes1);
+    var bytes1: [Root32.fixed_size]u8 = undefined;
+    const bytes1_written = try elem1.serializeIntoBytes(&bytes1);
+    try std.testing.expectEqual(bytes1.len, bytes1_written);
+    try std.testing.expectEqualSlices(u8, &new_val, &bytes1);
 }

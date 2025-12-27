@@ -79,17 +79,6 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
             return try Chunks.getAllInto(&self.base_view, length, values);
         }
 
-        /// Serialize the tree view directly to binary data.
-        /// This commits any pending changes and then serializes from the merkle tree.
-        pub fn serialize(self: *Self) ![]u8 {
-            try self.commit();
-            const size = self.serializedSize();
-            const output = try self.base_view.allocator.alloc(u8, size);
-            errdefer self.base_view.allocator.free(output);
-            _ = try self.serializeIntoBytes(output);
-            return output;
-        }
-
         /// Serialize the tree view into a provided buffer.
         /// Returns the number of bytes written.
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {

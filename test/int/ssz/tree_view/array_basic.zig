@@ -149,11 +149,12 @@ test "ArrayBasicTreeView - serialize (uint64 vector)" {
         var view = try VecU64Type.TreeView.init(allocator, &pool, tree_node);
         defer view.deinit();
 
-        const view_serialized = try view.serialize();
-        defer allocator.free(view_serialized);
+        var view_serialized: [VecU64Type.fixed_size]u8 = undefined;
+        const written = try view.serializeIntoBytes(&view_serialized);
+        try std.testing.expectEqual(view_serialized.len, written);
 
-        try std.testing.expectEqualSlices(u8, tc.expected_serialized, view_serialized);
-        try std.testing.expectEqualSlices(u8, &value_serialized, view_serialized);
+        try std.testing.expectEqualSlices(u8, tc.expected_serialized, &view_serialized);
+        try std.testing.expectEqualSlices(u8, &value_serialized, &view_serialized);
 
         const view_size = view.serializedSize();
         try std.testing.expectEqual(tc.expected_serialized.len, view_size);
@@ -182,10 +183,11 @@ test "ArrayBasicTreeView - serialize (uint8 vector)" {
     var view = try VecU8Type.TreeView.init(allocator, &pool, tree_node);
     defer view.deinit();
 
-    const view_serialized = try view.serialize();
-    defer allocator.free(view_serialized);
+    var view_serialized: [VecU8Type.fixed_size]u8 = undefined;
+    const written = try view.serializeIntoBytes(&view_serialized);
+    try std.testing.expectEqual(view_serialized.len, written);
 
-    try std.testing.expectEqualSlices(u8, &value, view_serialized);
+    try std.testing.expectEqualSlices(u8, &value, &view_serialized);
 
     const view_size = view.serializedSize();
     try std.testing.expectEqual(@as(usize, 8), view_size);
@@ -213,11 +215,12 @@ test "ArrayBasicTreeView - get and set" {
     try view.set(1, 999);
     try std.testing.expectEqual(@as(u64, 999), try view.get(1));
 
-    const serialized = try view.serialize();
-    defer allocator.free(serialized);
+    var serialized: [VecU64Type.fixed_size]u8 = undefined;
+    const written = try view.serializeIntoBytes(&serialized);
+    try std.testing.expectEqual(serialized.len, written);
 
     const expected = [4]u64{ 100, 999, 300, 400 };
     var expected_serialized: [VecU64Type.fixed_size]u8 = undefined;
     _ = VecU64Type.serializeIntoBytes(&expected, &expected_serialized);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, serialized);
+    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
 }

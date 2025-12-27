@@ -93,17 +93,6 @@ pub fn ContainerTreeView(comptime ST: type) type {
             }
         }
 
-        /// Serialize the tree view directly to binary data.
-        /// This commits any pending changes and then serializes from the merkle tree.
-        pub fn serialize(self: *Self) ![]u8 {
-            try self.commit();
-            const size = try self.serializedSize();
-            const output = try self.base_view.allocator.alloc(u8, size);
-            errdefer self.base_view.allocator.free(output);
-            _ = try self.serializeIntoBytes(output);
-            return output;
-        }
-
         /// Serialize the tree view into a provided buffer.
         /// Returns the number of bytes written.
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {

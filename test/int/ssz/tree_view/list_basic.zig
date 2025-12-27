@@ -455,13 +455,15 @@ test "ListBasicTreeView - serialize (uint8 list)" {
         var view = try ListU8Type.TreeView.init(allocator, &pool, tree_node);
         defer view.deinit();
 
-        const view_serialized = try view.serialize();
+        const view_size = try view.serializedSize();
+        const view_serialized = try allocator.alloc(u8, view_size);
         defer allocator.free(view_serialized);
+        const written = try view.serializeIntoBytes(view_serialized);
+        try std.testing.expectEqual(view_size, written);
 
         try std.testing.expectEqualSlices(u8, tc.expected_serialized, view_serialized);
         try std.testing.expectEqualSlices(u8, value_serialized, view_serialized);
 
-        const view_size = try view.serializedSize();
         try std.testing.expectEqual(tc.expected_serialized.len, view_size);
 
         var hash_root: [32]u8 = undefined;
@@ -517,13 +519,15 @@ test "ListBasicTreeView - serialize (uint64 list)" {
         var view = try ListU64Type.TreeView.init(allocator, &pool, tree_node);
         defer view.deinit();
 
-        const view_serialized = try view.serialize();
+        const view_size = try view.serializedSize();
+        const view_serialized = try allocator.alloc(u8, view_size);
         defer allocator.free(view_serialized);
+        const written = try view.serializeIntoBytes(view_serialized);
+        try std.testing.expectEqual(view_size, written);
 
         try std.testing.expectEqualSlices(u8, tc.expected_serialized, view_serialized);
         try std.testing.expectEqualSlices(u8, value_serialized, view_serialized);
 
-        const view_size = try view.serializedSize();
         try std.testing.expectEqual(tc.expected_serialized.len, view_size);
 
         var hash_root: [32]u8 = undefined;
@@ -553,8 +557,11 @@ test "ListBasicTreeView - push and serialize" {
     try view.push(3);
     try view.push(4);
 
-    const serialized = try view.serialize();
+    const size = try view.serializedSize();
+    const serialized = try allocator.alloc(u8, size);
     defer allocator.free(serialized);
+    const written = try view.serializeIntoBytes(serialized);
+    try std.testing.expectEqual(size, written);
 
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4 }, serialized);
 
@@ -590,8 +597,11 @@ test "ListBasicTreeView - sliceTo and serialize" {
     var sliced = try view.sliceTo(1);
     defer sliced.deinit();
 
-    const serialized = try sliced.serialize();
+    const size = try sliced.serializedSize();
+    const serialized = try allocator.alloc(u8, size);
     defer allocator.free(serialized);
+    const written = try sliced.serializeIntoBytes(serialized);
+    try std.testing.expectEqual(size, written);
 
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2 }, serialized);
     try std.testing.expectEqual(@as(usize, 2), try sliced.length());
