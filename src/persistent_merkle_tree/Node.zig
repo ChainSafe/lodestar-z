@@ -386,6 +386,131 @@ pub const Pool = struct {
             self.next_free_node = id;
         }
     }
+
+    //
+    // File Layout:
+    // ┌──────────────────────────────────────────────────────────────┐
+    // │  HEADER (24 bytes, uncompressed)                            │
+    // │    offset 0:  magic [8]u8       = "LSMTPOOL"                │
+    // │    offset 8:  version u32       = 1                         │
+    // │    offset 12: next_free u32     = head of free list         │
+    // │    offset 16: total_nodes u32   = number of nodes (len)     │
+    // │    offset 20: capacity u32      = allocated capacity        │
+    // ├──────────────────────────────────────────────────────────────┤
+    // │  COMPRESSED BODY (zlib)                                     │
+    // │    Raw MultiArrayList bytes: capacity × 44 bytes            │
+    // └──────────────────────────────────────────────────────────────┘
+    //
+    pub const FileHeader = extern struct {
+        magic: [8]u8 = MAGIC,
+        version: u32 = VERSION,
+        next_free: u32,
+        total_nodes: u32,
+        capacity: u32,
+
+        pub const MAGIC = "LSMTPOOL".*;
+        pub const VERSION: u32 = 1;
+
+        comptime {
+            std.debug.assert(@sizeOf(FileHeader) == 24);
+        }
+    };
+
+    pub const SerializeError = error{
+        WriteFailed,
+    } || Allocator.Error;
+
+    pub const DeserializeError = error{
+        InvalidMagic,
+        UnsupportedVersion,
+        ReadFailed,
+    } || Allocator.Error || Error;
+
+    /// Clears stale data in free nodes to improve compression ratio.
+    fn zeroFreeNodes(self: *Pool) void {
+        const states = self.nodes.items(.state);
+        const hashes = self.nodes.items(.hash);
+        const lefts = self.nodes.items(.left);
+        const rights = self.nodes.items(.right);
+
+        var node_id = self.next_free_node;
+        while (@intFromEnum(node_id) < self.nodes.len) {
+            const i = @intFromEnum(node_id);
+            hashes[i] = std.mem.zeroes([32]u8);
+            lefts[i] = @enumFromInt(0);
+            rights[i] = @enumFromInt(0);
+            node_id = states[i].getNextFree();
+        }
+    }
+
+    pub fn serialize(self: *Pool, writer: anytype) SerializeError!void {
+        self.zeroFreeNodes();
+
+        const multi_array = self.nodes.toMultiArrayList();
+        const header = FileHeader{
+            .next_free = @intFromEnum(self.next_free_node),
+            .total_nodes = @intCast(self.nodes.len),
+            .capacity = @intCast(multi_array.capacity),
+        };
+        writer.writeAll(std.mem.asBytes(&header)) catch return error.WriteFailed;
+
+        var compressor = std.compress.zlib.compressor(writer, .{ .level = .default }) catch
+            return error.WriteFailed;
+        const comp_writer = compressor.writer();
+
+        const total_bytes = @sizeOf(Node) * multi_array.capacity;
+        comp_writer.writeAll(multi_array.bytes[0..total_bytes]) catch
+            return error.WriteFailed;
+
+        compressor.finish() catch return error.WriteFailed;
+    }
+
+    pub fn readHeader(reader: anytype) DeserializeError!FileHeader {
+        var header: FileHeader = undefined;
+        reader.readNoEof(std.mem.asBytes(&header)) catch return error.ReadFailed;
+
+        if (!std.mem.eql(u8, &header.magic, &FileHeader.MAGIC)) {
+            return error.InvalidMagic;
+        }
+
+        if (header.version != FileHeader.VERSION) {
+            return error.UnsupportedVersion;
+        }
+
+        return header;
+    }
+
+    pub fn deserialize(allocator: Allocator, reader: anytype, header: FileHeader) DeserializeError!Pool {
+        var pool = try Pool.initEmpty(allocator, header.total_nodes, header.capacity);
+        errdefer pool.deinit();
+
+        var decompressor = std.compress.zlib.decompressor(reader);
+        const decomp_reader = decompressor.reader();
+
+        const multi_array = pool.nodes.toMultiArrayList();
+        const total_bytes = @sizeOf(Node) * multi_array.capacity;
+        decomp_reader.readNoEof(multi_array.bytes[0..total_bytes]) catch
+            return error.ReadFailed;
+
+        pool.next_free_node = @enumFromInt(header.next_free);
+
+        return pool;
+    }
+
+    fn initEmpty(allocator: Allocator, len: u32, capacity: u32) Error!Pool {
+        var pool: Pool = .{
+            .allocator = allocator,
+            .nodes = undefined,
+            .next_free_node = @enumFromInt(0),
+        };
+
+        var nodes = std.MultiArrayList(Node).empty;
+        try nodes.resize(allocator, capacity);
+        nodes.len = len;
+        pool.nodes = nodes.slice();
+
+        return pool;
+    }
 };
 
 /// A handle which uniquely identifies the node
