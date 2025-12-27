@@ -10,8 +10,8 @@ const type_root = @import("../type/root.zig");
 const itemsPerChunk = type_root.itemsPerChunk;
 const chunkDepth = type_root.chunkDepth;
 
-const BaseTreeView = @import("root.zig").BaseTreeView;
 const BasicPackedChunks = @import("chunks.zig").BasicPackedChunks;
+const assertTreeViewType = @import("assert.zig").assertTreeViewType;
 
 /// A specialized tree view for SSZ vector types with basic element types.
 /// Elements are packed into chunks (multiple elements per leaf node).
@@ -25,8 +25,9 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
         }
     }
 
-    return struct {
-        base_view: BaseTreeView,
+    const TreeView = struct {
+        allocator: Allocator,
+        chunks: Chunks,
 
         pub const SszType = ST;
         pub const Element = ST.Element.Type;
@@ -39,44 +40,54 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
         const items_per_chunk: usize = itemsPerChunk(ST.Element);
         const Chunks = BasicPackedChunks(ST, chunk_depth, items_per_chunk);
 
-        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
-            return Self{
-                .base_view = try BaseTreeView.init(allocator, pool, root),
-            };
+        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
+            const ptr = try allocator.create(Self);
+            try Chunks.init(&ptr.chunks, allocator, pool, root);
+            ptr.allocator = allocator;
+            return ptr;
         }
 
         pub fn deinit(self: *Self) void {
-            self.base_view.deinit();
+            self.chunks.deinit();
+            self.allocator.destroy(self);
         }
 
         pub fn commit(self: *Self) !void {
-            try self.base_view.commit();
+            try self.chunks.commit();
         }
 
         pub fn clearCache(self: *Self) void {
-            self.base_view.clearCache();
+            self.chunks.clearCache();
         }
 
         pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
-            try self.base_view.hashTreeRoot(out);
+            try self.commit();
+            out.* = self.chunks.root.getRoot(self.chunks.pool).*;
+        }
+
+        pub fn getRoot(self: *const Self) Node.Id {
+            return self.chunks.root;
         }
 
         pub fn get(self: *Self, index: usize) !Element {
             if (index >= length) return error.IndexOutOfBounds;
-            return try Chunks.get(&self.base_view, index);
+            return self.chunks.get(index);
         }
 
         pub fn set(self: *Self, index: usize, value: Element) !void {
             if (index >= length) return error.IndexOutOfBounds;
-            try Chunks.set(&self.base_view, index, value);
+            try self.chunks.set(index, value);
         }
 
-        pub fn getAll(self: *Self, allocator: Allocator) ![]Element {
-            return try Chunks.getAll(&self.base_view, allocator, length);
+        pub fn getAll(self: *Self) ![]Element {
+            return try self.chunks.getAll(self.allocator, length);
         }
 
         pub fn getAllInto(self: *Self, values: []Element) ![]Element {
-            return try Chunks.getAllInto(&self.base_view, length, values);
+            return try self.chunks.getAllInto(length, values);
         }
     };
+
+    assertTreeViewType(TreeView);
+    return TreeView;
 }

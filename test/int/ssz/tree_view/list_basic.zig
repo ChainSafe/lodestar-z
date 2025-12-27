@@ -45,7 +45,7 @@ test "TreeView list element roundtrip" {
 
     var roundtrip: ListType.Type = .empty;
     defer roundtrip.deinit(allocator);
-    try ListType.tree.toValue(allocator, view.base_view.data.root, &pool, &roundtrip);
+    try ListType.tree.toValue(allocator, view.getRoot(), &pool, &roundtrip);
     try std.testing.expectEqual(roundtrip.items.len, expected_list.items.len);
     try std.testing.expectEqualSlices(u32, expected_list.items, roundtrip.items);
 }
@@ -105,7 +105,7 @@ test "TreeView list getAllAlloc handles zero length" {
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
-    const filled = try view.getAll(allocator);
+    const filled = try view.getAll();
     defer allocator.free(filled);
 
     try std.testing.expectEqual(@as(usize, 0), filled.len);
@@ -132,7 +132,7 @@ test "TreeView list getAllAlloc spans multiple chunks" {
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
-    const filled = try view.getAll(allocator);
+    const filled = try view.getAll();
     defer allocator.free(filled);
 
     try std.testing.expectEqualSlices(u16, values[0..], filled);
@@ -195,7 +195,7 @@ test "TreeView list push across chunk boundary resets prefetch" {
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
-    const initial = try view.getAll(allocator);
+    const initial = try view.getAll();
     defer allocator.free(initial);
     try std.testing.expectEqual(@as(usize, 8), initial.len);
 
@@ -205,7 +205,7 @@ test "TreeView list push across chunk boundary resets prefetch" {
     try std.testing.expectEqual(@as(usize, 10), try view.length());
     try std.testing.expectEqual(@as(u32, 9), try view.get(9));
 
-    const filled = try view.getAll(allocator);
+    const filled = try view.getAll();
     defer allocator.free(filled);
     var expected: [10]u32 = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
     try std.testing.expectEqualSlices(u32, expected[0..], filled);
@@ -264,7 +264,7 @@ test "TreeView basic list getAll reflects pushes" {
     }
 
     try view.commit();
-    const filled = try view.getAll(allocator);
+    const filled = try view.getAll();
     defer allocator.free(filled);
     try std.testing.expectEqualSlices(u64, expected[0..], filled);
 }
@@ -340,7 +340,7 @@ test "TreeView basic list sliceTo matches incremental snapshots" {
 
         var actual: ListType.Type = .empty;
         defer actual.deinit(allocator);
-        try ListType.tree.toValue(allocator, sliced.base_view.data.root, &pool, &actual);
+        try ListType.tree.toValue(allocator, sliced.getRoot(), &pool, &actual);
 
         try std.testing.expectEqual(expected_len, actual.items.len);
         try std.testing.expectEqualSlices(u64, expected.items, actual.items);
@@ -390,7 +390,7 @@ test "TreeView list sliceTo truncates tail elements" {
 
     try std.testing.expectEqual(@as(usize, 3), try sliced.length());
 
-    const filled = try sliced.getAll(allocator);
+    const filled = try sliced.getAll();
     defer allocator.free(filled);
 
     try std.testing.expectEqualSlices(u32, values[0..3], filled);

@@ -37,7 +37,7 @@ test "TreeView vector element roundtrip" {
     try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
 
     var roundtrip: VectorType.Type = undefined;
-    try VectorType.tree.toValue(view.base_view.data.root, &pool, &roundtrip);
+    try VectorType.tree.toValue(view.getRoot(), &pool, &roundtrip);
     try std.testing.expectEqualSlices(u64, &expected, &roundtrip);
 }
 
@@ -80,7 +80,7 @@ test "TreeView vector getAllAlloc roundtrip" {
     var view = try VectorType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
-    const filled = try view.getAll(allocator);
+    const filled = try view.getAll();
     defer allocator.free(filled);
 
     try std.testing.expectEqualSlices(u16, values[0..], filled);
@@ -99,13 +99,13 @@ test "TreeView vector getAllAlloc repeat reflects updates" {
     var view = try VectorType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
-    const first = try view.getAll(allocator);
+    const first = try view.getAll();
     defer allocator.free(first);
     try std.testing.expectEqualSlices(u32, values[0..], first);
 
     try view.set(3, 99);
 
-    const second = try view.getAll(allocator);
+    const second = try view.getAll();
     defer allocator.free(second);
     values[3] = 99;
     try std.testing.expectEqualSlices(u32, values[0..], second);
