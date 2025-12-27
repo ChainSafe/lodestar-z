@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
+const isFixedType = @import("../type/type_kind.zig").isFixedType;
 const tree_view_root = @import("root.zig");
 const TreeViewData = tree_view_root.TreeViewData;
 const BaseTreeView = tree_view_root.BaseTreeView;
@@ -89,6 +90,27 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 );
             } else {
                 try self.base_view.setChildData(child_gindex, value.base_view.data);
+            }
+        }
+
+        /// Serialize the tree view into a provided buffer.
+        /// Returns the number of bytes written.
+        pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
+            try self.commit();
+            if (comptime isFixedType(ST)) {
+                return try ST.tree.serializeIntoBytes(self.base_view.data.root, self.base_view.pool, out);
+            } else {
+                return try ST.tree.serializeIntoBytes(self.base_view.allocator, self.base_view.data.root, self.base_view.pool, out);
+            }
+        }
+
+        /// Get the serialized size of this tree view.
+        pub fn serializedSize(self: *Self) !usize {
+            try self.commit();
+            if (comptime isFixedType(ST)) {
+                return ST.tree.serializedSize(self.base_view.data.root, self.base_view.pool);
+            } else {
+                return try ST.tree.serializedSize(self.base_view.allocator, self.base_view.data.root, self.base_view.pool);
             }
         }
     };
