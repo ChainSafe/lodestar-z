@@ -1,6 +1,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
+const metrics = @import("metrics.zig");
+const observeEpochTransitionStep = metrics.observeEpochTransitionStep;
+const observeEpochTransition = metrics.observeEpochTransition;
+const readSeconds = metrics.readSeconds;
+const Timer = std.time.Timer;
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -69,11 +74,12 @@ pub fn processSlotsWithTransientCache(
         try processSlot(allocator, post_state);
 
         if ((state.slot() + 1) % preset.SLOTS_PER_EPOCH == 0) {
-            // TODO(bing): metrics
-            // const epochTransitionTimer = metrics?.epochTransitionTime.startTimer();
+            var epoch_transition_timer = try Timer.start();
 
-            // TODO(bing): metrics: time beforeProcessEpoch
+            var timer = try Timer.start();
             var epoch_transition_cache = try EpochTransitionCache.init(allocator, post_state);
+            try observeEpochTransitionStep(.{ .step = .before_process_epoch }, timer.read());
+
             defer {
                 epoch_transition_cache.deinit();
                 allocator.destroy(epoch_transition_cache);
@@ -83,8 +89,9 @@ pub fn processSlotsWithTransientCache(
 
             state.slotPtr().* += 1;
 
+            timer = try Timer.start();
             try post_state.epoch_cache_ref.get().afterProcessEpoch(post_state, epoch_transition_cache);
-            // post_state.commit
+            try observeEpochTransitionStep(.{ .step = .after_process_epoch }, timer.read());
 
             const state_epoch = computeEpochAtSlot(state.slot());
 
@@ -107,11 +114,11 @@ pub fn processSlotsWithTransientCache(
             if (state_epoch == config.chain.FULU_FORK_EPOCH) {
                 try upgradeStateToFulu(allocator, post_state);
             }
+
+            metrics.state_transition.epoch_transition.observe(readSeconds(&epoch_transition_timer));
         } else {
             state.slotPtr().* += 1;
         }
-
-        //epochTransitionTimer
     }
 }
 
@@ -141,10 +148,7 @@ pub fn stateTransition(
         allocator.destroy(post_state);
     }
 
-    //TODO(bing): metrics
-    //if (metrics) {
-    //  onStateCloneMetrics(postState, metrics, StateCloneSource.stateTransition);
-    //}
+    try metrics.state_transition.onStateClone(post_state, .state_transition);
 
     try processSlotsWithTransientCache(allocator, post_state, block_slot, .{});
 
@@ -154,8 +158,7 @@ pub fn stateTransition(
     }
 
     //  // Note: time only on success
-    //  const processBlockTimer = metrics?.processBlockTime.startTimer();
-    //
+    var timer = try Timer.start();
     try processBlock(
         allocator,
         post_state,
@@ -166,27 +169,17 @@ pub fn stateTransition(
         },
         .{ .verify_signature = opts.verify_signatures },
     );
-    //
-    // TODO(bing): commit
-    //  const processBlockCommitTimer = metrics?.processBlockCommitTime.startTimer();
-    //  postState.commit();
-    //  processBlockCommitTimer?.();
+    metrics.state_transition.process_block.observe(readSeconds(&timer));
 
-    //  // Note: time only on success. Include processBlock and commit
-    //  processBlockTimer?.();
-    // TODO(bing): metrics
-    //  if (metrics) {
-    //    onPostStateMetrics(postState, metrics);
-    //  }
+    metrics.state_transition.onPostState(post_state);
 
     // Verify state root
     if (opts.verify_state_root) {
+        timer = try Timer.start();
         var post_state_root: [32]u8 = undefined;
-        //    const hashTreeRootTimer = metrics?.stateHashTreeRootTime.startTimer({
-        //      source: StateHashTreeRootSource.stateTransition,
-        //    });
         try post_state.state.hashTreeRoot(allocator, &post_state_root);
-        //    hashTreeRootTimer?.();
+
+        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .compute_new_state_root }, readSeconds(&timer));
 
         const block_state_root = switch (block) {
             .regular => |b| b.stateRoot(),
