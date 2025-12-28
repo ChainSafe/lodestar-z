@@ -8,19 +8,12 @@ const Gindex = @import("persistent_merkle_tree").Gindex;
 pub const ViewId = u32;
 
 const ViewState = struct {
-    alive: bool = false,
     root: Node.Id = undefined,
     children_nodes: std.AutoHashMapUnmanaged(Gindex, Node.Id) = .empty,
     children_views: std.AutoHashMapUnmanaged(Gindex, ViewId) = .empty,
     changed: std.AutoArrayHashMapUnmanaged(Gindex, void) = .empty,
 
-    fn deinit(self: *ViewState, allocator: Allocator, pool: *Node.Pool, store: *ViewStore) void {
-        if (!self.alive) return;
-
-        var child_iter = self.children_views.valueIterator();
-        while (child_iter.next()) |child_id_ptr| {
-            store.destroyViewRecursive(child_id_ptr.*);
-        }
+    fn deinit(self: *ViewState, allocator: Allocator, pool: *Node.Pool) void {
         self.children_views.deinit(allocator);
 
         self.clearChildrenNodesCache(pool);
@@ -29,7 +22,6 @@ const ViewState = struct {
         self.changed.deinit(allocator);
 
         pool.unref(self.root);
-        self.alive = false;
     }
 
     fn clearChildrenNodesCache(self: *ViewState, pool: *Node.Pool) void {
@@ -50,13 +42,6 @@ pub const ViewStore = struct {
     pool: *Node.Pool,
 
     views: std.ArrayListUnmanaged(ViewState) = .{},
-    free_ids: std.ArrayListUnmanaged(ViewId) = .{},
-
-    prefetch_progress_count: std.ArrayListUnmanaged(?usize) = .{},
-
-    list_length_cache: std.ArrayListUnmanaged(?usize) = .{},
-
-    list_length_dirty: std.ArrayListUnmanaged(bool) = .{},
 
     pub fn init(allocator: Allocator, pool: *Node.Pool) ViewStore {
         return .{
@@ -66,82 +51,36 @@ pub const ViewStore = struct {
     }
 
     pub fn deinit(self: *ViewStore) void {
-        for (self.views.items, 0..) |*view, i| {
-            _ = i;
-            view.deinit(self.allocator, self.pool, self);
+        for (self.views.items) |*view| {
+            view.deinit(self.allocator, self.pool);
         }
         self.views.deinit(self.allocator);
-        self.free_ids.deinit(self.allocator);
-        self.prefetch_progress_count.deinit(self.allocator);
-        self.list_length_cache.deinit(self.allocator);
-        self.list_length_dirty.deinit(self.allocator);
     }
 
     pub fn createView(self: *ViewStore, root: Node.Id) !ViewId {
         try self.pool.ref(root);
 
-        if (self.free_ids.items.len > 0) {
-            const id = self.free_ids.pop().?;
-            const idx: usize = @intCast(id);
-            const state = &self.views.items[idx];
-            state.* = .{
-                .alive = true,
-                .root = root,
-                .children_nodes = .empty,
-                .children_views = .empty,
-                .changed = .empty,
-            };
-
-            if (idx < self.prefetch_progress_count.items.len) {
-                self.prefetch_progress_count.items[idx] = null;
-            }
-            if (idx < self.list_length_cache.items.len) {
-                self.list_length_cache.items[idx] = null;
-            }
-            if (idx < self.list_length_dirty.items.len) {
-                self.list_length_dirty.items[idx] = true;
-            }
-            return id;
-        }
-
         try self.views.append(self.allocator, .{
-            .alive = true,
             .root = root,
             .children_nodes = .empty,
             .children_views = .empty,
             .changed = .empty,
         });
 
-        try self.prefetch_progress_count.append(self.allocator, null);
-        try self.list_length_cache.append(self.allocator, null);
-        try self.list_length_dirty.append(self.allocator, true);
-
         return @intCast(self.views.items.len - 1);
     }
 
-    pub fn destroyViewRecursive(self: *ViewStore, id: ViewId) void {
+    fn destroyLastView(self: *ViewStore, id: ViewId) void {
         const idx: usize = @intCast(id);
-        if (idx >= self.views.items.len) return;
-        if (!self.views.items[idx].alive) return;
-
-        self.views.items[idx].deinit(self.allocator, self.pool, self);
-        if (idx < self.prefetch_progress_count.items.len) {
-            self.prefetch_progress_count.items[idx] = null;
-        }
-        if (idx < self.list_length_cache.items.len) {
-            self.list_length_cache.items[idx] = null;
-        }
-        if (idx < self.list_length_dirty.items.len) {
-            self.list_length_dirty.items[idx] = true;
-        }
-        self.free_ids.append(self.allocator, id) catch {};
+        std.debug.assert(idx + 1 == self.views.items.len);
+        var state = self.views.pop().?;
+        state.deinit(self.allocator, self.pool);
     }
 
     fn getState(self: *ViewStore, id: ViewId) *ViewState {
         const idx: usize = @intCast(id);
         std.debug.assert(idx < self.views.items.len);
         const state = &self.views.items[idx];
-        std.debug.assert(state.alive);
         return state;
     }
 
@@ -158,8 +97,6 @@ pub const ViewStore = struct {
         state.clearChildrenNodesCache(self.pool);
         // For now, we do not clear children_views recursively here; callers can decide.
         state.changed.clearRetainingCapacity();
-        self.invalidatePrefetchProgress(id);
-        self.invalidateListLengthCache(id);
     }
 
     pub fn getChildNode(self: *ViewStore, id: ViewId, gindex: Gindex) !Node.Id {
@@ -179,9 +116,7 @@ pub const ViewStore = struct {
         var state = self.getState(id);
 
         // Replacing a child subtree rooted at gindex invalidates any cached child view at that gindex.
-        if (state.children_views.fetchRemove(gindex)) |entry| {
-            self.destroyViewRecursive(entry.value);
-        }
+        _ = state.children_views.fetchRemove(gindex);
 
         try state.changed.put(self.allocator, gindex, {});
 
@@ -191,6 +126,23 @@ pub const ViewStore = struct {
                 self.pool.unref(old_node.value);
             }
         }
+    }
+
+    pub fn setChildView(self: *ViewStore, id: ViewId, gindex: Gindex, child_id: ViewId) !void {
+        // Ensure child_id is in-bounds (same store).
+        _ = self.getState(child_id);
+
+        var state = self.getState(id);
+
+        // Switching to a child view invalidates any cached child node at that gindex.
+        if (state.children_nodes.fetchRemove(gindex)) |old_node| {
+            if (old_node.value.getState(self.pool).getRefCount() == 0) {
+                self.pool.unref(old_node.value);
+            }
+        }
+
+        try state.children_views.put(self.allocator, gindex, child_id);
+        try state.changed.put(self.allocator, gindex, {});
     }
 
     pub fn markChanged(self: *ViewStore, id: ViewId, gindex: Gindex) !void {
@@ -206,71 +158,18 @@ pub const ViewStore = struct {
         }
     }
 
-    pub fn invalidatePrefetchProgress(self: *ViewStore, id: ViewId) void {
-        const idx: usize = @intCast(id);
-        if (idx >= self.prefetch_progress_count.items.len) return;
-        self.prefetch_progress_count.items[idx] = null;
-    }
-
-    pub fn getPrefetchProgressCount(self: *ViewStore, id: ViewId) ?usize {
-        const idx: usize = @intCast(id);
-        if (idx >= self.prefetch_progress_count.items.len) return null;
-        return self.prefetch_progress_count.items[idx];
-    }
-
-    pub fn setPrefetchProgressCount(self: *ViewStore, id: ViewId, value: ?usize) void {
-        const idx: usize = @intCast(id);
-        if (idx >= self.prefetch_progress_count.items.len) return;
-        self.prefetch_progress_count.items[idx] = value;
-    }
-
-    pub fn invalidateListLengthCache(self: *ViewStore, id: ViewId) void {
-        const idx: usize = @intCast(id);
-        if (idx >= self.list_length_cache.items.len) return;
-        self.list_length_cache.items[idx] = null;
-        if (idx < self.list_length_dirty.items.len) {
-            self.list_length_dirty.items[idx] = true;
-        }
-    }
-
-    pub fn getListLengthCache(self: *ViewStore, id: ViewId) ?usize {
-        const idx: usize = @intCast(id);
-        if (idx >= self.list_length_cache.items.len) return null;
-        return self.list_length_cache.items[idx];
-    }
-
-    pub fn setListLengthCache(self: *ViewStore, id: ViewId, value: ?usize) void {
-        const idx: usize = @intCast(id);
-        if (idx >= self.list_length_cache.items.len) return;
-        self.list_length_cache.items[idx] = value;
-    }
-
-    pub fn isListLengthDirty(self: *ViewStore, id: ViewId) bool {
-        const idx: usize = @intCast(id);
-        if (idx >= self.list_length_dirty.items.len) return true;
-        return self.list_length_dirty.items[idx];
-    }
-
-    pub fn setListLengthDirty(self: *ViewStore, id: ViewId, dirty: bool) void {
-        const idx: usize = @intCast(id);
-        if (idx >= self.list_length_dirty.items.len) return;
-        self.list_length_dirty.items[idx] = dirty;
-    }
-
     pub fn getOrCreateChildView(self: *ViewStore, id: ViewId, gindex: Gindex) !ViewId {
         var state = self.getState(id);
 
         if (state.children_views.get(gindex)) |existing_child_id| {
-            // Mirror current BaseTreeView behavior: treat child access as potentially mutable.
             try state.changed.put(self.allocator, gindex, {});
             return existing_child_id;
         }
 
         const child_node = try self.getChildNode(id, gindex);
         const child_id = try self.createView(child_node);
-        errdefer self.destroyViewRecursive(child_id);
+        errdefer self.destroyLastView(child_id);
 
-        // createView() may reallocate the underlying views buffer; re-fetch the state pointer.
         state = self.getState(id);
         try state.children_views.put(self.allocator, gindex, child_id);
         try state.changed.put(self.allocator, gindex, {});

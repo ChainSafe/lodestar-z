@@ -32,7 +32,6 @@ pub fn ListBasicTreeViewViewStorePOC(comptime ST: type) type {
         pool: *Node.Pool,
         store: *ViewStore,
         view_id: ViewId,
-        owns_store: bool,
 
         pub const SszType = ST;
         pub const Element = ST.Element.Type;
@@ -43,21 +42,9 @@ pub fn ListBasicTreeViewViewStorePOC(comptime ST: type) type {
 
         const Self = @This();
 
-        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
-            const store = try allocator.create(ViewStore);
-            errdefer allocator.destroy(store);
-
-            store.* = ViewStore.init(allocator, pool);
-            errdefer store.deinit();
-
+        pub fn init(store: *ViewStore, root: Node.Id) !Self {
             const view_id = try store.createView(root);
-            return .{
-                .allocator = allocator,
-                .pool = pool,
-                .store = store,
-                .view_id = view_id,
-                .owns_store = true,
-            };
+            return fromStore(store, view_id);
         }
 
         pub fn fromStore(store: *ViewStore, view_id: ViewId) Self {
@@ -66,22 +53,10 @@ pub fn ListBasicTreeViewViewStorePOC(comptime ST: type) type {
                 .pool = store.pool,
                 .store = store,
                 .view_id = view_id,
-                .owns_store = false,
             };
         }
 
-        pub fn fromStoreWithContext(allocator: Allocator, pool: *Node.Pool, store: *ViewStore, view_id: ViewId) Self {
-            _ = allocator;
-            _ = pool;
-            return fromStore(store, view_id);
-        }
-
-        pub fn deinit(self: *Self) void {
-            if (!self.owns_store) return;
-            self.store.destroyViewRecursive(self.view_id);
-            self.store.deinit();
-            self.allocator.destroy(self.store);
-        }
+        pub fn deinit(_: *Self) void {}
 
         pub fn clearCache(self: *Self) void {
             self.store.clearCache(self.view_id);
@@ -101,46 +76,9 @@ pub fn ListBasicTreeViewViewStorePOC(comptime ST: type) type {
         }
 
         pub fn length(self: *Self) !usize {
-            return try self.getListLengthCachedOrLoad();
-        }
-
-        fn getListLengthCachedOrLoad(self: *Self) !usize {
-            if (!self.store.isListLengthDirty(self.view_id)) {
-                if (self.store.getListLengthCache(self.view_id)) |len| return len;
-            }
-
             const length_node = try self.store.getChildNode(self.view_id, @enumFromInt(3));
             const length_chunk = length_node.getRoot(self.pool);
-            const len = std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
-
-            self.store.setListLengthCache(self.view_id, len);
-            self.store.setListLengthDirty(self.view_id, false);
-            return len;
-        }
-
-        fn ensureChunksPrefetched(self: *Self, chunk_count: usize) !void {
-            if (chunk_count == 0) return;
-
-            var start: usize = 0;
-            if (self.store.getPrefetchProgressCount(self.view_id)) |prefetched| {
-                if (prefetched >= chunk_count) return;
-                start = prefetched;
-            }
-
-            const fetch_count = chunk_count - start;
-            if (fetch_count == 0) return;
-
-            const nodes = try self.allocator.alloc(Node.Id, fetch_count);
-            defer self.allocator.free(nodes);
-
-            try self.rootNodeId().getNodesAtDepth(self.pool, @as(u8, @intCast(chunk_depth)), start, nodes);
-
-            for (nodes, 0..) |node, i| {
-                const gindex = Gindex.fromDepth(chunk_depth, start + i);
-                try self.store.cacheChildNodeIfAbsent(self.view_id, gindex, node);
-            }
-
-            self.store.setPrefetchProgressCount(self.view_id, chunk_count);
+            return std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
         }
 
         pub fn get(self: *Self, index: usize) !Element {
@@ -179,9 +117,6 @@ pub fn ListBasicTreeViewViewStorePOC(comptime ST: type) type {
 
             const len_full_chunks = list_length / items_per_chunk;
             const remainder = list_length % items_per_chunk;
-            const chunk_count = len_full_chunks + @intFromBool(remainder != 0);
-
-            try self.ensureChunksPrefetched(chunk_count);
 
             for (0..len_full_chunks) |chunk_idx| {
                 const leaf_node = try self.store.getChildNode(self.view_id, Gindex.fromDepth(chunk_depth, chunk_idx));
@@ -218,13 +153,13 @@ pub fn ListBasicTreeViewViewStorePOC(comptime ST: type) type {
         }
 
         /// Return a new view containing all elements up to and including `index`.
-        /// The caller must call `deinit()` on the returned view to avoid memory leaks.
+        /// The returned view borrows the same `ViewStore` as `self`.
         pub fn sliceTo(self: *Self, index: usize) !Self {
             try self.commit();
 
             const list_length = try self.length();
             if (list_length == 0 or index >= list_length - 1) {
-                return try Self.init(self.allocator, self.pool, self.rootNodeId());
+                return try Self.init(self.store, self.rootNodeId());
             }
 
             const new_length = index + 1;
@@ -267,16 +202,13 @@ pub fn ListBasicTreeViewViewStorePOC(comptime ST: type) type {
             length_node = null;
             new_root = null;
 
-            return try Self.init(self.allocator, self.pool, root_with_length);
+            return try Self.init(self.store, root_with_length);
         }
 
         fn updateListLength(self: *Self, new_length: usize) !void {
             if (new_length > ST.limit) return error.LengthOverLimit;
             const length_node = try self.pool.createLeafFromUint(@intCast(new_length));
             errdefer self.pool.unref(length_node);
-
-            self.store.setListLengthCache(self.view_id, new_length);
-            self.store.setListLengthDirty(self.view_id, false);
 
             try self.store.setChildNode(self.view_id, @enumFromInt(3), length_node);
         }

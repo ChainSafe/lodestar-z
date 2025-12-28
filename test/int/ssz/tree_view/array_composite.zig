@@ -20,7 +20,9 @@ test "TreeView vector composite element set/get/commit" {
     const original: VectorType.Type = .{ v0, v1 };
 
     const root_node = try VectorType.tree.fromValue(&pool, &original);
-    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try VectorType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     const e0_view = try view.get(0);
@@ -31,7 +33,7 @@ test "TreeView vector composite element set/get/commit" {
 
     const replacement: Inner.Type = .{ .a = 9, .b = [_]u8{ 9, 9, 9, 9 } };
     const replacement_root = try Inner.tree.fromValue(&pool, &replacement);
-    var replacement_view: ?Inner.TreeView = try Inner.TreeView.init(allocator, &pool, replacement_root);
+    var replacement_view: ?Inner.TreeView = try Inner.TreeView.init(&store, replacement_root);
     defer if (replacement_view) |*v| v.deinit();
     try view.set(1, replacement_view.?);
     replacement_view = null;
@@ -63,14 +65,16 @@ test "TreeView vector composite index bounds" {
     const original: VectorType.Type = .{ .{ .x = 1 }, .{ .x = 2 } };
 
     const root_node = try VectorType.tree.fromValue(&pool, &original);
-    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try VectorType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     try std.testing.expectError(error.IndexOutOfBounds, view.get(2));
 
     const replacement: Inner.Type = .{ .x = 3 };
     const replacement_root = try Inner.tree.fromValue(&pool, &replacement);
-    var replacement_view: ?Inner.TreeView = try Inner.TreeView.init(allocator, &pool, replacement_root);
+    var replacement_view: ?Inner.TreeView = try Inner.TreeView.init(&store, replacement_root);
     defer if (replacement_view) |*v| v.deinit();
     try std.testing.expectError(error.IndexOutOfBounds, view.set(2, replacement_view.?));
 }
@@ -93,14 +97,16 @@ test "TreeView vector composite clearCache does not break subsequent commits" {
     const original: VectorType.Type = .{ v0, v1 };
 
     const root_node = try VectorType.tree.fromValue(&pool, &original);
-    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try VectorType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     view.clearCache();
 
     const replacement: Inner.Type = .{ .id = 1, .vec = [_]u32{ 0, 9 } };
     const replacement_root = try Inner.tree.fromValue(&pool, &replacement);
-    var replacement_view: ?Inner.TreeView = try Inner.TreeView.init(allocator, &pool, replacement_root);
+    var replacement_view: ?Inner.TreeView = try Inner.TreeView.init(&store, replacement_root);
     defer if (replacement_view) |*v| v.deinit();
     try view.set(0, replacement_view.?);
     replacement_view = null;
@@ -132,7 +138,10 @@ test "TreeView vector composite POC sub-view mutate + commit" {
     const root_node = try VectorType.tree.fromValue(&pool, &values);
 
     const VecPOC = ssz.ArrayCompositeTreeViewViewStorePOC(VectorType);
-    var view = try VecPOC.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
+    var view = try VecPOC.init(&store, root_node);
     defer view.deinit();
 
     var e0 = try view.get(0);

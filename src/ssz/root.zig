@@ -41,6 +41,8 @@ pub const Hasher = hasher.Hasher;
 pub const HasherData = hasher.HasherData;
 
 const tree_view = @import("tree_view/root.zig");
+pub const ViewStore = tree_view.ViewStore;
+pub const ViewId = tree_view.ViewId;
 pub const TreeViewData = tree_view.TreeViewData;
 pub const BaseTreeView = tree_view.BaseTreeView;
 pub const ContainerTreeView = tree_view.ContainerTreeView;

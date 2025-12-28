@@ -14,7 +14,10 @@ test "TreeView vector element roundtrip" {
     const original: VectorType.Type = [_]u64{ 11, 22, 33, 44 };
 
     const root_node = try VectorType.tree.fromValue(&pool, &original);
-    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
+
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try VectorType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     try std.testing.expectEqual(@as(u64, 11), try view.get(0));
@@ -52,7 +55,10 @@ test "TreeView vector getAll fills provided buffer" {
 
     const values = [_]u32{ 9, 8, 7, 6, 5, 4, 3, 2 };
     const root_node = try VectorType.tree.fromValue(&pool, &values);
-    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
+
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try VectorType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     const out = try allocator.alloc(u32, values.len);
@@ -78,7 +84,10 @@ test "TreeView vector getAllAlloc roundtrip" {
     const values = [_]u16{ 3, 1, 4, 1, 5 };
 
     const root_node = try VectorType.tree.fromValue(&pool, &values);
-    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
+
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try VectorType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     const filled = try view.getAll(allocator);
@@ -97,7 +106,10 @@ test "TreeView vector getAllAlloc repeat reflects updates" {
     var values = [_]u32{ 10, 20, 30, 40, 50, 60 };
 
     const root_node = try VectorType.tree.fromValue(&pool, &values);
-    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
+
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try VectorType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     const first = try view.getAll(allocator);
@@ -112,7 +124,7 @@ test "TreeView vector getAllAlloc repeat reflects updates" {
     try std.testing.expectEqualSlices(u32, values[0..], second);
 }
 
-test "TreeView vector prefetch POC updates metadata" {
+test "TreeView vector getAllInto works (viewstore POC)" {
     if (!build_options.container_viewstore_poc) return;
 
     const allocator = std.testing.allocator;
@@ -126,23 +138,17 @@ test "TreeView vector prefetch POC updates metadata" {
     const root_node = try VectorType.tree.fromValue(&pool, &values);
 
     const VecPOCView = ssz.ArrayBasicTreeViewViewStorePOC(VectorType);
-    var view = try VecPOCView.init(allocator, &pool, root_node);
-    defer view.deinit();
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
 
-    try std.testing.expectEqual(@as(?usize, null), view.prefetchedCount());
+    var view = try VecPOCView.init(&store, root_node);
+    defer view.deinit();
 
     const out = try allocator.alloc(u32, values.len);
     defer allocator.free(out);
 
     _ = try view.getAllInto(out);
-    try std.testing.expectEqual(@as(?usize, 1), view.prefetchedCount());
     try std.testing.expectEqualSlices(u32, values[0..], out);
 
     _ = try view.getAllInto(out);
-    try std.testing.expectEqual(@as(?usize, 1), view.prefetchedCount());
-
-    view.invalidatePrefetch();
-    try std.testing.expectEqual(@as(?usize, null), view.prefetchedCount());
-    _ = try view.getAllInto(out);
-    try std.testing.expectEqual(@as(?usize, 1), view.prefetchedCount());
 }

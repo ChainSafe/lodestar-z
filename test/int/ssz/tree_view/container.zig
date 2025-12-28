@@ -11,13 +11,15 @@ const Checkpoint = ssz.FixedContainerType(struct {
 test "TreeView container field roundtrip" {
     var pool = try Node.Pool.init(std.testing.allocator, 1000);
     defer pool.deinit();
+    var store = ssz.ViewStore.init(std.testing.allocator, &pool);
+    defer store.deinit();
     const checkpoint: Checkpoint.Type = .{
         .epoch = 42,
         .root = [_]u8{1} ** 32,
     };
 
     const root_node = try Checkpoint.tree.fromValue(&pool, &checkpoint);
-    var cp_view = try Checkpoint.TreeView.init(std.testing.allocator, &pool, root_node);
+    var cp_view = try Checkpoint.TreeView.init(&store, root_node);
     defer cp_view.deinit();
 
     // get field "epoch"
@@ -37,7 +39,7 @@ test "TreeView container field roundtrip" {
     // modify field "root"
     var new_root = [_]u8{2} ** 32;
     const new_root_node = try RootView.SszType.tree.fromValue(&pool, &new_root);
-    const new_root_view = try RootView.init(std.testing.allocator, &pool, new_root_node);
+    const new_root_view = try RootView.init(&store, new_root_node);
     try cp_view.set("root", new_root_view);
 
     // confirm "root" has been modified
@@ -68,6 +70,8 @@ test "TreeView container nested types set/get/commit" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 2048);
     defer pool.deinit();
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
 
     const Uint16 = ssz.UintType(16);
     const Uint32 = ssz.UintType(32);
@@ -100,7 +104,7 @@ test "TreeView container nested types set/get/commit" {
     defer Outer.deinit(allocator, &outer_value);
 
     const root = try Outer.tree.fromValue(allocator, &pool, &outer_value);
-    var view = try Outer.TreeView.init(allocator, &pool, root);
+    var view = try Outer.TreeView.init(&store, root);
     defer view.deinit();
 
     try std.testing.expectEqual(@as(u64, 0), try view.get("n"));
@@ -111,7 +115,7 @@ test "TreeView container nested types set/get/commit" {
         var bytes_value: Bytes.Type = Bytes.default_value;
         defer bytes_value.deinit(allocator);
         const bytes_root = try Bytes.tree.fromValue(allocator, &pool, &bytes_value);
-        var bytes_view = try Bytes.TreeView.init(allocator, &pool, bytes_root);
+        var bytes_view = try Bytes.TreeView.init(&store, bytes_root);
 
         try bytes_view.push(@as(u8, 0xAA));
         try bytes_view.push(@as(u8, 0xBB));
@@ -127,7 +131,7 @@ test "TreeView container nested types set/get/commit" {
     {
         const basic_vec_value: BasicVec.Type = [_]u16{ 0, 0, 0, 0 };
         const basic_vec_root = try BasicVec.tree.fromValue(&pool, &basic_vec_value);
-        var basic_vec_view = try BasicVec.TreeView.init(allocator, &pool, basic_vec_root);
+        var basic_vec_view = try BasicVec.TreeView.init(&store, basic_vec_root);
 
         try std.testing.expectEqual(@as(u16, 0), try basic_vec_view.get(0));
         try basic_vec_view.set(0, @as(u16, 1));
@@ -147,18 +151,18 @@ test "TreeView container nested types set/get/commit" {
     {
         const comp_vec_value: CompVec.Type = .{ InnerFixed.default_value, InnerFixed.default_value };
         const comp_vec_root = try CompVec.tree.fromValue(&pool, &comp_vec_value);
-        var comp_vec_view = try CompVec.TreeView.init(allocator, &pool, comp_vec_root);
+        var comp_vec_view = try CompVec.TreeView.init(&store, comp_vec_root);
 
         const e0: InnerFixed.Type = .{ .a = 11, .b = [_]u8{ 1, 2, 3, 4 } };
         const e0_root = try InnerFixed.tree.fromValue(&pool, &e0);
-        var e0_view: ?InnerFixed.TreeView = try InnerFixed.TreeView.init(allocator, &pool, e0_root);
+        var e0_view: ?InnerFixed.TreeView = try InnerFixed.TreeView.init(&store, e0_root);
         defer if (e0_view) |*v| v.deinit();
         try comp_vec_view.set(0, e0_view.?);
         e0_view = null;
 
         const e1: InnerFixed.Type = .{ .a = 22, .b = [_]u8{ 4, 3, 2, 1 } };
         const e1_root = try InnerFixed.tree.fromValue(&pool, &e1);
-        var e1_view: ?InnerFixed.TreeView = try InnerFixed.TreeView.init(allocator, &pool, e1_root);
+        var e1_view: ?InnerFixed.TreeView = try InnerFixed.TreeView.init(&store, e1_root);
         defer if (e1_view) |*v| v.deinit();
         try comp_vec_view.set(1, e1_view.?);
         e1_view = null;
@@ -170,12 +174,12 @@ test "TreeView container nested types set/get/commit" {
         var comp_list_value: CompList.Type = .empty;
         defer CompList.deinit(allocator, &comp_list_value);
         const comp_list_root = try CompList.tree.fromValue(allocator, &pool, &comp_list_value);
-        var comp_list_view = try CompList.TreeView.init(allocator, &pool, comp_list_root);
+        var comp_list_view = try CompList.TreeView.init(&store, comp_list_root);
 
         var inner_value: InnerVar.Type = InnerVar.default_value;
         defer InnerVar.deinit(allocator, &inner_value);
         const inner_root = try InnerVar.tree.fromValue(allocator, &pool, &inner_value);
-        var inner_view: ?InnerVar.TreeView = try InnerVar.TreeView.init(allocator, &pool, inner_root);
+        var inner_view: ?InnerVar.TreeView = try InnerVar.TreeView.init(&store, inner_root);
         defer if (inner_view) |*v| v.deinit();
         const inner = &inner_view.?;
 
@@ -184,7 +188,7 @@ test "TreeView container nested types set/get/commit" {
         var payload_value: InnerVar.TreeView.Field("payload").SszType.Type = InnerVar.TreeView.Field("payload").SszType.default_value;
         defer payload_value.deinit(allocator);
         const payload_root = try InnerVar.TreeView.Field("payload").SszType.tree.fromValue(allocator, &pool, &payload_value);
-        var payload_view = try InnerVar.TreeView.Field("payload").init(allocator, &pool, payload_root);
+        var payload_view = try InnerVar.TreeView.Field("payload").init(&store, payload_root);
         try payload_view.push(@as(u8, 0x5A));
         try inner.set("payload", payload_view);
 
@@ -237,7 +241,10 @@ test "TreeView container nested containers only" {
 
     const root = try Outer.tree.fromValue(&pool, &initial);
     const OuterPOCView = ssz.ContainerTreeViewViewStorePOC(Outer);
-    var view = try OuterPOCView.init(allocator, &pool, root);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
+    var view = try OuterPOCView.init(&store, root);
     defer view.deinit();
 
     var left_view = try view.get("left");
@@ -282,7 +289,10 @@ test "TreeView container POC vector field sub-view mutate + commit" {
     const root = try Outer.tree.fromValue(&pool, &initial);
 
     const OuterPOC = ssz.ContainerTreeViewViewStorePOC(Outer);
-    var view = try OuterPOC.init(allocator, &pool, root);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
+    var view = try OuterPOC.init(&store, root);
     defer view.deinit();
 
     // Borrow vec view from container, then borrow element view from vec.
@@ -332,7 +342,10 @@ test "TreeView container POC list field sub-view mutate + commit" {
     const root = try Outer.tree.fromValue(allocator, &pool, &initial);
 
     const OuterPOC = ssz.ContainerTreeViewViewStorePOC(Outer);
-    var view = try OuterPOC.init(allocator, &pool, root);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
+    var view = try OuterPOC.init(&store, root);
     defer view.deinit();
 
     // Borrow list view from container, then borrow element view from list.
@@ -378,7 +391,10 @@ test "TreeView container POC basic list field getAllInto reflects pushes" {
 
     const root = try Outer.tree.fromValue(allocator, &pool, &initial);
     const OuterPOC = ssz.ContainerTreeViewViewStorePOC(Outer);
-    var view = try OuterPOC.init(allocator, &pool, root);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
+    var view = try OuterPOC.init(&store, root);
     defer view.deinit();
 
     var numbers_view = try view.get("numbers");

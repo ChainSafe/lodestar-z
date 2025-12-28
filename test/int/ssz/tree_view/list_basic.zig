@@ -22,7 +22,9 @@ test "TreeView list element roundtrip" {
     try expected_list.appendSlice(allocator, &base_values);
 
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     try std.testing.expectEqual(@as(u32, 5), try view.get(0));
@@ -64,7 +66,9 @@ test "TreeView list push updates cached length" {
     try list.appendSlice(allocator, &[_]u32{ 1, 2, 3 });
 
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     try std.testing.expectEqual(@as(usize, 3), try view.length());
@@ -103,7 +107,9 @@ test "TreeView list getAllAlloc handles zero length" {
     defer list.deinit(allocator);
 
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     const filled = try view.getAll(allocator);
@@ -130,7 +136,9 @@ test "TreeView list getAllAlloc spans multiple chunks" {
     try list.appendSlice(allocator, &values);
 
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     const filled = try view.getAll(allocator);
@@ -152,7 +160,9 @@ test "TreeView list push batches before commit" {
     try list.appendSlice(allocator, &[_]u32{ 1, 2, 3, 4 });
 
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     try view.push(@as(u32, 5));
@@ -193,7 +203,9 @@ test "TreeView list push across chunk boundary resets prefetch" {
     try list.appendSlice(allocator, &[_]u32{ 0, 1, 2, 3, 4, 5, 6, 7 });
 
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     const initial = try view.getAll(allocator);
@@ -225,7 +237,9 @@ test "TreeView list push enforces limit" {
     try list.appendSlice(allocator, &[_]u32{ 1, 2 });
 
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     try std.testing.expectError(error.LengthOverLimit, view.push(@as(u32, 3)));
@@ -245,7 +259,9 @@ test "TreeView basic list getAll reflects pushes" {
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     var expected: [list_limit]u64 = undefined;
@@ -283,7 +299,9 @@ test "TreeView list sliceTo returns original when truncation unnecessary" {
     try list.appendSlice(allocator, &[_]u32{ 4, 5, 6, 7 });
 
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     try view.commit();
@@ -320,7 +338,9 @@ test "TreeView basic list sliceTo matches incremental snapshots" {
     var empty_list: ListType.Type = .empty;
     defer empty_list.deinit(allocator);
     const root_node = try ListType.tree.fromValue(allocator, &pool, &empty_list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     for (base_values) |value| {
@@ -381,7 +401,9 @@ test "TreeView list sliceTo truncates tail elements" {
     try list.appendSlice(allocator, &values);
 
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     try view.commit();
@@ -426,7 +448,10 @@ test "TreeView basic list ViewStore POC get/set/push/getAll" {
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
 
     const ListPOCView = ssz.ListBasicTreeViewViewStorePOC(ListType);
-    var view = try ListPOCView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
+    var view = try ListPOCView.init(&store, root_node);
     defer view.deinit();
 
     try std.testing.expectEqual(@as(usize, 9), try view.length());

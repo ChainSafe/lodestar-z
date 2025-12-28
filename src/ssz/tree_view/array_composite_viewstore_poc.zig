@@ -58,7 +58,6 @@ pub fn ArrayCompositeTreeViewViewStorePOC(comptime ST: type) type {
         pool: *Node.Pool,
         store: *ViewStore,
         view_id: ViewId,
-        owns_store: bool,
 
         pub const SszType = ST;
         pub const ElementST = ST.Element;
@@ -71,21 +70,9 @@ pub fn ArrayCompositeTreeViewViewStorePOC(comptime ST: type) type {
 
         pub const ElementView = ElementTreeViewViewStorePOC(ElementST);
 
-        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
-            const store = try allocator.create(ViewStore);
-            errdefer allocator.destroy(store);
-
-            store.* = ViewStore.init(allocator, pool);
-            errdefer store.deinit();
-
+        pub fn init(store: *ViewStore, root: Node.Id) !Self {
             const view_id = try store.createView(root);
-            return .{
-                .allocator = allocator,
-                .pool = pool,
-                .store = store,
-                .view_id = view_id,
-                .owns_store = true,
-            };
+            return fromStore(store, view_id);
         }
 
         pub fn fromStore(store: *ViewStore, view_id: ViewId) Self {
@@ -94,22 +81,10 @@ pub fn ArrayCompositeTreeViewViewStorePOC(comptime ST: type) type {
                 .pool = store.pool,
                 .store = store,
                 .view_id = view_id,
-                .owns_store = false,
             };
         }
 
-        pub fn fromStoreWithContext(allocator: Allocator, pool: *Node.Pool, store: *ViewStore, view_id: ViewId) Self {
-            _ = allocator;
-            _ = pool;
-            return fromStore(store, view_id);
-        }
-
-        pub fn deinit(self: *Self) void {
-            if (!self.owns_store) return;
-            self.store.destroyViewRecursive(self.view_id);
-            self.store.deinit();
-            self.allocator.destroy(self.store);
-        }
+        pub fn deinit(_: *Self) void {}
 
         pub fn clearCache(self: *Self) void {
             self.store.clearCache(self.view_id);
@@ -123,7 +98,7 @@ pub fn ArrayCompositeTreeViewViewStorePOC(comptime ST: type) type {
             if (index >= length) return error.IndexOutOfBounds;
             const child_gindex = Gindex.fromDepth(chunk_depth, index);
             const child_id = try self.store.getOrCreateChildView(self.view_id, child_gindex);
-            return ElementView.fromStoreWithContext(self.allocator, self.pool, self.store, child_id);
+            return ElementView.fromStore(self.store, child_id);
         }
 
         pub fn set(self: *Self, index: usize, value: ElementView) !void {
@@ -133,20 +108,16 @@ pub fn ArrayCompositeTreeViewViewStorePOC(comptime ST: type) type {
             var v = value;
             defer v.deinit();
 
-            if (v.store == self.store) {
-                if (self.store.cachedChildViewId(self.view_id, child_gindex)) |cached_child_id| {
-                    if (cached_child_id == v.view_id) {
-                        try self.store.markChanged(self.view_id, child_gindex);
-                        return;
-                    }
+            if (v.store != self.store) return error.DifferentStore;
+
+            if (self.store.cachedChildViewId(self.view_id, child_gindex)) |cached_child_id| {
+                if (cached_child_id == v.view_id) {
+                    try self.store.markChanged(self.view_id, child_gindex);
+                    return;
                 }
             }
 
-            try v.commit();
-            const child_root = v.rootNodeId();
-            // Keep the node alive even if `v` is owning and gets deinited.
-            try self.pool.ref(child_root);
-            try self.store.setChildNode(self.view_id, child_gindex, child_root);
+            try self.store.setChildView(self.view_id, child_gindex, v.view_id);
         }
 
         pub fn commit(self: *Self) !void {

@@ -12,6 +12,8 @@ test "TreeView composite list sliceTo truncates elements" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 512);
     defer pool.deinit();
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
 
     const ListType = ssz.FixedListType(Checkpoint, 16);
 
@@ -27,7 +29,7 @@ test "TreeView composite list sliceTo truncates elements" {
     try list.appendSlice(allocator, &checkpoints);
 
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     var sliced = try view.sliceTo(1);
@@ -48,6 +50,8 @@ test "TreeView composite list sliceFrom returns suffix" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 512);
     defer pool.deinit();
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
 
     const ListType = ssz.FixedListType(Checkpoint, 16);
 
@@ -63,7 +67,7 @@ test "TreeView composite list sliceFrom returns suffix" {
     try list.appendSlice(allocator, &checkpoints);
 
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     var suffix = try view.sliceFrom(2);
@@ -89,6 +93,8 @@ test "TreeView composite list sliceFrom handles boundary conditions" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
 
     const ListType = ssz.FixedListType(Checkpoint, 1024);
     const list_length = 16;
@@ -106,7 +112,7 @@ test "TreeView composite list sliceFrom handles boundary conditions" {
     try list.appendSlice(allocator, values[0..list_length]);
 
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     const min_index: i32 = -@as(i32, list_length) - 1;
@@ -161,6 +167,8 @@ test "TreeView composite list push appends element" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 512);
     defer pool.deinit();
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
 
     const ListType = ssz.FixedListType(Checkpoint, 8);
 
@@ -171,12 +179,12 @@ test "TreeView composite list push appends element" {
     try list.append(allocator, first);
 
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     const next_checkpoint = Checkpoint.Type{ .epoch = 10, .root = [_]u8{10} ** 32 };
     const next_node = try Checkpoint.tree.fromValue(&pool, &next_checkpoint);
-    var element_view = try Checkpoint.TreeView.init(allocator, &pool, next_node);
+    var element_view = try Checkpoint.TreeView.init(&store, next_node);
     var transferred = false;
     defer if (!transferred) element_view.deinit();
 
@@ -199,6 +207,8 @@ test "TreeView list of list commits inner length updates" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
 
     const Uint32 = ssz.UintType(32);
     const Bytes = ssz.ByteListType(32);
@@ -216,20 +226,20 @@ test "TreeView list of list commits inner length updates" {
     var outer_value: OuterListType.Type = .empty;
     defer OuterListType.deinit(allocator, &outer_value);
     const outer_root = try OuterListType.tree.fromValue(allocator, &pool, &outer_value);
-    var outer_view = try OuterListType.TreeView.init(allocator, &pool, outer_root);
+    var outer_view = try OuterListType.TreeView.init(&store, outer_root);
     defer outer_view.deinit();
 
     var inner_value: InnerListType.Type = .empty;
     defer InnerListType.deinit(allocator, &inner_value);
     const inner_root = try InnerListType.tree.fromValue(allocator, &pool, &inner_value);
-    var inner_view = try InnerListType.TreeView.init(allocator, &pool, inner_root);
+    var inner_view = try InnerListType.TreeView.init(&store, inner_root);
     var transferred = false;
     defer if (!transferred) inner_view.deinit();
 
     var e1_value: InnerElement.Type = InnerElement.default_value;
     defer InnerElement.deinit(allocator, &e1_value);
     const e1_root = try InnerElement.tree.fromValue(allocator, &pool, &e1_value);
-    var e1_view: ?InnerElement.TreeView = try InnerElement.TreeView.init(allocator, &pool, e1_root);
+    var e1_view: ?InnerElement.TreeView = try InnerElement.TreeView.init(&store, e1_root);
     defer if (e1_view) |*view| view.deinit();
     const e1 = &e1_view.?;
 
@@ -239,7 +249,7 @@ test "TreeView list of list commits inner length updates" {
     var payload_value: Bytes.Type = Bytes.default_value;
     defer payload_value.deinit(allocator);
     const payload_root = try Bytes.tree.fromValue(allocator, &pool, &payload_value);
-    var payload_view: ?Bytes.TreeView = try Bytes.TreeView.init(allocator, &pool, payload_root);
+    var payload_view: ?Bytes.TreeView = try Bytes.TreeView.init(&store, payload_root);
     defer if (payload_view) |*view| view.deinit();
     const payload = &payload_view.?;
 
@@ -262,7 +272,7 @@ test "TreeView list of list commits inner length updates" {
     var numbers_value: Numbers.Type = .empty;
     defer numbers_value.deinit(allocator);
     const numbers_root = try Numbers.tree.fromValue(allocator, &pool, &numbers_value);
-    var numbers_view: ?Numbers.TreeView = try Numbers.TreeView.init(allocator, &pool, numbers_root);
+    var numbers_view: ?Numbers.TreeView = try Numbers.TreeView.init(&store, numbers_root);
     defer if (numbers_view) |*view| view.deinit();
     const numbers = &numbers_view.?;
 
@@ -287,7 +297,7 @@ test "TreeView list of list commits inner length updates" {
 
     var vec_value: Vec2.Type = [_]u32{ 0, 0 };
     const vec_root = try Vec2.tree.fromValue(&pool, &vec_value);
-    var vec_view: ?Vec2.TreeView = try Vec2.TreeView.init(allocator, &pool, vec_root);
+    var vec_view: ?Vec2.TreeView = try Vec2.TreeView.init(&store, vec_root);
     defer if (vec_view) |*view| view.deinit();
     const vec = &vec_view.?;
 
@@ -315,7 +325,7 @@ test "TreeView list of list commits inner length updates" {
     var e2_value: InnerElement.Type = InnerElement.default_value;
     defer InnerElement.deinit(allocator, &e2_value);
     const e2_root = try InnerElement.tree.fromValue(allocator, &pool, &e2_value);
-    var e2_view: ?InnerElement.TreeView = try InnerElement.TreeView.init(allocator, &pool, e2_root);
+    var e2_view: ?InnerElement.TreeView = try InnerElement.TreeView.init(&store, e2_root);
     defer if (e2_view) |*view| view.deinit();
     const e2 = &e2_view.?;
 
@@ -324,7 +334,7 @@ test "TreeView list of list commits inner length updates" {
     var e2_payload_value: Bytes.Type = Bytes.default_value;
     defer e2_payload_value.deinit(allocator);
     const e2_payload_root = try Bytes.tree.fromValue(allocator, &pool, &e2_payload_value);
-    var e2_payload_view: ?Bytes.TreeView = try Bytes.TreeView.init(allocator, &pool, e2_payload_root);
+    var e2_payload_view: ?Bytes.TreeView = try Bytes.TreeView.init(&store, e2_payload_root);
     defer if (e2_payload_view) |*view| view.deinit();
     const e2_payload = &e2_payload_view.?;
     try e2_payload.push(@as(u8, 0xBB));
@@ -338,7 +348,7 @@ test "TreeView list of list commits inner length updates" {
         var e3_value: InnerElement.Type = InnerElement.default_value;
         defer InnerElement.deinit(allocator, &e3_value);
         const e3_root = try InnerElement.tree.fromValue(allocator, &pool, &e3_value);
-        var e3_view: ?InnerElement.TreeView = try InnerElement.TreeView.init(allocator, &pool, e3_root);
+        var e3_view: ?InnerElement.TreeView = try InnerElement.TreeView.init(&store, e3_root);
         defer if (e3_view) |*view| view.deinit();
         const e3 = &e3_view.?;
         try e3.set("id", @as(u32, 33));
@@ -392,7 +402,10 @@ test "TreeView composite list ViewStore POC borrowed element mutation" {
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
 
     const ListPOCView = ssz.ListCompositeTreeViewViewStorePOC(ListType);
-    var view = try ListPOCView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
+    var view = try ListPOCView.init(&store, root_node);
     defer view.deinit();
 
     var e1 = try view.get(1);
@@ -438,7 +451,10 @@ test "TreeView composite list ViewStore POC sliceFrom matches expected root" {
 
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
     const ListPOCView = ssz.ListCompositeTreeViewViewStorePOC(ListType);
-    var view = try ListPOCView.init(allocator, &pool, root_node);
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
+    var view = try ListPOCView.init(&store, root_node);
     defer view.deinit();
 
     var suffix = try view.sliceFrom(2);
@@ -461,6 +477,9 @@ test "TreeView composite list sliceTo matches incremental snapshots" {
     var pool = try Node.Pool.init(allocator, 2048);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     const ListType = ssz.FixedListType(Checkpoint, 1024);
     const total_values: usize = 16;
 
@@ -477,7 +496,7 @@ test "TreeView composite list sliceTo matches incremental snapshots" {
     try list.appendSlice(allocator, values[0..]);
 
     const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    var view = try ListType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     try view.commit();

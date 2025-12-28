@@ -58,7 +58,6 @@ pub fn ListCompositeTreeViewViewStorePOC(comptime ST: type) type {
         pool: *Node.Pool,
         store: *ViewStore,
         view_id: ViewId,
-        owns_store: bool,
 
         pub const SszType = ST;
         pub const ElementST = ST.Element;
@@ -70,21 +69,9 @@ pub fn ListCompositeTreeViewViewStorePOC(comptime ST: type) type {
 
         pub const ElementView = ElementTreeViewViewStorePOC(ElementST);
 
-        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
-            const store = try allocator.create(ViewStore);
-            errdefer allocator.destroy(store);
-
-            store.* = ViewStore.init(allocator, pool);
-            errdefer store.deinit();
-
+        pub fn init(store: *ViewStore, root: Node.Id) !Self {
             const view_id = try store.createView(root);
-            return .{
-                .allocator = allocator,
-                .pool = pool,
-                .store = store,
-                .view_id = view_id,
-                .owns_store = true,
-            };
+            return fromStore(store, view_id);
         }
 
         pub fn fromStore(store: *ViewStore, view_id: ViewId) Self {
@@ -93,22 +80,10 @@ pub fn ListCompositeTreeViewViewStorePOC(comptime ST: type) type {
                 .pool = store.pool,
                 .store = store,
                 .view_id = view_id,
-                .owns_store = false,
             };
         }
 
-        pub fn fromStoreWithContext(allocator: Allocator, pool: *Node.Pool, store: *ViewStore, view_id: ViewId) Self {
-            _ = allocator;
-            _ = pool;
-            return fromStore(store, view_id);
-        }
-
-        pub fn deinit(self: *Self) void {
-            if (!self.owns_store) return;
-            self.store.destroyViewRecursive(self.view_id);
-            self.store.deinit();
-            self.allocator.destroy(self.store);
-        }
+        pub fn deinit(_: *Self) void {}
 
         pub fn clearCache(self: *Self) void {
             self.store.clearCache(self.view_id);
@@ -128,21 +103,9 @@ pub fn ListCompositeTreeViewViewStorePOC(comptime ST: type) type {
         }
 
         pub fn length(self: *Self) !usize {
-            return try self.getListLengthCachedOrLoad();
-        }
-
-        fn getListLengthCachedOrLoad(self: *Self) !usize {
-            if (!self.store.isListLengthDirty(self.view_id)) {
-                if (self.store.getListLengthCache(self.view_id)) |len| return len;
-            }
-
             const length_node = try self.store.getChildNode(self.view_id, @enumFromInt(3));
             const length_chunk = length_node.getRoot(self.pool);
-            const len = std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
-
-            self.store.setListLengthCache(self.view_id, len);
-            self.store.setListLengthDirty(self.view_id, false);
-            return len;
+            return std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
         }
 
         pub fn get(self: *Self, index: usize) !ElementView {
@@ -150,7 +113,7 @@ pub fn ListCompositeTreeViewViewStorePOC(comptime ST: type) type {
             if (index >= list_length) return error.IndexOutOfBounds;
             const child_gindex = Gindex.fromDepth(chunk_depth, index);
             const child_id = try self.store.getOrCreateChildView(self.view_id, child_gindex);
-            return ElementView.fromStoreWithContext(self.allocator, self.pool, self.store, child_id);
+            return ElementView.fromStore(self.store, child_id);
         }
 
         pub fn set(self: *Self, index: usize, value: ElementView) !void {
@@ -161,19 +124,16 @@ pub fn ListCompositeTreeViewViewStorePOC(comptime ST: type) type {
             var v = value;
             defer v.deinit();
 
-            if (v.store == self.store) {
-                if (self.store.cachedChildViewId(self.view_id, child_gindex)) |cached_child_id| {
-                    if (cached_child_id == v.view_id) {
-                        try self.store.markChanged(self.view_id, child_gindex);
-                        return;
-                    }
+            if (v.store != self.store) return error.DifferentStore;
+
+            if (self.store.cachedChildViewId(self.view_id, child_gindex)) |cached_child_id| {
+                if (cached_child_id == v.view_id) {
+                    try self.store.markChanged(self.view_id, child_gindex);
+                    return;
                 }
             }
 
-            try v.commit();
-            const child_root = v.rootNodeId();
-            try self.pool.ref(child_root);
-            try self.store.setChildNode(self.view_id, child_gindex, child_root);
+            try self.store.setChildView(self.view_id, child_gindex, v.view_id);
         }
 
         pub fn push(self: *Self, value: ElementView) !void {
@@ -187,13 +147,13 @@ pub fn ListCompositeTreeViewViewStorePOC(comptime ST: type) type {
         }
 
         /// Return a new view containing all elements up to and including `index`.
-        /// The returned view must be deinitialized by the caller using `deinit()`.
+        /// The returned view borrows the same `ViewStore` as `self`.
         pub fn sliceTo(self: *Self, index: usize) !Self {
             try self.commit();
 
             const list_length = try self.length();
             if (list_length == 0 or index >= list_length - 1) {
-                return try Self.init(self.allocator, self.pool, self.rootNodeId());
+                return try Self.init(self.store, self.rootNodeId());
             }
 
             const new_length = index + 1;
@@ -213,17 +173,17 @@ pub fn ListCompositeTreeViewViewStorePOC(comptime ST: type) type {
             length_node = null;
             chunk_root = null;
 
-            return try Self.init(self.allocator, self.pool, root_with_length);
+            return try Self.init(self.store, root_with_length);
         }
 
         /// Return a new view containing all elements from `index` to the end.
-        /// The returned view must be deinitialized by the caller using `deinit()`.
+        /// The returned view borrows the same `ViewStore` as `self`.
         pub fn sliceFrom(self: *Self, index: usize) !Self {
             try self.commit();
 
             const list_length = try self.length();
             if (index == 0) {
-                return try Self.init(self.allocator, self.pool, self.rootNodeId());
+                return try Self.init(self.store, self.rootNodeId());
             }
 
             const target_length = if (index >= list_length) 0 else list_length - index;
@@ -251,7 +211,7 @@ pub fn ListCompositeTreeViewViewStorePOC(comptime ST: type) type {
             length_node = null;
             chunk_root = null;
 
-            return try Self.init(self.allocator, self.pool, new_root);
+            return try Self.init(self.store, new_root);
         }
 
         fn updateListLength(self: *Self, new_length: usize) !void {
@@ -260,9 +220,6 @@ pub fn ListCompositeTreeViewViewStorePOC(comptime ST: type) type {
             }
             const length_node = try self.pool.createLeafFromUint(@intCast(new_length));
             errdefer self.pool.unref(length_node);
-
-            self.store.setListLengthCache(self.view_id, new_length);
-            self.store.setListLengthDirty(self.view_id, false);
 
             try self.store.setChildNode(self.view_id, @enumFromInt(3), length_node);
         }

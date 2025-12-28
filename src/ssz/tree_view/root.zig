@@ -1,5 +1,8 @@
 const std = @import("std");
 
+pub const ViewStore = @import("view_store.zig").ViewStore;
+pub const ViewId = @import("view_store.zig").ViewId;
+
 pub const TreeViewData = @import("base.zig").TreeViewData;
 pub const BaseTreeView = @import("base.zig").BaseTreeView;
 pub const ContainerTreeView = @import("container.zig").ContainerTreeView;
