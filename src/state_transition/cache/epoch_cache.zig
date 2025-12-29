@@ -450,7 +450,7 @@ pub const EpochCache = struct {
 
         // Post-Fulu, EIP-7917 introduced the `proposer_lookahead`
         // field which we already processed in `processProposerLookahead`.
-        // Proposers are to be computed pre-fulu.
+        // Proposers are to be computed pre-fulu to be cached within `self`.
         if (self.epoch >= self.config.chain.FULU_FORK_EPOCH) {
             self.proposers = state.proposerLookahead()[0..preset.SLOTS_PER_EPOCH].*;
         } else {
