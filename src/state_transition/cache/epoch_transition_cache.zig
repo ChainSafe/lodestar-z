@@ -8,6 +8,10 @@ const Epoch = types.primitive.Epoch.Type;
 const preset = @import("preset").preset;
 const CachedBeaconStateAllForks = @import("./state_cache.zig").CachedBeaconStateAllForks;
 
+const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
+const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
+const deinitStateTransition = @import("../root.zig").deinitStateTransition;
+
 const attester_status = @import("../utils/attester_status.zig");
 const FLAG_CURR_HEAD_ATTESTER = attester_status.FLAG_CURR_HEAD_ATTESTER;
 const FLAG_CURR_SOURCE_ATTESTER = attester_status.FLAG_CURR_SOURCE_ATTESTER;
@@ -504,10 +508,6 @@ pub const EpochTransitionCache = struct {
         }
     }
 };
-
-const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
-const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
-const deinitStateTransition = @import("../root.zig").deinitStateTransition;
 
 test "EpochTransitionCache - finalProcessEpoch" {
     const allocator = std.testing.allocator;
