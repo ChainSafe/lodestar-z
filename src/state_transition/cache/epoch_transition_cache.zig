@@ -219,6 +219,7 @@ pub const EpochTransitionCache = struct {
         const effective_balances_by_increments = epoch_cache.getEffectiveBalanceIncrements().items;
 
         var next_epoch_shuffling_active_indices_length: usize = 0;
+
         var reused_cache = try getReusedEpochTransitionCache(allocator, validator_count);
         for (0..validator_count) |i| {
             const validator = state.validators().items[i];
@@ -503,3 +504,20 @@ pub const EpochTransitionCache = struct {
         }
     }
 };
+
+const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
+const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
+const deinitStateTransition = @import("../root.zig").deinitStateTransition;
+
+test "EpochTransitionCache - finalProcessEpoch" {
+    const allocator = std.testing.allocator;
+    var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+    defer test_state.deinit();
+
+    try upgradeStateToFulu(allocator, test_state.cached_state);
+
+    const epoch_cache = test_state.cached_state.getEpochCache();
+    try epoch_cache.finalProcessEpoch(test_state.cached_state);
+
+    deinitStateTransition();
+}
