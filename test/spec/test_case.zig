@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const snappy = @import("snappy");
+const snappy = @import("snappy").raw;
 const ForkSeq = @import("config").ForkSeq;
 const isFixedType = @import("ssz").isFixedType;
 const state_transition = @import("state_transition");

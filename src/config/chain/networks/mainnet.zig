@@ -5,6 +5,8 @@ const ChainConfig = @import("../chain_config.zig").ChainConfig;
 const BlobScheduleEntry = @import("../chain_config.zig").BlobScheduleEntry;
 const b = hex_utils.hexToBytesComptime;
 
+pub const mainnet_genesis_validators_root = b(32, "0x4b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe95");
+
 pub const mainnet_chain_config = ChainConfig{
     .PRESET_BASE = Preset.mainnet,
     .CONFIG_NAME = "mainnet",
@@ -31,7 +33,7 @@ pub const mainnet_chain_config = ChainConfig{
     .ELECTRA_FORK_VERSION = b(4, "0x05000000"),
     .ELECTRA_FORK_EPOCH = 364032,
     .FULU_FORK_VERSION = b(4, "0x06000000"),
-    .FULU_FORK_EPOCH = std.math.maxInt(u64),
+    .FULU_FORK_EPOCH = 411392,
 
     // Time parameters
     .SECONDS_PER_SLOT = 12,

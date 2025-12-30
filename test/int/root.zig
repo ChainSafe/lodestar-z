@@ -68,4 +68,6 @@ test {
     testing.refAllDecls(bit_list);
     testing.refAllDecls(byte_list);
     testing.refAllDecls(tree_view);
+
+    testing.refAllDecls(@import("./era/root.zig"));
 }

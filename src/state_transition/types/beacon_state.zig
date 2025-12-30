@@ -90,6 +90,107 @@ pub const BeaconStateAllForks = union(enum) {
         return state;
     }
 
+    pub fn deserialize(allocator: Allocator, fork_seq: ForkSeq, bytes: []const u8) !BeaconStateAllForks {
+        switch (fork_seq) {
+            .phase0 => {
+                const state = try allocator.create(BeaconStatePhase0);
+                errdefer allocator.destroy(state);
+                state.* = types.phase0.BeaconState.default_value;
+                try types.phase0.BeaconState.deserializeFromBytes(allocator, bytes, state);
+                return .{ .phase0 = state };
+            },
+            .altair => {
+                const state = try allocator.create(BeaconStateAltair);
+                errdefer allocator.destroy(state);
+                state.* = types.altair.BeaconState.default_value;
+                try types.altair.BeaconState.deserializeFromBytes(allocator, bytes, state);
+                return .{ .altair = state };
+            },
+            .bellatrix => {
+                const state = try allocator.create(BeaconStateBellatrix);
+                errdefer allocator.destroy(state);
+                state.* = types.bellatrix.BeaconState.default_value;
+                try types.bellatrix.BeaconState.deserializeFromBytes(allocator, bytes, state);
+                return .{ .bellatrix = state };
+            },
+            .capella => {
+                const state = try allocator.create(BeaconStateCapella);
+                errdefer allocator.destroy(state);
+                state.* = types.capella.BeaconState.default_value;
+                try types.capella.BeaconState.deserializeFromBytes(allocator, bytes, state);
+                return .{ .capella = state };
+            },
+            .deneb => {
+                const state = try allocator.create(BeaconStateDeneb);
+                errdefer allocator.destroy(state);
+                state.* = types.deneb.BeaconState.default_value;
+                try types.deneb.BeaconState.deserializeFromBytes(allocator, bytes, state);
+                return .{ .deneb = state };
+            },
+            .electra => {
+                const state = try allocator.create(BeaconStateElectra);
+                errdefer allocator.destroy(state);
+                state.* = types.electra.BeaconState.default_value;
+                try types.electra.BeaconState.deserializeFromBytes(allocator, bytes, state);
+                return .{ .electra = state };
+            },
+            .fulu => {
+                const state = try allocator.create(BeaconStateFulu);
+                errdefer allocator.destroy(state);
+                state.* = types.fulu.BeaconState.default_value;
+                try types.fulu.BeaconState.deserializeFromBytes(allocator, bytes, state);
+                return .{ .fulu = state };
+            },
+        }
+    }
+
+    pub fn serialize(self: BeaconStateAllForks, allocator: Allocator) ![]u8 {
+        switch (self) {
+            .phase0 => |state| {
+                const out = try allocator.alloc(u8, types.phase0.BeaconState.serializedSize(state));
+                errdefer allocator.free(out);
+                _ = types.phase0.BeaconState.serializeIntoBytes(state, out);
+                return out;
+            },
+            .altair => |state| {
+                const out = try allocator.alloc(u8, types.altair.BeaconState.serializedSize(state));
+                errdefer allocator.free(out);
+                _ = types.altair.BeaconState.serializeIntoBytes(state, out);
+                return out;
+            },
+            .bellatrix => |state| {
+                const out = try allocator.alloc(u8, types.bellatrix.BeaconState.serializedSize(state));
+                errdefer allocator.free(out);
+                _ = types.bellatrix.BeaconState.serializeIntoBytes(state, out);
+                return out;
+            },
+            .capella => |state| {
+                const out = try allocator.alloc(u8, types.capella.BeaconState.serializedSize(state));
+                errdefer allocator.free(out);
+                _ = types.capella.BeaconState.serializeIntoBytes(state, out);
+                return out;
+            },
+            .deneb => |state| {
+                const out = try allocator.alloc(u8, types.deneb.BeaconState.serializedSize(state));
+                errdefer allocator.free(out);
+                _ = types.deneb.BeaconState.serializeIntoBytes(state, out);
+                return out;
+            },
+            .electra => |state| {
+                const out = try allocator.alloc(u8, types.electra.BeaconState.serializedSize(state));
+                errdefer allocator.free(out);
+                _ = types.electra.BeaconState.serializeIntoBytes(state, out);
+                return out;
+            },
+            .fulu => |state| {
+                const out = try allocator.alloc(u8, types.fulu.BeaconState.serializedSize(state));
+                errdefer allocator.free(out);
+                _ = types.fulu.BeaconState.serializeIntoBytes(state, out);
+                return out;
+            },
+        }
+    }
+
     pub fn format(
         self: BeaconStateAllForks,
         comptime fmt: []const u8,
