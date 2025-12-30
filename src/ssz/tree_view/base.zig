@@ -134,22 +134,36 @@ pub const BaseTreeView = struct {
     }
 
     fn transferSafeCache(self: *BaseTreeView, out: *BaseTreeView) !void {
+        var safe_node_keys = std.ArrayList(Gindex).init(self.allocator);
+        defer safe_node_keys.deinit();
+
         var nodes_it = self.data.children_nodes.iterator();
         while (nodes_it.next()) |entry| {
             const gindex = entry.key_ptr.*;
             if (!self.data.changed.contains(gindex)) {
-                try out.data.children_nodes.put(self.allocator, gindex, entry.value_ptr.*);
-                self.data.children_nodes.removeByPtr(entry.key_ptr);
+                try safe_node_keys.append(gindex);
             }
         }
+
+        for (safe_node_keys.items) |gindex| {
+            const removed = self.data.children_nodes.fetchRemove(gindex) orelse continue;
+            try out.data.children_nodes.put(self.allocator, gindex, removed.value);
+        }
+
+        var safe_data_keys = std.ArrayList(Gindex).init(self.allocator);
+        defer safe_data_keys.deinit();
 
         var data_it = self.data.children_data.iterator();
         while (data_it.next()) |entry| {
             const gindex = entry.key_ptr.*;
             if (!self.data.changed.contains(gindex)) {
-                try out.data.children_data.put(self.allocator, gindex, entry.value_ptr.*);
-                self.data.children_data.removeByPtr(entry.key_ptr);
+                try safe_data_keys.append(gindex);
             }
+        }
+
+        for (safe_data_keys.items) |gindex| {
+            const removed = self.data.children_data.fetchRemove(gindex) orelse continue;
+            try out.data.children_data.put(self.allocator, gindex, removed.value);
         }
     }
 
