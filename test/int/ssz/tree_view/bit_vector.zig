@@ -38,6 +38,120 @@ test "BitVectorTreeView get/set roundtrip" {
     try std.testing.expectEqualSlices(u8, &expected_root, &view_root);
 }
 
+test "BitVectorTreeView clone(true) does not transfer cache" {
+    const allocator = std.testing.allocator;
+    const Bits = ssz.BitVectorType(44);
+
+    var pool = try Node.Pool.init(allocator, 2048);
+    defer pool.deinit();
+
+    var value: Bits.Type = Bits.default_value;
+    try value.set(1, true);
+    try value.set(7, true);
+    try value.set(31, true);
+
+    const root = try Bits.tree.fromValue(&pool, &value);
+    var view = try Bits.TreeView.init(allocator, &pool, root);
+    defer view.deinit();
+
+    _ = try view.get(0);
+    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
+
+    var cloned_no_cache = try view.clone(true);
+    defer cloned_no_cache.deinit();
+
+    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.base_view.data.children_nodes.count());
+}
+
+test "BitVectorTreeView clone(false) transfers cache and clears source" {
+    const allocator = std.testing.allocator;
+    const Bits = ssz.BitVectorType(44);
+
+    var pool = try Node.Pool.init(allocator, 2048);
+    defer pool.deinit();
+
+    var value: Bits.Type = Bits.default_value;
+    try value.set(1, true);
+    try value.set(7, true);
+    try value.set(31, true);
+
+    const root = try Bits.tree.fromValue(&pool, &value);
+    var view = try Bits.TreeView.init(allocator, &pool, root);
+    defer view.deinit();
+
+    _ = try view.get(0);
+    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
+
+    var cloned = try view.clone(false);
+    defer cloned.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), view.base_view.data.children_nodes.count());
+    try std.testing.expect(cloned.base_view.data.children_nodes.count() > 0);
+}
+
+test "BitVectorTreeView clone isolates updates" {
+    const allocator = std.testing.allocator;
+    const Bits = ssz.BitVectorType(44);
+
+    var pool = try Node.Pool.init(allocator, 2048);
+    defer pool.deinit();
+
+    const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
+    var v1 = try Bits.TreeView.init(allocator, &pool, root);
+    defer v1.deinit();
+
+    var v2 = try v1.clone(false);
+    defer v2.deinit();
+
+    try v2.set(0, true);
+    try v2.commit();
+
+    try std.testing.expect(!try v1.get(0));
+    try std.testing.expect(try v2.get(0));
+}
+
+test "BitVectorTreeView clone reads committed state" {
+    const allocator = std.testing.allocator;
+    const Bits = ssz.BitVectorType(44);
+
+    var pool = try Node.Pool.init(allocator, 2048);
+    defer pool.deinit();
+
+    const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
+    var v1 = try Bits.TreeView.init(allocator, &pool, root);
+    defer v1.deinit();
+
+    try v1.set(1, true);
+    try v1.commit();
+
+    var v2 = try v1.clone(false);
+    defer v2.deinit();
+
+    try std.testing.expect(try v2.get(1));
+}
+
+test "BitVectorTreeView clone drops uncommitted changes" {
+    const allocator = std.testing.allocator;
+    const Bits = ssz.BitVectorType(44);
+
+    var pool = try Node.Pool.init(allocator, 2048);
+    defer pool.deinit();
+
+    const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
+    var v = try Bits.TreeView.init(allocator, &pool, root);
+    defer v.deinit();
+
+    try v.set(2, true);
+    try std.testing.expect(try v.get(2));
+
+    var dropped = try v.clone(false);
+    defer dropped.deinit();
+
+    try std.testing.expect(!try v.get(2));
+    try std.testing.expect(!try dropped.get(2));
+}
+
 test "BitVectorTreeView toBoolArray roundtrip" {
     const allocator = std.testing.allocator;
     const Bits = ssz.BitVectorType(16);

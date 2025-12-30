@@ -113,6 +113,46 @@ pub const BaseTreeView = struct {
         };
     }
 
+    /// Create a new, independent BaseTreeView referencing the same current root node.
+    ///
+    /// - `dont_transfer_cache = false`: transfers *safe* cache entries from `self` into the clone.
+    ///   This is a best-effort transfer: only cache entries that are not marked as changed are moved.
+    ///   After transferring, this instance is reset to a committed-only state by clearing its caches.
+    /// - `dont_transfer_cache = true`: clone starts with an empty cache; this instance keeps its caches.
+    ///
+    /// Notes:
+    /// - Any uncommitted changes in this instance are not included in the clone. Call `commit()` first if needed.
+    pub fn clone(self: *BaseTreeView, dont_transfer_cache: bool) !BaseTreeView {
+        var out = try BaseTreeView.init(self.allocator, self.pool, self.data.root);
+        if (dont_transfer_cache) {
+            return out;
+        }
+
+        try self.transferSafeCache(&out);
+        self.clearCache();
+        return out;
+    }
+
+    fn transferSafeCache(self: *BaseTreeView, out: *BaseTreeView) !void {
+        var nodes_it = self.data.children_nodes.iterator();
+        while (nodes_it.next()) |entry| {
+            const gindex = entry.key_ptr.*;
+            if (!self.data.changed.contains(gindex)) {
+                try out.data.children_nodes.put(self.allocator, gindex, entry.value_ptr.*);
+                self.data.children_nodes.removeByPtr(entry.key_ptr);
+            }
+        }
+
+        var data_it = self.data.children_data.iterator();
+        while (data_it.next()) |entry| {
+            const gindex = entry.key_ptr.*;
+            if (!self.data.changed.contains(gindex)) {
+                try out.data.children_data.put(self.allocator, gindex, entry.value_ptr.*);
+                self.data.children_data.removeByPtr(entry.key_ptr);
+            }
+        }
+    }
+
     pub fn deinit(self: *BaseTreeView) void {
         self.data.deinit(self.allocator, self.pool);
     }

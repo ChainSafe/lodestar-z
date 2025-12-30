@@ -113,6 +113,176 @@ test "TreeView vector composite clearCache does not break subsequent commits" {
     try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
 }
 
+test "TreeView vector composite clone isolates updates" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const Inner = ssz.FixedContainerType(struct { a: Uint32 });
+    const VectorType = ssz.FixedVectorType(Inner, 2);
+
+    const original: VectorType.Type = .{ .{ .a = 1 }, .{ .a = 2 } };
+    const root = try VectorType.tree.fromValue(&pool, &original);
+
+    var v1 = try VectorType.TreeView.init(allocator, &pool, root);
+    defer v1.deinit();
+
+    var v2 = try v1.clone(false);
+    defer v2.deinit();
+
+    const replacement: Inner.Type = .{ .a = 9 };
+    const replacement_root = try Inner.tree.fromValue(&pool, &replacement);
+    var replacement_view: ?Inner.TreeView = try Inner.TreeView.init(allocator, &pool, replacement_root);
+    defer if (replacement_view) |*v| v.deinit();
+    try v2.set(1, replacement_view.?);
+    replacement_view = null;
+
+    try v2.commit();
+
+    const v1_e1 = try v1.get(1);
+    var v1_e1_value: Inner.Type = undefined;
+    try Inner.tree.toValue(v1_e1.base_view.data.root, &pool, &v1_e1_value);
+
+    const v2_e1 = try v2.get(1);
+    var v2_e1_value: Inner.Type = undefined;
+    try Inner.tree.toValue(v2_e1.base_view.data.root, &pool, &v2_e1_value);
+
+    try std.testing.expectEqual(@as(u32, 2), v1_e1_value.a);
+    try std.testing.expectEqual(@as(u32, 9), v2_e1_value.a);
+}
+
+test "TreeView vector composite clone reads committed state" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const Inner = ssz.FixedContainerType(struct { a: Uint32 });
+    const VectorType = ssz.FixedVectorType(Inner, 2);
+
+    const original: VectorType.Type = .{ .{ .a = 1 }, .{ .a = 2 } };
+    const root = try VectorType.tree.fromValue(&pool, &original);
+
+    var v1 = try VectorType.TreeView.init(allocator, &pool, root);
+    defer v1.deinit();
+
+    const replacement: Inner.Type = .{ .a = 9 };
+    const replacement_root = try Inner.tree.fromValue(&pool, &replacement);
+    var replacement_view: ?Inner.TreeView = try Inner.TreeView.init(allocator, &pool, replacement_root);
+    defer if (replacement_view) |*v| v.deinit();
+    try v1.set(1, replacement_view.?);
+    replacement_view = null;
+    try v1.commit();
+
+    var v2 = try v1.clone(false);
+    defer v2.deinit();
+
+    const v2_e1 = try v2.get(1);
+    var v2_e1_value: Inner.Type = undefined;
+    try Inner.tree.toValue(v2_e1.base_view.data.root, &pool, &v2_e1_value);
+
+    try std.testing.expectEqual(@as(u32, 9), v2_e1_value.a);
+}
+
+test "TreeView vector composite clone drops uncommitted changes" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const Inner = ssz.FixedContainerType(struct { a: Uint32 });
+    const VectorType = ssz.FixedVectorType(Inner, 2);
+
+    const original: VectorType.Type = .{ .{ .a = 1 }, .{ .a = 2 } };
+    const root = try VectorType.tree.fromValue(&pool, &original);
+
+    var v = try VectorType.TreeView.init(allocator, &pool, root);
+    defer v.deinit();
+
+    const replacement: Inner.Type = .{ .a = 9 };
+    const replacement_root = try Inner.tree.fromValue(&pool, &replacement);
+    var replacement_view: ?Inner.TreeView = try Inner.TreeView.init(allocator, &pool, replacement_root);
+    defer if (replacement_view) |*v0| v0.deinit();
+    try v.set(1, replacement_view.?);
+    replacement_view = null;
+
+    const v_e1_before = try v.get(1);
+    var v_e1_before_value: Inner.Type = undefined;
+    try Inner.tree.toValue(v_e1_before.base_view.data.root, &pool, &v_e1_before_value);
+    try std.testing.expectEqual(@as(u32, 9), v_e1_before_value.a);
+
+    var dropped = try v.clone(false);
+    defer dropped.deinit();
+
+    const v_e1_after = try v.get(1);
+    var v_e1_after_value: Inner.Type = undefined;
+    try Inner.tree.toValue(v_e1_after.base_view.data.root, &pool, &v_e1_after_value);
+
+    const dropped_e1 = try dropped.get(1);
+    var dropped_e1_value: Inner.Type = undefined;
+    try Inner.tree.toValue(dropped_e1.base_view.data.root, &pool, &dropped_e1_value);
+
+    try std.testing.expectEqual(@as(u32, 2), v_e1_after_value.a);
+    try std.testing.expectEqual(@as(u32, 2), dropped_e1_value.a);
+}
+
+test "TreeView vector composite clone(true) does not transfer cache" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const Inner = ssz.FixedContainerType(struct {
+        a: Uint32,
+    });
+    const VectorType = ssz.FixedVectorType(Inner, 2);
+
+    const original: VectorType.Type = .{ .{ .a = 1 }, .{ .a = 2 } };
+    const root_node = try VectorType.tree.fromValue(&pool, &original);
+    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    _ = try view.get(0);
+    try view.commit();
+
+    try std.testing.expect(view.base_view.data.children_data.count() > 0);
+
+    var cloned_no_cache = try view.clone(true);
+    defer cloned_no_cache.deinit();
+
+    try std.testing.expect(view.base_view.data.children_data.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.base_view.data.children_data.count());
+}
+
+test "TreeView vector composite clone(false) transfers cache and clears source" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const Inner = ssz.FixedContainerType(struct {
+        a: Uint32,
+    });
+    const VectorType = ssz.FixedVectorType(Inner, 2);
+
+    const original: VectorType.Type = .{ .{ .a = 1 }, .{ .a = 2 } };
+    const root_node = try VectorType.tree.fromValue(&pool, &original);
+    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    _ = try view.get(0);
+    try view.commit();
+
+    try std.testing.expect(view.base_view.data.children_data.count() > 0);
+
+    var cloned = try view.clone(false);
+    defer cloned.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), view.base_view.data.children_data.count());
+    try std.testing.expect(cloned.base_view.data.children_data.count() > 0);
+}
+
 // Tests ported from TypeScript ssz packages/ssz/test/unit/byType/vector/tree.test.ts
 test "ArrayCompositeTreeView - serialize (ByteVector32 vector)" {
     const allocator = std.testing.allocator;
