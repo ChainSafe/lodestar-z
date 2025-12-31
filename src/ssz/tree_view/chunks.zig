@@ -89,7 +89,7 @@ pub fn BasicPackedChunks(
         ) ![]Element {
             const values = try allocator.alloc(Element, len);
             errdefer allocator.free(values);
-            return try getAllInto(self, len, values);
+            return try self.getAllInto(len, values);
         }
 
         pub fn getAllInto(
@@ -104,7 +104,7 @@ pub fn BasicPackedChunks(
             const remainder = len % items_per_chunk;
             const chunk_count = len_full_chunks + @intFromBool(remainder != 0);
 
-            try populateAllNodes(self, chunk_count);
+            try self.populateAllNodes(chunk_count);
 
             for (0..len_full_chunks) |chunk_idx| {
                 const leaf_node = try self.getChildNode(Gindex.fromDepth(chunk_depth, chunk_idx));
