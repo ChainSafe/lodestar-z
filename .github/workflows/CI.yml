@@ -102,8 +102,8 @@ jobs:
       - name: Run Int Tests
         run: |
           zig build test:int
-  spec-test:
-    name: spec test
+  spec-test-ssz:
+    name: spec tests - ssz
     # It takes time to download and run spec tests, so we only run them on ubuntu-latest
     runs-on: ubuntu-latest
     needs: build-test
@@ -131,9 +131,6 @@ jobs:
         run: |
           zig build run:write_ssz_static_spec_tests
 
-      - name: Write spec tests
-        run: |
-          zig build run:write_spec_tests
       - name: Run ssz_generic spec tests
         run: |
           zig build test:ssz_generic_spec_tests
@@ -146,9 +143,63 @@ jobs:
         run: |
           zig build test:ssz_static_spec_tests -Dpreset=mainnet
 
+  spec-test-minimal:
+    name: spec tests - minimal
+    # It takes time to download and run spec tests, so we only run them on ubuntu-latest
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Restore spec tests cache
+        uses: actions/cache@v4
+        with:
+          path: test/spec/spec_tests
+          key: spec-test-data-${{ hashFiles('build.zig') }} # spec test version is defined in build.zig
+      - name: Download spec tests
+        run: |
+          zig build run:download_spec_tests
+
+      - name: Write spec tests
+        run: |
+          zig build run:write_spec_tests
+
       - name: Run spec tests - minimal
         run: |
           zig build test:spec_tests -Dpreset=minimal
+      - name: Run spec tests - mainnet
+        run: |
+          zig build test:spec_tests -Dpreset=mainnet
+
+  spec-test-mainnet:
+    name: spec tests - mainnet
+    # It takes time to download and run spec tests, so we only run them on ubuntu-latest
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Restore spec tests cache
+        uses: actions/cache@v4
+        with:
+          path: test/spec/spec_tests
+          key: spec-test-data-${{ hashFiles('build.zig') }} # spec test version is defined in build.zig
+      - name: Download spec tests
+        run: |
+          zig build run:download_spec_tests
+      - name: Write spec tests
+        run: |
+          zig build run:write_spec_tests
       - name: Run spec tests - mainnet
         run: |
           zig build test:spec_tests -Dpreset=mainnet
