@@ -6,6 +6,7 @@ const isBasicType = @import("../type/type_kind.zig").isBasicType;
 const FixedContainerType = @import("../type/container.zig").FixedContainerType;
 const UintType = @import("../type/uint.zig").UintType;
 const assertTreeViewType = @import("./assert.zig").assertTreeViewType;
+const isFixedType = @import("../type/type_kind.zig").isFixedType;
 
 /// A specialized tree view for SSZ container types, enabling efficient access and modification of container fields, given a backing merkle tree.
 ///
@@ -227,6 +228,27 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 }
 
                 self.child_data[field_index] = value;
+            }
+        }
+
+        /// Serialize the tree view into a provided buffer.
+        /// Returns the number of bytes written.
+        pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
+            try self.commit();
+            if (comptime isFixedType(ST)) {
+                return try ST.tree.serializeIntoBytes(self.root, self.pool, out);
+            } else {
+                return try ST.tree.serializeIntoBytes(self.allocator, self.root, self.pool, out);
+            }
+        }
+
+        /// Get the serialized size of this tree view.
+        pub fn serializedSize(self: *Self) !usize {
+            try self.commit();
+            if (comptime isFixedType(ST)) {
+                return ST.tree.serializedSize(self.root, self.pool);
+            } else {
+                return try ST.tree.serializedSize(self.allocator, self.root, self.pool);
             }
         }
     };

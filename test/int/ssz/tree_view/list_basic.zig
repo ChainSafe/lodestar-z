@@ -407,3 +407,202 @@ test "TreeView list sliceTo truncates tail elements" {
 
     try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
 }
+
+// Tests ported from TypeScript ssz packages/ssz/test/unit/byType/listBasic/tree.test.ts
+test "ListBasicTreeView - serialize (uint8 list)" {
+    const allocator = std.testing.allocator;
+
+    const Uint8 = ssz.UintType(8);
+    const ListU8Type = ssz.FixedListType(Uint8, 128);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const TestCase = struct {
+        id: []const u8,
+        values: []const u8,
+        expected_serialized: []const u8,
+        expected_root: [32]u8,
+    };
+
+    const test_cases = [_]TestCase{
+        .{
+            .id = "empty",
+            .values = &[_]u8{},
+            .expected_serialized = &[_]u8{},
+            .expected_root = [_]u8{ 0x28, 0xba, 0x18, 0x34, 0xa3, 0xa7, 0xb6, 0x57, 0x46, 0x0c, 0xe7, 0x9f, 0xa3, 0xa1, 0xd9, 0x09, 0xab, 0x88, 0x28, 0xfd, 0x55, 0x76, 0x59, 0xd4, 0xd0, 0x55, 0x4a, 0x9b, 0xdb, 0xc0, 0xec, 0x30 },
+        },
+        .{
+            .id = "4 values",
+            .values = &[_]u8{ 1, 2, 3, 4 },
+            .expected_serialized = &[_]u8{ 0x01, 0x02, 0x03, 0x04 },
+            .expected_root = [_]u8{ 0xba, 0xc5, 0x11, 0xd1, 0xf6, 0x41, 0xd6, 0xb8, 0x82, 0x32, 0x00, 0xbb, 0x4b, 0x3c, 0xce, 0xd3, 0xbd, 0x47, 0x20, 0x70, 0x1f, 0x18, 0x57, 0x1d, 0xff, 0x35, 0xa5, 0xd2, 0xa4, 0x01, 0x90, 0xfa },
+        },
+    };
+
+    for (test_cases) |tc| {
+        var value: ListU8Type.Type = ListU8Type.default_value;
+        defer value.deinit(allocator);
+        for (tc.values) |v| {
+            try value.append(allocator, v);
+        }
+
+        const value_serialized = try allocator.alloc(u8, ListU8Type.serializedSize(&value));
+        defer allocator.free(value_serialized);
+        _ = ListU8Type.serializeIntoBytes(&value, value_serialized);
+
+        const tree_node = try ListU8Type.tree.fromValue(allocator, &pool, &value);
+        var view = try ListU8Type.TreeView.init(allocator, &pool, tree_node);
+        defer view.deinit();
+
+        const view_size = try view.serializedSize();
+        const view_serialized = try allocator.alloc(u8, view_size);
+        defer allocator.free(view_serialized);
+        const written = try view.serializeIntoBytes(view_serialized);
+        try std.testing.expectEqual(view_size, written);
+
+        try std.testing.expectEqualSlices(u8, tc.expected_serialized, view_serialized);
+        try std.testing.expectEqualSlices(u8, value_serialized, view_serialized);
+
+        try std.testing.expectEqual(tc.expected_serialized.len, view_size);
+
+        var hash_root: [32]u8 = undefined;
+        try view.hashTreeRoot(&hash_root);
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
+    }
+}
+
+test "ListBasicTreeView - serialize (uint64 list)" {
+    const allocator = std.testing.allocator;
+
+    const Uint64 = ssz.UintType(64);
+    const ListU64Type = ssz.FixedListType(Uint64, 128);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const TestCase = struct {
+        id: []const u8,
+        values: []const u64,
+        expected_serialized: []const u8,
+        expected_root: [32]u8,
+    };
+
+    const test_cases = [_]TestCase{
+        .{
+            .id = "empty",
+            .values = &[_]u64{},
+            .expected_serialized = &[_]u8{},
+            .expected_root = [_]u8{ 0x52, 0xe2, 0x64, 0x7a, 0xbc, 0x3d, 0x0c, 0x9d, 0x3b, 0xe0, 0x38, 0x7f, 0x3f, 0x0d, 0x92, 0x54, 0x22, 0xc7, 0xa4, 0xe9, 0x8c, 0xf4, 0x48, 0x90, 0x66, 0xf0, 0xf4, 0x32, 0x81, 0xa8, 0x99, 0xf3 },
+        },
+        .{
+            .id = "4 values",
+            .values = &[_]u64{ 100000, 200000, 300000, 400000 },
+            // 0xa086010000000000400d030000000000e093040000000000801a060000000000
+            .expected_serialized = &[_]u8{ 0xa0, 0x86, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x0d, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0x93, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00 },
+            .expected_root = [_]u8{ 0xd1, 0xda, 0xef, 0x21, 0x55, 0x02, 0xb7, 0x74, 0x6e, 0x5f, 0xf3, 0xe8, 0x83, 0x3e, 0x39, 0x9c, 0xb2, 0x49, 0xab, 0x3f, 0x81, 0xd8, 0x24, 0xbe, 0x60, 0xe1, 0x74, 0xff, 0x56, 0x33, 0xc1, 0xbf },
+        },
+    };
+
+    for (test_cases) |tc| {
+        var value: ListU64Type.Type = ListU64Type.default_value;
+        defer value.deinit(allocator);
+        for (tc.values) |v| {
+            try value.append(allocator, v);
+        }
+
+        const value_serialized = try allocator.alloc(u8, ListU64Type.serializedSize(&value));
+        defer allocator.free(value_serialized);
+        _ = ListU64Type.serializeIntoBytes(&value, value_serialized);
+
+        const tree_node = try ListU64Type.tree.fromValue(allocator, &pool, &value);
+        var view = try ListU64Type.TreeView.init(allocator, &pool, tree_node);
+        defer view.deinit();
+
+        const view_size = try view.serializedSize();
+        const view_serialized = try allocator.alloc(u8, view_size);
+        defer allocator.free(view_serialized);
+        const written = try view.serializeIntoBytes(view_serialized);
+        try std.testing.expectEqual(view_size, written);
+
+        try std.testing.expectEqualSlices(u8, tc.expected_serialized, view_serialized);
+        try std.testing.expectEqualSlices(u8, value_serialized, view_serialized);
+
+        try std.testing.expectEqual(tc.expected_serialized.len, view_size);
+
+        var hash_root: [32]u8 = undefined;
+        try view.hashTreeRoot(&hash_root);
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
+    }
+}
+
+test "ListBasicTreeView - push and serialize" {
+    const allocator = std.testing.allocator;
+
+    const Uint8 = ssz.UintType(8);
+    const ListU8Type = ssz.FixedListType(Uint8, 128);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    var value: ListU8Type.Type = ListU8Type.default_value;
+    defer value.deinit(allocator);
+
+    const tree_node = try ListU8Type.tree.fromValue(allocator, &pool, &value);
+    var view = try ListU8Type.TreeView.init(allocator, &pool, tree_node);
+    defer view.deinit();
+
+    try view.push(1);
+    try view.push(2);
+    try view.push(3);
+    try view.push(4);
+
+    const size = try view.serializedSize();
+    const serialized = try allocator.alloc(u8, size);
+    defer allocator.free(serialized);
+    const written = try view.serializeIntoBytes(serialized);
+    try std.testing.expectEqual(size, written);
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4 }, serialized);
+
+    const len = try view.length();
+    try std.testing.expectEqual(@as(usize, 4), len);
+
+    var hash_root: [32]u8 = undefined;
+    try view.hashTreeRoot(&hash_root);
+    const expected_root = [_]u8{ 0xba, 0xc5, 0x11, 0xd1, 0xf6, 0x41, 0xd6, 0xb8, 0x82, 0x32, 0x00, 0xbb, 0x4b, 0x3c, 0xce, 0xd3, 0xbd, 0x47, 0x20, 0x70, 0x1f, 0x18, 0x57, 0x1d, 0xff, 0x35, 0xa5, 0xd2, 0xa4, 0x01, 0x90, 0xfa };
+    try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
+}
+
+test "ListBasicTreeView - sliceTo and serialize" {
+    const allocator = std.testing.allocator;
+
+    const Uint8 = ssz.UintType(8);
+    const ListU8Type = ssz.FixedListType(Uint8, 128);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    var value: ListU8Type.Type = ListU8Type.default_value;
+    defer value.deinit(allocator);
+    try value.append(allocator, 1);
+    try value.append(allocator, 2);
+    try value.append(allocator, 3);
+    try value.append(allocator, 4);
+
+    const tree_node = try ListU8Type.tree.fromValue(allocator, &pool, &value);
+    var view = try ListU8Type.TreeView.init(allocator, &pool, tree_node);
+    defer view.deinit();
+
+    var sliced = try view.sliceTo(1);
+    defer sliced.deinit();
+
+    const size = try sliced.serializedSize();
+    const serialized = try allocator.alloc(u8, size);
+    defer allocator.free(serialized);
+    const written = try sliced.serializeIntoBytes(serialized);
+    try std.testing.expectEqual(size, written);
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2 }, serialized);
+    try std.testing.expectEqual(@as(usize, 2), try sliced.length());
+}

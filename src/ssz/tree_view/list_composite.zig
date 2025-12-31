@@ -5,6 +5,7 @@ const Depth = hashing.Depth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
+const isFixedType = @import("../type/type_kind.zig").isFixedType;
 
 const type_root = @import("../type/root.zig");
 const chunkDepth = type_root.chunkDepth;
@@ -186,6 +187,19 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             const length_node = try self.chunks.pool.createLeafFromUint(@intCast(new_length));
             errdefer self.chunks.pool.unref(length_node);
             try self.chunks.setChildNode(@enumFromInt(3), length_node);
+        }
+
+        /// Serialize the tree view into a provided buffer.
+        /// Returns the number of bytes written.
+        pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
+            try self.commit();
+            return try ST.tree.serializeIntoBytes(self.allocator, self.chunks.root, self.chunks.pool, out);
+        }
+
+        /// Get the serialized size of this tree view.
+        pub fn serializedSize(self: *Self) !usize {
+            try self.commit();
+            return try ST.tree.serializedSize(self.allocator, self.chunks.root, self.chunks.pool);
         }
     };
 

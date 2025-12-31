@@ -166,6 +166,19 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             errdefer self.chunks.pool.unref(length_node);
             try self.chunks.setChildNode(@enumFromInt(3), length_node);
         }
+
+        /// Serialize the tree view into a provided buffer.
+        /// Returns the number of bytes written.
+        pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
+            try self.commit();
+            return try ST.tree.serializeIntoBytes(self.allocator, self.chunks.root, self.chunks.pool, out);
+        }
+
+        /// Get the serialized size of this tree view.
+        pub fn serializedSize(self: *Self) !usize {
+            try self.commit();
+            return try ST.tree.serializedSize(self.allocator, self.chunks.root, self.chunks.pool);
+        }
     };
 
     assertTreeViewType(TreeView);
