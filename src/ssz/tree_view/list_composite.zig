@@ -123,7 +123,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
             const list_length = try self.length();
             if (list_length == 0 or index >= list_length - 1) {
-                return try Self.init(self.chunks.allocator, self.chunks.pool, self.chunks.root);
+                return try Self.init(self.allocator, self.chunks.pool, self.chunks.root);
             }
 
             const new_length = index + 1;
@@ -141,7 +141,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             length_node = null;
             chunk_root = null;
 
-            return try Self.init(self.chunks.allocator, self.chunks.pool, root_with_length);
+            return try Self.init(self.allocator, self.chunks.pool, root_with_length);
         }
 
         /// Return a new view containing all elements from `index` to the end.
@@ -151,7 +151,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
             const list_length = try self.length();
             if (index == 0) {
-                return try Self.init(self.chunks.allocator, self.chunks.pool, self.chunks.root);
+                return try Self.init(self.allocator, self.chunks.pool, self.chunks.root);
             }
 
             const target_length = if (index >= list_length) 0 else list_length - index;
@@ -162,8 +162,8 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             if (target_length == 0) {
                 chunk_root = @enumFromInt(base_chunk_depth);
             } else {
-                const nodes = try self.chunks.allocator.alloc(Node.Id, target_length);
-                defer self.chunks.allocator.free(nodes);
+                const nodes = try self.allocator.alloc(Node.Id, target_length);
+                defer self.allocator.free(nodes);
                 try self.chunks.root.getNodesAtDepth(self.chunks.pool, chunk_depth, index, nodes);
 
                 chunk_root = try Node.fillWithContents(self.chunks.pool, nodes, base_chunk_depth);
@@ -177,7 +177,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             length_node = null;
             chunk_root = null;
 
-            return try Self.init(self.chunks.allocator, self.chunks.pool, new_root);
+            return try Self.init(self.allocator, self.chunks.pool, new_root);
         }
 
         fn updateListLength(self: *Self, new_length: usize) !void {

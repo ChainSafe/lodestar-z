@@ -113,7 +113,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
             const list_length = try self.length();
             if (list_length == 0 or index >= list_length - 1) {
-                return try Self.init(self.chunks.allocator, self.chunks.pool, self.chunks.root);
+                return try Self.init(self.allocator, self.chunks.pool, self.chunks.root);
             }
 
             const new_length = index + 1;
@@ -155,7 +155,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             length_node = null;
             new_root = null;
 
-            return try Self.init(self.chunks.allocator, self.chunks.pool, root_with_length);
+            return try Self.init(self.allocator, self.chunks.pool, root_with_length);
         }
 
         fn updateListLength(self: *Self, new_length: usize) !void {
