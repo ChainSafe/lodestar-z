@@ -157,8 +157,8 @@ pub const BaseTreeView = struct {
             }
         }
 
-        try out.data.children_nodes.ensureUnusedCapacity(self.allocator, safe_node_keys.items.len);
-        try out.data.children_data.ensureUnusedCapacity(self.allocator, safe_data_keys.items.len);
+        try out.data.children_nodes.ensureUnusedCapacity(self.allocator, @intCast(safe_node_keys.items.len));
+        try out.data.children_data.ensureUnusedCapacity(self.allocator, @intCast(safe_data_keys.items.len));
 
         for (safe_node_keys.items) |gindex| {
             const removed = self.data.children_nodes.fetchRemove(gindex) orelse continue;
