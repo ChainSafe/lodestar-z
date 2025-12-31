@@ -25,7 +25,7 @@ pub const WriterState = union(enum) {
         era_number: u64,
         current_offset: u64,
         block_offsets: std.ArrayList(u64),
-        last_slot: u64,
+        last_block_slot: u64,
     },
     finished_group: struct {
         era_number: u64,
@@ -92,7 +92,10 @@ pub fn writeVersion(self: *Writer, allocator: std.mem.Allocator) !void {
             .era_number = self.state.init_group.era_number,
             .current_offset = self.state.init_group.current_offset + e2s.header_size,
             .block_offsets = try std.ArrayList(u64).initCapacity(allocator, preset.SLOTS_PER_HISTORICAL_ROOT),
-            .last_slot = (try era.computeStartBlockSlotFromEraNumber(self.state.init_group.era_number)) - 1,
+            .last_block_slot = if (self.state.init_group.era_number == 0)
+                0
+            else
+                (try era.computeStartBlockSlotFromEraNumber(self.state.init_group.era_number)) - 1,
         },
     };
 }
@@ -108,7 +111,7 @@ pub fn writeCompressedState(self: *Writer, allocator: std.mem.Allocator, slot: u
         return error.InvalidStateSlot;
     }
 
-    for (self.state.write_group.last_slot + 1..slot) |_| {
+    for (self.state.write_group.last_block_slot + 1..slot) |_| {
         try self.state.write_group.block_offsets.append(0); // Empty slot
     }
 
@@ -143,7 +146,7 @@ pub fn writeCompressedState(self: *Writer, allocator: std.mem.Allocator, slot: u
 
     try e2s.writeEntry(self.file, self.state.write_group.current_offset, .SlotIndex, state_index_payload);
     self.state.write_group.current_offset += e2s.header_size + state_index_payload.len;
-    self.state.write_group.last_slot = slot;
+    self.state.write_group.last_block_slot = slot;
 
     self.state.write_group.block_offsets.deinit();
     self.state = .{
@@ -182,17 +185,17 @@ pub fn writeCompressedBlock(self: *Writer, allocator: std.mem.Allocator, slot: u
     if (!era.isValidEraBlockSlot(slot, self.state.write_group.era_number)) {
         return error.InvalidBlockSlot;
     }
-    if (slot <= self.state.write_group.last_slot) {
+    if (slot <= self.state.write_group.last_block_slot) {
         return error.NotAscendingBlockSlot;
     }
-    for (self.state.write_group.last_slot + 1..slot) |_| {
+    for (self.state.write_group.last_block_slot + 1..slot) |_| {
         try self.state.write_group.block_offsets.append(0); // Empty slot
     }
     const block_offset = self.state.write_group.current_offset;
     try e2s.writeEntry(self.file, block_offset, .CompressedSignedBeaconBlock, data);
     try self.state.write_group.block_offsets.append(block_offset);
     self.state.write_group.current_offset += e2s.header_size + data.len;
-    self.state.write_group.last_slot = slot;
+    self.state.write_group.last_block_slot = slot;
 }
 
 pub fn writeSerializedBlock(self: *Writer, allocator: std.mem.Allocator, slot: u64, data: []const u8) !void {

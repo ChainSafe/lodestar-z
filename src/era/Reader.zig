@@ -126,10 +126,13 @@ pub fn validate(self: Reader, allocator: std.mem.Allocator) !void {
         const era_number = self.era_number + group_index;
 
         // validate version entry
-        const start = if (index.blocks_index) |bi|
+        const start: i64 = if (index.blocks_index) |bi|
             bi.record_start + bi.offsets[0] - e2s.header_size
         else
             index.state_index.record_start + index.state_index.offsets[0] - e2s.header_size;
+        if (start < 0) {
+            return error.InvalidGroupStartIndex;
+        }
         try e2s.readVersion(self.file, @intCast(start));
 
         // Genesis era cannot have a block index
