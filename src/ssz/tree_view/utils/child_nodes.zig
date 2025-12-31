@@ -1,9 +1,9 @@
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 
-pub const ChildNodesUtils = struct {
+pub const ChildNodes = struct {
     /// common functions for TreeViews deal with children_nodes
-    pub fn getChildNodeOrTraverse(self: anytype, gindex: Gindex) !Node.Id {
+    pub fn getChildNode(self: anytype, gindex: Gindex) !Node.Id {
         const gop = try self.children_nodes.getOrPut(self.allocator, gindex);
         if (gop.found_existing) {
             return gop.value_ptr.*;
@@ -13,7 +13,7 @@ pub const ChildNodesUtils = struct {
         return child_node;
     }
 
-    pub fn setChildNodeUnrefOld(self: anytype, gindex: Gindex, node: Node.Id) !void {
+    pub fn setChildNode(self: anytype, gindex: Gindex, node: Node.Id) !void {
         try self.changed.put(self.allocator, gindex, {});
         const opt_old_node = try self.children_nodes.fetchPut(
             self.allocator,
@@ -29,7 +29,7 @@ pub const ChildNodesUtils = struct {
         }
     }
 
-    pub fn clearChildrenNodesAndUnref(self: anytype, pool: *Node.Pool) void {
+    pub fn clearChildrenNodesCache(self: anytype, pool: *Node.Pool) void {
         var value_iter = self.children_nodes.valueIterator();
         while (value_iter.next()) |node_id_ptr| {
             const node_id = node_id_ptr.*;

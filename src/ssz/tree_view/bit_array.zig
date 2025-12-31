@@ -6,7 +6,7 @@ const Depth = hashing.Depth;
 
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
-const ChildNodes = @import("./utils/child_nodes.zig").ChildNodesUtils;
+const ChildNodes = @import("./utils/child_nodes.zig").ChildNodes;
 
 /// Provides common bit array operations for both BitVectorTreeView and BitListTreeView.
 pub fn BitArray(comptime chunk_depth: Depth) type {
@@ -133,15 +133,15 @@ pub fn BitArray(comptime chunk_depth: Depth) type {
         }
 
         pub fn getChildNode(self: *Self, gindex: Gindex) !Node.Id {
-            return ChildNodes.getChildNodeOrTraverse(self, gindex);
+            return ChildNodes.getChildNode(self, gindex);
         }
 
         pub fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
-            try ChildNodes.setChildNodeUnrefOld(self, gindex, node);
+            try ChildNodes.setChildNode(self, gindex, node);
         }
 
         pub fn clearChildrenNodesCache(self: *Self) void {
-            ChildNodes.clearChildrenNodesAndUnref(self, self.pool);
+            ChildNodes.clearChildrenNodesCache(self, self.pool);
         }
     };
 }

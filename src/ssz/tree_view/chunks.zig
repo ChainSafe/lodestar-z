@@ -8,7 +8,7 @@ const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 
 const tree_view_root = @import("root.zig");
-const ChildNodes = @import("./utils/child_nodes.zig").ChildNodesUtils;
+const ChildNodes = @import("./utils/child_nodes.zig").ChildNodes;
 
 /// Shared helpers for basic element types packed into chunks.
 pub fn BasicPackedChunks(
@@ -151,15 +151,15 @@ pub fn BasicPackedChunks(
         }
 
         pub fn getChildNode(self: *Self, gindex: Gindex) !Node.Id {
-            return ChildNodes.getChildNodeOrTraverse(self, gindex);
+            return ChildNodes.getChildNode(self, gindex);
         }
 
         pub fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
-            try ChildNodes.setChildNodeUnrefOld(self, gindex, node);
+            try ChildNodes.setChildNode(self, gindex, node);
         }
 
         pub fn clearChildrenNodesCache(self: *Self) void {
-            ChildNodes.clearChildrenNodesAndUnref(self, self.pool);
+            ChildNodes.clearChildrenNodesCache(self, self.pool);
         }
     };
 }
@@ -281,15 +281,15 @@ pub fn CompositeChunks(
         }
 
         pub fn getChildNode(self: *Self, gindex: Gindex) !Node.Id {
-            return ChildNodes.getChildNodeOrTraverse(self, gindex);
+            return ChildNodes.getChildNode(self, gindex);
         }
 
         pub fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
-            try ChildNodes.setChildNodeUnrefOld(self, gindex, node);
+            try ChildNodes.setChildNode(self, gindex, node);
         }
 
         pub fn clearChildrenNodesCache(self: *Self) void {
-            ChildNodes.clearChildrenNodesAndUnref(self, self.pool);
+            ChildNodes.clearChildrenNodesCache(self, self.pool);
         }
 
         pub fn clearChildrenDataCache(self: *Self) void {
