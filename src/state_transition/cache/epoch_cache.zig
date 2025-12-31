@@ -448,6 +448,7 @@ pub const EpochCache = struct {
     pub fn finalProcessEpoch(self: *EpochCache, cached_state: *const CachedBeaconStateAllForks) !void {
         const state = cached_state.state;
 
+        self.proposers_prev_epoch = self.proposers;
         // Post-Fulu, EIP-7917 introduced the `proposer_lookahead`
         // field which we already processed in `processProposerLookahead`.
         // Proposers are to be computed pre-fulu to be cached within `self`.
