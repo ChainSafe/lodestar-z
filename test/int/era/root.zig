@@ -16,7 +16,7 @@ test "validate an existing era file" {
     if (std.fs.cwd().openFile(era_path, .{})) |f| {
         f.close();
     } else |_| {
-        return error.ZigTestSkip;
+        return error.SkipZigTest;
     }
 
     var config: c.BeaconConfig = undefined;
@@ -40,7 +40,7 @@ test "write an era file from an existing era file" {
     if (std.fs.cwd().openFile(era_path, .{})) |f| {
         f.close();
     } else |_| {
-        return error.ZigTestSkip;
+        return error.SkipZigTest;
     }
 
     var config: c.BeaconConfig = undefined;
