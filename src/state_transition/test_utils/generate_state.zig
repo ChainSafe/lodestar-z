@@ -209,32 +209,32 @@ pub const TestCachedBeaconStateAllForks = struct {
 pub fn getConfig(config: ChainConfig, fork: ForkSeq, fork_epoch: Epoch) ChainConfig {
     switch (fork) {
         .phase0 => return config,
-        .altair => return ChainConfig.mergeChainConfig(config, .{
+        .altair => return config.merge(.{
             .ALTAIR_FORK_EPOCH = fork_epoch,
         }),
-        .bellatrix => return ChainConfig.mergeChainConfig(config, .{
+        .bellatrix => return config.merge(.{
             .ALTAIR_FORK_EPOCH = 0,
             .BELLATRIX_FORK_EPOCH = fork_epoch,
         }),
-        .capella => return ChainConfig.mergeChainConfig(config, .{
+        .capella => return config.merge(.{
             .ALTAIR_FORK_EPOCH = 0,
             .BELLATRIX_FORK_EPOCH = 0,
             .CAPELLA_FORK_EPOCH = fork_epoch,
         }),
-        .deneb => return ChainConfig.mergeChainConfig(config, .{
+        .deneb => return config.merge(.{
             .ALTAIR_FORK_EPOCH = 0,
             .BELLATRIX_FORK_EPOCH = 0,
             .CAPELLA_FORK_EPOCH = 0,
             .DENEB_FORK_EPOCH = fork_epoch,
         }),
-        .electra => return ChainConfig.mergeChainConfig(config, .{
+        .electra => return config.merge(.{
             .ALTAIR_FORK_EPOCH = 0,
             .BELLATRIX_FORK_EPOCH = 0,
             .CAPELLA_FORK_EPOCH = 0,
             .DENEB_FORK_EPOCH = 0,
             .ELECTRA_FORK_EPOCH = fork_epoch,
         }),
-        .fulu => return ChainConfig.mergeChainConfig(config, .{
+        .fulu => return config.merge(.{
             .ALTAIR_FORK_EPOCH = 0,
             .BELLATRIX_FORK_EPOCH = 0,
             .CAPELLA_FORK_EPOCH = 0,

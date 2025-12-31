@@ -9,7 +9,7 @@ pub const config = BeaconConfig.init(chain_config, genesis_validators_root);
 
 pub const genesis_validators_root = b(32, "0xd8ea171f3c94aea21ebc42a1ed61052acf3f9209c00e4efbaaddac09ed9b8078");
 
-pub const chain_config = ChainConfig.mergeChainConfig(mainnet.chain_config, .{
+pub const chain_config = mainnet.chain_config.merge(.{
     .CONFIG_NAME = "sepolia",
 
     // Genesis

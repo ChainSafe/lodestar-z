@@ -107,7 +107,7 @@ pub const OptionalChainConfig = Optional(ChainConfig);
 ///
 /// For each field: if `overrides.<field>` is non-null, it replaces `config.<field>`.
 /// Otherwise the original value is kept. Precedence is always given to `overrides`.
-pub fn mergeChainConfig(config: ChainConfig, overrides: OptionalChainConfig) ChainConfig {
+pub fn merge(config: ChainConfig, overrides: OptionalChainConfig) ChainConfig {
     var merged = config;
     inline for (std.meta.fields(@TypeOf(overrides))) |field| {
         if (@field(overrides, field.name)) |value| {
@@ -144,10 +144,10 @@ fn Optional(comptime T: type) type {
     } });
 }
 
-test mergeChainConfig {
+test merge {
     const mainnet_config = @import("./networks/mainnet.zig").chain_config;
     const old_altair_epoch = mainnet_config.ALTAIR_FORK_EPOCH;
-    const merged_config = mergeChainConfig(mainnet_config, .{
+    const merged_config = merge(mainnet_config, .{
         .ALTAIR_FORK_EPOCH = old_altair_epoch + 1000,
     });
     try std.testing.expect(merged_config.ALTAIR_FORK_EPOCH == old_altair_epoch + 1000);

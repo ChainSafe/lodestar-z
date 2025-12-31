@@ -9,7 +9,7 @@ pub const config = BeaconConfig.init(chain_config, genesis_validators_root);
 
 pub const genesis_validators_root = b(32, "0x212f13fc4df078b6cb7db228f1c8307566dcecf900867401a92023d7ba99cb5f");
 
-pub const chain_config = ChainConfig.mergeChainConfig(mainnet.chain_config, .{
+pub const chain_config = mainnet.chain_config.merge(.{
     .CONFIG_NAME = "hoodi",
 
     // Genesis

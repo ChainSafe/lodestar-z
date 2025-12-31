@@ -9,7 +9,7 @@ pub const config = BeaconConfig.init(chain_config, genesis_validators_root);
 
 pub const genesis_validators_root = b(32, "0x9d642dac73058fbf39c0ae41ab1e34e4d889043cb199851ded7095bc99eb4c1e");
 
-pub const chain_config = ChainConfig.mergeChainConfig(gnosis.chain_config, .{
+pub const chain_config = gnosis.chain_config.merge(.{
     .CONFIG_NAME = "chiado",
 
     // Genesis
