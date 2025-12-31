@@ -86,6 +86,13 @@ pub const EpochCache = struct {
 
     proposers_prev_epoch: ?[preset.SLOTS_PER_EPOCH]ValidatorIndex,
 
+    /// Deterministic Proposer Lookahead was introduced as part of Fulu,
+    /// in [EIP-7917](https://eips.ethereum.org/EIPS/eip-7917).
+    ///
+    /// Thus, post-Fulu, this is populated from proposer lookahead, but
+    /// is null pre-Fulu.
+    proposers_next_epoch: ?[preset.SLOTS_PER_EPOCH]ValidatorIndex,
+
     // TODO: the below is not needed if we compute the next epoch shuffling eagerly
     // previous_decision_root
     // current_decision_root
@@ -294,6 +301,7 @@ pub const EpochCache = struct {
             .proposers = proposers,
             // On first epoch, set to null to prevent unnecessary work since this is only used for metrics
             .proposers_prev_epoch = null,
+            .proposers_next_epoch = null,
             .previous_shuffling = try EpochShufflingRc.init(allocator, previous_shuffling),
             .current_shuffling = try EpochShufflingRc.init(allocator, current_shuffling),
             .next_shuffling = try EpochShufflingRc.init(allocator, next_shuffling),
@@ -454,6 +462,7 @@ pub const EpochCache = struct {
         // Proposers are to be computed pre-fulu to be cached within `self`.
         if (self.epoch >= self.config.chain.FULU_FORK_EPOCH) {
             self.proposers = state.proposerLookahead()[0..preset.SLOTS_PER_EPOCH].*;
+            self.proposers_next_epoch = state.proposerLookahead()[preset.SLOTS_PER_EPOCH .. preset.SLOTS_PER_EPOCH * 2].*;
         } else {
             var upcoming_proposer_seed: [32]u8 = undefined;
             try getSeed(state, self.epoch, c.DOMAIN_BEACON_PROPOSER, &upcoming_proposer_seed);
