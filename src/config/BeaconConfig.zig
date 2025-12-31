@@ -194,7 +194,7 @@ pub fn forkSeqAtEpoch(self: *const BeaconConfig, epoch: Epoch) ForkSeq {
 
 /// Return the active fork version for `slot`.
 pub fn forkVersion(self: *const BeaconConfig, slot: Slot) *const [4]u8 {
-    return self.forkInfo(slot).version;
+    return &self.forkInfo(slot).version;
 }
 
 // TODO: is forkTypes() necessary?
@@ -216,7 +216,7 @@ pub fn getMaxBlobsPerBlock(self: *const BeaconConfig, epoch: Epoch) u64 {
 
 /// Return the maximum number of blob sidecars that may be requested for the given fork.
 pub fn getMaxRequestBlobSidecars(self: *const BeaconConfig, fork: ForkSeq) u64 {
-    return if (fork.isForkPostElectra()) self.chain.MAX_REQUEST_BLOB_SIDECARS_ELECTRA else self.chain.MAX_REQUEST_BLOB_SIDECARS;
+    return if (fork.gte(.electra)) self.chain.MAX_REQUEST_BLOB_SIDECARS_ELECTRA else self.chain.MAX_REQUEST_BLOB_SIDECARS;
 }
 
 /// Compute the signature domain for a message.
@@ -236,13 +236,11 @@ pub fn getDomain(self: *const BeaconConfig, state_slot: Slot, domain_type: Domai
 }
 
 pub fn getDomainForVoluntaryExit(self: *const BeaconConfig, state_slot: Slot, message_slot: ?Slot) !*const [32]u8 {
-    const domain = if (@divFloor(state_slot, preset.SLOTS_PER_EPOCH) < self.chain.DENEB_FORK_EPOCH) {
+    if (@divFloor(state_slot, preset.SLOTS_PER_EPOCH) < self.chain.DENEB_FORK_EPOCH) {
         return self.getDomain(state_slot, DOMAIN_VOLUNTARY_EXIT, message_slot);
     } else {
         return self.domain_cache.get(.capella, DOMAIN_VOLUNTARY_EXIT);
-    };
-
-    return domain;
+    }
 }
 
 // TODO: forkDigest2ForkName, forkDigest2ForkNameOption, forkName2ForkDigest, forkName2ForkDigestHex

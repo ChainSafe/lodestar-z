@@ -13,5 +13,14 @@ pub const sepolia = @import("./networks/sepolia.zig");
 pub const hoodi = @import("./networks/hoodi.zig");
 
 test {
-    testing.refAllDecls(@This());
+    testing.refAllDecls(BeaconConfig);
+    testing.refAllDecls(ChainConfig);
+    testing.refAllDecls(ForkSeq);
+
+    testing.refAllDecls(mainnet);
+    testing.refAllDecls(minimal);
+    testing.refAllDecls(gnosis);
+    testing.refAllDecls(chiado);
+    testing.refAllDecls(sepolia);
+    testing.refAllDecls(hoodi);
 }

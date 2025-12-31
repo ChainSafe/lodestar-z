@@ -46,8 +46,8 @@ pub const chain_config = mainnet.chain_config.merge(.{
             .MAX_BLOBS_PER_BLOCK = 15,
         },
         .{
-            .fork_epoch = 54016,
-            .max_blobs_per_block = 21,
+            .EPOCH = 54016,
+            .MAX_BLOBS_PER_BLOCK = 21,
         },
     },
 });
