@@ -8,7 +8,7 @@ const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 
 const tree_view_root = @import("root.zig");
-const child_nodes_utils = @import("./child_nodes.zig").ChildNodesUtils;
+const ChildNodes = @import("./utils/child_nodes.zig").ChildNodesUtils;
 
 /// Shared helpers for basic element types packed into chunks.
 pub fn BasicPackedChunks(
@@ -51,7 +51,7 @@ pub fn BasicPackedChunks(
         }
 
         pub fn commit(self: *Self) !void {
-            try child_nodes_utils.commit(self);
+            try ChildNodes.Change.commit(self);
         }
 
         pub fn clearCache(self: *Self) void {
@@ -151,15 +151,15 @@ pub fn BasicPackedChunks(
         }
 
         pub fn getChildNode(self: *Self, gindex: Gindex) !Node.Id {
-            return child_nodes_utils.getChildNodeOrTraverse(self, gindex);
+            return ChildNodes.getChildNodeOrTraverse(self, gindex);
         }
 
         pub fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
-            try child_nodes_utils.setChildNodeUnrefOld(self, gindex, node);
+            try ChildNodes.setChildNodeUnrefOld(self, gindex, node);
         }
 
         pub fn clearChildrenNodesCache(self: *Self) void {
-            child_nodes_utils.clearChildrenNodesAndUnref(self, self.pool);
+            ChildNodes.clearChildrenNodesAndUnref(self, self.pool);
         }
     };
 }
@@ -281,15 +281,15 @@ pub fn CompositeChunks(
         }
 
         pub fn getChildNode(self: *Self, gindex: Gindex) !Node.Id {
-            return child_nodes_utils.getChildNodeOrTraverse(self, gindex);
+            return ChildNodes.getChildNodeOrTraverse(self, gindex);
         }
 
         pub fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
-            try child_nodes_utils.setChildNodeUnrefOld(self, gindex, node);
+            try ChildNodes.setChildNodeUnrefOld(self, gindex, node);
         }
 
         pub fn clearChildrenNodesCache(self: *Self) void {
-            child_nodes_utils.clearChildrenNodesAndUnref(self, self.pool);
+            ChildNodes.clearChildrenNodesAndUnref(self, self.pool);
         }
 
         pub fn clearChildrenDataCache(self: *Self) void {

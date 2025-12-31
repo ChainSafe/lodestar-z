@@ -12,7 +12,7 @@ const itemsPerChunk = type_root.itemsPerChunk;
 const chunkDepth = type_root.chunkDepth;
 
 const BasicPackedChunks = @import("chunks.zig").BasicPackedChunks;
-const assertTreeViewType = @import("assert.zig").assertTreeViewType;
+const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
 
 /// A specialized tree view for SSZ list types with basic element types.
 /// Elements are packed into chunks (multiple elements per leaf node).

@@ -12,7 +12,7 @@ const chunkDepth = type_root.chunkDepth;
 
 const tree_view_root = @import("root.zig");
 const CompositeChunks = @import("chunks.zig").CompositeChunks;
-const assertTreeViewType = @import("assert.zig").assertTreeViewType;
+const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
 
 /// A specialized tree view for SSZ vector types with composite element types.
 /// Each element occupies its own subtree.

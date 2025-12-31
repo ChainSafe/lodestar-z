@@ -5,7 +5,7 @@ const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
 const FixedContainerType = @import("../type/container.zig").FixedContainerType;
 const UintType = @import("../type/uint.zig").UintType;
-const assertTreeViewType = @import("./assert.zig").assertTreeViewType;
+const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
 const isFixedType = @import("../type/type_kind.zig").isFixedType;
 
 /// A specialized tree view for SSZ container types, enabling efficient access and modification of container fields, given a backing merkle tree.

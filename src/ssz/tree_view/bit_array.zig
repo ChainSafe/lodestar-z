@@ -6,7 +6,7 @@ const Depth = hashing.Depth;
 
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
-const child_nodes_utils = @import("./child_nodes.zig").ChildNodesUtils;
+const ChildNodes = @import("./utils/child_nodes.zig").ChildNodesUtils;
 
 /// Provides common bit array operations for both BitVectorTreeView and BitListTreeView.
 pub fn BitArray(comptime chunk_depth: Depth) type {
@@ -44,7 +44,7 @@ pub fn BitArray(comptime chunk_depth: Depth) type {
         }
 
         pub fn commit(self: *Self) !void {
-            try child_nodes_utils.commit(self);
+            try ChildNodes.Change.commit(self);
         }
 
         pub fn clearCache(self: *Self) void {
@@ -133,15 +133,15 @@ pub fn BitArray(comptime chunk_depth: Depth) type {
         }
 
         pub fn getChildNode(self: *Self, gindex: Gindex) !Node.Id {
-            return child_nodes_utils.getChildNodeOrTraverse(self, gindex);
+            return ChildNodes.getChildNodeOrTraverse(self, gindex);
         }
 
         pub fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
-            try child_nodes_utils.setChildNodeUnrefOld(self, gindex, node);
+            try ChildNodes.setChildNodeUnrefOld(self, gindex, node);
         }
 
         pub fn clearChildrenNodesCache(self: *Self) void {
-            child_nodes_utils.clearChildrenNodesAndUnref(self, self.pool);
+            ChildNodes.clearChildrenNodesAndUnref(self, self.pool);
         }
     };
 }

@@ -7,7 +7,7 @@ const Depth = hashing.Depth;
 const Node = @import("persistent_merkle_tree").Node;
 
 const BitArray = @import("bit_array.zig").BitArray;
-const assertTreeViewType = @import("assert.zig").assertTreeViewType;
+const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
 
 pub fn BitVectorTreeView(comptime ST: type) type {
     comptime {

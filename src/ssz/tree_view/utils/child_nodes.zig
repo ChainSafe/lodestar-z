@@ -40,31 +40,33 @@ pub const ChildNodesUtils = struct {
         self.children_nodes.clearRetainingCapacity();
     }
 
-    /// common functions for TreeViews deal with children_nodes + changed
-    pub fn commit(self: anytype) !void {
-        if (self.changed.count() == 0) {
-            return;
-        }
-
-        const nodes = try self.allocator.alloc(Node.Id, self.changed.count());
-        defer self.allocator.free(nodes);
-
-        const gindices = self.changed.keys();
-        Gindex.sortAsc(gindices);
-
-        for (gindices, 0..) |gindex, i| {
-            if (self.children_nodes.get(gindex)) |child_node| {
-                nodes[i] = child_node;
-            } else {
-                return error.ChildNotFound;
+    pub const Change = struct {
+        /// common functions for TreeViews deal with children_nodes + changed
+        pub fn commit(self: anytype) !void {
+            if (self.changed.count() == 0) {
+                return;
             }
+
+            const nodes = try self.allocator.alloc(Node.Id, self.changed.count());
+            defer self.allocator.free(nodes);
+
+            const gindices = self.changed.keys();
+            Gindex.sortAsc(gindices);
+
+            for (gindices, 0..) |gindex, i| {
+                if (self.children_nodes.get(gindex)) |child_node| {
+                    nodes[i] = child_node;
+                } else {
+                    return error.ChildNotFound;
+                }
+            }
+
+            const new_root = try self.root.setNodesGrouped(self.pool, gindices, nodes);
+            try self.pool.ref(new_root);
+            self.pool.unref(self.root);
+            self.root = new_root;
+
+            self.changed.clearRetainingCapacity();
         }
-
-        const new_root = try self.root.setNodesGrouped(self.pool, gindices, nodes);
-        try self.pool.ref(new_root);
-        self.pool.unref(self.root);
-        self.root = new_root;
-
-        self.changed.clearRetainingCapacity();
-    }
+    };
 };

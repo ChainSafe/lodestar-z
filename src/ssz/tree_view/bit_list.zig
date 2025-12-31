@@ -10,7 +10,7 @@ const type_root = @import("../type/root.zig");
 const chunkDepth = type_root.chunkDepth;
 
 const BitArray = @import("bit_array.zig").BitArray;
-const assertTreeViewType = @import("assert.zig").assertTreeViewType;
+const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
 
 pub fn BitListTreeView(comptime ST: type) type {
     comptime {
