@@ -21,12 +21,11 @@ pub fn processProposerLookahead(
 ) !void {
     const state = cached_state.state;
 
-    // Only process for Fulu fork
-    if (!state.isFulu()) return;
-
     const fulu_state = switch (state.*) {
         .fulu => |s| s,
-        else => return error.NotFuluState,
+        // We already check for `state.isFulu()` in `processEpoch`
+        // but if we do get in here we simply return.
+        else => return,
     };
 
     const epoch_cache = cached_state.epoch_cache_ref.get();
