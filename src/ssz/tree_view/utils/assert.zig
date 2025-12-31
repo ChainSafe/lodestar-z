@@ -14,6 +14,27 @@ pub fn assertTreeViewType(comptime TV: type) void {
         @compileError("TreeView type must implement 'init' function");
     }
 
+    const init_fn_info = @typeInfo(@TypeOf(TV.init));
+    if (init_fn_info != .@"fn") {
+        @compileError("TreeView 'init' must be a function");
+    }
+
+    const return_type = init_fn_info.@"fn".return_type orelse @compileError("TreeView 'init' must have a return type");
+
+    const return_payload_type = switch (@typeInfo(return_type)) {
+        .error_union => |eu| eu.payload,
+        else => @compileError("TreeView 'init' must return an error union"),
+    };
+
+    const Self = switch (@typeInfo(return_payload_type)) {
+        .pointer => |ptr_info| ptr_info.child,
+        else => @compileError("TreeView 'init' must return a pointer to TreeView type"),
+    };
+
+    if (Self != TV) {
+        @compileError("TreeView 'init' must return pointer to Self type");
+    }
+
     if (!@hasDecl(TV, "deinit")) {
         @compileError("TreeView type must implement 'deinit' function");
     }
