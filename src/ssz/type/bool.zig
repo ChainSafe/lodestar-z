@@ -61,6 +61,13 @@ pub fn BoolType() type {
         };
 
         pub const tree = struct {
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
+                try serialized.validate(data);
+                var leaf: [32]u8 = [_]u8{0} ** 32;
+                leaf[0] = data[0];
+                return try pool.createLeaf(&leaf);
+            }
+
             pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 const hash = node.getRoot(pool);
                 out.* = if (hash[0] == 0) false else true;

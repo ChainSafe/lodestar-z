@@ -414,6 +414,51 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         };
 
         pub const tree = struct {
+            pub fn deserializeFromBytes(allocator: std.mem.Allocator, pool: *Node.Pool, data: []const u8) !Node.Id {
+                const bit_len = try serialized.length(data);
+                const chunk_count = (bit_len + 255) / 256;
+
+                if (chunk_count == 0) {
+                    // left: zero subtree, right: zero leaf (length = 0)
+                    return try pool.createBranch(
+                        @enumFromInt(chunk_depth),
+                        @enumFromInt(0),
+                    );
+                }
+
+                const raw_byte_length = (bit_len + 7) / 8;
+                const remainder_bits = bit_len % 8;
+
+                const nodes = try allocator.alloc(Node.Id, chunk_count);
+                defer allocator.free(nodes);
+
+                for (0..chunk_count) |i| {
+                    var leaf_buf = [_]u8{0} ** 32;
+                    const start_idx = i * 32;
+                    const remaining_bytes = raw_byte_length - start_idx;
+                    const bytes_to_copy = @min(remaining_bytes, 32);
+                    if (bytes_to_copy > 0) {
+                        // Copy packed bytes, excluding the final padding byte when remainder_bits==0
+                        @memcpy(leaf_buf[0..bytes_to_copy], data[start_idx..][0..bytes_to_copy]);
+
+                        // Remove padding bit if it exists in the last packed byte
+                        if (remainder_bits != 0) {
+                            const last_byte_index = raw_byte_length - 1;
+                            if (last_byte_index >= start_idx and last_byte_index < start_idx + bytes_to_copy) {
+                                const local_idx = last_byte_index - start_idx;
+                                leaf_buf[local_idx] ^= @as(u8, 1) << @intCast(remainder_bits);
+                            }
+                        }
+                    }
+                    nodes[i] = try pool.createLeaf(&leaf_buf);
+                }
+
+                return try pool.createBranch(
+                    try Node.fillWithContents(pool, nodes, chunk_depth),
+                    try pool.createLeafFromUint(bit_len),
+                );
+            }
+
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
                 const right = try node.getRight(pool);
                 const hash = right.getRoot(pool);

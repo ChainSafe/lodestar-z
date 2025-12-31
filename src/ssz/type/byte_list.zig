@@ -105,6 +105,39 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
         };
 
         pub const tree = struct {
+            pub fn deserializeFromBytes(allocator: std.mem.Allocator, pool: *Node.Pool, data: []const u8) !Node.Id {
+                if (data.len > limit) {
+                    return error.gtLimit;
+                }
+
+                const len: usize = data.len;
+                const chunk_count = (len + 31) / 32;
+                if (chunk_count == 0) {
+                    return try pool.createBranch(
+                        @enumFromInt(chunk_depth),
+                        @enumFromInt(0),
+                    );
+                }
+
+                const nodes = try allocator.alloc(Node.Id, chunk_count);
+                defer allocator.free(nodes);
+                for (0..chunk_count) |i| {
+                    var leaf_buf = [_]u8{0} ** 32;
+                    const start_idx = i * 32;
+                    const remaining_bytes = len - start_idx;
+                    const bytes_to_copy = @min(remaining_bytes, 32);
+                    if (bytes_to_copy > 0) {
+                        @memcpy(leaf_buf[0..bytes_to_copy], data[start_idx..][0..bytes_to_copy]);
+                    }
+                    nodes[i] = try pool.createLeaf(&leaf_buf);
+                }
+
+                return try pool.createBranch(
+                    try Node.fillWithContents(pool, nodes, chunk_depth),
+                    try pool.createLeafFromUint(len),
+                );
+            }
+
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
                 const right = try node.getRight(pool);
                 const hash = right.getRoot(pool);

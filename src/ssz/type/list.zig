@@ -194,6 +194,60 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
         };
 
         pub const tree = struct {
+            pub fn deserializeFromBytes(allocator: std.mem.Allocator, pool: *Node.Pool, data: []const u8) !Node.Id {
+                const len = try std.math.divExact(usize, data.len, Element.fixed_size);
+                if (len > limit) {
+                    return error.gtLimit;
+                }
+
+                const chunk_count = if (comptime isBasicType(Element))
+                    (Element.fixed_size * len + 31) / 32
+                else
+                    len;
+
+                if (chunk_count == 0) {
+                    return try pool.createBranch(
+                        @enumFromInt(chunk_depth),
+                        @enumFromInt(0),
+                    );
+                }
+
+                if (comptime isBasicType(Element)) {
+                    const nodes = try allocator.alloc(Node.Id, chunk_count);
+                    defer allocator.free(nodes);
+
+                    const serialized_size = len * Element.fixed_size;
+                    for (0..chunk_count) |i| {
+                        var leaf_buf = [_]u8{0} ** 32;
+                        const start_idx = i * 32;
+                        const remaining_bytes = serialized_size - start_idx;
+                        const bytes_to_copy = @min(remaining_bytes, 32);
+                        if (bytes_to_copy > 0) {
+                            @memcpy(leaf_buf[0..bytes_to_copy], data[start_idx..][0..bytes_to_copy]);
+                        }
+                        nodes[i] = try pool.createLeaf(&leaf_buf);
+                    }
+
+                    return try pool.createBranch(
+                        try Node.fillWithContents(pool, nodes, chunk_depth),
+                        try pool.createLeafFromUint(len),
+                    );
+                } else {
+                    const nodes = try allocator.alloc(Node.Id, chunk_count);
+                    defer allocator.free(nodes);
+
+                    for (0..len) |i| {
+                        const elem_bytes = data[i * Element.fixed_size .. (i + 1) * Element.fixed_size];
+                        nodes[i] = try Element.tree.deserializeFromBytes(pool, elem_bytes);
+                    }
+
+                    return try pool.createBranch(
+                        try Node.fillWithContents(pool, nodes, chunk_depth),
+                        try pool.createLeafFromUint(len),
+                    );
+                }
+            }
+
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
                 const right = try node.getRight(pool);
                 const hash = right.getRoot(pool);
@@ -527,6 +581,37 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
         };
 
         pub const tree = struct {
+            pub fn deserializeFromBytes(allocator: std.mem.Allocator, pool: *Node.Pool, data: []const u8) !Node.Id {
+                const offsets = try readVariableOffsets(allocator, data);
+                defer allocator.free(offsets);
+
+                const len = offsets.len - 1;
+                if (len > limit) {
+                    return error.gtLimit;
+                }
+
+                const chunk_count = len;
+                if (chunk_count == 0) {
+                    return try pool.createBranch(
+                        @enumFromInt(chunk_depth),
+                        @enumFromInt(0),
+                    );
+                }
+
+                const nodes = try allocator.alloc(Node.Id, chunk_count);
+                defer allocator.free(nodes);
+
+                for (0..len) |i| {
+                    const elem_bytes = data[offsets[i]..offsets[i + 1]];
+                    nodes[i] = try Element.tree.deserializeFromBytes(allocator, pool, elem_bytes);
+                }
+
+                return try pool.createBranch(
+                    try Node.fillWithContents(pool, nodes, chunk_depth),
+                    try pool.createLeafFromUint(len),
+                );
+            }
+
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
                 const right = try node.getRight(pool);
                 const hash = right.getRoot(pool);

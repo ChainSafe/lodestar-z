@@ -111,6 +111,34 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
         };
 
         pub const tree = struct {
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
+                if (data.len != fixed_size) {
+                    return error.invalidSize;
+                }
+
+                var nodes: [chunk_count]Node.Id = undefined;
+
+                if (comptime isBasicType(Element)) {
+                    for (0..chunk_count) |i| {
+                        var leaf_buf = [_]u8{0} ** 32;
+                        const start_idx = i * 32;
+                        const remaining_bytes = fixed_size - start_idx;
+                        const bytes_to_copy = @min(remaining_bytes, 32);
+                        if (bytes_to_copy > 0) {
+                            @memcpy(leaf_buf[0..bytes_to_copy], data[start_idx..][0..bytes_to_copy]);
+                        }
+                        nodes[i] = try pool.createLeaf(&leaf_buf);
+                    }
+                } else {
+                    for (0..length) |i| {
+                        const elem_bytes = data[i * Element.fixed_size .. (i + 1) * Element.fixed_size];
+                        nodes[i] = try Element.tree.deserializeFromBytes(pool, elem_bytes);
+                    }
+                }
+
+                return try Node.fillWithContents(pool, &nodes, chunk_depth);
+            }
+
             pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var nodes: [chunk_count]Node.Id = undefined;
 
@@ -331,6 +359,21 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
         };
 
         pub const tree = struct {
+            pub fn deserializeFromBytes(allocator: std.mem.Allocator, pool: *Node.Pool, data: []const u8) !Node.Id {
+                if (data.len > max_size or data.len < min_size) {
+                    return error.InvalidSize;
+                }
+
+                const offsets = try readVariableOffsets(data);
+                var nodes: [chunk_count]Node.Id = undefined;
+                for (0..length) |i| {
+                    const elem_bytes = data[offsets[i]..offsets[i + 1]];
+                    nodes[i] = try Element.tree.deserializeFromBytes(allocator, pool, elem_bytes);
+                }
+
+                return try Node.fillWithContents(pool, &nodes, chunk_depth);
+            }
+
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var nodes: [chunk_count]Node.Id = undefined;
 

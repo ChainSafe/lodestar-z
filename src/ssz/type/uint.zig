@@ -62,6 +62,15 @@ pub fn UintType(comptime bits: comptime_int) type {
         };
 
         pub const tree = struct {
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
+                if (data.len != fixed_size) {
+                    return error.InvalidSize;
+                }
+                var leaf: [32]u8 = [_]u8{0} ** 32;
+                @memcpy(leaf[0..fixed_size], data);
+                return try pool.createLeaf(&leaf);
+            }
+
             pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 const hash = node.getRoot(pool);
                 out.* = std.mem.readInt(Type, hash[0..bytes], .little);
