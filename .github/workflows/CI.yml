@@ -172,9 +172,6 @@ jobs:
       - name: Run spec tests - minimal
         run: |
           zig build test:spec_tests -Dpreset=minimal
-      - name: Run spec tests - mainnet
-        run: |
-          zig build test:spec_tests -Dpreset=mainnet
 
   spec-test-mainnet:
     name: spec tests - mainnet
