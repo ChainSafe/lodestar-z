@@ -124,6 +124,7 @@ pub const BaseTreeView = struct {
     /// - Any uncommitted changes in this instance are not included in the clone. Call `commit()` first if needed.
     pub fn clone(self: *BaseTreeView, dont_transfer_cache: bool) !BaseTreeView {
         var out = try BaseTreeView.init(self.allocator, self.pool, self.data.root);
+        errdefer out.deinit();
         if (dont_transfer_cache) {
             return out;
         }
@@ -145,11 +146,6 @@ pub const BaseTreeView = struct {
             }
         }
 
-        for (safe_node_keys.items) |gindex| {
-            const removed = self.data.children_nodes.fetchRemove(gindex) orelse continue;
-            try out.data.children_nodes.put(self.allocator, gindex, removed.value);
-        }
-
         var safe_data_keys = std.ArrayList(Gindex).init(self.allocator);
         defer safe_data_keys.deinit();
 
@@ -161,9 +157,17 @@ pub const BaseTreeView = struct {
             }
         }
 
+        try out.data.children_nodes.ensureUnusedCapacity(self.allocator, safe_node_keys.items.len);
+        try out.data.children_data.ensureUnusedCapacity(self.allocator, safe_data_keys.items.len);
+
+        for (safe_node_keys.items) |gindex| {
+            const removed = self.data.children_nodes.fetchRemove(gindex) orelse continue;
+            out.data.children_nodes.putAssumeCapacity(gindex, removed.value);
+        }
+
         for (safe_data_keys.items) |gindex| {
             const removed = self.data.children_data.fetchRemove(gindex) orelse continue;
-            try out.data.children_data.put(self.allocator, gindex, removed.value);
+            out.data.children_data.putAssumeCapacity(gindex, removed.value);
         }
     }
 
