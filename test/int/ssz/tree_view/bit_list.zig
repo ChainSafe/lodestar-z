@@ -18,25 +18,25 @@ test "BitListTreeView get/set roundtrip" {
     var view = try Bits.TreeView.init(allocator, &pool, root);
     defer view.deinit();
 
-    // for (0..12) |i| {
-    //     try std.testing.expectEqual(try expected.get(i), try view.get(i));
-    // }
+    for (0..12) |i| {
+        try std.testing.expectEqual(try expected.get(i), try view.get(i));
+    }
 
-    // try view.set(0, true);
-    // try view.set(1, false);
-    // try view.set(10, true);
-    // try view.set(11, false);
+    try view.set(0, true);
+    try view.set(1, false);
+    try view.set(10, true);
+    try view.set(11, false);
 
-    // try expected.setAssumeCapacity(0, true);
-    // try expected.setAssumeCapacity(1, false);
-    // try expected.setAssumeCapacity(10, true);
-    // try expected.setAssumeCapacity(11, false);
+    try expected.setAssumeCapacity(0, true);
+    try expected.setAssumeCapacity(1, false);
+    try expected.setAssumeCapacity(10, true);
+    try expected.setAssumeCapacity(11, false);
 
-    // var expected_root: [32]u8 = undefined;
-    // var view_root: [32]u8 = undefined;
-    // try Bits.hashTreeRoot(allocator, &expected, &expected_root);
-    // try view.hashTreeRoot(&view_root);
-    // try std.testing.expectEqualSlices(u8, &expected_root, &view_root);
+    var expected_root: [32]u8 = undefined;
+    var view_root: [32]u8 = undefined;
+    try Bits.hashTreeRoot(allocator, &expected, &expected_root);
+    try view.hashTreeRoot(&view_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &view_root);
 }
 
 test "BitListTreeView toBoolArray roundtrip" {
