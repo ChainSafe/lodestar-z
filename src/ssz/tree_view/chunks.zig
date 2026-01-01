@@ -161,6 +161,14 @@ pub fn BasicPackedChunks(
         pub fn clearChildrenNodesCache(self: *Self) void {
             ChildNodes.clearChildrenNodesCache(self, self.pool);
         }
+
+        pub fn getLength(self: *Self) !usize {
+            return try ChildNodes.getLength(self);
+        }
+
+        pub fn setLength(self: *Self, length: usize) !void {
+            try ChildNodes.setLength(self, length);
+        }
     };
 }
 
@@ -290,6 +298,14 @@ pub fn CompositeChunks(
 
         pub fn clearChildrenNodesCache(self: *Self) void {
             ChildNodes.clearChildrenNodesCache(self, self.pool);
+        }
+
+        pub fn getLength(self: *Self) !usize {
+            return try ChildNodes.getLength(self);
+        }
+
+        pub fn setLength(self: *Self, length: usize) !void {
+            try ChildNodes.setLength(self, length);
         }
 
         pub fn clearChildrenDataCache(self: *Self) void {

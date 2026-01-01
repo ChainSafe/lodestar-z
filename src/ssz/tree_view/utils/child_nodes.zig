@@ -1,3 +1,4 @@
+const std = @import("std");
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 
@@ -38,6 +39,18 @@ pub const ChildNodes = struct {
             }
         }
         self.children_nodes.clearRetainingCapacity();
+    }
+
+    pub fn getLength(self: anytype) !usize {
+        const length_node = try getChildNode(self, @enumFromInt(3));
+        const length_chunk = length_node.getRoot(self.pool);
+        return std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
+    }
+
+    pub fn setLength(self: anytype, length: usize) !void {
+        const length_node = try self.pool.createLeafFromUint(@intCast(length));
+        errdefer self.pool.unref(length_node);
+        try self.setChildNode(@enumFromInt(3), length_node);
     }
 
     pub const Change = struct {

@@ -29,6 +29,9 @@ pub fn ListBasicTreeView(comptime ST: type) type {
     const TreeView = struct {
         allocator: Allocator,
         chunks: Chunks,
+        _orig_len: usize,
+        _len: usize,
+
         pub const SszType = ST;
         pub const Element = ST.Element.Type;
 
@@ -43,6 +46,8 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             const ptr = try allocator.create(Self);
             try Chunks.init(&ptr.chunks, allocator, pool, root);
             ptr.allocator = allocator;
+            ptr._orig_len = try ptr.getLength();
+            ptr._len = ptr._orig_len;
             return ptr;
         }
 
@@ -52,7 +57,9 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         }
 
         pub fn commit(self: *Self) !void {
+            try self.updateListLength();
             try self.chunks.commit();
+            self._orig_len = self._len;
         }
 
         pub fn clearCache(self: *Self) void {
@@ -69,9 +76,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         }
 
         pub fn length(self: *Self) !usize {
-            const length_node = try self.chunks.getChildNode(@enumFromInt(3));
-            const length_chunk = length_node.getRoot(self.chunks.pool);
-            return std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
+            return self._len;
         }
 
         pub fn get(self: *Self, index: usize) !Element {
@@ -102,7 +107,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             if (list_length >= ST.limit) {
                 return error.LengthOverLimit;
             }
-            try self.updateListLength(list_length + 1);
+            self._len += 1;
             try self.set(list_length, value);
         }
 
@@ -158,15 +163,6 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             return try Self.init(self.allocator, self.chunks.pool, root_with_length);
         }
 
-        fn updateListLength(self: *Self, new_length: usize) !void {
-            if (new_length > ST.limit) {
-                return error.LengthOverLimit;
-            }
-            const length_node = try self.chunks.pool.createLeafFromUint(@intCast(new_length));
-            errdefer self.chunks.pool.unref(length_node);
-            try self.chunks.setChildNode(@enumFromInt(3), length_node);
-        }
-
         /// Serialize the tree view into a provided buffer.
         /// Returns the number of bytes written.
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
@@ -178,6 +174,21 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         pub fn serializedSize(self: *Self) !usize {
             try self.commit();
             return try ST.tree.serializedSize(self.allocator, self.chunks.root, self.chunks.pool);
+        }
+
+        fn getLength(self: *Self) !usize {
+            return self.chunks.getLength();
+        }
+
+        fn updateListLength(self: *Self) !void {
+            if (self._len == self._orig_len) {
+                return;
+            }
+
+            if (self._len > ST.limit) {
+                return error.LengthOverLimit;
+            }
+            try self.chunks.setLength(self._len);
         }
     };
 
