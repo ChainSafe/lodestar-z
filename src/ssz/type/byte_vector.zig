@@ -56,7 +56,7 @@ pub fn ByteVectorType(comptime _length: comptime_int) type {
 
         pub fn deserializeFromBytes(data: []const u8, out: *Type) !void {
             if (data.len != fixed_size) {
-                return error.invalidLength;
+                return error.InvalidSize;
             }
 
             @memcpy(out, data[0..fixed_size]);
@@ -65,7 +65,7 @@ pub fn ByteVectorType(comptime _length: comptime_int) type {
         pub const serialized = struct {
             pub fn validate(data: []const u8) !void {
                 if (data.len != fixed_size) {
-                    return error.invalidLength;
+                    return error.InvalidSize;
                 }
             }
 
@@ -79,7 +79,7 @@ pub fn ByteVectorType(comptime _length: comptime_int) type {
         pub const tree = struct {
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 if (data.len != fixed_size) {
-                    return error.invalidLength;
+                    return error.InvalidSize;
                 }
 
                 var chunks: [chunk_count][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** chunk_count;
