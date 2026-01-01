@@ -73,7 +73,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
 
         pub fn deserializeFromBytes(data: []const u8, out: *Type) !void {
             if (data.len != fixed_size) {
-                return error.invalidSize;
+                return error.InvalidSize;
             }
 
             for (0..length) |i| {
@@ -87,7 +87,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
         pub const serialized = struct {
             pub fn validate(data: []const u8) !void {
                 if (data.len != fixed_size) {
-                    return error.invalidSize;
+                    return error.InvalidSize;
                 }
                 for (0..length) |i| {
                     try Element.serialized.validate(data[i * Element.fixed_size .. (i + 1) * Element.fixed_size]);
@@ -113,7 +113,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
         pub const tree = struct {
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 if (data.len != fixed_size) {
-                    return error.invalidSize;
+                    return error.InvalidSize;
                 }
 
                 var nodes: [chunk_count]Node.Id = undefined;

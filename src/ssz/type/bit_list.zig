@@ -432,10 +432,8 @@ pub fn BitListType(comptime _limit: comptime_int) type {
                 const raw_byte_length = (bit_len + 7) / 8;
                 const chunk_bytes: []u8 = @ptrCast(chunks);
 
-                if (bit_len % 8 == 0) {
-                    @memcpy(chunk_bytes[0..raw_byte_length], data[0..raw_byte_length]);
-                } else {
-                    @memcpy(chunk_bytes[0..raw_byte_length], data[0..raw_byte_length]);
+                @memcpy(chunk_bytes[0..raw_byte_length], data[0..raw_byte_length]);
+                if (bit_len % 8 != 0) {
                     const last_1_index: u3 = @intCast(bit_len % 8);
                     chunk_bytes[raw_byte_length - 1] ^= @as(u8, 1) << last_1_index;
                 }
