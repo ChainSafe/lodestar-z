@@ -310,7 +310,6 @@ pub fn VariableContainerType(comptime ST: type) type {
     });
 
     return struct {
-        const Self = @This();
         pub const kind = TypeKind.container;
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
         pub const Fields: type = ST;
