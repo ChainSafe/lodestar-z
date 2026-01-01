@@ -51,7 +51,6 @@ pub fn FixedContainerType(comptime ST: type) type {
     });
 
     return struct {
-        const Self = @This();
         pub const kind = TypeKind.container;
         pub const Fields: type = ST;
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
