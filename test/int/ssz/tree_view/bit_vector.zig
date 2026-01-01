@@ -57,7 +57,7 @@ test "BitVectorTreeView clone(true) does not transfer cache" {
     _ = try view.get(0);
     try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
 
-    var cloned_no_cache = try view.clone(true);
+    var cloned_no_cache = try view.clone(.{ .transfer_cache = false });
     defer cloned_no_cache.deinit();
 
     try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
@@ -83,7 +83,7 @@ test "BitVectorTreeView clone(false) transfers cache and clears source" {
     _ = try view.get(0);
     try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
 
-    var cloned = try view.clone(false);
+    var cloned = try view.clone(.{});
     defer cloned.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), view.base_view.data.children_nodes.count());
@@ -101,7 +101,7 @@ test "BitVectorTreeView clone isolates updates" {
     var v1 = try Bits.TreeView.init(allocator, &pool, root);
     defer v1.deinit();
 
-    var v2 = try v1.clone(false);
+    var v2 = try v1.clone(.{});
     defer v2.deinit();
 
     try v2.set(0, true);
@@ -125,7 +125,7 @@ test "BitVectorTreeView clone reads committed state" {
     try v1.set(1, true);
     try v1.commit();
 
-    var v2 = try v1.clone(false);
+    var v2 = try v1.clone(.{});
     defer v2.deinit();
 
     try std.testing.expect(try v2.get(1));
@@ -145,7 +145,7 @@ test "BitVectorTreeView clone drops uncommitted changes" {
     try v.set(2, true);
     try std.testing.expect(try v.get(2));
 
-    var dropped = try v.clone(false);
+    var dropped = try v.clone(.{});
     defer dropped.deinit();
 
     try std.testing.expect(!try v.get(2));

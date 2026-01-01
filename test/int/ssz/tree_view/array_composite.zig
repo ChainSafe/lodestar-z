@@ -128,7 +128,7 @@ test "TreeView vector composite clone isolates updates" {
     var v1 = try VectorType.TreeView.init(allocator, &pool, root);
     defer v1.deinit();
 
-    var v2 = try v1.clone(false);
+    var v2 = try v1.clone(.{});
     defer v2.deinit();
 
     const replacement: Inner.Type = .{ .a = 9 };
@@ -175,7 +175,7 @@ test "TreeView vector composite clone reads committed state" {
     replacement_view = null;
     try v1.commit();
 
-    var v2 = try v1.clone(false);
+    var v2 = try v1.clone(.{});
     defer v2.deinit();
 
     const v2_e1 = try v2.get(1);
@@ -212,7 +212,7 @@ test "TreeView vector composite clone drops uncommitted changes" {
     try Inner.tree.toValue(v_e1_before.base_view.data.root, &pool, &v_e1_before_value);
     try std.testing.expectEqual(@as(u32, 9), v_e1_before_value.a);
 
-    var dropped = try v.clone(false);
+    var dropped = try v.clone(.{});
     defer dropped.deinit();
 
     const v_e1_after = try v.get(1);
@@ -248,7 +248,7 @@ test "TreeView vector composite clone(true) does not transfer cache" {
 
     try std.testing.expect(view.base_view.data.children_data.count() > 0);
 
-    var cloned_no_cache = try view.clone(true);
+    var cloned_no_cache = try view.clone(.{ .transfer_cache = false });
     defer cloned_no_cache.deinit();
 
     try std.testing.expect(view.base_view.data.children_data.count() > 0);
@@ -276,7 +276,7 @@ test "TreeView vector composite clone(false) transfers cache and clears source" 
 
     try std.testing.expect(view.base_view.data.children_data.count() > 0);
 
-    var cloned = try view.clone(false);
+    var cloned = try view.clone(.{});
     defer cloned.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), view.base_view.data.children_data.count());

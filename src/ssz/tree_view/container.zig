@@ -27,8 +27,8 @@ pub fn ContainerTreeView(comptime ST: type) type {
             };
         }
 
-        pub fn clone(self: *Self, dont_transfer_cache: bool) !Self {
-            return Self{ .base_view = try self.base_view.clone(dont_transfer_cache) };
+        pub fn clone(self: *Self, opts: BaseTreeView.CloneOpts) !Self {
+            return Self{ .base_view = try self.base_view.clone(opts) };
         }
 
         pub fn deinit(self: *Self) void {

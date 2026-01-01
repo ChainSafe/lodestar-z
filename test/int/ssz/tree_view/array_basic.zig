@@ -125,7 +125,7 @@ test "TreeView vector clone isolates subsequent updates" {
     var v1 = try Vec4.TreeView.init(allocator, &pool, root);
     defer v1.deinit();
 
-    var v2 = try v1.clone(false);
+    var v2 = try v1.clone(.{});
     defer v2.deinit();
 
     try v2.set(1, @as(u16, 9));
@@ -152,7 +152,7 @@ test "TreeView vector clone reads committed state" {
     try v1.set(2, @as(u16, 7));
     try v1.commit();
 
-    var v2 = try v1.clone(false);
+    var v2 = try v1.clone(.{});
     defer v2.deinit();
 
     try std.testing.expectEqual(@as(u16, 7), try v2.get(2));
@@ -175,7 +175,7 @@ test "TreeView vector clone drops uncommitted changes" {
     try v.set(0, @as(u16, 9));
     try std.testing.expectEqual(@as(u16, 9), try v.get(0));
 
-    var dropped = try v.clone(false);
+    var dropped = try v.clone(.{});
     defer dropped.deinit();
 
     try std.testing.expectEqual(@as(u16, 1), try v.get(0));
@@ -199,7 +199,7 @@ test "TreeView vector clone(true) does not transfer cache" {
     _ = try v.get(0);
     try std.testing.expect(v.base_view.data.children_nodes.count() > 0);
 
-    var cloned_no_cache = try v.clone(true);
+    var cloned_no_cache = try v.clone(.{ .transfer_cache = false });
     defer cloned_no_cache.deinit();
 
     try std.testing.expect(v.base_view.data.children_nodes.count() > 0);
@@ -223,7 +223,7 @@ test "TreeView vector clone(false) transfers cache and clears source" {
     _ = try v.get(0);
     try std.testing.expect(v.base_view.data.children_nodes.count() > 0);
 
-    var cloned = try v.clone(false);
+    var cloned = try v.clone(.{});
     defer cloned.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), v.base_view.data.children_nodes.count());

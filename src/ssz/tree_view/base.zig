@@ -105,6 +105,12 @@ pub const BaseTreeView = struct {
     pool: *Node.Pool,
     data: TreeViewData,
 
+    pub const CloneOpts = struct {
+        /// When true, transfer *safe* cache entries from `self` into the clone.
+        /// When false, the clone starts with an empty cache and `self` keeps its caches.
+        transfer_cache: bool = true,
+    };
+
     pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !BaseTreeView {
         return BaseTreeView{
             .allocator = allocator,
@@ -115,17 +121,17 @@ pub const BaseTreeView = struct {
 
     /// Create a new, independent BaseTreeView referencing the same current root node.
     ///
-    /// - `dont_transfer_cache = false`: transfers *safe* cache entries from `self` into the clone.
+    /// - `transfer_cache = true`: transfers *safe* cache entries from `self` into the clone.
     ///   This is a best-effort transfer: only cache entries that are not marked as changed are moved.
     ///   After transferring, this instance is reset to a committed-only state by clearing its caches.
-    /// - `dont_transfer_cache = true`: clone starts with an empty cache; this instance keeps its caches.
+    /// - `transfer_cache = false`: clone starts with an empty cache; this instance keeps its caches.
     ///
     /// Notes:
     /// - Any uncommitted changes in this instance are not included in the clone. Call `commit()` first if needed.
-    pub fn clone(self: *BaseTreeView, dont_transfer_cache: bool) !BaseTreeView {
+    pub fn clone(self: *BaseTreeView, opts: CloneOpts) !BaseTreeView {
         var out = try BaseTreeView.init(self.allocator, self.pool, self.data.root);
         errdefer out.deinit();
-        if (dont_transfer_cache) {
+        if (!opts.transfer_cache) {
             return out;
         }
 
