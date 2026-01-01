@@ -222,16 +222,13 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 try serialized.validate(data);
 
+                var chunks: [chunk_count][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** chunk_count;
+                const chunk_bytes: []u8 = @ptrCast(&chunks);
+                @memcpy(chunk_bytes[0..byte_length], data[0..byte_length]);
+
                 var nodes: [chunk_count]Node.Id = undefined;
-                for (0..chunk_count) |i| {
-                    var leaf_buf = [_]u8{0} ** 32;
-                    const start_idx = i * 32;
-                    const remaining_bytes = byte_length - start_idx;
-                    const bytes_to_copy = @min(remaining_bytes, 32);
-                    if (bytes_to_copy > 0) {
-                        @memcpy(leaf_buf[0..bytes_to_copy], data[start_idx..][0..bytes_to_copy]);
-                    }
-                    nodes[i] = try pool.createLeaf(&leaf_buf);
+                for (&chunks, 0..) |*chunk, i| {
+                    nodes[i] = try pool.createLeaf(chunk);
                 }
 
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
@@ -510,6 +507,52 @@ test "BitVectorType - tree roundtrip 512 bits" {
 
         var hash_root: [32]u8 = undefined;
         try Bits.hashTreeRoot(&value, &hash_root);
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
+    }
+}
+
+test "BitVectorType - tree.deserializeFromBytes 128 bits" {
+    const allocator = std.testing.allocator;
+
+    const Bits = BitVectorType(128);
+
+    const TestCase = struct {
+        id: []const u8,
+        serialized: [16]u8,
+        expected_root: [32]u8,
+    };
+
+    const test_cases = [_]TestCase{
+        .{
+            .id = "empty (one bit set)",
+            .serialized = [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 },
+            .expected_root = [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+        },
+        .{
+            .id = "some value",
+            .serialized = [_]u8{ 0xb5, 0x5b, 0x85, 0x92, 0xbc, 0xac, 0x47, 0x59, 0x06, 0x63, 0x14, 0x81, 0xbb, 0xc7, 0x46, 0xbc },
+            .expected_root = [_]u8{ 0xb5, 0x5b, 0x85, 0x92, 0xbc, 0xac, 0x47, 0x59, 0x06, 0x63, 0x14, 0x81, 0xbb, 0xc7, 0x46, 0xbc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+        },
+    };
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    for (test_cases) |tc| {
+        const tree_node = try Bits.tree.deserializeFromBytes(&pool, &tc.serialized);
+
+        const node_root = tree_node.getRoot(&pool);
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, node_root);
+
+        var value_from_tree: Bits.Type = undefined;
+        try Bits.tree.toValue(tree_node, &pool, &value_from_tree);
+
+        var tree_serialized: [Bits.fixed_size]u8 = undefined;
+        _ = try Bits.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
+        try std.testing.expectEqualSlices(u8, &tc.serialized, &tree_serialized);
+
+        var hash_root: [32]u8 = undefined;
+        try Bits.hashTreeRoot(&value_from_tree, &hash_root);
         try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
     }
 }

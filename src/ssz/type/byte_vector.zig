@@ -82,17 +82,15 @@ pub fn ByteVectorType(comptime _length: comptime_int) type {
                     return error.invalidLength;
                 }
 
+                var chunks: [chunk_count][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** chunk_count;
+                const chunk_bytes: []u8 = @ptrCast(&chunks);
+                @memcpy(chunk_bytes[0..length], data[0..length]);
+
                 var nodes: [chunk_count]Node.Id = undefined;
-                for (0..chunk_count) |i| {
-                    var leaf_buf = [_]u8{0} ** 32;
-                    const start_idx = i * 32;
-                    const remaining_bytes = length - start_idx;
-                    const bytes_to_copy = @min(remaining_bytes, 32);
-                    if (bytes_to_copy > 0) {
-                        @memcpy(leaf_buf[0..bytes_to_copy], data[start_idx..][0..bytes_to_copy]);
-                    }
-                    nodes[i] = try pool.createLeaf(&leaf_buf);
+                for (&chunks, 0..) |*chunk, i| {
+                    nodes[i] = try pool.createLeaf(chunk);
                 }
+
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }
 
@@ -338,4 +336,79 @@ test "ByteVectorType(96) - serializeIntoBytes (some value)" {
     var tree_serialized: [96]u8 = undefined;
     _ = try ByteVector96.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
     try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
+}
+
+test "ByteVectorType(32) - tree.deserializeFromBytes" {
+    const allocator = std.testing.allocator;
+    const ByteVector32 = ByteVectorType(32);
+
+    const TestCase = struct {
+        id: []const u8,
+        serialized: [32]u8,
+        expected_root: [32]u8,
+    };
+
+    const test_cases = [_]TestCase{
+        .{
+            .id = "zero",
+            .serialized = [_]u8{0x00} ** 32,
+            .expected_root = [_]u8{0x00} ** 32,
+        },
+        .{
+            .id = "some value",
+            .serialized = [_]u8{ 0x0c, 0xb9, 0x47, 0x37, 0x7e, 0x17, 0x7f, 0x77, 0x47, 0x19, 0xea, 0xd8, 0xd2, 0x10, 0xaf, 0x9c, 0x64, 0x61, 0xf4, 0x1b, 0xaf, 0x5b, 0x40, 0x82, 0xf8, 0x6a, 0x39, 0x11, 0x45, 0x48, 0x31, 0xb8 },
+            .expected_root = [_]u8{ 0x0c, 0xb9, 0x47, 0x37, 0x7e, 0x17, 0x7f, 0x77, 0x47, 0x19, 0xea, 0xd8, 0xd2, 0x10, 0xaf, 0x9c, 0x64, 0x61, 0xf4, 0x1b, 0xaf, 0x5b, 0x40, 0x82, 0xf8, 0x6a, 0x39, 0x11, 0x45, 0x48, 0x31, 0xb8 },
+        },
+    };
+
+    var pool = try Node.Pool.init(allocator, 64);
+    defer pool.deinit();
+
+    for (test_cases) |tc| {
+        const tree_node = try ByteVector32.tree.deserializeFromBytes(&pool, &tc.serialized);
+
+        const node_root = tree_node.getRoot(&pool);
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, node_root);
+
+        var value_from_tree: ByteVector32.Type = undefined;
+        try ByteVector32.tree.toValue(tree_node, &pool, &value_from_tree);
+
+        var tree_serialized: [32]u8 = undefined;
+        _ = try ByteVector32.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
+        try std.testing.expectEqualSlices(u8, &tc.serialized, &tree_serialized);
+
+        var hash_root: [32]u8 = undefined;
+        try ByteVector32.hashTreeRoot(&value_from_tree, &hash_root);
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
+    }
+}
+
+test "ByteVectorType(96) - tree.deserializeFromBytes" {
+    const allocator = std.testing.allocator;
+    const ByteVector96 = ByteVectorType(96);
+
+    // 0xb55b8592bcac475906631481bbc746bca7339d04ab1085e84884a700c03de4b1 repeated 3 times
+    const chunk = [_]u8{ 0xb5, 0x5b, 0x85, 0x92, 0xbc, 0xac, 0x47, 0x59, 0x06, 0x63, 0x14, 0x81, 0xbb, 0xc7, 0x46, 0xbc, 0xa7, 0x33, 0x9d, 0x04, 0xab, 0x10, 0x85, 0xe8, 0x48, 0x84, 0xa7, 0x00, 0xc0, 0x3d, 0xe4, 0xb1 };
+    const serialized = chunk ++ chunk ++ chunk;
+    // 0x032eecca637b67fd922e0e421b4be9c22948719ba02c6d03eb2c61cfdc4cb3e3
+    const expected_root = [_]u8{ 0x03, 0x2e, 0xec, 0xca, 0x63, 0x7b, 0x67, 0xfd, 0x92, 0x2e, 0x0e, 0x42, 0x1b, 0x4b, 0xe9, 0xc2, 0x29, 0x48, 0x71, 0x9b, 0xa0, 0x2c, 0x6d, 0x03, 0xeb, 0x2c, 0x61, 0xcf, 0xdc, 0x4c, 0xb3, 0xe3 };
+
+    var pool = try Node.Pool.init(allocator, 64);
+    defer pool.deinit();
+
+    const tree_node = try ByteVector96.tree.deserializeFromBytes(&pool, &serialized);
+
+    const node_root = tree_node.getRoot(&pool);
+    try std.testing.expectEqualSlices(u8, &expected_root, node_root);
+
+    var value_from_tree: ByteVector96.Type = undefined;
+    try ByteVector96.tree.toValue(tree_node, &pool, &value_from_tree);
+
+    var tree_serialized: [96]u8 = undefined;
+    _ = try ByteVector96.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
+    try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
+
+    var hash_root: [32]u8 = undefined;
+    try ByteVector96.hashTreeRoot(&value_from_tree, &hash_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
 }
