@@ -501,7 +501,7 @@ pub const BeaconStateAllForks = union(enum) {
         };
     }
 
-    pub fn historicalRoots(self: *BeaconStateAllForks) *std.ArrayListUnmanaged(Root) {
+    pub fn historicalRoots(self: *const BeaconStateAllForks) *std.ArrayListUnmanaged(Root) {
         return switch (self.*) {
             inline else => |state| &state.historical_roots,
         };

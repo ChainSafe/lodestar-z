@@ -51,7 +51,7 @@ pub fn readCompressedState(self: Reader, allocator: std.mem.Allocator, era_numbe
         return error.InvalidEraNumber;
     }
     const index = self.group_indices[group_index];
-    const offset: u64 = @intCast(@as(i64, @intCast(index.state_index.record_start)) + index.state_index.offsets[0]);
+    const offset: u64 = @intCast(try std.math.add(i64, @intCast(index.state_index.record_start), index.state_index.offsets[0]));
     const entry = try e2s.readEntry(allocator, self.file, offset);
     errdefer allocator.free(entry.data);
     if (entry.entry_type != .CompressedBeaconState) {
@@ -88,7 +88,7 @@ pub fn readCompressedBlock(self: Reader, allocator: std.mem.Allocator, slot: u64
 
     // Calculate offset within the index
     const slot_offset = try std.math.sub(u64, slot, blocks_index.start_slot);
-    const offset: u64 = @intCast(@as(i64, @intCast(blocks_index.record_start)) + blocks_index.offsets[slot_offset]);
+    const offset: u64 = @intCast(try std.math.add(i64, @intCast(blocks_index.record_start), blocks_index.offsets[slot_offset]));
     if (offset == 0) {
         return null; // Empty slot
     }

@@ -1,4 +1,13 @@
 const std = @import("std");
+const preset = @import("preset").preset;
+
+/// Maximum allowed size for an entry data payload in an E2Store (.e2s) file.
+/// Arbitrary limit to prevent excessive memory usage
+pub const max_entry_data_size = 512 * 1024 * 1024; // 512 MiB
+
+/// Maximum allowed number of offsets in a SlotIndex entry.
+/// Arbitrary limit to prevent excessive memory usage
+pub const max_slot_index_count = preset.SLOTS_PER_HISTORICAL_ROOT * 10;
 
 /// Known entry types in an E2Store (.e2s) file along with their exact 2-byte codes.
 pub const EntryType = enum(u16) {
@@ -8,7 +17,7 @@ pub const EntryType = enum(u16) {
     Version = 0x65 | (0x32 << 8), // "e2" in ASCII
     SlotIndex = 0x69 | (0x32 << 8), // "i2" in ASCII
 
-    pub fn fromBytes(bytes: u16) error{UnknownEntryType}!EntryType {
+    pub fn fromU16(bytes: u16) error{UnknownEntryType}!EntryType {
         inline for (std.meta.fields(EntryType)) |field| {
             if (bytes == @intFromEnum(@field(EntryType, field.name))) {
                 return @field(EntryType, field.name);
@@ -17,7 +26,7 @@ pub const EntryType = enum(u16) {
         return error.UnknownEntryType;
     }
 
-    pub fn toBytes(self: EntryType) u16 {
+    pub fn toU16(self: EntryType) u16 {
         return @intFromEnum(self);
     }
 };
@@ -30,6 +39,7 @@ pub const ReadError = error{
     InvalidSlotIndexCount,
     InvalidHeaderReservedBytes,
     Overflow,
+    DataSizeTooLarge,
 } || std.fs.File.PReadError || std.mem.Allocator.Error;
 
 /// Parsed entry from an E2Store (.e2s) file.
@@ -67,6 +77,10 @@ pub const SlotIndex = struct {
 
         return payload;
     }
+
+    pub fn deinit(self: SlotIndex, allocator: std.mem.Allocator) void {
+        allocator.free(self.offsets);
+    }
 };
 
 /// The complete version record.
@@ -85,10 +99,14 @@ pub fn readEntry(allocator: std.mem.Allocator, file: std.fs.File, offset: u64) R
     }
 
     // Validate entry type from first 2 bytes (little endian)
-    const entry_type = try EntryType.fromBytes(std.mem.readInt(u16, header[0..2], .little));
+    const entry_type = try EntryType.fromU16(std.mem.readInt(u16, header[0..2], .little));
 
     // Parse data length from next 4 bytes (little endian)
     const data_len = std.mem.readInt(u32, header[2..6], .little);
+
+    if (data_len > max_entry_data_size) {
+        return error.DataSizeTooLarge;
+    }
 
     // Validate reserved bytes are zero (offset 6-7)
     if (header[6] != 0 or header[7] != 0) {
@@ -133,6 +151,10 @@ pub fn readSlotIndex(allocator: std.mem.Allocator, file: std.fs.File, offset: u6
     }
     const count = std.mem.readInt(u64, count_buffer[0..8], .little);
 
+    if (count > max_slot_index_count) {
+        return error.InvalidSlotIndexCount;
+    }
+
     // Validate index position is within file bounds
     const record_start = try std.math.sub(u64, record_end, (8 * count + 24));
 
@@ -169,7 +191,7 @@ pub const WriteError = error{} || std.fs.File.PWriteError;
 
 pub fn writeEntry(file: std.fs.File, offset: u64, entry_type: EntryType, payload: []const u8) WriteError!void {
     var header: [8]u8 = [_]u8{0} ** 8;
-    std.mem.writeInt(u16, header[0..2], entry_type.toBytes(), .little);
+    std.mem.writeInt(u16, header[0..2], entry_type.toU16(), .little);
     std.mem.writeInt(u32, header[2..6], @intCast(payload.len), .little);
     try file.pwriteAll(&header, offset);
     try file.pwriteAll(payload, offset + header_size);

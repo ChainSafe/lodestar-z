@@ -36,6 +36,13 @@ pub const EraFileName = struct {
 pub const GroupIndex = struct {
     state_index: e2s.SlotIndex,
     blocks_index: ?e2s.SlotIndex,
+
+    pub fn deinit(self: GroupIndex, allocator: std.mem.Allocator) void {
+        self.state_index.deinit(allocator);
+        if (self.blocks_index) |bi| {
+            bi.deinit(allocator);
+        }
+    }
 };
 
 /// Read state and block SlotIndex entries from an era file and validate alignment.
@@ -43,6 +50,8 @@ pub const GroupIndex = struct {
 /// Ownership of the returned GroupIndex is transferred to the caller.
 pub fn readGroupIndex(allocator: std.mem.Allocator, file: std.fs.File, end: u64) !GroupIndex {
     const state_index = try e2s.readSlotIndex(allocator, file, end);
+    errdefer state_index.deinit(allocator);
+
     if (state_index.offsets.len != 1) {
         return error.InvalidE2SHeader;
     }
@@ -51,6 +60,8 @@ pub fn readGroupIndex(allocator: std.mem.Allocator, file: std.fs.File, end: u64)
     var blocks_index: ?e2s.SlotIndex = null;
     if (state_index.start_slot != 0) {
         blocks_index = try e2s.readSlotIndex(allocator, file, state_index.record_start);
+        errdefer blocks_index.?.deinit(allocator);
+
         if (blocks_index.?.offsets.len != preset.SLOTS_PER_HISTORICAL_ROOT) {
             return error.InvalidE2SHeader;
         }
@@ -79,10 +90,17 @@ pub fn readAllGroupIndices(allocator: std.mem.Allocator, file: std.fs.File) ![]G
         // Most era files have a single group, though the spec allows for multiple
         1,
     );
-    errdefer group_indices.deinit();
+    errdefer {
+        for (group_indices.items) |gi| {
+            gi.deinit(allocator);
+        }
+        group_indices.deinit();
+    }
 
     while (end > e2s.header_size) {
         const index = try readGroupIndex(allocator, file, @intCast(end));
+        errdefer index.deinit(allocator);
+
         try group_indices.append(index);
         end = if (index.blocks_index) |bi|
             bi.record_start + bi.offsets[0] - e2s.header_size
@@ -95,6 +113,7 @@ pub fn readAllGroupIndices(allocator: std.mem.Allocator, file: std.fs.File) ![]G
 
 pub fn readSlotFromBeaconStateBytes(bytes: []const u8) u64 {
     // slot is at offset 40: 8 (genesisTime) + 32 (genesisValidatorsRoot)
+    std.debug.assert(bytes.len >= 48);
     return std.mem.readInt(u64, bytes[40..][0..8], .little);
 }
 
@@ -122,7 +141,7 @@ pub fn getShortHistoricalRoot(state: state_transition.BeaconStateAllForks) ![8]u
         var root: [32]u8 = undefined;
         try ct.capella.HistoricalSummary.hashTreeRoot(&state.historicalSummaries().getLast(), &root);
         break :blk root;
-    } else @constCast(&state).historicalRoots().getLast();
+    } else &state.historicalRoots().getLast();
 
     _ = try std.fmt.bufPrint(&short_historical_root, "{x}", .{std.fmt.fmtSliceHexLower(historical_root[0..4])});
     return short_historical_root;

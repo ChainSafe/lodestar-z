@@ -120,8 +120,13 @@ pub fn writeCompressedState(self: *Writer, allocator: std.mem.Allocator, slot: u
     self.state.write_group.current_offset += e2s.header_size + data.len;
 
     if (self.state.write_group.era_number > 0) {
+        // Offsets values are relative to the start of the blocks index entry,
+        // but they are initially relative to the start of the file,
+        // so we need to adjust them.
+        // Reuse offsets memory for this purpose.
         const offsets = std.mem.bytesAsSlice(i64, std.mem.sliceAsBytes(self.state.write_group.block_offsets.items));
         for (0..self.state.write_group.block_offsets.items.len) |i| {
+            // Given the bounds of the era spec and network configurations, overflow is not feasible here.
             offsets[i] = @as(i64, @intCast(offsets[i])) - @as(i64, @intCast(self.state.write_group.current_offset));
         }
         const blocks_index: e2s.SlotIndex = .{
@@ -135,6 +140,7 @@ pub fn writeCompressedState(self: *Writer, allocator: std.mem.Allocator, slot: u
         try e2s.writeEntry(self.file, self.state.write_group.current_offset, .SlotIndex, blocks_index_payload);
         self.state.write_group.current_offset += e2s.header_size + blocks_index_payload.len;
     }
+    // Given the bounds of the era spec and network configurations, overflow is not feasible here.
     var state_index_offsets = [_]i64{@as(i64, @intCast(state_offset)) - @as(i64, @intCast(self.state.write_group.current_offset))};
     const state_index: e2s.SlotIndex = .{
         .start_slot = slot,
