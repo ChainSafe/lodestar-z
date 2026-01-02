@@ -231,6 +231,135 @@ test "TreeView list push enforces limit" {
     try std.testing.expectEqual(@as(usize, 2), try view.length());
 }
 
+test "TreeView list basic clone isolates updates" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const ListType = ssz.FixedListType(Uint32, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &[_]u32{ 1, 2, 3 });
+
+    const root = try ListType.tree.fromValue(allocator, &pool, &list);
+    var v1 = try ListType.TreeView.init(allocator, &pool, root);
+    defer v1.deinit();
+
+    var v2 = try v1.clone(.{});
+    defer v2.deinit();
+
+    try v2.set(1, @as(u32, 99));
+    try v2.commit();
+
+    try std.testing.expectEqual(@as(u32, 2), try v1.get(1));
+    try std.testing.expectEqual(@as(u32, 99), try v2.get(1));
+}
+
+test "TreeView list basic clone reads committed state" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const ListType = ssz.FixedListType(Uint32, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &[_]u32{ 1, 2, 3 });
+
+    const root = try ListType.tree.fromValue(allocator, &pool, &list);
+    var v1 = try ListType.TreeView.init(allocator, &pool, root);
+    defer v1.deinit();
+
+    try v1.set(0, @as(u32, 7));
+    try v1.commit();
+
+    var v2 = try v1.clone(.{});
+    defer v2.deinit();
+
+    try std.testing.expectEqual(@as(u32, 7), try v2.get(0));
+}
+
+test "TreeView list basic clone drops uncommitted changes" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const ListType = ssz.FixedListType(Uint32, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &[_]u32{ 1, 2, 3 });
+
+    const root = try ListType.tree.fromValue(allocator, &pool, &list);
+    var v = try ListType.TreeView.init(allocator, &pool, root);
+    defer v.deinit();
+
+    try v.set(0, @as(u32, 7));
+    try std.testing.expectEqual(@as(u32, 7), try v.get(0));
+
+    var dropped = try v.clone(.{});
+    defer dropped.deinit();
+
+    try std.testing.expectEqual(@as(u32, 1), try v.get(0));
+    try std.testing.expectEqual(@as(u32, 1), try dropped.get(0));
+}
+
+test "TreeView list basic clone(true) does not transfer cache" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const ListType = ssz.FixedListType(Uint32, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &[_]u32{ 1, 2, 3 });
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    _ = try view.get(0);
+    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
+
+    var cloned_no_cache = try view.clone(.{ .transfer_cache = false });
+    defer cloned_no_cache.deinit();
+
+    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.base_view.data.children_nodes.count());
+}
+
+test "TreeView list basic clone(false) transfers cache and clears source" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const ListType = ssz.FixedListType(Uint32, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &[_]u32{ 1, 2, 3 });
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    _ = try view.get(0);
+    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
+
+    var cloned = try view.clone(.{});
+    defer cloned.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), view.base_view.data.children_nodes.count());
+    try std.testing.expect(cloned.base_view.data.children_nodes.count() > 0);
+}
+
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listBasic/tree.test.ts#L180-L203
 test "TreeView basic list getAll reflects pushes" {
     const allocator = std.testing.allocator;

@@ -194,6 +194,173 @@ test "TreeView composite list push appends element" {
     try std.testing.expectEqual(next_checkpoint.epoch, roundtrip.items[1].epoch);
 }
 
+test "TreeView composite list clone isolates updates" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const ListType = ssz.FixedListType(Checkpoint, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.append(allocator, .{ .epoch = 1, .root = [_]u8{1} ** 32 });
+
+    const root = try ListType.tree.fromValue(allocator, &pool, &list);
+    var v1 = try ListType.TreeView.init(allocator, &pool, root);
+    defer v1.deinit();
+
+    var v2 = try v1.clone(.{});
+    defer v2.deinit();
+
+    const replacement = Checkpoint.Type{ .epoch = 9, .root = [_]u8{9} ** 32 };
+    const replacement_root = try Checkpoint.tree.fromValue(&pool, &replacement);
+    var replacement_view: ?Checkpoint.TreeView = try Checkpoint.TreeView.init(allocator, &pool, replacement_root);
+    defer if (replacement_view) |*v| v.deinit();
+    try v2.set(0, replacement_view.?);
+    replacement_view = null;
+    try v2.commit();
+
+    const v1_e0 = try v1.get(0);
+    var v1_e0_value: Checkpoint.Type = undefined;
+    try Checkpoint.tree.toValue(v1_e0.base_view.data.root, &pool, &v1_e0_value);
+
+    const v2_e0 = try v2.get(0);
+    var v2_e0_value: Checkpoint.Type = undefined;
+    try Checkpoint.tree.toValue(v2_e0.base_view.data.root, &pool, &v2_e0_value);
+
+    try std.testing.expectEqual(@as(u64, 1), v1_e0_value.epoch);
+    try std.testing.expectEqual(@as(u64, 9), v2_e0_value.epoch);
+}
+
+test "TreeView composite list clone reads committed state" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const ListType = ssz.FixedListType(Checkpoint, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.append(allocator, .{ .epoch = 1, .root = [_]u8{1} ** 32 });
+
+    const root = try ListType.tree.fromValue(allocator, &pool, &list);
+    var v1 = try ListType.TreeView.init(allocator, &pool, root);
+    defer v1.deinit();
+
+    const replacement = Checkpoint.Type{ .epoch = 9, .root = [_]u8{9} ** 32 };
+    const replacement_root = try Checkpoint.tree.fromValue(&pool, &replacement);
+    var replacement_view: ?Checkpoint.TreeView = try Checkpoint.TreeView.init(allocator, &pool, replacement_root);
+    defer if (replacement_view) |*v| v.deinit();
+    try v1.set(0, replacement_view.?);
+    replacement_view = null;
+    try v1.commit();
+
+    var v2 = try v1.clone(.{});
+    defer v2.deinit();
+
+    const v2_e0 = try v2.get(0);
+    var v2_e0_value: Checkpoint.Type = undefined;
+    try Checkpoint.tree.toValue(v2_e0.base_view.data.root, &pool, &v2_e0_value);
+
+    try std.testing.expectEqual(@as(u64, 9), v2_e0_value.epoch);
+}
+
+test "TreeView composite list clone drops uncommitted changes" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const ListType = ssz.FixedListType(Checkpoint, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.append(allocator, .{ .epoch = 1, .root = [_]u8{1} ** 32 });
+
+    const root = try ListType.tree.fromValue(allocator, &pool, &list);
+    var v = try ListType.TreeView.init(allocator, &pool, root);
+    defer v.deinit();
+
+    const replacement = Checkpoint.Type{ .epoch = 9, .root = [_]u8{9} ** 32 };
+    const replacement_root = try Checkpoint.tree.fromValue(&pool, &replacement);
+    var replacement_view: ?Checkpoint.TreeView = try Checkpoint.TreeView.init(allocator, &pool, replacement_root);
+    defer if (replacement_view) |*v0| v0.deinit();
+    try v.set(0, replacement_view.?);
+    replacement_view = null;
+
+    const v_e0_before = try v.get(0);
+    var v_e0_before_value: Checkpoint.Type = undefined;
+    try Checkpoint.tree.toValue(v_e0_before.base_view.data.root, &pool, &v_e0_before_value);
+    try std.testing.expectEqual(@as(u64, 9), v_e0_before_value.epoch);
+
+    var dropped = try v.clone(.{});
+    defer dropped.deinit();
+
+    const v_e0_after = try v.get(0);
+    var v_e0_after_value: Checkpoint.Type = undefined;
+    try Checkpoint.tree.toValue(v_e0_after.base_view.data.root, &pool, &v_e0_after_value);
+
+    const dropped_e0 = try dropped.get(0);
+    var dropped_e0_value: Checkpoint.Type = undefined;
+    try Checkpoint.tree.toValue(dropped_e0.base_view.data.root, &pool, &dropped_e0_value);
+
+    try std.testing.expectEqual(@as(u64, 1), v_e0_after_value.epoch);
+    try std.testing.expectEqual(@as(u64, 1), dropped_e0_value.epoch);
+}
+
+test "TreeView composite list clone(true) does not transfer cache" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    const ListType = ssz.FixedListType(Checkpoint, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.append(allocator, .{ .epoch = 1, .root = [_]u8{1} ** 32 });
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    _ = try view.get(0);
+    try view.commit();
+
+    try std.testing.expect(view.base_view.data.children_data.count() > 0);
+
+    var cloned_no_cache = try view.clone(.{ .transfer_cache = false });
+    defer cloned_no_cache.deinit();
+
+    try std.testing.expect(view.base_view.data.children_data.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.base_view.data.children_data.count());
+}
+
+test "TreeView composite list clone(false) transfers cache and clears source" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    const ListType = ssz.FixedListType(Checkpoint, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.append(allocator, .{ .epoch = 1, .root = [_]u8{1} ** 32 });
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    _ = try view.get(0);
+    try view.commit();
+
+    try std.testing.expect(view.base_view.data.children_data.count() > 0);
+
+    var cloned = try view.clone(.{});
+    defer cloned.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), view.base_view.data.children_data.count());
+    try std.testing.expect(cloned.base_view.data.children_data.count() > 0);
+}
+
 test "TreeView list of list commits inner length updates" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 1024);
