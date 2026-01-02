@@ -194,6 +194,60 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
         };
 
         pub const tree = struct {
+            pub fn deserializeFromBytes(allocator: std.mem.Allocator, pool: *Node.Pool, data: []const u8) !Node.Id {
+                const len = try std.math.divExact(usize, data.len, Element.fixed_size);
+                if (len > limit) {
+                    return error.gtLimit;
+                }
+
+                const chunk_count = if (comptime isBasicType(Element))
+                    (Element.fixed_size * len + 31) / 32
+                else
+                    len;
+
+                if (chunk_count == 0) {
+                    return try pool.createBranch(
+                        @enumFromInt(chunk_depth),
+                        @enumFromInt(0),
+                    );
+                }
+
+                if (comptime isBasicType(Element)) {
+                    const serialized_size = len * Element.fixed_size;
+
+                    const chunks = try allocator.alloc([32]u8, chunk_count);
+                    defer allocator.free(chunks);
+                    @memset(chunks, [_]u8{0} ** 32);
+
+                    const chunk_bytes: []u8 = @ptrCast(chunks);
+                    @memcpy(chunk_bytes[0..serialized_size], data[0..serialized_size]);
+
+                    const nodes = try allocator.alloc(Node.Id, chunk_count);
+                    defer allocator.free(nodes);
+                    for (chunks, 0..) |*chunk, i| {
+                        nodes[i] = try pool.createLeaf(chunk);
+                    }
+
+                    return try pool.createBranch(
+                        try Node.fillWithContents(pool, nodes, chunk_depth),
+                        try pool.createLeafFromUint(len),
+                    );
+                } else {
+                    const nodes = try allocator.alloc(Node.Id, chunk_count);
+                    defer allocator.free(nodes);
+
+                    for (0..len) |i| {
+                        const elem_bytes = data[i * Element.fixed_size .. (i + 1) * Element.fixed_size];
+                        nodes[i] = try Element.tree.deserializeFromBytes(pool, elem_bytes);
+                    }
+
+                    return try pool.createBranch(
+                        try Node.fillWithContents(pool, nodes, chunk_depth),
+                        try pool.createLeafFromUint(len),
+                    );
+                }
+            }
+
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
                 const right = try node.getRight(pool);
                 const hash = right.getRoot(pool);
@@ -527,6 +581,37 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
         };
 
         pub const tree = struct {
+            pub fn deserializeFromBytes(allocator: std.mem.Allocator, pool: *Node.Pool, data: []const u8) !Node.Id {
+                const offsets = try readVariableOffsets(allocator, data);
+                defer allocator.free(offsets);
+
+                const len = offsets.len - 1;
+                if (len > limit) {
+                    return error.gtLimit;
+                }
+
+                const chunk_count = len;
+                if (chunk_count == 0) {
+                    return try pool.createBranch(
+                        @enumFromInt(chunk_depth),
+                        @enumFromInt(0),
+                    );
+                }
+
+                const nodes = try allocator.alloc(Node.Id, chunk_count);
+                defer allocator.free(nodes);
+
+                for (0..len) |i| {
+                    const elem_bytes = data[offsets[i]..offsets[i + 1]];
+                    nodes[i] = try Element.tree.deserializeFromBytes(allocator, pool, elem_bytes);
+                }
+
+                return try pool.createBranch(
+                    try Node.fillWithContents(pool, nodes, chunk_depth),
+                    try pool.createLeafFromUint(len),
+                );
+            }
+
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
                 const right = try node.getRight(pool);
                 const hash = right.getRoot(pool);
@@ -1118,4 +1203,323 @@ test "VariableListType - serializeIntoBytes (List<List<uint16>> - 2 empty values
     defer allocator.free(tree_serialized);
     _ = try OuterList.tree.serializeIntoBytes(allocator, node, &pool, tree_serialized);
     try std.testing.expectEqualSlices(u8, &expected_serialized, tree_serialized);
+}
+
+test "FixedListType - tree.deserializeFromBytes (ListBasic uint8)" {
+    const allocator = std.testing.allocator;
+
+    const ListU8 = FixedListType(UintType(8), 128);
+
+    const TestCase = struct {
+        id: []const u8,
+        serialized: []const u8,
+        expected_root: [32]u8,
+    };
+
+    const test_cases = [_]TestCase{
+        .{
+            .id = "empty",
+            .serialized = &[_]u8{},
+            // 0x28ba1834a3a7b657460ce79fa3a1d909ab8828fd557659d4d0554a9bdbc0ec30
+            .expected_root = [_]u8{ 0x28, 0xba, 0x18, 0x34, 0xa3, 0xa7, 0xb6, 0x57, 0x46, 0x0c, 0xe7, 0x9f, 0xa3, 0xa1, 0xd9, 0x09, 0xab, 0x88, 0x28, 0xfd, 0x55, 0x76, 0x59, 0xd4, 0xd0, 0x55, 0x4a, 0x9b, 0xdb, 0xc0, 0xec, 0x30 },
+        },
+        .{
+            .id = "4 values",
+            .serialized = &[_]u8{ 0x01, 0x02, 0x03, 0x04 },
+            // 0xbac511d1f641d6b8823200bb4b3cced3bd4720701f18571dff35a5d2a40190fa
+            .expected_root = [_]u8{ 0xba, 0xc5, 0x11, 0xd1, 0xf6, 0x41, 0xd6, 0xb8, 0x82, 0x32, 0x00, 0xbb, 0x4b, 0x3c, 0xce, 0xd3, 0xbd, 0x47, 0x20, 0x70, 0x1f, 0x18, 0x57, 0x1d, 0xff, 0x35, 0xa5, 0xd2, 0xa4, 0x01, 0x90, 0xfa },
+        },
+    };
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    for (test_cases) |tc| {
+        const tree_node = try ListU8.tree.deserializeFromBytes(allocator, &pool, tc.serialized);
+
+        var value_from_tree: ListU8.Type = ListU8.default_value;
+        defer value_from_tree.deinit(allocator);
+        try ListU8.tree.toValue(allocator, tree_node, &pool, &value_from_tree);
+
+        try std.testing.expectEqual(tc.serialized.len, value_from_tree.items.len);
+        try std.testing.expectEqualSlices(u8, tc.serialized, value_from_tree.items);
+
+        const tree_size = try ListU8.tree.serializedSize(allocator, tree_node, &pool);
+        try std.testing.expectEqual(tc.serialized.len, tree_size);
+        const tree_serialized = try allocator.alloc(u8, tree_size);
+        defer allocator.free(tree_serialized);
+        _ = try ListU8.tree.serializeIntoBytes(allocator, tree_node, &pool, tree_serialized);
+        try std.testing.expectEqualSlices(u8, tc.serialized, tree_serialized);
+
+        var hash_root: [32]u8 = undefined;
+        try ListU8.hashTreeRoot(allocator, &value_from_tree, &hash_root);
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
+    }
+}
+
+test "FixedListType - tree.deserializeFromBytes (ListBasic uint64)" {
+    const allocator = std.testing.allocator;
+
+    const ListU64 = FixedListType(UintType(64), 128);
+
+    const TestCase = struct {
+        id: []const u8,
+        serialized: []const u8,
+        expected_values: []const u64,
+        expected_root: [32]u8,
+    };
+
+    const test_cases = [_]TestCase{
+        .{
+            .id = "empty",
+            .serialized = &[_]u8{},
+            .expected_values = &[_]u64{},
+            // 0x52e2647abc3d0c9d3be0387f3f0d925422c7a4e98cf4489066f0f43281a899f3
+            .expected_root = [_]u8{ 0x52, 0xe2, 0x64, 0x7a, 0xbc, 0x3d, 0x0c, 0x9d, 0x3b, 0xe0, 0x38, 0x7f, 0x3f, 0x0d, 0x92, 0x54, 0x22, 0xc7, 0xa4, 0xe9, 0x8c, 0xf4, 0x48, 0x90, 0x66, 0xf0, 0xf4, 0x32, 0x81, 0xa8, 0x99, 0xf3 },
+        },
+        .{
+            .id = "4 values",
+            // 0xa086010000000000400d030000000000e093040000000000801a060000000000
+            .serialized = &[_]u8{
+                0xa0, 0x86, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, // 100000
+                0x40, 0x0d, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, // 200000
+                0xe0, 0x93, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, // 300000
+                0x80, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, // 400000
+            },
+            .expected_values = &[_]u64{ 100000, 200000, 300000, 400000 },
+            // 0xd1daef215502b7746e5ff3e8833e399cb249ab3f81d824be60e174ff5633c1bf
+            .expected_root = [_]u8{ 0xd1, 0xda, 0xef, 0x21, 0x55, 0x02, 0xb7, 0x74, 0x6e, 0x5f, 0xf3, 0xe8, 0x83, 0x3e, 0x39, 0x9c, 0xb2, 0x49, 0xab, 0x3f, 0x81, 0xd8, 0x24, 0xbe, 0x60, 0xe1, 0x74, 0xff, 0x56, 0x33, 0xc1, 0xbf },
+        },
+        .{
+            .id = "8 values",
+            // 0xa086010000000000400d030000000000e093040000000000801a060000000000a086010000000000400d030000000000e093040000000000801a060000000000
+            .serialized = &[_]u8{
+                0xa0, 0x86, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, // 100000
+                0x40, 0x0d, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, // 200000
+                0xe0, 0x93, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, // 300000
+                0x80, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, // 400000
+                0xa0, 0x86, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, // 100000
+                0x40, 0x0d, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, // 200000
+                0xe0, 0x93, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, // 300000
+                0x80, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, // 400000
+            },
+            .expected_values = &[_]u64{ 100000, 200000, 300000, 400000, 100000, 200000, 300000, 400000 },
+            // 0xb55b8592bcac475906631481bbc746bca7339d04ab1085e84884a700c03de4b1
+            .expected_root = [_]u8{ 0xb5, 0x5b, 0x85, 0x92, 0xbc, 0xac, 0x47, 0x59, 0x06, 0x63, 0x14, 0x81, 0xbb, 0xc7, 0x46, 0xbc, 0xa7, 0x33, 0x9d, 0x04, 0xab, 0x10, 0x85, 0xe8, 0x48, 0x84, 0xa7, 0x00, 0xc0, 0x3d, 0xe4, 0xb1 },
+        },
+    };
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    for (test_cases) |tc| {
+        const tree_node = try ListU64.tree.deserializeFromBytes(allocator, &pool, tc.serialized);
+
+        var value_from_tree: ListU64.Type = ListU64.default_value;
+        defer value_from_tree.deinit(allocator);
+        try ListU64.tree.toValue(allocator, tree_node, &pool, &value_from_tree);
+
+        try std.testing.expectEqual(tc.expected_values.len, value_from_tree.items.len);
+        try std.testing.expectEqualSlices(u64, tc.expected_values, value_from_tree.items);
+
+        const tree_size = try ListU64.tree.serializedSize(allocator, tree_node, &pool);
+        try std.testing.expectEqual(tc.serialized.len, tree_size);
+        const tree_serialized = try allocator.alloc(u8, tree_size);
+        defer allocator.free(tree_serialized);
+        _ = try ListU64.tree.serializeIntoBytes(allocator, tree_node, &pool, tree_serialized);
+        try std.testing.expectEqualSlices(u8, tc.serialized, tree_serialized);
+
+        var hash_root: [32]u8 = undefined;
+        try ListU64.hashTreeRoot(allocator, &value_from_tree, &hash_root);
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
+    }
+}
+
+test "FixedListType - tree.deserializeFromBytes (ListComposite ByteVector32)" {
+    const allocator = std.testing.allocator;
+    const ByteVector32 = ByteVectorType(32);
+    const ListBV32 = FixedListType(ByteVector32, 128);
+
+    const TestCase = struct {
+        id: []const u8,
+        serialized: []const u8,
+        expected_root: [32]u8,
+    };
+
+    const test_cases = [_]TestCase{
+        .{
+            .id = "empty",
+            .serialized = &[_]u8{},
+            // 0x96559674a79656e540871e1f39c9b91e152aa8cddb71493e754827c4cc809d57
+            .expected_root = [_]u8{ 0x96, 0x55, 0x96, 0x74, 0xa7, 0x96, 0x56, 0xe5, 0x40, 0x87, 0x1e, 0x1f, 0x39, 0xc9, 0xb9, 0x1e, 0x15, 0x2a, 0xa8, 0xcd, 0xdb, 0x71, 0x49, 0x3e, 0x75, 0x48, 0x27, 0xc4, 0xcc, 0x80, 0x9d, 0x57 },
+        },
+        .{
+            .id = "2 roots",
+            // 0xddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+            .serialized = &([_]u8{0xdd} ** 32 ++ [_]u8{0xee} ** 32),
+            // 0x0cb947377e177f774719ead8d210af9c6461f41baf5b4082f86a3911454831b8
+            .expected_root = [_]u8{ 0x0c, 0xb9, 0x47, 0x37, 0x7e, 0x17, 0x7f, 0x77, 0x47, 0x19, 0xea, 0xd8, 0xd2, 0x10, 0xaf, 0x9c, 0x64, 0x61, 0xf4, 0x1b, 0xaf, 0x5b, 0x40, 0x82, 0xf8, 0x6a, 0x39, 0x11, 0x45, 0x48, 0x31, 0xb8 },
+        },
+    };
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    for (test_cases) |tc| {
+        const tree_node = try ListBV32.tree.deserializeFromBytes(allocator, &pool, tc.serialized);
+
+        var value_from_tree: ListBV32.Type = ListBV32.default_value;
+        defer value_from_tree.deinit(allocator);
+        try ListBV32.tree.toValue(allocator, tree_node, &pool, &value_from_tree);
+
+        try std.testing.expectEqual(tc.serialized.len / 32, value_from_tree.items.len);
+
+        const tree_size = try ListBV32.tree.serializedSize(allocator, tree_node, &pool);
+        try std.testing.expectEqual(tc.serialized.len, tree_size);
+        const tree_serialized = try allocator.alloc(u8, tree_size);
+        defer allocator.free(tree_serialized);
+        _ = try ListBV32.tree.serializeIntoBytes(allocator, tree_node, &pool, tree_serialized);
+        try std.testing.expectEqualSlices(u8, tc.serialized, tree_serialized);
+
+        var hash_root: [32]u8 = undefined;
+        try ListBV32.hashTreeRoot(allocator, &value_from_tree, &hash_root);
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
+    }
+}
+
+test "FixedListType - tree.deserializeFromBytes (ListComposite Container)" {
+    const allocator = std.testing.allocator;
+    const Container = FixedContainerType(struct {
+        a: UintType(64),
+        b: UintType(64),
+    });
+    const ListContainer = FixedListType(Container, 128);
+
+    const TestCase = struct {
+        id: []const u8,
+        serialized: []const u8,
+        expected_values: []const Container.Type,
+        expected_root: [32]u8,
+    };
+
+    const test_cases = [_]TestCase{
+        .{
+            .id = "empty",
+            .serialized = &[_]u8{},
+            .expected_values = &[_]Container.Type{},
+            // 0x96559674a79656e540871e1f39c9b91e152aa8cddb71493e754827c4cc809d57
+            .expected_root = [_]u8{ 0x96, 0x55, 0x96, 0x74, 0xa7, 0x96, 0x56, 0xe5, 0x40, 0x87, 0x1e, 0x1f, 0x39, 0xc9, 0xb9, 0x1e, 0x15, 0x2a, 0xa8, 0xcd, 0xdb, 0x71, 0x49, 0x3e, 0x75, 0x48, 0x27, 0xc4, 0xcc, 0x80, 0x9d, 0x57 },
+        },
+        .{
+            .id = "2 values",
+            // 0x0000000000000000000000000000000040e2010000000000f1fb090000000000
+            .serialized = &[_]u8{
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // a = 0
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // b = 0
+                0x40, 0xe2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, // a = 123456
+                0xf1, 0xfb, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, // b = 654321
+            },
+            .expected_values = &[_]Container.Type{
+                .{ .a = 0, .b = 0 },
+                .{ .a = 123456, .b = 654321 },
+            },
+            // 0x8ff94c10d39ffa84aa937e2a077239c2742cb425a2a161744a3e9876eb3c7210
+            .expected_root = [_]u8{ 0x8f, 0xf9, 0x4c, 0x10, 0xd3, 0x9f, 0xfa, 0x84, 0xaa, 0x93, 0x7e, 0x2a, 0x07, 0x72, 0x39, 0xc2, 0x74, 0x2c, 0xb4, 0x25, 0xa2, 0xa1, 0x61, 0x74, 0x4a, 0x3e, 0x98, 0x76, 0xeb, 0x3c, 0x72, 0x10 },
+        },
+    };
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    for (test_cases) |tc| {
+        const tree_node = try ListContainer.tree.deserializeFromBytes(allocator, &pool, tc.serialized);
+
+        var value_from_tree: ListContainer.Type = ListContainer.default_value;
+        defer value_from_tree.deinit(allocator);
+        try ListContainer.tree.toValue(allocator, tree_node, &pool, &value_from_tree);
+
+        try std.testing.expectEqual(tc.expected_values.len, value_from_tree.items.len);
+        for (tc.expected_values, 0..) |expected, i| {
+            try std.testing.expectEqual(expected.a, value_from_tree.items[i].a);
+            try std.testing.expectEqual(expected.b, value_from_tree.items[i].b);
+        }
+
+        const tree_size = try ListContainer.tree.serializedSize(allocator, tree_node, &pool);
+        try std.testing.expectEqual(tc.serialized.len, tree_size);
+        const tree_serialized = try allocator.alloc(u8, tree_size);
+        defer allocator.free(tree_serialized);
+        _ = try ListContainer.tree.serializeIntoBytes(allocator, tree_node, &pool, tree_serialized);
+        try std.testing.expectEqualSlices(u8, tc.serialized, tree_serialized);
+
+        var hash_root: [32]u8 = undefined;
+        try ListContainer.hashTreeRoot(allocator, &value_from_tree, &hash_root);
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
+    }
+}
+
+test "VariableListType - tree.deserializeFromBytes (List<List<uint16>>)" {
+    const allocator = std.testing.allocator;
+    const InnerList = FixedListType(UintType(16), 2);
+    const OuterList = VariableListType(InnerList, 2);
+
+    const TestCase = struct {
+        id: []const u8,
+        serialized: []const u8,
+        expected_root: [32]u8,
+    };
+
+    const test_cases = [_]TestCase{
+        .{
+            .id = "empty",
+            .serialized = &[_]u8{},
+            // 0x7a0501f5957bdf9cb3a8ff4966f02265f968658b7a9c62642cba1165e86642f5
+            .expected_root = [_]u8{ 0x7a, 0x05, 0x01, 0xf5, 0x95, 0x7b, 0xdf, 0x9c, 0xb3, 0xa8, 0xff, 0x49, 0x66, 0xf0, 0x22, 0x65, 0xf9, 0x68, 0x65, 0x8b, 0x7a, 0x9c, 0x62, 0x64, 0x2c, 0xba, 0x11, 0x65, 0xe8, 0x66, 0x42, 0xf5 },
+        },
+        .{
+            .id = "2 full values",
+            // 0x080000000c0000000100020003000400
+            .serialized = &[_]u8{
+                0x08, 0x00, 0x00, 0x00, // offset to inner1 (8)
+                0x0c, 0x00, 0x00, 0x00, // offset to inner2 (12)
+                0x01, 0x00, // 1
+                0x02, 0x00, // 2
+                0x03, 0x00, // 3
+                0x04, 0x00, // 4
+            },
+            // 0x58140d48f9c24545c1e3a50f1ebcca85fd40433c9859c0ac34342fc8e0a800b8
+            .expected_root = [_]u8{ 0x58, 0x14, 0x0d, 0x48, 0xf9, 0xc2, 0x45, 0x45, 0xc1, 0xe3, 0xa5, 0x0f, 0x1e, 0xbc, 0xca, 0x85, 0xfd, 0x40, 0x43, 0x3c, 0x98, 0x59, 0xc0, 0xac, 0x34, 0x34, 0x2f, 0xc8, 0xe0, 0xa8, 0x00, 0xb8 },
+        },
+        .{
+            .id = "2 empty values",
+            // 0x0800000008000000
+            .serialized = &[_]u8{
+                0x08, 0x00, 0x00, 0x00, // offset to inner1 (8)
+                0x08, 0x00, 0x00, 0x00, // offset to inner2 (8) - same offset since inner1 is empty
+            },
+            // 0xe839a22714bda05923b611d07be93b4d707027d29fd9eef7aa864ed587e462ec
+            .expected_root = [_]u8{ 0xe8, 0x39, 0xa2, 0x27, 0x14, 0xbd, 0xa0, 0x59, 0x23, 0xb6, 0x11, 0xd0, 0x7b, 0xe9, 0x3b, 0x4d, 0x70, 0x70, 0x27, 0xd2, 0x9f, 0xd9, 0xee, 0xf7, 0xaa, 0x86, 0x4e, 0xd5, 0x87, 0xe4, 0x62, 0xec },
+        },
+    };
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    for (test_cases) |tc| {
+        const tree_node = try OuterList.tree.deserializeFromBytes(allocator, &pool, tc.serialized);
+
+        var value_from_tree: OuterList.Type = OuterList.default_value;
+        defer OuterList.deinit(allocator, &value_from_tree);
+        try OuterList.tree.toValue(allocator, tree_node, &pool, &value_from_tree);
+
+        const tree_size = try OuterList.tree.serializedSize(allocator, tree_node, &pool);
+        try std.testing.expectEqual(tc.serialized.len, tree_size);
+        const tree_serialized = try allocator.alloc(u8, tree_size);
+        defer allocator.free(tree_serialized);
+        _ = try OuterList.tree.serializeIntoBytes(allocator, tree_node, &pool, tree_serialized);
+        try std.testing.expectEqualSlices(u8, tc.serialized, tree_serialized);
+
+        var hash_root: [32]u8 = undefined;
+        try OuterList.hashTreeRoot(allocator, &value_from_tree, &hash_root);
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
+    }
 }

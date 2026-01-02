@@ -105,6 +105,39 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
         };
 
         pub const tree = struct {
+            pub fn deserializeFromBytes(allocator: std.mem.Allocator, pool: *Node.Pool, data: []const u8) !Node.Id {
+                if (data.len > limit) {
+                    return error.gtLimit;
+                }
+
+                const len: usize = data.len;
+                const chunk_count = (len + 31) / 32;
+                if (chunk_count == 0) {
+                    return try pool.createBranch(
+                        @enumFromInt(chunk_depth),
+                        @enumFromInt(0),
+                    );
+                }
+
+                const chunks = try allocator.alloc([32]u8, chunk_count);
+                defer allocator.free(chunks);
+                @memset(chunks, [_]u8{0} ** 32);
+
+                const chunk_bytes: []u8 = @ptrCast(chunks);
+                @memcpy(chunk_bytes[0..len], data[0..len]);
+
+                const nodes = try allocator.alloc(Node.Id, chunk_count);
+                defer allocator.free(nodes);
+                for (chunks, 0..) |*chunk, i| {
+                    nodes[i] = try pool.createLeaf(chunk);
+                }
+
+                return try pool.createBranch(
+                    try Node.fillWithContents(pool, nodes, chunk_depth),
+                    try pool.createLeafFromUint(len),
+                );
+            }
+
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
                 const right = try node.getRight(pool);
                 const hash = right.getRoot(pool);
@@ -414,4 +447,65 @@ test "ByteListType - serializeIntoBytes (96 bytes some value)" {
     var tree_serialized: [96]u8 = undefined;
     _ = try ByteList256.tree.serializeIntoBytes(allocator, tree_node, &pool, &tree_serialized);
     try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
+}
+
+test "ByteListType - tree.deserializeFromBytes (32 bytes)" {
+    const allocator = std.testing.allocator;
+    const ByteList256 = ByteListType(256);
+
+    // 0x0cb947377e177f774719ead8d210af9c6461f41baf5b4082f86a3911454831b8
+    const serialized = [_]u8{ 0x0c, 0xb9, 0x47, 0x37, 0x7e, 0x17, 0x7f, 0x77, 0x47, 0x19, 0xea, 0xd8, 0xd2, 0x10, 0xaf, 0x9c, 0x64, 0x61, 0xf4, 0x1b, 0xaf, 0x5b, 0x40, 0x82, 0xf8, 0x6a, 0x39, 0x11, 0x45, 0x48, 0x31, 0xb8 };
+    // 0x50425dbd7a34b50b20916e965ce5c060abe6516ac71bb00a4afebe5d5c4568b8
+    const expected_root = [_]u8{ 0x50, 0x42, 0x5d, 0xbd, 0x7a, 0x34, 0xb5, 0x0b, 0x20, 0x91, 0x6e, 0x96, 0x5c, 0xe5, 0xc0, 0x60, 0xab, 0xe6, 0x51, 0x6a, 0xc7, 0x1b, 0xb0, 0x0a, 0x4a, 0xfe, 0xbe, 0x5d, 0x5c, 0x45, 0x68, 0xb8 };
+
+    var pool = try Node.Pool.init(allocator, 64);
+    defer pool.deinit();
+
+    const tree_node = try ByteList256.tree.deserializeFromBytes(allocator, &pool, &serialized);
+
+    const node_root = tree_node.getRoot(&pool);
+    try std.testing.expectEqualSlices(u8, &expected_root, node_root);
+
+    var value_from_tree: ByteList256.Type = ByteList256.default_value;
+    defer value_from_tree.deinit(allocator);
+    try ByteList256.tree.toValue(allocator, tree_node, &pool, &value_from_tree);
+
+    var tree_serialized: [32]u8 = undefined;
+    _ = try ByteList256.tree.serializeIntoBytes(allocator, tree_node, &pool, &tree_serialized);
+    try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
+
+    var hash_root: [32]u8 = undefined;
+    try ByteList256.hashTreeRoot(allocator, &value_from_tree, &hash_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
+}
+
+test "ByteListType - tree.deserializeFromBytes (96 bytes)" {
+    const allocator = std.testing.allocator;
+    const ByteList256 = ByteListType(256);
+
+    // 0xb55b8592bcac475906631481bbc746bca7339d04ab1085e84884a700c03de4b1 repeated 3 times
+    const chunk = [_]u8{ 0xb5, 0x5b, 0x85, 0x92, 0xbc, 0xac, 0x47, 0x59, 0x06, 0x63, 0x14, 0x81, 0xbb, 0xc7, 0x46, 0xbc, 0xa7, 0x33, 0x9d, 0x04, 0xab, 0x10, 0x85, 0xe8, 0x48, 0x84, 0xa7, 0x00, 0xc0, 0x3d, 0xe4, 0xb1 };
+    const serialized = chunk ++ chunk ++ chunk;
+    // 0x5d3ae4b886c241ffe8dc7ae1b5f0e2fb9b682e1eac2ddea292ef02cc179e6903
+    const expected_root = [_]u8{ 0x5d, 0x3a, 0xe4, 0xb8, 0x86, 0xc2, 0x41, 0xff, 0xe8, 0xdc, 0x7a, 0xe1, 0xb5, 0xf0, 0xe2, 0xfb, 0x9b, 0x68, 0x2e, 0x1e, 0xac, 0x2d, 0xde, 0xa2, 0x92, 0xef, 0x02, 0xcc, 0x17, 0x9e, 0x69, 0x03 };
+
+    var pool = try Node.Pool.init(allocator, 64);
+    defer pool.deinit();
+
+    const tree_node = try ByteList256.tree.deserializeFromBytes(allocator, &pool, &serialized);
+
+    const node_root = tree_node.getRoot(&pool);
+    try std.testing.expectEqualSlices(u8, &expected_root, node_root);
+
+    var value_from_tree: ByteList256.Type = ByteList256.default_value;
+    defer value_from_tree.deinit(allocator);
+    try ByteList256.tree.toValue(allocator, tree_node, &pool, &value_from_tree);
+
+    var tree_serialized: [96]u8 = undefined;
+    _ = try ByteList256.tree.serializeIntoBytes(allocator, tree_node, &pool, &tree_serialized);
+    try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
+
+    var hash_root: [32]u8 = undefined;
+    try ByteList256.hashTreeRoot(allocator, &value_from_tree, &hash_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
 }
