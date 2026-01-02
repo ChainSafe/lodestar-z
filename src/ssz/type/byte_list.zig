@@ -203,23 +203,21 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
                 );
             }
 
-            pub fn serializeIntoBytes(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
                 const len = try length(node, pool);
                 const chunk_count = (len + 31) / 32;
                 if (chunk_count == 0) {
                     return 0;
                 }
 
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
-                try node.getNodesAtDepth(pool, chunk_depth + 1, 0, nodes);
+                var it = node.depthIterator(pool, chunk_depth + 1, 0);
 
                 for (0..chunk_count) |i| {
                     const start_idx = i * 32;
                     const remaining_bytes = len - start_idx;
                     const bytes_to_copy = @min(remaining_bytes, 32);
                     if (bytes_to_copy > 0) {
-                        @memcpy(out[start_idx..][0..bytes_to_copy], nodes[i].getRoot(pool)[0..bytes_to_copy]);
+                        @memcpy(out[start_idx..][0..bytes_to_copy], (try it.next()).getRoot(pool)[0..bytes_to_copy]);
                     }
                 }
                 return len;
@@ -328,7 +326,7 @@ test "ByteListType - serializeIntoBytes (4 bytes zero)" {
     defer pool.deinit();
     const tree_node = try ByteList256.tree.fromValue(allocator, &pool, &value);
     var tree_serialized: [4]u8 = undefined;
-    _ = try ByteList256.tree.serializeIntoBytes(allocator, tree_node, &pool, &tree_serialized);
+    _ = try ByteList256.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
     try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
 }
 
@@ -356,7 +354,7 @@ test "ByteListType - serializeIntoBytes (4 bytes some value)" {
     defer pool.deinit();
     const tree_node = try ByteList256.tree.fromValue(allocator, &pool, &value);
     var tree_serialized: [4]u8 = undefined;
-    _ = try ByteList256.tree.serializeIntoBytes(allocator, tree_node, &pool, &tree_serialized);
+    _ = try ByteList256.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
     try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
 }
 
@@ -383,7 +381,7 @@ test "ByteListType - serializeIntoBytes (32 bytes zero)" {
     defer pool.deinit();
     const tree_node = try ByteList256.tree.fromValue(allocator, &pool, &value);
     var tree_serialized: [32]u8 = undefined;
-    _ = try ByteList256.tree.serializeIntoBytes(allocator, tree_node, &pool, &tree_serialized);
+    _ = try ByteList256.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
     try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
 }
 
@@ -412,7 +410,7 @@ test "ByteListType - serializeIntoBytes (32 bytes some value)" {
     defer pool.deinit();
     const tree_node = try ByteList256.tree.fromValue(allocator, &pool, &value);
     var tree_serialized: [32]u8 = undefined;
-    _ = try ByteList256.tree.serializeIntoBytes(allocator, tree_node, &pool, &tree_serialized);
+    _ = try ByteList256.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
     try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
 }
 
@@ -445,7 +443,7 @@ test "ByteListType - serializeIntoBytes (96 bytes some value)" {
     defer pool.deinit();
     const tree_node = try ByteList256.tree.fromValue(allocator, &pool, &value);
     var tree_serialized: [96]u8 = undefined;
-    _ = try ByteList256.tree.serializeIntoBytes(allocator, tree_node, &pool, &tree_serialized);
+    _ = try ByteList256.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
     try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
 }
 
@@ -471,7 +469,7 @@ test "ByteListType - tree.deserializeFromBytes (32 bytes)" {
     try ByteList256.tree.toValue(allocator, tree_node, &pool, &value_from_tree);
 
     var tree_serialized: [32]u8 = undefined;
-    _ = try ByteList256.tree.serializeIntoBytes(allocator, tree_node, &pool, &tree_serialized);
+    _ = try ByteList256.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
     try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
 
     var hash_root: [32]u8 = undefined;
@@ -502,7 +500,7 @@ test "ByteListType - tree.deserializeFromBytes (96 bytes)" {
     try ByteList256.tree.toValue(allocator, tree_node, &pool, &value_from_tree);
 
     var tree_serialized: [96]u8 = undefined;
-    _ = try ByteList256.tree.serializeIntoBytes(allocator, tree_node, &pool, &tree_serialized);
+    _ = try ByteList256.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
     try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
 
     var hash_root: [32]u8 = undefined;
