@@ -144,10 +144,6 @@ pub fn ByteVectorType(comptime _length: comptime_int) type {
                 }
                 return fixed_size;
             }
-
-            pub fn serializedSize(_: Node.Id, _: *Node.Pool) usize {
-                return fixed_size;
-            }
         };
 
         pub fn serializeIntoJson(writer: anytype, in: *const Type) !void {

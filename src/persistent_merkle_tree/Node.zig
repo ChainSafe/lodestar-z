@@ -540,6 +540,10 @@ pub const Id = enum(u32) {
         );
     }
 
+    pub fn depthIterator(root_node: Id, pool: *Pool, depth: Depth, start_index: usize) DepthIterator {
+        return DepthIterator.init(pool, root_node, depth, start_index);
+    }
+
     /// Get multiple nodes in a single traversal
     ///
     /// Stores `out.len` nodes at the specified `depth`, starting from `start_index`.
@@ -1115,3 +1119,119 @@ pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth) !Id {
 
     return contents[0];
 }
+
+pub const DepthIterator = struct {
+    pool: *Pool,
+    node_id: Id,
+    parents_buf: [max_depth]Id,
+    diffi: Depth,
+    base_gindex: Gindex,
+    index: usize,
+
+    pub fn init(pool: *Pool, root_node: Id, depth: Depth, start_index: usize) DepthIterator {
+        return .{
+            .pool = pool,
+            .node_id = root_node,
+            .parents_buf = undefined,
+            .diffi = depth,
+            .base_gindex = Gindex.fromDepth(depth, 0),
+            .index = start_index,
+        };
+    }
+
+    pub fn next(self: *DepthIterator) Error!Id {
+        const path_len = self.base_gindex.pathLen();
+        // Depth 0: only the root exists; yield once then finish.
+        if (@intFromEnum(self.base_gindex) <= 1) {
+            if (self.index != 0) return Error.InvalidLength;
+            self.index = 1;
+            return self.node_id;
+        }
+
+        const max_length: Gindex.Uint = @intFromEnum(self.base_gindex);
+        if (self.index >= max_length) return Error.InvalidLength;
+
+        const states = self.pool.nodes.items(.state);
+        const lefts = self.pool.nodes.items(.left);
+        const rights = self.pool.nodes.items(.right);
+
+        // Compute gindex for current index at the requested depth.
+        const gindex = Gindex.fromUint(@intCast(@intFromEnum(self.base_gindex) | self.index));
+
+        // diffi: how many levels we can reuse from previous traversal (initialized to depth by caller state)
+        const d = path_len - self.diffi;
+
+        var path = gindex.toPath();
+        path.nextN(d);
+
+        var node_id = self.node_id;
+
+        // Navigate down from the shared prefix (d) to the target, updating parents.
+        for (d..path_len) |bit_i| {
+            if (node_id.noChild(states[@intFromEnum(node_id)])) {
+                return Error.InvalidNode;
+            }
+            self.parents_buf[bit_i] = node_id;
+            node_id = if (path.left())
+                lefts[@intFromEnum(node_id)]
+            else
+                rights[@intFromEnum(node_id)];
+            path.next();
+        }
+
+        // Yield current node.
+        const out_id = node_id;
+
+        // Prepare state for next index.
+        const index = self.index;
+        self.index += 1;
+
+        if (self.index >= max_length) {
+            // No next element; iterator is done after this yield.
+            return out_id;
+        }
+
+        // Same "depth diff" computation as getNodesAtDepth (underflow-safe: only used when there is a next index).
+        self.diffi = @intCast(@bitSizeOf(Gindex) - @clz(index ^ (index + 1)));
+        self.node_id = self.parents_buf[path_len - self.diffi];
+
+        return out_id;
+    }
+
+    pub fn seekTo(self: *DepthIterator, index: usize) Error!Id {
+        const path_len = self.base_gindex.pathLen();
+
+        // Depth 0 (or base_gindex <= 1): only root is addressable at index 0.
+        if (@intFromEnum(self.base_gindex) <= 1) {
+            if (index != 0) return Error.InvalidLength;
+            self.index = 0;
+            return self.node_id;
+        }
+
+        const max_length: usize = @intCast(@intFromEnum(self.base_gindex));
+        if (index >= max_length) return Error.InvalidLength;
+
+        // Determine how far we can reuse the existing path from the current cursor to the target.
+        // If we're seeking "backwards", we can only safely reuse from already-cached parents;
+        // compute diff from the previous yielded index when possible.
+        const cur = self.index;
+        const prev: usize = if (cur == 0) 0 else (cur - 1);
+        const shared_from = if (index >= cur) cur else prev;
+
+        self.diffi = if (index == shared_from)
+            @as(Depth, 0)
+        else
+            @intCast(@bitSizeOf(Gindex) - @clz(shared_from ^ index));
+
+        // Rewind node_id to the cached parent at the shared depth (no root restart).
+        // Note: parents_buf is populated by previous `next()` calls; for the first call
+        // (no cached parents), shared_from==cur==start_index, so diffi resolves to depth and
+        // node_id remains as initialized.
+        if (path_len >= self.diffi and self.diffi != 0) {
+            self.node_id = self.parents_buf[path_len - self.diffi];
+        }
+
+        self.index = index;
+        return try self.next();
+    }
+};

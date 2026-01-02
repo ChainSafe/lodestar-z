@@ -92,7 +92,7 @@ pub fn BoolType() type {
                 return try pool.createLeaf(&new_leaf);
             }
 
-            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) usize {
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
                 const hash = node.getRoot(pool);
                 out[0] = hash[0];
                 return fixed_size;
@@ -165,7 +165,7 @@ test "BoolType - serializeIntoBytes (false)" {
     defer pool.deinit();
     const tree_node = try Bool.tree.fromValue(&pool, &value);
     var tree_serialized: [1]u8 = undefined;
-    _ = Bool.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
+    _ = try Bool.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
     try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
 }
 
@@ -188,7 +188,7 @@ test "BoolType - serializeIntoBytes (true)" {
     defer pool.deinit();
     const tree_node = try Bool.tree.fromValue(&pool, &value);
     var tree_serialized: [1]u8 = undefined;
-    _ = Bool.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
+    _ = try Bool.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
     try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
 }
 
@@ -222,7 +222,7 @@ test "BoolType - tree.deserializeFromBytes" {
         try std.testing.expectEqual(tc.expected_value, value_from_tree);
 
         var tree_serialized: [1]u8 = undefined;
-        _ = Bool.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
+        _ = try Bool.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
         try std.testing.expectEqualSlices(u8, &tc.serialized, &tree_serialized);
 
         var hash_root: [32]u8 = undefined;

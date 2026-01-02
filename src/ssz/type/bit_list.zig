@@ -520,7 +520,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             }
 
             /// Serialize BitList to bytes.
-            pub fn serializeIntoBytes(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
                 const bit_len = try length(node, pool);
                 const serialized_bit_len = bit_len + 1; // + 1 for padding bit
                 const byte_len = std.math.divCeil(usize, serialized_bit_len, 8) catch unreachable;
@@ -534,16 +534,14 @@ pub fn BitListType(comptime _limit: comptime_int) type {
 
                 const raw_byte_length = (bit_len + 7) / 8;
 
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
-                try node.getNodesAtDepth(pool, chunk_depth + 1, 0, nodes);
+                var it = node.depthIterator(pool, chunk_depth + 1, 0);
 
                 for (0..chunk_count) |i| {
                     const start_idx = i * 32;
                     const remaining_bytes = raw_byte_length - start_idx;
                     const bytes_to_copy = @min(remaining_bytes, 32);
                     if (bytes_to_copy > 0) {
-                        @memcpy(out[start_idx..][0..bytes_to_copy], nodes[i].getRoot(pool)[0..bytes_to_copy]);
+                        @memcpy(out[start_idx..][0..bytes_to_copy], (try it.next()).getRoot(pool)[0..bytes_to_copy]);
                     }
                 }
 
@@ -795,7 +793,7 @@ test "BitListType - tree roundtrip" {
 
         const tree_serialized = try allocator.alloc(u8, tree_size);
         defer allocator.free(tree_serialized);
-        _ = try Bits.tree.serializeIntoBytes(allocator, tree_node, &pool, tree_serialized);
+        _ = try Bits.tree.serializeIntoBytes(tree_node, &pool, tree_serialized);
         try std.testing.expectEqualSlices(u8, tc.serialized, tree_serialized);
 
         var hash_root: [32]u8 = undefined;
@@ -850,7 +848,7 @@ test "BitListType - tree.deserializeFromBytes" {
         try std.testing.expectEqual(tc.serialized.len, tree_size);
         const tree_serialized = try allocator.alloc(u8, tree_size);
         defer allocator.free(tree_serialized);
-        _ = try Bits.tree.serializeIntoBytes(allocator, tree_node, &pool, tree_serialized);
+        _ = try Bits.tree.serializeIntoBytes(tree_node, &pool, tree_serialized);
         try std.testing.expectEqualSlices(u8, tc.serialized, tree_serialized);
 
         var hash_root: [32]u8 = undefined;

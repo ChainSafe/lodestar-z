@@ -517,3 +517,47 @@ fn treeZeroAfterIndexNaive(
 
     return try Node.fillWithContents(pool, contents, depth);
 }
+
+test "DepthIterator matches getNodesAtDepth" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 64);
+    defer pool.deinit();
+    const p = &pool;
+
+    const depth: Depth = 2;
+    const start_index: usize = 0;
+    const count: usize = 4;
+
+    // Create a root that is navigable to depth=2, then set all leaves at depth 2.
+    const root = try pool.createBranch(@enumFromInt(1), @enumFromInt(1));
+    defer pool.unref(root);
+
+    var leaves: [count]Node.Id = undefined;
+    for (0..count) |i| leaves[i] = try pool.createLeafFromUint(@intCast(i + 1000));
+
+    const indices = [_]usize{ 0, 1, 2, 3 };
+    const new_root = try root.setNodesAtDepth(p, depth, &indices, &leaves);
+    defer pool.unref(new_root);
+
+    // Baseline: bulk helper
+    var bulk: [count]Node.Id = undefined;
+    try new_root.getNodesAtDepth(p, depth, start_index, &bulk);
+
+    // Iterator: one-by-one
+    var it = Node.DepthIterator.init(p, new_root, depth, start_index);
+    var iter: [count]Node.Id = undefined;
+    for (0..count) |i| {
+        iter[i] = try it.next();
+    }
+    try std.testing.expectError(error.InvalidLength, it.next());
+
+    for (0..count) |j| {
+        try std.testing.expectEqual(bulk[j], iter[j]);
+    }
+
+    // Test seekTo
+    const seek_to_indices = [_]usize{ 2, 0, 3, 1 };
+    for (seek_to_indices) |i| {
+        try std.testing.expectEqual(bulk[i], try it.seekTo(i));
+    }
+}

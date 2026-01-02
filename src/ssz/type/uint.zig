@@ -96,13 +96,9 @@ pub fn UintType(comptime bits: comptime_int) type {
                 return try pool.createLeaf(&new_leaf);
             }
 
-            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) usize {
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
                 const hash = node.getRoot(pool);
                 @memcpy(out[0..fixed_size], hash[0..fixed_size]);
-                return fixed_size;
-            }
-
-            pub fn serializedSize(_: Node.Id, _: *Node.Pool) usize {
                 return fixed_size;
             }
         };
@@ -151,501 +147,163 @@ test "UintType - sanity" {
     try std.testing.expectEqualSlices(u8, input_json, output_json.items);
 }
 
+fn testFixed(
+    allocator: std.mem.Allocator,
+    comptime ST: type,
+    value: ST.Type,
+    expected_serialized: []const u8,
+    expected_root: []const u8,
+) !void {
+    var serialized: [ST.fixed_size]u8 = undefined;
+    const written = ST.serializeIntoBytes(&value, &serialized);
+    try std.testing.expectEqual(ST.fixed_size, written);
+    try std.testing.expectEqualSlices(u8, expected_serialized, &serialized);
+
+    var root: [32]u8 = undefined;
+    try ST.hashTreeRoot(&value, &root);
+    try std.testing.expectEqualSlices(u8, expected_root, &root);
+
+    var value_from_serialized: ST.Type = undefined;
+    try ST.deserializeFromBytes(&serialized, &value_from_serialized);
+    try std.testing.expectEqual(value, value_from_serialized);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const tree_from_value = try ST.tree.fromValue(&pool, &value);
+    try std.testing.expectEqualSlices(u8, expected_root, tree_from_value.getRoot(&pool));
+
+    var value_from_tree: ST.Type = undefined;
+    try ST.tree.toValue(tree_from_value, &pool, &value_from_tree);
+    try std.testing.expectEqual(value, value_from_tree);
+
+    var tree_serialized: [ST.fixed_size]u8 = undefined;
+    _ = try ST.tree.serializeIntoBytes(tree_from_value, &pool, &tree_serialized);
+    try std.testing.expectEqualSlices(u8, expected_serialized, &tree_serialized);
+
+    const tree_from_serialized = try ST.tree.deserializeFromBytes(&pool, expected_serialized);
+    try std.testing.expectEqualSlices(u8, expected_root, tree_from_serialized.getRoot(&pool));
+
+    try std.testing.expectError(error.InvalidSize, ST.tree.deserializeFromBytes(&pool, &[_]u8{}));
+}
+
 // Refer to https://github.com/ChainSafe/ssz/blob/f5ed0b457333749b5c3f49fa5eafa096a725f033/packages/ssz/test/unit/byType/uint/valid.test.ts#L4-L135
-test "UintType(8) - serializeIntoBytes (0x00)" {
-    const allocator = std.testing.allocator;
-    const Uint8 = UintType(8);
-
-    const value: Uint8.Type = 0;
-
-    const expected_serialized = [_]u8{0x00};
-    const expected_root = [_]u8{0x00} ++ [_]u8{0x00} ** 31;
-
-    var serialized: [Uint8.fixed_size]u8 = undefined;
-    const written = Uint8.serializeIntoBytes(&value, &serialized);
-    try std.testing.expectEqual(@as(usize, 1), written);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
-
-    var root: [32]u8 = undefined;
-    try Uint8.hashTreeRoot(&value, &root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &root);
-
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-    const node = try Uint8.tree.fromValue(&pool, &value);
-    var tree_serialized: [Uint8.fixed_size]u8 = undefined;
-    _ = Uint8.tree.serializeIntoBytes(node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &tree_serialized);
+test "UintType(8) - 0x00" {
+    try testFixed(
+        std.testing.allocator,
+        UintType(8),
+        0,
+        &[_]u8{0x00},
+        &[_]u8{0x00} ++ [_]u8{0x00} ** 31,
+    );
 }
 
-test "UintType(8) - serializeIntoBytes (0xff)" {
-    const allocator = std.testing.allocator;
-    const Uint8 = UintType(8);
-
-    const value: Uint8.Type = 255;
-
-    const expected_serialized = [_]u8{0xff};
-    const expected_root = [_]u8{0xff} ++ [_]u8{0x00} ** 31;
-
-    var serialized: [Uint8.fixed_size]u8 = undefined;
-    const written = Uint8.serializeIntoBytes(&value, &serialized);
-    try std.testing.expectEqual(@as(usize, 1), written);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
-
-    var root: [32]u8 = undefined;
-    try Uint8.hashTreeRoot(&value, &root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &root);
-
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-    const node = try Uint8.tree.fromValue(&pool, &value);
-    var tree_serialized: [Uint8.fixed_size]u8 = undefined;
-    _ = Uint8.tree.serializeIntoBytes(node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &tree_serialized);
+test "UintType(8) - 0xff" {
+    try testFixed(
+        std.testing.allocator,
+        UintType(8),
+        255,
+        &[_]u8{0xff},
+        &[_]u8{0xff} ++ [_]u8{0x00} ** 31,
+    );
 }
 
-test "UintType(16) - serializeIntoBytes (2^8)" {
-    const allocator = std.testing.allocator;
-    const Uint16 = UintType(16);
-
-    const value: Uint16.Type = 256; // 2^8
-
-    const expected_serialized = [_]u8{ 0x00, 0x01 };
-
-    var serialized: [Uint16.fixed_size]u8 = undefined;
-    const written = Uint16.serializeIntoBytes(&value, &serialized);
-    try std.testing.expectEqual(@as(usize, 2), written);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
-
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-    const node = try Uint16.tree.fromValue(&pool, &value);
-    var tree_serialized: [Uint16.fixed_size]u8 = undefined;
-    _ = Uint16.tree.serializeIntoBytes(node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &tree_serialized);
+test "UintType(16) - 2^8" {
+    try testFixed(
+        std.testing.allocator,
+        UintType(16),
+        256,
+        &[_]u8{ 0x00, 0x01 },
+        &[_]u8{ 0x00, 0x01 } ++ [_]u8{0x00} ** 30,
+    );
 }
 
-test "UintType(16) - serializeIntoBytes (0xffff)" {
-    const allocator = std.testing.allocator;
-    const Uint16 = UintType(16);
-
-    const value: Uint16.Type = 65535; // 2^16 - 1
-
-    const expected_serialized = [_]u8{ 0xff, 0xff };
-
-    var serialized: [Uint16.fixed_size]u8 = undefined;
-    const written = Uint16.serializeIntoBytes(&value, &serialized);
-    try std.testing.expectEqual(@as(usize, 2), written);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
-
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-    const node = try Uint16.tree.fromValue(&pool, &value);
-    var tree_serialized: [Uint16.fixed_size]u8 = undefined;
-    _ = Uint16.tree.serializeIntoBytes(node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &tree_serialized);
+test "UintType(16) - 0xffff" {
+    try testFixed(
+        std.testing.allocator,
+        UintType(16),
+        65535,
+        &[_]u8{ 0xff, 0xff },
+        &[_]u8{ 0xff, 0xff } ++ [_]u8{0x00} ** 30,
+    );
 }
 
-test "UintType(32) - serializeIntoBytes (0x00000000)" {
-    const allocator = std.testing.allocator;
-    const Uint32 = UintType(32);
-
-    const value: Uint32.Type = 0;
-
-    const expected_serialized = [_]u8{ 0x00, 0x00, 0x00, 0x00 };
-    const expected_root = [_]u8{ 0x00, 0x00, 0x00, 0x00 } ++ [_]u8{0x00} ** 28;
-
-    var serialized: [Uint32.fixed_size]u8 = undefined;
-    const written = Uint32.serializeIntoBytes(&value, &serialized);
-    try std.testing.expectEqual(@as(usize, 4), written);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
-
-    var root: [32]u8 = undefined;
-    try Uint32.hashTreeRoot(&value, &root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &root);
-
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-    const node = try Uint32.tree.fromValue(&pool, &value);
-    var tree_serialized: [Uint32.fixed_size]u8 = undefined;
-    _ = Uint32.tree.serializeIntoBytes(node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &tree_serialized);
+test "UintType(32) - 0x00000000" {
+    try testFixed(
+        std.testing.allocator,
+        UintType(32),
+        0,
+        &[_]u8{ 0x00, 0x00, 0x00, 0x00 },
+        &[_]u8{ 0x00, 0x00, 0x00, 0x00 } ++ [_]u8{0x00} ** 28,
+    );
 }
 
-test "UintType(32) - serializeIntoBytes (0xffffffff)" {
-    const allocator = std.testing.allocator;
-    const Uint32 = UintType(32);
-
-    const value: Uint32.Type = 4294967295;
-
-    const expected_serialized = [_]u8{ 0xff, 0xff, 0xff, 0xff };
-    const expected_root = [_]u8{ 0xff, 0xff, 0xff, 0xff } ++ [_]u8{0x00} ** 28;
-
-    var serialized: [Uint32.fixed_size]u8 = undefined;
-    const written = Uint32.serializeIntoBytes(&value, &serialized);
-    try std.testing.expectEqual(@as(usize, 4), written);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
-
-    var root: [32]u8 = undefined;
-    try Uint32.hashTreeRoot(&value, &root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &root);
-
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-    const node = try Uint32.tree.fromValue(&pool, &value);
-    var tree_serialized: [Uint32.fixed_size]u8 = undefined;
-    _ = Uint32.tree.serializeIntoBytes(node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &tree_serialized);
+test "UintType(32) - 0xffffffff" {
+    try testFixed(
+        std.testing.allocator,
+        UintType(32),
+        4294967295,
+        &[_]u8{ 0xff, 0xff, 0xff, 0xff },
+        &[_]u8{ 0xff, 0xff, 0xff, 0xff } ++ [_]u8{0x00} ** 28,
+    );
 }
 
-test "UintType(64) - serializeIntoBytes (100000)" {
-    const allocator = std.testing.allocator;
-    const Uint64 = UintType(64);
-
-    const value: Uint64.Type = 100000;
-
-    const expected_serialized = [_]u8{ 0xa0, 0x86, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 };
-    const expected_root = [_]u8{ 0xa0, 0x86, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 } ++ [_]u8{0x00} ** 24;
-
-    var serialized: [Uint64.fixed_size]u8 = undefined;
-    const written = Uint64.serializeIntoBytes(&value, &serialized);
-    try std.testing.expectEqual(@as(usize, 8), written);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
-
-    var root: [32]u8 = undefined;
-    try Uint64.hashTreeRoot(&value, &root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &root);
-
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-    const node = try Uint64.tree.fromValue(&pool, &value);
-    var tree_serialized: [Uint64.fixed_size]u8 = undefined;
-    _ = Uint64.tree.serializeIntoBytes(node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &tree_serialized);
+test "UintType(64) - 100000" {
+    try testFixed(
+        std.testing.allocator,
+        UintType(64),
+        100000,
+        &[_]u8{ 0xa0, 0x86, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 },
+        &[_]u8{ 0xa0, 0x86, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 } ++ [_]u8{0x00} ** 24,
+    );
 }
 
-test "UintType(64) - serializeIntoBytes (max)" {
-    const allocator = std.testing.allocator;
-    const Uint64 = UintType(64);
-
-    const value: Uint64.Type = 18446744073709551615;
-
-    const expected_serialized = [_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
-    const expected_root = [_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff } ++ [_]u8{0x00} ** 24;
-
-    var serialized: [Uint64.fixed_size]u8 = undefined;
-    const written = Uint64.serializeIntoBytes(&value, &serialized);
-    try std.testing.expectEqual(@as(usize, 8), written);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
-
-    var root: [32]u8 = undefined;
-    try Uint64.hashTreeRoot(&value, &root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &root);
-
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-    const node = try Uint64.tree.fromValue(&pool, &value);
-    var tree_serialized: [Uint64.fixed_size]u8 = undefined;
-    _ = Uint64.tree.serializeIntoBytes(node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &tree_serialized);
+test "UintType(64) - max" {
+    try testFixed(
+        std.testing.allocator,
+        UintType(64),
+        18446744073709551615,
+        &[_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff },
+        &[_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff } ++ [_]u8{0x00} ** 24,
+    );
 }
 
-test "UintType(128) - serializeIntoBytes (0x01)" {
-    const allocator = std.testing.allocator;
-    const Uint128 = UintType(128);
-
-    const value: Uint128.Type = 0x01;
-
-    const expected_serialized = [_]u8{0x01} ++ [_]u8{0x00} ** 15;
-    const expected_root = [_]u8{0x01} ++ [_]u8{0x00} ** 31;
-
-    var serialized: [Uint128.fixed_size]u8 = undefined;
-    const written = Uint128.serializeIntoBytes(&value, &serialized);
-    try std.testing.expectEqual(@as(usize, 16), written);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
-
-    var root: [32]u8 = undefined;
-    try Uint128.hashTreeRoot(&value, &root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &root);
-
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-    const node = try Uint128.tree.fromValue(&pool, &value);
-    var tree_serialized: [Uint128.fixed_size]u8 = undefined;
-    _ = Uint128.tree.serializeIntoBytes(node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &tree_serialized);
+test "UintType(128) - 0x01" {
+    try testFixed(
+        std.testing.allocator,
+        UintType(128),
+        0x01,
+        &[_]u8{0x01} ++ [_]u8{0x00} ** 15,
+        &[_]u8{0x01} ++ [_]u8{0x00} ** 31,
+    );
 }
 
-test "UintType(128) - serializeIntoBytes (max)" {
-    const allocator = std.testing.allocator;
-    const Uint128 = UintType(128);
-
-    const value: Uint128.Type = 0xffffffffffffffffffffffffffffffff;
-
-    const expected_serialized = [_]u8{0xff} ** 16;
-    const expected_root = [_]u8{0xff} ** 16 ++ [_]u8{0x00} ** 16;
-
-    var serialized: [Uint128.fixed_size]u8 = undefined;
-    const written = Uint128.serializeIntoBytes(&value, &serialized);
-    try std.testing.expectEqual(@as(usize, 16), written);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
-
-    var root: [32]u8 = undefined;
-    try Uint128.hashTreeRoot(&value, &root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &root);
-
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-    const node = try Uint128.tree.fromValue(&pool, &value);
-    var tree_serialized: [Uint128.fixed_size]u8 = undefined;
-    _ = Uint128.tree.serializeIntoBytes(node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &tree_serialized);
+test "UintType(128) - max" {
+    try testFixed(
+        std.testing.allocator,
+        UintType(128),
+        0xffffffffffffffffffffffffffffffff,
+        &[_]u8{0xff} ** 16,
+        &[_]u8{0xff} ** 16 ++ [_]u8{0x00} ** 16,
+    );
 }
 
-test "UintType(256) - serializeIntoBytes (0xaabb)" {
-    const allocator = std.testing.allocator;
-    const Uint256 = UintType(256);
-
-    const value: Uint256.Type = 0xaabb;
-
-    const expected_serialized = [_]u8{ 0xbb, 0xaa } ++ [_]u8{0x00} ** 30;
-    const expected_root = [_]u8{ 0xbb, 0xaa } ++ [_]u8{0x00} ** 30;
-
-    var serialized: [Uint256.fixed_size]u8 = undefined;
-    const written = Uint256.serializeIntoBytes(&value, &serialized);
-    try std.testing.expectEqual(@as(usize, 32), written);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
-
-    var root: [32]u8 = undefined;
-    try Uint256.hashTreeRoot(&value, &root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &root);
-
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-    const node = try Uint256.tree.fromValue(&pool, &value);
-    var tree_serialized: [Uint256.fixed_size]u8 = undefined;
-    _ = Uint256.tree.serializeIntoBytes(node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &tree_serialized);
+test "UintType(256) - 0xaabb" {
+    try testFixed(
+        std.testing.allocator,
+        UintType(256),
+        0xaabb,
+        &[_]u8{ 0xbb, 0xaa } ++ [_]u8{0x00} ** 30,
+        &[_]u8{ 0xbb, 0xaa } ++ [_]u8{0x00} ** 30,
+    );
 }
 
-test "UintType(256) - serializeIntoBytes (max)" {
-    const allocator = std.testing.allocator;
-    const Uint256 = UintType(256);
-
-    const value: Uint256.Type = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
-
-    const expected_serialized = [_]u8{0xff} ** 32;
-    const expected_root = [_]u8{0xff} ** 32;
-
-    var serialized: [Uint256.fixed_size]u8 = undefined;
-    const written = Uint256.serializeIntoBytes(&value, &serialized);
-    try std.testing.expectEqual(@as(usize, 32), written);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
-
-    var root: [32]u8 = undefined;
-    try Uint256.hashTreeRoot(&value, &root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &root);
-
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-    const node = try Uint256.tree.fromValue(&pool, &value);
-    var tree_serialized: [Uint256.fixed_size]u8 = undefined;
-    _ = Uint256.tree.serializeIntoBytes(node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &expected_serialized, &tree_serialized);
-}
-
-test "UintType(8) - tree.deserializeFromBytes" {
-    const allocator = std.testing.allocator;
-    const Uint8 = UintType(8);
-
-    const TestCase = struct {
-        id: []const u8,
-        serialized: [1]u8,
-        expected_value: u8,
-        expected_root: [32]u8,
-    };
-
-    const test_cases = [_]TestCase{
-        .{ .id = "zero", .serialized = [_]u8{0x00}, .expected_value = 0, .expected_root = [_]u8{0x00} ++ [_]u8{0x00} ** 31 },
-        .{ .id = "max", .serialized = [_]u8{0xff}, .expected_value = 255, .expected_root = [_]u8{0xff} ++ [_]u8{0x00} ** 31 },
-    };
-
-    var pool = try Node.Pool.init(allocator, 64);
-    defer pool.deinit();
-
-    for (test_cases) |tc| {
-        const tree_node = try Uint8.tree.deserializeFromBytes(&pool, &tc.serialized);
-
-        const node_root = tree_node.getRoot(&pool);
-        try std.testing.expectEqualSlices(u8, &tc.expected_root, node_root);
-
-        var value_from_tree: Uint8.Type = undefined;
-        try Uint8.tree.toValue(tree_node, &pool, &value_from_tree);
-        try std.testing.expectEqual(tc.expected_value, value_from_tree);
-
-        var tree_serialized: [Uint8.fixed_size]u8 = undefined;
-        _ = Uint8.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
-        try std.testing.expectEqualSlices(u8, &tc.serialized, &tree_serialized);
-
-        var hash_root: [32]u8 = undefined;
-        try Uint8.hashTreeRoot(&value_from_tree, &hash_root);
-        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
-    }
-
-    try std.testing.expectError(error.InvalidSize, Uint8.tree.deserializeFromBytes(&pool, &[_]u8{}));
-}
-
-test "UintType(64) - tree.deserializeFromBytes" {
-    const allocator = std.testing.allocator;
-    const Uint64 = UintType(64);
-
-    const serialized = [_]u8{ 0xa0, 0x86, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 };
-    const expected_value: u64 = 100000;
-    const expected_root = serialized ++ [_]u8{0x00} ** 24;
-
-    var pool = try Node.Pool.init(allocator, 64);
-    defer pool.deinit();
-
-    const tree_node = try Uint64.tree.deserializeFromBytes(&pool, &serialized);
-
-    const node_root = tree_node.getRoot(&pool);
-    try std.testing.expectEqualSlices(u8, &expected_root, node_root);
-
-    var value_from_tree: Uint64.Type = undefined;
-    try Uint64.tree.toValue(tree_node, &pool, &value_from_tree);
-    try std.testing.expectEqual(expected_value, value_from_tree);
-
-    var tree_serialized: [Uint64.fixed_size]u8 = undefined;
-    _ = Uint64.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
-
-    var hash_root: [32]u8 = undefined;
-    try Uint64.hashTreeRoot(&value_from_tree, &hash_root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
-
-    try std.testing.expectError(error.InvalidSize, Uint64.tree.deserializeFromBytes(&pool, &[_]u8{0x00}));
-}
-
-test "UintType(16) - tree.deserializeFromBytes" {
-    const allocator = std.testing.allocator;
-    const Uint16 = UintType(16);
-
-    const serialized = [_]u8{ 0x00, 0x01 }; // 256
-    const expected_value: u16 = 256;
-    const expected_root = serialized ++ [_]u8{0x00} ** 30;
-
-    var pool = try Node.Pool.init(allocator, 64);
-    defer pool.deinit();
-
-    const tree_node = try Uint16.tree.deserializeFromBytes(&pool, &serialized);
-
-    const node_root = tree_node.getRoot(&pool);
-    try std.testing.expectEqualSlices(u8, &expected_root, node_root);
-
-    var value_from_tree: Uint16.Type = undefined;
-    try Uint16.tree.toValue(tree_node, &pool, &value_from_tree);
-    try std.testing.expectEqual(expected_value, value_from_tree);
-
-    var tree_serialized: [Uint16.fixed_size]u8 = undefined;
-    _ = Uint16.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
-
-    var hash_root: [32]u8 = undefined;
-    try Uint16.hashTreeRoot(&value_from_tree, &hash_root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
-
-    try std.testing.expectError(error.InvalidSize, Uint16.tree.deserializeFromBytes(&pool, &[_]u8{0x00}));
-}
-
-test "UintType(32) - tree.deserializeFromBytes" {
-    const allocator = std.testing.allocator;
-    const Uint32 = UintType(32);
-
-    const serialized = [_]u8{ 0xff, 0xff, 0xff, 0xff };
-    const expected_value: u32 = 4294967295;
-    const expected_root = serialized ++ [_]u8{0x00} ** 28;
-
-    var pool = try Node.Pool.init(allocator, 64);
-    defer pool.deinit();
-
-    const tree_node = try Uint32.tree.deserializeFromBytes(&pool, &serialized);
-
-    const node_root = tree_node.getRoot(&pool);
-    try std.testing.expectEqualSlices(u8, &expected_root, node_root);
-
-    var value_from_tree: Uint32.Type = undefined;
-    try Uint32.tree.toValue(tree_node, &pool, &value_from_tree);
-    try std.testing.expectEqual(expected_value, value_from_tree);
-
-    var tree_serialized: [Uint32.fixed_size]u8 = undefined;
-    _ = Uint32.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
-
-    var hash_root: [32]u8 = undefined;
-    try Uint32.hashTreeRoot(&value_from_tree, &hash_root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
-
-    try std.testing.expectError(error.InvalidSize, Uint32.tree.deserializeFromBytes(&pool, &[_]u8{0x00}));
-}
-
-test "UintType(128) - tree.deserializeFromBytes" {
-    const allocator = std.testing.allocator;
-    const Uint128 = UintType(128);
-
-    const serialized = [_]u8{0xff} ** 16;
-    const expected_value: u128 = 0xffffffffffffffffffffffffffffffff;
-    const expected_root = serialized ++ [_]u8{0x00} ** 16;
-
-    var pool = try Node.Pool.init(allocator, 64);
-    defer pool.deinit();
-
-    const tree_node = try Uint128.tree.deserializeFromBytes(&pool, &serialized);
-
-    const node_root = tree_node.getRoot(&pool);
-    try std.testing.expectEqualSlices(u8, &expected_root, node_root);
-
-    var value_from_tree: Uint128.Type = undefined;
-    try Uint128.tree.toValue(tree_node, &pool, &value_from_tree);
-    try std.testing.expectEqual(expected_value, value_from_tree);
-
-    var tree_serialized: [Uint128.fixed_size]u8 = undefined;
-    _ = Uint128.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
-
-    var hash_root: [32]u8 = undefined;
-    try Uint128.hashTreeRoot(&value_from_tree, &hash_root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
-
-    try std.testing.expectError(error.InvalidSize, Uint128.tree.deserializeFromBytes(&pool, &[_]u8{0x00}));
-}
-
-test "UintType(256) - tree.deserializeFromBytes" {
-    const allocator = std.testing.allocator;
-    const Uint256 = UintType(256);
-
-    const serialized = [_]u8{ 0xbb, 0xaa } ++ [_]u8{0x00} ** 30;
-    const expected_value: u256 = 0xaabb;
-    const expected_root = serialized;
-
-    var pool = try Node.Pool.init(allocator, 64);
-    defer pool.deinit();
-
-    const tree_node = try Uint256.tree.deserializeFromBytes(&pool, &serialized);
-
-    const node_root = tree_node.getRoot(&pool);
-    try std.testing.expectEqualSlices(u8, &expected_root, node_root);
-
-    var value_from_tree: Uint256.Type = undefined;
-    try Uint256.tree.toValue(tree_node, &pool, &value_from_tree);
-    try std.testing.expectEqual(expected_value, value_from_tree);
-
-    var tree_serialized: [Uint256.fixed_size]u8 = undefined;
-    _ = Uint256.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
-    try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
-
-    var hash_root: [32]u8 = undefined;
-    try Uint256.hashTreeRoot(&value_from_tree, &hash_root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
-
-    try std.testing.expectError(error.InvalidSize, Uint256.tree.deserializeFromBytes(&pool, &[_]u8{0x00}));
+test "UintType(256) - max" {
+    try testFixed(
+        std.testing.allocator,
+        UintType(256),
+        0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+        &[_]u8{0xff} ** 32,
+        &[_]u8{0xff} ** 32,
+    );
 }

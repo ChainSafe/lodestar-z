@@ -288,10 +288,6 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
                 }
                 return fixed_size;
             }
-
-            pub fn serializedSize(_: Node.Id, _: *Node.Pool) usize {
-                return fixed_size;
-            }
         };
 
         pub fn serializeIntoJson(writer: anytype, in: *const Type) !void {
@@ -442,7 +438,7 @@ test "BitVectorType - tree roundtrip 128 bits" {
 
         try std.testing.expect(Bits.equals(&value, &value_from_tree));
 
-        const tree_size = Bits.tree.serializedSize(tree_node, &pool);
+        const tree_size = Bits.fixed_size;
         try std.testing.expectEqual(tc.serialized.len, tree_size);
 
         var tree_serialized: [Bits.fixed_size]u8 = undefined;
@@ -498,7 +494,7 @@ test "BitVectorType - tree roundtrip 512 bits" {
 
         try std.testing.expect(Bits.equals(&value, &value_from_tree));
 
-        const tree_size = Bits.tree.serializedSize(tree_node, &pool);
+        const tree_size = Bits.fixed_size;
         try std.testing.expectEqual(tc.serialized.len, tree_size);
 
         var tree_serialized: [Bits.fixed_size]u8 = undefined;

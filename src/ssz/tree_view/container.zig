@@ -101,20 +101,16 @@ pub fn ContainerTreeView(comptime ST: type) type {
         /// Returns the number of bytes written.
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
             try self.commit();
-            if (comptime isFixedType(ST)) {
-                return try ST.tree.serializeIntoBytes(self.base_view.data.root, self.base_view.pool, out);
-            } else {
-                return try ST.tree.serializeIntoBytes(self.base_view.allocator, self.base_view.data.root, self.base_view.pool, out);
-            }
+            return try ST.tree.serializeIntoBytes(self.base_view.data.root, self.base_view.pool, out);
         }
 
         /// Get the serialized size of this tree view.
         pub fn serializedSize(self: *Self) !usize {
             try self.commit();
             if (comptime isFixedType(ST)) {
-                return ST.tree.serializedSize(self.base_view.data.root, self.base_view.pool);
+                return ST.fixed_size;
             } else {
-                return try ST.tree.serializedSize(self.base_view.allocator, self.base_view.data.root, self.base_view.pool);
+                return try ST.tree.serializedSize(self.base_view.data.root, self.base_view.pool);
             }
         }
     };
