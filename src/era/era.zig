@@ -141,7 +141,7 @@ pub fn getShortHistoricalRoot(state: state_transition.BeaconStateAllForks) ![8]u
         var root: [32]u8 = undefined;
         try ct.capella.HistoricalSummary.hashTreeRoot(&state.historicalSummaries().getLast(), &root);
         break :blk root;
-    } else &state.historicalRoots().getLast();
+    } else state.historicalRoots().getLast();
 
     _ = try std.fmt.bufPrint(&short_historical_root, "{x}", .{std.fmt.fmtSliceHexLower(historical_root[0..4])});
     return short_historical_root;
