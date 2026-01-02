@@ -84,6 +84,16 @@ pub fn BoolType() type {
                 new_leaf[offset] = if (value.*) 1 else 0;
                 return try pool.createLeaf(&new_leaf);
             }
+
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) usize {
+                const hash = node.getRoot(pool);
+                out[0] = hash[0];
+                return fixed_size;
+            }
+
+            pub fn serializedSize(_: Node.Id, _: *Node.Pool) usize {
+                return fixed_size;
+            }
         };
 
         pub fn serializeIntoJson(writer: anytype, in: *const Type) !void {
@@ -126,4 +136,51 @@ test "BoolType - sanity" {
     try expectEqualRoots(Bool, b, cloned);
     try std.testing.expectEqualSlices(u8, input_json, output_json.items);
     try expectEqualSerialized(Bool, b, cloned);
+}
+
+// Refer to https://github.com/ChainSafe/ssz/blob/f5ed0b457333749b5c3f49fa5eafa096a725f033/packages/ssz/test/unit/byType/boolean/valid.test.ts#L4-L21
+test "BoolType - serializeIntoBytes (false)" {
+    const Bool = BoolType();
+    const value: Bool.Type = false;
+
+    var serialized: [1]u8 = undefined;
+    const size = Bool.serializeIntoBytes(&value, &serialized);
+    try std.testing.expectEqual(@as(usize, 1), size);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0x00}, &serialized);
+
+    var root: [32]u8 = undefined;
+    try Bool.hashTreeRoot(&value, &root);
+    const expected_root = [_]u8{0x00} ++ [_]u8{0x00} ** 31;
+    try std.testing.expectEqualSlices(u8, &expected_root, &root);
+
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 32);
+    defer pool.deinit();
+    const tree_node = try Bool.tree.fromValue(&pool, &value);
+    var tree_serialized: [1]u8 = undefined;
+    _ = Bool.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
+    try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
+}
+
+test "BoolType - serializeIntoBytes (true)" {
+    const Bool = BoolType();
+    const value: Bool.Type = true;
+
+    var serialized: [1]u8 = undefined;
+    const size = Bool.serializeIntoBytes(&value, &serialized);
+    try std.testing.expectEqual(@as(usize, 1), size);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0x01}, &serialized);
+
+    var root: [32]u8 = undefined;
+    try Bool.hashTreeRoot(&value, &root);
+    const expected_root = [_]u8{0x01} ++ [_]u8{0x00} ** 31;
+    try std.testing.expectEqualSlices(u8, &expected_root, &root);
+
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 32);
+    defer pool.deinit();
+    const tree_node = try Bool.tree.fromValue(&pool, &value);
+    var tree_serialized: [1]u8 = undefined;
+    _ = Bool.tree.serializeIntoBytes(tree_node, &pool, &tree_serialized);
+    try std.testing.expectEqualSlices(u8, &serialized, &tree_serialized);
 }

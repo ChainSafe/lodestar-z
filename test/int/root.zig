@@ -1,7 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
 const state_transition = @import("./state_transition.zig");
-const epoch_transition_cache = @import("./cache/epoch_transition_cache.zig");
 const process_justification_and_finalization = @import("./epoch/process_justification_and_finalization.zig");
 const process_inactivity_updates = @import("./epoch/process_inactivity_updates.zig");
 const process_registry_updates = @import("./epoch/process_registry_updates.zig");
@@ -30,7 +29,6 @@ const byte_list = @import("./ssz/byte_list.zig");
 const tree_view = @import("./ssz/tree_view.zig");
 
 test {
-    testing.refAllDecls(epoch_transition_cache);
     testing.refAllDecls(process_justification_and_finalization);
     testing.refAllDecls(process_rewards_and_penalties);
     testing.refAllDecls(process_inactivity_updates);
@@ -47,7 +45,6 @@ test {
     testing.refAllDecls(process_sync_committee_updates);
     testing.refAllDecls(process_proposer_lookahead);
     testing.refAllDecls(process_epoch);
-    testing.refAllDecls(epoch_transition_cache);
     testing.refAllDecls(state_transition);
 
     testing.refAllDecls(@import("./process_block_header.zig"));
