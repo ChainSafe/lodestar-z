@@ -45,6 +45,10 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
             };
         }
 
+        pub fn clone(self: *Self, opts: BaseTreeView.CloneOpts) !Self {
+            return Self{ .base_view = try self.base_view.clone(opts) };
+        }
+
         pub fn deinit(self: *Self) void {
             self.base_view.deinit();
         }
@@ -81,6 +85,18 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
 
         pub fn getAllInto(self: *Self, values: []Element) ![]Element {
             return try Chunks.getAllInto(&self.base_view, length, values);
+        }
+
+        /// Serialize the tree view into a provided buffer.
+        /// Returns the number of bytes written.
+        pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
+            try self.commit();
+            return try ST.tree.serializeIntoBytes(self.base_view.data.root, self.base_view.pool, out);
+        }
+
+        /// Get the serialized size of this tree view.
+        pub fn serializedSize(_: *Self) usize {
+            return ST.fixed_size;
         }
     };
 }
