@@ -3,6 +3,7 @@ const std = @import("std");
 const panic = std.debug.panic;
 const Allocator = std.mem.Allocator;
 const expect = std.testing.expect;
+const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
 const Slot = types.primitive.Slot.Type;
 const Deposit = types.phase0.Deposit.Type;
@@ -22,13 +23,147 @@ const AttesterSlashings = @import("./attester_slashing.zig").AttesterSlashings;
 const AttesterSlashing = @import("./attester_slashing.zig").AttesterSlashing;
 
 pub const SignedBeaconBlock = union(enum) {
-    phase0: *const types.phase0.SignedBeaconBlock.Type,
-    altair: *const types.altair.SignedBeaconBlock.Type,
-    bellatrix: *const types.bellatrix.SignedBeaconBlock.Type,
-    capella: *const types.capella.SignedBeaconBlock.Type,
-    deneb: *const types.deneb.SignedBeaconBlock.Type,
-    electra: *const types.electra.SignedBeaconBlock.Type,
-    fulu: *const types.fulu.SignedBeaconBlock.Type,
+    phase0: *types.phase0.SignedBeaconBlock.Type,
+    altair: *types.altair.SignedBeaconBlock.Type,
+    bellatrix: *types.bellatrix.SignedBeaconBlock.Type,
+    capella: *types.capella.SignedBeaconBlock.Type,
+    deneb: *types.deneb.SignedBeaconBlock.Type,
+    electra: *types.electra.SignedBeaconBlock.Type,
+    fulu: *types.fulu.SignedBeaconBlock.Type,
+
+    pub fn deserialize(allocator: std.mem.Allocator, fork_seq: ForkSeq, bytes: []const u8) !SignedBeaconBlock {
+        switch (fork_seq) {
+            .phase0 => {
+                const signed_block = try allocator.create(types.phase0.SignedBeaconBlock.Type);
+                errdefer allocator.destroy(signed_block);
+                signed_block.* = types.phase0.SignedBeaconBlock.default_value;
+                try types.phase0.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                return .{ .phase0 = signed_block };
+            },
+            .altair => {
+                const signed_block = try allocator.create(types.altair.SignedBeaconBlock.Type);
+                errdefer allocator.destroy(signed_block);
+                signed_block.* = types.altair.SignedBeaconBlock.default_value;
+                try types.altair.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                return .{ .altair = signed_block };
+            },
+            .bellatrix => {
+                const signed_block = try allocator.create(types.bellatrix.SignedBeaconBlock.Type);
+                errdefer allocator.destroy(signed_block);
+                signed_block.* = types.bellatrix.SignedBeaconBlock.default_value;
+                try types.bellatrix.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                return .{ .bellatrix = signed_block };
+            },
+            .capella => {
+                const signed_block = try allocator.create(types.capella.SignedBeaconBlock.Type);
+                errdefer allocator.destroy(signed_block);
+                signed_block.* = types.capella.SignedBeaconBlock.default_value;
+                try types.capella.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                return .{ .capella = signed_block };
+            },
+            .deneb => {
+                const signed_block = try allocator.create(types.deneb.SignedBeaconBlock.Type);
+                errdefer allocator.destroy(signed_block);
+                signed_block.* = types.deneb.SignedBeaconBlock.default_value;
+                try types.deneb.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                return .{ .deneb = signed_block };
+            },
+            .electra => {
+                const signed_block = try allocator.create(types.electra.SignedBeaconBlock.Type);
+                errdefer allocator.destroy(signed_block);
+                signed_block.* = types.electra.SignedBeaconBlock.default_value;
+                try types.electra.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                return .{ .electra = signed_block };
+            },
+            .fulu => {
+                const signed_block = try allocator.create(types.fulu.SignedBeaconBlock.Type);
+                errdefer allocator.destroy(signed_block);
+                signed_block.* = types.fulu.SignedBeaconBlock.default_value;
+                try types.fulu.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                return .{ .fulu = signed_block };
+            },
+        }
+    }
+
+    pub fn deinit(self: SignedBeaconBlock, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .phase0 => |signed_block| {
+                types.phase0.SignedBeaconBlock.deinit(allocator, signed_block);
+                allocator.destroy(signed_block);
+            },
+            .altair => |signed_block| {
+                types.altair.SignedBeaconBlock.deinit(allocator, signed_block);
+                allocator.destroy(signed_block);
+            },
+            .bellatrix => |signed_block| {
+                types.bellatrix.SignedBeaconBlock.deinit(allocator, signed_block);
+                allocator.destroy(signed_block);
+            },
+            .capella => |signed_block| {
+                types.capella.SignedBeaconBlock.deinit(allocator, signed_block);
+                allocator.destroy(signed_block);
+            },
+            .deneb => |signed_block| {
+                types.deneb.SignedBeaconBlock.deinit(allocator, signed_block);
+                allocator.destroy(signed_block);
+            },
+            .electra => |signed_block| {
+                types.electra.SignedBeaconBlock.deinit(allocator, signed_block);
+                allocator.destroy(signed_block);
+            },
+            .fulu => |signed_block| {
+                types.fulu.SignedBeaconBlock.deinit(allocator, signed_block);
+                allocator.destroy(signed_block);
+            },
+        }
+    }
+
+    pub fn serialize(self: SignedBeaconBlock, allocator: std.mem.Allocator) ![]u8 {
+        switch (self) {
+            .phase0 => |signed_block| {
+                const out = try allocator.alloc(u8, types.phase0.SignedBeaconBlock.serializedSize(signed_block));
+                errdefer allocator.free(out);
+                _ = types.phase0.SignedBeaconBlock.serializeIntoBytes(signed_block, out);
+                return out;
+            },
+            .altair => |signed_block| {
+                const out = try allocator.alloc(u8, types.altair.SignedBeaconBlock.serializedSize(signed_block));
+                errdefer allocator.free(out);
+                _ = types.altair.SignedBeaconBlock.serializeIntoBytes(signed_block, out);
+                return out;
+            },
+            .bellatrix => |signed_block| {
+                const out = try allocator.alloc(u8, types.bellatrix.SignedBeaconBlock.serializedSize(signed_block));
+                errdefer allocator.free(out);
+                _ = types.bellatrix.SignedBeaconBlock.serializeIntoBytes(signed_block, out);
+                return out;
+            },
+            .capella => |signed_block| {
+                const out = try allocator.alloc(u8, types.capella.SignedBeaconBlock.serializedSize(signed_block));
+                errdefer allocator.free(out);
+                _ = types.capella.SignedBeaconBlock.serializeIntoBytes(signed_block, out);
+                return out;
+            },
+            .deneb => |signed_block| {
+                const out = try allocator.alloc(u8, types.deneb.SignedBeaconBlock.serializedSize(signed_block));
+                errdefer allocator.free(out);
+                _ = types.deneb.SignedBeaconBlock.serializeIntoBytes(signed_block, out);
+                return out;
+            },
+            .electra => |signed_block| {
+                const out = try allocator.alloc(u8, types.electra.SignedBeaconBlock.serializedSize(signed_block));
+                errdefer allocator.free(out);
+                _ = types.electra.SignedBeaconBlock.serializeIntoBytes(signed_block, out);
+                return out;
+            },
+            .fulu => |signed_block| {
+                const out = try allocator.alloc(u8, types.fulu.SignedBeaconBlock.serializedSize(signed_block));
+                errdefer allocator.free(out);
+                _ = types.fulu.SignedBeaconBlock.serializeIntoBytes(signed_block, out);
+                return out;
+            },
+        }
+    }
 
     pub fn beaconBlock(self: *const SignedBeaconBlock) BeaconBlock {
         return switch (self.*) {

@@ -15,8 +15,8 @@
             .hash = "hashtree-0.1.0-sBOovqUTAADdAyrPOQ23wdPSJWPFfueipnRNqrERPaP_",
         },
         .snappy = .{
-            .url = "git+https://github.com/chainsafe/snappy.zig#ede2ad602ac9ffa506e3724a2bf5fc14c806187f",
-            .hash = "snappy-0.1.0-n4AaqtMYAACgB1kHWQ2_CFI-gbtYEUCbXyYlQZ2ENyfd",
+            .url = "git+https://github.com/chainsafe/snappy.zig#206a3019ed9f5cb1e382bddca9a51d7c3e7d8cd3",
+            .hash = "snappy-0.1.0-n4Aaqtw4AAA1bcVRSEh4ERJs4_Tjzph4cXEMPdYtQbeA",
         },
         .yaml = .{
             .url = "git+https://github.com/chainsafe/zig-yaml#e0e5962579e990a66c21424416c7ac092b20b772",

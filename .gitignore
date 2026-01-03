@@ -5,3 +5,4 @@ test/spec/test_case/
 *.ssz
 test/spec/ssz/generic_tests.zig
 test/spec/ssz/static_tests.zig
+*.era
