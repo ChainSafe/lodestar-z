@@ -191,7 +191,7 @@ pub fn isValidDepositSignature(config: *const BeaconConfig, pubkey: BLSPubkey, w
     var domain: Domain = undefined;
     computeDomain(DOMAIN_DEPOSIT, GENESIS_FORK_VERSION, ZERO_HASH, &domain) catch return false;
     var signing_root: Root = undefined;
-    computeSigningRoot(types.phase0.DepositMessage, &deposit_message, domain, &signing_root) catch return false;
+    computeSigningRoot(types.phase0.DepositMessage, &deposit_message, &domain, &signing_root) catch return false;
 
     // Pubkeys must be checked for group + inf. This must be done only once when the validator deposit is processed
     const public_key = blst.PublicKey.uncompress(&pubkey) catch return false;

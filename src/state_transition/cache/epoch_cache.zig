@@ -282,7 +282,7 @@ pub const EpochCache = struct {
         var previous_target_unslashed_balance_increments: u64 = 0;
         var current_target_unslashed_balance_increments: u64 = 0;
 
-        if (fork_seq.isPostAltair()) {
+        if (fork_seq.gte(.altair)) {
             const previous_epoch_participation = state.previousEpochParticipations().items;
             const current_epoch_participation = state.currentEpochParticipations().items;
 

@@ -25,7 +25,7 @@ pub fn isValidIndexedAttestation(comptime IA: type, cached_state: *const CachedB
 pub fn isValidIndexedAttestationIndices(cached_state: *const CachedBeaconStateAllForks, indices: []const ValidatorIndex) bool {
     // verify max number of indices
     const fork_seq = cached_state.state.forkSeq();
-    const max_indices: usize = if (fork_seq.isPostElectra())
+    const max_indices: usize = if (fork_seq.gte(.electra))
         preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT
     else
         preset.MAX_VALIDATORS_PER_COMMITTEE;

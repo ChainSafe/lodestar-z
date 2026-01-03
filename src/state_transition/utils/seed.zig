@@ -32,8 +32,8 @@ pub fn computeProposers(allocator: Allocator, fork_seq: ForkSeq, epoch_seed: [32
         var seed: [32]u8 = undefined;
         digest(buffer[0..], &seed);
 
-        const rand_byte_count: ByteCount = if (fork_seq.isPostElectra()) ByteCount.Two else ByteCount.One;
-        const max_effective_balance: u64 = if (fork_seq.isPostElectra()) preset.MAX_EFFECTIVE_BALANCE_ELECTRA else preset.MAX_EFFECTIVE_BALANCE;
+        const rand_byte_count: ByteCount = if (fork_seq.gte(.electra)) ByteCount.Two else ByteCount.One;
+        const max_effective_balance: u64 = if (fork_seq.gte(.electra)) preset.MAX_EFFECTIVE_BALANCE_ELECTRA else preset.MAX_EFFECTIVE_BALANCE;
         out[i] = try computeProposerIndex(allocator, &seed, active_indices, effective_balance_increments.items, rand_byte_count, max_effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT, preset.SHUFFLE_ROUND_COUNT);
     }
 }

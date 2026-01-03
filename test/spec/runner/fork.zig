@@ -1,6 +1,5 @@
 const std = @import("std");
 const ForkSeq = @import("config").ForkSeq;
-const forkSeqByForkName = @import("config").forkSeqByForkName;
 const state_transition = @import("state_transition");
 const upgradeStateToAltair = state_transition.upgradeStateToAltair;
 const upgradeStateToBellatrix = state_transition.upgradeStateToBellatrix;
@@ -116,7 +115,7 @@ fn loadTargetFork(allocator: Allocator, dir: std.fs.Dir) !ForkSeq {
         const end = std.mem.indexOf(u8, after_key, "}") orelse return error.InvalidMetaFile;
         const fork_slice = after_key[0..end];
         if (fork_slice.len == 0) return error.InvalidMetaFile;
-        return forkSeqByForkName(fork_slice);
+        return ForkSeq.fromName(fork_slice);
     }
 
     return error.InvalidMetaFile;

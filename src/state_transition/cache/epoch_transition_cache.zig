@@ -257,7 +257,7 @@ pub const EpochTransitionCache = struct {
 
             reused_cache.flags.items[i] = flag;
 
-            if (fork_seq.isPostElectra()) {
+            if (fork_seq.gte(.electra)) {
                 reused_cache.is_compounding_validator_arr.items[i] = hasCompoundingWithdrawalCredential(validator.withdrawal_credentials);
             }
 
@@ -424,7 +424,7 @@ pub const EpochTransitionCache = struct {
         }
 
         // assertCorrectProgressiveBalances = true by default
-        if (fork_seq.isPostAltair()) {
+        if (fork_seq.gte(.altair)) {
             if (epoch_cache.current_target_unslashed_balance_increments != curr_target_unsl_stake) {
                 return error.InCorrectCurrentTargetUnslashedBalance;
             }

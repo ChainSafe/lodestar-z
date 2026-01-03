@@ -1,11 +1,14 @@
 const std = @import("std");
-const hex_utils = @import("hex");
 const Preset = @import("preset").Preset;
-const ChainConfig = @import("../chain_config.zig").ChainConfig;
-const BlobScheduleEntry = @import("../chain_config.zig").BlobScheduleEntry;
-const b = hex_utils.hexToBytesComptime;
+const ChainConfig = @import("../ChainConfig.zig");
+const BeaconConfig = @import("../BeaconConfig.zig");
+const b = @import("hex").hexToBytesComptime;
 
-pub const gnosis_chain_config = ChainConfig{
+pub const config = BeaconConfig.init(chain_config, genesis_validators_root);
+
+pub const genesis_validators_root = b(32, "0xf5dcb5564e829aab27264b9becd5dfaa017085611224cb3036f573368dbb9d47");
+
+pub const chain_config = ChainConfig{
     .PRESET_BASE = Preset.gnosis,
     .CONFIG_NAME = "gnosis",
 
@@ -84,5 +87,5 @@ pub const gnosis_chain_config = ChainConfig{
     .BALANCE_PER_ADDITIONAL_CUSTODY_GROUP = 32000000000,
 
     // Blob Scheduling
-    .BLOB_SCHEDULE = &[_]BlobScheduleEntry{},
+    .BLOB_SCHEDULE = &[_]ChainConfig.BlobScheduleEntry{},
 };

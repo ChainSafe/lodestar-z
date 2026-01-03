@@ -32,7 +32,7 @@ pub const BlsSetting = enum {
 };
 
 pub fn TestCaseUtils(comptime fork: ForkSeq) type {
-    const ForkTypes = @field(types, fork.forkName());
+    const ForkTypes = @field(types, fork.name());
     return struct {
         pub fn getForkPre() ForkSeq {
             return switch (fork) {
@@ -48,7 +48,7 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
 
         pub fn loadPreStatePreFork(allocator: Allocator, dir: std.fs.Dir, fork_epoch: Epoch) !TestCachedBeaconStateAllForks {
             const fork_pre = comptime getForkPre();
-            const ForkPreTypes = @field(types, fork_pre.forkName());
+            const ForkPreTypes = @field(types, fork_pre.name());
             const pre_state = try allocator.create(ForkPreTypes.BeaconState.Type);
             var transfered_pre_state: bool = false;
             errdefer {

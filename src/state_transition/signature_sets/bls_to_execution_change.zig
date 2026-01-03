@@ -20,7 +20,7 @@ pub fn verifyBlsToExecutionChangeSignature(cached_state: *const CachedBeaconStat
 
 pub fn getBlsToExecutionChangeSignatureSet(config: *const BeaconConfig, signed_bls_to_execution_change: *const SignedBLSToExecutionChange) !SingleSignatureSet {
     // signatureFork for signing domain is fixed
-    const domain = try config.getDomainByForkSeq(.phase0, c.DOMAIN_BLS_TO_EXECUTION_CHANGE);
+    const domain = try config.domain_cache.get(.phase0, c.DOMAIN_BLS_TO_EXECUTION_CHANGE);
     var signing_root: Root = undefined;
     try computeSigningRoot(types.capella.BLSToExecutionChange, &signed_bls_to_execution_change.message, domain, &signing_root);
 

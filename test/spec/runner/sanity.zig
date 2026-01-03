@@ -93,7 +93,7 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
 }
 
 pub fn BlocksTestCase(comptime fork: ForkSeq) type {
-    const ForkTypes = @field(ssz, fork.forkName());
+    const ForkTypes = @field(ssz, fork.name());
     const tc_utils = TestCaseUtils(fork);
     const SignedBeaconBlock = @field(ForkTypes, "SignedBeaconBlock");
 

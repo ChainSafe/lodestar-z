@@ -2,14 +2,7 @@ const std = @import("std");
 
 const Depth = @import("depth.zig").Depth;
 const max_depth_ = @import("depth.zig").max_depth;
-
-/// This non-extern implementation is required to compute the zero hashes at comptime.
-fn hashOne(out: *[32]u8, obj1: *const [32]u8, obj2: *const [32]u8) void {
-    var h = std.crypto.hash.sha2.Sha256.init(.{});
-    h.update(obj1);
-    h.update(obj2);
-    h.final(out);
-}
+const hashOne = @import("sha256.zig").hashOne;
 
 pub fn ZeroHash(max_depth: u8) type {
     comptime {
@@ -22,9 +15,6 @@ pub fn ZeroHash(max_depth: u8) type {
         hashes: [max_depth][32]u8,
 
         pub fn init() @This() {
-            // It seems that the default sha2 implementation does a lot of comptime execution
-            @setEvalBranchQuota(@as(usize, max_depth) * 10000);
-
             var zh: @This() = undefined;
             for (0..max_depth) |i| {
                 if (i == 0) {
