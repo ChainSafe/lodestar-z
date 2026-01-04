@@ -168,6 +168,11 @@ pub fn ByteVectorType(comptime _length: comptime_int) type {
             }
             _ = try hexToBytes(out, hex_bytes);
         }
+
+        pub fn defaultTreeView(allocator: std.mem.Allocator, pool: *Node.Pool) !TreeView {
+            const root = try tree.fromValue(pool, &default_value);
+            return try TreeView.init(allocator, pool, root);
+        }
     };
 }
 

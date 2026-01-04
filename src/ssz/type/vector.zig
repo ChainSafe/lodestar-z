@@ -237,6 +237,11 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
                 else => return error.InvalidJson,
             }
         }
+
+        pub fn defaultTreeView(allocator: std.mem.Allocator, pool: *Node.Pool) !TreeView {
+            const root = try tree.fromValue(pool, &default_value);
+            return try TreeView.init(allocator, pool, root);
+        }
     };
 }
 
@@ -446,6 +451,11 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
                 .array_end => {},
                 else => return error.InvalidJson,
             }
+        }
+
+        pub fn defaultTreeView(allocator: std.mem.Allocator, pool: *Node.Pool) !TreeView {
+            const root = try tree.fromValue(allocator, pool, &default_value);
+            return try TreeView.init(allocator, pool, root);
         }
     };
 }
