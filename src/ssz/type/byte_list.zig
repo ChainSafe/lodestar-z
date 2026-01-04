@@ -261,6 +261,11 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
             try out.resize(allocator, hex_bytes_len);
             _ = try hexToBytes(out.items, hex_bytes);
         }
+
+        pub fn defaultTreeView(allocator: std.mem.Allocator, pool: *Node.Pool) !TreeView {
+            const root = try tree.fromValue(allocator, pool, &default_value);
+            return try TreeView.init(allocator, pool, root);
+        }
     };
 }
 test "clone" {
