@@ -42,7 +42,6 @@ const upgradeStateToFulu = @import("slot/upgrade_state_to_fulu.zig").upgradeStat
 const SignedBlock = @import("types/block.zig").SignedBlock;
 
 pub const ExecutionPayloadStatus = enum(u8) {
-    pre_merge,
     invalid,
     valid,
 };
