@@ -674,11 +674,7 @@ test "ListBasicTreeView - push and serialize" {
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
 
-    var value: ListU8Type.Type = ListU8Type.default_value;
-    defer value.deinit(allocator);
-
-    const tree_node = try ListU8Type.tree.fromValue(allocator, &pool, &value);
-    var view = try ListU8Type.TreeView.init(allocator, &pool, tree_node);
+    var view = try ListU8Type.defaultTreeView(allocator, &pool);
     defer view.deinit();
 
     try view.push(1);

@@ -316,6 +316,11 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
                 return error.trailingData;
             }
         }
+
+        pub fn defaultTreeView(allocator: std.mem.Allocator, pool: *Node.Pool) !TreeView {
+            const root = try tree.fromValue(pool, &default_value);
+            return try TreeView.init(allocator, pool, root);
+        }
     };
 }
 

@@ -252,6 +252,11 @@ pub fn FixedContainerType(comptime ST: type) type {
             const field_index = getFieldIndex(name);
             return comptime Gindex.fromDepth(chunk_depth, field_index);
         }
+
+        pub fn defaultTreeView(allocator: std.mem.Allocator, pool: *Node.Pool) !TreeView {
+            const root = try tree.fromValue(pool, &default_value);
+            return try TreeView.init(allocator, pool, root);
+        }
     };
 }
 
@@ -680,6 +685,11 @@ pub fn VariableContainerType(comptime ST: type) type {
                 .object_end => {},
                 else => return error.InvalidJson,
             }
+        }
+
+        pub fn defaultTreeView(allocator: std.mem.Allocator, pool: *Node.Pool) !TreeView {
+            const root = try tree.fromValue(allocator, pool, &default_value);
+            return try TreeView.init(allocator, pool, root);
         }
     };
 }
