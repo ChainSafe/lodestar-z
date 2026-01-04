@@ -11,8 +11,9 @@ const type_root = @import("../type/root.zig");
 const chunkDepth = type_root.chunkDepth;
 
 const tree_view_root = @import("root.zig");
-const BaseTreeView = tree_view_root.BaseTreeView;
 const CompositeChunks = @import("chunks.zig").CompositeChunks;
+const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
+const CloneOpts = @import("utils/type.zig").CloneOpts;
 
 /// A specialized tree view for SSZ vector types with composite element types.
 /// Each element occupies its own subtree.
@@ -24,13 +25,16 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
         if (!@hasDecl(ST, "Element") or isBasicType(ST.Element)) {
             @compileError("ArrayCompositeTreeView can only be used with Vector of composite element types");
         }
+
+        assertTreeViewType(ST.Element.TreeView);
     }
 
-    return struct {
-        base_view: BaseTreeView,
+    const TreeView = struct {
+        allocator: Allocator,
+        chunks: Chunks,
 
         pub const SszType = ST;
-        pub const Element = ST.Element.TreeView;
+        pub const Element = *ST.Element.TreeView;
         pub const length = ST.length;
 
         const Self = @This();
@@ -39,35 +43,47 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
         const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, ST);
         const Chunks = CompositeChunks(ST, chunk_depth);
 
-        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
-            return .{
-                .base_view = try BaseTreeView.init(allocator, pool, root),
-            };
+        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
+            const ptr = try allocator.create(Self);
+            try Chunks.init(&ptr.chunks, allocator, pool, root);
+            ptr.allocator = allocator;
+            return ptr;
         }
 
-        pub fn clone(self: *Self, opts: BaseTreeView.CloneOpts) !Self {
-            return Self{ .base_view = try self.base_view.clone(opts) };
+        pub fn clone(self: *Self, opts: CloneOpts) !*Self {
+            const ptr = try self.allocator.create(Self);
+            errdefer self.allocator.destroy(ptr);
+
+            try Chunks.clone(&self.chunks, opts, &ptr.chunks);
+            ptr.allocator = self.allocator;
+            return ptr;
         }
 
         pub fn deinit(self: *Self) void {
-            self.base_view.deinit();
+            self.chunks.deinit();
+            self.allocator.destroy(self);
         }
 
         pub fn commit(self: *Self) !void {
-            try self.base_view.commit();
+            try self.chunks.commit();
         }
 
         pub fn clearCache(self: *Self) void {
-            self.base_view.clearCache();
+            self.chunks.clearCache();
         }
 
         pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
-            try self.base_view.hashTreeRoot(out);
+            try self.commit();
+            out.* = self.chunks.root.getRoot(self.chunks.pool).*;
+        }
+
+        pub fn getRoot(self: *const Self) Node.Id {
+            return self.chunks.root;
         }
 
         pub fn get(self: *Self, index: usize) !Element {
             if (index >= length) return error.IndexOutOfBounds;
-            return try Chunks.get(&self.base_view, index);
+            return self.chunks.get(index);
         }
 
         pub fn getReadonly(self: *Self, index: usize) !Element {
@@ -79,7 +95,7 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
 
         pub fn set(self: *Self, index: usize, value: Element) !void {
             if (index >= length) return error.IndexOutOfBounds;
-            try Chunks.set(&self.base_view, index, value);
+            try self.chunks.set(index, value);
         }
 
         pub fn getAllReadonly(self: *Self, allocator: Allocator) ![]Element {
@@ -94,9 +110,9 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
             try self.commit();
             if (comptime isFixedType(ST)) {
-                return try ST.tree.serializeIntoBytes(self.base_view.data.root, self.base_view.pool, out);
+                return try ST.tree.serializeIntoBytes(self.chunks.root, self.chunks.pool, out);
             } else {
-                return try ST.tree.serializeIntoBytes(self.base_view.allocator, self.base_view.data.root, self.base_view.pool, out);
+                return try ST.tree.serializeIntoBytes(self.allocator, self.chunks.root, self.chunks.pool, out);
             }
         }
 
@@ -104,10 +120,13 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
         pub fn serializedSize(self: *Self) !usize {
             try self.commit();
             if (comptime isFixedType(ST)) {
-                return ST.tree.serializedSize(self.base_view.data.root, self.base_view.pool);
+                return ST.tree.serializedSize(self.chunks.root, self.chunks.pool);
             } else {
-                return try ST.tree.serializedSize(self.base_view.allocator, self.base_view.data.root, self.base_view.pool);
+                return try ST.tree.serializedSize(self.allocator, self.chunks.root, self.chunks.pool);
             }
         }
     };
+
+    assertTreeViewType(TreeView);
+    return TreeView;
 }

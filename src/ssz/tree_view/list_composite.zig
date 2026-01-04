@@ -11,8 +11,9 @@ const type_root = @import("../type/root.zig");
 const chunkDepth = type_root.chunkDepth;
 
 const tree_view_root = @import("root.zig");
-const BaseTreeView = tree_view_root.BaseTreeView;
 const CompositeChunks = @import("chunks.zig").CompositeChunks;
+const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
+const CloneOpts = @import("utils/type.zig").CloneOpts;
 
 /// A specialized tree view for SSZ list types with composite element types.
 /// Each element occupies its own subtree.
@@ -24,13 +25,17 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         if (!@hasDecl(ST, "Element") or isBasicType(ST.Element)) {
             @compileError("ListCompositeTreeView can only be used with List of composite element types");
         }
+        assertTreeViewType(ST.Element.TreeView);
     }
 
-    return struct {
-        base_view: BaseTreeView,
+    const TreeView = struct {
+        allocator: Allocator,
+        chunks: Chunks,
+        _orig_len: usize,
+        _len: usize,
 
         pub const SszType = ST;
-        pub const Element = ST.Element.TreeView;
+        pub const Element = *ST.Element.TreeView;
 
         const Self = @This();
 
@@ -38,43 +43,58 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, ST);
         const Chunks = CompositeChunks(ST, chunk_depth);
 
-        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
-            return Self{
-                .base_view = try BaseTreeView.init(allocator, pool, root),
-            };
+        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
+            const ptr = try allocator.create(Self);
+            try Chunks.init(&ptr.chunks, allocator, pool, root);
+            ptr.allocator = allocator;
+            ptr._orig_len = try ptr.getLength();
+            ptr._len = ptr._orig_len;
+            return ptr;
         }
 
-        pub fn clone(self: *Self, opts: BaseTreeView.CloneOpts) !Self {
-            return Self{ .base_view = try self.base_view.clone(opts) };
+        pub fn clone(self: *Self, opts: CloneOpts) !*Self {
+            const ptr = try self.allocator.create(Self);
+            errdefer self.allocator.destroy(ptr);
+
+            try self.chunks.clone(opts, &ptr.chunks);
+            ptr.allocator = self.allocator;
+            ptr._orig_len = self._orig_len;
+            ptr._len = self._len;
+            return ptr;
         }
 
         pub fn deinit(self: *Self) void {
-            self.base_view.deinit();
+            self.chunks.deinit();
+            self.allocator.destroy(self);
         }
 
         pub fn commit(self: *Self) !void {
-            try self.base_view.commit();
+            try self.updateListLength();
+            try self.chunks.commit();
+            self._orig_len = self._len;
         }
 
         pub fn clearCache(self: *Self) void {
-            self.base_view.clearCache();
+            self.chunks.clearCache();
         }
 
         pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
             try self.commit();
-            out.* = self.base_view.data.root.getRoot(self.base_view.pool).*;
+            out.* = self.chunks.root.getRoot(self.chunks.pool).*;
         }
 
-        pub fn length(self: *Self) !usize {
-            const length_node = try self.base_view.getChildNode(@enumFromInt(3));
-            const length_chunk = length_node.getRoot(self.base_view.pool);
-            return std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
+        pub fn getRoot(self: *const Self) Node.Id {
+            return self.chunks.root;
+        }
+
+        pub fn length(self: *const Self) !usize {
+            return self._len;
         }
 
         pub fn get(self: *Self, index: usize) !Element {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
-            return try Chunks.get(&self.base_view, index);
+            return self.chunks.get(index);
         }
 
         pub fn getReadonly(self: *Self, index: usize) !Element {
@@ -87,7 +107,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         pub fn set(self: *Self, index: usize, value: Element) !void {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
-            try Chunks.set(&self.base_view, index, value);
+            try self.chunks.set(index, value);
         }
 
         pub fn getAllReadonly(self: *Self, allocator: Allocator) ![]Element {
@@ -108,18 +128,18 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                 return error.LengthOverLimit;
             }
 
-            try self.updateListLength(list_length + 1);
+            self._len += 1;
             try self.set(list_length, value);
         }
 
         /// Return a new view containing all elements up to and including `index`.
         /// The caller **must** call `deinit()` on the returned view to avoid memory leaks.
-        pub fn sliceTo(self: *Self, index: usize) !Self {
+        pub fn sliceTo(self: *Self, index: usize) !*Self {
             try self.commit();
 
             const list_length = try self.length();
             if (list_length == 0 or index >= list_length - 1) {
-                return try Self.init(self.base_view.allocator, self.base_view.pool, self.base_view.data.root);
+                return try Self.init(self.allocator, self.chunks.pool, self.chunks.root);
             }
 
             const new_length = index + 1;
@@ -127,75 +147,85 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                 return error.LengthOverLimit;
             }
 
-            var chunk_root: ?Node.Id = try Node.Id.truncateAfterIndex(self.base_view.data.root, self.base_view.pool, chunk_depth, index);
-            defer if (chunk_root) |id| self.base_view.pool.unref(id);
+            var chunk_root: ?Node.Id = try Node.Id.truncateAfterIndex(self.chunks.root, self.chunks.pool, chunk_depth, index);
+            defer if (chunk_root) |id| self.chunks.pool.unref(id);
 
-            var length_node: ?Node.Id = try self.base_view.pool.createLeafFromUint(@intCast(new_length));
-            defer if (length_node) |id| self.base_view.pool.unref(id);
-            const root_with_length = try Node.Id.setNode(chunk_root.?, self.base_view.pool, @enumFromInt(3), length_node.?);
-            errdefer self.base_view.pool.unref(root_with_length);
+            var length_node: ?Node.Id = try self.chunks.pool.createLeafFromUint(@intCast(new_length));
+            defer if (length_node) |id| self.chunks.pool.unref(id);
+            const root_with_length = try Node.Id.setNode(chunk_root.?, self.chunks.pool, @enumFromInt(3), length_node.?);
+            errdefer self.chunks.pool.unref(root_with_length);
             length_node = null;
             chunk_root = null;
 
-            return try Self.init(self.base_view.allocator, self.base_view.pool, root_with_length);
+            return try Self.init(self.allocator, self.chunks.pool, root_with_length);
         }
 
         /// Return a new view containing all elements from `index` to the end.
         /// The returned view must be deinitialized by the caller using `deinit()` to avoid memory leaks.
-        pub fn sliceFrom(self: *Self, index: usize) !Self {
+        pub fn sliceFrom(self: *Self, index: usize) !*Self {
             try self.commit();
 
             const list_length = try self.length();
             if (index == 0) {
-                return try Self.init(self.base_view.allocator, self.base_view.pool, self.base_view.data.root);
+                return try Self.init(self.allocator, self.chunks.pool, self.chunks.root);
             }
 
             const target_length = if (index >= list_length) 0 else list_length - index;
 
             var chunk_root: ?Node.Id = null;
-            defer if (chunk_root) |id| self.base_view.pool.unref(id);
+            defer if (chunk_root) |id| self.chunks.pool.unref(id);
 
             if (target_length == 0) {
                 chunk_root = @enumFromInt(base_chunk_depth);
             } else {
-                const nodes = try self.base_view.allocator.alloc(Node.Id, target_length);
-                defer self.base_view.allocator.free(nodes);
-                try self.base_view.data.root.getNodesAtDepth(self.base_view.pool, chunk_depth, index, nodes);
+                const nodes = try self.allocator.alloc(Node.Id, target_length);
+                defer self.allocator.free(nodes);
+                try self.chunks.root.getNodesAtDepth(self.chunks.pool, chunk_depth, index, nodes);
 
-                chunk_root = try Node.fillWithContents(self.base_view.pool, nodes, base_chunk_depth);
+                chunk_root = try Node.fillWithContents(self.chunks.pool, nodes, base_chunk_depth);
             }
 
-            var length_node: ?Node.Id = try self.base_view.pool.createLeafFromUint(@intCast(target_length));
-            defer if (length_node) |id| self.base_view.pool.unref(id);
+            var length_node: ?Node.Id = try self.chunks.pool.createLeafFromUint(@intCast(target_length));
+            defer if (length_node) |id| self.chunks.pool.unref(id);
 
-            const new_root = try self.base_view.pool.createBranch(chunk_root.?, length_node.?);
-            errdefer self.base_view.pool.unref(new_root);
+            const new_root = try self.chunks.pool.createBranch(chunk_root.?, length_node.?);
+            errdefer self.chunks.pool.unref(new_root);
             length_node = null;
             chunk_root = null;
 
-            return try Self.init(self.base_view.allocator, self.base_view.pool, new_root);
-        }
-
-        fn updateListLength(self: *Self, new_length: usize) !void {
-            if (new_length > ST.limit) {
-                return error.LengthOverLimit;
-            }
-            const length_node = try self.base_view.pool.createLeafFromUint(@intCast(new_length));
-            errdefer self.base_view.pool.unref(length_node);
-            try self.base_view.setChildNode(@enumFromInt(3), length_node);
+            return try Self.init(self.allocator, self.chunks.pool, new_root);
         }
 
         /// Serialize the tree view into a provided buffer.
         /// Returns the number of bytes written.
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
             try self.commit();
-            return try ST.tree.serializeIntoBytes(self.base_view.allocator, self.base_view.data.root, self.base_view.pool, out);
+            return try ST.tree.serializeIntoBytes(self.allocator, self.chunks.root, self.chunks.pool, out);
         }
 
         /// Get the serialized size of this tree view.
         pub fn serializedSize(self: *Self) !usize {
             try self.commit();
-            return try ST.tree.serializedSize(self.base_view.allocator, self.base_view.data.root, self.base_view.pool);
+            return try ST.tree.serializedSize(self.allocator, self.chunks.root, self.chunks.pool);
+        }
+
+        fn getLength(self: *Self) !usize {
+            return try self.chunks.getLength();
+        }
+
+        fn updateListLength(self: *Self) !void {
+            if (self._len == self._orig_len) {
+                return;
+            }
+
+            if (self._len > ST.limit) {
+                return error.LengthOverLimit;
+            }
+
+            try self.chunks.setLength(self._len);
         }
     };
+
+    assertTreeViewType(TreeView);
+    return TreeView;
 }
