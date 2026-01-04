@@ -68,15 +68,23 @@ const beacon_state = ssz.VariableContainerType(struct {
 
 // Using merkle trees
 test TreeView {
+    const ssz = @import("ssz");
     const Node = @import("persistent_merkle_tree").Node;
     var pool = try Node.Pool.init(std.testing.allocator, 100_000);
     defer pool.deinit();
-    const root_node = try checkpoint.tree.fromValue(&pool, .{
+    const root_node = try checkpoint.tree.fromValue(std.testing.allocator, &pool, .{
         .epoch = 42,
         .root = [_]u8{0} ** 32,
     });
 
-    var view = try checkpoint.TreeView.init(std.testing.allocator, &pool, root_node);
+    // Create a ViewStore to manage view state during a transaction
+    var store = ssz.ViewStore.init(std.testing.allocator, &pool);
+    defer store.deinit();
+
+    // Initialize TreeView with the ViewStore
+    var view = try checkpoint.TreeView.init(&store, root_node);
+    defer view.deinit();
+
     try std.testing.expectEqual(
         u64,
         42,
@@ -84,14 +92,14 @@ test TreeView {
         // returns
         //     if (comptime isBasicType(field.type)) field.type.Value
         //     else TreeView(field.type)
-        try view.getField("epoch"),
+        try view.get("epoch"),
     );
 
     // set field by field name
-    try view.setField("epoch", 100);
-    
+    try view.set("epoch", 100);
+
     // commit changes, updating the stored root node
-    view.commit();
+    try view.commit();
 
     // htr now works as expected
     var htr_from_value: [32]u8 = undefined;
@@ -101,13 +109,14 @@ test TreeView {
     }, &htr_from_value);
 
     var htr_from_tree: [32]u8 = undefined;
-    view.hashTreeRoot(&htr_from_tree);
-    
+    try view.hashTreeRoot(&htr_from_tree);
+
     try std.testing.expectEqualSlices(
         u8,
         &htr_from_value,
         &htr_from_tree,
     );
+}
 }
 
 

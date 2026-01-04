@@ -1,21 +1,22 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+
 const hashing = @import("hashing");
 const Depth = hashing.Depth;
-const Node = @import("persistent_merkle_tree").Node;
-const Gindex = @import("persistent_merkle_tree").Gindex;
+
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
 const isFixedType = @import("../type/type_kind.zig").isFixedType;
 
 const type_root = @import("../type/root.zig");
 const chunkDepth = type_root.chunkDepth;
 
-const tree_view_root = @import("root.zig");
-const BaseTreeView = tree_view_root.BaseTreeView;
+const Node = @import("persistent_merkle_tree").Node;
+
+const ViewStore = @import("view_store.zig").ViewStore;
+const ViewId = @import("view_store.zig").ViewId;
+
 const CompositeChunks = @import("chunks.zig").CompositeChunks;
 
-/// A specialized tree view for SSZ vector types with composite element types.
-/// Each element occupies its own subtree.
 pub fn ArrayCompositeTreeView(comptime ST: type) type {
     comptime {
         if (ST.kind != .vector) {
@@ -27,70 +28,70 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
     }
 
     return struct {
-        base_view: BaseTreeView,
+        allocator: Allocator,
+        pool: *Node.Pool,
+        store: *ViewStore,
+        view_id: ViewId,
 
         pub const SszType = ST;
-        pub const Element = ST.Element.TreeView;
-        pub const length = ST.length;
-
-        const Self = @This();
+        pub const ElementST = ST.Element;
+        pub const length: usize = ST.length;
 
         const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
         const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, ST);
+
         const Chunks = CompositeChunks(ST, chunk_depth);
 
-        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
+        const Self = @This();
+
+        pub const ElementView = Chunks.ElementTreeView;
+
+        pub fn init(store: *ViewStore, root: Node.Id) !Self {
+            const view_id = try store.createView(root);
+            return fromStore(store, view_id);
+        }
+
+        pub fn fromStore(store: *ViewStore, view_id: ViewId) Self {
             return .{
-                .base_view = try BaseTreeView.init(allocator, pool, root),
+                .allocator = store.allocator,
+                .pool = store.pool,
+                .store = store,
+                .view_id = view_id,
             };
         }
 
-        pub fn clone(self: *Self, opts: BaseTreeView.CloneOpts) !Self {
-            return Self{ .base_view = try self.base_view.clone(opts) };
+        pub fn clone(self: *Self, opts: ViewStore.CloneOpts) !Self {
+            const new_id = try self.store.cloneView(self.view_id, opts);
+            return fromStore(self.store, new_id);
         }
 
-        pub fn deinit(self: *Self) void {
-            self.base_view.deinit();
+        pub fn deinit(_: *Self) void {}
+
+        pub fn clearCache(self: *Self) void {
+            self.store.clearCache(self.view_id);
         }
 
         pub fn rootNodeId(self: *const Self) Node.Id {
-            return self.base_view.data.root;
+            return self.store.rootNode(self.view_id);
         }
 
         pub fn commit(self: *Self) !void {
-            try self.base_view.commit();
-        }
-
-        pub fn clearCache(self: *Self) void {
-            self.base_view.clearCache();
+            try self.store.commit(self.view_id);
         }
 
         pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
-            try self.base_view.hashTreeRoot(out);
+            try self.commit();
+            out.* = self.rootNodeId().getRoot(self.pool).*;
         }
 
-        pub fn get(self: *Self, index: usize) !Element {
+        pub fn get(self: *Self, index: usize) !ElementView {
             if (index >= length) return error.IndexOutOfBounds;
-            return try Chunks.get(&self.base_view, index);
+            return try Chunks.get(self.store, self.view_id, index);
         }
 
-        pub fn getReadonly(self: *Self, index: usize) !Element {
-            // TODO: Implement read-only access after other PRs land.
-            _ = self;
-            _ = index;
-            return error.NotImplemented;
-        }
-
-        pub fn set(self: *Self, index: usize, value: Element) !void {
+        pub fn set(self: *Self, index: usize, value: ElementView) !void {
             if (index >= length) return error.IndexOutOfBounds;
-            try Chunks.set(&self.base_view, index, value);
-        }
-
-        pub fn getAllReadonly(self: *Self, allocator: Allocator) ![]Element {
-            // TODO: Implement bulk read-only access after other PRs land.
-            _ = self;
-            _ = allocator;
-            return error.NotImplemented;
+            try Chunks.set(self.store, self.view_id, index, value);
         }
 
         /// Serialize the tree view into a provided buffer.
@@ -98,9 +99,9 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
             try self.commit();
             if (comptime isFixedType(ST)) {
-                return try ST.tree.serializeIntoBytes(self.base_view.data.root, self.base_view.pool, out);
+                return try ST.tree.serializeIntoBytes(self.store.rootNode(self.view_id), self.pool, out);
             } else {
-                return try ST.tree.serializeIntoBytes(self.base_view.allocator, self.base_view.data.root, self.base_view.pool, out);
+                return try ST.tree.serializeIntoBytes(self.allocator, self.store.rootNode(self.view_id), self.pool, out);
             }
         }
 
@@ -108,9 +109,9 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
         pub fn serializedSize(self: *Self) !usize {
             try self.commit();
             if (comptime isFixedType(ST)) {
-                return ST.tree.serializedSize(self.base_view.data.root, self.base_view.pool);
+                return ST.tree.serializedSize(self.store.rootNode(self.view_id), self.pool);
             } else {
-                return try ST.tree.serializedSize(self.base_view.allocator, self.base_view.data.root, self.base_view.pool);
+                return try ST.tree.serializedSize(self.allocator, self.store.rootNode(self.view_id), self.pool);
             }
         }
     };

@@ -43,18 +43,11 @@ pub const HasherData = hasher.HasherData;
 const tree_view = @import("tree_view/root.zig");
 pub const ViewStore = tree_view.ViewStore;
 pub const ViewId = tree_view.ViewId;
-pub const TreeViewData = tree_view.TreeViewData;
-pub const BaseTreeView = tree_view.BaseTreeView;
 pub const ContainerTreeView = tree_view.ContainerTreeView;
 pub const ArrayBasicTreeView = tree_view.ArrayBasicTreeView;
 pub const ArrayCompositeTreeView = tree_view.ArrayCompositeTreeView;
 pub const ListBasicTreeView = tree_view.ListBasicTreeView;
 pub const ListCompositeTreeView = tree_view.ListCompositeTreeView;
-pub const ContainerTreeViewViewStorePOC = tree_view.ContainerTreeViewViewStorePOC;
-pub const ArrayBasicTreeViewViewStorePOC = tree_view.ArrayBasicTreeViewViewStorePOC;
-pub const ArrayCompositeTreeViewViewStorePOC = tree_view.ArrayCompositeTreeViewViewStorePOC;
-pub const ListBasicTreeViewViewStorePOC = tree_view.ListBasicTreeViewViewStorePOC;
-pub const ListCompositeTreeViewViewStorePOC = tree_view.ListCompositeTreeViewViewStorePOC;
 
 test {
     testing.refAllDecls(@This());

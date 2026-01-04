@@ -9,6 +9,9 @@ test "BitVectorTreeView get/set roundtrip" {
     var pool = try Node.Pool.init(allocator, 2048);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     var expected: Bits.Type = Bits.default_value;
     try expected.set(1, true);
     try expected.set(7, true);
@@ -16,7 +19,7 @@ test "BitVectorTreeView get/set roundtrip" {
     try expected.set(Bits.length - 1, true);
 
     const root = try Bits.tree.fromValue(&pool, &expected);
-    var view = try Bits.TreeView.init(allocator, &pool, root);
+    var view = try Bits.TreeView.init(&store, root);
     defer view.deinit();
 
     for (0..Bits.length) |i| {
@@ -38,12 +41,15 @@ test "BitVectorTreeView get/set roundtrip" {
     try std.testing.expectEqualSlices(u8, &expected_root, &view_root);
 }
 
-test "BitVectorTreeView clone(true) does not transfer cache" {
+test "BitVectorTreeView clone(false) keeps uncommitted changes" {
     const allocator = std.testing.allocator;
     const Bits = ssz.BitVectorType(44);
 
     var pool = try Node.Pool.init(allocator, 2048);
     defer pool.deinit();
+
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
 
     var value: Bits.Type = Bits.default_value;
     try value.set(1, true);
@@ -51,43 +57,17 @@ test "BitVectorTreeView clone(true) does not transfer cache" {
     try value.set(31, true);
 
     const root = try Bits.tree.fromValue(&pool, &value);
-    var view = try Bits.TreeView.init(allocator, &pool, root);
+    var view = try Bits.TreeView.init(&store, root);
     defer view.deinit();
 
-    _ = try view.get(0);
-    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
+    try view.set(2, true);
+    try std.testing.expect(try view.get(2));
 
     var cloned_no_cache = try view.clone(.{ .transfer_cache = false });
     defer cloned_no_cache.deinit();
 
-    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
-    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.base_view.data.children_nodes.count());
-}
-
-test "BitVectorTreeView clone(false) transfers cache and clears source" {
-    const allocator = std.testing.allocator;
-    const Bits = ssz.BitVectorType(44);
-
-    var pool = try Node.Pool.init(allocator, 2048);
-    defer pool.deinit();
-
-    var value: Bits.Type = Bits.default_value;
-    try value.set(1, true);
-    try value.set(7, true);
-    try value.set(31, true);
-
-    const root = try Bits.tree.fromValue(&pool, &value);
-    var view = try Bits.TreeView.init(allocator, &pool, root);
-    defer view.deinit();
-
-    _ = try view.get(0);
-    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
-
-    var cloned = try view.clone(.{});
-    defer cloned.deinit();
-
-    try std.testing.expectEqual(@as(usize, 0), view.base_view.data.children_nodes.count());
-    try std.testing.expect(cloned.base_view.data.children_nodes.count() > 0);
+    try std.testing.expect(try view.get(2));
+    try std.testing.expect(!try cloned_no_cache.get(2));
 }
 
 test "BitVectorTreeView clone isolates updates" {
@@ -97,8 +77,11 @@ test "BitVectorTreeView clone isolates updates" {
     var pool = try Node.Pool.init(allocator, 2048);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
-    var v1 = try Bits.TreeView.init(allocator, &pool, root);
+    var v1 = try Bits.TreeView.init(&store, root);
     defer v1.deinit();
 
     var v2 = try v1.clone(.{});
@@ -118,8 +101,11 @@ test "BitVectorTreeView clone reads committed state" {
     var pool = try Node.Pool.init(allocator, 2048);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
-    var v1 = try Bits.TreeView.init(allocator, &pool, root);
+    var v1 = try Bits.TreeView.init(&store, root);
     defer v1.deinit();
 
     try v1.set(1, true);
@@ -138,8 +124,11 @@ test "BitVectorTreeView clone drops uncommitted changes" {
     var pool = try Node.Pool.init(allocator, 2048);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
-    var v = try Bits.TreeView.init(allocator, &pool, root);
+    var v = try Bits.TreeView.init(&store, root);
     defer v.deinit();
 
     try v.set(2, true);
@@ -159,11 +148,14 @@ test "BitVectorTreeView toBoolArray roundtrip" {
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     const expected_bools = [_]bool{ true, false, true, true, false, true, false, true, true, false, true, true, false, false, true, false };
     const value = try Bits.Type.fromBoolArray(expected_bools);
 
     const root = try Bits.tree.fromValue(&pool, &value);
-    var view = try Bits.TreeView.init(allocator, &pool, root);
+    var view = try Bits.TreeView.init(&store, root);
     defer view.deinit();
 
     const actual_bools = try view.toBoolArray(allocator);
@@ -178,11 +170,14 @@ test "BitVectorTreeView toBoolArrayInto roundtrip" {
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     const expected_bools = [_]bool{ true, false, true, true, false, true, false, true, true, false, true, true };
     const value = try Bits.Type.fromBoolArray(expected_bools);
 
     const root = try Bits.tree.fromValue(&pool, &value);
-    var view = try Bits.TreeView.init(allocator, &pool, root);
+    var view = try Bits.TreeView.init(&store, root);
     defer view.deinit();
 
     var out: [Bits.length]bool = undefined;
@@ -197,11 +192,14 @@ test "BitVectorTreeView set reflects in toBoolArray" {
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     const initial_bools = [_]bool{ false, false, false, false, false, false, false, false };
     const value = try Bits.Type.fromBoolArray(initial_bools);
 
     const root = try Bits.tree.fromValue(&pool, &value);
-    var view = try Bits.TreeView.init(allocator, &pool, root);
+    var view = try Bits.TreeView.init(&store, root);
     defer view.deinit();
 
     try view.set(0, true);
@@ -222,6 +220,9 @@ test "BitVectorTreeView multi-chunk" {
     var pool = try Node.Pool.init(allocator, 4096);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     var value: Bits.Type = Bits.default_value;
     try value.set(0, true);
     try value.set(255, true); // last bit of first chunk
@@ -229,7 +230,7 @@ test "BitVectorTreeView multi-chunk" {
     try value.set(299, true); // last bit
 
     const root = try Bits.tree.fromValue(&pool, &value);
-    var view = try Bits.TreeView.init(allocator, &pool, root);
+    var view = try Bits.TreeView.init(&store, root);
     defer view.deinit();
 
     try std.testing.expect(try view.get(0));
@@ -270,6 +271,9 @@ test "BitVectorTreeView remainder edge cases (1 and 255)" {
         var pool = try Node.Pool.init(allocator, 4096);
         defer pool.deinit();
 
+        var store = ssz.ViewStore.init(allocator, &pool);
+        defer store.deinit();
+
         var value: Bits.Type = Bits.default_value;
         try value.set(0, true);
         try value.set(255, true);
@@ -277,7 +281,7 @@ test "BitVectorTreeView remainder edge cases (1 and 255)" {
         try value.set(len - 1, true);
 
         const root = try Bits.tree.fromValue(&pool, &value);
-        var view = try Bits.TreeView.init(allocator, &pool, root);
+        var view = try Bits.TreeView.init(&store, root);
         defer view.deinit();
 
         const bools = try view.toBoolArray(allocator);
@@ -303,6 +307,9 @@ test "BitVectorTreeView full-chunk edge cases (remainder=0)" {
         var pool = try Node.Pool.init(allocator, 4096);
         defer pool.deinit();
 
+        var store = ssz.ViewStore.init(allocator, &pool);
+        defer store.deinit();
+
         var value: Bits.Type = Bits.default_value;
         try value.set(0, true);
         try value.set(255, true);
@@ -312,7 +319,7 @@ test "BitVectorTreeView full-chunk edge cases (remainder=0)" {
         }
 
         const root = try Bits.tree.fromValue(&pool, &value);
-        var view = try Bits.TreeView.init(allocator, &pool, root);
+        var view = try Bits.TreeView.init(&store, root);
         defer view.deinit();
 
         const bools = try view.toBoolArray(allocator);

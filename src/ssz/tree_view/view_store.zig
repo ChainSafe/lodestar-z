@@ -43,6 +43,12 @@ pub const ViewStore = struct {
 
     views: std.ArrayListUnmanaged(ViewState) = .{},
 
+    pub const CloneOpts = struct {
+        /// When true, transfer safe cached nodes into the clone and clear caches on the source.
+        /// When false, the clone starts with empty caches and the source is untouched.
+        transfer_cache: bool = true,
+    };
+
     pub fn init(allocator: Allocator, pool: *Node.Pool) ViewStore {
         return .{
             .allocator = allocator,
@@ -70,6 +76,47 @@ pub const ViewStore = struct {
         return @intCast(self.views.items.len - 1);
     }
 
+    /// Create a new view for the same root as `id`.
+    /// If `transfer_cache` is true, safe cached child nodes are moved into the clone and
+    /// the source view caches are cleared (dropping uncommitted changes).
+    pub fn cloneView(self: *ViewStore, id: ViewId, opts: CloneOpts) !ViewId {
+        var state = self.getState(id);
+        const root = state.root;
+        const new_id = try self.createView(root);
+        if (!opts.transfer_cache) return new_id;
+
+        state = self.getState(id);
+        var new_state = self.getState(new_id);
+
+        var safe_node_keys = std.ArrayList(Gindex).init(self.allocator);
+        defer safe_node_keys.deinit();
+
+        var nodes_it = state.children_nodes.iterator();
+        while (nodes_it.next()) |entry| {
+            const gindex = entry.key_ptr.*;
+            if (!state.changed.contains(gindex)) {
+                try safe_node_keys.append(gindex);
+            }
+        }
+
+        try new_state.children_nodes.ensureUnusedCapacity(
+            self.allocator,
+            @intCast(safe_node_keys.items.len),
+        );
+
+        for (safe_node_keys.items) |gindex| {
+            const removed = state.children_nodes.fetchRemove(gindex) orelse continue;
+            new_state.children_nodes.putAssumeCapacity(gindex, removed.value);
+        }
+
+        // Drop child view mappings to avoid sharing mutable subviews.
+        state.children_views.clearRetainingCapacity();
+
+        // Clear remaining caches and drop uncommitted changes from the source.
+        self.clearCache(id);
+        return new_id;
+    }
+
     fn destroyLastView(self: *ViewStore, id: ViewId) void {
         const idx: usize = @intCast(id);
         std.debug.assert(idx + 1 == self.views.items.len);
@@ -77,6 +124,9 @@ pub const ViewStore = struct {
         state.deinit(self.allocator, self.pool);
     }
 
+    /// Returns a pointer into `views.items`.
+    /// Callers must not hold this pointer across any operation that can grow/shrink `views`
+    /// (e.g. createView/append/ensureTotalCapacity), because reallocation will invalidate it.
     fn getState(self: *ViewStore, id: ViewId) *ViewState {
         const idx: usize = @intCast(id);
         std.debug.assert(idx < self.views.items.len);

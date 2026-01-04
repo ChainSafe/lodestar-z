@@ -10,12 +10,9 @@ const OffsetIterator = @import("offsets.zig").OffsetIterator;
 const merkleize = @import("hashing").merkleize;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
-const build_options = @import("build_options");
 const tree_view = @import("../tree_view/root.zig");
 const ArrayBasicTreeView = tree_view.ArrayBasicTreeView;
 const ArrayCompositeTreeView = tree_view.ArrayCompositeTreeView;
-const ArrayBasicTreeViewViewStorePOC = tree_view.ArrayBasicTreeViewViewStorePOC;
-const ArrayCompositeTreeViewViewStorePOC = tree_view.ArrayCompositeTreeViewViewStorePOC;
 
 pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
     comptime {
@@ -31,10 +28,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
         pub const Element: type = ST;
         pub const length: usize = _length;
         pub const Type: type = [length]Element.Type;
-        pub const TreeView: type = if (build_options.container_viewstore_poc)
-            (if (isBasicType(Element)) ArrayBasicTreeViewViewStorePOC(@This()) else ArrayCompositeTreeViewViewStorePOC(@This()))
-        else
-            (if (isBasicType(Element)) ArrayBasicTreeView(@This()) else ArrayCompositeTreeView(@This()));
+        pub const TreeView: type = if (isBasicType(Element)) ArrayBasicTreeView(@This()) else ArrayCompositeTreeView(@This());
         pub const fixed_size: usize = Element.fixed_size * length;
         pub const chunk_count: usize = if (isBasicType(Element)) std.math.divCeil(usize, fixed_size, 32) catch unreachable else length;
         pub const chunk_depth: u8 = maxChunksToDepth(chunk_count);

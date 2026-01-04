@@ -9,12 +9,9 @@ const merkleize = @import("hashing").merkleize;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
-const build_options = @import("build_options");
 const tree_view = @import("../tree_view/root.zig");
 const ListBasicTreeView = tree_view.ListBasicTreeView;
 const ListCompositeTreeView = tree_view.ListCompositeTreeView;
-const ListBasicTreeViewViewStorePOC = tree_view.ListBasicTreeViewViewStorePOC;
-const ListCompositeTreeViewViewStorePOC = tree_view.ListCompositeTreeViewViewStorePOC;
 
 pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
     comptime {
@@ -30,10 +27,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
         pub const Element: type = ST;
         pub const limit: usize = _limit;
         pub const Type: type = std.ArrayListUnmanaged(Element.Type);
-        pub const TreeView: type = if (build_options.container_viewstore_poc)
-            (if (isBasicType(Element)) ListBasicTreeViewViewStorePOC(@This()) else ListCompositeTreeViewViewStorePOC(@This()))
-        else
-            (if (isBasicType(Element)) ListBasicTreeView(@This()) else ListCompositeTreeView(@This()));
+        pub const TreeView: type = if (isBasicType(Element)) ListBasicTreeView(@This()) else ListCompositeTreeView(@This());
         pub const min_size: usize = 0;
         pub const max_size: usize = Element.fixed_size * limit;
         pub const max_chunk_count: usize = if (isBasicType(Element)) std.math.divCeil(usize, max_size, 32) catch unreachable else limit;
@@ -416,10 +410,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
         pub const Element: type = ST;
         pub const limit: usize = _limit;
         pub const Type: type = std.ArrayListUnmanaged(Element.Type);
-        pub const TreeView: type = if (build_options.container_viewstore_poc)
-            (if (isBasicType(Element)) ListBasicTreeViewViewStorePOC(@This()) else ListCompositeTreeViewViewStorePOC(@This()))
-        else
-            (if (isBasicType(Element)) ListBasicTreeView(@This()) else ListCompositeTreeView(@This()));
+        pub const TreeView: type = if (isBasicType(Element)) ListBasicTreeView(@This()) else ListCompositeTreeView(@This());
         pub const min_size: usize = 0;
         pub const max_size: usize = Element.max_size * limit + 4 * limit;
         pub const max_chunk_count: usize = limit;
