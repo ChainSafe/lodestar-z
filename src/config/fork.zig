@@ -1,7 +1,10 @@
 const std = @import("std");
 const types = @import("consensus_types");
 const Epoch = types.primitive.Epoch.Type;
+const Slot = types.primitive.Slot.Type;
 const Version = types.primitive.Version.Type;
+const ChainConfig = @import("./chain/chain_config.zig").ChainConfig;
+const preset = @import("preset").preset;
 
 pub const TOTAL_FORKS = 7;
 
@@ -95,6 +98,18 @@ pub const ForkInfo = struct {
     prev_version: Version,
     prev_fork_seq: ForkSeq,
 };
+
+/// Determine ForkSeq from slot using chain config
+pub fn forkSeqAtSlot(chain_config: ChainConfig, slot: Slot) ForkSeq {
+    const epoch = slot / preset.SLOTS_PER_EPOCH;
+    if (epoch >= chain_config.FULU_FORK_EPOCH) return .fulu;
+    if (epoch >= chain_config.ELECTRA_FORK_EPOCH) return .electra;
+    if (epoch >= chain_config.DENEB_FORK_EPOCH) return .deneb;
+    if (epoch >= chain_config.CAPELLA_FORK_EPOCH) return .capella;
+    if (epoch >= chain_config.BELLATRIX_FORK_EPOCH) return .bellatrix;
+    if (epoch >= chain_config.ALTAIR_FORK_EPOCH) return .altair;
+    return .phase0;
+}
 
 test "fork - forkName" {
     try std.testing.expectEqualSlices(u8, "phase0", ForkSeq.phase0.forkName());
