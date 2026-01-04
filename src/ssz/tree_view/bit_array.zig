@@ -6,7 +6,8 @@ const Depth = hashing.Depth;
 
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
-const ChildNodes = @import("./utils/child_nodes.zig").ChildNodes;
+const ChildNodes = @import("utils/child_nodes.zig").ChildNodes;
+const CloneOpts = @import("utils/type.zig").CloneOpts;
 
 /// Provides common bit array operations for both BitVectorTreeView and BitListTreeView.
 pub fn BitArray(comptime chunk_depth: Depth) type {
@@ -34,6 +35,39 @@ pub fn BitArray(comptime chunk_depth: Depth) type {
                 .children_nodes = .empty,
                 .changed = .empty,
             };
+        }
+
+        pub fn clone(self: *Self, opts: CloneOpts, out: *Self) !void {
+            if (!opts.transfer_cache) {
+                out.* = .{
+                    .allocator = self.allocator,
+                    .pool = self.pool,
+                    .root = self.root,
+                    .children_nodes = .empty,
+                    .changed = .empty,
+                };
+                return;
+            }
+
+            out.* = .{
+                .allocator = self.allocator,
+                .pool = self.pool,
+                .root = self.root,
+                .children_nodes = self.children_nodes,
+                .changed = .empty,
+            };
+
+            var nodes_it = out.children_nodes.iterator();
+            while (nodes_it.next()) |entry| {
+                const gindex = entry.key_ptr.*;
+                if (self.changed.contains(gindex)) {
+                    _ = out.children_nodes.remove(gindex);
+                }
+            }
+
+            // clear self's caches
+            self.children_nodes = .empty;
+            self.changed.clearRetainingCapacity();
         }
 
         pub fn deinit(self: *Self) void {

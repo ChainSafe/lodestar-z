@@ -212,6 +212,110 @@ test "TreeView container nested types set/get/commit" {
     try std.testing.expectEqualSlices(u8, &[_]u8{0x5A}, roundtrip.comp_list.items[0].payload.items);
 }
 
+test "TreeView container clone isolates updates" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const Uint64 = ssz.UintType(64);
+    const C = ssz.FixedContainerType(struct {
+        n: Uint64,
+    });
+
+    const value: C.Type = .{ .n = 1 };
+    const root = try C.tree.fromValue(&pool, &value);
+
+    var v1 = try C.TreeView.init(allocator, &pool, root);
+    defer v1.deinit();
+
+    var v2 = try v1.clone(.{});
+    defer v2.deinit();
+
+    try v2.set("n", @as(u64, 99));
+    try v2.commit();
+
+    try std.testing.expectEqual(@as(u64, 1), try v1.get("n"));
+    try std.testing.expectEqual(@as(u64, 99), try v2.get("n"));
+}
+
+test "TreeView container clone drops uncommitted changes" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const Uint64 = ssz.UintType(64);
+    const C = ssz.FixedContainerType(struct {
+        n: Uint64,
+    });
+
+    const value: C.Type = .{ .n = 1 };
+    const root = try C.tree.fromValue(&pool, &value);
+
+    var v = try C.TreeView.init(allocator, &pool, root);
+    defer v.deinit();
+
+    try v.set("n", @as(u64, 7));
+    try std.testing.expectEqual(@as(u64, 7), try v.get("n"));
+
+    var dropped = try v.clone(.{});
+    defer dropped.deinit();
+
+    try std.testing.expectEqual(@as(u64, 1), try v.get("n"));
+    try std.testing.expectEqual(@as(u64, 1), try dropped.get("n"));
+}
+
+test "TreeView container clone(true) does not transfer cache" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const Uint64 = ssz.UintType(64);
+    const C = ssz.FixedContainerType(struct {
+        n: Uint64,
+    });
+
+    const value: C.Type = .{ .n = 1 };
+    const root = try C.tree.fromValue(&pool, &value);
+
+    var v = try C.TreeView.init(allocator, &pool, root);
+    defer v.deinit();
+
+    _ = try v.get("n");
+    try std.testing.expect(v.child_data[0] != null);
+
+    var cloned_no_cache = try v.clone(.{ .transfer_cache = false });
+    defer cloned_no_cache.deinit();
+
+    try std.testing.expect(v.child_data[0] != null);
+    try std.testing.expect(cloned_no_cache.child_data[0] == null);
+}
+
+test "TreeView container clone(false) transfers cache and clears source" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const Uint64 = ssz.UintType(64);
+    const C = ssz.FixedContainerType(struct {
+        n: Uint64,
+    });
+
+    const value: C.Type = .{ .n = 1 };
+    const root = try C.tree.fromValue(&pool, &value);
+
+    var v = try C.TreeView.init(allocator, &pool, root);
+    defer v.deinit();
+
+    _ = try v.get("n");
+    try std.testing.expect(v.child_data[0] != null);
+
+    var cloned = try v.clone(.{});
+    defer cloned.deinit();
+
+    try std.testing.expect(v.child_data[0] == null);
+    try std.testing.expect(cloned.child_data[0] != null);
+}
+
 // Tests ported from TypeScript ssz packages/ssz/test/unit/byType/container/tree.test.ts
 test "ContainerTreeView - serialize (basic fields)" {
     const allocator = std.testing.allocator;

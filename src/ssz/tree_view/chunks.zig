@@ -8,7 +8,8 @@ const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 
 const tree_view_root = @import("root.zig");
-const ChildNodes = @import("./utils/child_nodes.zig").ChildNodes;
+const ChildNodes = @import("utils/child_nodes.zig").ChildNodes;
+const CloneOpts = @import("utils/type.zig").CloneOpts;
 
 /// Shared helpers for basic element types packed into chunks.
 pub fn BasicPackedChunks(
@@ -41,6 +42,40 @@ pub fn BasicPackedChunks(
                 .children_nodes = .empty,
                 .changed = .empty,
             };
+        }
+
+        pub fn clone(self: *Self, opts: CloneOpts, out: *Self) !void {
+            if (!opts.transfer_cache) {
+                out.* = .{
+                    .allocator = self.allocator,
+                    .pool = self.pool,
+                    .root = self.root,
+                    .children_nodes = .empty,
+                    .changed = .empty,
+                };
+
+                return;
+            }
+
+            out.* = .{
+                .allocator = self.allocator,
+                .pool = self.pool,
+                .root = self.root,
+                .children_nodes = self.children_nodes,
+                .changed = .empty,
+            };
+
+            var nodes_it = out.children_nodes.iterator();
+            while (nodes_it.next()) |entry| {
+                const gindex = entry.key_ptr.*;
+                if (self.changed.contains(gindex)) {
+                    _ = out.children_nodes.remove(gindex);
+                }
+            }
+
+            // clear self's caches
+            self.children_nodes = .empty;
+            self.changed.clearRetainingCapacity();
         }
 
         pub fn deinit(self: *Self) void {
@@ -207,6 +242,45 @@ pub fn CompositeChunks(
                 .children_data = .empty,
                 .changed = .empty,
             };
+        }
+
+        pub fn clone(self: *Self, opts: CloneOpts, out: *Self) !void {
+            if (!opts.transfer_cache) {
+                out.* = .{
+                    .allocator = self.allocator,
+                    .pool = self.pool,
+                    .root = self.root,
+                    .children_nodes = .empty,
+                    .children_data = .empty,
+                    .changed = .empty,
+                };
+
+                return;
+            }
+
+            out.* = .{
+                .allocator = self.allocator,
+                .pool = self.pool,
+                .root = self.root,
+                .children_nodes = self.children_nodes,
+                .children_data = self.children_data,
+                .changed = .empty,
+            };
+
+            var data_it = out.children_data.iterator();
+            while (data_it.next()) |entry| {
+                const gindex = entry.key_ptr.*;
+                if (self.changed.contains(gindex)) {
+                    const elem_data = entry.value_ptr.*;
+                    elem_data.deinit();
+                    _ = out.children_data.remove(gindex);
+                }
+            }
+
+            // clear self's caches
+            self.children_nodes = .empty;
+            self.children_data = .empty;
+            self.changed.clearRetainingCapacity();
         }
 
         /// Deinitialize the Data and free all associated resources.

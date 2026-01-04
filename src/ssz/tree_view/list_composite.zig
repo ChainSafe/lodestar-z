@@ -13,6 +13,7 @@ const chunkDepth = type_root.chunkDepth;
 const tree_view_root = @import("root.zig");
 const CompositeChunks = @import("chunks.zig").CompositeChunks;
 const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
+const CloneOpts = @import("utils/type.zig").CloneOpts;
 
 /// A specialized tree view for SSZ list types with composite element types.
 /// Each element occupies its own subtree.
@@ -48,6 +49,17 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             ptr.allocator = allocator;
             ptr._orig_len = try ptr.getLength();
             ptr._len = ptr._orig_len;
+            return ptr;
+        }
+
+        pub fn clone(self: *Self, opts: CloneOpts) !*Self {
+            const ptr = try self.allocator.create(Self);
+            errdefer self.allocator.destroy(ptr);
+
+            try self.chunks.clone(opts, &ptr.chunks);
+            ptr.allocator = self.allocator;
+            ptr._orig_len = self._orig_len;
+            ptr._len = self._len;
             return ptr;
         }
 

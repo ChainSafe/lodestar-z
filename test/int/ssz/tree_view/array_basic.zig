@@ -111,6 +111,125 @@ test "TreeView vector getAllAlloc repeat reflects updates" {
     try std.testing.expectEqualSlices(u32, values[0..], second);
 }
 
+test "TreeView vector clone isolates subsequent updates" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const Uint16 = ssz.UintType(16);
+    const Vec4 = ssz.FixedVectorType(Uint16, 4);
+
+    const value: Vec4.Type = [_]u16{ 0, 0, 0, 0 };
+    const root = try Vec4.tree.fromValue(&pool, &value);
+
+    var v1 = try Vec4.TreeView.init(allocator, &pool, root);
+    defer v1.deinit();
+
+    var v2 = try v1.clone(.{});
+    defer v2.deinit();
+
+    try v2.set(1, @as(u16, 9));
+    try v2.commit();
+
+    try std.testing.expectEqual(@as(u16, 0), try v1.get(1));
+    try std.testing.expectEqual(@as(u16, 9), try v2.get(1));
+}
+
+test "TreeView vector clone reads committed state" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const Uint16 = ssz.UintType(16);
+    const Vec4 = ssz.FixedVectorType(Uint16, 4);
+
+    const value: Vec4.Type = [_]u16{ 0, 0, 0, 0 };
+    const root = try Vec4.tree.fromValue(&pool, &value);
+
+    var v1 = try Vec4.TreeView.init(allocator, &pool, root);
+    defer v1.deinit();
+
+    try v1.set(2, @as(u16, 7));
+    try v1.commit();
+
+    var v2 = try v1.clone(.{});
+    defer v2.deinit();
+
+    try std.testing.expectEqual(@as(u16, 7), try v2.get(2));
+}
+
+test "TreeView vector clone drops uncommitted changes" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const Uint16 = ssz.UintType(16);
+    const Vec4 = ssz.FixedVectorType(Uint16, 4);
+
+    const value: Vec4.Type = [_]u16{ 1, 2, 3, 4 };
+    const root = try Vec4.tree.fromValue(&pool, &value);
+
+    var v = try Vec4.TreeView.init(allocator, &pool, root);
+    defer v.deinit();
+
+    try v.set(0, @as(u16, 9));
+    try std.testing.expectEqual(@as(u16, 9), try v.get(0));
+
+    var dropped = try v.clone(.{});
+    defer dropped.deinit();
+
+    try std.testing.expectEqual(@as(u16, 1), try v.get(0));
+    try std.testing.expectEqual(@as(u16, 1), try dropped.get(0));
+}
+
+test "TreeView vector clone(true) does not transfer cache" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const Uint16 = ssz.UintType(16);
+    const Vec4 = ssz.FixedVectorType(Uint16, 4);
+
+    const value: Vec4.Type = [_]u16{ 1, 2, 3, 4 };
+    const root = try Vec4.tree.fromValue(&pool, &value);
+
+    var v = try Vec4.TreeView.init(allocator, &pool, root);
+    defer v.deinit();
+
+    _ = try v.get(0);
+    try std.testing.expect(v.chunks.children_nodes.count() > 0);
+
+    var cloned_no_cache = try v.clone(.{ .transfer_cache = false });
+    defer cloned_no_cache.deinit();
+
+    try std.testing.expect(v.chunks.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.chunks.children_nodes.count());
+}
+
+test "TreeView vector clone(false) transfers cache and clears source" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const Uint16 = ssz.UintType(16);
+    const Vec4 = ssz.FixedVectorType(Uint16, 4);
+
+    const value: Vec4.Type = [_]u16{ 1, 2, 3, 4 };
+    const root = try Vec4.tree.fromValue(&pool, &value);
+
+    var v = try Vec4.TreeView.init(allocator, &pool, root);
+    defer v.deinit();
+
+    _ = try v.get(0);
+    try std.testing.expect(v.chunks.children_nodes.count() > 0);
+
+    var cloned = try v.clone(.{});
+    defer cloned.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), v.chunks.children_nodes.count());
+    try std.testing.expect(cloned.chunks.children_nodes.count() > 0);
+}
+
 // Tests ported from TypeScript ssz packages/ssz/test/unit/byType/vector/tree.test.ts
 test "ArrayBasicTreeView - serialize (uint64 vector)" {
     const allocator = std.testing.allocator;

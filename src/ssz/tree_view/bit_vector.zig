@@ -8,6 +8,7 @@ const Node = @import("persistent_merkle_tree").Node;
 
 const BitArray = @import("bit_array.zig").BitArray;
 const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
+const CloneOpts = @import("utils/type.zig").CloneOpts;
 
 pub fn BitVectorTreeView(comptime ST: type) type {
     comptime {
@@ -36,6 +37,15 @@ pub fn BitVectorTreeView(comptime ST: type) type {
             const ptr = try allocator.create(Self);
             try BitOps.init(&ptr.data, allocator, pool, root);
             ptr.allocator = allocator;
+            return ptr;
+        }
+
+        pub fn clone(self: *Self, opts: CloneOpts) !*Self {
+            const ptr = try self.allocator.create(Self);
+            errdefer self.allocator.destroy(ptr);
+
+            try self.data.clone(opts, &ptr.data);
+            ptr.allocator = self.allocator;
             return ptr;
         }
 

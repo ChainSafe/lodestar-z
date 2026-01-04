@@ -7,6 +7,7 @@ const FixedContainerType = @import("../type/container.zig").FixedContainerType;
 const UintType = @import("../type/uint.zig").UintType;
 const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
 const isFixedType = @import("../type/type_kind.zig").isFixedType;
+const CloneOpts = @import("utils/type.zig").CloneOpts;
 
 /// A specialized tree view for SSZ container types, enabling efficient access and modification of container fields, given a backing merkle tree.
 ///
@@ -75,6 +76,48 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 .root = root,
                 .changed = .empty,
             };
+            return ptr;
+        }
+
+        pub fn clone(self: *Self, opts: CloneOpts) !*Self {
+            const ptr = try self.allocator.create(Self);
+            if (!opts.transfer_cache) {
+                ptr.* = .{
+                    .allocator = self.allocator,
+                    .pool = self.pool,
+                    .child_data = .{null} ** ST.chunk_count,
+                    .original_nodes = .{null} ** ST.chunk_count,
+                    .root = self.root,
+                    .changed = .empty,
+                };
+                return ptr;
+            }
+
+            ptr.* = .{
+                .allocator = self.allocator,
+                .pool = self.pool,
+                .child_data = self.child_data,
+                .original_nodes = self.original_nodes,
+                .root = self.root,
+                .changed = .empty,
+            };
+
+            inline for (0..ST.fields.len) |i| {
+                if (self.changed.contains(i)) {
+                    if (ptr.child_data[i]) |child_view_ptr| {
+                        if (!comptime isBasicType(ST.fields[i].type)) {
+                            @constCast(child_view_ptr).deinit();
+                        }
+                    }
+                    ptr.child_data[i] = null;
+                }
+            }
+
+            // clear self's caches
+            self.child_data = .{null} ** ST.chunk_count;
+            self.original_nodes = .{null} ** ST.chunk_count;
+            self.changed.clearRetainingCapacity();
+
             return ptr;
         }
 
