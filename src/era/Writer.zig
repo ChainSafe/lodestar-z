@@ -126,7 +126,7 @@ pub fn writeCompressedState(self: *Writer, allocator: std.mem.Allocator, slot: u
     // Pad block offsets up to the state slot (treated as empty slots)
     try self.state.write_group.block_offsets.appendNTimes(
         0,
-        try std.math.sub(u64, slot, self.state.write_group.last_block_slot),
+        try std.math.sub(u64, slot, self.state.write_group.last_block_slot + 1),
     );
 
     const state_offset = self.state.write_group.current_offset;
@@ -212,7 +212,7 @@ pub fn writeCompressedBlock(self: *Writer, allocator: std.mem.Allocator, slot: u
     // Pad block offsets up to the block slot (treated as empty slots)
     try self.state.write_group.block_offsets.appendNTimes(
         0,
-        try std.math.sub(u64, slot, self.state.write_group.last_block_slot),
+        try std.math.sub(u64, slot, self.state.write_group.last_block_slot + 1),
     );
 
     const block_offset = self.state.write_group.current_offset;
