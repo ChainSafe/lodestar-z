@@ -1198,3 +1198,82 @@ pub const DepthIterator = struct {
         return out_id;
     }
 };
+
+/// Incrementally build a tree by appending leaves, filling missing right siblings with zero-nodes.
+/// Matches the behavior of `fillWithContents`, but optimized for incremental appends.
+pub const FillWithContentsIterator = struct {
+    pool: *Pool,
+    depth: Depth,
+    // At each level i, holds either null or the unpaired left node at that level.
+    lefts: [max_depth]?Id,
+
+    pub fn init(pool: *Pool, depth: Depth) FillWithContentsIterator {
+        return .{
+            .pool = pool,
+            .depth = depth,
+            .lefts = [_]?Id{null} ** max_depth,
+        };
+    }
+
+    /// Clean up references held by the iterator.
+    ///
+    /// This only needs to be called if the iterator is abandoned before `finish` is called.
+    pub fn deinit(self: *FillWithContentsIterator) void {
+        for (self.lefts) |left| {
+            if (left) |node_id| {
+                self.pool.unref(node_id);
+            }
+        }
+    }
+
+    /// Append a leaf (or subtree root at leaf level). Builds branches incrementally.
+    pub fn append(self: *FillWithContentsIterator, node_id: Id) Error!void {
+        // Bounds check
+        if (self.lefts[self.depth] != null) {
+            return Error.InvalidLength;
+        }
+
+        var carry = node_id;
+        for (0..self.depth) |level| {
+            if (self.lefts[level]) |left| {
+                self.lefts[level] = null;
+                carry = try self.pool.createBranch(left, carry);
+            } else {
+                self.lefts[level] = carry;
+                return;
+            }
+        }
+        // Only reaches here if the tree is full
+        self.lefts[self.depth] = carry;
+    }
+
+    /// Finalize the tree, returning the root node. Uses zero-nodes to pad missing right siblings.
+    pub fn finish(self: *FillWithContentsIterator) Error!Id {
+        if (self.lefts[self.depth]) |root| {
+            return root;
+        }
+
+        var carry: Id = @enumFromInt(self.depth);
+        var start_level: usize = self.depth;
+
+        // Find the lowest non-null as starting carry.
+        for (0..self.depth) |level| {
+            if (self.lefts[level] != null) {
+                carry = @enumFromInt(@as(u32, @intCast(level)));
+                start_level = level;
+                break;
+            }
+        }
+
+        // Starting from the lowest non-null, build upwards with zero-nodes.
+        for (start_level..self.depth) |level| {
+            if (self.lefts[level]) |left| {
+                self.lefts[level] = null;
+                carry = try self.pool.createBranch(left, carry);
+            } else {
+                carry = try self.pool.createBranch(carry, @enumFromInt(@as(u32, @intCast(level))));
+            }
+        }
+        return carry;
+    }
+};
