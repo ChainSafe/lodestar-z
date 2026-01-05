@@ -554,10 +554,4 @@ test "DepthIterator matches getNodesAtDepth" {
     for (0..count) |j| {
         try std.testing.expectEqual(bulk[j], iter[j]);
     }
-
-    // Test seekTo
-    const seek_to_indices = [_]usize{ 2, 0, 3, 1 };
-    for (seek_to_indices) |i| {
-        try std.testing.expectEqual(bulk[i], try it.seekTo(i));
-    }
 }

@@ -1197,41 +1197,4 @@ pub const DepthIterator = struct {
 
         return out_id;
     }
-
-    pub fn seekTo(self: *DepthIterator, index: usize) Error!Id {
-        const path_len = self.base_gindex.pathLen();
-
-        // Depth 0 (or base_gindex <= 1): only root is addressable at index 0.
-        if (@intFromEnum(self.base_gindex) <= 1) {
-            if (index != 0) return Error.InvalidLength;
-            self.index = 0;
-            return self.node_id;
-        }
-
-        const max_length: usize = @intCast(@intFromEnum(self.base_gindex));
-        if (index >= max_length) return Error.InvalidLength;
-
-        // Determine how far we can reuse the existing path from the current cursor to the target.
-        // If we're seeking "backwards", we can only safely reuse from already-cached parents;
-        // compute diff from the previous yielded index when possible.
-        const cur = self.index;
-        const prev: usize = if (cur == 0) 0 else (cur - 1);
-        const shared_from = if (index >= cur) cur else prev;
-
-        self.diffi = if (index == shared_from)
-            @as(Depth, 0)
-        else
-            @intCast(@bitSizeOf(Gindex) - @clz(shared_from ^ index));
-
-        // Rewind node_id to the cached parent at the shared depth (no root restart).
-        // Note: parents_buf is populated by previous `next()` calls; for the first call
-        // (no cached parents), shared_from==cur==start_index, so diffi resolves to depth and
-        // node_id remains as initialized.
-        if (path_len >= self.diffi and self.diffi != 0) {
-            self.node_id = self.parents_buf[path_len - self.diffi];
-        }
-
-        self.index = index;
-        return try self.next();
-    }
 };
