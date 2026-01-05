@@ -127,9 +127,9 @@ pub fn validate(self: Reader, allocator: std.mem.Allocator) !void {
 
         // validate version entry
         const start: i64 = if (index.blocks_index) |bi|
-            bi.record_start + bi.offsets[0] - e2s.header_size
+            @as(i64, @intCast(bi.record_start)) + bi.offsets[0] - e2s.header_size
         else
-            index.state_index.record_start + index.state_index.offsets[0] - e2s.header_size;
+            @as(i64, @intCast(index.state_index.record_start)) + index.state_index.offsets[0] - e2s.header_size;
         if (start < 0) {
             return error.InvalidGroupStartIndex;
         }

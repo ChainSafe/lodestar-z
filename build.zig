@@ -696,6 +696,27 @@ pub fn build(b: *std.Build) void {
     tls_run_test_int.dependOn(&run_test_int.step);
     tls_run_test.dependOn(&run_test_int.step);
 
+    const module_int_slow = b.createModule(.{
+        .root_source_file = b.path("test/int_slow/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("int_slow"), module_int_slow) catch @panic("OOM");
+
+    const test_int_slow = b.addTest(.{
+        .name = "int_slow",
+        .root_module = module_int_slow,
+        .filters = b.option([][]const u8, "int_slow.filters", "int_slow test filters") orelse &[_][]const u8{},
+    });
+    const install_test_int_slow = b.addInstallArtifact(test_int_slow, .{});
+    const tls_install_test_int_slow = b.step("build-test:int_slow", "Install the int_slow test");
+    tls_install_test_int_slow.dependOn(&install_test_int_slow.step);
+
+    const run_test_int_slow = b.addRunArtifact(test_int_slow);
+    const tls_run_test_int_slow = b.step("test:int_slow", "Run the int_slow test");
+    tls_run_test_int_slow.dependOn(&run_test_int_slow.step);
+    tls_run_test.dependOn(&run_test_int_slow.step);
+
     const module_spec_tests = b.createModule(.{
         .root_source_file = b.path("test/spec/root.zig"),
         .target = target,
@@ -847,8 +868,10 @@ pub fn build(b: *std.Build) void {
     module_int.addImport("hex", module_hex);
     module_int.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_int.addImport("blst", dep_blst.module("blst"));
-    module_int.addImport("download_era_options", options_module_download_era_options);
-    module_int.addImport("era", module_era);
+
+    module_int_slow.addImport("config", module_config);
+    module_int_slow.addImport("download_era_options", options_module_download_era_options);
+    module_int_slow.addImport("era", module_era);
 
     module_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
     module_spec_tests.addImport("consensus_types", module_consensus_types);

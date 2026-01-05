@@ -103,9 +103,9 @@ pub fn readAllGroupIndices(allocator: std.mem.Allocator, file: std.fs.File) ![]G
 
         try group_indices.append(index);
         end = if (index.blocks_index) |bi|
-            bi.record_start + bi.offsets[0] - e2s.header_size
+            @as(i64, @intCast(bi.record_start)) + bi.offsets[0] - e2s.header_size
         else
-            index.state_index.record_start + index.state_index.offsets[0] - e2s.header_size;
+            @as(i64, @intCast(index.state_index.record_start)) + index.state_index.offsets[0] - e2s.header_size;
     }
 
     return group_indices.toOwnedSlice();

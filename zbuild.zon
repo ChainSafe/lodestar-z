@@ -199,6 +199,15 @@
                     .hex,
                     .persistent_merkle_tree,
                     .blst,
+                },
+            },
+            .filters = .{},
+        },
+        .int_slow = .{
+            .root_module = .{
+                .root_source_file = "test/int_slow/root.zig",
+                .imports = .{
+                    .config,
                     .download_era_options,
                     .era,
                 },

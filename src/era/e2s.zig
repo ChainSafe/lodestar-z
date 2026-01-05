@@ -54,7 +54,7 @@ pub const SlotIndex = struct {
     /// File positions where data can be found. Length varies by index type.
     offsets: []i64,
     /// File position where this index record starts
-    record_start: u32,
+    record_start: u64,
 
     /// Serialize a SlotIndex into a byte array.
     ///
@@ -183,7 +183,7 @@ pub fn readSlotIndex(allocator: std.mem.Allocator, file: std.fs.File, offset: u6
     return .{
         .start_slot = start_slot,
         .offsets = offsets,
-        .record_start = @intCast(record_start),
+        .record_start = record_start,
     };
 }
 

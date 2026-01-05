@@ -50,6 +50,10 @@ pub fn open(config: c.BeaconConfig, path: []const u8, era_number: u64) !Writer {
     };
 }
 
+/// Close the writer and renames the ERA file.
+/// Returns the path of the ERA file.
+///
+/// Caller takes ownership of the returned slice.
 pub fn finish(self: *Writer, allocator: std.mem.Allocator) ![]const u8 {
     if (self.state != .finished_group) {
         return error.NotFinished;
@@ -67,6 +71,7 @@ pub fn finish(self: *Writer, allocator: std.mem.Allocator) ![]const u8 {
         allocator,
         &[_][]const u8{ std.fs.path.dirname(self.path) orelse ".", new_base },
     );
+    errdefer allocator.free(new_path);
     try std.fs.cwd().rename(self.path, new_path);
 
     return new_path;
@@ -111,9 +116,11 @@ pub fn writeCompressedState(self: *Writer, allocator: std.mem.Allocator, slot: u
         return error.InvalidStateSlot;
     }
 
-    for (self.state.write_group.last_block_slot + 1..slot) |_| {
-        try self.state.write_group.block_offsets.append(0); // Empty slot
-    }
+    // Pad block offsets up to the state slot (treated as empty slots)
+    try self.state.write_group.block_offsets.appendNTimes(
+        0,
+        try std.math.sub(u64, slot, self.state.write_group.last_block_slot),
+    );
 
     const state_offset = self.state.write_group.current_offset;
     try e2s.writeEntry(self.file, self.state.write_group.current_offset, .CompressedBeaconState, data);
@@ -194,9 +201,13 @@ pub fn writeCompressedBlock(self: *Writer, allocator: std.mem.Allocator, slot: u
     if (slot <= self.state.write_group.last_block_slot) {
         return error.NotAscendingBlockSlot;
     }
-    for (self.state.write_group.last_block_slot + 1..slot) |_| {
-        try self.state.write_group.block_offsets.append(0); // Empty slot
-    }
+
+    // Pad block offsets up to the block slot (treated as empty slots)
+    try self.state.write_group.block_offsets.appendNTimes(
+        0,
+        try std.math.sub(u64, slot, self.state.write_group.last_block_slot),
+    );
+
     const block_offset = self.state.write_group.current_offset;
     try e2s.writeEntry(self.file, block_offset, .CompressedSignedBeaconBlock, data);
     try self.state.write_group.block_offsets.append(block_offset);
