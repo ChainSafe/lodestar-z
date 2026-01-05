@@ -1,5 +1,12 @@
 ///! Writer is responsible for writing ERA files.
 ///! See https://github.com/eth-clients/e2store-format-specs/blob/main/formats/era.md
+///!
+///! Usage:
+///! 1. Create a Writer with `Writer.open`
+///! 2. For each group:
+///!    a. Call `writeBlock` for each block in the group (skip for genesis era)
+///!    b. Call `writeState` for the state at the end of the group
+///! 3. Call `finish` to finalize the ERA file and rename it appropriately
 const std = @import("std");
 const c = @import("config");
 const preset = @import("preset").preset;
