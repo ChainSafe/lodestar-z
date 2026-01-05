@@ -306,6 +306,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
 
         const serialized_size = if (comptime ssz.isFixedType(ST)) ST.fixed_size else try ST.tree.serializedSize(node, &pool);
         const serialized_from_tree = try allocator.alloc(u8, serialized_size);
+        defer allocator.free(serialized_from_tree);
         _ = try ST.tree.serializeIntoBytes(node, &pool, serialized_from_tree);
         try std.testing.expectEqualSlices(u8, serialized_expected, serialized_from_tree);
     }
