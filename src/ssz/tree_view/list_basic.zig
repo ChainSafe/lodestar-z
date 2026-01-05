@@ -156,6 +156,132 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             return try Self.init(self.base_view.allocator, self.base_view.pool, root_with_length);
         }
 
+        /// Return a new view containing all elements from `index` to the end.
+        /// The caller **must** call `deinit()` on the returned view to avoid memory leaks.
+        pub fn sliceFrom(self: *Self, index: usize) !Self {
+            try self.commit();
+
+            const list_length = try self.length();
+
+            // If index is 0, return a copy of the current view
+            if (index == 0) {
+                return try Self.init(self.base_view.allocator, self.base_view.pool, self.base_view.data.root);
+            }
+
+            const target_length = if (index >= list_length) 0 else list_length - index;
+
+            if (target_length == 0) {
+                const chunk_root: Node.Id = @enumFromInt(base_chunk_depth);
+                var length_node: ?Node.Id = try self.base_view.pool.createLeafFromUint(0);
+                defer if (length_node) |id| self.base_view.pool.unref(id);
+
+                const new_root = try self.base_view.pool.createBranch(chunk_root, length_node.?);
+                errdefer self.base_view.pool.unref(new_root);
+                length_node = null;
+
+                return try Self.init(self.base_view.allocator, self.base_view.pool, new_root);
+            }
+
+            const start_chunk_index = index / items_per_chunk;
+            const start_offset_in_chunk = index % items_per_chunk;
+            const end_chunk_index = (list_length - 1) / items_per_chunk;
+            const source_chunk_count = end_chunk_index - start_chunk_index + 1;
+
+            const new_chunk_count = (target_length + items_per_chunk - 1) / items_per_chunk;
+
+            const source_nodes = try self.base_view.allocator.alloc(Node.Id, source_chunk_count);
+            defer self.base_view.allocator.free(source_nodes);
+            try self.base_view.data.root.getNodesAtDepth(
+                self.base_view.pool,
+                chunk_depth,
+                start_chunk_index,
+                source_nodes,
+            );
+
+            const new_chunk_nodes = try self.base_view.allocator.alloc(Node.Id, new_chunk_count);
+            defer self.base_view.allocator.free(new_chunk_nodes);
+
+            const chunk_root_value: Node.Id = blk: {
+                // Track newly created leaf nodes for error cleanup.
+                //
+                // - aligned case: at most 1 leaf is newly created (only if we need to zero-pad the last chunk)
+                // - unaligned case: all chunks are newly created leaves
+                var newly_created_count: usize = 0;
+                var newly_created_last_leaf: ?Node.Id = null;
+
+                errdefer {
+                    if (start_offset_in_chunk == 0) {
+                        if (newly_created_last_leaf) |id| self.base_view.pool.unref(id);
+                    } else {
+                        for (new_chunk_nodes[0..newly_created_count]) |node| self.base_view.pool.unref(node);
+                    }
+                }
+
+                if (start_offset_in_chunk == 0) {
+                    for (0..new_chunk_count) |i| {
+                        if (i < source_chunk_count - 1 or (list_length % items_per_chunk == 0)) {
+                            // Full chunk - reuse directly (no ref needed, fillWithContents handles it)
+                            new_chunk_nodes[i] = source_nodes[i];
+                        } else {
+                            // Last chunk - may need to zero trailing bytes for new length
+                            const elems_in_last = target_length % items_per_chunk;
+                            std.debug.assert(elems_in_last != 0);
+
+                            var chunk_bytes = source_nodes[i].getRoot(self.base_view.pool).*;
+                            const keep_bytes = elems_in_last * ST.Element.fixed_size;
+                            if (keep_bytes < BYTES_PER_CHUNK) {
+                                @memset(chunk_bytes[keep_bytes..], 0);
+                            }
+                            new_chunk_nodes[i] = try self.base_view.pool.createLeaf(&chunk_bytes);
+                            newly_created_count = 1;
+                            newly_created_last_leaf = new_chunk_nodes[i];
+                        }
+                    }
+                } else {
+                    for (0..new_chunk_count) |new_chunk_idx| {
+                        var chunk_bytes: [BYTES_PER_CHUNK]u8 = [_]u8{0} ** BYTES_PER_CHUNK;
+                        const start_elem = new_chunk_idx * items_per_chunk;
+                        const end_elem = @min(start_elem + items_per_chunk, target_length);
+
+                        for (start_elem..end_elem) |elem_idx| {
+                            const src_elem_idx = index + elem_idx;
+                            const src_chunk_idx = src_elem_idx / items_per_chunk - start_chunk_index;
+                            const src_offset = src_elem_idx % items_per_chunk;
+
+                            // Repack by copying the serialized bytes for each element.
+                            // This is safe because `ST.Element` is a basic type (uint/bool) and leaf chunks store the
+                            // canonical SSZ byte encoding for those elements.
+                            const src_leaf = source_nodes[src_chunk_idx].getRoot(self.base_view.pool);
+                            const src_byte_off = src_offset * ST.Element.fixed_size;
+                            const dst_offset = (elem_idx - start_elem) * ST.Element.fixed_size;
+                            @memcpy(
+                                chunk_bytes[dst_offset..][0..ST.Element.fixed_size],
+                                src_leaf[src_byte_off..][0..ST.Element.fixed_size],
+                            );
+                        }
+
+                        new_chunk_nodes[new_chunk_idx] = try self.base_view.pool.createLeaf(&chunk_bytes);
+                        newly_created_count += 1;
+                    }
+                }
+
+                break :blk try Node.fillWithContents(self.base_view.pool, new_chunk_nodes, base_chunk_depth);
+            };
+
+            var chunk_root: ?Node.Id = chunk_root_value;
+            defer if (chunk_root) |id| self.base_view.pool.unref(id);
+
+            var length_node: ?Node.Id = try self.base_view.pool.createLeafFromUint(@intCast(target_length));
+            defer if (length_node) |id| self.base_view.pool.unref(id);
+
+            const new_root = try self.base_view.pool.createBranch(chunk_root.?, length_node.?);
+            errdefer self.base_view.pool.unref(new_root);
+            chunk_root = null;
+            length_node = null;
+
+            return try Self.init(self.base_view.allocator, self.base_view.pool, new_root);
+        }
+
         fn updateListLength(self: *Self, new_length: usize) !void {
             if (new_length > ST.limit) {
                 return error.LengthOverLimit;
