@@ -164,6 +164,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 var nodes: [chunk_count]Node.Id = undefined;
+                errdefer pool.free(&nodes);
 
                 if (comptime isBasicType(Element)) {
                     const items_per_chunk = 32 / Element.fixed_size;
@@ -382,11 +383,12 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
                 }
             }
 
-            pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 var nodes: [chunk_count]Node.Id = undefined;
+                errdefer pool.free(&nodes);
 
                 for (0..chunk_count) |i| {
-                    nodes[i] = try Element.tree.fromValue(allocator, pool, &value[i]);
+                    nodes[i] = try Element.tree.fromValue(pool, &value[i]);
                 }
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }
@@ -636,7 +638,7 @@ test "VariableVectorType - serializeIntoBytes (VectorComposite ListBasic - [[1,2
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
-    const node = try VectorList.tree.fromValue(allocator, &pool, &value);
+    const node = try VectorList.tree.fromValue(&pool, &value);
     const tree_size = try VectorList.tree.serializedSize(node, &pool);
     try std.testing.expectEqual(@as(usize, 40), tree_size);
     const tree_serialized = try allocator.alloc(u8, tree_size);

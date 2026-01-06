@@ -166,6 +166,8 @@ pub fn FixedContainerType(comptime ST: type) type {
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 var nodes: [chunk_count]Node.Id = undefined;
+                errdefer pool.free(&nodes);
+
                 inline for (fields, 0..) |field, i| {
                     const field_value = &@field(value, field.name);
                     nodes[i] = try field.type.tree.fromValue(pool, field_value);
@@ -577,15 +579,13 @@ pub fn VariableContainerType(comptime ST: type) type {
                 }
             }
 
-            pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 var nodes: [chunk_count]Node.Id = undefined;
+                errdefer pool.free(&nodes);
+
                 inline for (fields, 0..) |field, i| {
                     const field_value = &@field(value, field.name);
-                    if (comptime isFixedType(field.type)) {
-                        nodes[i] = try field.type.tree.fromValue(pool, field_value);
-                    } else {
-                        nodes[i] = try field.type.tree.fromValue(allocator, pool, field_value);
-                    }
+                    nodes[i] = try field.type.tree.fromValue(pool, field_value);
                 }
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }
@@ -897,7 +897,7 @@ test "VariableContainerType - serializeIntoBytes (zero)" {
 
     var pool = try Node.Pool.init(allocator, 64);
     defer pool.deinit();
-    const node = try Container.tree.fromValue(allocator, &pool, &value);
+    const node = try Container.tree.fromValue(&pool, &value);
     const tree_size = try Container.tree.serializedSize(node, &pool);
     try std.testing.expectEqual(@as(usize, 12), tree_size);
     const tree_serialized = try allocator.alloc(u8, tree_size);
@@ -946,7 +946,7 @@ test "VariableContainerType - serializeIntoBytes (some value)" {
 
     var pool = try Node.Pool.init(allocator, 128);
     defer pool.deinit();
-    const node = try Container.tree.fromValue(allocator, &pool, &value);
+    const node = try Container.tree.fromValue(&pool, &value);
     const tree_size = try Container.tree.serializedSize(node, &pool);
     try std.testing.expectEqual(@as(usize, 52), tree_size);
     const tree_serialized = try allocator.alloc(u8, tree_size);

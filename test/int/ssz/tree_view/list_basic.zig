@@ -20,7 +20,7 @@ test "TreeView list element roundtrip" {
     defer expected_list.deinit(allocator);
     try expected_list.appendSlice(allocator, &base_values);
 
-    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    const root_node = try ListType.tree.fromValue(&pool, &list);
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
@@ -62,7 +62,7 @@ test "TreeView list push updates cached length" {
     defer list.deinit(allocator);
     try list.appendSlice(allocator, &[_]u32{ 1, 2, 3 });
 
-    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    const root_node = try ListType.tree.fromValue(&pool, &list);
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
@@ -101,7 +101,7 @@ test "TreeView list getAllAlloc handles zero length" {
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
 
-    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    const root_node = try ListType.tree.fromValue(&pool, &list);
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
@@ -128,7 +128,7 @@ test "TreeView list getAllAlloc spans multiple chunks" {
     }
     try list.appendSlice(allocator, &values);
 
-    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    const root_node = try ListType.tree.fromValue(&pool, &list);
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
@@ -150,7 +150,7 @@ test "TreeView list push batches before commit" {
     defer list.deinit(allocator);
     try list.appendSlice(allocator, &[_]u32{ 1, 2, 3, 4 });
 
-    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    const root_node = try ListType.tree.fromValue(&pool, &list);
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
@@ -191,7 +191,7 @@ test "TreeView list push across chunk boundary resets prefetch" {
     defer list.deinit(allocator);
     try list.appendSlice(allocator, &[_]u32{ 0, 1, 2, 3, 4, 5, 6, 7 });
 
-    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    const root_node = try ListType.tree.fromValue(&pool, &list);
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
@@ -223,7 +223,7 @@ test "TreeView list push enforces limit" {
     defer list.deinit(allocator);
     try list.appendSlice(allocator, &[_]u32{ 1, 2 });
 
-    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    const root_node = try ListType.tree.fromValue(&pool, &list);
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
@@ -243,7 +243,7 @@ test "TreeView list basic clone isolates updates" {
     defer list.deinit(allocator);
     try list.appendSlice(allocator, &[_]u32{ 1, 2, 3 });
 
-    const root = try ListType.tree.fromValue(allocator, &pool, &list);
+    const root = try ListType.tree.fromValue(&pool, &list);
     var v1 = try ListType.TreeView.init(allocator, &pool, root);
     defer v1.deinit();
 
@@ -269,7 +269,7 @@ test "TreeView list basic clone reads committed state" {
     defer list.deinit(allocator);
     try list.appendSlice(allocator, &[_]u32{ 1, 2, 3 });
 
-    const root = try ListType.tree.fromValue(allocator, &pool, &list);
+    const root = try ListType.tree.fromValue(&pool, &list);
     var v1 = try ListType.TreeView.init(allocator, &pool, root);
     defer v1.deinit();
 
@@ -294,7 +294,7 @@ test "TreeView list basic clone drops uncommitted changes" {
     defer list.deinit(allocator);
     try list.appendSlice(allocator, &[_]u32{ 1, 2, 3 });
 
-    const root = try ListType.tree.fromValue(allocator, &pool, &list);
+    const root = try ListType.tree.fromValue(&pool, &list);
     var v = try ListType.TreeView.init(allocator, &pool, root);
     defer v.deinit();
 
@@ -320,7 +320,7 @@ test "TreeView list basic clone(true) does not transfer cache" {
     defer list.deinit(allocator);
     try list.appendSlice(allocator, &[_]u32{ 1, 2, 3 });
 
-    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    const root_node = try ListType.tree.fromValue(&pool, &list);
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
@@ -346,7 +346,7 @@ test "TreeView list basic clone(false) transfers cache and clears source" {
     defer list.deinit(allocator);
     try list.appendSlice(allocator, &[_]u32{ 1, 2, 3 });
 
-    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    const root_node = try ListType.tree.fromValue(&pool, &list);
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
@@ -372,7 +372,7 @@ test "TreeView basic list getAll reflects pushes" {
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
-    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    const root_node = try ListType.tree.fromValue(&pool, &list);
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
@@ -410,7 +410,7 @@ test "TreeView list sliceTo returns original when truncation unnecessary" {
     defer list.deinit(allocator);
     try list.appendSlice(allocator, &[_]u32{ 4, 5, 6, 7 });
 
-    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    const root_node = try ListType.tree.fromValue(&pool, &list);
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
@@ -447,7 +447,7 @@ test "TreeView basic list sliceTo matches incremental snapshots" {
 
     var empty_list: ListType.Type = .empty;
     defer empty_list.deinit(allocator);
-    const root_node = try ListType.tree.fromValue(allocator, &pool, &empty_list);
+    const root_node = try ListType.tree.fromValue(&pool, &empty_list);
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
@@ -508,7 +508,7 @@ test "TreeView list sliceTo truncates tail elements" {
     const values = [_]u32{ 10, 20, 30, 40, 50 };
     try list.appendSlice(allocator, &values);
 
-    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    const root_node = try ListType.tree.fromValue(&pool, &list);
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
@@ -580,7 +580,7 @@ test "ListBasicTreeView - serialize (uint8 list)" {
         defer allocator.free(value_serialized);
         _ = ListU8Type.serializeIntoBytes(&value, value_serialized);
 
-        const tree_node = try ListU8Type.tree.fromValue(allocator, &pool, &value);
+        const tree_node = try ListU8Type.tree.fromValue(&pool, &value);
         var view = try ListU8Type.TreeView.init(allocator, &pool, tree_node);
         defer view.deinit();
 
@@ -644,7 +644,7 @@ test "ListBasicTreeView - serialize (uint64 list)" {
         defer allocator.free(value_serialized);
         _ = ListU64Type.serializeIntoBytes(&value, value_serialized);
 
-        const tree_node = try ListU64Type.tree.fromValue(allocator, &pool, &value);
+        const tree_node = try ListU64Type.tree.fromValue(&pool, &value);
         var view = try ListU64Type.TreeView.init(allocator, &pool, tree_node);
         defer view.deinit();
 
@@ -677,7 +677,7 @@ test "ListBasicTreeView - push and serialize" {
     var value: ListU8Type.Type = ListU8Type.default_value;
     defer value.deinit(allocator);
 
-    const tree_node = try ListU8Type.tree.fromValue(allocator, &pool, &value);
+    const tree_node = try ListU8Type.tree.fromValue(&pool, &value);
     var view = try ListU8Type.TreeView.init(allocator, &pool, tree_node);
     defer view.deinit();
 
@@ -719,7 +719,7 @@ test "ListBasicTreeView - sliceTo and serialize" {
     try value.append(allocator, 3);
     try value.append(allocator, 4);
 
-    const tree_node = try ListU8Type.tree.fromValue(allocator, &pool, &value);
+    const tree_node = try ListU8Type.tree.fromValue(&pool, &value);
     var view = try ListU8Type.TreeView.init(allocator, &pool, tree_node);
     defer view.deinit();
 

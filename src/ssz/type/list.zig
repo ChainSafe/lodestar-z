@@ -294,7 +294,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                 }
             }
 
-            pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 const len = value.items.len;
                 const chunk_count = chunkCount(value);
                 if (chunk_count == 0) {
@@ -304,13 +304,14 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                     );
                 }
 
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
+                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                errdefer it.deinit();
+
                 if (comptime isBasicType(Element)) {
                     const items_per_chunk = 32 / Element.fixed_size;
                     var next: usize = 0; // index in value.items
 
-                    for (0..chunk_count) |i| {
+                    for (0..chunk_count) |_| {
                         var leaf_buf = [_]u8{0} ** 32;
 
                         // how many items still remain to be packed into this chunk?
@@ -325,17 +326,20 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                         }
                         next += to_write;
 
-                        nodes[i] = try pool.createLeaf(&leaf_buf);
+                        try it.append(try pool.createLeaf(&leaf_buf));
                     }
                 } else {
                     for (0..chunk_count) |i| {
-                        nodes[i] = try Element.tree.fromValue(pool, &value.items[i]);
+                        try it.append(try Element.tree.fromValue(pool, &value.items[i]));
                     }
                 }
-                return try pool.createBranch(
-                    try Node.fillWithContents(pool, nodes, chunk_depth),
-                    try pool.createLeafFromUint(len),
-                );
+
+                const content_root = try it.finish();
+                errdefer pool.unref(content_root);
+                const len_mixin = try pool.createLeafFromUint(len);
+                errdefer pool.unref(len_mixin);
+
+                return try pool.createBranch(content_root, len_mixin);
             }
 
             pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
@@ -624,7 +628,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                 }
             }
 
-            pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 const len = value.items.len;
                 const chunk_count = len;
                 if (chunk_count == 0) {
@@ -634,15 +638,19 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                     );
                 }
 
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
+                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                errdefer it.deinit();
+
                 for (0..chunk_count) |i| {
-                    nodes[i] = try Element.tree.fromValue(allocator, pool, &value.items[i]);
+                    try it.append(try Element.tree.fromValue(pool, &value.items[i]));
                 }
-                return try pool.createBranch(
-                    try Node.fillWithContents(pool, nodes, chunk_depth),
-                    try pool.createLeafFromUint(len),
-                );
+
+                const content_root = try it.finish();
+                errdefer pool.unref(content_root);
+                const len_mixin = try pool.createLeafFromUint(len);
+                errdefer pool.unref(len_mixin);
+
+                return try pool.createBranch(content_root, len_mixin);
             }
 
             pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
@@ -810,7 +818,7 @@ test "FixedListType - tree roundtrip (ListBasic uint8)" {
         defer allocator.free(serialized);
         _ = ListU8.serializeIntoBytes(&value, serialized);
 
-        const tree_node = try ListU8.tree.fromValue(allocator, &pool, &value);
+        const tree_node = try ListU8.tree.fromValue(&pool, &value);
 
         var value_from_tree: ListU8.Type = ListU8.default_value;
         defer value_from_tree.deinit(allocator);
@@ -879,7 +887,7 @@ test "FixedListType - tree roundtrip (ListBasic uint64)" {
         defer allocator.free(serialized);
         _ = ListU64.serializeIntoBytes(&value, serialized);
 
-        const tree_node = try ListU64.tree.fromValue(allocator, &pool, &value);
+        const tree_node = try ListU64.tree.fromValue(&pool, &value);
 
         var value_from_tree: ListU64.Type = ListU64.default_value;
         defer value_from_tree.deinit(allocator);
@@ -924,7 +932,7 @@ test "FixedListType - serializeIntoBytes (ListComposite ByteVector32 - empty)" {
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
-    const node = try ListBV32.tree.fromValue(allocator, &pool, &value);
+    const node = try ListBV32.tree.fromValue(&pool, &value);
     const tree_size = try ListBV32.tree.serializedSize(node, &pool);
     try std.testing.expectEqual(@as(usize, 0), tree_size);
     const tree_serialized = try allocator.alloc(u8, tree_size);
@@ -962,7 +970,7 @@ test "FixedListType - serializeIntoBytes (ListComposite ByteVector32 - 2 roots)"
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
-    const node = try ListBV32.tree.fromValue(allocator, &pool, &value);
+    const node = try ListBV32.tree.fromValue(&pool, &value);
     const tree_size = try ListBV32.tree.serializedSize(node, &pool);
     try std.testing.expectEqual(@as(usize, 64), tree_size);
     const tree_serialized = try allocator.alloc(u8, tree_size);
@@ -998,7 +1006,7 @@ test "FixedListType - serializeIntoBytes (ListComposite Container - empty)" {
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
-    const node = try ListContainer.tree.fromValue(allocator, &pool, &value);
+    const node = try ListContainer.tree.fromValue(&pool, &value);
     const tree_size = try ListContainer.tree.serializedSize(node, &pool);
     try std.testing.expectEqual(@as(usize, 0), tree_size);
     const tree_serialized = try allocator.alloc(u8, tree_size);
@@ -1044,7 +1052,7 @@ test "FixedListType - serializeIntoBytes (ListComposite Container - 2 values)" {
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
-    const node = try ListContainer.tree.fromValue(allocator, &pool, &value);
+    const node = try ListContainer.tree.fromValue(&pool, &value);
     const tree_size = try ListContainer.tree.serializedSize(node, &pool);
     try std.testing.expectEqual(@as(usize, 32), tree_size);
     const tree_serialized = try allocator.alloc(u8, tree_size);
@@ -1078,7 +1086,7 @@ test "VariableListType - serializeIntoBytes (List<List<uint16>> - empty)" {
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
-    const node = try OuterList.tree.fromValue(allocator, &pool, &value);
+    const node = try OuterList.tree.fromValue(&pool, &value);
     const tree_size = try OuterList.tree.serializedSize(node, &pool);
     try std.testing.expectEqual(@as(usize, 0), tree_size);
     const tree_serialized = try allocator.alloc(u8, tree_size);
@@ -1127,7 +1135,7 @@ test "VariableListType - serializeIntoBytes (List<List<uint16>> - 2 full values)
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
-    const node = try OuterList.tree.fromValue(allocator, &pool, &value);
+    const node = try OuterList.tree.fromValue(&pool, &value);
     const tree_size = try OuterList.tree.serializedSize(node, &pool);
     try std.testing.expectEqual(@as(usize, 16), tree_size);
     const tree_serialized = try allocator.alloc(u8, tree_size);
@@ -1170,7 +1178,7 @@ test "VariableListType - serializeIntoBytes (List<List<uint16>> - 2 empty values
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
-    const node = try OuterList.tree.fromValue(allocator, &pool, &value);
+    const node = try OuterList.tree.fromValue(&pool, &value);
     const tree_size = try OuterList.tree.serializedSize(node, &pool);
     try std.testing.expectEqual(@as(usize, 8), tree_size);
     const tree_serialized = try allocator.alloc(u8, tree_size);

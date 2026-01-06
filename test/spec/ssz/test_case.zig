@@ -275,10 +275,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
 
     // test conversion between tree and value
     {
-        const node = if (comptime ssz.isFixedType(ST))
-            try ST.tree.fromValue(&pool, value_expected)
-        else
-            try ST.tree.fromValue(allocator, &pool, value_expected);
+        const node = try ST.tree.fromValue(&pool, value_expected);
         defer pool.unref(node);
 
         try std.testing.expectEqualSlices(u8, &root_expected, node.getRoot(&pool));

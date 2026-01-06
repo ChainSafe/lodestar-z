@@ -486,7 +486,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
                 }
             }
 
-            pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 const chunk_count = chunkCount(value);
                 if (chunk_count == 0) {
                     return try pool.createBranch(
@@ -496,8 +496,9 @@ pub fn BitListType(comptime _limit: comptime_int) type {
                 }
                 const byte_length = (value.bit_len + 7) / 8;
 
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
+                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                errdefer it.deinit();
+
                 for (0..chunk_count) |i| {
                     var leaf_buf = [_]u8{0} ** 32;
                     const start_idx = i * 32;
@@ -511,12 +512,15 @@ pub fn BitListType(comptime _limit: comptime_int) type {
                         @memcpy(leaf_buf[0..bytes_to_copy], value.data.items[start_idx..][0..bytes_to_copy]);
                     }
 
-                    nodes[i] = try pool.createLeaf(&leaf_buf);
+                    try it.append(try pool.createLeaf(&leaf_buf));
                 }
-                return try pool.createBranch(
-                    try Node.fillWithContents(pool, nodes, chunk_depth),
-                    try pool.createLeafFromUint(value.bit_len),
-                );
+
+                const content_root = try it.finish();
+                errdefer pool.unref(content_root);
+                const len_mixin = try pool.createLeafFromUint(value.bit_len);
+                errdefer pool.unref(len_mixin);
+
+                return try pool.createBranch(content_root, len_mixin);
             }
 
             /// Serialize BitList to bytes.
@@ -780,7 +784,7 @@ test "BitListType - tree roundtrip" {
         try Bits.deserializeFromBytes(allocator, tc.serialized, &value);
         defer value.deinit(allocator);
 
-        const tree_node = try Bits.tree.fromValue(allocator, &pool, &value);
+        const tree_node = try Bits.tree.fromValue(&pool, &value);
 
         var value_from_tree: Bits.Type = Bits.default_value;
         try Bits.tree.toValue(allocator, tree_node, &pool, &value_from_tree);
