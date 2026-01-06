@@ -80,27 +80,13 @@ pub fn ContainerTreeView(comptime ST: type) type {
         }
 
         pub fn clone(self: *Self, opts: CloneOpts) !*Self {
-            const ptr = try self.allocator.create(Self);
+            const ptr = try init(self.allocator, self.pool, self.root);
             if (!opts.transfer_cache) {
-                ptr.* = .{
-                    .allocator = self.allocator,
-                    .pool = self.pool,
-                    .child_data = .{null} ** ST.chunk_count,
-                    .original_nodes = .{null} ** ST.chunk_count,
-                    .root = self.root,
-                    .changed = .empty,
-                };
                 return ptr;
             }
 
-            ptr.* = .{
-                .allocator = self.allocator,
-                .pool = self.pool,
-                .child_data = self.child_data,
-                .original_nodes = self.original_nodes,
-                .root = self.root,
-                .changed = .empty,
-            };
+            ptr.child_data = self.child_data;
+            ptr.original_nodes = self.original_nodes;
 
             inline for (0..ST.fields.len) |i| {
                 if (self.changed.contains(i)) {

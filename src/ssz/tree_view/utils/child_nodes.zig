@@ -1,6 +1,7 @@
 const std = @import("std");
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
+const CloneOpts = @import("clone_opts.zig").CloneOpts;
 
 /// common functions for TreeViews deal with children_nodes
 pub const ChildNodes = struct {
@@ -79,6 +80,28 @@ pub const ChildNodes = struct {
             self.pool.unref(self.root);
             self.root = new_root;
 
+            self.changed.clearRetainingCapacity();
+        }
+
+        pub fn clone(comptime T: type, self: *T, opts: CloneOpts, out: *T) !void {
+            try T.init(out, self.allocator, self.pool, self.root);
+
+            if (!opts.transfer_cache) {
+                return;
+            }
+
+            out.children_nodes = self.children_nodes;
+
+            var nodes_it = out.children_nodes.iterator();
+            while (nodes_it.next()) |entry| {
+                const gindex = entry.key_ptr.*;
+                if (self.changed.contains(gindex)) {
+                    _ = out.children_nodes.remove(gindex);
+                }
+            }
+
+            // clear self's caches
+            self.children_nodes = .empty;
             self.changed.clearRetainingCapacity();
         }
     };

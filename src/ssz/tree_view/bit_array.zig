@@ -38,36 +38,7 @@ pub fn BitArray(comptime chunk_depth: Depth) type {
         }
 
         pub fn clone(self: *Self, opts: CloneOpts, out: *Self) !void {
-            if (!opts.transfer_cache) {
-                out.* = .{
-                    .allocator = self.allocator,
-                    .pool = self.pool,
-                    .root = self.root,
-                    .children_nodes = .empty,
-                    .changed = .empty,
-                };
-                return;
-            }
-
-            out.* = .{
-                .allocator = self.allocator,
-                .pool = self.pool,
-                .root = self.root,
-                .children_nodes = self.children_nodes,
-                .changed = .empty,
-            };
-
-            var nodes_it = out.children_nodes.iterator();
-            while (nodes_it.next()) |entry| {
-                const gindex = entry.key_ptr.*;
-                if (self.changed.contains(gindex)) {
-                    _ = out.children_nodes.remove(gindex);
-                }
-            }
-
-            // clear self's caches
-            self.children_nodes = .empty;
-            self.changed.clearRetainingCapacity();
+            try ChildNodes.Change.clone(Self, self, opts, out);
         }
 
         pub fn deinit(self: *Self) void {
