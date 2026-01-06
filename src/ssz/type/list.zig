@@ -395,6 +395,11 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                 }
             }
         };
+
+        pub fn defaultTreeView(allocator: std.mem.Allocator, pool: *Node.Pool) !TreeView {
+            const root = try tree.fromValue(allocator, pool, &default_value);
+            return try TreeView.init(allocator, pool, root);
+        }
     };
 }
 
@@ -727,6 +732,11 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                 try Element.deserializeFromJson(allocator, source, &out.items[i]);
             }
             return error.invalidLength;
+        }
+
+        pub fn defaultTreeView(allocator: std.mem.Allocator, pool: *Node.Pool) !TreeView {
+            const root = try tree.fromValue(allocator, pool, &default_value);
+            return try TreeView.init(allocator, pool, root);
         }
     };
 }

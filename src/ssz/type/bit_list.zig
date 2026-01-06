@@ -587,6 +587,11 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             }
             try deserializeFromBytes(allocator, bytes, out);
         }
+
+        pub fn defaultTreeView(allocator: std.mem.Allocator, pool: *Node.Pool) !TreeView {
+            const root = try tree.fromValue(allocator, pool, &default_value);
+            return try TreeView.init(allocator, pool, root);
+        }
     };
 }
 

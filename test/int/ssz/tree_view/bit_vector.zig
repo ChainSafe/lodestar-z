@@ -97,8 +97,7 @@ test "BitVectorTreeView clone isolates updates" {
     var pool = try Node.Pool.init(allocator, 2048);
     defer pool.deinit();
 
-    const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
-    var v1 = try Bits.TreeView.init(allocator, &pool, root);
+    var v1 = try Bits.defaultTreeView(allocator, &pool);
     defer v1.deinit();
 
     var v2 = try v1.clone(.{});
@@ -118,8 +117,7 @@ test "BitVectorTreeView clone reads committed state" {
     var pool = try Node.Pool.init(allocator, 2048);
     defer pool.deinit();
 
-    const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
-    var v1 = try Bits.TreeView.init(allocator, &pool, root);
+    var v1 = try Bits.defaultTreeView(allocator, &pool);
     defer v1.deinit();
 
     try v1.set(1, true);
@@ -138,8 +136,7 @@ test "BitVectorTreeView clone drops uncommitted changes" {
     var pool = try Node.Pool.init(allocator, 2048);
     defer pool.deinit();
 
-    const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
-    var v = try Bits.TreeView.init(allocator, &pool, root);
+    var v = try Bits.defaultTreeView(allocator, &pool);
     defer v.deinit();
 
     try v.set(2, true);

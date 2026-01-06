@@ -95,11 +95,7 @@ test "TreeView container nested types set/get/commit" {
         comp_list: CompList,
     });
 
-    var outer_value: Outer.Type = Outer.default_value;
-    defer Outer.deinit(allocator, &outer_value);
-
-    const root = try Outer.tree.fromValue(allocator, &pool, &outer_value);
-    var view = try Outer.TreeView.init(allocator, &pool, root);
+    var view = try Outer.defaultTreeView(allocator, &pool);
     defer view.deinit();
 
     try std.testing.expectEqual(@as(u64, 0), try view.get("n"));
@@ -107,10 +103,7 @@ test "TreeView container nested types set/get/commit" {
     try std.testing.expectEqual(@as(u64, 7), try view.get("n"));
 
     {
-        var bytes_value: Bytes.Type = Bytes.default_value;
-        defer bytes_value.deinit(allocator);
-        const bytes_root = try Bytes.tree.fromValue(allocator, &pool, &bytes_value);
-        var bytes_view = try Bytes.TreeView.init(allocator, &pool, bytes_root);
+        var bytes_view = try Bytes.defaultTreeView(allocator, &pool);
 
         try bytes_view.push(@as(u8, 0xAA));
         try bytes_view.push(@as(u8, 0xBB));
@@ -124,9 +117,7 @@ test "TreeView container nested types set/get/commit" {
     }
 
     {
-        const basic_vec_value: BasicVec.Type = [_]u16{ 0, 0, 0, 0 };
-        const basic_vec_root = try BasicVec.tree.fromValue(&pool, &basic_vec_value);
-        var basic_vec_view = try BasicVec.TreeView.init(allocator, &pool, basic_vec_root);
+        var basic_vec_view = try BasicVec.defaultTreeView(allocator, &pool);
 
         try std.testing.expectEqual(@as(u16, 0), try basic_vec_view.get(0));
         try basic_vec_view.set(0, @as(u16, 1));
@@ -166,24 +157,15 @@ test "TreeView container nested types set/get/commit" {
     }
 
     {
-        var comp_list_value: CompList.Type = .empty;
-        defer CompList.deinit(allocator, &comp_list_value);
-        const comp_list_root = try CompList.tree.fromValue(allocator, &pool, &comp_list_value);
-        var comp_list_view = try CompList.TreeView.init(allocator, &pool, comp_list_root);
+        var comp_list_view = try CompList.defaultTreeView(allocator, &pool);
 
-        var inner_value: InnerVar.Type = InnerVar.default_value;
-        defer InnerVar.deinit(allocator, &inner_value);
-        const inner_root = try InnerVar.tree.fromValue(allocator, &pool, &inner_value);
-        var inner_view: ?InnerVar.TreeView = try InnerVar.TreeView.init(allocator, &pool, inner_root);
+        var inner_view: ?InnerVar.TreeView = try InnerVar.defaultTreeView(allocator, &pool);
         defer if (inner_view) |*v| v.deinit();
         const inner = &inner_view.?;
 
         try inner.set("id", @as(u32, 99));
 
-        var payload_value: InnerVar.TreeView.Field("payload").SszType.Type = InnerVar.TreeView.Field("payload").SszType.default_value;
-        defer payload_value.deinit(allocator);
-        const payload_root = try InnerVar.TreeView.Field("payload").SszType.tree.fromValue(allocator, &pool, &payload_value);
-        var payload_view = try InnerVar.TreeView.Field("payload").init(allocator, &pool, payload_root);
+        var payload_view = try InnerVar.TreeView.Field("payload").SszType.defaultTreeView(allocator, &pool);
         try payload_view.push(@as(u8, 0x5A));
         try inner.set("payload", payload_view);
 
