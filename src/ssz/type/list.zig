@@ -194,7 +194,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
         };
 
         pub const tree = struct {
-            pub fn deserializeFromBytes(allocator: std.mem.Allocator, pool: *Node.Pool, data: []const u8) !Node.Id {
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 const len = try std.math.divExact(usize, data.len, Element.fixed_size);
                 if (len > limit) {
                     return error.gtLimit;
@@ -212,40 +212,36 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                     );
                 }
 
+                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                errdefer it.deinit();
+
                 if (comptime isBasicType(Element)) {
-                    const serialized_size = len * Element.fixed_size;
-
-                    const chunks = try allocator.alloc([32]u8, chunk_count);
-                    defer allocator.free(chunks);
-                    @memset(chunks, [_]u8{0} ** 32);
-
-                    const chunk_bytes: []u8 = @ptrCast(chunks);
-                    @memcpy(chunk_bytes[0..serialized_size], data[0..serialized_size]);
-
-                    const nodes = try allocator.alloc(Node.Id, chunk_count);
-                    defer allocator.free(nodes);
-                    for (chunks, 0..) |*chunk, i| {
-                        nodes[i] = try pool.createLeaf(chunk);
+                    for (0..chunk_count - 1) |i| {
+                        var chunk: [32]u8 = undefined;
+                        @memcpy(chunk[0..32], data[i * 32 ..][0..32]);
+                        try it.append(try pool.createLeaf(&chunk));
                     }
-
-                    return try pool.createBranch(
-                        try Node.fillWithContents(pool, nodes, chunk_depth),
-                        try pool.createLeafFromUint(len),
-                    );
+                    {
+                        // last chunk may be partial
+                        var chunk = [_]u8{0} ** 32;
+                        const i = chunk_count - 1;
+                        const remaining_bytes = (len * Element.fixed_size) - i * 32;
+                        @memcpy(chunk[0..remaining_bytes], data[i * 32 ..][0..remaining_bytes]);
+                        try it.append(try pool.createLeaf(&chunk));
+                    }
                 } else {
-                    const nodes = try allocator.alloc(Node.Id, chunk_count);
-                    defer allocator.free(nodes);
-
                     for (0..len) |i| {
                         const elem_bytes = data[i * Element.fixed_size .. (i + 1) * Element.fixed_size];
-                        nodes[i] = try Element.tree.deserializeFromBytes(pool, elem_bytes);
+                        try it.append(try Element.tree.deserializeFromBytes(pool, elem_bytes));
                     }
-
-                    return try pool.createBranch(
-                        try Node.fillWithContents(pool, nodes, chunk_depth),
-                        try pool.createLeafFromUint(len),
-                    );
                 }
+
+                const content_root = try it.finish();
+                errdefer pool.unref(content_root);
+                const len_mixin = try pool.createLeafFromUint(len);
+                errdefer pool.unref(len_mixin);
+
+                return try pool.createBranch(content_root, len_mixin);
             }
 
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
@@ -566,11 +562,11 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
         };
 
         pub const tree = struct {
-            pub fn deserializeFromBytes(allocator: std.mem.Allocator, pool: *Node.Pool, data: []const u8) !Node.Id {
-                const offsets = try readVariableOffsets(allocator, data);
-                defer allocator.free(offsets);
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
+                var iterator = OffsetIterator(Self).init(data);
+                const first_offset = if (data.len == 0) 0 else try iterator.next();
+                const len = first_offset / 4;
 
-                const len = offsets.len - 1;
                 if (len > limit) {
                     return error.gtLimit;
                 }
@@ -583,18 +579,27 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                     );
                 }
 
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
+                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                errdefer it.deinit();
 
-                for (0..len) |i| {
-                    const elem_bytes = data[offsets[i]..offsets[i + 1]];
-                    nodes[i] = try Element.tree.deserializeFromBytes(allocator, pool, elem_bytes);
+                var offset = first_offset;
+                for (0..len - 1) |_| {
+                    const next_offset = try iterator.next();
+                    const elem_bytes = data[offset..next_offset];
+                    offset = next_offset;
+                    try it.append(try Element.tree.deserializeFromBytes(pool, elem_bytes));
+                }
+                {
+                    const elem_bytes = data[offset..data.len];
+                    try it.append(try Element.tree.deserializeFromBytes(pool, elem_bytes));
                 }
 
-                return try pool.createBranch(
-                    try Node.fillWithContents(pool, nodes, chunk_depth),
-                    try pool.createLeafFromUint(len),
-                );
+                const content_root = try it.finish();
+                errdefer pool.unref(content_root);
+                const len_mixin = try pool.createLeafFromUint(len);
+                errdefer pool.unref(len_mixin);
+
+                return try pool.createBranch(content_root, len_mixin);
             }
 
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
@@ -1217,7 +1222,7 @@ test "FixedListType - tree.deserializeFromBytes (ListBasic uint8)" {
     defer pool.deinit();
 
     for (test_cases) |tc| {
-        const tree_node = try ListU8.tree.deserializeFromBytes(allocator, &pool, tc.serialized);
+        const tree_node = try ListU8.tree.deserializeFromBytes(&pool, tc.serialized);
 
         var value_from_tree: ListU8.Type = ListU8.default_value;
         defer value_from_tree.deinit(allocator);
@@ -1295,7 +1300,7 @@ test "FixedListType - tree.deserializeFromBytes (ListBasic uint64)" {
     defer pool.deinit();
 
     for (test_cases) |tc| {
-        const tree_node = try ListU64.tree.deserializeFromBytes(allocator, &pool, tc.serialized);
+        const tree_node = try ListU64.tree.deserializeFromBytes(&pool, tc.serialized);
 
         var value_from_tree: ListU64.Type = ListU64.default_value;
         defer value_from_tree.deinit(allocator);
@@ -1348,7 +1353,7 @@ test "FixedListType - tree.deserializeFromBytes (ListComposite ByteVector32)" {
     defer pool.deinit();
 
     for (test_cases) |tc| {
-        const tree_node = try ListBV32.tree.deserializeFromBytes(allocator, &pool, tc.serialized);
+        const tree_node = try ListBV32.tree.deserializeFromBytes(&pool, tc.serialized);
 
         var value_from_tree: ListBV32.Type = ListBV32.default_value;
         defer value_from_tree.deinit(allocator);
@@ -1414,7 +1419,7 @@ test "FixedListType - tree.deserializeFromBytes (ListComposite Container)" {
     defer pool.deinit();
 
     for (test_cases) |tc| {
-        const tree_node = try ListContainer.tree.deserializeFromBytes(allocator, &pool, tc.serialized);
+        const tree_node = try ListContainer.tree.deserializeFromBytes(&pool, tc.serialized);
 
         var value_from_tree: ListContainer.Type = ListContainer.default_value;
         defer value_from_tree.deinit(allocator);
@@ -1487,7 +1492,7 @@ test "VariableListType - tree.deserializeFromBytes (List<List<uint16>>)" {
     defer pool.deinit();
 
     for (test_cases) |tc| {
-        const tree_node = try OuterList.tree.deserializeFromBytes(allocator, &pool, tc.serialized);
+        const tree_node = try OuterList.tree.deserializeFromBytes(&pool, tc.serialized);
 
         var value_from_tree: OuterList.Type = OuterList.default_value;
         defer OuterList.deinit(allocator, &value_from_tree);

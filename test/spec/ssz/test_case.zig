@@ -293,10 +293,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
 
     // test conversion between tree and serialized
     {
-        const node = if (comptime ssz.isFixedType(ST))
-            try ST.tree.deserializeFromBytes(&pool, serialized_expected)
-        else
-            try ST.tree.deserializeFromBytes(allocator, &pool, serialized_expected);
+        const node = try ST.tree.deserializeFromBytes(&pool, serialized_expected);
         defer pool.unref(node);
 
         try std.testing.expectEqualSlices(u8, &root_expected, node.getRoot(&pool));

@@ -414,7 +414,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         };
 
         pub const tree = struct {
-            pub fn deserializeFromBytes(allocator: std.mem.Allocator, pool: *Node.Pool, data: []const u8) !Node.Id {
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 const bit_len = try serialized.length(data);
                 const chunk_count = (bit_len + 255) / 256;
 
@@ -425,29 +425,35 @@ pub fn BitListType(comptime _limit: comptime_int) type {
                     );
                 }
 
-                const chunks = try allocator.alloc([32]u8, chunk_count);
-                defer allocator.free(chunks);
-                @memset(chunks, [_]u8{0} ** 32);
+                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                errdefer it.deinit();
 
-                const raw_byte_length = (bit_len + 7) / 8;
-                const chunk_bytes: []u8 = @ptrCast(chunks);
-
-                @memcpy(chunk_bytes[0..raw_byte_length], data[0..raw_byte_length]);
-                if (bit_len % 8 != 0) {
-                    const last_1_index: u3 = @intCast(bit_len % 8);
-                    chunk_bytes[raw_byte_length - 1] ^= @as(u8, 1) << last_1_index;
+                for (0..chunk_count - 1) |i| {
+                    var chunk: [32]u8 = undefined;
+                    @memcpy(chunk[0..32], data[i * 32 ..][0..32]);
+                    try it.append(try pool.createLeaf(&chunk));
+                }
+                {
+                    // last chunk may be partial
+                    var chunk = [_]u8{0} ** 32;
+                    const raw_byte_length = (bit_len + 7) / 8;
+                    const i = chunk_count - 1;
+                    const remaining_bytes = raw_byte_length - i * 32;
+                    @memcpy(chunk[0..remaining_bytes], data[i * 32 ..][0..remaining_bytes]);
+                    // remove padding bit
+                    if (bit_len % 8 != 0) {
+                        const last_1_index: u3 = @intCast(bit_len % 8);
+                        chunk[remaining_bytes - 1] ^= @as(u8, 1) << last_1_index;
+                    }
+                    try it.append(try pool.createLeaf(&chunk));
                 }
 
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
-                for (chunks, 0..) |*chunk, i| {
-                    nodes[i] = try pool.createLeaf(chunk);
-                }
+                const content_root = try it.finish();
+                errdefer pool.unref(content_root);
+                const len_mixin = try pool.createLeafFromUint(bit_len);
+                errdefer pool.unref(len_mixin);
 
-                return try pool.createBranch(
-                    try Node.fillWithContents(pool, nodes, chunk_depth),
-                    try pool.createLeafFromUint(bit_len),
-                );
+                return try pool.createBranch(content_root, len_mixin);
             }
 
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
@@ -839,7 +845,7 @@ test "BitListType - tree.deserializeFromBytes" {
     defer pool.deinit();
 
     for (test_cases) |tc| {
-        const tree_node = try Bits.tree.deserializeFromBytes(allocator, &pool, tc.serialized);
+        const tree_node = try Bits.tree.deserializeFromBytes(&pool, tc.serialized);
 
         const node_root = tree_node.getRoot(&pool);
         try std.testing.expectEqualSlices(u8, &tc.expected_root, node_root);

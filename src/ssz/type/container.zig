@@ -143,6 +143,7 @@ pub fn FixedContainerType(comptime ST: type) type {
                 }
 
                 var nodes: [chunk_count]Node.Id = undefined;
+                errdefer pool.free(&nodes);
                 var offset: usize = 0;
 
                 inline for (fields, 0..) |field, i| {
@@ -543,24 +544,21 @@ pub fn VariableContainerType(comptime ST: type) type {
         };
 
         pub const tree = struct {
-            pub fn deserializeFromBytes(allocator: std.mem.Allocator, pool: *Node.Pool, data: []const u8) !Node.Id {
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 if (data.len > max_size or data.len < min_size) {
                     return error.InvalidSize;
                 }
 
                 const ranges = try readFieldRanges(data);
                 var nodes: [chunk_count]Node.Id = undefined;
+                errdefer pool.free(&nodes);
 
                 inline for (fields, 0..) |field, i| {
                     const start = ranges[i][0];
                     const end = ranges[i][1];
                     const field_bytes = data[start..end];
 
-                    if (comptime isFixedType(field.type)) {
-                        nodes[i] = try field.type.tree.deserializeFromBytes(pool, field_bytes);
-                    } else {
-                        nodes[i] = try field.type.tree.deserializeFromBytes(allocator, pool, field_bytes);
-                    }
+                    nodes[i] = try field.type.tree.deserializeFromBytes(pool, field_bytes);
                 }
 
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
@@ -977,7 +975,7 @@ test "VariableContainerType - tree.deserializeFromBytes" {
     var pool = try Node.Pool.init(allocator, 128);
     defer pool.deinit();
 
-    const node = try Container.tree.deserializeFromBytes(allocator, &pool, &serialized);
+    const node = try Container.tree.deserializeFromBytes(&pool, &serialized);
     try std.testing.expectEqualSlices(u8, &expected_root, node.getRoot(&pool));
 
     const roundtrip_size = try Container.tree.serializedSize(node, &pool);

@@ -105,7 +105,7 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
         };
 
         pub const tree = struct {
-            pub fn deserializeFromBytes(allocator: std.mem.Allocator, pool: *Node.Pool, data: []const u8) !Node.Id {
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 if (data.len > limit) {
                     return error.gtLimit;
                 }
@@ -119,23 +119,29 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
                     );
                 }
 
-                const chunks = try allocator.alloc([32]u8, chunk_count);
-                defer allocator.free(chunks);
-                @memset(chunks, [_]u8{0} ** 32);
+                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                errdefer it.deinit();
 
-                const chunk_bytes: []u8 = @ptrCast(chunks);
-                @memcpy(chunk_bytes[0..len], data[0..len]);
-
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
-                for (chunks, 0..) |*chunk, i| {
-                    nodes[i] = try pool.createLeaf(chunk);
+                for (0..chunk_count - 1) |i| {
+                    var chunk: [32]u8 = undefined;
+                    @memcpy(chunk[0..32], data[i * 32 ..][0..32]);
+                    try it.append(try pool.createLeaf(&chunk));
+                }
+                {
+                    // last chunk may be partial
+                    var chunk = [_]u8{0} ** 32;
+                    const i = chunk_count - 1;
+                    const remaining_bytes = len - i * 32;
+                    @memcpy(chunk[0..remaining_bytes], data[i * 32 ..][0..remaining_bytes]);
+                    try it.append(try pool.createLeaf(&chunk));
                 }
 
-                return try pool.createBranch(
-                    try Node.fillWithContents(pool, nodes, chunk_depth),
-                    try pool.createLeafFromUint(len),
-                );
+                const content_root = try it.finish();
+                errdefer pool.unref(content_root);
+                const len_mixin = try pool.createLeafFromUint(len);
+                errdefer pool.unref(len_mixin);
+
+                return try pool.createBranch(content_root, len_mixin);
             }
 
             pub fn length(node: Node.Id, pool: *Node.Pool) !usize {
@@ -463,7 +469,7 @@ test "ByteListType - tree.deserializeFromBytes (32 bytes)" {
     var pool = try Node.Pool.init(allocator, 64);
     defer pool.deinit();
 
-    const tree_node = try ByteList256.tree.deserializeFromBytes(allocator, &pool, &serialized);
+    const tree_node = try ByteList256.tree.deserializeFromBytes(&pool, &serialized);
 
     const node_root = tree_node.getRoot(&pool);
     try std.testing.expectEqualSlices(u8, &expected_root, node_root);
@@ -494,7 +500,7 @@ test "ByteListType - tree.deserializeFromBytes (96 bytes)" {
     var pool = try Node.Pool.init(allocator, 64);
     defer pool.deinit();
 
-    const tree_node = try ByteList256.tree.deserializeFromBytes(allocator, &pool, &serialized);
+    const tree_node = try ByteList256.tree.deserializeFromBytes(&pool, &serialized);
 
     const node_root = tree_node.getRoot(&pool);
     try std.testing.expectEqualSlices(u8, &expected_root, node_root);
