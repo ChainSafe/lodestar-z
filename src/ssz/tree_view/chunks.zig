@@ -9,7 +9,7 @@ const Gindex = @import("persistent_merkle_tree").Gindex;
 
 const tree_view_root = @import("root.zig");
 const ChildNodes = @import("utils/child_nodes.zig").ChildNodes;
-const CloneOpts = @import("utils/type.zig").CloneOpts;
+const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
 
 /// Shared helpers for basic element types packed into chunks.
 pub fn BasicPackedChunks(

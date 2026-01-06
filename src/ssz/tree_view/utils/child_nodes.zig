@@ -2,8 +2,8 @@ const std = @import("std");
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 
+/// common functions for TreeViews deal with children_nodes
 pub const ChildNodes = struct {
-    /// common functions for TreeViews deal with children_nodes
     pub fn getChildNode(self: anytype, gindex: Gindex) !Node.Id {
         const gop = try self.children_nodes.getOrPut(self.allocator, gindex);
         if (gop.found_existing) {
@@ -53,8 +53,8 @@ pub const ChildNodes = struct {
         try self.setChildNode(@enumFromInt(3), length_node);
     }
 
+    /// common functions for TreeViews deal with children_nodes + changed
     pub const Change = struct {
-        /// common functions for TreeViews deal with children_nodes + changed
         pub fn commit(self: anytype) !void {
             if (self.changed.count() == 0) {
                 return;

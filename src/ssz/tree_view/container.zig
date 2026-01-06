@@ -7,7 +7,7 @@ const FixedContainerType = @import("../type/container.zig").FixedContainerType;
 const UintType = @import("../type/uint.zig").UintType;
 const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
 const isFixedType = @import("../type/type_kind.zig").isFixedType;
-const CloneOpts = @import("utils/type.zig").CloneOpts;
+const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
 
 /// A specialized tree view for SSZ container types, enabling efficient access and modification of container fields, given a backing merkle tree.
 ///

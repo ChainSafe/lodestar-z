@@ -7,7 +7,7 @@ const Depth = hashing.Depth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const ChildNodes = @import("utils/child_nodes.zig").ChildNodes;
-const CloneOpts = @import("utils/type.zig").CloneOpts;
+const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
 
 /// Provides common bit array operations for both BitVectorTreeView and BitListTreeView.
 pub fn BitArray(comptime chunk_depth: Depth) type {
