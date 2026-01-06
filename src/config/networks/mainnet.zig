@@ -1,13 +1,14 @@
 const std = @import("std");
-const hex_utils = @import("hex");
 const Preset = @import("preset").Preset;
-const ChainConfig = @import("../chain_config.zig").ChainConfig;
-const BlobScheduleEntry = @import("../chain_config.zig").BlobScheduleEntry;
-const b = hex_utils.hexToBytesComptime;
+const ChainConfig = @import("../ChainConfig.zig");
+const BeaconConfig = @import("../BeaconConfig.zig");
+const b = @import("hex").hexToBytesComptime;
 
-pub const mainnet_genesis_validators_root = b(32, "0x4b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe95");
+pub const config = BeaconConfig.init(chain_config, genesis_validators_root);
 
-pub const mainnet_chain_config = ChainConfig{
+pub const genesis_validators_root = b(32, "0x4b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe95");
+
+pub const chain_config = ChainConfig{
     .PRESET_BASE = Preset.mainnet,
     .CONFIG_NAME = "mainnet",
 
@@ -86,5 +87,14 @@ pub const mainnet_chain_config = ChainConfig{
     .BALANCE_PER_ADDITIONAL_CUSTODY_GROUP = 32000000000,
 
     // Blob Scheduling
-    .BLOB_SCHEDULE = &[_]BlobScheduleEntry{},
+    .BLOB_SCHEDULE = &[_]ChainConfig.BlobScheduleEntry{
+        .{
+            .EPOCH = 412672,
+            .MAX_BLOBS_PER_BLOCK = 15,
+        },
+        .{
+            .EPOCH = 419072,
+            .MAX_BLOBS_PER_BLOCK = 21,
+        },
+    },
 };

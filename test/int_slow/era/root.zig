@@ -19,10 +19,7 @@ test "validate an existing era file" {
         return error.SkipZigTest;
     }
 
-    var config: c.BeaconConfig = undefined;
-    try config.init(c.mainnet_chain_config, c.mainnet_genesis_validators_root);
-
-    var reader = try era.Reader.open(allocator, config, era_path);
+    var reader = try era.Reader.open(allocator, c.mainnet.config, era_path);
     defer reader.close(allocator);
 
     // Main validation
@@ -43,11 +40,8 @@ test "write an era file from an existing era file" {
         return error.SkipZigTest;
     }
 
-    var config: c.BeaconConfig = undefined;
-    try config.init(c.mainnet_chain_config, c.mainnet_genesis_validators_root);
-
     // Read known-good era file
-    var reader = try era.Reader.open(allocator, config, era_path);
+    var reader = try era.Reader.open(allocator, c.mainnet.config, era_path);
     defer reader.close(allocator);
 
     var tmp_dir = std.testing.tmpDir(.{});
@@ -59,7 +53,7 @@ test "write an era file from an existing era file" {
     defer allocator.free(out_path);
 
     // Write known-good era to a new era file
-    var writer = try era.Writer.open(config, out_path, reader.era_number);
+    var writer = try era.Writer.open(c.mainnet.config, out_path, reader.era_number);
 
     const blocks_index = reader.group_indices[0].blocks_index orelse return error.NoBlockIndex;
     for (blocks_index.start_slot..blocks_index.start_slot + blocks_index.offsets.len) |slot| {
@@ -82,7 +76,7 @@ test "write an era file from an existing era file" {
     if (!std.mem.eql(u8, std.fs.path.basename(final_out_path), std.fs.path.basename(era_path))) {
         return error.IncorrectWrittenEraFileName;
     }
-    var out_reader = try era.Reader.open(allocator, config, final_out_path);
+    var out_reader = try era.Reader.open(allocator, c.mainnet.config, final_out_path);
     defer out_reader.close(allocator);
 
     // Compare struct fields
