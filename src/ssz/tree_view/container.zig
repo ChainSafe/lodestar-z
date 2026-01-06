@@ -199,7 +199,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
         }
 
         /// Get a field by name. If the field is a basic type, returns the value directly.
-        /// Caller borrows a copy of the value so there is no need to deinit it.
+        /// Caller borrows a reference to child value so there is no need to deinit it.
         pub fn get(self: *Self, comptime field_name: []const u8) !Field(field_name) {
             const field_index = comptime ST.getFieldIndex(field_name);
             const ChildST = ST.getFieldType(field_name);

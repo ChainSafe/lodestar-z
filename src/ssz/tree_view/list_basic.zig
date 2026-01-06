@@ -91,7 +91,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             return self.chunks.root;
         }
 
-        pub fn length(self: *Self) !usize {
+        pub fn length(self: *const Self) !usize {
             return self._len;
         }
 
