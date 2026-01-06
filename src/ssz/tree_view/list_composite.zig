@@ -31,7 +31,9 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
     const TreeView = struct {
         allocator: Allocator,
         chunks: Chunks,
+        // the original length, before any modifications
         _orig_len: usize,
+        // the current length, may differ from original until committed
         _len: usize,
 
         pub const SszType = ST;
