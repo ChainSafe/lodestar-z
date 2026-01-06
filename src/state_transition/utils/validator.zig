@@ -36,7 +36,7 @@ pub fn getActiveValidatorIndices(allocator: Allocator, state: *const BeaconState
 }
 
 pub fn getActivationChurnLimit(config: *const BeaconConfig, fork: ForkSeq, active_validator_count: usize) usize {
-    if (fork.isPostDeneb()) {
+    if (fork.gte(.deneb)) {
         return @min(config.chain.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT, getChurnLimit(config, active_validator_count));
     }
 
