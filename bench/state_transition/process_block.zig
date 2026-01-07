@@ -373,9 +373,9 @@ pub fn main() !void {
     const state_bytes = try state_file.readToEndAlloc(allocator, 10_000_000_000);
     defer allocator.free(state_bytes);
 
-    const chain_config = config.mainnet_chain_config;
+    const chain_config = config.mainnet.chain_config;
     const slot = slotFromStateBytes(state_bytes);
-    const detected_fork = config.forkSeqAtSlot(chain_config, slot);
+    const detected_fork = config.mainnet.config.forkSeq(slot);
     try stdout.print("Detected fork: {s} (slot {})\n", .{ @tagName(detected_fork), slot });
 
     const block_file = try std.fs.cwd().openFile(block_path, .{});
@@ -394,17 +394,17 @@ fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, stdout: an
     const signed_beacon_block = try loadBlock(fork, allocator, block_bytes);
     const block_slot = signed_beacon_block.beaconBlock().slot();
 
-    const beacon_config = try config.BeaconConfig.init(allocator, chain_config, beacon_state.genesisValidatorsRoot());
+    const beacon_config = config.BeaconConfig.init(chain_config, beacon_state.genesisValidatorsRoot());
     const pubkey_index_map = try PubkeyIndexMap.init(allocator);
     const index_pubkey_cache = try allocator.create(state_transition.Index2PubkeyCache);
     index_pubkey_cache.* = state_transition.Index2PubkeyCache.init(allocator);
     try state_transition.syncPubkeys(beacon_state.validators().items, pubkey_index_map, index_pubkey_cache);
 
     const cached_state = try CachedBeaconStateAllForks.createCachedBeaconState(allocator, beacon_state, .{
-        .config = beacon_config,
+        .config = &beacon_config,
         .index_to_pubkey = index_pubkey_cache,
         .pubkey_to_index = pubkey_index_map,
-    }, .{ .skip_sync_committee_cache = !comptime fork.isPostAltair(), .skip_sync_pubkeys = false });
+    }, .{ .skip_sync_committee_cache = !comptime fork.gte(.altair), .skip_sync_pubkeys = false });
 
     try state_transition.state_transition.processSlotsWithTransientCache(allocator, cached_state, block_slot, .{});
     try stdout.print("State: slot={}, validators={}\n", .{ cached_state.state.slot(), beacon_state.validators().items.len });
@@ -419,10 +419,10 @@ fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, stdout: an
 
     try bench.addParam("block_header", &ProcessBlockHeaderBench{ .cached_state = cached_state, .signed_block = signed_block }, .{});
 
-    if (comptime fork.isPostCapella()) {
+    if (comptime fork.gte(.capella)) {
         try bench.addParam("withdrawals", &ProcessWithdrawalsBench{ .cached_state = cached_state, .signed_block = signed_block }, .{});
     }
-    if (comptime fork.isPostBellatrix()) {
+    if (comptime fork.gte(.bellatrix)) {
         try bench.addParam("execution_payload", &ProcessExecutionPayloadBench{ .cached_state = cached_state, .body = body }, .{});
     }
 
@@ -432,7 +432,7 @@ fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, stdout: an
     try bench.addParam("operations", &ProcessOperationsBench(.{ .verify_signature = true }){ .cached_state = cached_state, .signed_block = signed_block }, .{});
     try bench.addParam("operations_no_sig", &ProcessOperationsBench(.{ .verify_signature = false }){ .cached_state = cached_state, .signed_block = signed_block }, .{});
 
-    if (comptime fork.isPostAltair()) {
+    if (comptime fork.gte(.altair)) {
         try bench.addParam("sync_aggregate", &ProcessSyncAggregateBench(.{ .verify_signature = true }){ .cached_state = cached_state, .signed_block = signed_block }, .{});
         try bench.addParam("sync_aggregate_no_sig", &ProcessSyncAggregateBench(.{ .verify_signature = false }){ .cached_state = cached_state, .signed_block = signed_block }, .{});
     }

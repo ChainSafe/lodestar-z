@@ -333,9 +333,9 @@ const ProcessProposerLookaheadBench = struct {
             cloned.deinit();
             allocator.destroy(cloned);
         }
-        const epoch_cache = cloned.getEpochCache();
-        const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
-        state_transition.processProposerLookahead.processProposerLookahead(allocator, cloned.state, &effective_balance_increments) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        defer cache.deinit();
+        state_transition.processProposerLookahead(allocator, cloned, cache) catch unreachable;
     }
 };
 
@@ -516,9 +516,7 @@ const ProcessEpochSegmentedBench = struct {
 
         if (state.isFulu()) {
             const lookahead_start = std.time.nanoTimestamp();
-            const epoch_cache = cloned.getEpochCache();
-            const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
-            state_transition.processProposerLookahead.processProposerLookahead(allocator, state, &effective_balance_increments) catch unreachable;
+            state_transition.processProposerLookahead(allocator, cloned, cache) catch unreachable;
             recordSegment(.proposer_lookahead, elapsedSince(lookahead_start));
         }
 
@@ -546,9 +544,9 @@ pub fn main() !void {
     try stdout.print("State file loaded: {} bytes\n", .{state_bytes.len});
 
     // Detect fork from state SSZ bytes
-    const chain_config = config.mainnet_chain_config;
+    const chain_config = config.mainnet.chain_config;
     const slot = slotFromStateBytes(state_bytes);
-    const detected_fork = config.forkSeqAtSlot(chain_config, slot);
+    const detected_fork = config.mainnet.config.forkSeq(slot);
     try stdout.print("Detected fork: {s} (slot {})\n", .{ @tagName(detected_fork), slot });
 
     // Dispatch to fork-specific loading
@@ -573,7 +571,7 @@ fn runBenchmark(
         beacon_state.validators().items.len,
     });
 
-    const beacon_config = try config.BeaconConfig.init(allocator, chain_config, beacon_state.genesisValidatorsRoot());
+    const beacon_config = config.BeaconConfig.init(chain_config, beacon_state.genesisValidatorsRoot());
 
     const pubkey_index_map = try PubkeyIndexMap.init(allocator);
     const index_pubkey_cache = try allocator.create(state_transition.Index2PubkeyCache);
@@ -582,13 +580,13 @@ fn runBenchmark(
     try state_transition.syncPubkeys(beacon_state.validators().items, pubkey_index_map, index_pubkey_cache);
 
     const immutable_data = state_transition.EpochCacheImmutableData{
-        .config = beacon_config,
+        .config = &beacon_config,
         .index_to_pubkey = index_pubkey_cache,
         .pubkey_to_index = pubkey_index_map,
     };
 
     const cached_state = try CachedBeaconStateAllForks.createCachedBeaconState(allocator, beacon_state, immutable_data, .{
-        .skip_sync_committee_cache = !comptime fork.isPostAltair(),
+        .skip_sync_committee_cache = !comptime fork.gte(.altair),
         .skip_sync_pubkeys = false,
     });
 
@@ -603,7 +601,7 @@ fn runBenchmark(
     }, .{});
 
     // Post-Altair
-    if (comptime fork.isPostAltair()) {
+    if (comptime fork.gte(.altair)) {
         try bench.addParam("inactivity_updates", &ProcessInactivityUpdatesBench{
             .cached_state = cached_state,
         }, .{});
@@ -625,7 +623,7 @@ fn runBenchmark(
         .cached_state = cached_state,
     }, .{});
 
-    if (comptime fork.isPostElectra()) {
+    if (comptime fork.gte(.electra)) {
         try bench.addParam("pending_deposits", &ProcessPendingDepositsBench{
             .cached_state = cached_state,
         }, .{});
@@ -647,13 +645,13 @@ fn runBenchmark(
         .cached_state = cached_state,
     }, .{});
 
-    if (comptime fork.isPostCapella()) {
+    if (comptime fork.gte(.capella)) {
         try bench.addParam("historical_summaries", &ProcessHistoricalSummariesUpdateBench{
             .cached_state = cached_state,
         }, .{});
     }
 
-    if (comptime fork.isPostAltair()) {
+    if (comptime fork.gte(.altair)) {
         try bench.addParam("participation_flags", &ProcessParticipationFlagUpdatesBench{
             .cached_state = cached_state,
         }, .{});
@@ -664,7 +662,7 @@ fn runBenchmark(
     }
 
     // Post-Fulu
-    if (comptime fork.isPostFulu()) {
+    if (comptime fork.gte(.fulu)) {
         try bench.addParam("proposer_lookahead", &ProcessProposerLookaheadBench{
             .cached_state = cached_state,
         }, .{});

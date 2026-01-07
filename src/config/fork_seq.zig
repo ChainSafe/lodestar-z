@@ -1,6 +1,9 @@
 const std = @import("std");
 const types = @import("consensus_types");
+const preset = @import("preset").preset;
+const ChainConfig = @import("./ChainConfig.zig");
 const Epoch = types.primitive.Epoch.Type;
+const Slot = types.primitive.Slot.Type;
 const Version = types.primitive.Version.Type;
 
 /// Ordered consensus fork identifiers used throughout the client.
