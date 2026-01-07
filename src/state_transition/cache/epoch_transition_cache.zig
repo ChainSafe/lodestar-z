@@ -8,6 +8,10 @@ const Epoch = types.primitive.Epoch.Type;
 const preset = @import("preset").preset;
 const CachedBeaconStateAllForks = @import("./state_cache.zig").CachedBeaconStateAllForks;
 
+const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
+const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
+const deinitStateTransition = @import("../root.zig").deinitStateTransition;
+
 const attester_status = @import("../utils/attester_status.zig");
 const FLAG_CURR_HEAD_ATTESTER = attester_status.FLAG_CURR_HEAD_ATTESTER;
 const FLAG_CURR_SOURCE_ATTESTER = attester_status.FLAG_CURR_SOURCE_ATTESTER;
@@ -219,6 +223,7 @@ pub const EpochTransitionCache = struct {
         const effective_balances_by_increments = epoch_cache.getEffectiveBalanceIncrements().items;
 
         var next_epoch_shuffling_active_indices_length: usize = 0;
+
         var reused_cache = try getReusedEpochTransitionCache(allocator, validator_count);
         for (0..validator_count) |i| {
             const validator = state.validators().items[i];
@@ -252,7 +257,7 @@ pub const EpochTransitionCache = struct {
 
             reused_cache.flags.items[i] = flag;
 
-            if (fork_seq.isPostElectra()) {
+            if (fork_seq.gte(.electra)) {
                 reused_cache.is_compounding_validator_arr.items[i] = hasCompoundingWithdrawalCredential(validator.withdrawal_credentials);
             }
 
@@ -419,7 +424,7 @@ pub const EpochTransitionCache = struct {
         }
 
         // assertCorrectProgressiveBalances = true by default
-        if (fork_seq.isPostAltair()) {
+        if (fork_seq.gte(.altair)) {
             if (epoch_cache.current_target_unslashed_balance_increments != curr_target_unsl_stake) {
                 return error.InCorrectCurrentTargetUnslashedBalance;
             }
@@ -503,3 +508,32 @@ pub const EpochTransitionCache = struct {
         }
     }
 };
+
+test "EpochTransitionCache - finalProcessEpoch" {
+    const allocator = std.testing.allocator;
+    var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+    defer test_state.deinit();
+
+    try upgradeStateToFulu(allocator, test_state.cached_state);
+
+    const epoch_cache = test_state.cached_state.getEpochCache();
+    try epoch_cache.finalProcessEpoch(test_state.cached_state);
+}
+
+test "EpochTransitionCache.beforeProcessEpoch" {
+    const allocator = std.testing.allocator;
+    const validator_count_arr = &.{ 256, 10_000 };
+
+    inline for (validator_count_arr) |validator_count| {
+        var test_state = try TestCachedBeaconStateAllForks.init(allocator, validator_count);
+        defer test_state.deinit();
+
+        var epoch_transition_cache = try EpochTransitionCache.init(allocator, test_state.cached_state);
+        defer {
+            epoch_transition_cache.deinit();
+            allocator.destroy(epoch_transition_cache);
+        }
+    }
+
+    deinitStateTransition();
+}

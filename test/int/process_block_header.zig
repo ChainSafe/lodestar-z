@@ -2,7 +2,7 @@ test "process block header - sanity" {
     const allocator = std.testing.allocator;
 
     var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
-    const slot = config.mainnet_chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
+    const slot = config.mainnet.chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
     defer test_state.deinit();
 
     const proposers = test_state.cached_state.getEpochCache().proposers;

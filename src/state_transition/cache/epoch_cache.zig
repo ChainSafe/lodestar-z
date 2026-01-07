@@ -84,11 +84,16 @@ pub const EpochCache = struct {
 
     proposers: [preset.SLOTS_PER_EPOCH]ValidatorIndex,
 
-    proposer_prev_epoch: ?[preset.SLOTS_PER_EPOCH]ValidatorIndex,
+    proposers_prev_epoch: ?[preset.SLOTS_PER_EPOCH]ValidatorIndex,
 
-    // TODO: may not need this
-    // proposers_next_epoch: not needed after EIP-7917
-    // the below is not needed if we compute the next epoch shuffling eagerly
+    /// Deterministic Proposer Lookahead was introduced as part of Fulu,
+    /// in [EIP-7917](https://eips.ethereum.org/EIPS/eip-7917).
+    ///
+    /// Thus, post-Fulu, this is populated from proposer lookahead, but
+    /// is null pre-Fulu.
+    proposers_next_epoch: ?[preset.SLOTS_PER_EPOCH]ValidatorIndex,
+
+    // TODO: the below is not needed if we compute the next epoch shuffling eagerly
     // previous_decision_root
     // current_decision_root
     // next_decision_root
@@ -277,7 +282,7 @@ pub const EpochCache = struct {
         var previous_target_unslashed_balance_increments: u64 = 0;
         var current_target_unslashed_balance_increments: u64 = 0;
 
-        if (fork_seq.isPostAltair()) {
+        if (fork_seq.gte(.altair)) {
             const previous_epoch_participation = state.previousEpochParticipations().items;
             const current_epoch_participation = state.currentEpochParticipations().items;
 
@@ -295,7 +300,8 @@ pub const EpochCache = struct {
             .index_to_pubkey = index_to_pubkey,
             .proposers = proposers,
             // On first epoch, set to null to prevent unnecessary work since this is only used for metrics
-            .proposer_prev_epoch = null,
+            .proposers_prev_epoch = null,
+            .proposers_next_epoch = null,
             .previous_shuffling = try EpochShufflingRc.init(allocator, previous_shuffling),
             .current_shuffling = try EpochShufflingRc.init(allocator, current_shuffling),
             .next_shuffling = try EpochShufflingRc.init(allocator, next_shuffling),
@@ -346,7 +352,7 @@ pub const EpochCache = struct {
             .index_to_pubkey = self.index_to_pubkey,
             // Immutable data
             .proposers = self.proposers,
-            .proposer_prev_epoch = self.proposer_prev_epoch,
+            .proposers_prev_epoch = self.proposers_prev_epoch,
             // reuse the same instances, increase reference count
             .previous_shuffling = self.previous_shuffling.acquire(),
             .current_shuffling = self.current_shuffling.acquire(),
@@ -423,10 +429,6 @@ pub const EpochCache = struct {
         );
         self.next_shuffling = try EpochShufflingRc.init(self.allocator, next_shuffling);
 
-        var upcoming_proposer_seed: [32]u8 = undefined;
-        try getSeed(state, upcoming_epoch, c.DOMAIN_BEACON_PROPOSER, &upcoming_proposer_seed);
-        try computeProposers(self.allocator, self.config.forkSeqAtEpoch(upcoming_epoch), upcoming_proposer_seed, upcoming_epoch, self.current_shuffling.get().active_indices, self.effective_balance_increment.get(), &self.proposers);
-
         self.churn_limit = getChurnLimit(self.config, self.current_shuffling.get().active_indices.len);
         self.activation_churn_limit = getActivationChurnLimit(self.config, self.config.forkSeq(state.slot()), self.current_shuffling.get().active_indices.len);
 
@@ -448,6 +450,32 @@ pub const EpochCache = struct {
         self.current_target_unslashed_balance_increments = 0;
         self.epoch = computeEpochAtSlot(state.slot());
         self.sync_period = computeSyncPeriodAtEpoch(self.epoch);
+    }
+
+    /// At fork boundary, this runs post-fork logic and after `upgradeState*`.
+    pub fn finalProcessEpoch(self: *EpochCache, cached_state: *const CachedBeaconStateAllForks) !void {
+        const state = cached_state.state;
+
+        self.proposers_prev_epoch = self.proposers;
+        // Post-Fulu, EIP-7917 introduced the `proposer_lookahead`
+        // field which we already processed in `processProposerLookahead`.
+        // Proposers are to be computed pre-fulu to be cached within `self`.
+        if (self.epoch >= self.config.chain.FULU_FORK_EPOCH) {
+            self.proposers = state.proposerLookahead()[0..preset.SLOTS_PER_EPOCH].*;
+            self.proposers_next_epoch = state.proposerLookahead()[preset.SLOTS_PER_EPOCH .. preset.SLOTS_PER_EPOCH * 2].*;
+        } else {
+            var upcoming_proposer_seed: [32]u8 = undefined;
+            try getSeed(state, self.epoch, c.DOMAIN_BEACON_PROPOSER, &upcoming_proposer_seed);
+            try computeProposers(
+                self.allocator,
+                self.config.forkSeqAtEpoch(self.epoch),
+                upcoming_proposer_seed,
+                self.epoch,
+                self.current_shuffling.get().active_indices,
+                self.effective_balance_increment.get(),
+                &self.proposers,
+            );
+        }
     }
 
     pub fn beforeEpochTransition(self: *EpochCache) !void {
@@ -637,6 +665,13 @@ pub const EpochCache = struct {
             null;
 
         return shuffling;
+    }
+
+    /// Returns the active validator indices for the given epoch from the cached shuffling.
+    /// Returns null if the epoch is not covered by the cached shufflings.
+    pub fn getActiveIndicesAtEpoch(self: *const EpochCache, epoch: Epoch) ?[]const ValidatorIndex {
+        const shuffling = self.getShufflingAtEpochOrNull(epoch) orelse return null;
+        return shuffling.active_indices;
     }
 
     /// Note: The range of slots a validator has to perform duties is off by one.

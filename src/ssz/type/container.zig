@@ -12,6 +12,7 @@ const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const Depth = @import("persistent_merkle_tree").Depth;
+const ContainerTreeView = @import("../tree_view/root.zig").ContainerTreeView;
 
 pub fn FixedContainerType(comptime ST: type) type {
     const ssz_fields = switch (@typeInfo(ST)) {
@@ -54,6 +55,7 @@ pub fn FixedContainerType(comptime ST: type) type {
         pub const Fields: type = ST;
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
         pub const Type: type = T;
+        pub const TreeView: type = ContainerTreeView(@This());
         pub const fixed_size: usize = _fixed_size;
         pub const field_offsets: [fields.len]usize = _offsets;
         pub const chunk_count: usize = fields.len;
@@ -135,6 +137,24 @@ pub fn FixedContainerType(comptime ST: type) type {
         };
 
         pub const tree = struct {
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
+                if (data.len != fixed_size) {
+                    return error.InvalidSize;
+                }
+
+                var nodes: [chunk_count]Node.Id = undefined;
+                var offset: usize = 0;
+
+                inline for (fields, 0..) |field, i| {
+                    const field_bytes = data[offset .. offset + field.type.fixed_size];
+                    offset += field.type.fixed_size;
+
+                    nodes[i] = try field.type.tree.deserializeFromBytes(pool, field_bytes);
+                }
+
+                return try Node.fillWithContents(pool, &nodes, chunk_depth);
+            }
+
             pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var nodes: [chunk_count]Node.Id = undefined;
                 try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
@@ -153,24 +173,20 @@ pub fn FixedContainerType(comptime ST: type) type {
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }
 
-            pub fn serializeIntoBytes(value: Node.Id, pool: *Node.Pool, out: []u8) !usize {
-                var i: usize = 0;
-                inline for (fields) |field| {
-                    const field_value_ptr = &@field(value, field.name);
-                    i += try field.type.tree.serializeIntoBytes(field_value_ptr, pool, out[i..]);
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                var nodes: [chunk_count]Node.Id = undefined;
+                try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
+
+                var offset: usize = 0;
+                inline for (fields, 0..) |field, i| {
+                    const result = field.type.tree.serializeIntoBytes(nodes[i], pool, out[offset..]);
+                    offset += if (@typeInfo(@TypeOf(result)) == .error_union) try result else result;
                 }
-                return i;
+                return offset;
             }
 
-            pub fn deserializeFromBytes(data: []const u8, pool: *Node.Pool, out: *Node.Id) !void {
-                if (data.len != fixed_size) {
-                    return error.InvalidSize;
-                }
-                var i: usize = 0;
-                inline for (fields) |field| {
-                    try field.type.tree.deserializeFromBytes(data[i .. i + field.type.fixed_size], pool, &@field(out, field.name));
-                    i += field.type.fixed_size;
-                }
+            pub fn serializedSize(_: Node.Id, _: *Node.Pool) usize {
+                return fixed_size;
             }
         };
 
@@ -297,6 +313,7 @@ pub fn VariableContainerType(comptime ST: type) type {
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
         pub const Fields: type = ST;
         pub const Type: type = T;
+        pub const TreeView: type = ContainerTreeView(@This());
         pub const min_size: usize = _min_size;
         pub const max_size: usize = _max_size;
         pub const field_offsets: [fields.len]usize = _offsets;
@@ -529,6 +546,29 @@ pub fn VariableContainerType(comptime ST: type) type {
         };
 
         pub const tree = struct {
+            pub fn deserializeFromBytes(allocator: std.mem.Allocator, pool: *Node.Pool, data: []const u8) !Node.Id {
+                if (data.len > max_size or data.len < min_size) {
+                    return error.InvalidSize;
+                }
+
+                const ranges = try readFieldRanges(data);
+                var nodes: [chunk_count]Node.Id = undefined;
+
+                inline for (fields, 0..) |field, i| {
+                    const start = ranges[i][0];
+                    const end = ranges[i][1];
+                    const field_bytes = data[start..end];
+
+                    if (comptime isFixedType(field.type)) {
+                        nodes[i] = try field.type.tree.deserializeFromBytes(pool, field_bytes);
+                    } else {
+                        nodes[i] = try field.type.tree.deserializeFromBytes(allocator, pool, field_bytes);
+                    }
+                }
+
+                return try Node.fillWithContents(pool, &nodes, chunk_depth);
+            }
+
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var nodes: [chunk_count]Node.Id = undefined;
                 try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
@@ -553,6 +593,41 @@ pub fn VariableContainerType(comptime ST: type) type {
                     }
                 }
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
+            }
+
+            pub fn serializeIntoBytes(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                var nodes: [chunk_count]Node.Id = undefined;
+                try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
+
+                var fixed_index: usize = 0;
+                var variable_index: usize = fixed_end;
+
+                inline for (fields, 0..) |field, i| {
+                    if (comptime isFixedType(field.type)) {
+                        const result = field.type.tree.serializeIntoBytes(nodes[i], pool, out[fixed_index..]);
+                        fixed_index += if (@typeInfo(@TypeOf(result)) == .error_union) try result else result;
+                    } else {
+                        std.mem.writeInt(u32, out[fixed_index..][0..4], @intCast(variable_index), .little);
+                        fixed_index += 4;
+                        variable_index += try field.type.tree.serializeIntoBytes(allocator, nodes[i], pool, out[variable_index..]);
+                    }
+                }
+                return variable_index;
+            }
+
+            pub fn serializedSize(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool) !usize {
+                var nodes: [chunk_count]Node.Id = undefined;
+                try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
+
+                var total_size: usize = 0;
+                inline for (fields, 0..) |field, i| {
+                    if (comptime isFixedType(field.type)) {
+                        total_size += field.type.fixed_size;
+                    } else {
+                        total_size += 4 + try field.type.tree.serializedSize(allocator, nodes[i], pool);
+                    }
+                }
+                return total_size;
             }
         };
 
@@ -678,4 +753,245 @@ test "clone" {
     try expectEqualRootsAlloc(Foo, allocator, f, cloned_f);
     try expectEqualSerializedAlloc(Foo, allocator, f, cloned_f);
     // TODO(bing): test equals when ready
+}
+
+// Refer to https://github.com/ChainSafe/ssz/blob/f5ed0b457333749b5c3f49fa5eafa096a725f033/packages/ssz/test/unit/byType/container/valid.test.ts#L9-L64
+test "FixedContainerType - serializeIntoBytes (zero)" {
+    const allocator = std.testing.allocator;
+    const Container = FixedContainerType(struct {
+        a: UintType(64),
+        b: UintType(64),
+    });
+
+    const value: Container.Type = .{ .a = 0, .b = 0 };
+    const expected_serialized = [_]u8{0} ** 16;
+    const expected_root = [_]u8{ 0xf5, 0xa5, 0xfd, 0x42, 0xd1, 0x6a, 0x20, 0x30, 0x27, 0x98, 0xef, 0x6e, 0xd3, 0x09, 0x97, 0x9b, 0x43, 0x00, 0x3d, 0x23, 0x20, 0xd9, 0xf0, 0xe8, 0xea, 0x98, 0x31, 0xa9, 0x27, 0x59, 0xfb, 0x4b };
+
+    var serialized: [Container.fixed_size]u8 = undefined;
+    const written = Container.serializeIntoBytes(&value, &serialized);
+    try std.testing.expectEqual(@as(usize, 16), written);
+    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
+
+    var root: [32]u8 = undefined;
+    try Container.hashTreeRoot(&value, &root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &root);
+
+    var pool = try Node.Pool.init(allocator, 64);
+    defer pool.deinit();
+    const node = try Container.tree.fromValue(&pool, &value);
+    var tree_serialized: [Container.fixed_size]u8 = undefined;
+    const tree_written = Container.tree.serializeIntoBytes(node, &pool, &tree_serialized);
+    const tree_written_val = if (@typeInfo(@TypeOf(tree_written)) == .error_union) try tree_written else tree_written;
+    try std.testing.expectEqual(@as(usize, 16), tree_written_val);
+    try std.testing.expectEqualSlices(u8, &expected_serialized, &tree_serialized);
+}
+
+test "FixedContainerType - serializeIntoBytes (some value)" {
+    const allocator = std.testing.allocator;
+    const Container = FixedContainerType(struct {
+        a: UintType(64),
+        b: UintType(64),
+    });
+
+    const value: Container.Type = .{ .a = 123456, .b = 654321 };
+    // 0x40e2010000000000f1fb090000000000
+    const expected_serialized = [_]u8{ 0x40, 0xe2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf1, 0xfb, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    const expected_root = [_]u8{ 0x53, 0xb3, 0x8a, 0xff, 0x7b, 0xf2, 0xdd, 0x1a, 0x49, 0x90, 0x3d, 0x07, 0xa3, 0x35, 0x09, 0xb9, 0x80, 0xc6, 0xac, 0xc9, 0xf2, 0x23, 0x5a, 0x45, 0xaa, 0xc3, 0x42, 0xb0, 0xa9, 0x52, 0x8c, 0x22 };
+
+    var serialized: [Container.fixed_size]u8 = undefined;
+    const written = Container.serializeIntoBytes(&value, &serialized);
+    try std.testing.expectEqual(@as(usize, 16), written);
+    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
+
+    var root: [32]u8 = undefined;
+    try Container.hashTreeRoot(&value, &root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &root);
+
+    var pool = try Node.Pool.init(allocator, 64);
+    defer pool.deinit();
+    const node = try Container.tree.fromValue(&pool, &value);
+    var tree_serialized: [Container.fixed_size]u8 = undefined;
+    const tree_written = Container.tree.serializeIntoBytes(node, &pool, &tree_serialized);
+    const tree_written_val = if (@typeInfo(@TypeOf(tree_written)) == .error_union) try tree_written else tree_written;
+    try std.testing.expectEqual(@as(usize, 16), tree_written_val);
+    try std.testing.expectEqualSlices(u8, &expected_serialized, &tree_serialized);
+}
+
+test "FixedContainerType - tree.deserializeFromBytes" {
+    const allocator = std.testing.allocator;
+    const Container = FixedContainerType(struct {
+        a: UintType(64),
+        b: UintType(64),
+    });
+
+    const value: Container.Type = .{ .a = 123456, .b = 654321 };
+    const expected_serialized = [_]u8{ 0x40, 0xe2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf1, 0xfb, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    const expected_root = [_]u8{ 0x53, 0xb3, 0x8a, 0xff, 0x7b, 0xf2, 0xdd, 0x1a, 0x49, 0x90, 0x3d, 0x07, 0xa3, 0x35, 0x09, 0xb9, 0x80, 0xc6, 0xac, 0xc9, 0xf2, 0x23, 0x5a, 0x45, 0xaa, 0xc3, 0x42, 0xb0, 0xa9, 0x52, 0x8c, 0x22 };
+
+    var pool = try Node.Pool.init(allocator, 64);
+    defer pool.deinit();
+
+    const node = try Container.tree.deserializeFromBytes(&pool, &expected_serialized);
+    try std.testing.expectEqualSlices(u8, &expected_root, node.getRoot(&pool));
+
+    var roundtrip: [Container.fixed_size]u8 = undefined;
+    const written = Container.tree.serializeIntoBytes(node, &pool, &roundtrip);
+    const written_val = if (@typeInfo(@TypeOf(written)) == .error_union) try written else written;
+    try std.testing.expectEqual(@as(usize, Container.fixed_size), written_val);
+    try std.testing.expectEqualSlices(u8, &expected_serialized, &roundtrip);
+
+    // sanity: same root as fromValue
+    const node2 = try Container.tree.fromValue(&pool, &value);
+    try std.testing.expectEqualSlices(u8, node2.getRoot(&pool), node.getRoot(&pool));
+}
+
+test "FixedContainerType - serializeIntoBytes (uint64 + ByteVector32)" {
+    const allocator = std.testing.allocator;
+    const Container = FixedContainerType(struct {
+        a: UintType(64),
+        b: ByteVectorType(32),
+    });
+
+    const value: Container.Type = .{ .a = 123456, .b = [_]u8{0x0a} ** 32 };
+    // 0x40e20100000000000a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a
+    const expected_serialized = [_]u8{ 0x40, 0xe2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 } ++ [_]u8{0x0a} ** 32;
+    const expected_root = [_]u8{ 0x97, 0xb6, 0x2a, 0xdf, 0x79, 0xc8, 0x23, 0xff, 0x07, 0xc5, 0xe7, 0xba, 0x80, 0xb9, 0x12, 0x05, 0x9f, 0x6f, 0x0f, 0x40, 0xba, 0xd5, 0xf2, 0x67, 0xd4, 0x74, 0x7b, 0x21, 0xea, 0xfb, 0x77, 0x58 };
+
+    var serialized: [Container.fixed_size]u8 = undefined;
+    const written = Container.serializeIntoBytes(&value, &serialized);
+    try std.testing.expectEqual(@as(usize, 40), written);
+    try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
+
+    var root: [32]u8 = undefined;
+    try Container.hashTreeRoot(&value, &root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &root);
+
+    var pool = try Node.Pool.init(allocator, 64);
+    defer pool.deinit();
+    const node = try Container.tree.fromValue(&pool, &value);
+    var tree_serialized: [Container.fixed_size]u8 = undefined;
+    const tree_written = Container.tree.serializeIntoBytes(node, &pool, &tree_serialized);
+    const tree_written_val = if (@typeInfo(@TypeOf(tree_written)) == .error_union) try tree_written else tree_written;
+    try std.testing.expectEqual(@as(usize, 40), tree_written_val);
+    try std.testing.expectEqualSlices(u8, &expected_serialized, &tree_serialized);
+}
+
+test "VariableContainerType - serializeIntoBytes (zero)" {
+    const allocator = std.testing.allocator;
+    const Container = VariableContainerType(struct {
+        a: FixedListType(UintType(64), 128),
+        b: UintType(64),
+    });
+
+    var value: Container.Type = Container.default_value;
+    // a = [], b = 0
+    // 0x0c0000000000000000000000
+    const expected_serialized = [_]u8{ 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    const expected_root = [_]u8{ 0xdc, 0x36, 0x19, 0xcb, 0xbc, 0x5e, 0xf0, 0xe0, 0xa3, 0xb3, 0x8e, 0x3c, 0xa5, 0xd3, 0x1c, 0x2b, 0x16, 0x86, 0x8e, 0xac, 0xb6, 0xe4, 0xbc, 0xf8, 0xb4, 0x51, 0x09, 0x63, 0x35, 0x43, 0x15, 0xf5 };
+
+    const size = Container.serializedSize(&value);
+    try std.testing.expectEqual(@as(usize, 12), size);
+    const serialized = try allocator.alloc(u8, size);
+    defer allocator.free(serialized);
+    const written = Container.serializeIntoBytes(&value, serialized);
+    try std.testing.expectEqual(@as(usize, 12), written);
+    try std.testing.expectEqualSlices(u8, &expected_serialized, serialized);
+
+    var root: [32]u8 = undefined;
+    try Container.hashTreeRoot(allocator, &value, &root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &root);
+
+    var pool = try Node.Pool.init(allocator, 64);
+    defer pool.deinit();
+    const node = try Container.tree.fromValue(allocator, &pool, &value);
+    const tree_size = try Container.tree.serializedSize(allocator, node, &pool);
+    try std.testing.expectEqual(@as(usize, 12), tree_size);
+    const tree_serialized = try allocator.alloc(u8, tree_size);
+    defer allocator.free(tree_serialized);
+    const tree_written = try Container.tree.serializeIntoBytes(allocator, node, &pool, tree_serialized);
+    try std.testing.expectEqual(@as(usize, 12), tree_written);
+    try std.testing.expectEqualSlices(u8, &expected_serialized, tree_serialized);
+}
+
+test "VariableContainerType - serializeIntoBytes (some value)" {
+    const allocator = std.testing.allocator;
+    const Container = VariableContainerType(struct {
+        a: FixedListType(UintType(64), 128),
+        b: UintType(64),
+    });
+
+    var value: Container.Type = Container.default_value;
+    // a = [123456, 654321, 123456, 654321, 123456], b = 654321
+    try value.a.appendSlice(allocator, &[_]u64{ 123456, 654321, 123456, 654321, 123456 });
+    value.b = 654321;
+    defer value.a.deinit(allocator);
+
+    // 0x0c000000f1fb09000000000040e2010000000000f1fb09000000000040e2010000000000f1fb09000000000040e2010000000000
+    const expected_serialized = [_]u8{
+        0x0c, 0x00, 0x00, 0x00, // offset to a (12)
+        0xf1, 0xfb, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, // b = 654321
+        0x40, 0xe2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, // a[0] = 123456
+        0xf1, 0xfb, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, // a[1] = 654321
+        0x40, 0xe2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, // a[2] = 123456
+        0xf1, 0xfb, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, // a[3] = 654321
+        0x40, 0xe2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, // a[4] = 123456
+    };
+    const expected_root = [_]u8{ 0x5f, 0xf1, 0xb9, 0x2b, 0x2f, 0xa5, 0x5e, 0xea, 0x1a, 0x14, 0xb2, 0x65, 0x47, 0x03, 0x5b, 0x2f, 0x54, 0x37, 0x81, 0x4b, 0x34, 0x36, 0x17, 0x22, 0x05, 0xfa, 0x7d, 0x6a, 0xf4, 0x09, 0x17, 0x48 };
+
+    const size = Container.serializedSize(&value);
+    try std.testing.expectEqual(@as(usize, 52), size);
+    const serialized = try allocator.alloc(u8, size);
+    defer allocator.free(serialized);
+    const written = Container.serializeIntoBytes(&value, serialized);
+    try std.testing.expectEqual(@as(usize, 52), written);
+    try std.testing.expectEqualSlices(u8, &expected_serialized, serialized);
+
+    var root: [32]u8 = undefined;
+    try Container.hashTreeRoot(allocator, &value, &root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &root);
+
+    var pool = try Node.Pool.init(allocator, 128);
+    defer pool.deinit();
+    const node = try Container.tree.fromValue(allocator, &pool, &value);
+    const tree_size = try Container.tree.serializedSize(allocator, node, &pool);
+    try std.testing.expectEqual(@as(usize, 52), tree_size);
+    const tree_serialized = try allocator.alloc(u8, tree_size);
+    defer allocator.free(tree_serialized);
+    const tree_written = try Container.tree.serializeIntoBytes(allocator, node, &pool, tree_serialized);
+    try std.testing.expectEqual(@as(usize, 52), tree_written);
+    try std.testing.expectEqualSlices(u8, &expected_serialized, tree_serialized);
+}
+
+test "VariableContainerType - tree.deserializeFromBytes" {
+    const allocator = std.testing.allocator;
+    const Container = VariableContainerType(struct {
+        a: FixedListType(UintType(64), 128),
+        b: UintType(64),
+    });
+
+    const serialized = [_]u8{
+        0x0c, 0x00, 0x00, 0x00, // offset to a (12)
+        0xf1, 0xfb, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, // b = 654321
+        0x40, 0xe2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, // a[0] = 123456
+        0xf1, 0xfb, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, // a[1] = 654321
+        0x40, 0xe2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, // a[2] = 123456
+        0xf1, 0xfb, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, // a[3] = 654321
+        0x40, 0xe2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, // a[4] = 123456
+    };
+    const expected_root = [_]u8{ 0x5f, 0xf1, 0xb9, 0x2b, 0x2f, 0xa5, 0x5e, 0xea, 0x1a, 0x14, 0xb2, 0x65, 0x47, 0x03, 0x5b, 0x2f, 0x54, 0x37, 0x81, 0x4b, 0x34, 0x36, 0x17, 0x22, 0x05, 0xfa, 0x7d, 0x6a, 0xf4, 0x09, 0x17, 0x48 };
+
+    var pool = try Node.Pool.init(allocator, 128);
+    defer pool.deinit();
+
+    const node = try Container.tree.deserializeFromBytes(allocator, &pool, &serialized);
+    try std.testing.expectEqualSlices(u8, &expected_root, node.getRoot(&pool));
+
+    const roundtrip_size = try Container.tree.serializedSize(allocator, node, &pool);
+    try std.testing.expectEqual(@as(usize, serialized.len), roundtrip_size);
+
+    const out = try allocator.alloc(u8, roundtrip_size);
+    defer allocator.free(out);
+    const written = try Container.tree.serializeIntoBytes(allocator, node, &pool, out);
+    try std.testing.expectEqual(@as(usize, serialized.len), written);
+    try std.testing.expectEqualSlices(u8, &serialized, out);
 }

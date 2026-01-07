@@ -11,12 +11,12 @@
             .hash = "blst_z-0.0.0-td3FNDuaAAA1nbeXzEihbQm-w9sJWrGpkrEjioonUnrV",
         },
         .hashtree = .{
-            .url = "git+https://github.com/chainsafe/hashtree-z#43a58b0fd4813515cda3d0ffc622125243a01c54",
-            .hash = "hashtree-0.1.0-sBOovrYSAAArAQVa-a6BhOPWPTrgKrJtufxWjQYMNNAN",
+            .url = "git+https://github.com/chainsafe/hashtree-z#4ed9aebb6178662299ae799f6914499820ff0180",
+            .hash = "hashtree-0.1.0-sBOovqUTAADdAyrPOQ23wdPSJWPFfueipnRNqrERPaP_",
         },
         .snappy = .{
-            .url = "git+https://github.com/chainsafe/snappy.zig#ede2ad602ac9ffa506e3724a2bf5fc14c806187f",
-            .hash = "snappy-0.1.0-n4AaqtMYAACgB1kHWQ2_CFI-gbtYEUCbXyYlQZ2ENyfd",
+            .url = "git+https://github.com/chainsafe/snappy.zig#206a3019ed9f5cb1e382bddca9a51d7c3e7d8cd3",
+            .hash = "snappy-0.1.0-n4Aaqtw4AAA1bcVRSEh4ERJs4_Tjzph4cXEMPdYtQbeA",
         },
         .yaml = .{
             .url = "git+https://github.com/chainsafe/zig-yaml#e0e5962579e990a66c21424416c7ac092b20b772",

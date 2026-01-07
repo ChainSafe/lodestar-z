@@ -30,7 +30,7 @@ const MerkleProof = struct {
 };
 
 pub fn TestCase(comptime fork: ForkSeq) type {
-    const ForkTypes = @field(ct, fork.forkName());
+    const ForkTypes = @field(ct, fork.name());
     const BeaconBlockBody = ForkTypes.BeaconBlockBody;
     const KzgCommitment = ct.primitive.KZGCommitment;
 
