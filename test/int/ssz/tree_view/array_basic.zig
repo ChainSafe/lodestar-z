@@ -7,13 +7,16 @@ test "TreeView vector element roundtrip" {
     var pool = try Node.Pool.init(allocator, 128);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     const Uint64 = ssz.UintType(64);
     const VectorType = ssz.FixedVectorType(Uint64, 4);
 
     const original: VectorType.Type = [_]u64{ 11, 22, 33, 44 };
 
     const root_node = try VectorType.tree.fromValue(&pool, &original);
-    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
+    var view = try VectorType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     try std.testing.expectEqual(@as(u64, 11), try view.get(0));
@@ -37,7 +40,7 @@ test "TreeView vector element roundtrip" {
     try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
 
     var roundtrip: VectorType.Type = undefined;
-    try VectorType.tree.toValue(view.base_view.data.root, &pool, &roundtrip);
+    try VectorType.tree.toValue(view.rootNodeId(), &pool, &roundtrip);
     try std.testing.expectEqualSlices(u64, &expected, &roundtrip);
 }
 
@@ -46,12 +49,15 @@ test "TreeView vector getAll fills provided buffer" {
     var pool = try Node.Pool.init(allocator, 256);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     const Uint32 = ssz.UintType(32);
     const VectorType = ssz.FixedVectorType(Uint32, 8);
 
     const values = [_]u32{ 9, 8, 7, 6, 5, 4, 3, 2 };
     const root_node = try VectorType.tree.fromValue(&pool, &values);
-    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
+    var view = try VectorType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     const out = try allocator.alloc(u32, values.len);
@@ -72,12 +78,15 @@ test "TreeView vector getAllAlloc roundtrip" {
     var pool = try Node.Pool.init(allocator, 256);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     const Uint16 = ssz.UintType(16);
     const VectorType = ssz.FixedVectorType(Uint16, 5);
     const values = [_]u16{ 3, 1, 4, 1, 5 };
 
     const root_node = try VectorType.tree.fromValue(&pool, &values);
-    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
+    var view = try VectorType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     const filled = try view.getAll(allocator);
@@ -91,12 +100,15 @@ test "TreeView vector getAllAlloc repeat reflects updates" {
     var pool = try Node.Pool.init(allocator, 256);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     const Uint32 = ssz.UintType(32);
     const VectorType = ssz.FixedVectorType(Uint32, 6);
     var values = [_]u32{ 10, 20, 30, 40, 50, 60 };
 
     const root_node = try VectorType.tree.fromValue(&pool, &values);
-    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
+    var view = try VectorType.TreeView.init(&store, root_node);
     defer view.deinit();
 
     const first = try view.getAll(allocator);
@@ -111,10 +123,40 @@ test "TreeView vector getAllAlloc repeat reflects updates" {
     try std.testing.expectEqualSlices(u32, values[0..], second);
 }
 
+test "TreeView vector getAllInto works" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const VectorType = ssz.FixedVectorType(Uint32, 8);
+
+    const values = [_]u32{ 9, 8, 7, 6, 5, 4, 3, 2 };
+    const root_node = try VectorType.tree.fromValue(&pool, &values);
+
+    var view = try VectorType.TreeView.init(&store, root_node);
+    defer view.deinit();
+
+    const out = try allocator.alloc(u32, values.len);
+    defer allocator.free(out);
+
+    _ = try view.getAllInto(out);
+    try std.testing.expectEqualSlices(u32, values[0..], out);
+
+    _ = try view.getAllInto(out);
+    try std.testing.expectEqualSlices(u32, values[0..], out);
+}
+
 test "TreeView vector clone isolates subsequent updates" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
+
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
 
     const Uint16 = ssz.UintType(16);
     const Vec4 = ssz.FixedVectorType(Uint16, 4);
@@ -122,7 +164,7 @@ test "TreeView vector clone isolates subsequent updates" {
     const value: Vec4.Type = [_]u16{ 0, 0, 0, 0 };
     const root = try Vec4.tree.fromValue(&pool, &value);
 
-    var v1 = try Vec4.TreeView.init(allocator, &pool, root);
+    var v1 = try Vec4.TreeView.init(&store, root);
     defer v1.deinit();
 
     var v2 = try v1.clone(.{});
@@ -140,13 +182,16 @@ test "TreeView vector clone reads committed state" {
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     const Uint16 = ssz.UintType(16);
     const Vec4 = ssz.FixedVectorType(Uint16, 4);
 
     const value: Vec4.Type = [_]u16{ 0, 0, 0, 0 };
     const root = try Vec4.tree.fromValue(&pool, &value);
 
-    var v1 = try Vec4.TreeView.init(allocator, &pool, root);
+    var v1 = try Vec4.TreeView.init(&store, root);
     defer v1.deinit();
 
     try v1.set(2, @as(u16, 7));
@@ -163,13 +208,16 @@ test "TreeView vector clone drops uncommitted changes" {
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     const Uint16 = ssz.UintType(16);
     const Vec4 = ssz.FixedVectorType(Uint16, 4);
 
     const value: Vec4.Type = [_]u16{ 1, 2, 3, 4 };
     const root = try Vec4.tree.fromValue(&pool, &value);
 
-    var v = try Vec4.TreeView.init(allocator, &pool, root);
+    var v = try Vec4.TreeView.init(&store, root);
     defer v.deinit();
 
     try v.set(0, @as(u16, 9));
@@ -182,10 +230,13 @@ test "TreeView vector clone drops uncommitted changes" {
     try std.testing.expectEqual(@as(u16, 1), try dropped.get(0));
 }
 
-test "TreeView vector clone(true) does not transfer cache" {
+test "TreeView vector clone(false) keeps uncommitted changes" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
+
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
 
     const Uint16 = ssz.UintType(16);
     const Vec4 = ssz.FixedVectorType(Uint16, 4);
@@ -193,41 +244,14 @@ test "TreeView vector clone(true) does not transfer cache" {
     const value: Vec4.Type = [_]u16{ 1, 2, 3, 4 };
     const root = try Vec4.tree.fromValue(&pool, &value);
 
-    var v = try Vec4.TreeView.init(allocator, &pool, root);
+    var v = try Vec4.TreeView.init(&store, root);
     defer v.deinit();
 
-    _ = try v.get(0);
-    try std.testing.expect(v.base_view.data.children_nodes.count() > 0);
+    try v.set(0, @as(u16, 9));
 
-    var cloned_no_cache = try v.clone(.{ .transfer_cache = false });
-    defer cloned_no_cache.deinit();
+    _ = try v.clone(.{ .transfer_cache = false });
 
-    try std.testing.expect(v.base_view.data.children_nodes.count() > 0);
-    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.base_view.data.children_nodes.count());
-}
-
-test "TreeView vector clone(false) transfers cache and clears source" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-
-    const Uint16 = ssz.UintType(16);
-    const Vec4 = ssz.FixedVectorType(Uint16, 4);
-
-    const value: Vec4.Type = [_]u16{ 1, 2, 3, 4 };
-    const root = try Vec4.tree.fromValue(&pool, &value);
-
-    var v = try Vec4.TreeView.init(allocator, &pool, root);
-    defer v.deinit();
-
-    _ = try v.get(0);
-    try std.testing.expect(v.base_view.data.children_nodes.count() > 0);
-
-    var cloned = try v.clone(.{});
-    defer cloned.deinit();
-
-    try std.testing.expectEqual(@as(usize, 0), v.base_view.data.children_nodes.count());
-    try std.testing.expect(cloned.base_view.data.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(u16, 9), try v.get(0));
 }
 
 // Tests ported from TypeScript ssz packages/ssz/test/unit/byType/vector/tree.test.ts
@@ -239,6 +263,9 @@ test "ArrayBasicTreeView - serialize (uint64 vector)" {
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
+
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
 
     const TestCase = struct {
         id: []const u8,
@@ -265,7 +292,7 @@ test "ArrayBasicTreeView - serialize (uint64 vector)" {
         _ = VecU64Type.serializeIntoBytes(&value, &value_serialized);
 
         const tree_node = try VecU64Type.tree.fromValue(&pool, &value);
-        var view = try VecU64Type.TreeView.init(allocator, &pool, tree_node);
+        var view = try VecU64Type.TreeView.init(&store, tree_node);
         defer view.deinit();
 
         var view_serialized: [VecU64Type.fixed_size]u8 = undefined;
@@ -293,13 +320,16 @@ test "ArrayBasicTreeView - serialize (uint8 vector)" {
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     const value = [8]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
 
     var value_serialized: [VecU8Type.fixed_size]u8 = undefined;
     _ = VecU8Type.serializeIntoBytes(&value, &value_serialized);
 
     const tree_node = try VecU8Type.tree.fromValue(&pool, &value);
-    var view = try VecU8Type.TreeView.init(allocator, &pool, tree_node);
+    var view = try VecU8Type.TreeView.init(&store, tree_node);
     defer view.deinit();
 
     var view_serialized: [VecU8Type.fixed_size]u8 = undefined;
@@ -321,9 +351,12 @@ test "ArrayBasicTreeView - get and set" {
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
 
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
     const value = [4]u64{ 100, 200, 300, 400 };
     const tree_node = try VecU64Type.tree.fromValue(&pool, &value);
-    var view = try VecU64Type.TreeView.init(allocator, &pool, tree_node);
+    var view = try VecU64Type.TreeView.init(&store, tree_node);
     defer view.deinit();
 
     try std.testing.expectEqual(@as(u64, 100), try view.get(0));

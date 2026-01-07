@@ -27,10 +27,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
         pub const Element: type = ST;
         pub const limit: usize = _limit;
         pub const Type: type = std.ArrayListUnmanaged(Element.Type);
-        pub const TreeView: type = if (isBasicType(Element))
-            ListBasicTreeView(@This())
-        else
-            ListCompositeTreeView(@This());
+        pub const TreeView: type = if (isBasicType(Element)) ListBasicTreeView(@This()) else ListCompositeTreeView(@This());
         pub const min_size: usize = 0;
         pub const max_size: usize = Element.fixed_size * limit;
         pub const max_chunk_count: usize = if (isBasicType(Element)) std.math.divCeil(usize, max_size, 32) catch unreachable else limit;
@@ -413,10 +410,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
         pub const Element: type = ST;
         pub const limit: usize = _limit;
         pub const Type: type = std.ArrayListUnmanaged(Element.Type);
-        pub const TreeView: type = if (isBasicType(Element))
-            ListBasicTreeView(@This())
-        else
-            ListCompositeTreeView(@This());
+        pub const TreeView: type = if (isBasicType(Element)) ListBasicTreeView(@This()) else ListCompositeTreeView(@This());
         pub const min_size: usize = 0;
         pub const max_size: usize = Element.max_size * limit + 4 * limit;
         pub const max_chunk_count: usize = limit;

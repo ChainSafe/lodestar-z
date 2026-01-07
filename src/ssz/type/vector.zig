@@ -28,10 +28,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
         pub const Element: type = ST;
         pub const length: usize = _length;
         pub const Type: type = [length]Element.Type;
-        pub const TreeView: type = if (isBasicType(Element))
-            ArrayBasicTreeView(@This())
-        else
-            ArrayCompositeTreeView(@This());
+        pub const TreeView: type = if (isBasicType(Element)) ArrayBasicTreeView(@This()) else ArrayCompositeTreeView(@This());
         pub const fixed_size: usize = Element.fixed_size * length;
         pub const chunk_count: usize = if (isBasicType(Element)) std.math.divCeil(usize, fixed_size, 32) catch unreachable else length;
         pub const chunk_depth: u8 = maxChunksToDepth(chunk_count);
