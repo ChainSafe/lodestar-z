@@ -162,15 +162,20 @@ pub const TestCachedBeaconStateAllForks = struct {
 
     pub fn initFromState(allocator: Allocator, state: *BeaconStateAllForks, fork: ForkSeq, fork_epoch: Epoch) !TestCachedBeaconStateAllForks {
         const owned_state = try allocator.create(BeaconStateAllForks);
+        errdefer allocator.destroy(owned_state);
         owned_state.* = state.*;
 
         const pubkey_index_map = try PubkeyIndexMap.init(allocator);
-        errdefer allocator.destroy(pubkey_index_map);
+        errdefer pubkey_index_map.deinit();
         const index_pubkey_cache = try allocator.create(Index2PubkeyCache);
-        errdefer allocator.destroy(index_pubkey_cache);
+        errdefer {
+            index_pubkey_cache.deinit();
+            allocator.destroy(index_pubkey_cache);
+        }
         index_pubkey_cache.* = Index2PubkeyCache.init(allocator);
         const chain_config = getConfig(active_chain_config, fork, fork_epoch);
         const config = try allocator.create(BeaconConfig);
+        errdefer allocator.destroy(config);
         config.* = BeaconConfig.init(chain_config, owned_state.genesisValidatorsRoot());
 
         try syncPubkeys(owned_state.validators().items, pubkey_index_map, index_pubkey_cache);
@@ -196,12 +201,12 @@ pub const TestCachedBeaconStateAllForks = struct {
     }
 
     pub fn deinit(self: *TestCachedBeaconStateAllForks) void {
-        self.allocator.destroy(self.config);
+        self.cached_state.deinit();
+        self.allocator.destroy(self.cached_state);
         self.pubkey_index_map.deinit();
         self.index_pubkey_cache.deinit();
         self.allocator.destroy(self.index_pubkey_cache);
-        self.cached_state.deinit();
-        self.allocator.destroy(self.cached_state);
+        self.allocator.destroy(self.config);
     }
 };
 
