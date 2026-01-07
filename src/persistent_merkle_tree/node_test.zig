@@ -517,3 +517,87 @@ fn treeZeroAfterIndexNaive(
 
     return try Node.fillWithContents(pool, contents, depth);
 }
+
+test "DepthIterator matches getNodesAtDepth" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 64);
+    defer pool.deinit();
+    const p = &pool;
+
+    const depth: Depth = 2;
+    const start_index: usize = 0;
+    const count: usize = 4;
+
+    // Create a root that is navigable to depth=2, then set all leaves at depth 2.
+    const root = try pool.createBranch(@enumFromInt(1), @enumFromInt(1));
+    defer pool.unref(root);
+
+    var leaves: [count]Node.Id = undefined;
+    for (0..count) |i| leaves[i] = try pool.createLeafFromUint(@intCast(i + 1000));
+
+    const indices = [_]usize{ 0, 1, 2, 3 };
+    const new_root = try root.setNodesAtDepth(p, depth, &indices, &leaves);
+    defer pool.unref(new_root);
+
+    // Baseline: bulk helper
+    var bulk: [count]Node.Id = undefined;
+    try new_root.getNodesAtDepth(p, depth, start_index, &bulk);
+
+    // Iterator: one-by-one
+    var it = Node.DepthIterator.init(p, new_root, depth, start_index);
+    var iter: [count]Node.Id = undefined;
+    for (0..count) |i| {
+        iter[i] = try it.next();
+    }
+    try std.testing.expectError(error.InvalidLength, it.next());
+
+    for (0..count) |j| {
+        try std.testing.expectEqual(bulk[j], iter[j]);
+    }
+}
+
+test "FillWithContentsIterator matches fillWithContents" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 128);
+    defer pool.deinit();
+    const p = &pool;
+
+    const depth: Depth = 3;
+    const count: usize = 5; // intentionally not a power of two
+
+    var leaves = try allocator.alloc(Node.Id, count);
+    defer allocator.free(leaves);
+
+    for (0..count) |i| {
+        leaves[i] = try pool.createLeafFromUint(@intCast(i + 1));
+        try pool.ref(leaves[i]);
+    }
+    defer {
+        for (leaves) |leaf| pool.unref(leaf);
+    }
+
+    // Batch
+    for (1..count) |i| {
+        // create a copy since fillWithContents mutates the input slice :(
+        const leaves_copy = try allocator.dupe(Node.Id, leaves[0..i]);
+        defer allocator.free(leaves_copy);
+
+        const root_batch = try Node.fillWithContents(p, leaves_copy, depth);
+        defer p.unref(root_batch);
+
+        // Incremental
+        var it = Node.FillWithContentsIterator.init(p, depth);
+        for (leaves[0..i]) |leaf| try it.append(leaf);
+        const root_iter = try it.finish();
+        defer p.unref(root_iter);
+
+        try std.testing.expectEqualSlices(u8, root_batch.getRoot(p), root_iter.getRoot(p));
+    }
+
+    // Empty case should match `fillWithContents` behavior (returns zero-node at depth)
+    var empty_it = Node.FillWithContentsIterator.init(p, depth);
+    errdefer empty_it.deinit();
+
+    const empty_root_iter = try empty_it.finish();
+    try std.testing.expectEqual(@as(Node.Id, @enumFromInt(depth)), empty_root_iter);
+}
