@@ -164,14 +164,22 @@ pub const TestCachedBeaconStateAllForks = struct {
     pub fn initFromState(allocator: Allocator, state: *BeaconStateAllForks, fork: ForkSeq, fork_epoch: Epoch) !TestCachedBeaconStateAllForks {
         const owned_state = try allocator.create(BeaconStateAllForks);
         owned_state.* = state.*;
+        errdefer {
+            owned_state.deinit(allocator);
+            allocator.destroy(owned_state);
+        }
 
         const pubkey_index_map = try PubkeyIndexMap.init(allocator);
-        errdefer allocator.destroy(pubkey_index_map);
+        errdefer pubkey_index_map.deinit();
         const index_pubkey_cache = try allocator.create(Index2PubkeyCache);
-        errdefer allocator.destroy(index_pubkey_cache);
         index_pubkey_cache.* = Index2PubkeyCache.init(allocator);
+        errdefer {
+            index_pubkey_cache.deinit();
+            allocator.destroy(index_pubkey_cache);
+        }
         const chain_config = getConfig(active_chain_config, fork, fork_epoch);
         const config = try allocator.create(BeaconConfig);
+        errdefer allocator.destroy(config);
         try config.init(chain_config, owned_state.genesisValidatorsRoot());
 
         try syncPubkeys(owned_state.validators().items, pubkey_index_map, index_pubkey_cache);
