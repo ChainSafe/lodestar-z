@@ -540,10 +540,6 @@ pub const Id = enum(u32) {
         );
     }
 
-    pub fn depthIterator(root_node: Id, pool: *Pool, depth: Depth, start_index: usize) DepthIterator {
-        return DepthIterator.init(pool, root_node, depth, start_index);
-    }
-
     /// Get multiple nodes in a single traversal
     ///
     /// Stores `out.len` nodes at the specified `depth`, starting from `start_index`.
@@ -1120,6 +1116,8 @@ pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth) !Id {
     return contents[0];
 }
 
+/// Iterator to traverse all nodes at a specific depth.
+/// Use this instead of `getNodesAtDepth` when memory usage is a concern.
 pub const DepthIterator = struct {
     pool: *Pool,
     node_id: Id,
@@ -1128,6 +1126,9 @@ pub const DepthIterator = struct {
     base_gindex: Gindex,
     index: usize,
 
+    /// Initialize a depth iterator starting from `start_index` at the specified `depth`.
+    ///
+    /// There is no `deinit` function since the iterator does not allocate any resources.
     pub fn init(pool: *Pool, root_node: Id, depth: Depth, start_index: usize) DepthIterator {
         return .{
             .pool = pool,

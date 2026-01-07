@@ -349,7 +349,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                 else
                     len;
 
-                var it = node.depthIterator(pool, chunk_depth + 1, 0);
+                var it = Node.DepthIterator.init(pool, node, chunk_depth + 1, 0);
 
                 if (comptime isBasicType(Element)) {
                     const serialized_size = len * Element.fixed_size;
@@ -664,7 +664,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                     return 0;
                 }
 
-                var it = node.depthIterator(pool, chunk_depth + 1, 0);
+                var it = Node.DepthIterator.init(pool, node, chunk_depth + 1, 0);
 
                 const fixed_end = len * 4;
                 var variable_index = fixed_end;
@@ -683,7 +683,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                     return 0;
                 }
 
-                var it = node.depthIterator(pool, chunk_depth + 1, 0);
+                var it = Node.DepthIterator.init(pool, node, chunk_depth + 1, 0);
 
                 var total_size: usize = len * 4; // Offsets
                 for (0..len) |_| {

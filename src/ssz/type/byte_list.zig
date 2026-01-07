@@ -220,7 +220,7 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
                     return 0;
                 }
 
-                var it = node.depthIterator(pool, chunk_depth + 1, 0);
+                var it = Node.DepthIterator.init(pool, node, chunk_depth + 1, 0);
 
                 for (0..chunk_count) |i| {
                     const start_idx = i * 32;

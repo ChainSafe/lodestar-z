@@ -596,6 +596,8 @@ test "FillWithContentsIterator matches fillWithContents" {
 
     // Empty case should match `fillWithContents` behavior (returns zero-node at depth)
     var empty_it = Node.FillWithContentsIterator.init(p, depth);
+    errdefer empty_it.deinit();
+
     const empty_root_iter = try empty_it.finish();
     try std.testing.expectEqual(@as(Node.Id, @enumFromInt(depth)), empty_root_iter);
 }
