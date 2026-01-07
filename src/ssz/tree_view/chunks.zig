@@ -34,7 +34,6 @@ pub fn setChildViewValue(
 }
 
 /// Shared helpers for basic element types packed into chunks.
-/// Works with ViewStore-based tree views.
 pub fn BasicPackedChunks(
     comptime ST: type,
     comptime chunk_depth: Depth,
@@ -121,7 +120,6 @@ pub fn BasicPackedChunks(
 }
 
 /// Shared helpers for composite element types, where each element occupies its own subtree.
-/// Works with ViewStore-based tree views.
 pub fn CompositeChunks(
     comptime ST: type,
     comptime chunk_depth: Depth,

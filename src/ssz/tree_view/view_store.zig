@@ -44,7 +44,10 @@ pub const ViewStore = struct {
     views: std.ArrayListUnmanaged(ViewState) = .{},
 
     pub const CloneOpts = struct {
-        /// When true, transfer safe cached nodes into the clone and clear caches on the source.
+        /// When true, transfer *safe* cache entries into the clone and clear caches on the source.
+        /// This includes:
+        /// - `children_nodes` entries not marked as changed
+        /// - `children_views` entries not marked as changed (subview cache)
         /// When false, the clone starts with empty caches and the source is untouched.
         transfer_cache: bool = true,
     };
@@ -76,9 +79,19 @@ pub const ViewStore = struct {
         return @intCast(self.views.items.len - 1);
     }
 
-    /// Create a new view for the same root as `id`.
-    /// If `transfer_cache` is true, safe cached child nodes are moved into the clone and
-    /// the source view caches are cleared (dropping uncommitted changes).
+    /// Create a new view for the same committed root as `id`.
+    ///
+    /// - Any uncommitted changes in `id` are NOT included in the clone. Call `commit(id)` first if needed.
+    /// - If `transfer_cache` is true, *safe* cache entries are moved into the clone:
+    ///   - cached child nodes (`children_nodes`) at gindices not marked as changed
+    ///   - cached child views (`children_views`) at gindices not marked as changed
+    ///   After transferring, the source view is reset to a committed-only state by clearing its caches.
+    ///
+    /// Note on subviews:
+    /// `children_views` is a cache mapping (gindex -> ViewId). When transferring, those mappings are
+    /// moved to the clone and removed from the source. After cloning, accessing the same child on the
+    /// source may create a new subview (new ViewId). Do not assume a previously obtained child ViewId
+    /// remains associated with the source view after `cloneView(..., .{ .transfer_cache = true })`.
     pub fn cloneView(self: *ViewStore, id: ViewId, opts: CloneOpts) !ViewId {
         var state = self.getState(id);
         const root = state.root;
@@ -99,9 +112,25 @@ pub const ViewStore = struct {
             }
         }
 
+        var safe_view_keys = std.ArrayList(Gindex).init(self.allocator);
+        defer safe_view_keys.deinit();
+
+        var views_it = state.children_views.iterator();
+        while (views_it.next()) |entry| {
+            const gindex = entry.key_ptr.*;
+            if (!state.changed.contains(gindex)) {
+                try safe_view_keys.append(gindex);
+            }
+        }
+
         try new_state.children_nodes.ensureUnusedCapacity(
             self.allocator,
             @intCast(safe_node_keys.items.len),
+        );
+
+        try new_state.children_views.ensureUnusedCapacity(
+            self.allocator,
+            @intCast(safe_view_keys.items.len),
         );
 
         for (safe_node_keys.items) |gindex| {
@@ -109,7 +138,12 @@ pub const ViewStore = struct {
             new_state.children_nodes.putAssumeCapacity(gindex, removed.value);
         }
 
-        // Drop child view mappings to avoid sharing mutable subviews.
+        for (safe_view_keys.items) |gindex| {
+            const removed = state.children_views.fetchRemove(gindex) orelse continue;
+            new_state.children_views.putAssumeCapacity(gindex, removed.value);
+        }
+
+        // Drop any remaining child view mappings to avoid sharing mutable subviews.
         state.children_views.clearRetainingCapacity();
 
         // Clear remaining caches and drop uncommitted changes from the source.

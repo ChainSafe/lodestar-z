@@ -1,6 +1,7 @@
 const std = @import("std");
 const ssz = @import("ssz");
 const Node = @import("persistent_merkle_tree").Node;
+const Gindex = @import("persistent_merkle_tree").Gindex;
 
 const Checkpoint = ssz.FixedContainerType(struct {
     epoch: ssz.UintType(64),
@@ -503,6 +504,44 @@ test "TreeView container clone(false) keeps uncommitted changes" {
 
     try std.testing.expectEqual(@as(u64, 7), try v.get("n"));
     try std.testing.expectEqual(@as(u64, 1), try cloned_no_cache.get("n"));
+}
+
+test "TreeView container clone transfers safe subview cache" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    var store = ssz.ViewStore.init(allocator, &pool);
+    defer store.deinit();
+
+    const Uint64 = ssz.UintType(64);
+    const Inner = ssz.FixedContainerType(struct {
+        x: Uint64,
+    });
+    const Outer = ssz.FixedContainerType(struct {
+        inner: Inner,
+    });
+
+    const value: Outer.Type = .{ .inner = .{ .x = 42 } };
+    const root = try Outer.tree.fromValue(&pool, &value);
+
+    var v1 = try Outer.TreeView.init(&store, root);
+    defer v1.deinit();
+
+    _ = try v1.get("inner");
+    try v1.commit();
+
+    const inner_field_index = comptime Outer.getFieldIndex("inner");
+    const inner_gindex = Gindex.fromDepth(Outer.chunk_depth, inner_field_index);
+
+    const cached_before = store.cachedChildViewId(v1.view_id, inner_gindex) orelse
+        return error.TestExpectedCacheHit;
+
+    var v2 = try v1.clone(.{});
+    defer v2.deinit();
+
+    try std.testing.expectEqual(@as(?ssz.ViewId, null), store.cachedChildViewId(v1.view_id, inner_gindex));
+    try std.testing.expectEqual(@as(?ssz.ViewId, cached_before), store.cachedChildViewId(v2.view_id, inner_gindex));
 }
 
 // Tests ported from TypeScript ssz packages/ssz/test/unit/byType/container/tree.test.ts
