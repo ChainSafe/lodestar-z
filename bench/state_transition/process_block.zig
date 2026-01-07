@@ -75,6 +75,10 @@ const slotFromStateBytes = @import("utils.zig").slotFromStateBytes;
 const loadState = @import("utils.zig").loadState;
 const loadBlock = @import("utils.zig").loadBlock;
 
+const BenchOpts = struct {
+    verify_signature: bool,
+};
+
 const ProcessBlockHeaderBench = struct {
     cached_state: *CachedBeaconStateAllForks,
     signed_block: SignedBlock,
@@ -142,7 +146,7 @@ const ProcessExecutionPayloadBench = struct {
     }
 };
 
-fn ProcessRandaoBench(comptime verify_sig: bool) type {
+fn ProcessRandaoBench(comptime opts: BenchOpts) type {
     return struct {
         cached_state: *CachedBeaconStateAllForks,
         signed_block: SignedBlock,
@@ -155,7 +159,7 @@ fn ProcessRandaoBench(comptime verify_sig: bool) type {
             }
             const block = self.signed_block.message();
             const body = block.beaconBlockBody();
-            state_transition.processRandao(cloned, body, block.proposerIndex(), verify_sig) catch unreachable;
+            state_transition.processRandao(cloned, body, block.proposerIndex(), opts.verify_signature) catch unreachable;
         }
     };
 }
@@ -176,7 +180,7 @@ const ProcessEth1DataBench = struct {
     }
 };
 
-fn ProcessOperationsBench(comptime verify_sig: bool) type {
+fn ProcessOperationsBench(comptime opts: BenchOpts) type {
     return struct {
         cached_state: *CachedBeaconStateAllForks,
         signed_block: SignedBlock,
@@ -189,12 +193,12 @@ fn ProcessOperationsBench(comptime verify_sig: bool) type {
             }
             const block = self.signed_block.message();
             const body = block.beaconBlockBody();
-            state_transition.processOperations(allocator, cloned, body, .{ .verify_signature = verify_sig }) catch unreachable;
+            state_transition.processOperations(allocator, cloned, body, .{ .verify_signature = opts.verify_signature }) catch unreachable;
         }
     };
 }
 
-fn ProcessSyncAggregateBench(comptime verify_sig: bool) type {
+fn ProcessSyncAggregateBench(comptime opts: BenchOpts) type {
     return struct {
         cached_state: *CachedBeaconStateAllForks,
         signed_block: SignedBlock,
@@ -207,12 +211,12 @@ fn ProcessSyncAggregateBench(comptime verify_sig: bool) type {
             }
             const block = self.signed_block.message();
             const body = block.beaconBlockBody();
-            state_transition.processSyncAggregate(allocator, cloned, body.syncAggregate(), verify_sig) catch unreachable;
+            state_transition.processSyncAggregate(allocator, cloned, body.syncAggregate(), opts.verify_signature) catch unreachable;
         }
     };
 }
 
-fn ProcessBlockBench(comptime verify_sig: bool) type {
+fn ProcessBlockBench(comptime opts: BenchOpts) type {
     return struct {
         cached_state: *CachedBeaconStateAllForks,
         signed_block: SignedBlock,
@@ -225,7 +229,7 @@ fn ProcessBlockBench(comptime verify_sig: bool) type {
             }
             const block = self.signed_block.message();
             const external_data = BlockExternalData{ .execution_payload_status = .valid, .data_availability_status = .available };
-            state_transition.processBlock(allocator, cloned, block, external_data, .{ .verify_signature = verify_sig }) catch unreachable;
+            state_transition.processBlock(allocator, cloned, block, external_data, .{ .verify_signature = opts.verify_signature }) catch unreachable;
         }
     };
 }
@@ -422,19 +426,19 @@ fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, stdout: an
         try bench.addParam("execution_payload", &ProcessExecutionPayloadBench{ .cached_state = cached_state, .body = body }, .{});
     }
 
-    try bench.addParam("randao", &ProcessRandaoBench(true){ .cached_state = cached_state, .signed_block = signed_block }, .{});
-    try bench.addParam("randao_no_sig", &ProcessRandaoBench(false){ .cached_state = cached_state, .signed_block = signed_block }, .{});
+    try bench.addParam("randao", &ProcessRandaoBench(.{ .verify_signature = true }){ .cached_state = cached_state, .signed_block = signed_block }, .{});
+    try bench.addParam("randao_no_sig", &ProcessRandaoBench(.{ .verify_signature = false }){ .cached_state = cached_state, .signed_block = signed_block }, .{});
     try bench.addParam("eth1_data", &ProcessEth1DataBench{ .cached_state = cached_state, .signed_block = signed_block }, .{});
-    try bench.addParam("operations", &ProcessOperationsBench(true){ .cached_state = cached_state, .signed_block = signed_block }, .{});
-    try bench.addParam("operations_no_sig", &ProcessOperationsBench(false){ .cached_state = cached_state, .signed_block = signed_block }, .{});
+    try bench.addParam("operations", &ProcessOperationsBench(.{ .verify_signature = true }){ .cached_state = cached_state, .signed_block = signed_block }, .{});
+    try bench.addParam("operations_no_sig", &ProcessOperationsBench(.{ .verify_signature = false }){ .cached_state = cached_state, .signed_block = signed_block }, .{});
 
     if (comptime fork.isPostAltair()) {
-        try bench.addParam("sync_aggregate", &ProcessSyncAggregateBench(true){ .cached_state = cached_state, .signed_block = signed_block }, .{});
-        try bench.addParam("sync_aggregate_no_sig", &ProcessSyncAggregateBench(false){ .cached_state = cached_state, .signed_block = signed_block }, .{});
+        try bench.addParam("sync_aggregate", &ProcessSyncAggregateBench(.{ .verify_signature = true }){ .cached_state = cached_state, .signed_block = signed_block }, .{});
+        try bench.addParam("sync_aggregate_no_sig", &ProcessSyncAggregateBench(.{ .verify_signature = false }){ .cached_state = cached_state, .signed_block = signed_block }, .{});
     }
 
-    try bench.addParam("process_block", &ProcessBlockBench(true){ .cached_state = cached_state, .signed_block = signed_block }, .{});
-    try bench.addParam("process_block_no_sig", &ProcessBlockBench(false){ .cached_state = cached_state, .signed_block = signed_block }, .{});
+    try bench.addParam("process_block", &ProcessBlockBench(.{ .verify_signature = true }){ .cached_state = cached_state, .signed_block = signed_block }, .{});
+    try bench.addParam("process_block_no_sig", &ProcessBlockBench(.{ .verify_signature = false }){ .cached_state = cached_state, .signed_block = signed_block }, .{});
 
     // Segmented benchmark (step-by-step timing)
     resetSegmentStats();
