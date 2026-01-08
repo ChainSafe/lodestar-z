@@ -6,6 +6,7 @@ pub const BoolType = @import("bool.zig").BoolType;
 pub const UintType = @import("uint.zig").UintType;
 
 pub const BitListType = @import("bit_list.zig").BitListType;
+pub const BitList = @import("bit_list.zig").BitList;
 pub const isBitListType = @import("bit_list.zig").isBitListType;
 
 pub const BitVectorType = @import("bit_vector.zig").BitVectorType;
