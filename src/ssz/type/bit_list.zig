@@ -15,8 +15,18 @@ const getZeroHash = @import("hashing").getZeroHash;
 const Node = @import("persistent_merkle_tree").Node;
 const BitListTreeView = @import("../tree_view/root.zig").BitListTreeView;
 
-pub fn BitList(comptime limit: comptime_int) type {
-    return struct {
+pub fn isBitListType(ST: type) bool {
+    return ST.kind == .list and ST.Element.kind == .bool and ST.Type == BitListType(ST.limit).Impl;
+}
+
+pub fn BitListType(comptime _limit: comptime_int) type {
+    comptime {
+        if (_limit <= 0) {
+            @compileError("limit must be greater than 0");
+        }
+    }
+
+    const Impl = struct {
         data: std.ArrayListUnmanaged(u8),
         bit_len: usize,
 
@@ -30,7 +40,7 @@ pub fn BitList(comptime limit: comptime_int) type {
         }
 
         pub fn fromBitLen(allocator: std.mem.Allocator, bit_len: usize) !@This() {
-            if (bit_len > limit) {
+            if (bit_len > _limit) {
                 return error.tooLarge;
             }
 
@@ -138,7 +148,7 @@ pub fn BitList(comptime limit: comptime_int) type {
         }
 
         pub fn resize(self: *@This(), allocator: std.mem.Allocator, bit_len: usize) !void {
-            if (bit_len > limit) {
+            if (bit_len > _limit) {
                 return error.tooLarge;
             }
 
@@ -233,23 +243,12 @@ pub fn BitList(comptime limit: comptime_int) type {
             return indices;
         }
     };
-}
 
-pub fn isBitListType(ST: type) bool {
-    return ST.kind == .list and ST.Element.kind == .bool and ST.Type == BitList(ST.limit);
-}
-
-pub fn BitListType(comptime _limit: comptime_int) type {
-    comptime {
-        if (_limit <= 0) {
-            @compileError("limit must be greater than 0");
-        }
-    }
     return struct {
         pub const kind = TypeKind.list;
         pub const Element: type = BoolType();
         pub const limit: usize = _limit;
-        pub const Type: type = BitList(limit);
+        pub const Type: type = Impl;
         pub const TreeView: type = BitListTreeView(@This());
         pub const min_size: usize = 1;
         pub const max_size: usize = std.math.divCeil(usize, limit + 1, 8) catch unreachable;
