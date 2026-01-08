@@ -1,5 +1,5 @@
 const std = @import("std");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const processJustificationAndFinalization = @import("./process_justification_and_finalization.zig").processJustificationAndFinalization;
@@ -21,7 +21,7 @@ const processSyncCommitteeUpdates = @import("./process_sync_committee_updates.zi
 const processProposerLookahead = @import("./process_proposer_lookahead.zig").processProposerLookahead;
 
 // TODO: add metrics
-pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconStateAllForks, cache: *EpochTransitionCache) !void {
+pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconState, cache: *EpochTransitionCache) !void {
     const state = cached_state.state;
     try processJustificationAndFinalization(cached_state, cache);
 

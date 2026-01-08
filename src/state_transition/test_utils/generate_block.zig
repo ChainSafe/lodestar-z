@@ -8,12 +8,12 @@ const preset = @import("preset").preset;
 const state_transition = @import("../root.zig");
 const Root = types.primitive.Root.Type;
 const ZERO_HASH = @import("constants").ZERO_HASH;
-const CachedBeaconStateAllForks = state_transition.CachedBeaconStateAllForks;
+const CachedBeaconState = state_transition.CachedBeaconState;
 const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
 const getBlockRootAtSlot = state_transition.getBlockRootAtSlot;
 
 /// Generate a valid electra block for the given pre-state.
-pub fn generateElectraBlock(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, out: *types.electra.SignedBeaconBlock.Type) !void {
+pub fn generateElectraBlock(allocator: Allocator, cached_state: *const CachedBeaconState, out: *types.electra.SignedBeaconBlock.Type) !void {
     const state = cached_state.state;
     var attestations = types.electra.Attestations.default_value;
     // no need to fill up to MAX_ATTESTATIONS_ELECTRA

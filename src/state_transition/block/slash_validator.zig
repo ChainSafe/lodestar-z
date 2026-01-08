@@ -2,7 +2,7 @@ const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
@@ -12,7 +12,7 @@ const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateV
 const TIMELY_TARGET = 1 << c.TIMELY_TARGET_FLAG_INDEX;
 
 pub fn slashValidator(
-    cached_state: *const CachedBeaconStateAllForks,
+    cached_state: *const CachedBeaconState,
     slashed_index: ValidatorIndex,
     whistle_blower_index: ?ValidatorIndex,
 ) !void {

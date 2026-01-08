@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const SignedBeaconBlock = @import("../types/beacon_block.zig").SignedBeaconBlock;
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
 const c = @import("constants");
@@ -10,7 +10,7 @@ const computeBlockSigningRoot = @import("../utils/signing_root.zig").computeBloc
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const verifySignatureSet = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
 
-pub fn getProposerSlashingSignatureSets(cached_state: *const CachedBeaconStateAllForks, proposer_slashing: *const types.phase0.ProposerSlashing.Type) ![2]SingleSignatureSet {
+pub fn getProposerSlashingSignatureSets(cached_state: *const CachedBeaconState, proposer_slashing: *const types.phase0.ProposerSlashing.Type) ![2]SingleSignatureSet {
     const config = cached_state.config;
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
@@ -42,7 +42,7 @@ pub fn getProposerSlashingSignatureSets(cached_state: *const CachedBeaconStateAl
     return result;
 }
 
-pub fn proposerSlashingsSignatureSets(cached_state: *const CachedBeaconStateAllForks, signed_block: *const SignedBeaconBlock, out: std.ArrayList(SingleSignatureSet)) !void {
+pub fn proposerSlashingsSignatureSets(cached_state: *const CachedBeaconState, signed_block: *const SignedBeaconBlock, out: std.ArrayList(SingleSignatureSet)) !void {
     const proposer_slashings = signed_block.beaconBlock().beaconBlockBody().proposerSlashings().items;
     for (proposer_slashings) |proposer_slashing| {
         const signature_sets = getProposerSlashingSignatureSets(cached_state, proposer_slashing);

@@ -1,7 +1,7 @@
 const std = @import("std");
 const types = @import("consensus_types");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const getActivationExitChurnLimit = @import("../utils/validator.zig").getActivationExitChurnLimit;
 const preset = @import("preset").preset;
@@ -17,7 +17,7 @@ const GENESIS_SLOT = @import("preset").GENESIS_SLOT;
 const c = @import("constants");
 
 /// we append EpochTransitionCache.is_compounding_validator_arr in this flow
-pub fn processPendingDeposits(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, cache: *EpochTransitionCache) !void {
+pub fn processPendingDeposits(allocator: Allocator, cached_state: *CachedBeaconState, cache: *EpochTransitionCache) !void {
     const epoch_cache = cached_state.getEpochCache();
     const state = cached_state.state;
     const next_epoch = epoch_cache.epoch + 1;
@@ -114,7 +114,7 @@ pub fn processPendingDeposits(allocator: Allocator, cached_state: *CachedBeaconS
 }
 
 /// we append EpochTransitionCache.is_compounding_validator_arr in this flow
-fn applyPendingDeposit(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, deposit: PendingDeposit, cache: *EpochTransitionCache) !void {
+fn applyPendingDeposit(allocator: Allocator, cached_state: *CachedBeaconState, deposit: PendingDeposit, cache: *EpochTransitionCache) !void {
     const epoch_cache = cached_state.getEpochCache();
     const state = cached_state.state;
     const validator_index = epoch_cache.getValidatorIndex(&deposit.pubkey) orelse null;

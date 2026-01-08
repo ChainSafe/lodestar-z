@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const types = @import("consensus_types");
 const Epoch = types.primitive.Epoch.Type;
 const preset = @import("preset").preset;
@@ -28,7 +28,7 @@ const SLOTS_PER_EPOCH_SQRT = std.math.sqrt(preset.SLOTS_PER_EPOCH);
 /// AT = AttestationType
 /// for phase0 it's `types.phase0.Attestation.Type`
 /// for electra it's `types.electra.Attestation.Type`
-pub fn processAttestationsAltair(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, comptime AT: type, attestations: []AT, verify_signature: bool) !void {
+pub fn processAttestationsAltair(allocator: Allocator, cached_state: *const CachedBeaconState, comptime AT: type, attestations: []AT, verify_signature: bool) !void {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const effective_balance_increments = epoch_cache.effective_balance_increment.get().items;
@@ -117,7 +117,7 @@ pub fn processAttestationsAltair(allocator: Allocator, cached_state: *const Cach
     increaseBalance(state, try cached_state.getBeaconProposer(state_slot), proposer_reward);
 }
 
-pub fn getAttestationParticipationStatus(state: *const BeaconStateAllForks, data: types.phase0.AttestationData.Type, inclusion_delay: u64, current_epoch: Epoch, root_cache: *RootCache) !u8 {
+pub fn getAttestationParticipationStatus(state: *const BeaconState, data: types.phase0.AttestationData.Type, inclusion_delay: u64, current_epoch: Epoch, root_cache: *RootCache) !u8 {
     const justified_checkpoint: Checkpoint = if (data.target.epoch == current_epoch)
         root_cache.current_justified_checkpoint
     else

@@ -133,7 +133,7 @@ pub fn computeStartBlockSlotFromEraNumber(era_number: u64) !u64 {
     return (try std.math.sub(u64, era_number, 1)) * preset.SLOTS_PER_HISTORICAL_ROOT;
 }
 
-pub fn getShortHistoricalRoot(state: state_transition.BeaconStateAllForks) ![8]u8 {
+pub fn getShortHistoricalRoot(state: state_transition.BeaconState) ![8]u8 {
     var short_historical_root: [8]u8 = undefined;
     const historical_root = if (state.slot() == 0)
         state.genesisValidatorsRoot()

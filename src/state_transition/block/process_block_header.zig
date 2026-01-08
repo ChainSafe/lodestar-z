@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
 const BeaconConfig = @import("config").BeaconConfig;
 const BeaconBlockHeader = types.phase0.BeaconBlockHeader.Type;
@@ -10,7 +10,7 @@ const SignedBlock = @import("../types/block.zig").SignedBlock;
 const ZERO_HASH = @import("constants").ZERO_HASH;
 const Block = @import("../types/block.zig").Block;
 
-pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, block: Block) !void {
+pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaconState, block: Block) !void {
     const state = cached_state.state;
     const slot = state.slot();
 

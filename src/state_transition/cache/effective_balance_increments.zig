@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const ReferenceCount = @import("../utils/reference_count.zig").ReferenceCount;
 const EFFECTIVE_BALANCE_INCREMENT = preset.EFFECTIVE_BALANCE_INCREMENT;
 
@@ -23,13 +23,14 @@ pub fn getEffectiveBalanceIncrementsWithLen(allocator: Allocator, validator_coun
     return getEffectiveBalanceIncrementsZeroed(allocator, len);
 }
 
-pub fn getEffectiveBalanceIncrements(allocator: Allocator, state: BeaconStateAllForks) !EffectiveBalanceIncrements {
-    const validator_count = state.validators().items.len;
-    var increments = try EffectiveBalanceIncrements.initCapacity(allocator, validator_count);
-    try increments.resize(validator_count);
+pub fn getEffectiveBalanceIncrements(allocator: Allocator, state: BeaconState) !EffectiveBalanceIncrements {
+    const validators = try (try state.validators()).getAll(allocator);
+    defer allocator.free(validators);
 
-    for (0..validator_count) |i| {
-        const validator = state.validators()[i];
+    var increments = try EffectiveBalanceIncrements.initCapacity(allocator, validators.len);
+    try increments.resize(validators.len);
+
+    for (validators, 0..) |validator, i| {
         increments.items[i] = @divFloor(validator.effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT);
     }
 }

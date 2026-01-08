@@ -1,7 +1,7 @@
 test "process block header - sanity" {
     const allocator = std.testing.allocator;
 
-    var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, 256);
     const slot = config.mainnet.chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
     defer test_state.deinit();
 
@@ -27,7 +27,7 @@ const std = @import("std");
 const types = @import("consensus_types");
 const config = @import("config");
 const state_transition = @import("state_transition");
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const preset = @import("preset").preset;
 const processBlockHeader = state_transition.processBlockHeader;
 const Block = state_transition.Block;

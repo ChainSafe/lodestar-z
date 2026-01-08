@@ -1,4 +1,4 @@
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
 const ProposerSlashing = types.phase0.ProposerSlashing.Type;
@@ -8,7 +8,7 @@ const verifySignature = @import("../utils/signature_sets.zig").verifySingleSigna
 const slashValidator = @import("./slash_validator.zig").slashValidator;
 
 pub fn processProposerSlashing(
-    cached_state: *const CachedBeaconStateAllForks,
+    cached_state: *const CachedBeaconState,
     proposer_slashing: *const ProposerSlashing,
     verify_signatures: bool,
 ) !void {
@@ -18,7 +18,7 @@ pub fn processProposerSlashing(
 }
 
 pub fn assertValidProposerSlashing(
-    cached_state: *const CachedBeaconStateAllForks,
+    cached_state: *const CachedBeaconState,
     proposer_slashing: *const ProposerSlashing,
     verify_signature: bool,
 ) !void {

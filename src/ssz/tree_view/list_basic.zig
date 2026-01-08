@@ -72,6 +72,10 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             return std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
         }
 
+        pub fn setLength(self: *Self, new_length: usize) !void {
+            try self.updateListLength(new_length);
+        }
+
         pub fn get(self: *Self, index: usize) !Element {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;

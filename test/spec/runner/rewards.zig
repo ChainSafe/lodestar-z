@@ -3,7 +3,7 @@ const ct = @import("consensus_types");
 const ssz = @import("ssz");
 const ForkSeq = @import("config").ForkSeq;
 const state_transition = @import("state_transition");
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const TestCaseUtils = @import("../test_case.zig").TestCaseUtils;
 const loadSszValue = @import("../test_case.zig").loadSszSnappyValue;
 
@@ -28,7 +28,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
     const tc_utils = TestCaseUtils(fork);
 
     return struct {
-        pre: TestCachedBeaconStateAllForks,
+        pre: TestCachedBeaconState,
         expected_rewards: []u64,
         expected_penalties: []u64,
         actual_rewards: []u64,

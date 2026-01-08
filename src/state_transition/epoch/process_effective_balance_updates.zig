@@ -1,5 +1,5 @@
 const std = @import("std");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const types = @import("consensus_types");
@@ -14,7 +14,7 @@ const DOWNWARD_THRESHOLD = HYSTERESIS_INCREMENT * preset.HYSTERESIS_DOWNWARD_MUL
 const UPWARD_THRESHOLD = HYSTERESIS_INCREMENT * preset.HYSTERESIS_UPWARD_MULTIPLIER;
 
 /// this function also update EpochTransitionCache
-pub fn processEffectiveBalanceUpdates(cached_state: *CachedBeaconStateAllForks, cache: *EpochTransitionCache) !usize {
+pub fn processEffectiveBalanceUpdates(cached_state: *CachedBeaconState, cache: *EpochTransitionCache) !usize {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const validators = state.validators();

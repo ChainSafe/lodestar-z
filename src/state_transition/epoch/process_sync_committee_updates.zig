@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const types = @import("consensus_types");
@@ -10,7 +10,7 @@ const BLSPubkey = types.primitive.BLSPubkey.Type;
 const getNextSyncCommitteeIndices = @import("../utils/sync_committee.zig").getNextSyncCommitteeIndices;
 const blst = @import("blst");
 
-pub fn processSyncCommitteeUpdates(allocator: Allocator, cached_state: *CachedBeaconStateAllForks) !void {
+pub fn processSyncCommitteeUpdates(allocator: Allocator, cached_state: *CachedBeaconState) !void {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const next_epoch = epoch_cache.epoch + 1;

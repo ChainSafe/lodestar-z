@@ -11,7 +11,7 @@ const ExecutionPayload = @import("types/execution_payload.zig").ExecutionPayload
 
 const Slot = types.primitive.Slot.Type;
 
-const CachedBeaconStateAllForks = @import("cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("cache/state_cache.zig").CachedBeaconState;
 pub const SignedBeaconBlock = @import("types/beacon_block.zig").SignedBeaconBlock;
 const verifyProposerSignature = @import("./signature_sets/proposer.zig").verifyProposerSignature;
 const processBlock = @import("./block/process_block.zig").processBlock;
@@ -58,7 +58,7 @@ pub const BlockExternalData = struct {
 
 pub fn processSlotsWithTransientCache(
     allocator: std.mem.Allocator,
-    post_state: *CachedBeaconStateAllForks,
+    post_state: *CachedBeaconState,
     slot: Slot,
     _: EpochTransitionCacheOpts,
 ) !void {
@@ -126,10 +126,10 @@ pub const TransitionOpt = struct {
 
 pub fn stateTransition(
     allocator: std.mem.Allocator,
-    state: *CachedBeaconStateAllForks,
+    state: *CachedBeaconState,
     signed_block: SignedBlock,
     opts: TransitionOpt,
-) !*CachedBeaconStateAllForks {
+) !*CachedBeaconState {
     const block = signed_block.message();
     const block_slot = switch (block) {
         .regular => |b| b.slot(),

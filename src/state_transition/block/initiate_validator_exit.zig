@@ -1,5 +1,5 @@
 const std = @import("std");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
 const Validator = types.phase0.Validator.Type;
@@ -26,7 +26,7 @@ const computeExitEpochAndUpdateChurn = @import("../utils/epoch.zig").computeExit
 /// ```
 /// Forcing consumers to pass the SubTree of `validator` directly mitigates this issue.
 ///
-pub fn initiateValidatorExit(cached_state: *const CachedBeaconStateAllForks, validator: *Validator) !void {
+pub fn initiateValidatorExit(cached_state: *const CachedBeaconState, validator: *Validator) !void {
     const config = cached_state.config.chain;
     const epoch_cache = cached_state.getEpochCache();
     const state = cached_state.state;

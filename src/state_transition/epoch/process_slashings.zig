@@ -1,9 +1,9 @@
 const std = @import("std");
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
 const decreaseBalance = @import("../utils//balance.zig").decreaseBalance;
 const EFFECTIVE_BALANCE_INCREMENT = preset.EFFECTIVE_BALANCE_INCREMENT;
@@ -14,7 +14,7 @@ const PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX = preset.PROPORTIONAL_SLASHING_
 /// TODO: consider returning number[] when we switch to TreeView
 pub fn processSlashings(
     allocator: std.mem.Allocator,
-    cached_state: *CachedBeaconStateAllForks,
+    cached_state: *CachedBeaconState,
     cache: *const EpochTransitionCache,
 ) !void {
     // Return early if there no index to slash
@@ -56,7 +56,7 @@ pub fn processSlashings(
     }
 }
 
-pub fn getTotalSlashingsByIncrement(state: *const BeaconStateAllForks) u64 {
+pub fn getTotalSlashingsByIncrement(state: *const BeaconState) u64 {
     var total_slashings_by_increment: u64 = 0;
     const count = state.slashings().len;
 

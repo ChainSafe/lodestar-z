@@ -1,7 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const generateElectraBlock = state_transition.test_utils.generateElectraBlock;
 const types = @import("consensus_types");
 const Root = types.primitive.Root.Type;
@@ -11,7 +11,7 @@ const state_transition = @import("state_transition");
 const stateTransition = state_transition.state_transition.stateTransition;
 const TransitionOpt = state_transition.state_transition.TransitionOpt;
 const SignedBeaconBlock = state_transition.state_transition.SignedBeaconBlock;
-const CachedBeaconStateAllForks = state_transition.CachedBeaconStateAllForks;
+const CachedBeaconState = state_transition.CachedBeaconState;
 const SignedBlock = state_transition.SignedBlock;
 
 const TestCase = struct {
@@ -30,7 +30,7 @@ test "state transition - electra block" {
     inline for (test_cases) |tc| {
         const allocator = std.testing.allocator;
 
-        var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+        var test_state = try TestCachedBeaconState.init(allocator, 256);
         defer test_state.deinit();
         const electra_block_ptr = try allocator.create(types.electra.SignedBeaconBlock.Type);
         try generateElectraBlock(allocator, test_state.cached_state, electra_block_ptr);

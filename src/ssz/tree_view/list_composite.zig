@@ -71,6 +71,15 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             return std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
         }
 
+        pub fn setLength(self: *Self, new_length: usize) !void {
+            try self.updateListLength(new_length);
+        }
+
+        pub fn getRoot(self: *Self, index: usize) !*const [32]u8 {
+            const field_node = try self.base_view.getChildNode(Gindex.fromDepth(chunk_depth, index));
+            return field_node.getRoot(self.base_view.pool);
+        }
+
         pub fn get(self: *Self, index: usize) !Element {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
@@ -88,6 +97,17 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
             try Chunks.set(&self.base_view, index, value);
+        }
+
+        pub fn setValue(self: *Self, index: usize, value: *const ST.Element.Type) !void {
+            const root = try ST.Element.tree.fromValue(self.base_view.pool, value);
+            errdefer self.base_view.pool.unref(root);
+            const child_view = try ST.Element.TreeView.init(
+                self.base_view.allocator,
+                self.base_view.pool,
+                root,
+            );
+            try self.set(index, child_view);
         }
 
         pub fn getAllReadonly(self: *Self, allocator: Allocator) ![]Element {
@@ -110,6 +130,17 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
             try self.updateListLength(list_length + 1);
             try self.set(list_length, value);
+        }
+
+        pub fn pushValue(self: *Self, value: *const ST.Element.Type) !void {
+            const child_root = try ST.Element.tree.fromValue(self.base_view.pool, value);
+            errdefer self.base_view.pool.unref(child_root);
+            const child_view = try ST.Element.TreeView.init(
+                self.base_view.allocator,
+                self.base_view.pool,
+                child_root,
+            );
+            try self.push(child_view);
         }
 
         /// Return a new view containing all elements up to and including `index`.
@@ -196,6 +227,11 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         pub fn serializedSize(self: *Self) !usize {
             try self.commit();
             return try ST.tree.serializedSize(self.base_view.data.root, self.base_view.pool);
+        }
+
+        pub fn fromValue(allocator: Allocator, pool: *Node.Pool, value: *const ST.Type) !Self {
+            const root = try ST.tree.fromValue(pool, value);
+            return try Self.init(allocator, pool, root);
         }
     };
 }

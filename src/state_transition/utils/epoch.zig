@@ -1,11 +1,11 @@
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const Slot = types.primitive.Slot.Type;
 const Epoch = types.primitive.Epoch.Type;
 const SyncPeriod = types.primitive.SyncPeriod.Type;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const Gwei = types.primitive.Gwei.Type;
 const getActivationExitChurnLimit = @import("../utils/validator.zig").getActivationExitChurnLimit;
 const getConsolidationChurnLimit = @import("../utils/validator.zig").getConsolidationChurnLimit;
@@ -34,7 +34,7 @@ pub fn computeActivationExitEpoch(epoch: Epoch) Epoch {
     return epoch + 1 + preset.MAX_SEED_LOOKAHEAD;
 }
 
-pub fn computeExitEpochAndUpdateChurn(cached_state: *const CachedBeaconStateAllForks, exit_balance: Gwei) u64 {
+pub fn computeExitEpochAndUpdateChurn(cached_state: *const CachedBeaconState, exit_balance: Gwei) u64 {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const state_earliest_exit_epoch = state.earliestExitEpoch();
@@ -60,7 +60,7 @@ pub fn computeExitEpochAndUpdateChurn(cached_state: *const CachedBeaconStateAllF
     return state_earliest_exit_epoch.*;
 }
 
-pub fn computeConsolidationEpochAndUpdateChurn(cached_state: *const CachedBeaconStateAllForks, consolidation_balance: Gwei) u64 {
+pub fn computeConsolidationEpochAndUpdateChurn(cached_state: *const CachedBeaconState, consolidation_balance: Gwei) u64 {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
 
@@ -91,7 +91,7 @@ pub fn computeConsolidationEpochAndUpdateChurn(cached_state: *const CachedBeacon
     return state_earliest_consolidation_epoch.*;
 }
 
-pub fn getCurrentEpoch(state: BeaconStateAllForks) Epoch {
+pub fn getCurrentEpoch(state: BeaconState) Epoch {
     return computeEpochAtSlot(state.slot());
 }
 
@@ -99,7 +99,7 @@ pub fn computePreviousEpoch(epoch: Epoch) Epoch {
     return if (epoch == GENESIS_EPOCH) GENESIS_EPOCH else epoch - 1;
 }
 
-pub fn getPreviousEpoch(state: BeaconStateAllForks) Epoch {
+pub fn getPreviousEpoch(state: BeaconState) Epoch {
     return computePreviousEpoch(getCurrentEpoch(state));
 }
 

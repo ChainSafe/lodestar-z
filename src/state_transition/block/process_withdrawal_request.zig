@@ -1,5 +1,5 @@
 const std = @import("std");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const c = @import("constants");
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -13,7 +13,7 @@ const getPendingBalanceToWithdraw = @import("../utils/validator.zig").getPending
 const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateValidatorExit;
 const computeExitEpochAndUpdateChurn = @import("../utils/epoch.zig").computeExitEpochAndUpdateChurn;
 
-pub fn processWithdrawalRequest(allocator: std.mem.Allocator, cached_state: *CachedBeaconStateAllForks, withdrawal_request: *const WithdrawalRequest) !void {
+pub fn processWithdrawalRequest(allocator: std.mem.Allocator, cached_state: *CachedBeaconState, withdrawal_request: *const WithdrawalRequest) !void {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const config = epoch_cache.config;
@@ -76,7 +76,7 @@ pub fn processWithdrawalRequest(allocator: std.mem.Allocator, cached_state: *Cac
     }
 }
 
-fn isValidatorEligibleForWithdrawOrExit(validator: *const Validator, source_address: []const u8, cached_state: *const CachedBeaconStateAllForks) bool {
+fn isValidatorEligibleForWithdrawOrExit(validator: *const Validator, source_address: []const u8, cached_state: *const CachedBeaconState) bool {
     const withdrawal_credentials = validator.withdrawal_credentials;
     const address = withdrawal_credentials[12..];
     const epoch_cache = cached_state.getEpochCache();

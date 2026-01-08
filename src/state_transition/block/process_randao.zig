@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
@@ -12,7 +12,7 @@ const verifyRandaoSignature = @import("../signature_sets/randao.zig").verifyRand
 const digest = @import("../utils/sha256.zig").digest;
 
 pub fn processRandao(
-    cached_state: *const CachedBeaconStateAllForks,
+    cached_state: *const CachedBeaconState,
     body: Body,
     proposer_idx: u64,
     verify_signature: bool,

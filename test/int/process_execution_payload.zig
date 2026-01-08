@@ -1,7 +1,7 @@
 test "process execution payload - sanity" {
     const allocator = std.testing.allocator;
 
-    var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, 256);
     defer test_state.deinit();
 
     var execution_payload: types.electra.ExecutionPayload.Type = types.electra.ExecutionPayload.default_value;
@@ -28,7 +28,7 @@ const types = @import("consensus_types");
 const config = @import("config");
 
 const state_transition = @import("state_transition");
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const processExecutionPayload = state_transition.processExecutionPayload;
 const SignedBlock = state_transition.SignedBlock;
 const Block = state_transition.Block;

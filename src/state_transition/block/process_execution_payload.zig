@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
@@ -24,7 +24,7 @@ const PartialPayload = struct {
 
 pub fn processExecutionPayload(
     allocator: Allocator,
-    cached_state: *const CachedBeaconStateAllForks,
+    cached_state: *const CachedBeaconState,
     body: Body,
     external_data: BlockExternalData,
 ) !void {

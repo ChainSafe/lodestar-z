@@ -17,7 +17,7 @@ const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRo
 const blst = @import("blst");
 const verify = @import("../utils/bls.zig").verify;
 const ForkSeq = types.primitive.ForkSeq.Type;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const getMaxEffectiveBalance = @import("../utils/validator.zig").getMaxEffectiveBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 const verifyMerkleBranch = @import("../utils/verify_merkle_branch.zig").verifyMerkleBranch;
@@ -55,7 +55,7 @@ pub const DepositData = union(enum) {
     }
 };
 
-pub fn processDeposit(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, deposit: *const types.phase0.Deposit.Type) !void {
+pub fn processDeposit(allocator: Allocator, cached_state: *CachedBeaconState, deposit: *const types.phase0.Deposit.Type) !void {
     const state = cached_state.state;
     // verify the merkle branch
     var deposit_data_root: Root = undefined;
@@ -80,7 +80,7 @@ pub fn processDeposit(allocator: Allocator, cached_state: *CachedBeaconStateAllF
 
 /// Adds a new validator into the registry. Or increase balance if already exist.
 /// Follows applyDeposit() in consensus spec. Will be used by processDeposit() and processDepositRequest()
-pub fn applyDeposit(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, deposit: *const DepositData) !void {
+pub fn applyDeposit(allocator: Allocator, cached_state: *CachedBeaconState, deposit: *const DepositData) !void {
     const config = cached_state.config;
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
@@ -124,7 +124,7 @@ pub fn applyDeposit(allocator: Allocator, cached_state: *CachedBeaconStateAllFor
 
 pub fn addValidatorToRegistry(
     allocator: Allocator,
-    cached_state: *CachedBeaconStateAllForks,
+    cached_state: *CachedBeaconState,
     pubkey: BLSPubkey,
     withdrawal_credentials: WithdrawalCredentials,
     amount: u64,

@@ -1,10 +1,10 @@
 const std = @import("std");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const preset = @import("preset").preset;
 const MIN_EPOCHS_TO_INACTIVITY_PENALTY = preset.MIN_EPOCHS_TO_INACTIVITY_PENALTY;
 const computePreviousEpoch = @import("./epoch.zig").computePreviousEpoch;
 
-pub fn getFinalityDelay(cached_state: *const CachedBeaconStateAllForks) u64 {
+pub fn getFinalityDelay(cached_state: *const CachedBeaconState) u64 {
     const previous_epoch = computePreviousEpoch(cached_state.getEpochCache().epoch);
     std.debug.assert(previous_epoch >= cached_state.state.finalizedCheckpoint().epoch);
 
@@ -16,6 +16,6 @@ pub fn getFinalityDelay(cached_state: *const CachedBeaconStateAllForks) u64 {
 /// where inactive validators get progressively penalized more and more, to reduce their influence
 /// until blocks get finalized again. See here (https://github.com/ethereum/annotated-spec/blob/master/phase0/beacon-chain.md#inactivity-quotient) for what the inactivity leak is, what it's for and how
 /// it works.
-pub fn isInInactivityLeak(state: *const CachedBeaconStateAllForks) bool {
+pub fn isInInactivityLeak(state: *const CachedBeaconState) bool {
     return getFinalityDelay(state) > MIN_EPOCHS_TO_INACTIVITY_PENALTY;
 }

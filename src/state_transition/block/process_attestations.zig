@@ -1,8 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const EpochCacheImmutableData = @import("../cache/epoch_cache.zig").EpochCacheImmutableData;
 const types = @import("consensus_types");
 const Epoch = types.primitive.Epoch.Type;
@@ -12,7 +12,7 @@ const Attestations = @import("../types/attestation.zig").Attestations;
 const processAttestationPhase0 = @import("./process_attestation_phase0.zig").processAttestationPhase0;
 const processAttestationsAltair = @import("./process_attestation_altair.zig").processAttestationsAltair;
 
-pub fn processAttestations(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, attestations: Attestations, verify_signatures: bool) !void {
+pub fn processAttestations(allocator: Allocator, cached_state: *CachedBeaconState, attestations: Attestations, verify_signatures: bool) !void {
     const state = cached_state.state;
     switch (attestations) {
         .phase0 => |attestations_phase0| {
@@ -36,7 +36,7 @@ test "process attestations - sanity" {
     const allocator = std.testing.allocator;
 
     {
-        var test_state = try TestCachedBeaconStateAllForks.init(allocator, 16);
+        var test_state = try TestCachedBeaconState.init(allocator, 16);
         defer test_state.deinit();
         var phase0: std.ArrayListUnmanaged(types.phase0.Attestation.Type) = .empty;
         const attestation = types.phase0.Attestation.default_value;
@@ -46,7 +46,7 @@ test "process attestations - sanity" {
         phase0.deinit(allocator);
     }
     {
-        var test_state = try TestCachedBeaconStateAllForks.init(allocator, 16);
+        var test_state = try TestCachedBeaconState.init(allocator, 16);
         defer test_state.deinit();
         var electra: std.ArrayListUnmanaged(types.electra.Attestation.Type) = .empty;
         const attestation = types.electra.Attestation.default_value;

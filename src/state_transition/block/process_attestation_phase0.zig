@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const ssz = @import("ssz");
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -14,7 +14,7 @@ const Phase0Attestation = types.phase0.Attestation.Type;
 const ElectraAttestation = types.electra.Attestation.Type;
 const PendingAttestation = types.phase0.PendingAttestation.Type;
 
-pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, attestation: *const Phase0Attestation, verify_signature: bool) !void {
+pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaconState, attestation: *const Phase0Attestation, verify_signature: bool) !void {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const slot = state.slot();
@@ -65,7 +65,7 @@ pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaco
 }
 
 /// AT could be either Phase0Attestation or ElectraAttestation
-pub fn validateAttestation(comptime AT: type, cached_state: *const CachedBeaconStateAllForks, attestation: *const AT) !void {
+pub fn validateAttestation(comptime AT: type, cached_state: *const CachedBeaconState, attestation: *const AT) !void {
     const epoch_cache = cached_state.getEpochCache();
     const state = cached_state.state;
     const state_slot = state.slot();
@@ -148,9 +148,9 @@ pub fn validateAttestation(comptime AT: type, cached_state: *const CachedBeaconS
     }
 }
 
-pub fn isTimelyTarget(state: *const BeaconStateAllForks, inclusion_distance: Slot) bool {
+pub fn isTimelyTarget(state: *const BeaconState, inclusion_distance: Slot) bool {
     // post deneb attestation is valid till end of next epoch for target
-    if (state.isPostDeneb()) {
+    if (state.forkSeq().gte(.deneb)) {
         return true;
     }
 

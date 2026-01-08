@@ -1,7 +1,7 @@
 test "process withdrawals - sanity" {
     const allocator = std.testing.allocator;
 
-    var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, 256);
     defer test_state.deinit();
     var withdrawals_result = WithdrawalsResult{
         .withdrawals = try Withdrawals.initCapacity(
@@ -23,7 +23,7 @@ test "process withdrawals - sanity" {
 const std = @import("std");
 const state_transition = @import("state_transition");
 const preset = @import("preset").preset;
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const processWithdrawals = state_transition.processWithdrawals;
 const getExpectedWithdrawals = state_transition.getExpectedWithdrawals;
 const WithdrawalsResult = state_transition.WithdrawalsResult;

@@ -1,5 +1,5 @@
 const std = @import("std");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
@@ -7,7 +7,7 @@ const isInInactivityLeak = @import("../utils/finality.zig").isInInactivityLeak;
 const attester_status_utils = @import("../utils/attester_status.zig");
 const hasMarkers = attester_status_utils.hasMarkers;
 
-pub fn processInactivityUpdates(cached_state: *CachedBeaconStateAllForks, cache: *const EpochTransitionCache) !void {
+pub fn processInactivityUpdates(cached_state: *CachedBeaconState, cache: *const EpochTransitionCache) !void {
     if (cached_state.getEpochCache().epoch == GENESIS_EPOCH) {
         return;
     }

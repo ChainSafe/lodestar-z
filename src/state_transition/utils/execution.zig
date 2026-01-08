@@ -6,10 +6,10 @@ const Block = @import("../types/block.zig").Block;
 const BeaconBlockBody = @import("../types/beacon_block.zig").BeaconBlockBody;
 const ExecutionPayload = @import("../types/beacon_block.zig").ExecutionPayload;
 // const ExecutionPayloadHeader
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 
-pub fn isExecutionEnabled(state: *const BeaconStateAllForks, block: Block) bool {
+pub fn isExecutionEnabled(state: *const BeaconState, block: Block) bool {
     if (!state.isPostBellatrix()) return false;
     if (isMergeTransitionComplete(state)) return true;
 
@@ -40,7 +40,7 @@ pub fn isExecutionEnabled(state: *const BeaconStateAllForks, block: Block) bool 
     }
 }
 
-pub fn isMergeTransitionBlock(state: *const BeaconStateAllForks, body: *const BeaconBlockBody) bool {
+pub fn isMergeTransitionBlock(state: *const BeaconState, body: *const BeaconBlockBody) bool {
     if (!state.isBellatrix()) {
         return false;
     }
@@ -49,7 +49,7 @@ pub fn isMergeTransitionBlock(state: *const BeaconStateAllForks, body: *const Be
         !types.bellatrix.ExecutionPayload.equals(body.getExecutionPayload().bellatrix, types.bellatrix.ExecutionPayload.default_value));
 }
 
-pub fn isMergeTransitionComplete(state: *const BeaconStateAllForks) bool {
+pub fn isMergeTransitionComplete(state: *const BeaconState) bool {
     if (!state.isPostCapella()) {
         return switch (state.*) {
             .bellatrix => |s| !types.bellatrix.ExecutionPayloadHeader.equals(&s.latest_execution_payload_header, &types.bellatrix.ExecutionPayloadHeader.default_value),

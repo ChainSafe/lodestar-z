@@ -1,7 +1,7 @@
 test "process randao - sanity" {
     const allocator = std.testing.allocator;
 
-    var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, 256);
     const slot = config.mainnet.chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
     defer test_state.deinit();
 
@@ -28,7 +28,7 @@ const config = @import("config");
 
 const Allocator = std.mem.Allocator;
 const state_transition = @import("state_transition");
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 
 const preset = @import("preset").preset;
 

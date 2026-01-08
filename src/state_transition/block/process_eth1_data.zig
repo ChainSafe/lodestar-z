@@ -1,10 +1,10 @@
 const std = @import("std");
 const types = @import("consensus_types");
 const Eth1Data = types.phase0.Eth1Data.Type;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const preset = @import("preset").preset;
 
-pub fn processEth1Data(allocator: std.mem.Allocator, cached_state: *const CachedBeaconStateAllForks, eth1_data: *const Eth1Data) !void {
+pub fn processEth1Data(allocator: std.mem.Allocator, cached_state: *const CachedBeaconState, eth1_data: *const Eth1Data) !void {
     const state = cached_state.state;
     if (becomesNewEth1Data(cached_state, eth1_data)) {
         const state_eth1_data = state.eth1Data();
@@ -14,7 +14,7 @@ pub fn processEth1Data(allocator: std.mem.Allocator, cached_state: *const Cached
     try state.eth1DataVotes().append(allocator, eth1_data.*);
 }
 
-pub fn becomesNewEth1Data(cached_state: *const CachedBeaconStateAllForks, new_eth1_data: *const Eth1Data) bool {
+pub fn becomesNewEth1Data(cached_state: *const CachedBeaconState, new_eth1_data: *const Eth1Data) bool {
     const state = cached_state.state;
     const SLOTS_PER_ETH1_VOTING_PERIOD = preset.EPOCHS_PER_ETH1_VOTING_PERIOD * preset.SLOTS_PER_EPOCH;
 

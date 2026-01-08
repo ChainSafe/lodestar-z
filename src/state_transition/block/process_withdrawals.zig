@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const types = @import("consensus_types");
 const Root = types.primitive.Root.Type;
 const preset = @import("preset").preset;
@@ -29,7 +29,7 @@ pub const WithdrawalsResult = struct {
 /// refer to https://github.com/ethereum/consensus-specs/blob/dev/specs/electra/beacon-chain.md#modified-process_withdrawals
 pub fn processWithdrawals(
     allocator: Allocator,
-    cached_state: *const CachedBeaconStateAllForks,
+    cached_state: *const CachedBeaconState,
     expected_withdrawals_result: WithdrawalsResult,
     payload_withdrawals_root: Root,
 ) !void {
@@ -84,7 +84,7 @@ pub fn getExpectedWithdrawals(
     allocator: Allocator,
     withdrawals_result: *WithdrawalsResult,
     withdrawal_balances: *std.AutoHashMap(ValidatorIndex, usize),
-    cached_state: *const CachedBeaconStateAllForks,
+    cached_state: *const CachedBeaconState,
 ) !void {
     const state = cached_state.state;
     if (state.isPreCapella()) {

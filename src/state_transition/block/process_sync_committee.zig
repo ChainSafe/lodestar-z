@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
 const Block = @import("../types/block.zig").Block;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
@@ -22,7 +22,7 @@ const decreaseBalance = balance_utils.decreaseBalance;
 
 pub fn processSyncAggregate(
     allocator: Allocator,
-    cached_state: *CachedBeaconStateAllForks,
+    cached_state: *CachedBeaconState,
     sync_aggregate: *const SyncAggregate,
     verify_signatures: bool,
 ) !void {
@@ -109,7 +109,7 @@ pub fn processSyncAggregate(
 /// Consumers should deinit the returned pubkeys
 /// this is to be used when we implement getBlockSignatureSets
 /// see https://github.com/ChainSafe/state-transition-z/issues/72
-pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, block: Block, participant_indices: ?[]usize) !?AggregatedSignatureSet {
+pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *const CachedBeaconState, block: Block, participant_indices: ?[]usize) !?AggregatedSignatureSet {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const sync_aggregate = block.beaconBlockBody().syncAggregate();

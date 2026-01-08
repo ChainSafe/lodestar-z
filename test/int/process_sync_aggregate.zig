@@ -1,7 +1,7 @@
 test "process sync aggregate - sanity" {
     const allocator = std.testing.allocator;
 
-    var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, 256);
     defer test_state.deinit();
 
     const state = test_state.cached_state.state;
@@ -39,7 +39,7 @@ const preset = @import("preset").preset;
 const c = @import("constants");
 
 const Allocator = std.mem.Allocator;
-const TestCachedBeaconStateAllForks = @import("state_transition").test_utils.TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
 
 const state_transition = @import("state_transition");
 const processSyncAggregate = state_transition.processSyncAggregate;

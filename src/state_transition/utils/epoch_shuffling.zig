@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const preset = @import("preset").preset;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const getSeed = @import("./seed.zig").getSeed;
 const c = @import("constants");
 const innerShuffleList = @import("./shuffle.zig").innerShuffleList;
@@ -103,7 +103,7 @@ test EpochShuffling {
 }
 
 /// active_indices is allocated at consumer side and transfer ownership to EpochShuffling
-pub fn computeEpochShuffling(allocator: Allocator, state: *const BeaconStateAllForks, active_indices: []ValidatorIndex, epoch: Epoch) !*EpochShuffling {
+pub fn computeEpochShuffling(allocator: Allocator, state: *const BeaconState, active_indices: []ValidatorIndex, epoch: Epoch) !*EpochShuffling {
     var seed = [_]u8{0} ** 32;
     try getSeed(state, epoch, c.DOMAIN_BEACON_ATTESTER, &seed);
     return EpochShuffling.init(allocator, seed, epoch, active_indices);

@@ -1,15 +1,15 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 
-pub fn processParticipationFlagUpdates(allocator: std.mem.Allocator, cached_state: *CachedBeaconStateAllForks) !void {
+pub fn processParticipationFlagUpdates(cached_state: *CachedBeaconState) !void {
     const state = cached_state.state;
     // rotate EpochParticipation
-    try state.rotateEpochParticipations(allocator);
+    try state.rotateEpochParticipation();
 
     // We need to replace the node of currentEpochParticipation with a node that represents an empty list of some length.
     // SSZ represents a list as = new BranchNode(chunksNode, lengthNode).

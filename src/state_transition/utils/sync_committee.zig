@@ -2,7 +2,7 @@ const std = @import("std");
 const blst = @import("blst");
 const AggregatePublicKey = blst.AggregatePublicKey;
 const Allocator = std.mem.Allocator;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const EffiectiveBalanceIncrements = @import("../cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -26,7 +26,7 @@ pub const SyncCommitteeInfo = struct {
 };
 
 /// Consumer must deallocate the returned `SyncCommitteeInfo` struct
-pub fn getNextSyncCommittee(allocator: Allocator, state: *const BeaconStateAllForks, active_validators_indices: []const ValidatorIndex, effective_balance_increment: EffiectiveBalanceIncrements, out: *SyncCommitteeInfo) !void {
+pub fn getNextSyncCommittee(allocator: Allocator, state: *const BeaconState, active_validators_indices: []const ValidatorIndex, effective_balance_increment: EffiectiveBalanceIncrements, out: *SyncCommitteeInfo) !void {
     var indices = std.ArrayList(ValidatorIndex).init(allocator);
     try indices.resize(preset.SYNC_COMMITTEE_SIZE);
     try getNextSyncCommitteeIndices(allocator, state, active_validators_indices, effective_balance_increment, indices.items);

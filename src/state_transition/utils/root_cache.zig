@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const getBlockRootFn = @import("../utils/block_root.zig").getBlockRoot;
 const getBlockRootAtSlotFn = @import("../utils/block_root.zig").getBlockRootAtSlot;
 const types = @import("consensus_types");
@@ -14,11 +14,11 @@ pub const RootCache = struct {
     allocator: Allocator,
     current_justified_checkpoint: Checkpoint,
     previous_justified_checkpoint: Checkpoint,
-    state: *const BeaconStateAllForks,
+    state: *const BeaconState,
     block_root_epoch_cache: std.AutoHashMap(Epoch, Root),
     block_root_slot_cache: std.AutoHashMap(Slot, Root),
 
-    pub fn init(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks) !*RootCache {
+    pub fn init(allocator: Allocator, cached_state: *const CachedBeaconState) !*RootCache {
         const instance = try allocator.create(RootCache);
         errdefer allocator.destroy(instance);
         const state = cached_state.state;

@@ -1,5 +1,5 @@
 const std = @import("std");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const FAR_FUTURE_EPOCH = @import("constants").FAR_FUTURE_EPOCH;
@@ -20,7 +20,7 @@ const isActiveValidator = validator_utils.isActiveValidator;
 // TODO Electra: Clean up necessary as there is a lot of overlap with isValidSwitchToCompoundRequest
 pub fn processConsolidationRequest(
     allocator: std.mem.Allocator,
-    cached_state: *CachedBeaconStateAllForks,
+    cached_state: *CachedBeaconState,
     consolidation: *const ConsolidationRequest,
 ) !void {
     const state = cached_state.state;
@@ -108,7 +108,7 @@ pub fn processConsolidationRequest(
     try state.pendingConsolidations().append(allocator, pending_consolidation);
 }
 
-fn isValidSwitchToCompoundRequest(cached_state: *const CachedBeaconStateAllForks, consolidation: *const ConsolidationRequest) bool {
+fn isValidSwitchToCompoundRequest(cached_state: *const CachedBeaconState, consolidation: *const ConsolidationRequest) bool {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
 

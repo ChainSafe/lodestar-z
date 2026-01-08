@@ -3,8 +3,8 @@ const Allocator = std.mem.Allocator;
 const ssz = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
 const computeEpochAtSlot = @import("./epoch.zig").computeEpochAtSlot;
 const seed_utils = @import("./seed.zig");
@@ -16,7 +16,7 @@ const computeProposers = seed_utils.computeProposers;
 /// Uses active indices from the epoch cache shufflings.
 pub fn initializeProposerLookahead(
     allocator: Allocator,
-    cached_state: *const CachedBeaconStateAllForks,
+    cached_state: *const CachedBeaconState,
     out: []ValidatorIndex,
 ) !void {
     const lookahead_epochs = preset.MIN_SEED_LOOKAHEAD + 1;

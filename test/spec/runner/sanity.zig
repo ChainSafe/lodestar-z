@@ -3,9 +3,9 @@ const ssz = @import("consensus_types");
 const ForkSeq = @import("config").ForkSeq;
 const Preset = @import("preset").Preset;
 const state_transition = @import("state_transition");
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
-const BeaconStateAllForks = state_transition.BeaconStateAllForks;
-const CachedBeaconStateAllForks = state_transition.CachedBeaconStateAllForks;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+const BeaconState = state_transition.BeaconState;
+const CachedBeaconState = state_transition.CachedBeaconState;
 const test_case = @import("../test_case.zig");
 const loadSszValue = test_case.loadSszSnappyValue;
 const expectEqualBeaconStates = test_case.expectEqualBeaconStates;
@@ -29,8 +29,8 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
     const tc_utils = TestCaseUtils(fork);
 
     return struct {
-        pre: TestCachedBeaconStateAllForks,
-        post: BeaconStateAllForks,
+        pre: TestCachedBeaconState,
+        post: BeaconState,
         slots: u64,
 
         const Self = @This();
@@ -98,9 +98,9 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
     const SignedBeaconBlock = @field(ForkTypes, "SignedBeaconBlock");
 
     return struct {
-        pre: TestCachedBeaconStateAllForks,
+        pre: TestCachedBeaconState,
         // a null post state means the test is expected to fail
-        post: ?BeaconStateAllForks,
+        post: ?BeaconState,
         blocks: []SignedBeaconBlock.Type,
         bls_setting: BlsSetting,
 
@@ -176,9 +176,9 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
             }
         }
 
-        pub fn process(self: *Self) !*CachedBeaconStateAllForks {
+        pub fn process(self: *Self) !*CachedBeaconState {
             const verify = self.bls_setting.verify();
-            var post_state: *CachedBeaconStateAllForks = self.pre.cached_state;
+            var post_state: *CachedBeaconState = self.pre.cached_state;
             for (self.blocks, 0..) |*block, i| {
                 const signed_block = @unionInit(state_transition.SignedBeaconBlock, @tagName(fork), block);
                 {

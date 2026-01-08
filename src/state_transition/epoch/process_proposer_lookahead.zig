@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const ssz = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
@@ -16,7 +16,7 @@ const computeProposers = seed_utils.computeProposers;
 /// Uses active indices from the epoch transition cache for the new epoch.
 pub fn processProposerLookahead(
     allocator: Allocator,
-    cached_state: *CachedBeaconStateAllForks,
+    cached_state: *CachedBeaconState,
     epoch_transition_cache: *const EpochTransitionCache,
 ) !void {
     const state = cached_state.state;

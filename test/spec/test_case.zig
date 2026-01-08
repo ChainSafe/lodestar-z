@@ -5,8 +5,8 @@ const ForkSeq = @import("config").ForkSeq;
 const isFixedType = @import("ssz").isFixedType;
 const state_transition = @import("state_transition");
 const SignedBeaconBlock = state_transition.SignedBeaconBlock;
-const BeaconStateAllForks = state_transition.BeaconStateAllForks;
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
+const BeaconState = state_transition.BeaconState;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 
 const types = @import("consensus_types");
 const Epoch = types.primitive.Epoch.Type;
@@ -46,7 +46,7 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
             };
         }
 
-        pub fn loadPreStatePreFork(allocator: Allocator, dir: std.fs.Dir, fork_epoch: Epoch) !TestCachedBeaconStateAllForks {
+        pub fn loadPreStatePreFork(allocator: Allocator, dir: std.fs.Dir, fork_epoch: Epoch) !TestCachedBeaconState {
             const fork_pre = comptime getForkPre();
             const ForkPreTypes = @field(types, fork_pre.name());
             const pre_state = try allocator.create(ForkPreTypes.BeaconState.Type);
@@ -61,11 +61,11 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
             try loadSszSnappyValue(ForkPreTypes.BeaconState, allocator, dir, "pre.ssz_snappy", pre_state);
             transfered_pre_state = true;
 
-            var pre_state_all_forks = try BeaconStateAllForks.init(fork_pre, pre_state);
-            return try TestCachedBeaconStateAllForks.initFromState(allocator, &pre_state_all_forks, fork, fork_epoch);
+            var pre_state_all_forks = try BeaconState.init(fork_pre, pre_state);
+            return try TestCachedBeaconState.initFromState(allocator, &pre_state_all_forks, fork, fork_epoch);
         }
 
-        pub fn loadPreState(allocator: Allocator, dir: std.fs.Dir) !TestCachedBeaconStateAllForks {
+        pub fn loadPreState(allocator: Allocator, dir: std.fs.Dir) !TestCachedBeaconState {
             const pre_state = try allocator.create(ForkTypes.BeaconState.Type);
             var transfered_pre_state: bool = false;
             errdefer {
@@ -78,12 +78,12 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
             try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "pre.ssz_snappy", pre_state);
             transfered_pre_state = true;
 
-            var pre_state_all_forks = try BeaconStateAllForks.init(fork, pre_state);
-            return try TestCachedBeaconStateAllForks.initFromState(allocator, &pre_state_all_forks, fork, pre_state_all_forks.fork().epoch);
+            var pre_state_all_forks = try BeaconState.init(fork, pre_state);
+            return try TestCachedBeaconState.initFromState(allocator, &pre_state_all_forks, fork, pre_state_all_forks.fork().epoch);
         }
 
         /// consumer should deinit the returned state and destroy the pointer
-        pub fn loadPostState(allocator: Allocator, dir: std.fs.Dir) !?BeaconStateAllForks {
+        pub fn loadPostState(allocator: Allocator, dir: std.fs.Dir) !?BeaconState {
             if (dir.statFile("post.ssz_snappy")) |_| {
                 const post_state = try allocator.create(ForkTypes.BeaconState.Type);
                 errdefer {
@@ -92,7 +92,7 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
                 }
                 post_state.* = ForkTypes.BeaconState.default_value;
                 try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", post_state);
-                return try BeaconStateAllForks.init(fork, post_state);
+                return try BeaconState.init(fork, post_state);
             } else |err| {
                 if (err == error.FileNotFound) {
                     return null;
@@ -238,7 +238,7 @@ pub fn loadSszSnappyValue(comptime ST: type, allocator: std.mem.Allocator, dir: 
     }
 }
 
-pub fn expectEqualBeaconStates(expected: BeaconStateAllForks, actual: BeaconStateAllForks) !void {
+pub fn expectEqualBeaconStates(expected: BeaconState, actual: BeaconState) !void {
     if (expected.forkSeq() != actual.forkSeq()) return error.ForkMismatch;
 
     switch (expected.forkSeq()) {

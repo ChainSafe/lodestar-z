@@ -67,14 +67,14 @@ pub fn readSerializedState(self: Reader, allocator: std.mem.Allocator, era_numbe
     return try snappy.uncompress(allocator, compressed) orelse error.InvalidE2SHeader;
 }
 
-pub fn readState(self: Reader, allocator: std.mem.Allocator, era_number: ?u64) !state_transition.BeaconStateAllForks {
+pub fn readState(self: Reader, allocator: std.mem.Allocator, era_number: ?u64) !state_transition.BeaconState {
     const serialized = try self.readSerializedState(allocator, era_number);
     defer allocator.free(serialized);
 
     const state_slot = era.readSlotFromBeaconStateBytes(serialized);
     const state_fork = self.config.forkSeq(state_slot);
 
-    return try state_transition.BeaconStateAllForks.deserialize(allocator, state_fork, serialized);
+    return try state_transition.BeaconState.deserialize(allocator, state_fork, serialized);
 }
 
 pub fn readCompressedBlock(self: Reader, allocator: std.mem.Allocator, slot: u64) !?[]const u8 {

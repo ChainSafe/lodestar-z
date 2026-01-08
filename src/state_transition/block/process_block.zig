@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
 const Root = types.primitive.Root.Type;
@@ -31,7 +31,7 @@ pub const ProcessBlockOpts = struct {
 /// Process a block and update the state following Ethereum Consensus specifications.
 pub fn processBlock(
     allocator: Allocator,
-    cached_state: *CachedBeaconStateAllForks,
+    cached_state: *CachedBeaconState,
     block: Block,
     external_data: BlockExternalData,
     opts: ProcessBlockOpts,

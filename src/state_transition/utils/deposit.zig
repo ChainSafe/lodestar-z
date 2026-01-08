@@ -2,9 +2,9 @@ const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const Eth1Data = types.phase0.Eth1Data.Type;
 const MAX_DEPOSITS = preset.MAX_DEPOSITS;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 
-pub fn getEth1DepositCount(cached_state: *const CachedBeaconStateAllForks, eth1_data: ?*const Eth1Data) u64 {
+pub fn getEth1DepositCount(cached_state: *const CachedBeaconState, eth1_data: ?*const Eth1Data) u64 {
     const state = cached_state.state;
 
     const eth1_data_to_use = eth1_data orelse state.eth1Data();

@@ -1,13 +1,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const types = @import("consensus_types");
 const Root = types.primitive.Root.Type;
 const preset = @import("preset").preset;
 
-pub fn processHistoricalSummariesUpdate(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, cache: *const EpochTransitionCache) !void {
+pub fn processHistoricalSummariesUpdate(allocator: Allocator, cached_state: *CachedBeaconState, cache: *const EpochTransitionCache) !void {
     const state = cached_state.state;
     const next_epoch = cache.current_epoch + 1;
 

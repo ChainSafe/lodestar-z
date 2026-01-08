@@ -1,5 +1,5 @@
 const std = @import("std");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
@@ -8,7 +8,7 @@ const verifySingleSignatureSet = @import("../utils/signature_sets.zig").verifySi
 const verifyAggregatedSignatureSet = @import("../utils/signature_sets.zig").verifyAggregatedSignatureSet;
 const getIndexedAttestationSignatureSet = @import("../signature_sets/indexed_attestation.zig").getIndexedAttestationSignatureSet;
 
-pub fn isValidIndexedAttestation(comptime IA: type, cached_state: *const CachedBeaconStateAllForks, indexed_attestation: *const IA, verify_signature: bool) !bool {
+pub fn isValidIndexedAttestation(comptime IA: type, cached_state: *const CachedBeaconState, indexed_attestation: *const IA, verify_signature: bool) !bool {
     if (!isValidIndexedAttestationIndices(cached_state, indexed_attestation.attesting_indices.items)) {
         return false;
     }
@@ -22,7 +22,7 @@ pub fn isValidIndexedAttestation(comptime IA: type, cached_state: *const CachedB
     }
 }
 
-pub fn isValidIndexedAttestationIndices(cached_state: *const CachedBeaconStateAllForks, indices: []const ValidatorIndex) bool {
+pub fn isValidIndexedAttestationIndices(cached_state: *const CachedBeaconState, indices: []const ValidatorIndex) bool {
     // verify max number of indices
     const fork_seq = cached_state.state.forkSeq();
     const max_indices: usize = if (fork_seq.gte(.electra))

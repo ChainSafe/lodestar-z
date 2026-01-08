@@ -1,5 +1,5 @@
 const std = @import("std");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const Body = @import("../types/block.zig").Body;
@@ -18,7 +18,7 @@ const ProcessBlockOpts = @import("./process_block.zig").ProcessBlockOpts;
 
 pub fn processOperations(
     allocator: std.mem.Allocator,
-    cached_state: *CachedBeaconStateAllForks,
+    cached_state: *CachedBeaconState,
     body: Body,
     opts: ProcessBlockOpts,
 ) !void {
