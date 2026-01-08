@@ -13,7 +13,7 @@ const Node = @import("persistent_merkle_tree").Node;
 const BitVectorTreeView = @import("../tree_view/root.zig").BitVectorTreeView;
 
 pub fn isBitVectorType(ST: type) bool {
-    return ST.kind == .vector and ST.Element.kind == .bool and ST.Type == BitVectorType(ST.length).Impl;
+    return ST.kind == .vector and ST.Element.kind == .bool and ST.Type == BitVectorType(ST.length).Type;
 }
 
 pub fn BitVectorType(comptime _length: comptime_int) type {
