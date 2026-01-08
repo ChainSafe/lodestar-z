@@ -735,3 +735,304 @@ test "ListBasicTreeView - sliceTo and serialize" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2 }, serialized);
     try std.testing.expectEqual(@as(usize, 2), try sliced.length());
 }
+
+test "TreeView basic list sliceFrom returns suffix" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const ListType = ssz.FixedListType(Uint32, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+
+    const values = [_]u32{ 10, 20, 30, 40, 50 };
+    try list.appendSlice(allocator, &values);
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    var suffix = try view.sliceFrom(2);
+    defer suffix.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), try suffix.length());
+
+    const filled = try suffix.getAll(allocator);
+    defer allocator.free(filled);
+
+    try std.testing.expectEqualSlices(u32, values[2..], filled);
+
+    var expected: ListType.Type = .empty;
+    defer expected.deinit(allocator);
+    try expected.appendSlice(allocator, values[2..]);
+
+    var expected_root: [32]u8 = undefined;
+    try ListType.hashTreeRoot(allocator, &expected, &expected_root);
+
+    var actual_root: [32]u8 = undefined;
+    try suffix.hashTreeRoot(&actual_root);
+
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}
+
+test "TreeView basic list sliceFrom index 0 returns copy" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const ListType = ssz.FixedListType(Uint32, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &[_]u32{ 1, 2, 3, 4 });
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    var suffix = try view.sliceFrom(0);
+    defer suffix.deinit();
+
+    try std.testing.expectEqual(try view.length(), try suffix.length());
+
+    var view_root: [32]u8 = undefined;
+    try view.hashTreeRoot(&view_root);
+
+    var suffix_root: [32]u8 = undefined;
+    try suffix.hashTreeRoot(&suffix_root);
+
+    try std.testing.expectEqualSlices(u8, &view_root, &suffix_root);
+}
+
+test "TreeView basic list sliceFrom beyond length returns empty" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256);
+    defer pool.deinit();
+
+    const Uint32 = ssz.UintType(32);
+    const ListType = ssz.FixedListType(Uint32, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &[_]u32{ 1, 2, 3 });
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    var suffix = try view.sliceFrom(10);
+    defer suffix.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), try suffix.length());
+}
+
+test "TreeView basic list sliceFrom handles boundary conditions" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 2048);
+    defer pool.deinit();
+
+    const Uint64 = ssz.UintType(64);
+    const ListType = ssz.FixedListType(Uint64, 1024);
+    const list_length: usize = 16;
+
+    var base_values: [list_length]u64 = undefined;
+    for (&base_values, 0..) |*value, idx| {
+        value.* = @intCast(idx);
+    }
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, base_values[0..list_length]);
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    for (0..list_length + 2) |start_index| {
+        const expected_len = if (start_index >= list_length) 0 else list_length - start_index;
+
+        var sliced = try view.sliceFrom(start_index);
+        defer sliced.deinit();
+
+        try std.testing.expectEqual(expected_len, try sliced.length());
+
+        if (expected_len > 0) {
+            var actual: ListType.Type = .empty;
+            defer actual.deinit(allocator);
+            try ListType.tree.toValue(allocator, sliced.base_view.data.root, &pool, &actual);
+
+            var expected: ListType.Type = .empty;
+            defer expected.deinit(allocator);
+            try expected.appendSlice(allocator, base_values[start_index..list_length]);
+
+            try std.testing.expectEqual(expected_len, actual.items.len);
+            try std.testing.expectEqualSlices(u64, expected.items, actual.items);
+
+            var expected_root: [32]u8 = undefined;
+            try ListType.hashTreeRoot(allocator, &expected, &expected_root);
+
+            var actual_root: [32]u8 = undefined;
+            try sliced.hashTreeRoot(&actual_root);
+
+            try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+        }
+    }
+}
+
+test "TreeView basic list sliceFrom works with different element sizes" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    {
+        const Uint8 = ssz.UintType(8);
+        const ListType = ssz.FixedListType(Uint8, 64);
+
+        var list: ListType.Type = .empty;
+        defer list.deinit(allocator);
+        var values: [40]u8 = undefined;
+        for (&values, 0..) |*v, i| v.* = @intCast(i);
+        try list.appendSlice(allocator, &values);
+
+        const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+        var view = try ListType.TreeView.init(allocator, &pool, root_node);
+        defer view.deinit();
+
+        // Slice from middle of second chunk (unaligned case)
+        var suffix = try view.sliceFrom(35);
+        defer suffix.deinit();
+
+        try std.testing.expectEqual(@as(usize, 5), try suffix.length());
+
+        const filled = try suffix.getAll(allocator);
+        defer allocator.free(filled);
+        try std.testing.expectEqualSlices(u8, values[35..], filled);
+
+        var expected: ListType.Type = .empty;
+        defer expected.deinit(allocator);
+        try expected.appendSlice(allocator, values[35..]);
+
+        var expected_root: [32]u8 = undefined;
+        try ListType.hashTreeRoot(allocator, &expected, &expected_root);
+
+        var actual_root: [32]u8 = undefined;
+        try suffix.hashTreeRoot(&actual_root);
+
+        try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+    }
+
+    {
+        const Uint16 = ssz.UintType(16);
+        const ListType = ssz.FixedListType(Uint16, 64);
+
+        var list: ListType.Type = .empty;
+        defer list.deinit(allocator);
+        var values: [20]u16 = undefined;
+        for (&values, 0..) |*v, i| v.* = @intCast(i * 100);
+        try list.appendSlice(allocator, &values);
+
+        const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+        var view = try ListType.TreeView.init(allocator, &pool, root_node);
+        defer view.deinit();
+
+        // Slice from middle of second chunk (unaligned case)
+        var suffix = try view.sliceFrom(17);
+        defer suffix.deinit();
+
+        try std.testing.expectEqual(@as(usize, 3), try suffix.length());
+
+        const filled = try suffix.getAll(allocator);
+        defer allocator.free(filled);
+        try std.testing.expectEqualSlices(u16, values[17..], filled);
+
+        var expected: ListType.Type = .empty;
+        defer expected.deinit(allocator);
+        try expected.appendSlice(allocator, values[17..]);
+
+        var expected_root: [32]u8 = undefined;
+        try ListType.hashTreeRoot(allocator, &expected, &expected_root);
+
+        var actual_root: [32]u8 = undefined;
+        try suffix.hashTreeRoot(&actual_root);
+
+        try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+    }
+}
+
+test "TreeView basic list sliceFrom aligned case reuses chunks" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    // u32 has 8 items per chunk, so slicing from index 8 is aligned
+    const Uint32 = ssz.UintType(32);
+    const ListType = ssz.FixedListType(Uint32, 32);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    var values: [16]u32 = undefined;
+    for (&values, 0..) |*v, i| v.* = @intCast(i * 10);
+    try list.appendSlice(allocator, &values);
+
+    const root_node = try ListType.tree.fromValue(allocator, &pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    // Slice from chunk boundary (aligned case)
+    var suffix = try view.sliceFrom(8);
+    defer suffix.deinit();
+
+    try std.testing.expectEqual(@as(usize, 8), try suffix.length());
+
+    const filled = try suffix.getAll(allocator);
+    defer allocator.free(filled);
+    try std.testing.expectEqualSlices(u32, values[8..], filled);
+
+    var expected: ListType.Type = .empty;
+    defer expected.deinit(allocator);
+    try expected.appendSlice(allocator, values[8..]);
+
+    var expected_root: [32]u8 = undefined;
+    try ListType.hashTreeRoot(allocator, &expected, &expected_root);
+
+    var actual_root: [32]u8 = undefined;
+    try suffix.hashTreeRoot(&actual_root);
+
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}
+
+test "ListBasicTreeView - sliceFrom and serialize" {
+    const allocator = std.testing.allocator;
+
+    const Uint8 = ssz.UintType(8);
+    const ListU8Type = ssz.FixedListType(Uint8, 128);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    var value: ListU8Type.Type = ListU8Type.default_value;
+    defer value.deinit(allocator);
+    try value.append(allocator, 1);
+    try value.append(allocator, 2);
+    try value.append(allocator, 3);
+    try value.append(allocator, 4);
+
+    const tree_node = try ListU8Type.tree.fromValue(allocator, &pool, &value);
+    var view = try ListU8Type.TreeView.init(allocator, &pool, tree_node);
+    defer view.deinit();
+
+    var sliced = try view.sliceFrom(2);
+    defer sliced.deinit();
+
+    const size = try sliced.serializedSize();
+    const serialized = try allocator.alloc(u8, size);
+    defer allocator.free(serialized);
+    const written = try sliced.serializeIntoBytes(serialized);
+    try std.testing.expectEqual(size, written);
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 3, 4 }, serialized);
+    try std.testing.expectEqual(@as(usize, 2), try sliced.length());
+}
