@@ -98,7 +98,7 @@ test "TreeView container nested types set/get/commit" {
     var outer_value: Outer.Type = Outer.default_value;
     defer Outer.deinit(allocator, &outer_value);
 
-    const root = try Outer.tree.fromValue(allocator, &pool, &outer_value);
+    const root = try Outer.tree.fromValue(&pool, &outer_value);
     var view = try Outer.TreeView.init(allocator, &pool, root);
     defer view.deinit();
 
@@ -109,7 +109,7 @@ test "TreeView container nested types set/get/commit" {
     {
         var bytes_value: Bytes.Type = Bytes.default_value;
         defer bytes_value.deinit(allocator);
-        const bytes_root = try Bytes.tree.fromValue(allocator, &pool, &bytes_value);
+        const bytes_root = try Bytes.tree.fromValue(&pool, &bytes_value);
         var bytes_view = try Bytes.TreeView.init(allocator, &pool, bytes_root);
 
         try bytes_view.push(@as(u8, 0xAA));
@@ -168,12 +168,12 @@ test "TreeView container nested types set/get/commit" {
     {
         var comp_list_value: CompList.Type = .empty;
         defer CompList.deinit(allocator, &comp_list_value);
-        const comp_list_root = try CompList.tree.fromValue(allocator, &pool, &comp_list_value);
+        const comp_list_root = try CompList.tree.fromValue(&pool, &comp_list_value);
         var comp_list_view = try CompList.TreeView.init(allocator, &pool, comp_list_root);
 
         var inner_value: InnerVar.Type = InnerVar.default_value;
         defer InnerVar.deinit(allocator, &inner_value);
-        const inner_root = try InnerVar.tree.fromValue(allocator, &pool, &inner_value);
+        const inner_root = try InnerVar.tree.fromValue(&pool, &inner_value);
         var inner_view: ?*InnerVar.TreeView = try InnerVar.TreeView.init(allocator, &pool, inner_root);
         defer if (inner_view) |v| v.deinit();
         const inner = inner_view.?;
@@ -183,7 +183,7 @@ test "TreeView container nested types set/get/commit" {
         const payload_value_ssz_type = @typeInfo(InnerVar.TreeView.Field("payload")).pointer.child.SszType;
         var payload_value = payload_value_ssz_type.default_value;
         defer payload_value.deinit(allocator);
-        const payload_root = try payload_value_ssz_type.tree.fromValue(allocator, &pool, &payload_value);
+        const payload_root = try payload_value_ssz_type.tree.fromValue(&pool, &payload_value);
         var payload_view = try payload_value_ssz_type.TreeView.init(allocator, &pool, payload_root);
         try payload_view.push(@as(u8, 0x5A));
         try inner.set("payload", payload_view);
@@ -443,7 +443,7 @@ test "ContainerTreeView - serialize (with nested list)" {
     defer allocator.free(value_serialized);
     _ = TestContainer.serializeIntoBytes(&value, value_serialized);
 
-    const tree_node = try TestContainer.tree.fromValue(allocator, &pool, &value);
+    const tree_node = try TestContainer.tree.fromValue(&pool, &value);
     var view = try TestContainer.TreeView.init(allocator, &pool, tree_node);
     defer view.deinit();
 

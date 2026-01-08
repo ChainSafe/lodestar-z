@@ -1,11 +1,14 @@
 const std = @import("std");
-const hex_utils = @import("hex");
 const Preset = @import("preset").Preset;
-const ChainConfig = @import("../chain_config.zig").ChainConfig;
-const BlobScheduleEntry = @import("../chain_config.zig").BlobScheduleEntry;
-const b = hex_utils.hexToBytesComptime;
+const ChainConfig = @import("../ChainConfig.zig");
+const BeaconConfig = @import("../BeaconConfig.zig");
+const b = @import("hex").hexToBytesComptime;
 
-pub const minimal_chain_config = ChainConfig{
+pub const config = BeaconConfig.init(chain_config, genesis_validators_root);
+
+pub const genesis_validators_root = [_]u8{0} ** 32;
+
+pub const chain_config = ChainConfig{
     .PRESET_BASE = Preset.minimal,
     .CONFIG_NAME = "minimal",
 
@@ -84,5 +87,5 @@ pub const minimal_chain_config = ChainConfig{
     .BALANCE_PER_ADDITIONAL_CUSTODY_GROUP = 32000000000,
 
     // Blob Scheduling
-    .BLOB_SCHEDULE = &[_]BlobScheduleEntry{},
+    .BLOB_SCHEDULE = &[_]ChainConfig.BlobScheduleEntry{},
 };

@@ -117,6 +117,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
                 }
 
                 var nodes: [chunk_count]Node.Id = undefined;
+                errdefer pool.free(&nodes);
 
                 if (comptime isBasicType(Element)) {
                     var chunks: [chunk_count][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** chunk_count;
@@ -164,6 +165,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 var nodes: [chunk_count]Node.Id = undefined;
+                errdefer pool.free(&nodes);
 
                 if (comptime isBasicType(Element)) {
                     const items_per_chunk = 32 / Element.fixed_size;
@@ -204,10 +206,6 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
                         offset += try Element.tree.serializeIntoBytes(nodes[i], pool, out[offset..]);
                     }
                 }
-                return fixed_size;
-            }
-
-            pub fn serializedSize(_: Node.Id, _: *Node.Pool) usize {
                 return fixed_size;
             }
         };
@@ -356,16 +354,18 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
         };
 
         pub const tree = struct {
-            pub fn deserializeFromBytes(allocator: std.mem.Allocator, pool: *Node.Pool, data: []const u8) !Node.Id {
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 if (data.len > max_size or data.len < min_size) {
                     return error.InvalidSize;
                 }
 
                 const offsets = try readVariableOffsets(data);
                 var nodes: [chunk_count]Node.Id = undefined;
+                errdefer pool.free(&nodes);
+
                 for (0..length) |i| {
                     const elem_bytes = data[offsets[i]..offsets[i + 1]];
-                    nodes[i] = try Element.tree.deserializeFromBytes(allocator, pool, elem_bytes);
+                    nodes[i] = try Element.tree.deserializeFromBytes(pool, elem_bytes);
                 }
 
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
@@ -386,16 +386,17 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
                 }
             }
 
-            pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 var nodes: [chunk_count]Node.Id = undefined;
+                errdefer pool.free(&nodes);
 
                 for (0..chunk_count) |i| {
-                    nodes[i] = try Element.tree.fromValue(allocator, pool, &value[i]);
+                    nodes[i] = try Element.tree.fromValue(pool, &value[i]);
                 }
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }
 
-            pub fn serializeIntoBytes(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
                 var nodes: [chunk_count]Node.Id = undefined;
                 try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
 
@@ -404,19 +405,19 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
 
                 for (0..length) |i| {
                     std.mem.writeInt(u32, out[i * 4 ..][0..4], @intCast(variable_index), .little);
-                    variable_index += try Element.tree.serializeIntoBytes(allocator, nodes[i], pool, out[variable_index..]);
+                    variable_index += try Element.tree.serializeIntoBytes(nodes[i], pool, out[variable_index..]);
                 }
 
                 return variable_index;
             }
 
-            pub fn serializedSize(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool) !usize {
+            pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {
                 var nodes: [chunk_count]Node.Id = undefined;
                 try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
 
                 var total_size: usize = length * 4; // Offsets
                 for (0..length) |i| {
-                    total_size += try Element.tree.serializedSize(allocator, nodes[i], pool);
+                    total_size += try Element.tree.serializedSize(nodes[i], pool);
                 }
                 return total_size;
             }
@@ -640,12 +641,12 @@ test "VariableVectorType - serializeIntoBytes (VectorComposite ListBasic - [[1,2
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
-    const node = try VectorList.tree.fromValue(allocator, &pool, &value);
-    const tree_size = try VectorList.tree.serializedSize(allocator, node, &pool);
+    const node = try VectorList.tree.fromValue(&pool, &value);
+    const tree_size = try VectorList.tree.serializedSize(node, &pool);
     try std.testing.expectEqual(@as(usize, 40), tree_size);
     const tree_serialized = try allocator.alloc(u8, tree_size);
     defer allocator.free(tree_serialized);
-    _ = try VectorList.tree.serializeIntoBytes(allocator, node, &pool, tree_serialized);
+    _ = try VectorList.tree.serializeIntoBytes(node, &pool, tree_serialized);
     try std.testing.expectEqualSlices(u8, &expected_serialized, tree_serialized);
 }
 
@@ -789,7 +790,7 @@ test "VariableVectorType - tree.deserializeFromBytes (VectorComposite ListBasic)
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
 
-    const tree_node = try VectorList.tree.deserializeFromBytes(allocator, &pool, &serialized);
+    const tree_node = try VectorList.tree.deserializeFromBytes(&pool, &serialized);
 
     var value_from_tree: VectorList.Type = VectorList.default_value;
     defer VectorList.deinit(allocator, &value_from_tree);
@@ -802,11 +803,11 @@ test "VariableVectorType - tree.deserializeFromBytes (VectorComposite ListBasic)
     try std.testing.expectEqual(@as(u64, 5), value_from_tree[1].items[0]);
     try std.testing.expectEqual(@as(u64, 6), value_from_tree[1].items[1]);
 
-    const tree_size = try VectorList.tree.serializedSize(allocator, tree_node, &pool);
+    const tree_size = try VectorList.tree.serializedSize(tree_node, &pool);
     try std.testing.expectEqual(@as(usize, 40), tree_size);
     const tree_serialized = try allocator.alloc(u8, tree_size);
     defer allocator.free(tree_serialized);
-    _ = try VectorList.tree.serializeIntoBytes(allocator, tree_node, &pool, tree_serialized);
+    _ = try VectorList.tree.serializeIntoBytes(tree_node, &pool, tree_serialized);
     try std.testing.expectEqualSlices(u8, &serialized, tree_serialized);
 
     var hash_root: [32]u8 = undefined;

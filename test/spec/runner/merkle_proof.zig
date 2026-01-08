@@ -30,7 +30,7 @@ const MerkleProof = struct {
 };
 
 pub fn TestCase(comptime fork: ForkSeq) type {
-    const ForkTypes = @field(ct, fork.forkName());
+    const ForkTypes = @field(ct, fork.name());
     const BeaconBlockBody = ForkTypes.BeaconBlockBody;
     const KzgCommitment = ct.primitive.KZGCommitment;
 
@@ -99,7 +99,8 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             var pool = try Node.Pool.init(self.allocator, 2048);
             defer pool.deinit();
 
-            const root_node = try BeaconBlockBody.tree.fromValue(self.allocator, &pool, &self.body);
+            const root_node = try BeaconBlockBody.tree.fromValue(&pool, &self.body);
+            defer pool.unref(root_node);
 
             var single_proof = try pmt.proof.createSingleProof(self.allocator, &pool, root_node, gindex);
             defer single_proof.deinit(self.allocator);

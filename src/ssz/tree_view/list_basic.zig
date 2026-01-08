@@ -183,13 +183,13 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         /// Returns the number of bytes written.
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
             try self.commit();
-            return try ST.tree.serializeIntoBytes(self.allocator, self.chunks.root, self.chunks.pool, out);
+            return try ST.tree.serializeIntoBytes(self.chunks.root, self.chunks.pool, out);
         }
 
         /// Get the serialized size of this tree view.
         pub fn serializedSize(self: *Self) !usize {
             try self.commit();
-            return try ST.tree.serializedSize(self.allocator, self.chunks.root, self.chunks.pool);
+            return try ST.tree.serializedSize(self.chunks.root, self.chunks.pool);
         }
 
         fn getLength(self: *Self) !usize {

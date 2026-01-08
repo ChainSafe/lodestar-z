@@ -14,7 +14,7 @@ test "BitListTreeView get/set roundtrip" {
     try expected.setAssumeCapacity(1, true);
     try expected.setAssumeCapacity(9, true);
 
-    const root = try Bits.tree.fromValue(allocator, &pool, &expected);
+    const root = try Bits.tree.fromValue(&pool, &expected);
     var view = try Bits.TreeView.init(allocator, &pool, root);
     defer view.deinit();
 
@@ -51,7 +51,7 @@ test "BitListTreeView clone(true) does not transfer cache" {
     try value.setAssumeCapacity(1, true);
     try value.setAssumeCapacity(9, true);
 
-    const root = try Bits.tree.fromValue(allocator, &pool, &value);
+    const root = try Bits.tree.fromValue(&pool, &value);
     var view = try Bits.TreeView.init(allocator, &pool, root);
     defer view.deinit();
 
@@ -77,7 +77,7 @@ test "BitListTreeView clone(false) transfers cache and clears source" {
     try value.setAssumeCapacity(1, true);
     try value.setAssumeCapacity(9, true);
 
-    const root = try Bits.tree.fromValue(allocator, &pool, &value);
+    const root = try Bits.tree.fromValue(&pool, &value);
     var view = try Bits.TreeView.init(allocator, &pool, root);
     defer view.deinit();
 
@@ -101,7 +101,7 @@ test "BitListTreeView clone isolates updates" {
     var value = try Bits.Type.fromBitLen(allocator, 12);
     defer value.deinit(allocator);
 
-    const root = try Bits.tree.fromValue(allocator, &pool, &value);
+    const root = try Bits.tree.fromValue(&pool, &value);
     var v1 = try Bits.TreeView.init(allocator, &pool, root);
     defer v1.deinit();
 
@@ -125,7 +125,7 @@ test "BitListTreeView clone reads committed state" {
     var value = try Bits.Type.fromBitLen(allocator, 12);
     defer value.deinit(allocator);
 
-    const root = try Bits.tree.fromValue(allocator, &pool, &value);
+    const root = try Bits.tree.fromValue(&pool, &value);
     var v1 = try Bits.TreeView.init(allocator, &pool, root);
     defer v1.deinit();
 
@@ -148,7 +148,7 @@ test "BitListTreeView clone drops uncommitted changes" {
     var value = try Bits.Type.fromBitLen(allocator, 12);
     defer value.deinit(allocator);
 
-    const root = try Bits.tree.fromValue(allocator, &pool, &value);
+    const root = try Bits.tree.fromValue(&pool, &value);
     var v = try Bits.TreeView.init(allocator, &pool, root);
     defer v.deinit();
 
@@ -173,7 +173,7 @@ test "BitListTreeView toBoolArray roundtrip" {
     var value = try Bits.Type.fromBoolSlice(allocator, &expected_bools);
     defer value.deinit(allocator);
 
-    const root = try Bits.tree.fromValue(allocator, &pool, &value);
+    const root = try Bits.tree.fromValue(&pool, &value);
     var view = try Bits.TreeView.init(allocator, &pool, root);
     defer view.deinit();
 
@@ -193,7 +193,7 @@ test "BitListTreeView toBoolArrayInto roundtrip" {
     var value = try Bits.Type.fromBoolSlice(allocator, &expected_bools);
     defer value.deinit(allocator);
 
-    const root = try Bits.tree.fromValue(allocator, &pool, &value);
+    const root = try Bits.tree.fromValue(&pool, &value);
     var view = try Bits.TreeView.init(allocator, &pool, root);
     defer view.deinit();
 
@@ -212,7 +212,7 @@ test "BitListTreeView set reflects in toBoolArray" {
     var value = try Bits.Type.fromBitLen(allocator, 8);
     defer value.deinit(allocator);
 
-    const root = try Bits.tree.fromValue(allocator, &pool, &value);
+    const root = try Bits.tree.fromValue(&pool, &value);
     var view = try Bits.TreeView.init(allocator, &pool, root);
     defer view.deinit();
 
@@ -241,7 +241,7 @@ test "BitListTreeView multi-chunk" {
     try value.setAssumeCapacity(256, true); // first bit of second chunk
     try value.setAssumeCapacity(299, true); // last bit
 
-    const root = try Bits.tree.fromValue(allocator, &pool, &value);
+    const root = try Bits.tree.fromValue(&pool, &value);
     var view = try Bits.TreeView.init(allocator, &pool, root);
     defer view.deinit();
 
@@ -300,7 +300,7 @@ test "BitListTreeView padding bit roundtrip" {
         defer deserialized.deinit(allocator);
         try Bits.deserializeFromBytes(allocator, serialized, &deserialized);
 
-        const root = try Bits.tree.fromValue(allocator, &pool, &deserialized);
+        const root = try Bits.tree.fromValue(&pool, &deserialized);
         var view = try Bits.TreeView.init(allocator, &pool, root);
         defer view.deinit();
 
@@ -330,7 +330,7 @@ test "BitListTreeView remainder edge cases (1 and 255)" {
         try value.setAssumeCapacity(256, true);
         try value.setAssumeCapacity(bit_len - 1, true);
 
-        const root = try Bits.tree.fromValue(allocator, &pool, &value);
+        const root = try Bits.tree.fromValue(&pool, &value);
         var view = try Bits.TreeView.init(allocator, &pool, root);
         defer view.deinit();
 
@@ -372,7 +372,7 @@ test "BitListTreeView full-chunk edge cases (remainder=0)" {
             try value.setAssumeCapacity(511, true);
         }
 
-        const root = try Bits.tree.fromValue(allocator, &pool, &value);
+        const root = try Bits.tree.fromValue(&pool, &value);
         var view = try Bits.TreeView.init(allocator, &pool, root);
         defer view.deinit();
 
