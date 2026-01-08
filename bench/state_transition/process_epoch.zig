@@ -1,72 +1,7 @@
-//! Benchmark for epoch processing (works for any fork)
-// https://github.com/ethereum/consensus-specs/blob/master/specs/fulu/beacon-chain.md#epoch-processing // fulu spec
-//
-// Benchmarks all process_epoch operations per spec:
-// - process_justification_and_finalization
-// - process_inactivity_updates
-// - process_rewards_and_penalties
-// - process_registry_updates
-// - process_slashings
-// - process_eth1_data_reset
-// - process_pending_deposits
-// - process_pending_consolidations
-// - process_effective_balance_updates
-// - process_slashings_reset
-// - process_randao_mixes_reset
-// - process_historical_summaries_update
-// - process_participation_flag_updates
-// - process_sync_committee_updates
-// - process_proposer_lookahead
-
-// printf "Date: %s\nKernel: %s\nCPU: %s\nCPUs: %s\nMemory: %sGi\n" "$(date)" "$(uname -sr)" "$(sysctl -n machdep.cpu.brand_string)" "$(sysctl -n hw.ncpu)" "$(echo "$(sysctl -n hw.memsize) / 1024 / 1024 / 1024" | bc)"
-// Date: Tue Dec  9 2025
-// Kernel: Darwin 25.1.0
-// CPU: Apple M3
-// CPUs: 8
-// Memory: 16Gi
-//
-// zbuild run bench_process_epoch -Doptimize=ReleaseFast OR zbuild run bench_process_epoch -Doptimize=ReleaseFast -- path/to/state.ssz
-//
-
-// benchmark              runs     total time     time/run (avg ± σ)     (min ... max)                p75        p99        p995
-// -----------------------------------------------------------------------------------------------------------------------------
-// justification_finaliza 50       2.761s         55.231ms ± 28.408ms    (42.914ms ... 212.278ms)     52.687ms   212.278ms  212.278ms
-// inactivity_updates     50       3.269s         65.395ms ± 56.716ms    (44.303ms ... 420.884ms)     63.98ms    420.884ms  420.884ms
-// rewards_and_penalties  50       3.054s         61.097ms ± 14.23ms     (50.545ms ... 123.211ms)     65.181ms   123.211ms  123.211ms
-// registry_updates       50       2.239s         44.787ms ± 3.212ms     (42.75ms ... 63.517ms)       44.919ms   63.517ms   63.517ms
-// slashings              50       2.654s         53.081ms ± 20.441ms    (43.786ms ... 168.974ms)     52.541ms   168.974ms  168.974ms
-// eth1_data_reset        50       3.279s         65.583ms ± 45.885ms    (43.824ms ... 334.921ms)     63.749ms   334.921ms  334.921ms
-// pending_deposits       50       2.423s         48.47ms ± 5.328ms      (44.152ms ... 66.379ms)      50.604ms   66.379ms   66.379ms
-// pending_consolidations 50       2.455s         49.113ms ± 26.513ms    (40.343ms ... 230.838ms)     47.555ms   230.838ms  230.838ms
-// effective_balance_upda 50       2.855s         57.108ms ± 34.315ms    (45.385ms ... 283.733ms)     54.997ms   283.733ms  283.733ms
-// slashings_reset        50       2.432s         48.648ms ± 6.057ms     (43.558ms ... 76.909ms)      51.305ms   76.909ms   76.909ms
-// randao_mixes_reset     50       2.396s         47.932ms ± 11.039ms    (42.822ms ... 107.591ms)     45.983ms   107.591ms  107.591ms
-// historical_summaries   50       2.626s         52.521ms ± 25.266ms    (43.366ms ... 169.103ms)     50.577ms   169.103ms  169.103ms
-// participation_flags    50       1.49s          29.809ms ± 3.037ms     (26.777ms ... 44.142ms)      30.766ms   44.142ms   44.142ms
-// sync_committee_updates 50       1.433s         28.671ms ± 1.48ms      (26.905ms ... 35.25ms)       29.028ms   35.25ms    35.25ms
-// proposer_lookahead     50       4.737s         94.747ms ± 10.154ms    (87.623ms ... 151.313ms)     97.462ms   151.313ms  151.313ms
-// process_epoch          50       6.467s         129.358ms ± 49.3ms     (112.78ms ... 454.686ms)     126.361ms  454.686ms  454.686ms
-// epoch(segments)        50       6.123s         122.466ms ± 11.917ms   (112.619ms ... 176.248ms)    124.022ms  176.248ms  176.248ms
-
-// Segmented epoch breakdown:
-// step                         runs     total time     time/run (avg)
-// ------------------------------------------------------------------
-// epoch_total                  50            3.810s       76.201ms
-// justification_finalization   50            0.084ms        0.002ms
-// inactivity_updates           50          121.064ms        2.421ms
-// rewards_and_penalties        50          343.620ms        6.872ms
-// registry_updates             50            0.004ms        0.000ms
-// slashings                    50            0.002ms        0.000ms
-// eth1_data_reset              50            0.003ms        0.000ms
-// pending_deposits             50           51.236ms        1.025ms
-// pending_consolidations       50            0.067ms        0.001ms
-// effective_balance_updates    50           97.227ms        1.945ms
-// slashings_reset              50            0.064ms        0.001ms
-// randao_mixes_reset           50            0.017ms        0.000ms
-// historical_summaries         50            0.000ms        0.000ms
-// participation_flags          50            7.565ms        0.151ms
-// sync_committee_updates       50            0.007ms        0.000ms
-// proposer_lookahead           50            3.189s       63.781ms
+//! Benchmark for fork-specific epoch processing.
+//!
+//! Uses a mainnet state at slot 13180928.
+//! Run with: zig build run:bench_process_epoch -Doptimize=ReleaseFast [-- /path/to/state.ssz]
 
 const std = @import("std");
 const zbench = @import("zbench");
@@ -389,10 +324,11 @@ fn printSegmentStats(stdout: anytype) !void {
         if (count == 0) continue;
         const total_ns = step_durations_ns[idx];
         const avg_ns: u128 = total_ns / count;
-        const total_ms = @as(f64, @floatFromInt(total_ns)) / 1_000_000.0;
-        const avg_ms = @as(f64, @floatFromInt(avg_ns)) / 1_000_000.0;
-        if (total_ms >= 1000.0) {
-            try stdout.print("{s:<28} {d:<8} {d:>10.3}s   {d:>10.3}ms\n", .{ @tagName(step), count, total_ms / 1000.0, avg_ms });
+        const total_ms = @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms;
+        const avg_ms = @as(f64, @floatFromInt(avg_ns)) / std.time.ns_per_ms;
+        const total_s = total_ms / std.time.ms_per_s;
+        if (total_ms >= std.time.ms_per_s) {
+            try stdout.print("{s:<28} {d:<8} {d:>10.3}s   {d:>10.3}ms\n", .{ @tagName(step), count, total_s, avg_ms });
         } else {
             try stdout.print("{s:<28} {d:<8} {d:>10.3}ms   {d:>10.3}ms\n", .{ @tagName(step), count, total_ms, avg_ms });
         }
@@ -547,7 +483,7 @@ pub fn main() !void {
     const chain_config = config.mainnet.chain_config;
     const slot = slotFromStateBytes(state_bytes);
     const detected_fork = config.mainnet.config.forkSeq(slot);
-    try stdout.print("Detected fork: {s} (slot {})\n", .{ @tagName(detected_fork), slot });
+    try stdout.print("Benchmarking processEpoch with state at fork: {s} (slot {})\n", .{ @tagName(detected_fork), slot });
 
     // Dispatch to fork-specific loading
     inline for (comptime std.enums.values(ForkSeq)) |fork| {

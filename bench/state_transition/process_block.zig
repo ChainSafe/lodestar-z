@@ -1,20 +1,7 @@
-//! Benchmark for block processing (works for any fork)
-// https://github.com/ethereum/consensus-specs/blob/master/specs/fulu/beacon-chain.md#block-processing //fulu specs
-//
-// Uses real mainnet state and block:
-// - State: slot 13180928
-// - Block: slot 13180929
-//
-// Run with: zbuild run bench_process_block -Doptimize=ReleaseFast
-//
-// Benchmarks all process_block operations per spec:
-// - process_block_header
-// - process_withdrawals (post-Capella)
-// - process_execution_payload (post-Bellatrix)
-// - process_randao
-// - process_eth1_data
-// - process_operations
-// - process_sync_aggregate (post-Altair)
+//! Benchmark for fork-specific block processing.
+//!
+//! Uses a mainnet state at slot 13180928 and block at slot 13180929.
+//! Run with: zig build run:bench_process_block -Doptimize=ReleaseFast [-- /path/to/state.ssz /path/to/block.ssz]
 
 // printf "Date: %s\nKernel: %s\nCPU: %s\nCPUs: %s\nMemory: %sGi\n" "$(date)" "$(uname -sr)" "$(sysctl -n machdep.cpu.brand_string)" "$(sysctl -n hw.ncpu)" "$(echo "$(sysctl -n hw.memsize) / 1024 / 1024 / 1024" | bc)"
 // Date: Tue Dec  9 2025
@@ -275,10 +262,11 @@ fn printSegmentStats(stdout: anytype) !void {
         if (count == 0) continue;
         const total_ns = step_durations_ns[idx];
         const avg_ns: u128 = total_ns / count;
-        const total_ms = @as(f64, @floatFromInt(total_ns)) / 1_000_000.0;
-        const avg_ms = @as(f64, @floatFromInt(avg_ns)) / 1_000_000.0;
-        if (total_ms >= 1000.0) {
-            try stdout.print("{s:<22} {d:<8} {d:.3}s         {d:.3}ms\n", .{ @tagName(step), count, total_ms / 1000.0, avg_ms });
+        const total_ms = @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms;
+        const avg_ms = @as(f64, @floatFromInt(avg_ns)) / std.time.ns_per_ms;
+        const total_s = total_ms / std.time.ms_per_s;
+        if (total_ms >= std.time.ms_per_s) {
+            try stdout.print("{s:<22} {d:<8} {d:.3}s         {d:.3}ms\n", .{ @tagName(step), count, total_s, avg_ms });
         } else {
             try stdout.print("{s:<22} {d:<8} {d:.3}ms        {d:.3}ms\n", .{ @tagName(step), count, total_ms, avg_ms });
         }
@@ -376,7 +364,7 @@ pub fn main() !void {
     const chain_config = config.mainnet.chain_config;
     const slot = slotFromStateBytes(state_bytes);
     const detected_fork = config.mainnet.config.forkSeq(slot);
-    try stdout.print("Detected fork: {s} (slot {})\n", .{ @tagName(detected_fork), slot });
+    try stdout.print("Benchmarking processBlock with state at fork: {s} (slot {})\n", .{ @tagName(detected_fork), slot });
 
     const block_file = try std.fs.cwd().openFile(block_path, .{});
     defer block_file.close();
