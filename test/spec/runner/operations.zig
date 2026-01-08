@@ -21,6 +21,7 @@ pub const Operation = enum {
     attestation,
     attester_slashing,
     block_header,
+    blinded_block_header,
     bls_to_execution_change,
     consolidation_request,
     deposit,
@@ -35,6 +36,7 @@ pub const Operation = enum {
     pub fn inputName(self: Operation) []const u8 {
         return switch (self) {
             .block_header => "block",
+            .blinded_block_header => "block",
             .bls_to_execution_change => "address_change",
             .execution_payload => "body",
             .withdrawals => "execution_payload",
@@ -47,6 +49,7 @@ pub const Operation = enum {
             .attestation => "Attestation",
             .attester_slashing => "AttesterSlashing",
             .block_header => "BeaconBlock",
+            .blinded_block_header => "BeaconBlock",
             .bls_to_execution_change => "SignedBLSToExecutionChange",
             .consolidation_request => "ConsolidationRequest",
             .deposit => "Deposit",
@@ -61,7 +64,10 @@ pub const Operation = enum {
     }
 
     pub fn suiteName(self: Operation) []const u8 {
-        return @tagName(self) ++ "/pyspec_tests";
+        return switch (self) {
+            .blinded_block_header => "block_header/pyspec_tests",
+            else => @tagName(self) ++ "/pyspec_tests",
+        };
     }
 };
 
@@ -148,6 +154,15 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 },
                 .block_header => {
                     const block = state_transition.Block{ .regular = @unionInit(state_transition.BeaconBlock, @tagName(fork), &self.op) };
+                    try state_transition.processBlockHeader(allocator, self.pre.cached_state, block);
+                },
+                .blinded_block_header => {
+                    // only block after capella could have blinded blocks
+                    if (comptime !fork.gte(.capella) or fork.gte(.fulu)) {
+                        return error.SkipZigTest;
+                    }
+                    const blinded_block = try test_case.beaconBlockToBlinded(fork).convert(allocator, &self.op);
+                    const block = state_transition.Block{ .blinded = @unionInit(state_transition.BlindedBeaconBlock, @tagName(fork), &blinded_block) };
                     try state_transition.processBlockHeader(allocator, self.pre.cached_state, block);
                 },
                 .bls_to_execution_change => {
