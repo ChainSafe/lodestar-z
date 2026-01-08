@@ -12,9 +12,19 @@ const getZeroHash = @import("hashing").getZeroHash;
 const Node = @import("persistent_merkle_tree").Node;
 const BitVectorTreeView = @import("../tree_view/root.zig").BitVectorTreeView;
 
-pub fn BitVector(comptime _length: comptime_int) type {
+pub fn isBitVectorType(ST: type) bool {
+    return ST.kind == .vector and ST.Element.kind == .bool and ST.Type == BitVectorType(ST.length).Impl;
+}
+
+pub fn BitVectorType(comptime _length: comptime_int) type {
+    comptime {
+        if (_length <= 0) {
+            @compileError("length must be greater than 0");
+        }
+    }
     const byte_len = std.math.divCeil(usize, _length, 8) catch unreachable;
-    return struct {
+
+    const Impl = struct {
         data: [byte_len]u8,
 
         pub const length = _length;
@@ -150,24 +160,13 @@ pub fn BitVector(comptime _length: comptime_int) type {
             return indices;
         }
     };
-}
 
-pub fn isBitVectorType(ST: type) bool {
-    return ST.kind == .vector and ST.Element.kind == .bool and ST.Type == BitVector(ST.length);
-}
-
-pub fn BitVectorType(comptime _length: comptime_int) type {
-    comptime {
-        if (_length <= 0) {
-            @compileError("length must be greater than 0");
-        }
-    }
     return struct {
         pub const kind = TypeKind.vector;
         pub const Element: type = BoolType();
         pub const length: usize = _length;
         pub const byte_length = std.math.divCeil(usize, length, 8) catch unreachable;
-        pub const Type: type = BitVector(length);
+        pub const Type: type = Impl;
         pub const TreeView: type = BitVectorTreeView(@This());
         pub const fixed_size: usize = byte_length;
         pub const chunk_count: usize = std.math.divCeil(usize, fixed_size, 32) catch unreachable;
