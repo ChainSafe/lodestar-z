@@ -73,12 +73,12 @@ const Metrics = struct {
     attestations_per_block: CountGauge,
     proposer_rewards: ProposerRewardsGauge,
 
-    const EpochTransition = m.Histogram(f32, &.{ 0.2, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 10 });
-    const EpochTransitionCommit = m.Histogram(f32, &.{ 0.01, 0.05, 0.1, 0.2, 0.5, 0.75, 1 });
-    const EpochTransitionStep = m.HistogramVec(f32, EpochTransitionStepLabel, &.{ 0.01, 0.05, 0.1, 0.2, 0.5, 0.75, 1 });
-    const ProcessBlock = m.Histogram(f32, &.{ 0.005, 0.01, 0.02, 0.05, 0.1, 1 });
-    const ProcessBlockCommit = m.Histogram(f32, &.{ 0.005, 0.01, 0.02, 0.05, 0.1, 1 });
-    const StateHashTreeRoot = m.HistogramVec(f32, HashTreeRootLabel, &.{ 0.05, 0.1, 0.2, 0.5, 1, 1.5 });
+    const EpochTransition = m.Histogram(f64, &.{ 0.2, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 10 });
+    const EpochTransitionCommit = m.Histogram(f64, &.{ 0.01, 0.05, 0.1, 0.2, 0.5, 0.75, 1 });
+    const EpochTransitionStep = m.HistogramVec(f64, EpochTransitionStepLabel, &.{ 0.01, 0.05, 0.1, 0.2, 0.5, 0.75, 1 });
+    const ProcessBlock = m.Histogram(f64, &.{ 0.005, 0.01, 0.02, 0.05, 0.1, 1 });
+    const ProcessBlockCommit = m.Histogram(f64, &.{ 0.005, 0.01, 0.02, 0.05, 0.1, 1 });
+    const StateHashTreeRoot = m.HistogramVec(f64, HashTreeRootLabel, &.{ 0.05, 0.1, 0.2, 0.5, 1, 1.5 });
     const CountGauge = m.Gauge(u64);
     const GaugeVecSource = m.GaugeVec(u64, StateCloneSourceLabel);
     const PreStateClonedCount = m.Histogram(u32, &.{ 1, 2, 5, 10, 50, 250 });
@@ -248,15 +248,13 @@ pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
 /// Prometheus recommends that time coding be in seconds.
 ///
 /// See for example: https://prometheus.io/docs/instrumenting/writing_clientlibs/#gauge
-pub fn readSeconds(timer: *std.time.Timer) f32 {
-    return @floatFromInt(timer.read() / std.time.ns_per_s);
+pub fn readSeconds(timer: *std.time.Timer) f64 {
+    return @as(f64, @floatFromInt(timer.read())) / std.time.ns_per_s;
 }
 
 /// Observe a value in seconds for the `epoch_transition` histogram.
 pub fn observeEpochTransition(ns: u64) !void {
-    try state_transition.epoch_transition.observe(
-        @floatFromInt(ns / std.time.ns_per_s),
-    );
+    try state_transition.epoch_transition.observe(@as(f64, @floatFromInt(ns)) / std.time.ns_per_s);
 }
 
 /// Observe a value in seconds for the `epoch_transition_step` labelled histogram.
@@ -266,7 +264,7 @@ pub fn observeEpochTransitionStep(
 ) !void {
     try state_transition.epoch_transition_step.observe(
         labels,
-        @floatFromInt(ns / std.time.ns_per_s),
+        @as(f64, @floatFromInt(ns)) / std.time.ns_per_s,
     );
 }
 
