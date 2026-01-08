@@ -859,14 +859,11 @@ pub fn build(b: *std.Build) void {
     module_bench_hashing.addImport("zbench", dep_zbench.module("zbench"));
 
     module_int.addImport("build_options", options_module_build_options);
-    module_int.addImport("ssz", module_ssz);
     module_int.addImport("state_transition", module_state_transition);
     module_int.addImport("config", module_config);
     module_int.addImport("consensus_types", module_consensus_types);
     module_int.addImport("preset", module_preset);
     module_int.addImport("constants", module_constants);
-    module_int.addImport("hex", module_hex);
-    module_int.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_int.addImport("blst", dep_blst.module("blst"));
 
     module_int_slow.addImport("config", module_config);
