@@ -273,7 +273,7 @@ pub fn expectEqualBeaconStates(expected: BeaconStateAllForks, actual: BeaconStat
 }
 
 pub fn beaconBlockToBlinded(comptime fork: ForkSeq) type {
-    const ForkTypes = @field(types, fork.forkName());
+    const ForkTypes = @field(types, fork.name());
 
     return struct {
         pub fn convert(
