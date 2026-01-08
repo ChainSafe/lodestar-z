@@ -12,7 +12,6 @@ pub const BoolType = types.BoolType;
 pub const UintType = types.UintType;
 
 pub const BitListType = types.BitListType;
-pub const BitList = types.BitList;
 pub const isBitListType = types.isBitListType;
 
 pub const BitVectorType = types.BitVectorType;
