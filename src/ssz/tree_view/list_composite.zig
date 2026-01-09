@@ -5,7 +5,6 @@ const Depth = hashing.Depth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
-const isFixedType = @import("../type/type_kind.zig").isFixedType;
 
 const type_root = @import("../type/root.zig");
 const chunkDepth = type_root.chunkDepth;
@@ -115,6 +114,17 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             _ = self;
             _ = allocator;
             return error.NotImplemented;
+        }
+
+        /// Get all element values in a single traversal.
+        ///
+        /// WARNING: Returns all committed changes. If there are any pending changes,
+        /// commit them beforehand.
+        ///
+        /// Caller owns the returned slice and must free it with the same allocator.
+        pub fn getAllReadonlyValues(self: *Self, allocator: Allocator) ![]ST.Element.Type {
+            const list_length = try self.length();
+            return try Chunks.getAllValues(&self.base_view, allocator, list_length);
         }
 
         /// Appends an element to the end of the list.

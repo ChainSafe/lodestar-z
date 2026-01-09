@@ -7,6 +7,8 @@ const Depth = hashing.Depth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 
+const isFixedType = @import("../type/type_kind.zig").isFixedType;
+
 const tree_view_root = @import("root.zig");
 const BaseTreeView = tree_view_root.BaseTreeView;
 const TreeViewData = tree_view_root.TreeViewData;
@@ -60,6 +62,10 @@ pub fn BasicPackedChunks(
         ) ![]Element {
             if (values.len != len) return error.InvalidSize;
             if (len == 0) return values;
+
+            if (base_view.data.changed.count() != 0) {
+                return error.MustCommitBeforeBulkRead;
+            }
 
             const len_full_chunks = len / items_per_chunk;
             const remainder = len % items_per_chunk;
@@ -120,6 +126,7 @@ pub fn CompositeChunks(
 ) type {
     return struct {
         pub const Element = ST.Element.TreeView;
+        pub const Value = ST.Element.Type;
 
         pub fn get(base_view: *BaseTreeView, index: usize) !Element {
             const child_data = try base_view.getChildData(Gindex.fromDepth(chunk_depth, index));
@@ -135,6 +142,53 @@ pub fn CompositeChunks(
         pub fn set(base_view: *BaseTreeView, index: usize, value: Element) !void {
             const gindex = Gindex.fromDepth(chunk_depth, index);
             try base_view.setChildData(gindex, value.base_view.data);
+        }
+
+        /// Get all element values in a single traversal.
+        ///
+        /// WARNING: Returns all committed changes. If there are any pending changes,
+        /// commit them beforehand.
+        ///
+        /// Caller owns the returned slice and must free it with the same allocator.
+        pub fn getAllValues(
+            base_view: *BaseTreeView,
+            allocator: Allocator,
+            len: usize,
+        ) ![]Value {
+            const values = try allocator.alloc(Value, len);
+            errdefer allocator.free(values);
+            _ = try getAllValuesInto(base_view, allocator, values);
+            return values;
+        }
+
+        /// Fills `values` with all element values in a single traversal.
+        /// `values.len` determines the number of elements read.
+        pub fn getAllValuesInto(
+            base_view: *BaseTreeView,
+            allocator: Allocator,
+            values: []Value,
+        ) ![]Value {
+            const len = values.len;
+            if (len == 0) return values;
+
+            if (base_view.data.changed.count() != 0) {
+                return error.MustCommitBeforeBulkRead;
+            }
+
+            const nodes = try allocator.alloc(Node.Id, len);
+            defer allocator.free(nodes);
+
+            try base_view.data.root.getNodesAtDepth(base_view.pool, chunk_depth, 0, nodes);
+
+            for (nodes, 0..) |node, i| {
+                if (comptime isFixedType(ST.Element)) {
+                    try ST.Element.tree.toValue(node, base_view.pool, &values[i]);
+                } else {
+                    try ST.Element.tree.toValue(allocator, node, base_view.pool, &values[i]);
+                }
+            }
+
+            return values;
         }
     };
 }

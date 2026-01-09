@@ -95,6 +95,16 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
             return error.NotImplemented;
         }
 
+        /// Get all element values in a single traversal.
+        ///
+        /// WARNING: Returns all committed changes. If there are any pending changes,
+        /// commit them beforehand.
+        ///
+        /// Caller owns the returned slice and must free it with the same allocator.
+        pub fn getAllReadonlyValues(self: *Self, allocator: Allocator) ![]ST.Element.Type {
+            return try Chunks.getAllValues(&self.base_view, allocator, length);
+        }
+
         /// Serialize the tree view into a provided buffer.
         /// Returns the number of bytes written.
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {

@@ -8,6 +8,7 @@ const types = @import("consensus_types");
 const hex = @import("hex");
 const Epoch = types.primitive.Epoch.Type;
 const ElectraBeaconState = types.electra.BeaconState.Type;
+const Validator = types.phase0.Validator.Type;
 const BLSPubkey = types.primitive.BLSPubkey.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const preset = @import("preset").preset;
@@ -178,7 +179,11 @@ pub const TestCachedBeaconState = struct {
         errdefer allocator.destroy(config);
         config.* = BeaconConfig.init(chain_config, (try state.genesisValidatorsRoot()).*);
 
-        try syncPubkeys(state.validators().items, pubkey_index_map, index_pubkey_cache);
+        var validators_view = try state.validators();
+        const validators = try validators_view.getAllReadonlyValues(allocator);
+        defer allocator.free(validators);
+        
+        try syncPubkeys(validators, pubkey_index_map, index_pubkey_cache);
 
         const immutable_data = state_transition.EpochCacheImmutableData{
             .config = config,

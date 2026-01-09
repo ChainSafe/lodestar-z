@@ -28,7 +28,7 @@ pub const CachedBeaconState = struct {
 
     /// This class takes ownership of state after this function and has responsibility to deinit it
     pub fn createCachedBeaconState(allocator: Allocator, state: BeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*CachedBeaconState {
-        const epoch_cache = try EpochCache.createFromState(allocator, state, immutable_data, option);
+        const epoch_cache = try EpochCache.createFromState(allocator, &state, immutable_data, option);
         errdefer epoch_cache.deinit();
         const epoch_cache_ref = try EpochCacheRc.init(allocator, epoch_cache);
         errdefer epoch_cache_ref.release();
