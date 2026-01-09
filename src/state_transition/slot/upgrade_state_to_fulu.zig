@@ -9,15 +9,16 @@ pub fn upgradeStateToFulu(allocator: Allocator, cached_state: *CachedBeaconState
         return error.StateIsNotElectra;
     }
 
-    const state = try electra_state.upgradeUnsafe();
+    var state = try electra_state.upgradeUnsafe();
     defer electra_state.deinit();
 
     // Update fork version
-    try state.setFork(.{
-        .previous_version = try electra_state.fork().getValue("current_version"),
+    const new_fork = ct.phase0.Fork.Type{
+        .previous_version = try electra_state.forkCurrentVersion(),
         .current_version = cached_state.config.chain.FULU_FORK_VERSION,
         .epoch = cached_state.getEpochCache().epoch,
-    });
+    };
+    try state.setFork(&new_fork);
 
     var proposer_lookahead = ct.fulu.ProposerLookahead.default_value;
     try initializeProposerLookahead(
@@ -25,5 +26,5 @@ pub fn upgradeStateToFulu(allocator: Allocator, cached_state: *CachedBeaconState
         cached_state,
         &proposer_lookahead,
     );
-    try state.setProposerLookahead(proposer_lookahead);
+    try state.setProposerLookahead(&proposer_lookahead);
 }

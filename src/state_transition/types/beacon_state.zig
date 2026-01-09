@@ -199,10 +199,13 @@ pub const BeaconState = union(ForkSeq) {
 
     pub fn forkCurrentVersion(self: *const BeaconState) ![4]u8 {
         var f = try self.fork();
-        return f.getValue("current_version");
+        const current_version_root = try f.getRoot("current_version");
+        var version: [4]u8 = undefined;
+        @memcpy(&version, current_version_root[0..4]);
+        return version;
     }
 
-    pub fn setFork(self: *BeaconState, f: *const ct.phase0.Fork.Value) !void {
+    pub fn setFork(self: *BeaconState, f: *const ct.phase0.Fork.Type) !void {
         switch (self.*) {
             inline else => |*state| try state.setValue("fork", f),
         }
@@ -667,9 +670,9 @@ pub const BeaconState = union(ForkSeq) {
 
     /// Returns a read-only slice of proposer_lookahead values.
     /// Caller owns the returned slice and must free it with the same allocator.
-    pub fn proposerLookaheadSlice(self: *const BeaconState, allocator: Allocator) ![]const u64 {
+    pub fn proposerLookaheadSlice(self: *const BeaconState, allocator: Allocator) !*const [64]u64 {
         var lookahead_view = try self.proposerLookahead();
-        return lookahead_view.getAllReadonlyValues(allocator);
+        return @ptrCast(try lookahead_view.getAll(allocator));
     }
 
     pub fn setProposerLookahead(self: *BeaconState, proposer_lookahead: *const ct.fulu.ProposerLookahead.Type) !void {
@@ -695,18 +698,18 @@ pub const BeaconState = union(ForkSeq) {
         errdefer upgraded.deinit();
 
         inline for (F.fields) |f| {
-            const field_name: []const u8 = comptime f.name[0..f.name.len];
-            if (@hasField(T.Fields, field_name)) {
+            // const field_name: []const u8 = comptime f.name[0..f.name.len];
+            if (comptime T.hasField(f.name)) {
                 if (comptime isFixedType(f.type)) {
-                    try upgraded.set(field_name, try committed_state.get(field_name));
+                    try upgraded.set(f.name, try committed_state.get(f.name));
                 } else {
-                    if (@field(T.Fields, field_name) != f.type) {
+                    if (T.getFieldType(f.name) != f.type) {
                         // BeaconState of prev_fork and cur_fork has the same field name but different types
                         // for example latest_execution_payload_header changed from Bellatrix to Capella
                         // In this case we just skip copying this field and leave it to caller to set properly
                     } else {
-                        const source_node = try committed_state.getRootNode(field_name);
-                        try upgraded.setRootNode(field_name, source_node);
+                        const source_node = try committed_state.getRootNode(f.name);
+                        try upgraded.setRootNode(f.name, source_node);
                     }
                 }
             }

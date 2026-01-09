@@ -21,7 +21,7 @@ pub fn processProposerLookahead(
 ) !void {
     const state = cached_state.state;
 
-    const proposer_lookahead: []u64 = try state.proposerLookaheadSlice(allocator);
+    const proposer_lookahead: *[64]u64 = @constCast(try state.proposerLookaheadSlice(allocator));
     defer allocator.free(proposer_lookahead);
 
     const epoch_cache = cached_state.epoch_cache_ref.get();
@@ -37,7 +37,7 @@ pub fn processProposerLookahead(
 
     // Fill in the last epoch with new proposer indices
     // The new epoch is current_epoch + MIN_SEED_LOOKAHEAD + 1 = current_epoch + 2
-    const current_epoch = computeEpochAtSlot(state.slot());
+    const current_epoch = computeEpochAtSlot(try state.slot());
     const new_epoch = current_epoch + preset.MIN_SEED_LOOKAHEAD + 1;
 
     // Active indices for the new epoch come from the epoch transition cache
@@ -46,7 +46,7 @@ pub fn processProposerLookahead(
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
 
     var seed: [32]u8 = undefined;
-    try getSeed(state, new_epoch, c.DOMAIN_BEACON_PROPOSER, &seed);
+    try getSeed(&state, new_epoch, c.DOMAIN_BEACON_PROPOSER, &seed);
 
     try computeProposers(
         allocator,
@@ -58,5 +58,5 @@ pub fn processProposerLookahead(
         proposer_lookahead[last_epoch_start..],
     );
 
-    try state.setProposerLookahead(&proposer_lookahead);
+    try @constCast(&state).setProposerLookahead(proposer_lookahead);
 }

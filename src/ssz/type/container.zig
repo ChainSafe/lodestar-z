@@ -239,6 +239,15 @@ pub fn FixedContainerType(comptime ST: type) type {
             }
         }
 
+        pub fn hasField(comptime name: []const u8) bool {
+            inline for (fields) |field| {
+                if (std.mem.eql(u8, name, field.name)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         pub fn getFieldType(comptime name: []const u8) type {
             comptime {
                 @setEvalBranchQuota(20000);
@@ -442,6 +451,15 @@ pub fn VariableContainerType(comptime ST: type) type {
             } else {
                 @compileError("field does not exist");
             }
+        }
+
+        pub fn hasField(comptime name: []const u8) bool {
+            inline for (fields) |field| {
+                if (std.mem.eql(u8, name, field.name)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         pub fn getFieldType(comptime name: []const u8) type {

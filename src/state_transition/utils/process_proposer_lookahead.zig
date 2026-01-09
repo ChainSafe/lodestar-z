@@ -26,7 +26,7 @@ pub fn initializeProposerLookahead(
     const epoch_cache = cached_state.epoch_cache_ref.get();
     const state = cached_state.state;
 
-    const current_epoch = computeEpochAtSlot(state.slot());
+    const current_epoch = computeEpochAtSlot(try state.slot());
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
     const fork_seq = state.forkSeq();
 
@@ -39,7 +39,7 @@ pub fn initializeProposerLookahead(
         const active_indices = epoch_cache.getActiveIndicesAtEpoch(epoch) orelse return error.ActiveIndicesNotFound;
 
         var seed: [32]u8 = undefined;
-        try getSeed(state, epoch, c.DOMAIN_BEACON_PROPOSER, &seed);
+        try getSeed(&state, epoch, c.DOMAIN_BEACON_PROPOSER, &seed);
 
         try computeProposers(
             allocator,
