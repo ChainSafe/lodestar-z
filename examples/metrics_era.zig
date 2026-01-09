@@ -74,27 +74,27 @@ pub fn main() !void {
     try state_transition.metrics.init(allocator, .{});
     defer state_transition.metrics.state_transition.deinit();
 
-    const era_path_pre = try std.fs.path.join(
+    const era_path_state = try std.fs.path.join(
         allocator,
         &[_][]const u8{ download_era_options.era_out_dir, download_era_options.era_files[0] },
     );
-    defer allocator.free(era_path_pre);
-    const era_path_post = try std.fs.path.join(
+    defer allocator.free(era_path_state);
+    const era_path_blocks = try std.fs.path.join(
         allocator,
         &[_][]const u8{ download_era_options.era_out_dir, download_era_options.era_files[1] },
     );
-    defer allocator.free(era_path_post);
+    defer allocator.free(era_path_blocks);
 
-    var reader_pre = try eraReader(allocator, era_path_pre);
-    defer reader_pre.close(allocator);
-    var reader_post = try eraReader(allocator, era_path_post);
-    defer reader_post.close(allocator);
+    var reader_state = try eraReader(allocator, era_path_state);
+    defer reader_state.close(allocator);
+    var reader_blocks = try eraReader(allocator, era_path_blocks);
+    defer reader_blocks.close(allocator);
 
     std.debug.print("Reading state\n", .{});
     var state_ptr = try allocator.create(state_transition.BeaconStateAllForks);
     errdefer allocator.destroy(state_ptr);
-    state_ptr.* = try reader_pre.readState(allocator, null);
-    const blocks_index = reader_post.group_indices[0].blocks_index orelse return error.NoBlockIndex;
+    state_ptr.* = try reader_state.readState(allocator, null);
+    const blocks_index = reader_blocks.group_indices[0].blocks_index orelse return error.NoBlockIndex;
     const index_pubkey_cache = try allocator.create(Index2PubkeyCache);
     errdefer {
         index_pubkey_cache.deinit();
@@ -126,7 +126,7 @@ pub fn main() !void {
     );
     std.debug.print("Running state transition\n", .{});
     for (blocks_index.start_slot + 1..blocks_index.start_slot + blocks_index.offsets.len) |slot| {
-        const raw_block = try reader_post.readBlock(allocator, slot) orelse continue;
+        const raw_block = try reader_blocks.readBlock(allocator, slot) orelse continue;
         defer raw_block.deinit(allocator);
 
         const block: SignedBlock = .{ .regular = raw_block };
