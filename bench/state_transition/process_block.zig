@@ -3,44 +3,6 @@
 //! Uses a mainnet state at slot 13180928 and block at slot 13180929.
 //! Run with: zig build run:bench_process_block -Doptimize=ReleaseFast [-- /path/to/state.ssz /path/to/block.ssz]
 
-// printf "Date: %s\nKernel: %s\nCPU: %s\nCPUs: %s\nMemory: %sGi\n" "$(date)" "$(uname -sr)" "$(sysctl -n machdep.cpu.brand_string)" "$(sysctl -n hw.ncpu)" "$(echo "$(sysctl -n hw.memsize) / 1024 / 1024 / 1024" | bc)"
-// Date: Tue Dec  9 2025
-// Kernel: Darwin 25.1.0
-// CPU: Apple M3
-// CPUs: 8
-// Memory: 16Gi
-//
-// zbuild run bench_process_block -Doptimize=ReleaseFast OR zbuild run bench_process_block -Doptimize=ReleaseFast -- /path/to/state.ssz /path/to/block.ssz
-
-// State: slot=13180929, validators=2156873
-// benchmark              runs     total time     time/run (avg ± σ)     (min ... max)                p75        p99        p995
-// -----------------------------------------------------------------------------------------------------------------------------
-// block_header           50       1.515s         30.312ms ± 9.578ms     (26.488ms ... 94.892ms)      30.18ms    94.892ms   94.892ms
-// withdrawals            50       1.449s         28.99ms ± 2.556ms      (26.232ms ... 39.097ms)      29.447ms   39.097ms   39.097ms
-// execution_payload      50       1.745s         34.917ms ± 11.606ms    (26.696ms ... 93.451ms)      38.481ms   93.451ms   93.451ms
-// randao                 50       1.919s         38.384ms ± 5.864ms     (28.478ms ... 51.428ms)      41.875ms   51.428ms   51.428ms
-// randao_no_sig          50       1.69s          33.814ms ± 13.099ms    (27.682ms ... 104.232ms)     32.55ms    104.232ms  104.232ms
-// eth1_data              50       1.83s          36.601ms ± 33.016ms    (26.611ms ... 261.882ms)     32.772ms   261.882ms  261.882ms
-// operations             50       2.277s         45.545ms ± 6.849ms     (41.418ms ... 90.257ms)      46.806ms   90.257ms   90.257ms
-// operations_no_sig      50       1.535s         30.712ms ± 3.142ms     (27.777ms ... 44.238ms)      30.832ms   44.238ms   44.238ms
-// sync_aggregate         50       1.539s         30.795ms ± 2.939ms     (26.857ms ... 41.007ms)      31.772ms   41.007ms   41.007ms
-// sync_aggregate_no_sig  50       1.649s         32.984ms ± 25.843ms    (26.37ms ... 209.967ms)      30.63ms    209.967ms  209.967ms
-// process_block          50       2.39s          47.811ms ± 6.151ms     (43.82ms ... 73.096ms)       47.603ms   73.096ms   73.096ms
-// process_block_no_sig   50       1.657s         33.152ms ± 5.263ms     (29.143ms ... 60.873ms)      32.916ms   60.873ms   60.873ms
-// block(segments)        50       2.555s         51.112ms ± 8.533ms     (44.404ms ... 95.221ms)      53.978ms   95.221ms   95.221ms
-
-// Segmented block breakdown :
-// step                   runs     total time     time/run (avg)
-// ---------------------------------------------------------------------
-// block_total            50       1.041s         20.828ms
-// block_header           50       53.676ms        1.074ms
-// withdrawals            50       1.191ms        0.024ms
-// execution_payload      50       26.506ms        0.530ms
-// randao                 50       38.248ms        0.765ms
-// eth1_data              50       0.055ms        0.001ms
-// operations             50       852.513ms        17.050ms
-// sync_aggregate         50       69.058ms        1.381ms
-
 const std = @import("std");
 const zbench = @import("zbench");
 const state_transition = @import("state_transition");

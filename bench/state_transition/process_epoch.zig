@@ -536,7 +536,6 @@ fn runBenchmark(
         .cached_state = cached_state,
     }, .{});
 
-    // Post-Altair
     if (comptime fork.gte(.altair)) {
         try bench.addParam("inactivity_updates", &ProcessInactivityUpdatesBench{
             .cached_state = cached_state,
@@ -597,7 +596,6 @@ fn runBenchmark(
         }, .{});
     }
 
-    // Post-Fulu
     if (comptime fork.gte(.fulu)) {
         try bench.addParam("proposer_lookahead", &ProcessProposerLookaheadBench{
             .cached_state = cached_state,
