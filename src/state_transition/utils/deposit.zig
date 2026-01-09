@@ -4,25 +4,28 @@ const Eth1Data = types.phase0.Eth1Data.Type;
 const MAX_DEPOSITS = preset.MAX_DEPOSITS;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 
-pub fn getEth1DepositCount(cached_state: *const CachedBeaconState, eth1_data: ?*const Eth1Data) u64 {
-    const state = cached_state.state;
+pub fn getEth1DepositCount(cached_state: *const CachedBeaconState, eth1_data: ?*const Eth1Data) !u64 {
+    const state = &cached_state.state;
 
-    const eth1_data_to_use = eth1_data orelse state.eth1Data();
+    const deposit_count: u64 = if (eth1_data) |d| d.deposit_count else blk: {
+        var eth1_data_view = try state.eth1Data();
+        break :blk try eth1_data_view.get("deposit_count");
+    };
 
-    if (state.isPostElectra()) {
-        const deposit_requests_start_index = state.depositRequestsStartIndex();
-        // eth1DataIndexLimit = min(UintNum64, UintBn64) can be safely casted as UintNum64
-        // since the result lies within upper and lower bound of UintNum64
-        const eth1_data_index_limit: u64 = if (eth1_data_to_use.deposit_count < deposit_requests_start_index.*)
-            eth1_data_to_use.deposit_count
+    const eth1_deposit_index = try state.eth1DepositIndex();
+
+    if (state.forkSeq().gte(.electra)) {
+        const deposit_requests_start_index = try state.depositRequestsStartIndex();
+        const eth1_data_index_limit: u64 = if (deposit_count < deposit_requests_start_index)
+            deposit_count
         else
-            deposit_requests_start_index.*;
+            deposit_requests_start_index;
 
-        return if (state.eth1DepositIndex() < eth1_data_index_limit)
-            @min(MAX_DEPOSITS, eth1_data_index_limit - state.eth1DepositIndex())
+        return if (eth1_deposit_index < eth1_data_index_limit)
+            @min(MAX_DEPOSITS, eth1_data_index_limit - eth1_deposit_index)
         else
             0;
     }
 
-    return @min(MAX_DEPOSITS, eth1_data_to_use.deposit_count - state.eth1DepositIndex());
+    return @min(MAX_DEPOSITS, deposit_count - eth1_deposit_index);
 }

@@ -17,19 +17,24 @@ pub fn generateElectraBlock(allocator: Allocator, cached_state: *const CachedBea
     const state = cached_state.state;
     var attestations = types.electra.Attestations.default_value;
     // no need to fill up to MAX_ATTESTATIONS_ELECTRA
-    const att_slot: Slot = state.slot() - 2;
+    const att_slot: Slot = (try state.slot()) - 2;
     const att_index = 0;
-    const att_block_root = try getBlockRootAtSlot(state, att_slot);
+    const att_block_root = try getBlockRootAtSlot(&state, att_slot);
     const target_epoch = cached_state.getEpochCache().epoch;
     const target_epoch_slot = computeStartSlotAtEpoch(target_epoch);
+    var source_checkpoint_view = try state.currentJustifiedCheckpoint();
+    var source_checkpoint: types.phase0.Checkpoint.Type = undefined;
+    try source_checkpoint_view.toValue(allocator, &source_checkpoint);
+
+    const att_target_root = try getBlockRootAtSlot(&state, target_epoch_slot);
     const att_data: types.phase0.AttestationData.Type = .{
         .slot = att_slot,
         .index = att_index,
-        .beacon_block_root = att_block_root,
-        .source = state.currentJustifiedCheckpoint().*,
+        .beacon_block_root = att_block_root.*,
+        .source = source_checkpoint,
         .target = .{
             .epoch = target_epoch,
-            .root = try getBlockRootAtSlot(state, target_epoch_slot),
+            .root = att_target_root.*,
         },
     };
     const committee_count = try cached_state.getEpochCache().getCommitteeCountPerSlot(target_epoch);
@@ -64,7 +69,7 @@ pub fn generateElectraBlock(allocator: Allocator, cached_state: *const CachedBea
 
     out.* = .{
         .message = .{
-            .slot = state.slot() + 1,
+            .slot = (try state.slot()) + 1,
             // value is generated after running real state transition int test
             .proposer_index = 41,
             .parent_root = try hex.hexToRoot("0x4e647394b6f96c1cd44938483ddf14d89b35d3f67586a59cbfd410a56efbb2b1"),

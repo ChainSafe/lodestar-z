@@ -22,7 +22,7 @@ pub fn assertValidProposerSlashing(
     proposer_slashing: *const ProposerSlashing,
     verify_signature: bool,
 ) !void {
-    const state = cached_state.state;
+    const state = &cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const header_1 = proposer_slashing.signed_header_1.message;
     const header_2 = proposer_slashing.signed_header_2.message;
@@ -37,7 +37,9 @@ pub fn assertValidProposerSlashing(
         return error.InvalidProposerSlashingProposerIndexMismatch;
     }
 
-    if (header_1.proposer_index >= state.validators().items.len) {
+    var validators_view = try state.validators();
+    const validators_len = try validators_view.length();
+    if (header_1.proposer_index >= validators_len) {
         return error.InvalidProposerSlashingProposerIndexOutOfRange;
     }
 
@@ -47,7 +49,9 @@ pub fn assertValidProposerSlashing(
     }
 
     // verify the proposer is slashable
-    const proposer = state.validators().items[header_1.proposer_index];
+    var proposer_view = try validators_view.get(header_1.proposer_index);
+    var proposer: types.phase0.Validator.Type = undefined;
+    try proposer_view.toValue(cached_state.allocator, &proposer);
     if (!isSlashableValidator(&proposer, epoch_cache.epoch)) {
         return error.InvalidProposerSlashingProposerNotSlashable;
     }

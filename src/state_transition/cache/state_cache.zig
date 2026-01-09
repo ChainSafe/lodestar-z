@@ -87,7 +87,7 @@ pub const CachedBeaconState = struct {
 
         // For Fulu, use proposer_lookahead from state
         if (self.state.forkSeq().gte(.fulu)) {
-            const current_epoch = computeEpochAtSlot(self.state.slot());
+            const current_epoch = computeEpochAtSlot(try self.state.slot());
             const slot_epoch = computeEpochAtSlot(slot);
 
             // proposer_lookahead covers current_epoch through current_epoch + MIN_SEED_LOOKAHEAD
@@ -98,7 +98,7 @@ pub const CachedBeaconState = struct {
                 return error.SlotOutsideProposerLookahead;
             }
 
-            const proposer_lookahead = try self.state.proposerLookahead();
+            var proposer_lookahead = try self.state.proposerLookahead();
             const epoch_offset = slot_epoch - lookahead_start_epoch;
             const slot_in_epoch = slot % preset_import.SLOTS_PER_EPOCH;
             const index = epoch_offset * preset_import.SLOTS_PER_EPOCH + slot_in_epoch;

@@ -27,12 +27,12 @@ pub fn randaoRevealSignatureSet(
     proposer_idx: u64,
 ) !SingleSignatureSet {
     const epoch_cache = cached_state.getEpochCache();
-    const state = cached_state.state;
+    const state = &cached_state.state;
     const config = cached_state.config;
 
     // should not get epoch from epoch_cache
     const epoch = computeEpochAtSlot(slot);
-    const domain = try config.getDomain(state.slot(), c.DOMAIN_RANDAO, slot);
+    const domain = try config.getDomain(try state.slot(), c.DOMAIN_RANDAO, slot);
     var signing_root: Root = undefined;
     try computeSigningRoot(types.primitive.Epoch, &epoch, domain, &signing_root);
     return .{

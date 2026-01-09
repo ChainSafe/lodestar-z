@@ -9,11 +9,11 @@ test "process sync aggregate - sanity" {
 
     const state = test_state.cached_state.state;
     const config = test_state.cached_state.config;
-    const previous_slot = state.slot() - 1;
-    const root_signed = try state_transition.getBlockRootAtSlot(state, previous_slot);
-    const domain = try config.getDomain(state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
+    const previous_slot = (try state.slot()) - 1;
+    const root_signed = try state_transition.getBlockRootAtSlot(&state, previous_slot);
+    const domain = try config.getDomain(try state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
     var signing_root: Root = undefined;
-    try computeSigningRoot(types.primitive.Root, &root_signed, domain, &signing_root);
+    try computeSigningRoot(types.primitive.Root, root_signed, domain, &signing_root);
 
     const committee_indices = @as(*const [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex, @ptrCast(test_state.cached_state.getEpochCache().current_sync_committee_indexed.get().getValidatorIndices()));
     // validator 0 signs

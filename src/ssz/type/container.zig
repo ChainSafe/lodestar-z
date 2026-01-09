@@ -227,6 +227,9 @@ pub fn FixedContainerType(comptime ST: type) type {
         }
 
         pub fn getFieldIndex(comptime name: []const u8) usize {
+            comptime {
+                @setEvalBranchQuota(20000);
+            }
             inline for (fields, 0..) |field, i| {
                 if (std.mem.eql(u8, name, field.name)) {
                     return i;
@@ -237,6 +240,9 @@ pub fn FixedContainerType(comptime ST: type) type {
         }
 
         pub fn getFieldType(comptime name: []const u8) type {
+            comptime {
+                @setEvalBranchQuota(20000);
+            }
             inline for (fields) |field| {
                 if (std.mem.eql(u8, name, field.name)) {
                     return field.type;

@@ -26,7 +26,7 @@ pub fn processSyncAggregate(
     sync_aggregate: *const SyncAggregate,
     verify_signatures: bool,
 ) !void {
-    const state = cached_state.state;
+    const state = &cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const committee_indices = @as(*const [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex, @ptrCast(epoch_cache.current_sync_committee_indexed.get().getValidatorIndices()));
     const sync_committee_bits = sync_aggregate.sync_committee_bits;
@@ -43,9 +43,9 @@ pub fn processSyncAggregate(
 
         // When there's no participation we cons ider the signature valid and just ignore it
         if (participant_indices.items.len > 0) {
-            const previous_slot = @max(state.slot(), 1) - 1;
+            const previous_slot = @max(try state.slot(), 1) - 1;
             const root_signed = try getBlockRootAtSlot(state, previous_slot);
-            const domain = try cached_state.config.getDomain(state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
+            const domain = try cached_state.config.getDomain(try state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
 
             const pubkeys = try allocator.alloc(blst.PublicKey, participant_indices.items.len);
             defer allocator.free(pubkeys);
@@ -54,7 +54,7 @@ pub fn processSyncAggregate(
             }
 
             var signing_root: Root = undefined;
-            try computeSigningRoot(types.primitive.Root, &root_signed, domain, &signing_root);
+            try computeSigningRoot(types.primitive.Root, root_signed, domain, &signing_root);
 
             const signature_set = AggregatedSignatureSet{
                 .pubkeys = pubkeys,
@@ -74,9 +74,9 @@ pub fn processSyncAggregate(
 
     const sync_participant_reward = epoch_cache.sync_participant_reward;
     const sync_proposer_reward = epoch_cache.sync_proposer_reward;
-    const proposer_index = try cached_state.getBeaconProposer(state.slot());
-    const balances = state.balances();
-    var proposer_balance = balances.items[proposer_index];
+    const proposer_index = try cached_state.getBeaconProposer(try state.slot());
+    var balances = try state.balances();
+    var proposer_balance = try balances.get(proposer_index);
 
     for (0..preset.SYNC_COMMITTEE_SIZE) |i| {
         const index = committee_indices[i];
@@ -86,7 +86,7 @@ pub fn processSyncAggregate(
             if (index == proposer_index) {
                 proposer_balance += sync_participant_reward;
             } else {
-                increaseBalance(state, index, sync_participant_reward);
+                try increaseBalance(&cached_state.state, index, sync_participant_reward);
             }
 
             // Proposer reward
@@ -97,20 +97,20 @@ pub fn processSyncAggregate(
             if (index == proposer_index) {
                 proposer_balance = @max(0, proposer_balance - sync_participant_reward);
             } else {
-                decreaseBalance(state, index, sync_participant_reward);
+                try decreaseBalance(&cached_state.state, index, sync_participant_reward);
             }
         }
     }
 
     // Apply proposer balance
-    balances.items[proposer_index] = proposer_balance;
+    try balances.set(proposer_index, proposer_balance);
 }
 
 /// Consumers should deinit the returned pubkeys
 /// this is to be used when we implement getBlockSignatureSets
 /// see https://github.com/ChainSafe/state-transition-z/issues/72
 pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *const CachedBeaconState, block: Block, participant_indices: ?[]usize) !?AggregatedSignatureSet {
-    const state = cached_state.state;
+    const state = &cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const sync_aggregate = block.beaconBlockBody().syncAggregate();
     const signature = sync_aggregate.sync_committee_signature;
@@ -148,7 +148,7 @@ pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *const C
     // So getSyncCommitteeSignatureSet() can be called with a state in any slot (with the correct shuffling)
     const root_signed = block.parentRoot();
 
-    const domain = try cached_state.config.getDomain(state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
+    const domain = try cached_state.config.getDomain(try state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
 
     const pubkeys = try allocator.alloc(blst.PublicKey, participant_indices_.len);
     for (0..participant_indices_.len) |i| {

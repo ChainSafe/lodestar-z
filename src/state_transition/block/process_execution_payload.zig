@@ -24,11 +24,11 @@ const PartialPayload = struct {
 
 pub fn processExecutionPayload(
     allocator: Allocator,
-    cached_state: *const CachedBeaconState,
+    cached_state: *CachedBeaconState,
     body: Body,
     external_data: BlockExternalData,
 ) !void {
-    const state = cached_state.state;
+    const state = &cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const config = epoch_cache.config;
     var partial_payload = PartialPayload{};
@@ -54,15 +54,15 @@ pub fn processExecutionPayload(
     // Verify consistency of the parent hash, block number, base fee per gas and gas limit
     // with respect to the previous execution payload header
     if (isMergeTransitionComplete(state)) {
-        const latest_header = state.latestExecutionPayloadHeader();
-        if (!std.mem.eql(u8, &partial_payload.parent_hash, &latest_header.getBlockHash())) {
+        const latest_block_hash = try state.latestExecutionPayloadHeaderBlockHash();
+        if (!std.mem.eql(u8, &partial_payload.parent_hash, latest_block_hash)) {
             return error.InvalidExecutionPayloadParentHash;
         }
     }
 
     // Verify random
-    const expected_random = getRandaoMix(state, epoch_cache.epoch);
-    if (!std.mem.eql(u8, &partial_payload.prev_randao, &expected_random)) {
+    const expected_random = try getRandaoMix(state, epoch_cache.epoch);
+    if (!std.mem.eql(u8, &partial_payload.prev_randao, expected_random)) {
         return error.InvalidExecutionPayloadRandom;
     }
 
@@ -72,12 +72,12 @@ pub fn processExecutionPayload(
     // def compute_timestamp_at_slot(state: BeaconState, slot: Slot) -> uint64:
     //   slots_since_genesis = slot - GENESIS_SLOT
     //   return uint64(state.genesis_time + slots_since_genesis * SECONDS_PER_SLOT)
-    if (partial_payload.timestamp != state.genesisTime() + state.slot() * config.chain.SECONDS_PER_SLOT) {
+    if (partial_payload.timestamp != (try state.genesisTime()) + (try state.slot()) * config.chain.SECONDS_PER_SLOT) {
         return error.InvalidExecutionPayloadTimestamp;
     }
 
-    if (state.isPostDeneb()) {
-        const max_blobs_per_block = config.getMaxBlobsPerBlock(computeEpochAtSlot(state.slot()));
+    if (state.forkSeq().gte(.deneb)) {
+        const max_blobs_per_block = config.getMaxBlobsPerBlock(computeEpochAtSlot(try state.slot()));
         if (body.blobKzgCommitmentsLen() > max_blobs_per_block) {
             return error.BlobKzgCommitmentsExceedsLimit;
         }
@@ -103,5 +103,5 @@ pub fn processExecutionPayload(
     }
     defer payload_header.destroy(allocator);
 
-    state.setLatestExecutionPayloadHeader(allocator, payload_header);
+    try state.setLatestExecutionPayloadHeader(payload_header);
 }

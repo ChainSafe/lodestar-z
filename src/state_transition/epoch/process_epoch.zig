@@ -38,7 +38,7 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
 
     processEth1DataReset(allocator, cached_state, cache);
 
-    if (state.isPostElectra()) {
+    if (state.forkSeq().gte(.electra)) {
         try processPendingDeposits(allocator, cached_state, cache);
         try processPendingConsolidations(allocator, cached_state, cache);
     }
@@ -49,7 +49,7 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
     processSlashingsReset(cached_state, cache);
     processRandaoMixesReset(cached_state, cache);
 
-    if (state.isPostCapella()) {
+    if (state.forkSeq().gte(.capella)) {
         try processHistoricalSummariesUpdate(allocator, cached_state, cache);
     } else {
         try processHistoricalRootsUpdate(allocator, cached_state, cache);
@@ -58,7 +58,7 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
     if (state.isPhase0()) {
         processParticipationRecordUpdates(allocator, cached_state);
     } else {
-        try processParticipationFlagUpdates(allocator, cached_state);
+        try processParticipationFlagUpdates(cached_state);
     }
 
     if (state.isPostAltair()) {

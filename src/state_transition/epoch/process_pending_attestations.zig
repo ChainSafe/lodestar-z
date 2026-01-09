@@ -24,8 +24,8 @@ pub fn processPendingAttestations(
     head_flag: u8,
 ) !void {
     const epoch_cache = cached_state.getEpochCache();
-    const state = cached_state.state;
-    const state_slot = state.slot();
+    const state = &cached_state.state;
+    const state_slot = try state.slot();
     const prev_epoch = epoch_cache.getPreviousShuffling().epoch;
     if (attestations.len == 0) {
         return;
@@ -45,7 +45,8 @@ pub fn processPendingAttestations(
         const proposer_index = att.proposer_index;
         const att_slot = att_data.slot;
         const att_voted_target_root = std.mem.eql(u8, att_data.target.root[0..], actual_target_block_root[0..]);
-        const att_voted_head_root = att_slot < state_slot and std.mem.eql(u8, att_data.beacon_block_root[0..], &(try getBlockRootAtSlot(state, att_slot)));
+        const head_root = try getBlockRootAtSlot(state, att_slot);
+        const att_voted_head_root = att_slot < state_slot and std.mem.eql(u8, att_data.beacon_block_root[0..], head_root[0..]);
         const committee = @as([]const u64, try epoch_cache.getBeaconCommittee(att_slot, att_data.index));
         var participants = try att.aggregation_bits.intersectValues(ValidatorIndex, allocator, committee);
         defer participants.deinit();

@@ -10,9 +10,9 @@ const SignedBlock = @import("../types/block.zig").SignedBlock;
 const ZERO_HASH = @import("constants").ZERO_HASH;
 const Block = @import("../types/block.zig").Block;
 
-pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaconState, block: Block) !void {
-    const state = cached_state.state;
-    const slot = state.slot();
+pub fn processBlockHeader(allocator: Allocator, cached_state: *CachedBeaconState, block: Block) !void {
+    const state = &cached_state.state;
+    const slot = try state.slot();
 
     // verify that the slots match
     if (block.slot() != slot) {
@@ -20,7 +20,9 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaco
     }
 
     // Verify that the block is newer than latest block header
-    if (!(block.slot() > state.latestBlockHeader().slot)) {
+    var latest_header_view = try state.latestBlockHeader();
+    const latest_header_slot = try latest_header_view.get("slot");
+    if (!(block.slot() > latest_header_slot)) {
         return error.BlockNotNewerThanLatestHeader;
     }
 
@@ -32,14 +34,13 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaco
 
     // verify that the parent matches
     var header_parent_root: [32]u8 = undefined;
-    try types.phase0.BeaconBlockHeader.hashTreeRoot(state.latestBlockHeader(), &header_parent_root);
+    try latest_header_view.hashTreeRoot(&header_parent_root);
     if (!std.mem.eql(u8, &block.parentRoot(), &header_parent_root)) {
         return error.BlockParentRootMismatch;
     }
     var body_root: [32]u8 = undefined;
     try block.beaconBlockBody().hashTreeRoot(allocator, &body_root);
     // cache current block as the new latest block
-    const state_latest_block_header = state.latestBlockHeader();
     const latest_block_header: BeaconBlockHeader = .{
         .slot = slot,
         .proposer_index = proposer_index,
@@ -47,10 +48,13 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaco
         .state_root = ZERO_HASH,
         .body_root = body_root,
     };
-    state_latest_block_header.* = latest_block_header;
+    try state.setLatestBlockHeader(&latest_block_header);
 
     // verify proposer is not slashed. Only once per block, may use the slower read from tree
-    if (state.validators().items[proposer_index].slashed) {
+    var validators_view = try state.validators();
+    var proposer_validator_view = try validators_view.get(proposer_index);
+    const proposer_slashed = try proposer_validator_view.get("slashed");
+    if (proposer_slashed) {
         return error.BlockProposerSlashed;
     }
 }

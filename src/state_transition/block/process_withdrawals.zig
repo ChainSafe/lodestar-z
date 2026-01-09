@@ -51,7 +51,7 @@ pub fn processWithdrawals(
         decreaseBalance(state, withdrawal.validator_index, withdrawal.amount);
     }
 
-    if (state.isPostElectra()) {
+    if (state.forkSeq().gte(.electra)) {
         const pending_partial_withdrawals = state.pendingPartialWithdrawals();
         const keep_len = pending_partial_withdrawals.items.len - processed_partial_withdrawals_count;
 
@@ -87,7 +87,7 @@ pub fn getExpectedWithdrawals(
     cached_state: *const CachedBeaconState,
 ) !void {
     const state = cached_state.state;
-    if (state.isPreCapella()) {
+    if (state.forkSeq().lt(.capella)) {
         return error.InvalidForkSequence;
     }
 
@@ -102,7 +102,7 @@ pub fn getExpectedWithdrawals(
     // partial_withdrawals_count is withdrawals coming from EL since electra (EIP-7002)
     var processed_partial_withdrawals_count: u64 = 0;
 
-    if (state.isPostElectra()) {
+    if (state.forkSeq().gte(.electra)) {
         // TODO: this optimization logic is not needed for TreeView
         // MAX_PENDING_PARTIALS_PER_WITHDRAWALS_SWEEP = 8, PENDING_PARTIAL_WITHDRAWALS_LIMIT: 134217728 so we should only call getAllReadonly() if it makes sense
         // pendingPartialWithdrawals comes from EIP-7002 smart contract where it takes fee so it's more likely than not validator is in correct condition to withdraw

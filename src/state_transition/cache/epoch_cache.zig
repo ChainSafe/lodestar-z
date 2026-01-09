@@ -298,8 +298,13 @@ pub const EpochCache = struct {
         var current_target_unslashed_balance_increments: u64 = 0;
 
         if (fork_seq.gte(.altair)) {
-            const previous_epoch_participation = state.previousEpochParticipations().items;
-            const current_epoch_participation = state.currentEpochParticipations().items;
+            var previous_epoch_participation_view = try state.previousEpochParticipation();
+            const previous_epoch_participation = try previous_epoch_participation_view.getAll(allocator);
+            defer allocator.free(previous_epoch_participation);
+
+            var current_epoch_participation_view = try state.currentEpochParticipation();
+            const current_epoch_participation = try current_epoch_participation_view.getAll(allocator);
+            defer allocator.free(current_epoch_participation);
 
             previous_target_unslashed_balance_increments = sumTargetUnslashedBalanceIncrements(previous_epoch_participation, previous_epoch, validators);
             current_target_unslashed_balance_increments = sumTargetUnslashedBalanceIncrements(current_epoch_participation, current_epoch, validators);

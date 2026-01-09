@@ -25,7 +25,7 @@ pub fn processOperations(
     const state = cached_state.state;
 
     // verify that outstanding deposits are processed up to the maximum number of deposits
-    const max_deposits = getEth1DepositCount(cached_state, null);
+    const max_deposits = try getEth1DepositCount(cached_state, null);
     if (body.deposits().len != max_deposits) {
         return error.InvalidDepositCount;
     }
@@ -58,13 +58,13 @@ pub fn processOperations(
         try processVoluntaryExit(cached_state, voluntary_exit, opts.verify_signature);
     }
 
-    if (state.isPostCapella()) {
+    if (state.forkSeq().gte(.capella)) {
         for (body.blsToExecutionChanges()) |*bls_to_execution_change| {
             try processBlsToExecutionChange(cached_state, bls_to_execution_change);
         }
     }
 
-    if (state.isPostElectra()) {
+    if (state.forkSeq().gte(.electra)) {
         for (body.depositRequests()) |*deposit_request| {
             try processDepositRequest(allocator, cached_state, deposit_request);
         }

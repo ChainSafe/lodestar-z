@@ -342,10 +342,10 @@ pub fn toExecutionPayloadHeader(
     result.extra_data = try payload.extra_data.clone(allocator);
     result.base_fee_per_gas = payload.base_fee_per_gas;
     result.block_hash = payload.block_hash;
-    if (@hasField(@TypeOf(payload), "transactions_root")) {
+    if (@hasField(@TypeOf(payload.*), "transactions_root")) {
         result.transactions_root = payload.transactions_root;
     }
-    if (@hasField(@TypeOf(payload), "withdrawals_root")) {
+    if (@hasField(@TypeOf(payload.*), "withdrawals_root")) {
         result.withdrawals_root = payload.withdrawals_root;
     }
     // remaining fields are left unset

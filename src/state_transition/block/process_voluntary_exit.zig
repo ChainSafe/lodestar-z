@@ -39,7 +39,7 @@ pub fn isValidVoluntaryExit(cached_state: *CachedBeaconState, signed_voluntary_e
             current_epoch >= voluntary_exit.epoch and
             // verify the validator had been active long enough
             current_epoch >= validator.activation_epoch + config.SHARD_COMMITTEE_PERIOD and
-            (if (state.isPostElectra()) getPendingBalanceToWithdraw(cached_state.state, voluntary_exit.validator_index) == 0 else true) and
+            (if (state.forkSeq().gte(.electra)) getPendingBalanceToWithdraw(cached_state.state, voluntary_exit.validator_index) == 0 else true) and
             // verify signature
             if (verify_signature) try verifyVoluntaryExitSignature(cached_state, signed_voluntary_exit) else true);
 }

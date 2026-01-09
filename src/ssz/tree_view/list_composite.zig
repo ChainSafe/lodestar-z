@@ -142,17 +142,6 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             try self.set(list_length, value);
         }
 
-        pub fn pushValue(self: *Self, value: *const ST.Element.Type) !void {
-            const child_root = try ST.Element.tree.fromValue(self.base_view.pool, value);
-            errdefer self.base_view.pool.unref(child_root);
-            const child_view = try ST.Element.TreeView.init(
-                self.base_view.allocator,
-                self.base_view.pool,
-                child_root,
-            );
-            try self.push(child_view);
-        }
-
         /// Return a new view containing all elements up to and including `index`.
         /// The caller **must** call `deinit()` on the returned view to avoid memory leaks.
         pub fn sliceTo(self: *Self, index: usize) !Self {

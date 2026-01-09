@@ -197,8 +197,8 @@ pub const EpochTransitionCache = struct {
     pub fn init(allocator: Allocator, cached_state: *CachedBeaconState) !*EpochTransitionCache {
         const config = cached_state.config;
         var epoch_cache = cached_state.getEpochCache();
-        const state = cached_state.state;
-        const fork_seq = config.forkSeq(state.slot());
+        const state = &cached_state.state;
+        const fork_seq = config.forkSeq(try state.slot());
         const current_epoch = epoch_cache.epoch;
         const prev_epoch = epoch_cache.getPreviousShuffling().epoch;
         const next_epoch = current_epoch + 1;
@@ -215,7 +215,8 @@ pub const EpochTransitionCache = struct {
         var indices_to_eject = std.ArrayList(ValidatorIndex).init(allocator);
 
         var total_active_stake_by_increment: u64 = 0;
-        const validators = try (try state.validators()).getAll(allocator);
+        var validators_view = try state.validators();
+        const validators = try validators_view.getAllReadonlyValues(allocator);
         defer allocator.free(validators);
         const validator_count = validators.len;
 
@@ -354,9 +355,11 @@ pub const EpochTransitionCache = struct {
             try reused_cache.inclusion_delays.resize(validator_count);
             @memset(reused_cache.inclusion_delays.items, 0);
 
-            const previous_epoch_pending_attestations = try state.previousEpochPendingAttestations().getAll(allocator);
+            var previous_epoch_pending_attestations_view = try state.previousEpochPendingAttestations();
+            const previous_epoch_pending_attestations = try previous_epoch_pending_attestations_view.getAllReadonlyValues(allocator);
             defer allocator.free(previous_epoch_pending_attestations);
-            const current_epoch_pending_attestations = try state.currentEpochPendingAttestations().getAll(allocator);
+            var current_epoch_pending_attestations_view = try state.currentEpochPendingAttestations();
+            const current_epoch_pending_attestations = try current_epoch_pending_attestations_view.getAllReadonlyValues(allocator);
             defer allocator.free(current_epoch_pending_attestations);
 
             try processPendingAttestations(
@@ -389,9 +392,11 @@ pub const EpochTransitionCache = struct {
             try reused_cache.previous_epoch_participation.resize(validator_count);
             try reused_cache.current_epoch_participation.resize(validator_count);
 
-            const previous_epoch_participation = try (try state.previousEpochParticipation()).getAll(allocator);
+            var previous_epoch_participation_view = try state.previousEpochParticipation();
+            const previous_epoch_participation = try previous_epoch_participation_view.getAll(allocator);
             defer allocator.free(previous_epoch_participation);
-            const current_epoch_participation = try (try state.currentEpochParticipation()).getAll(allocator);
+            var current_epoch_participation_view = try state.currentEpochParticipation();
+            const current_epoch_participation = try current_epoch_participation_view.getAll(allocator);
             defer allocator.free(current_epoch_participation);
 
             @memcpy(reused_cache.previous_epoch_participation.items[0..validator_count], previous_epoch_participation);

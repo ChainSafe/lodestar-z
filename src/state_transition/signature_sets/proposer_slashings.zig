@@ -12,7 +12,7 @@ const verifySignatureSet = @import("../utils/signature_sets.zig").verifySingleSi
 
 pub fn getProposerSlashingSignatureSets(cached_state: *const CachedBeaconState, proposer_slashing: *const types.phase0.ProposerSlashing.Type) ![2]SingleSignatureSet {
     const config = cached_state.config;
-    const state = cached_state.state;
+    const state = &cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
 
     const signed_header_1 = proposer_slashing.signed_header_1;
@@ -20,8 +20,8 @@ pub fn getProposerSlashingSignatureSets(cached_state: *const CachedBeaconState, 
     // In state transition, ProposerSlashing headers are only partially validated. Their slot could be higher than the
     // clock and the slashing would still be valid. Must use bigint variants to hash correctly to all possible values
     var result: [2]SingleSignatureSet = undefined;
-    const domain_1 = try config.getDomain(state.slot(), c.DOMAIN_BEACON_PROPOSER, signed_header_1.message.slot);
-    const domain_2 = try config.getDomain(state.slot(), c.DOMAIN_BEACON_PROPOSER, signed_header_2.message.slot);
+    const domain_1 = try config.getDomain(try state.slot(), c.DOMAIN_BEACON_PROPOSER, signed_header_1.message.slot);
+    const domain_2 = try config.getDomain(try state.slot(), c.DOMAIN_BEACON_PROPOSER, signed_header_2.message.slot);
     var signing_root_1: [32]u8 = undefined;
     try computeSigningRoot(types.phase0.BeaconBlockHeader, &signed_header_1.message, domain_1, &signing_root_1);
     var signing_root_2: [32]u8 = undefined;
