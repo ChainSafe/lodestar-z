@@ -205,7 +205,7 @@ pub fn forkVersion(self: *const BeaconConfig, slot: Slot) *const [4]u8 {
 /// Return the maximum number of blobs allowed per block at `epoch`.
 ///
 /// Fulu introduced Blob Parameter Only (BPO) hard forks [EIP-7892] to adjust the max blobs per block,
-/// so the max blobs per block from that fork onwards differ depending on which epoch the hard forks happen.
+/// so the max blobs in that fork differ depending on which epoch the BPO hard forks happen.
 ///
 /// Reference: https://eips.ethereum.org/EIPS/eip-7892
 pub fn getMaxBlobsPerBlock(self: *const BeaconConfig, epoch: Epoch) u64 {

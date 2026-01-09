@@ -151,7 +151,6 @@ pub fn stateTransition(
     }
 
     try metrics.state_transition.onStateClone(post_state, .state_transition);
-
     try processSlots(allocator, post_state, block_slot, .{});
 
     // Verify proposer signature only

@@ -159,28 +159,28 @@ pub fn build(b: *std.Build) void {
     const tls_run_exe_download_era_files = b.step("run:download_era_files", "Run the download_era_files executable");
     tls_run_exe_download_era_files.dependOn(&run_exe_download_era_files.step);
 
-    const module_metrics_server = b.createModule(.{
-        .root_source_file = b.path("examples/metrics_server.zig"),
+    const module_metrics_era = b.createModule(.{
+        .root_source_file = b.path("examples/metrics_era.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("metrics_server"), module_metrics_server) catch @panic("OOM");
+    b.modules.put(b.dupe("metrics_era"), module_metrics_era) catch @panic("OOM");
 
-    const exe_metrics_server = b.addExecutable(.{
-        .name = "metrics_server",
-        .root_module = module_metrics_server,
+    const exe_metrics_era = b.addExecutable(.{
+        .name = "metrics_era",
+        .root_module = module_metrics_era,
     });
 
-    const install_exe_metrics_server = b.addInstallArtifact(exe_metrics_server, .{});
+    const install_exe_metrics_era = b.addInstallArtifact(exe_metrics_era, .{});
 
-    const tls_install_exe_metrics_server = b.step("build-exe:metrics_server", "Install the metrics_server executable");
-    tls_install_exe_metrics_server.dependOn(&install_exe_metrics_server.step);
-    b.getInstallStep().dependOn(&install_exe_metrics_server.step);
+    const tls_install_exe_metrics_era = b.step("build-exe:metrics_era", "Install the metrics_era executable");
+    tls_install_exe_metrics_era.dependOn(&install_exe_metrics_era.step);
+    b.getInstallStep().dependOn(&install_exe_metrics_era.step);
 
-    const run_exe_metrics_server = b.addRunArtifact(exe_metrics_server);
-    if (b.args) |args| run_exe_metrics_server.addArgs(args);
-    const tls_run_exe_metrics_server = b.step("run:metrics_server", "Run the metrics_server executable");
-    tls_run_exe_metrics_server.dependOn(&run_exe_metrics_server.step);
+    const run_exe_metrics_era = b.addRunArtifact(exe_metrics_era);
+    if (b.args) |args| run_exe_metrics_era.addArgs(args);
+    const tls_run_exe_metrics_era = b.step("run:metrics_era", "Run the metrics_era executable");
+    tls_run_exe_metrics_era.dependOn(&run_exe_metrics_era.step);
 
     const module_download_spec_tests = b.createModule(.{
         .root_source_file = b.path("test/spec/download_spec_tests.zig"),
@@ -616,19 +616,19 @@ pub fn build(b: *std.Build) void {
     tls_run_test_download_era_files.dependOn(&run_test_download_era_files.step);
     tls_run_test.dependOn(&run_test_download_era_files.step);
 
-    const test_metrics_server = b.addTest(.{
-        .name = "metrics_server",
-        .root_module = module_metrics_server,
-        .filters = b.option([][]const u8, "metrics_server.filters", "metrics_server test filters") orelse &[_][]const u8{},
+    const test_metrics_era = b.addTest(.{
+        .name = "metrics_era",
+        .root_module = module_metrics_era,
+        .filters = b.option([][]const u8, "metrics_era.filters", "metrics_era test filters") orelse &[_][]const u8{},
     });
-    const install_test_metrics_server = b.addInstallArtifact(test_metrics_server, .{});
-    const tls_install_test_metrics_server = b.step("build-test:metrics_server", "Install the metrics_server test");
-    tls_install_test_metrics_server.dependOn(&install_test_metrics_server.step);
+    const install_test_metrics_era = b.addInstallArtifact(test_metrics_era, .{});
+    const tls_install_test_metrics_era = b.step("build-test:metrics_era", "Install the metrics_era test");
+    tls_install_test_metrics_era.dependOn(&install_test_metrics_era.step);
 
-    const run_test_metrics_server = b.addRunArtifact(test_metrics_server);
-    const tls_run_test_metrics_server = b.step("test:metrics_server", "Run the metrics_server test");
-    tls_run_test_metrics_server.dependOn(&run_test_metrics_server.step);
-    tls_run_test.dependOn(&run_test_metrics_server.step);
+    const run_test_metrics_era = b.addRunArtifact(test_metrics_era);
+    const tls_run_test_metrics_era = b.step("test:metrics_era", "Run the metrics_era test");
+    tls_run_test_metrics_era.dependOn(&run_test_metrics_era.step);
+    tls_run_test.dependOn(&run_test_metrics_era.step);
 
     const test_download_spec_tests = b.addTest(.{
         .name = "download_spec_tests",
@@ -950,9 +950,13 @@ pub fn build(b: *std.Build) void {
 
     module_download_era_files.addImport("download_era_options", options_module_download_era_options);
 
-    module_metrics_server.addImport("consensus_types", module_consensus_types);
-    module_metrics_server.addImport("state_transition", module_state_transition);
-    module_metrics_server.addImport("httpz", dep_httpz.module("httpz"));
+    module_metrics_era.addImport("consensus_types", module_consensus_types);
+    module_metrics_era.addImport("state_transition", module_state_transition);
+    module_metrics_era.addImport("download_era_options", options_module_download_era_options);
+    module_metrics_era.addImport("era", module_era);
+    module_metrics_era.addImport("config", module_config);
+    module_metrics_era.addImport("preset", module_preset);
+    module_metrics_era.addImport("httpz", dep_httpz.module("httpz"));
 
     module_download_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
 
