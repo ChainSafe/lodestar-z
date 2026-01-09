@@ -62,9 +62,9 @@ pub fn ContainerTreeView(comptime ST: type) type {
             return Gindex.fromDepth(ST.chunk_depth, field_index);
         }
 
-        pub fn getRootNode(self: *Self, comptime field_name: []const u8) !Node.Id {
+        pub fn getRootNode(self: *const Self, comptime field_name: []const u8) !Node.Id {
             const field_gindex = Self.getGindex(field_name);
-            return try self.base_view.getChildNode(field_gindex);
+            return try @constCast(&self.base_view).getChildNode(field_gindex);
         }
 
         pub fn setRootNode(self: *Self, comptime field_name: []const u8, root: Node.Id) !void {
@@ -72,24 +72,24 @@ pub fn ContainerTreeView(comptime ST: type) type {
             return try self.base_view.setChildNode(field_gindex, root);
         }
 
-        pub fn getRoot(self: *Self, comptime field_name: []const u8) !*const [32]u8 {
+        pub fn getRoot(self: *const Self, comptime field_name: []const u8) !*const [32]u8 {
             const field_node = try self.getRootNode(field_name);
             return field_node.getRoot(self.base_view.pool);
         }
 
         /// Get a field by name. If the field is a basic type, returns the value directly.
         /// Caller borrows a copy of the value so there is no need to deinit it.
-        pub fn get(self: *Self, comptime field_name: []const u8) !Field(field_name) {
+        pub fn get(self: *const Self, comptime field_name: []const u8) !Field(field_name) {
             const field_index = comptime ST.getFieldIndex(field_name);
             const ChildST = ST.getFieldType(field_name);
             const child_gindex = Gindex.fromDepth(ST.chunk_depth, field_index);
             if (comptime isBasicType(ChildST)) {
                 var value: ChildST.Type = undefined;
-                const child_node = try self.base_view.getChildNode(child_gindex);
+                const child_node = try @constCast(&self.base_view).getChildNode(child_gindex);
                 try ChildST.tree.toValue(child_node, self.base_view.pool, &value);
                 return value;
             } else {
-                const child_data = try self.base_view.getChildData(child_gindex);
+                const child_data = try @constCast(&self.base_view).getChildData(child_gindex);
 
                 return .{
                     .base_view = .{
