@@ -18,7 +18,7 @@ pub const SyncCommitteeCacheRc = ReferenceCount(SyncCommitteeCache);
 /// instead of that, we count on reference counting to deallocate the memory, see ReferenceCount() utility
 pub const SyncCommitteeCache = union(enum) {
     phase0: void,
-    altair: *SyncCommitteeCache,
+    altair: *SyncCommitteeCacheAltair,
 
     pub fn getValidatorIndices(self: *const SyncCommitteeCache) []ValidatorIndex {
         return switch (self.*) {
@@ -59,7 +59,7 @@ pub const SyncCommitteeCache = union(enum) {
 };
 
 /// this is for post-altair
-const SyncCommitteeCache = struct {
+const SyncCommitteeCacheAltair = struct {
     allocator: Allocator,
 
     // this takes ownership of validator_indices, consumer needs to transfer ownership to this cache
