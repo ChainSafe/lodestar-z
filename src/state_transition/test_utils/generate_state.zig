@@ -159,7 +159,9 @@ pub const TestCachedBeaconState = struct {
         const state = try generateElectraState(allocator, pool, active_chain_config, validator_count);
         errdefer state.deinit();
 
-        return initFromState(allocator, state, ForkSeq.electra, state.fork().epoch);
+        const fork_view = try state.fork();
+        const fork_epoch = try fork_view.get("epoch");
+        return initFromState(allocator, state, ForkSeq.electra, fork_epoch);
     }
 
     pub fn initFromState(allocator: Allocator, state: BeaconState, fork: ForkSeq, fork_epoch: Epoch) !TestCachedBeaconState {
