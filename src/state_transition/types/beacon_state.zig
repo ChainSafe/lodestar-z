@@ -142,9 +142,15 @@ pub const BeaconState = union(ForkSeq) {
         };
     }
 
+    pub fn commit(self: *const BeaconState) !void {
+        switch (self.*) {
+            inline else => |*state| try @constCast(state).commit(),
+        }
+    }
+
     pub fn hashTreeRoot(self: *const BeaconState) !*const [32]u8 {
         return switch (self.*) {
-            inline else => |state| {
+            inline else => |*state| {
                 try state.commit();
                 return state.base_view.root.getRoot(state.base_view.pool);
             },
@@ -277,10 +283,20 @@ pub const BeaconState = union(ForkSeq) {
         try self.setEth1DepositIndex(try self.eth1DepositIndex() + 1);
     }
 
-    // TODO: change to []Validator
     pub fn validators(self: *const BeaconState) !ct.phase0.Validators.TreeView {
         return switch (self.*) {
             inline else => |state| try state.get("validators"),
+        };
+    }
+
+    // Returns a read-only slice of validators.
+    // Caller owns the returned slice and must free it with the same allocator.
+    pub fn validatorsSlice(self: *const BeaconState, allocator: Allocator) ![]const ct.phase0.Validator.Type {
+        return switch (self.*) {
+            inline else => |state| {
+                var validators_view = try state.get("validators");
+                return validators_view.getAllReadonlyValues(allocator);
+            },
         };
     }
 

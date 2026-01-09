@@ -52,15 +52,15 @@ pub fn processSlashings(
             try penalties_by_effective_balance_increment.put(effective_balance_increment, p);
             break :blk p;
         };
-        decreaseBalance(state, index, penalty);
+        try decreaseBalance(state, index, penalty);
     }
 }
 
 pub fn getTotalSlashingsByIncrement(state: *const BeaconState) !u64 {
     var total_slashings_by_increment: u64 = 0;
     var slashings = try state.slashings();
-        const slashings_len = @TypeOf(slashings).length;
-        for (0..slashings_len) |i| {
+    const slashings_len = @TypeOf(slashings).length;
+    for (0..slashings_len) |i| {
         const slashing = try slashings.get(i);
         total_slashings_by_increment += @divFloor(slashing, preset.EFFECTIVE_BALANCE_INCREMENT);
     }

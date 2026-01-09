@@ -33,7 +33,10 @@ const active_chain_config = if (active_preset == .mainnet) mainnet_chain_config 
 /// consumer has responsibility to deinit it
 pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config: ChainConfig, validator_count: usize) !BeaconState {
     const electra_state = try allocator.create(ElectraBeaconState);
-    defer allocator.destroy(electra_state);
+    defer {
+        types.electra.BeaconState.deinit(allocator, electra_state);
+        allocator.destroy(electra_state);
+    }
     electra_state.* = types.electra.BeaconState.default_value;
     electra_state.genesis_time = 1596546008;
     electra_state.genesis_validators_root = try hex.hexToRoot("0x8a8b3f1f1e2d3c4b5a697887766554433221100ffeeddccbbaa9988776655443");
@@ -146,6 +149,8 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
     try current_sync_committee.setValue("pubkeys", &next_sync_committee_pubkeys);
     try current_sync_committee.setValue("aggregate_pubkey", &aggregate_pubkey);
 
+    try beacon_state.commit();
+
     return beacon_state;
 }
 
@@ -179,10 +184,9 @@ pub const TestCachedBeaconState = struct {
         errdefer allocator.destroy(config);
         config.* = BeaconConfig.init(chain_config, (try state.genesisValidatorsRoot()).*);
 
-        var validators_view = try state.validators();
-        const validators = try validators_view.getAllReadonlyValues(allocator);
+        const validators = try state.validatorsSlice(allocator);
         defer allocator.free(validators);
-        
+
         try syncPubkeys(validators, pubkey_index_map, index_pubkey_cache);
 
         const immutable_data = state_transition.EpochCacheImmutableData{

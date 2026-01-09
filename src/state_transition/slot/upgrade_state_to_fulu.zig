@@ -9,7 +9,7 @@ pub fn upgradeStateToFulu(allocator: Allocator, cached_state: *CachedBeaconState
         return error.StateIsNotElectra;
     }
 
-    const state = try electra_state.upgradeUnsafe(allocator);
+    const state = try electra_state.upgradeUnsafe();
     defer electra_state.deinit();
 
     // Update fork version

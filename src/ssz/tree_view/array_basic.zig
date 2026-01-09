@@ -65,9 +65,9 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
             try self.base_view.hashTreeRoot(out);
         }
 
-        pub fn get(self: *Self, index: usize) !Element {
+        pub fn get(self: *const Self, index: usize) !Element {
             if (index >= length) return error.IndexOutOfBounds;
-            return try Chunks.get(&self.base_view, index);
+            return try Chunks.get(@constCast(&self.base_view), index);
         }
 
         pub fn set(self: *Self, index: usize, value: Element) !void {

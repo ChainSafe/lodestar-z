@@ -431,8 +431,8 @@ pub const BeaconBlockBody = union(enum) {
             .bellatrix => |body| .{ .bellatrix = &body.execution_payload },
             .capella => |body| .{ .capella = &body.execution_payload },
             .deneb => |body| .{ .deneb = &body.execution_payload },
-            .electra => |body| .{ .electra = &body.execution_payload },
-            .fulu => |body| .{ .electra = &body.execution_payload },
+            .electra => |body| .{ .deneb = &body.execution_payload },
+            .fulu => |body| .{ .deneb = &body.execution_payload },
             else => panic("ExecutionPayload is not available in {}", .{self}),
         };
     }
@@ -559,7 +559,7 @@ pub const BlindedBeaconBlockBody = union(enum) {
         return switch (self.*) {
             .capella => |body| .{ .capella = &body.execution_payload_header },
             .deneb => |body| .{ .deneb = &body.execution_payload_header },
-            .electra => |body| .{ .electra = &body.execution_payload_header },
+            .electra => |body| .{ .deneb = &body.execution_payload_header },
         };
     }
 
