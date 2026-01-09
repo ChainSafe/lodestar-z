@@ -62,8 +62,6 @@ fn getMetrics(_: *MetricsHandler, _: *httpz.Request, res: *httpz.Response) !void
 
 fn eraReader(allocator: std.mem.Allocator, era_path: []const u8) !era.Reader {
     std.debug.print("Reading era file at {s}\n", .{era_path});
-    // First check that the era file exists
-
     return try era.Reader.open(allocator, c.mainnet.config, era_path);
 }
 
