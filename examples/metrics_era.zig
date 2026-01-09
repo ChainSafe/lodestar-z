@@ -124,7 +124,7 @@ pub fn main() !void {
             .skip_sync_pubkeys = false,
         },
     );
-    std.debug.print("Running state transition\n", .{});
+    std.debug.print("Running state transition.\nYou may open up a local prometheus instance to check out metrics in action.\n", .{});
     for (blocks_index.start_slot + 1..blocks_index.start_slot + blocks_index.offsets.len) |slot| {
         const raw_block = try reader_blocks.readBlock(allocator, slot) orelse continue;
         defer raw_block.deinit(allocator);
