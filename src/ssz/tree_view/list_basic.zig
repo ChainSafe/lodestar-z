@@ -197,9 +197,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                 return;
             }
 
-            if (self._len > ST.limit) {
-                return error.LengthOverLimit;
-            }
+            std.debug.assert(self._len <= ST.limit);
             try self.chunks.setLength(self._len);
         }
     };
