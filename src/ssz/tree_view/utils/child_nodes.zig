@@ -3,7 +3,7 @@ const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const CloneOpts = @import("clone_opts.zig").CloneOpts;
 
-/// common functions for TreeViews deal with children_nodes
+/// Common functions for `TreeView`s dealing with `children_nodes`.
 pub const ChildNodes = struct {
     pub fn getChildNode(self: anytype, gindex: Gindex) !Node.Id {
         const gop = try self.children_nodes.getOrPut(self.allocator, gindex);
@@ -54,7 +54,7 @@ pub const ChildNodes = struct {
         try self.setChildNode(@enumFromInt(3), length_node);
     }
 
-    /// common functions for TreeViews deal with children_nodes + changed
+    /// Common functions for TreeViews deal with `children_nodes` + `changed`
     pub const Change = struct {
         pub fn commit(self: anytype) !void {
             if (self.changed.count() == 0) {

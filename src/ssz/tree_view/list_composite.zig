@@ -51,7 +51,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
             try Chunks.init(&ptr.chunks, allocator, pool, root);
             ptr.allocator = allocator;
-            ptr._orig_len = try ptr.getLength();
+            ptr._orig_len = try ptr.chunks.getLength();
             ptr._len = ptr._orig_len;
             return ptr;
         }
@@ -211,10 +211,6 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         pub fn serializedSize(self: *Self) !usize {
             try self.commit();
             return try ST.tree.serializedSize(self.chunks.root, self.chunks.pool);
-        }
-
-        fn getLength(self: *Self) !usize {
-            return try self.chunks.getLength();
         }
 
         fn updateListLength(self: *Self) !void {
