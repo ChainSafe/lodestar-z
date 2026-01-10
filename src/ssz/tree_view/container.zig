@@ -113,7 +113,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             self.allocator.destroy(self);
         }
 
-        pub fn clearChildrenDataCache(self: *Self) void {
+        fn clearChildrenDataCache(self: *Self) void {
             inline for (self.child_data, 0..) |child_opt, i| {
                 if (child_opt) |child| {
                     if (!comptime isBasicType(ST.fields[i].type)) {

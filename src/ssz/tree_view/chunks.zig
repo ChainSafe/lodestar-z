@@ -163,7 +163,7 @@ pub fn BasicPackedChunks(
             try ChildNodes.setChildNode(self, gindex, node);
         }
 
-        pub fn clearChildrenNodesCache(self: *Self) void {
+        fn clearChildrenNodesCache(self: *Self) void {
             ChildNodes.clearChildrenNodesCache(self, self.pool);
         }
 
@@ -327,7 +327,7 @@ pub fn CompositeChunks(
             try ChildNodes.setChildNode(self, gindex, node);
         }
 
-        pub fn clearChildrenNodesCache(self: *Self) void {
+        fn clearChildrenNodesCache(self: *Self) void {
             ChildNodes.clearChildrenNodesCache(self, self.pool);
         }
 
@@ -339,7 +339,7 @@ pub fn CompositeChunks(
             try ChildNodes.setLength(self, length);
         }
 
-        pub fn clearChildrenDataCache(self: *Self) void {
+        fn clearChildrenDataCache(self: *Self) void {
             var value_iter = self.children_data.valueIterator();
             while (value_iter.next()) |child_ptr| {
                 child_ptr.*.deinit();
