@@ -168,16 +168,14 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 }
             }
 
+            self.changed.clearRetainingCapacity();
             if (changed_idx == 0) {
                 return;
             }
-
             const new_root = try self.root.setNodesAtDepth(self.pool, ST.chunk_depth, indices[0..changed_idx], nodes[0..changed_idx]);
             try self.pool.ref(new_root);
             self.pool.unref(self.root);
             self.root = new_root;
-
-            self.changed.clearRetainingCapacity();
         }
 
         pub fn getRoot(self: *const Self) Node.Id {
