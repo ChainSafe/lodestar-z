@@ -237,12 +237,12 @@ pub fn ContainerTreeView(comptime ST: type) type {
         pub fn set(self: *Self, comptime field_name: []const u8, value: Field(field_name)) !void {
             const field_index = comptime ST.getFieldIndex(field_name);
             const ChildST = ST.getFieldType(field_name);
-            try self.changed.put(self.allocator, field_index, {});
 
             if (comptime isBasicType(ChildST)) {
                 const existing = self.child_data[field_index];
                 if (existing) |child_value| {
                     if (child_value == value) {
+                        // if consumer keeps setting a new value, do nothing
                         return;
                     }
                 }
@@ -258,6 +258,8 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
                 self.child_data[field_index] = value;
             }
+
+            try self.changed.put(self.allocator, field_index, {});
         }
 
         /// Serialize the tree view into a provided buffer.
