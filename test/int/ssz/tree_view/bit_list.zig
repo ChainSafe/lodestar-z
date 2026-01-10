@@ -56,13 +56,13 @@ test "BitListTreeView clone(true) does not transfer cache" {
     defer view.deinit();
 
     _ = try view.get(0);
-    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
+    try std.testing.expect(view.data.children_nodes.count() > 0);
 
     var cloned_no_cache = try view.clone(.{ .transfer_cache = false });
     defer cloned_no_cache.deinit();
 
-    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
-    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.base_view.data.children_nodes.count());
+    try std.testing.expect(view.data.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.data.children_nodes.count());
 }
 
 test "BitListTreeView clone(false) transfers cache and clears source" {
@@ -82,13 +82,13 @@ test "BitListTreeView clone(false) transfers cache and clears source" {
     defer view.deinit();
 
     _ = try view.get(0);
-    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
+    try std.testing.expect(view.data.children_nodes.count() > 0);
 
     var cloned = try view.clone(.{});
     defer cloned.deinit();
 
-    try std.testing.expectEqual(@as(usize, 0), view.base_view.data.children_nodes.count());
-    try std.testing.expect(cloned.base_view.data.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), view.data.children_nodes.count());
+    try std.testing.expect(cloned.data.children_nodes.count() > 0);
 }
 
 test "BitListTreeView clone isolates updates" {
