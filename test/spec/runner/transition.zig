@@ -10,8 +10,12 @@ const CachedBeaconStateAllForks = state_transition.CachedBeaconStateAllForks;
 const test_case = @import("../test_case.zig");
 const loadSszValue = test_case.loadSszSnappyValue;
 const expectEqualBeaconStates = test_case.expectEqualBeaconStates;
+const expectEqualBlindedBeaconStates = test_case.expectEqualBlindedBeaconStates;
 const TestCaseUtils = test_case.TestCaseUtils;
 const loadSignedBeaconBlock = test_case.loadSignedBeaconBlock;
+const beaconBlockToBlinded = test_case.beaconBlockToBlinded;
+const loadBlsSetting = test_case.loadBlsSetting;
+const BlsSetting = test_case.BlsSetting;
 
 pub fn Transition(comptime fork: ForkSeq) type {
     const tc_utils = TestCaseUtils(fork);
@@ -20,6 +24,8 @@ pub fn Transition(comptime fork: ForkSeq) type {
         pre: TestCachedBeaconStateAllForks,
         post: ?BeaconStateAllForks,
         blocks: []SignedBeaconBlock,
+        bls_setting: BlsSetting,
+        dir: std.fs.Dir,
 
         const Self = @This();
 
@@ -37,6 +43,8 @@ pub fn Transition(comptime fork: ForkSeq) type {
                 .pre = undefined,
                 .post = undefined,
                 .blocks = undefined,
+                .bls_setting = loadBlsSetting(allocator, dir),
+                .dir = dir,
             };
 
             // Load meta.yaml for blocks_count
@@ -148,14 +156,138 @@ pub fn Transition(comptime fork: ForkSeq) type {
             return post_state;
         }
 
+        pub fn processBlinded(self: *Self, pre_state: *CachedBeaconStateAllForks) !*CachedBeaconStateAllForks {
+            var post_state: *CachedBeaconStateAllForks = pre_state;
+
+            // Note: runTest() already ensures all blocks are Capella+ and no fork transitions
+            for (self.blocks, 0..) |beacon_block, i| {
+                switch (beacon_block) {
+                    .capella => |b| {
+                        var regular_body_root: [32]u8 = undefined;
+                        try ssz.capella.BeaconBlockBody.hashTreeRoot(self.pre.allocator, &b.message.body, &regular_body_root);
+
+                        const blinded_block = ssz.capella.SignedBlindedBeaconBlock.Type{
+                            .message = try beaconBlockToBlinded(.capella).convert(self.pre.allocator, &b.message),
+                            .signature = b.signature,
+                        };
+                        defer ssz.capella.ExecutionPayloadHeader.getFieldType("extra_data").deinit(self.pre.allocator, @constCast(&blinded_block.message.body.execution_payload_header.extra_data));
+
+                        post_state = try self.processBlindedBlock(post_state, .{ .capella = &blinded_block }, i, regular_body_root);
+                    },
+                    .deneb => |b| {
+                        var regular_body_root: [32]u8 = undefined;
+                        try ssz.deneb.BeaconBlockBody.hashTreeRoot(self.pre.allocator, &b.message.body, &regular_body_root);
+
+                        const blinded_block = ssz.deneb.SignedBlindedBeaconBlock.Type{
+                            .message = try beaconBlockToBlinded(.deneb).convert(self.pre.allocator, &b.message),
+                            .signature = b.signature,
+                        };
+                        defer ssz.deneb.ExecutionPayloadHeader.getFieldType("extra_data").deinit(self.pre.allocator, @constCast(&blinded_block.message.body.execution_payload_header.extra_data));
+
+                        post_state = try self.processBlindedBlock(post_state, .{ .deneb = &blinded_block }, i, regular_body_root);
+                    },
+                    .electra => |b| {
+                        var regular_body_root: [32]u8 = undefined;
+                        try ssz.electra.BeaconBlockBody.hashTreeRoot(self.pre.allocator, &b.message.body, &regular_body_root);
+
+                        const blinded_block = ssz.electra.SignedBlindedBeaconBlock.Type{
+                            .message = try beaconBlockToBlinded(.electra).convert(self.pre.allocator, &b.message),
+                            .signature = b.signature,
+                        };
+                        defer {
+                            ssz.electra.BeaconBlockBody.getFieldType("execution_requests").deinit(self.pre.allocator, @constCast(&blinded_block.message.body.execution_requests));
+                            ssz.electra.ExecutionPayloadHeader.getFieldType("extra_data").deinit(self.pre.allocator, @constCast(&blinded_block.message.body.execution_payload_header.extra_data));
+                        }
+
+                        post_state = try self.processBlindedBlock(post_state, .{ .electra = &blinded_block }, i, regular_body_root);
+                    },
+                    else => return error.UnsupportedForkForBlindedBlocks,
+                }
+            }
+
+            return post_state;
+        }
+
+        fn processBlindedBlock(
+            self: *Self,
+            post_state: *CachedBeaconStateAllForks,
+            blinded_block: state_transition.SignedBlindedBeaconBlock,
+            block_index: usize,
+            regular_body_root: [32]u8,
+        ) !*CachedBeaconStateAllForks {
+            errdefer {
+                if (block_index > 0) {
+                    post_state.deinit();
+                    self.pre.allocator.destroy(post_state);
+                }
+            }
+
+            const new_post_state = try state_transition.state_transition.stateTransition(
+                self.pre.allocator,
+                post_state,
+                .{ .blinded = blinded_block },
+                .{
+                    .verify_state_root = true,
+                    .verify_proposer = false,
+                    .verify_signatures = false,
+                },
+            );
+
+            const to_destroy = post_state;
+            const result = new_post_state;
+
+            // Restore regular body_root for multi-block support
+            result.state.latestBlockHeader().body_root = regular_body_root;
+
+            if (block_index > 0) {
+                to_destroy.deinit();
+                self.pre.allocator.destroy(to_destroy);
+            }
+
+            return result;
+        }
+
         pub fn runTest(self: *Self) !void {
             if (self.post) |post| {
+                // Test regular blocks
                 const actual = try self.process();
                 defer {
                     actual.deinit();
                     self.pre.allocator.destroy(actual);
                 }
                 try expectEqualBeaconStates(post, actual.state.*);
+
+                // Test blinded blocks for Capella+ (if BLS verification is not required)
+                if (comptime fork.gte(.capella) and fork.lte(.electra)) {
+                    if (!self.bls_setting.verify()) {
+                        const pre_state_fork = self.pre.cached_state.state.forkSeq();
+
+                        // Check if blocks cross fork boundaries
+                        // Skip blinded testing for cross-fork scenarios (e.g., Deneb state → Electra blocks)
+                        var has_fork_transition = false;
+                        for (self.blocks) |block| {
+                            const block_fork_tag = std.meta.activeTag(block);
+                            const block_fork: ForkSeq = @enumFromInt(@intFromEnum(block_fork_tag));
+                            if (block_fork != pre_state_fork) {
+                                has_fork_transition = true;
+                                break;
+                            }
+                        }
+
+                        // Only test same-fork scenarios with Capella+
+                        if (!has_fork_transition and pre_state_fork.gte(.capella)) {
+                            var blinded_pre = try tc_utils.loadPreStatePreFork(self.pre.allocator, self.dir, @intCast(self.pre.cached_state.state.fork().epoch));
+                            defer blinded_pre.deinit();
+
+                            const blinded_actual = try self.processBlinded(blinded_pre.cached_state);
+                            defer {
+                                blinded_actual.deinit();
+                                self.pre.allocator.destroy(blinded_actual);
+                            }
+                            try expectEqualBlindedBeaconStates(post, blinded_actual.state.*);
+                        }
+                    }
+                }
             } else {
                 _ = self.process() catch |err| {
                     if (err == error.SkipZigTest) {

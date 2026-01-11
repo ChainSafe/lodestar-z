@@ -13,6 +13,7 @@ const Slot = types.primitive.Slot.Type;
 
 const CachedBeaconStateAllForks = @import("cache/state_cache.zig").CachedBeaconStateAllForks;
 pub const SignedBeaconBlock = @import("types/beacon_block.zig").SignedBeaconBlock;
+pub const SignedBlindedBeaconBlock = @import("types/beacon_block.zig").SignedBlindedBeaconBlock;
 const verifyProposerSignature = @import("./signature_sets/proposer.zig").verifyProposerSignature;
 pub const processBlock = @import("./block/process_block.zig").processBlock;
 const BeaconBlock = @import("types/beacon_block.zig").BeaconBlock;
@@ -24,7 +25,6 @@ const ProposerSlashing = types.phase0.ProposerSlashing.Type;
 const BlindedBeaconBlock = @import("types/beacon_block.zig").BlindedBeaconBlock;
 const BlindedBeaconBlockBody = @import("types/beacon_block.zig").BlindedBeaconBlockBody;
 const BeaconBlockBody = @import("types/beacon_block.zig").BeaconBlockBody;
-const SignedBlindedBeaconBlock = @import("types/beacon_block.zig").SignedBlindedBeaconBlock;
 const EpochTransitionCacheOpts = @import("cache/epoch_transition_cache.zig").EpochTransitionCacheOpts;
 const EpochTransitionCache = @import("cache/epoch_transition_cache.zig").EpochTransitionCache;
 const ReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").ReusedEpochTransitionCache;

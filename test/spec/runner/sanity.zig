@@ -9,9 +9,11 @@ const CachedBeaconStateAllForks = state_transition.CachedBeaconStateAllForks;
 const test_case = @import("../test_case.zig");
 const loadSszValue = test_case.loadSszSnappyValue;
 const expectEqualBeaconStates = test_case.expectEqualBeaconStates;
+const expectEqualBlindedBeaconStates = test_case.expectEqualBlindedBeaconStates;
 const TestCaseUtils = test_case.TestCaseUtils;
 const loadBlsSetting = test_case.loadBlsSetting;
 const BlsSetting = test_case.BlsSetting;
+const beaconBlockToBlinded = test_case.beaconBlockToBlinded;
 
 /// https://github.com/ethereum/consensus-specs/blob/master/tests/formats/sanity/README.md
 pub const Handler = enum {
@@ -103,6 +105,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
         post: ?BeaconStateAllForks,
         blocks: []SignedBeaconBlock.Type,
         bls_setting: BlsSetting,
+        dir: std.fs.Dir,
 
         const Self = @This();
 
@@ -122,6 +125,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
                 .post = undefined,
                 .blocks = undefined,
                 .bls_setting = loadBlsSetting(allocator, dir),
+                .dir = dir,
             };
 
             // load pre state
@@ -211,14 +215,87 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
             return post_state;
         }
 
+        pub fn processBlinded(self: *Self, pre_state: *CachedBeaconStateAllForks) !*CachedBeaconStateAllForks {
+            const SignedBlindedBeaconBlock = @field(ForkTypes, "SignedBlindedBeaconBlock");
+            const verify = self.bls_setting.verify();
+            var post_state: *CachedBeaconStateAllForks = pre_state;
+
+            for (self.blocks, 0..) |*block, i| {
+                // Calculate the regular block's body_root for later restoration
+                var regular_body_root: [32]u8 = undefined;
+                try ForkTypes.BeaconBlockBody.hashTreeRoot(self.pre.allocator, &block.message.body, &regular_body_root);
+
+                // convert regular block to blinded block
+                const blinded_block = SignedBlindedBeaconBlock.Type{
+                    .message = try beaconBlockToBlinded(fork).convert(self.pre.allocator, &block.message),
+                    .signature = block.signature,
+                };
+                defer {
+                    // Clean up cloned fields in blinded block body
+                    if (comptime @hasField(ForkTypes.BlindedBeaconBlockBody.Type, "execution_requests")) {
+                        ForkTypes.BeaconBlockBody.getFieldType("execution_requests").deinit(self.pre.allocator, @constCast(&blinded_block.message.body.execution_requests));
+                    }
+                    // Clean up cloned extra_data in execution_payload_header
+                    ForkTypes.ExecutionPayloadHeader.getFieldType("extra_data").deinit(self.pre.allocator, @constCast(&blinded_block.message.body.execution_payload_header.extra_data));
+                }
+                const signed_blinded_block = @unionInit(state_transition.SignedBlindedBeaconBlock, @tagName(fork), &blinded_block);
+                {
+                    errdefer {
+                        if (i > 0) {
+                            post_state.deinit();
+                            self.pre.allocator.destroy(post_state);
+                        }
+                    }
+                    const new_post_state = try state_transition.state_transition.stateTransition(self.pre.allocator, post_state, .{
+                        .blinded = signed_blinded_block,
+                    }, .{
+                        .verify_signatures = verify,
+                        .verify_proposer = verify,
+                        .verify_state_root = false,
+                    });
+
+                    const to_destroy = post_state;
+                    post_state = new_post_state;
+
+                    // Fix up the body_root in latest_block_header to match the regular block
+                    // This ensures the next block's parent_root will match correctly
+                    post_state.state.latestBlockHeader().body_root = regular_body_root;
+
+                    if (i > 0) {
+                        to_destroy.deinit();
+                        self.pre.allocator.destroy(to_destroy);
+                    }
+                }
+            }
+
+            return post_state;
+        }
+
         pub fn runTest(self: *Self) !void {
             if (self.post) |post| {
+                // Test regular blocks
                 const actual = try self.process();
                 defer {
                     actual.deinit();
                     self.pre.allocator.destroy(actual);
                 }
                 try expectEqualBeaconStates(post, actual.state.*);
+
+                // Test blinded blocks using converted blocks (Capella to Electra)
+                if (comptime fork.gte(.capella) and fork.lte(.electra)) {
+                    // we only run blinded block tests when bls_setting = 2 (ignored)
+                    if (!self.bls_setting.verify()) {
+                        var blinded_pre = try tc_utils.loadPreState(self.pre.allocator, self.dir);
+                        defer blinded_pre.deinit();
+
+                        const blinded_actual = try self.processBlinded(blinded_pre.cached_state);
+                        defer {
+                            blinded_actual.deinit();
+                            self.pre.allocator.destroy(blinded_actual);
+                        }
+                        try expectEqualBlindedBeaconStates(post, blinded_actual.state.*);
+                    }
+                }
             } else {
                 _ = self.process() catch |err| {
                     if (err == error.SkipZigTest) {

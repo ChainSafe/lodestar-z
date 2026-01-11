@@ -4,6 +4,7 @@ const testing = std.testing;
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
 pub const BeaconBlock = @import("./types/beacon_block.zig").BeaconBlock;
 pub const BeaconBlockBody = @import("./types/beacon_block.zig").BeaconBlockBody;
+pub const BlindedBeaconBlock = @import("./types/beacon_block.zig").BlindedBeaconBlock;
 pub const BeaconStateAllForks = @import("./types/beacon_state.zig").BeaconStateAllForks;
 pub const CachedBeaconStateAllForks = @import("./cache/state_cache.zig").CachedBeaconStateAllForks;
 pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
@@ -86,6 +87,7 @@ pub const SignedBlock = @import("./types/block.zig").SignedBlock;
 pub const Block = @import("./types/block.zig").Block;
 pub const Body = @import("./types/block.zig").Body;
 pub const SignedBeaconBlock = @import("./types/beacon_block.zig").SignedBeaconBlock;
+pub const SignedBlindedBeaconBlock = @import("./types/beacon_block.zig").SignedBlindedBeaconBlock;
 pub const Attestations = @import("./types/attestation.zig").Attestations;
 pub const processProposerLookahead = @import("./epoch/process_proposer_lookahead.zig").processProposerLookahead;
 
