@@ -109,6 +109,7 @@
                 .ssz,
                 .config,
                 .consensus_types,
+                .persistent_merkle_tree,
                 .blst,
                 .preset,
                 .constants,
