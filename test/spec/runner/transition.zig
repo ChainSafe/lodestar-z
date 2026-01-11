@@ -137,8 +137,8 @@ pub fn Transition(comptime fork: ForkSeq) type {
                     },
                     .{
                         .verify_state_root = true,
-                        .verify_proposer = false,
-                        .verify_signatures = false,
+                        .verify_proposer = true,
+                        .verify_signatures = true,
                     },
                 );
 
