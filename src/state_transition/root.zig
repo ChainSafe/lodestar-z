@@ -5,6 +5,7 @@ pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSignin
 pub const BeaconBlock = @import("./types/beacon_block.zig").BeaconBlock;
 pub const BeaconBlockBody = @import("./types/beacon_block.zig").BeaconBlockBody;
 pub const BeaconStateAllForks = @import("./types/beacon_state.zig").BeaconStateAllForks;
+pub const BeaconStateTreeViewAllForks = @import("./types/beacon_state_tree_view.zig").BeaconStateTreeViewAllForks;
 pub const CachedBeaconStateAllForks = @import("./cache/state_cache.zig").CachedBeaconStateAllForks;
 pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
 
@@ -70,6 +71,8 @@ pub const processConsolidationRequest = @import("./block/process_consolidation_r
 // utils
 pub const getBlockRootAtSlot = @import("./utils/block_root.zig").getBlockRootAtSlot;
 pub const computeStartSlotAtEpoch = @import("./utils/epoch.zig").computeStartSlotAtEpoch;
+pub const loadState = @import("./utils/load_state.zig").loadState;
+pub const MigrateStateOutput = @import("./utils/load_state.zig").MigrateStateOutput;
 pub const deinitStateTransition = @import("./state_transition.zig").deinitStateTransition;
 
 pub const WithdrawalsResult = @import("./block/process_withdrawals.zig").WithdrawalsResult;
