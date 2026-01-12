@@ -28,3 +28,16 @@ pub fn processSyncCommitteeUpdates(allocator: Allocator, cached_state: *CachedBe
         try epoch_cache.rotateSyncCommitteeIndexed(allocator, &next_sync_committee_info.indices);
     }
 }
+
+test "processSyncCommitteeUpdates - sanity" {
+    const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
+    const allocator = std.testing.allocator;
+    const validator_count_arr = &.{ 256, 10_000 };
+
+    inline for (validator_count_arr) |validator_count| {
+        var test_state = try TestCachedBeaconStateAllForks.init(allocator, validator_count);
+        defer test_state.deinit();
+        try processSyncCommitteeUpdates(allocator, test_state.cached_state);
+    }
+    defer @import("../state_transition.zig").deinitStateTransition();
+}

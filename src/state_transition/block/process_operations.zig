@@ -78,3 +78,19 @@ pub fn processOperations(
         }
     }
 }
+
+const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
+const Block = @import("../types/block.zig").Block;
+const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
+test "process operations" {
+    const allocator = std.testing.allocator;
+
+    var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+    defer test_state.deinit();
+
+    const electra_block = types.electra.BeaconBlock.default_value;
+    const beacon_block = BeaconBlock{ .electra = &electra_block };
+
+    const block = Block{ .regular = beacon_block };
+    try processOperations(allocator, test_state.cached_state, block.beaconBlockBody(), .{});
+}

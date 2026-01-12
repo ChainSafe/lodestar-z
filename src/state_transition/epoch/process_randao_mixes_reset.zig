@@ -18,3 +18,12 @@ pub fn processRandaoMixesReset(cached_state: *CachedBeaconState, cache: *const E
         try old.clone(.{}),
     );
 }
+
+test "processRandaoMixesReset - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processRandaoMixesReset, .{
+        .alloc = false,
+        .err_return = true,
+        .void_return = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}

@@ -69,3 +69,12 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
         try processProposerLookahead(allocator, cached_state, cache);
     }
 }
+
+test "processEpoch - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processEpoch, .{
+        .alloc = true,
+        .err_return = true,
+        .void_return = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}

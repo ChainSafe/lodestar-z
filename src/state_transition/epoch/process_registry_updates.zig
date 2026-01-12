@@ -48,3 +48,12 @@ pub fn processRegistryUpdates(cached_state: *CachedBeaconState, cache: *const Ep
         try validator.set("activation_epoch", activation_epoch);
     }
 }
+
+test "processRegistryUpdates - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processRegistryUpdates, .{
+        .alloc = false,
+        .err_return = true,
+        .void_return = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}

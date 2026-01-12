@@ -9,3 +9,10 @@ pub fn processBlobKzgCommitments(external_data: BlockExternalData) !void {
         else => {},
     }
 }
+
+test "process blob kzg commitments - sanity" {
+    try processBlobKzgCommitments(.{
+        .execution_payload_status = .valid,
+        .data_availability_status = .available,
+    });
+}

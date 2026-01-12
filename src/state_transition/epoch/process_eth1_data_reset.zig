@@ -14,3 +14,12 @@ pub fn processEth1DataReset(cached_state: *CachedBeaconState, cache: *const Epoc
         try state.resetEth1DataVotes();
     }
 }
+
+test "processEth1DataReset - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processEth1DataReset, .{
+        .alloc = false,
+        .err_return = true,
+        .void_return = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}

@@ -45,3 +45,12 @@ pub fn processInactivityUpdates(cached_state: *CachedBeaconState, cache: *const 
         }
     }
 }
+
+test "processInactivityUpdates - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processInactivityUpdates, .{
+        .alloc = false,
+        .err_return = true,
+        .void_return = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}

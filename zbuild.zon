@@ -204,22 +204,6 @@
             .root_module = .{
                 .root_source_file = "test/int/root.zig",
                 .imports = .{
-                    .build_options,
-                    .state_transition,
-                    .config,
-                    .consensus_types,
-                    .preset,
-                    .constants,
-                    .blst,
-                    .persistent_merkle_tree,
-                },
-            },
-            .filters = .{},
-        },
-        .int_slow = .{
-            .root_module = .{
-                .root_source_file = "test/int_slow/root.zig",
-                .imports = .{
                     .config,
                     .download_era_options,
                     .era,

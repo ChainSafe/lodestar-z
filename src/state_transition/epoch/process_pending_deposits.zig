@@ -150,3 +150,12 @@ fn applyPendingDeposit(allocator: Allocator, cached_state: *CachedBeaconState, d
         }
     }
 }
+
+test "processPendingDeposits - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processPendingDeposits, .{
+        .alloc = true,
+        .err_return = true,
+        .void_return = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}
