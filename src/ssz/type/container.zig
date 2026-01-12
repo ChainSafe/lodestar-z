@@ -79,7 +79,7 @@ pub fn FixedContainerType(comptime ST: type) type {
         }
 
         /// Creates a new `FixedContainerType` and clones all underlying fields in the container.
-        /// out is a pointer to any types that contains all fields of Type.
+        /// `out` is a pointer to any types that contains all fields of `Type`.
         /// Caller owns the memory.
         pub fn clone(value: *const Type, out: anytype) !void {
             const OutType = @TypeOf(out.*);
