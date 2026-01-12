@@ -171,17 +171,17 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
             return indices;
         }
 
-        pub fn hashTreeRoot(value: *const @This(), out: *[32]u8) !void {
+        pub fn hashTreeRoot(value: *const Type, out: *[32]u8) !void {
             var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
             _ = serializeIntoBytes(value, @ptrCast(&chunks));
             try merkleize(@ptrCast(&chunks), chunk_depth, out);
         }
 
-        pub fn clone(value: *const @This(), out: *@This()) !void {
+        pub fn clone(value: *const Type, out: *Type) !void {
             out.* = value.*;
         }
 
-        pub fn serializeIntoBytes(value: *const @This(), out: []u8) usize {
+        pub fn serializeIntoBytes(value: *const Type, out: []u8) usize {
             @memcpy(out[0..byte_length], &value.data);
             return byte_length;
         }
@@ -287,7 +287,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
             }
         };
 
-        pub fn serializeIntoJson(writer: anytype, in: *const @This()) !void {
+        pub fn serializeIntoJson(writer: anytype, in: *const Type) !void {
             const bytes = in.*.data;
             var byte_str: [2 + 2 * byte_length]u8 = undefined;
 
@@ -295,7 +295,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
             try writer.print("\"{s}\"", .{byte_str});
         }
 
-        pub fn deserializeFromJson(source: *std.json.Scanner, out: *@This()) !void {
+        pub fn deserializeFromJson(source: *std.json.Scanner, out: *Type) !void {
             const hex_bytes = switch (try source.next()) {
                 .string => |v| v,
                 else => return error.InvalidJson,
