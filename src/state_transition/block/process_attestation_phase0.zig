@@ -23,12 +23,13 @@ pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaco
     try validateAttestation(types.phase0.Attestation.Type, cached_state, attestation);
 
     // should store a clone of aggregation_bits on Phase0 BeaconState to avoid double free error
-    var cloned_aggregation_bits: ssz.BitListType(preset.MAX_VALIDATORS_PER_COMMITTEE).Type = undefined;
-    try ssz.BitListType(preset.MAX_VALIDATORS_PER_COMMITTEE).clone(allocator, &attestation.aggregation_bits, &cloned_aggregation_bits);
+    const AggregationBits = ssz.BitListType(preset.MAX_VALIDATORS_PER_COMMITTEE);
+    var cloned_aggregation_bits: AggregationBits = undefined;
+    try AggregationBits.clone(allocator, &attestation.aggregation_bits, &cloned_aggregation_bits);
     var appended: bool = false;
     errdefer {
         if (!appended) {
-            cloned_aggregation_bits.deinit(allocator);
+            AggregationBits.deinit(allocator, &cloned_aggregation_bits);
         }
     }
 
