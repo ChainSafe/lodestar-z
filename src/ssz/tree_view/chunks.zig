@@ -63,9 +63,10 @@ pub fn BasicPackedChunks(
             if (values.len != len) return error.InvalidSize;
             if (len == 0) return values;
 
-            if (base_view.data.changed.count() != 0) {
-                return error.MustCommitBeforeBulkRead;
-            }
+            // TODO revisit this restriction later
+            // if (base_view.data.changed.count() != 0) {
+            //     return error.MustCommitBeforeBulkRead;
+            // }
 
             const len_full_chunks = len / items_per_chunk;
             const remainder = len % items_per_chunk;

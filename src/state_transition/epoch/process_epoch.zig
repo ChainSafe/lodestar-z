@@ -40,14 +40,14 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
 
     if (state.forkSeq().gte(.electra)) {
         try processPendingDeposits(allocator, cached_state, cache);
-        try processPendingConsolidations(allocator, cached_state, cache);
+        try processPendingConsolidations(cached_state, cache);
     }
 
     // const numUpdate = processEffectiveBalanceUpdates(fork, state, cache);
-    _ = try processEffectiveBalanceUpdates(cached_state, cache);
+    _ = try processEffectiveBalanceUpdates(allocator, cached_state, cache);
 
-    processSlashingsReset(cached_state, cache);
-    processRandaoMixesReset(cached_state, cache);
+    try processSlashingsReset(cached_state, cache);
+    try processRandaoMixesReset(cached_state, cache);
 
     if (state.forkSeq().gte(.capella)) {
         try processHistoricalSummariesUpdate(cached_state, cache);
@@ -55,8 +55,8 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
         try processHistoricalRootsUpdate(cached_state, cache);
     }
 
-    if (state.isPhase0()) {
-        processParticipationRecordUpdates(allocator, cached_state);
+    if (state.forkSeq() == .phase0) {
+        try processParticipationRecordUpdates(cached_state);
     } else {
         try processParticipationFlagUpdates(cached_state);
     }
@@ -65,7 +65,7 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
         try processSyncCommitteeUpdates(allocator, cached_state);
     }
 
-    if (state.isFulu()) {
+    if (state.forkSeq().gte(.fulu)) {
         try processProposerLookahead(allocator, cached_state, cache);
     }
 }

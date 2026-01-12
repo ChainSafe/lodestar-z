@@ -8,7 +8,7 @@ const TestRunner = @import("./test_runner.zig").TestRunner;
 
 test "processPendingConsolidations - sanity" {
     try TestRunner(state_transition.processPendingConsolidations, .{
-        .alloc = true,
+        .alloc = false,
         .err_return = true,
         .void_return = true,
     }).testProcessEpochFn();
