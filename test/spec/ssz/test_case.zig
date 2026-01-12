@@ -11,10 +11,10 @@ const Allocator = std.mem.Allocator;
 
 pub fn parseYaml(comptime ST: type, allocator: Allocator, y: yaml.Yaml, out: *ST.Type) !void {
     if (comptime ssz.isBitVectorType(ST)) {
-        const bytes_buf = try allocator.alloc(u8, ST.byte_length + 2);
+        const bytes_buf = try allocator.alloc(u8, ST.byte_len + 2);
         const yaml_bytes = try y.parse(allocator, []const u8);
         const bytes = try hex.hexToBytes(bytes_buf, yaml_bytes);
-        out.* = ST.Type{ .data = bytes[0..ST.byte_length].* };
+        out.* = ST.Type{ .data = bytes[0..ST.byte_len].* };
         return;
     } else if (comptime ssz.isBitListType(ST)) {
         const bytes_buf = try allocator.alloc(u8, ((ST.limit + 7) / 8) + 2);
