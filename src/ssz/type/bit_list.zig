@@ -20,11 +20,7 @@ pub fn isBitListType(ST: type) bool {
 }
 
 pub fn BitListType(comptime _limit: comptime_int) type {
-    comptime {
-        if (_limit <= 0) {
-            @compileError("limit must be greater than 0");
-        }
-    }
+    if (_limit <= 0) @compileError("limit must be greater than 0");
 
     return struct {
         const Self = @This();
@@ -40,7 +36,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         pub const chunk_depth: u8 = maxChunksToDepth(max_chunk_count);
 
         data: std.ArrayListUnmanaged(u8),
-        bit_len: usize,
+        bit_len: usize = 0,
 
         pub const empty: Self = .{
             .data = std.ArrayListUnmanaged(u8).empty,
