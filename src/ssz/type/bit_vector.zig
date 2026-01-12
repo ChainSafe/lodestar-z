@@ -182,7 +182,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
             return byte_length;
         }
 
-        pub fn deserializeFromBytes(data: []const u8, out: *@This()) !void {
+        pub fn deserializeFromBytes(data: []const u8, out: *Type) !void {
             try serialized.validate(data);
 
             @memcpy(&out.data, data[0..fixed_size]);
