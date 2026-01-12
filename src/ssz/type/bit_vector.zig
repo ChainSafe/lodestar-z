@@ -221,7 +221,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
 
                 var chunks: [chunk_count][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** chunk_count;
                 const chunk_bytes: []u8 = @ptrCast(&chunks);
-                @memcpy(chunk_bytes[0..byte_length], data[0..byte_len]);
+                @memcpy(chunk_bytes[0..byte_length], data[0..byte_length]);
 
                 var nodes: [chunk_count]Node.Id = undefined;
                 for (&chunks, 0..) |*chunk, i| {
