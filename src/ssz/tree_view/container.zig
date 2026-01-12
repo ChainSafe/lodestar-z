@@ -39,8 +39,10 @@ pub fn ContainerTreeView(comptime ST: type) type {
             try self.base_view.commit();
         }
 
-        pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
-            try self.base_view.hashTreeRoot(out);
+        /// Return the root hash of the tree.
+        /// The returned array is owned by the internal pool and must not be modified.
+        pub fn hashTreeRoot(self: *Self) !*const [32]u8 {
+            return try self.base_view.hashTreeRoot();
         }
 
         pub fn Field(comptime field_name: []const u8) type {
@@ -105,6 +107,22 @@ pub fn ContainerTreeView(comptime ST: type) type {
                     },
                 };
             }
+        }
+
+        pub fn getValue(self: *const Self, allocator: Allocator, comptime field_name: []const u8) !FieldValue(field_name) {
+            const ChildST = ST.getFieldType(field_name);
+            if (comptime isBasicType(ChildST)) {
+                return self.get(field_name);
+            }
+
+            var child_view = try self.get(field_name);
+            var out = ChildST.default_value;
+            if (comptime isFixedType(ChildST)) {
+                try child_view.toValue(&out);
+            } else {
+                try child_view.toValue(allocator, &out);
+            }
+            return out;
         }
 
         /// Set a field by name. If the field is a basic type, pass the value directly.
@@ -246,14 +264,8 @@ test "TreeView container field roundtrip" {
     };
     try Checkpoint.hashTreeRoot(&expected_checkpoint, &htr_from_value);
 
-    var htr_from_tree: [32]u8 = undefined;
-    try cp_view.hashTreeRoot(&htr_from_tree);
-
-    try std.testing.expectEqualSlices(
-        u8,
-        &htr_from_value,
-        &htr_from_tree,
-    );
+    const htr_from_tree = try cp_view.hashTreeRoot();
+    try std.testing.expectEqualSlices(u8, &htr_from_value, htr_from_tree);
 }
 
 test "TreeView container nested types set/get/commit" {
@@ -573,9 +585,8 @@ test "ContainerTreeView - serialize (basic fields)" {
         const view_size = try view.serializedSize();
         try std.testing.expectEqual(tc.expected_serialized.len, view_size);
 
-        var hash_root: [32]u8 = undefined;
-        try view.hashTreeRoot(&hash_root);
-        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
+        const hash_root = try view.hashTreeRoot();
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, hash_root);
     }
 }
 
@@ -653,9 +664,8 @@ test "ContainerTreeView - serialize (with nested list)" {
     try std.testing.expectEqualSlices(u8, &expected_serialized, view_serialized);
     try std.testing.expectEqualSlices(u8, value_serialized, view_serialized);
 
-    var hash_root: [32]u8 = undefined;
-    try view.hashTreeRoot(&hash_root);
     // 0xdc3619cbbc5ef0e0a3b38e3ca5d31c2b16868eacb6e4bcf8b4510963354315f5
     const expected_root = [_]u8{ 0xdc, 0x36, 0x19, 0xcb, 0xbc, 0x5e, 0xf0, 0xe0, 0xa3, 0xb3, 0x8e, 0x3c, 0xa5, 0xd3, 0x1c, 0x2b, 0x16, 0x86, 0x8e, 0xac, 0xb6, 0xe4, 0xbc, 0xf8, 0xb4, 0x51, 0x09, 0x63, 0x35, 0x43, 0x15, 0xf5 };
-    try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
+    const hash_root = try view.hashTreeRoot();
+    try std.testing.expectEqualSlices(u8, &expected_root, hash_root);
 }

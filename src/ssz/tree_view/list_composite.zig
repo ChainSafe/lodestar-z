@@ -60,9 +60,10 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             self.base_view.clearCache();
         }
 
-        pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
-            try self.commit();
-            out.* = self.base_view.data.root.getRoot(self.base_view.pool).*;
+        /// Return the root hash of the tree.
+        /// The returned array is owned by the internal pool and must not be modified.
+        pub fn hashTreeRoot(self: *Self) !*const [32]u8 {
+            return try self.base_view.hashTreeRoot();
         }
 
         pub fn length(self: *Self) !usize {
@@ -462,10 +463,8 @@ test "TreeView composite list sliceFrom handles boundary conditions" {
             var expected_root: [32]u8 = expected_node.getRoot(&pool).*;
             defer pool.unref(expected_node);
 
-            var actual_root: [32]u8 = undefined;
-            try sliced.hashTreeRoot(&actual_root);
-
-            try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+            const actual_root = try sliced.hashTreeRoot();
+            try std.testing.expectEqualSlices(u8, &expected_root, actual_root);
         }
     }
 }
@@ -906,10 +905,8 @@ test "TreeView composite list sliceTo matches incremental snapshots" {
         var expected_root: [32]u8 = undefined;
         try ListType.hashTreeRoot(allocator, &expected, &expected_root);
 
-        var actual_root: [32]u8 = undefined;
-        try sliced.hashTreeRoot(&actual_root);
-
-        try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+        const actual_root = try sliced.hashTreeRoot();
+        try std.testing.expectEqualSlices(u8, &expected_root, actual_root);
 
         const serialized_len = ListType.serializedSize(&expected);
         const expected_bytes = try allocator.alloc(u8, serialized_len);
@@ -982,9 +979,8 @@ test "ListCompositeTreeView - serialize (ByteVector32 list)" {
         try std.testing.expectEqualSlices(u8, value_serialized, view_serialized);
         try std.testing.expectEqual(value_serialized.len, view_size);
 
-        var hash_root: [32]u8 = undefined;
-        try view.hashTreeRoot(&hash_root);
-        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
+        const hash_root = try view.hashTreeRoot();
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, hash_root);
     }
 }
 
@@ -1058,9 +1054,8 @@ test "ListCompositeTreeView - serialize (Container list)" {
         try std.testing.expectEqualSlices(u8, tc.expected_serialized, view_serialized);
         try std.testing.expectEqualSlices(u8, value_serialized, view_serialized);
 
-        var hash_root: [32]u8 = undefined;
-        try view.hashTreeRoot(&hash_root);
-        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
+        const hash_root = try view.hashTreeRoot();
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, hash_root);
     }
 }
 
@@ -1103,10 +1098,9 @@ test "ListCompositeTreeView - push and serialize" {
     try std.testing.expectEqualSlices(u8, &val1, serialized[0..32]);
     try std.testing.expectEqualSlices(u8, &val2, serialized[32..64]);
 
-    var hash_root: [32]u8 = undefined;
-    try view.hashTreeRoot(&hash_root);
     const expected_root = [_]u8{ 0x0c, 0xb9, 0x47, 0x37, 0x7e, 0x17, 0x7f, 0x77, 0x47, 0x19, 0xea, 0xd8, 0xd2, 0x10, 0xaf, 0x9c, 0x64, 0x61, 0xf4, 0x1b, 0xaf, 0x5b, 0x40, 0x82, 0xf8, 0x6a, 0x39, 0x11, 0x45, 0x48, 0x31, 0xb8 };
-    try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
+    const hash_root = try view.hashTreeRoot();
+    try std.testing.expectEqualSlices(u8, &expected_root, hash_root);
 }
 
 test "ListCompositeTreeView - ReadonlyIterator" {

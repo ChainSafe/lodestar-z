@@ -195,9 +195,9 @@ pub const BaseTreeView = struct {
         self.data.changed.clearRetainingCapacity();
     }
 
-    pub fn hashTreeRoot(self: *BaseTreeView, out: *[32]u8) !void {
+    pub fn hashTreeRoot(self: *BaseTreeView) !*const [32]u8 {
         try self.commit();
-        out.* = self.data.root.getRoot(self.pool).*;
+        return self.data.root.getRoot(self.pool);
     }
 
     pub fn getChildNode(self: *BaseTreeView, gindex: Gindex) !Node.Id {

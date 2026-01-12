@@ -61,8 +61,10 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
             self.base_view.clearCache();
         }
 
-        pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
-            try self.base_view.hashTreeRoot(out);
+        /// Return the root hash of the tree.
+        /// The returned array is owned by the internal pool and must not be modified.
+        pub fn hashTreeRoot(self: *Self) !*const [32]u8 {
+            return try self.base_view.hashTreeRoot();
         }
 
         pub fn getRoot(self: *const Self, index: usize) !*const [32]u8 {
@@ -86,6 +88,17 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
         pub fn set(self: *Self, index: usize, value: Element) !void {
             if (index >= length) return error.IndexOutOfBounds;
             try Chunks.set(&self.base_view, index, value);
+        }
+
+        pub fn setValue(self: *Self, index: usize, value: *const ST.Element.Type) !void {
+            const root = try ST.Element.tree.fromValue(self.base_view.pool, value);
+            errdefer self.base_view.pool.unref(root);
+            const child_view = try ST.Element.TreeView.init(
+                self.base_view.allocator,
+                self.base_view.pool,
+                root,
+            );
+            try self.set(index, child_view);
         }
 
         pub fn getAllReadonly(self: *Self, allocator: Allocator) ![]Element {
@@ -164,13 +177,12 @@ test "TreeView vector composite element set/get/commit" {
 
     try view.commit();
 
-    var actual_root: [32]u8 = undefined;
-    try view.hashTreeRoot(&actual_root);
+    const actual_root = try view.hashTreeRoot();
 
     var expected: VectorType.Type = .{ v0, replacement };
     var expected_root: [32]u8 = undefined;
     try VectorType.hashTreeRoot(&expected, &expected_root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, actual_root);
 
     var roundtrip: VectorType.Type = undefined;
     try VectorType.tree.toValue(view.base_view.data.root, &pool, &roundtrip);
@@ -231,13 +243,12 @@ test "TreeView vector composite clearCache does not break subsequent commits" {
     try view.set(0, replacement_view.?);
     replacement_view = null;
 
-    var actual_root: [32]u8 = undefined;
-    try view.hashTreeRoot(&actual_root);
+    const actual_root = try view.hashTreeRoot();
 
     var expected: VectorType.Type = .{ replacement, v1 };
     var expected_root: [32]u8 = undefined;
     try VectorType.hashTreeRoot(&expected, &expected_root);
-    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, actual_root);
 }
 
 test "TreeView vector composite clone isolates updates" {
@@ -492,11 +503,10 @@ test "ArrayCompositeTreeView - serialize (Container vector)" {
     };
     try std.testing.expectEqualSlices(u8, &expected, &view_serialized);
 
-    var hash_root: [32]u8 = undefined;
-    try view.hashTreeRoot(&hash_root);
+    const actual_root = try view.hashTreeRoot();
     // 0xb1a797eb50654748ba239010edccea7b46b55bf740730b700684f48b0c478372
     const expected_root = [_]u8{ 0xb1, 0xa7, 0x97, 0xeb, 0x50, 0x65, 0x47, 0x48, 0xba, 0x23, 0x90, 0x10, 0xed, 0xcc, 0xea, 0x7b, 0x46, 0xb5, 0x5b, 0xf7, 0x40, 0x73, 0x0b, 0x70, 0x06, 0x84, 0xf4, 0x8b, 0x0c, 0x47, 0x83, 0x72 };
-    try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, actual_root);
 }
 
 test "ArrayCompositeTreeView - get and set" {
