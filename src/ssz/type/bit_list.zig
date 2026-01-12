@@ -16,7 +16,7 @@ const Node = @import("persistent_merkle_tree").Node;
 const BitListTreeView = @import("../tree_view/root.zig").BitListTreeView;
 
 pub fn isBitListType(ST: type) bool {
-    return ST.kind == .list and ST.Element.kind == .bool and ST.Type == BitListType(ST.limit).Type;
+    return ST.kind == .list and ST.Element.kind == .bool and ST == BitListType(ST.limit);
 }
 
 pub fn BitListType(comptime _limit: comptime_int) type {
@@ -26,20 +26,40 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         }
     }
 
-    const Impl = struct {
+    return struct {
+        const Self = @This();
+
+        pub const kind = TypeKind.list;
+        pub const Element: type = BoolType();
+        pub const limit: usize = _limit;
+        pub const Type: type = Self;
+        pub const TreeView: type = BitListTreeView(Self);
+        pub const min_size: usize = 1;
+        pub const max_size: usize = std.math.divCeil(usize, limit + 1, 8) catch unreachable;
+        pub const max_chunk_count: usize = std.math.divCeil(usize, limit, 256) catch unreachable;
+        pub const chunk_depth: u8 = maxChunksToDepth(max_chunk_count);
+
         data: std.ArrayListUnmanaged(u8),
         bit_len: usize,
 
-        pub const empty: @This() = .{
+        pub const empty: Self = .{
             .data = std.ArrayListUnmanaged(u8).empty,
             .bit_len = 0,
         };
 
-        pub fn equals(self: *const @This(), other: *const @This()) bool {
+        pub const default_value: Type = .empty;
+
+        pub const default_root: [32]u8 = blk: {
+            var buf = getZeroHash(chunk_depth).*;
+            mixInLength(0, &buf);
+            break :blk buf;
+        };
+
+        pub fn equals(self: *const Type, other: *const Type) bool {
             return self.bit_len == other.bit_len and std.mem.eql(u8, self.data.items, other.data.items);
         }
 
-        pub fn fromBitLen(allocator: std.mem.Allocator, bit_len: usize) !@This() {
+        pub fn fromBitLen(allocator: std.mem.Allocator, bit_len: usize) !Self {
             if (bit_len > _limit) {
                 return error.tooLarge;
             }
@@ -49,21 +69,21 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             var data = try std.ArrayListUnmanaged(u8).initCapacity(allocator, byte_len);
             data.expandToCapacity();
             @memset(data.items, 0);
-            return @This(){
+            return .{
                 .data = data,
                 .bit_len = bit_len,
             };
         }
 
-        pub fn fromBoolSlice(allocator: std.mem.Allocator, bools: []const bool) !@This() {
-            var bl = try @This().fromBitLen(allocator, bools.len);
+        pub fn fromBoolSlice(allocator: std.mem.Allocator, bools: []const bool) !Self {
+            var bl = try Self.fromBitLen(allocator, bools.len);
             for (bools, 0..) |bit, i| {
                 try bl.set(allocator, i, bit);
             }
             return bl;
         }
 
-        pub fn toBoolSlice(self: *const @This(), out: *[]bool) !void {
+        pub fn toBoolSlice(self: *const Self, out: *[]bool) !void {
             if (out.len != self.bit_len) {
                 return error.InvalidSize;
             }
@@ -72,7 +92,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             }
         }
 
-        pub fn getTrueBitIndexes(self: *const @This(), out: []usize) !usize {
+        pub fn getTrueBitIndexes(self: *const Self, out: []usize) !usize {
             if (out.len < self.bit_len) {
                 return error.InvalidSize;
             }
@@ -106,7 +126,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             return true_bit_count;
         }
 
-        pub fn getSingleTrueBit(self: *const @This()) ?usize {
+        pub fn getSingleTrueBit(self: *const Self) ?usize {
             var found_index: ?usize = null;
 
             for (self.data.items, 0..) |byte, i_byte| {
@@ -125,11 +145,11 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             return found_index;
         }
 
-        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-            self.data.deinit(allocator);
+        pub fn deinit(allocator: std.mem.Allocator, value: *Type) void {
+            value.data.deinit(allocator);
         }
 
-        pub fn get(self: *const @This(), bit_index: usize) !bool {
+        pub fn get(self: *const Self, bit_index: usize) !bool {
             if (bit_index >= self.bit_len) {
                 return error.OutOfRange;
             }
@@ -140,14 +160,14 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             return (self.data.items[byte_idx] & mask) == mask;
         }
 
-        pub fn set(self: *@This(), allocator: std.mem.Allocator, bit_index: usize, bit: bool) !void {
+        pub fn set(self: *Self, allocator: std.mem.Allocator, bit_index: usize, bit: bool) !void {
             if (bit_index + 1 > self.bit_len) {
                 try self.resize(allocator, bit_index + 1);
             }
             try self.setAssumeCapacity(bit_index, bit);
         }
 
-        pub fn resize(self: *@This(), allocator: std.mem.Allocator, bit_len: usize) !void {
+        pub fn resize(self: *Self, allocator: std.mem.Allocator, bit_len: usize) !void {
             if (bit_len > _limit) {
                 return error.tooLarge;
             }
@@ -171,7 +191,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         }
 
         /// Set bit value at index `bit_index`
-        pub fn setAssumeCapacity(self: *@This(), bit_index: usize, bit: bool) !void {
+        pub fn setAssumeCapacity(self: *Self, bit_index: usize, bit: bool) !void {
             if (bit_index >= self.bit_len) {
                 return error.OutOfRange;
             }
@@ -205,7 +225,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         ///
         /// Caller must call `deinit` on the returned list
         pub fn intersectValues(
-            self: *const @This(),
+            self: *const Self,
             comptime T: type,
             allocator: std.mem.Allocator,
             values: []const T,
@@ -241,34 +261,6 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             }
 
             return indices;
-        }
-    };
-
-    return struct {
-        pub const kind = TypeKind.list;
-        pub const Element: type = BoolType();
-        pub const limit: usize = _limit;
-        pub const Type: type = Impl;
-        pub const TreeView: type = BitListTreeView(@This());
-        pub const min_size: usize = 1;
-        pub const max_size: usize = std.math.divCeil(usize, limit + 1, 8) catch unreachable;
-        pub const max_chunk_count: usize = std.math.divCeil(usize, limit, 256) catch unreachable;
-        pub const chunk_depth: u8 = maxChunksToDepth(max_chunk_count);
-
-        pub const default_value: Type = Type.empty;
-
-        pub const default_root: [32]u8 = blk: {
-            var buf = getZeroHash(chunk_depth).*;
-            mixInLength(0, &buf);
-            break :blk buf;
-        };
-
-        pub fn equals(a: *const Type, b: *const Type) bool {
-            return a.equals(b);
-        }
-
-        pub fn deinit(allocator: std.mem.Allocator, value: *Type) void {
-            value.data.deinit(allocator);
         }
 
         pub fn chunkCount(value: *const Type) usize {
@@ -628,8 +620,8 @@ pub fn BitListType(comptime _limit: comptime_int) type {
 test "BitListType - sanity" {
     const allocator = std.testing.allocator;
     const Bits = BitListType(40);
-    var b: Bits.Type = try Bits.Type.fromBitLen(allocator, 30);
-    defer b.deinit(allocator);
+    var b: Bits = try Bits.fromBitLen(allocator, 30);
+    defer Bits.deinit(allocator, &b);
 
     try b.setAssumeCapacity(2, true);
 
@@ -647,8 +639,8 @@ test "BitListType - sanity with bools" {
     const Bits = BitListType(16);
     const expected_bools = [_]bool{ true, false, true, true, false, true, false, true, true, false, true, true };
     const expected_true_bit_indexes = [_]usize{ 0, 2, 3, 5, 7, 8, 10, 11 };
-    var b: Bits.Type = try Bits.Type.fromBoolSlice(allocator, &expected_bools);
-    defer b.deinit(allocator);
+    var b: Bits = try Bits.fromBoolSlice(allocator, &expected_bools);
+    defer Bits.deinit(allocator, &b);
 
     var actual_bools = try allocator.alloc(bool, expected_bools.len);
     defer allocator.free(actual_bools);
@@ -663,8 +655,8 @@ test "BitListType - sanity with bools" {
     try std.testing.expectEqualSlices(usize, &expected_true_bit_indexes, true_bit_indexes[0..true_bit_count]);
 
     const expected_single_bool = [_]bool{ false, false, false, false, false, true, false, false, false, false, false, false };
-    var b_single_bool: Bits.Type = try Bits.Type.fromBoolSlice(allocator, &expected_single_bool);
-    defer b_single_bool.deinit(allocator);
+    var b_single_bool: Bits = try Bits.fromBoolSlice(allocator, &expected_single_bool);
+    defer Bits.deinit(allocator, &b_single_bool);
 
     try std.testing.expectEqual(b_single_bool.getSingleTrueBit(), 5);
 }
@@ -682,8 +674,8 @@ test "BitListType - intersectValues" {
     const Bits = BitListType(16);
 
     for (test_cases) |tc| {
-        var b: Bits.Type = try Bits.Type.fromBitLen(allocator, tc.bit_len);
-        defer b.deinit(allocator);
+        var b: Bits = try Bits.fromBitLen(allocator, tc.bit_len);
+        defer Bits.deinit(allocator, &b);
 
         for (tc.expected) |i| try b.setAssumeCapacity(i, true);
 
@@ -701,12 +693,12 @@ test "clone" {
     const allocator = std.testing.allocator;
 
     const Bits = BitListType(40);
-    var b: Bits.Type = try Bits.Type.fromBitLen(allocator, 30);
-    defer b.deinit(allocator);
+    var b: Bits = try Bits.fromBitLen(allocator, 30);
+    defer Bits.deinit(allocator, &b);
 
-    var cloned: Bits.Type = undefined;
+    var cloned: Bits = undefined;
     try Bits.clone(allocator, &b, &cloned);
-    defer cloned.deinit(allocator);
+    defer Bits.deinit(allocator, &cloned);
 
     try std.testing.expect(&b != &cloned);
     try std.testing.expect(b.bit_len == cloned.bit_len);
@@ -722,8 +714,8 @@ test "resize" {
     // First byte: 1, 0, 1, 1, 0, 1, 0, 1 = 173
     // Second byte: 1, 0, 1, 1, 1, 0, 1, 1 = 221
     const bools = [_]bool{ true, false, true, true, false, true, false, true, true, false, true, true, true, false, true, true };
-    var b: Bits.Type = try Bits.Type.fromBoolSlice(allocator, &bools);
-    defer b.deinit(allocator);
+    var b: Bits = try Bits.fromBoolSlice(allocator, &bools);
+    defer Bits.deinit(allocator, &b);
 
     try std.testing.expect(b.data.items.len == 2);
     try std.testing.expect(b.data.items[0] == 173);
@@ -760,17 +752,17 @@ test "BitListType - padding bit test cases" {
     const Bits = BitListType(8);
 
     for (test_cases) |tc| {
-        var b: Bits.Type = try Bits.Type.fromBoolSlice(allocator, tc.bools);
-        defer b.deinit(allocator);
+        var b: Bits = try Bits.fromBoolSlice(allocator, tc.bools);
+        defer Bits.deinit(allocator, &b);
 
         const serialized = try allocator.alloc(u8, Bits.serializedSize(&b));
         defer allocator.free(serialized);
         _ = Bits.serializeIntoBytes(&b, serialized);
         try std.testing.expectEqualSlices(u8, tc.expected_hex, serialized);
 
-        var deserialized: Bits.Type = Bits.default_value;
+        var deserialized: Bits = Bits.default_value;
         try Bits.deserializeFromBytes(allocator, serialized, &deserialized);
-        defer deserialized.deinit(allocator);
+        defer Bits.deinit(allocator, &deserialized);
 
         var deserialized_bools = try allocator.alloc(bool, deserialized.bit_len);
         defer allocator.free(deserialized_bools);
@@ -813,15 +805,15 @@ test "BitListType - tree roundtrip" {
     defer pool.deinit();
 
     for (test_cases) |tc| {
-        var value: Bits.Type = Bits.default_value;
+        var value: Bits = Bits.default_value;
         try Bits.deserializeFromBytes(allocator, tc.serialized, &value);
-        defer value.deinit(allocator);
+        defer Bits.deinit(allocator, &value);
 
         const tree_node = try Bits.tree.fromValue(&pool, &value);
 
-        var value_from_tree: Bits.Type = Bits.default_value;
+        var value_from_tree: Bits = Bits.default_value;
         try Bits.tree.toValue(allocator, tree_node, &pool, &value_from_tree);
-        defer value_from_tree.deinit(allocator);
+        defer Bits.deinit(allocator, &value_from_tree);
 
         try std.testing.expect(Bits.equals(&value, &value_from_tree));
 
@@ -877,8 +869,8 @@ test "BitListType - tree.deserializeFromBytes" {
         const node_root = tree_node.getRoot(&pool);
         try std.testing.expectEqualSlices(u8, &tc.expected_root, node_root);
 
-        var value_from_tree: Bits.Type = Bits.default_value;
-        defer value_from_tree.deinit(allocator);
+        var value_from_tree: Bits = Bits.default_value;
+        defer Bits.deinit(allocator, &value_from_tree);
         try Bits.tree.toValue(allocator, tree_node, &pool, &value_from_tree);
 
         const tree_size = try Bits.tree.serializedSize(tree_node, &pool);
@@ -951,13 +943,13 @@ test "BitListType equals" {
     const allocator = std.testing.allocator;
     const BL = BitListType(32);
 
-    var a = try BL.Type.fromBitLen(allocator, 8);
-    var b = try BL.Type.fromBitLen(allocator, 8);
-    var c = try BL.Type.fromBitLen(allocator, 7);
+    var a = try BL.fromBitLen(allocator, 8);
+    var b = try BL.fromBitLen(allocator, 8);
+    var c = try BL.fromBitLen(allocator, 7);
 
-    defer a.deinit(allocator);
-    defer b.deinit(allocator);
-    defer c.deinit(allocator);
+    defer BL.deinit(allocator, &a);
+    defer BL.deinit(allocator, &b);
+    defer BL.deinit(allocator, &c);
 
     try a.set(allocator, 0, true);
     try a.set(allocator, 3, true);
