@@ -52,3 +52,15 @@ pub fn becomesNewEth1Data(cached_state: *const CachedBeaconStateAllForks, new_et
 fn isEqualEth1DataView(a: *const Eth1Data, b: *const Eth1Data) bool {
     return types.phase0.Eth1Data.equals(a, b);
 }
+
+const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
+
+test "process eth1 data - sanity" {
+    const allocator = std.testing.allocator;
+
+    var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+    defer test_state.deinit();
+
+    const block = types.electra.BeaconBlock.default_value;
+    try processEth1Data(allocator, test_state.cached_state, &block.body.eth1_data);
+}

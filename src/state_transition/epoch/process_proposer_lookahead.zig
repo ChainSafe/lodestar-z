@@ -62,3 +62,13 @@ pub fn processProposerLookahead(
         fulu_state.proposer_lookahead[last_epoch_start..],
     );
 }
+
+test "processProposerLookahead sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processProposerLookahead, .{
+        .alloc = true,
+        .err_return = true,
+        .void_return = true,
+        .fulu = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}

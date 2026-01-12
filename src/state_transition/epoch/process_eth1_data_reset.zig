@@ -16,3 +16,12 @@ pub fn processEth1DataReset(allocator: Allocator, cached_state: *CachedBeaconSta
         state_eth1_data_votes.clearAndFree(allocator);
     }
 }
+
+test "processEth1DataReset - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processEth1DataReset, .{
+        .alloc = true,
+        .err_return = false,
+        .void_return = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}
