@@ -267,6 +267,14 @@ pub const Pool = struct {
             }
             out[i] = self.createUnsafe(states);
             states[@intFromEnum(out[i])] = State.branch_lazy.initRefCount();
+
+            // Initialize left/right children to zero.
+            //
+            // The node is marked as `branch_lazy`, so `unref` will attempt to traverse its children during cleanup.
+            // If an error occurs before the node is fully constructed and `free` is called, stale values in `left`/`right`
+            // could lead to accessing invalid memory. Setting them to zero ensures safe cleanup.
+            self.nodes.items(.left)[@intFromEnum(out[i])] = @enumFromInt(0);
+            self.nodes.items(.right)[@intFromEnum(out[i])] = @enumFromInt(0);
         }
         return allocated;
     }
@@ -748,6 +756,80 @@ pub const Id = enum(u32) {
         return node_id;
     }
 
+    /// Zeroes every node strictly to the right of `index` at the provided `depth`.
+    pub fn truncateAfterIndex(root_node: Id, pool: *Pool, depth: Depth, index: usize) Error!Id {
+        if (depth == 0) {
+            return root_node;
+        }
+
+        const max_length = @as(Gindex.Uint, 1) << depth;
+        if (index >= max_length - 1) {
+            if (index >= max_length) {
+                return Error.InvalidLength;
+            }
+            return root_node;
+        }
+
+        const path_len = @as(usize, depth);
+
+        var path_lefts_buf: [max_depth]Id = undefined;
+        var path_rights_buf: [max_depth]Id = undefined;
+        var path_parents_buf: [max_depth]Id = undefined;
+
+        const path_lefts = path_lefts_buf[0..path_len];
+        const path_rights = path_rights_buf[0..path_len];
+        const path_parents = path_parents_buf[0..path_len];
+
+        _ = try pool.alloc(path_parents);
+        errdefer pool.free(path_parents);
+
+        const states = pool.nodes.items(.state);
+        const lefts = pool.nodes.items(.left);
+        const rights = pool.nodes.items(.right);
+
+        var node_id = root_node;
+
+        for (0..path_len - 1) |i| {
+            if (node_id.noChild(states[@intFromEnum(node_id)])) {
+                return Error.InvalidNode;
+            }
+
+            const depthi = path_len - i - 1;
+            const go_left = isLeftIndex(depthi, index);
+            if (go_left) {
+                path_lefts[i] = path_parents[i + 1];
+                const zero_depth: Depth = @intCast(depthi);
+                path_rights[i] = @enumFromInt(zero_depth);
+                node_id = lefts[@intFromEnum(node_id)];
+            } else {
+                path_lefts[i] = lefts[@intFromEnum(node_id)];
+                path_rights[i] = path_parents[i + 1];
+                node_id = rights[@intFromEnum(node_id)];
+            }
+        }
+
+        if (node_id.noChild(states[@intFromEnum(node_id)])) {
+            return Error.InvalidNode;
+        }
+
+        const go_left_last = isLeftIndex(0, index);
+        if (go_left_last) {
+            path_lefts[path_len - 1] = lefts[@intFromEnum(node_id)];
+            path_rights[path_len - 1] = @enumFromInt(0);
+        } else {
+            path_lefts[path_len - 1] = lefts[@intFromEnum(node_id)];
+            path_rights[path_len - 1] = rights[@intFromEnum(node_id)];
+        }
+
+        try pool.rebind(path_parents, path_lefts, path_rights);
+        return path_parents[0];
+    }
+
+    inline fn isLeftIndex(depthi: usize, index: usize) bool {
+        const mask: usize = @as(usize, 1) << @intCast(depthi);
+        return (index & mask) == 0;
+    }
+
     /// Set multiple nodes in batch, editing and traversing nodes strictly once.
     /// - gindexes MUST be sorted in ascending order beforehand.
     pub fn setNodes(root_node: Id, pool: *Pool, gindices: []const Gindex, nodes: []Id) Error!Id {
@@ -894,6 +976,35 @@ pub const Id = enum(u32) {
 
         return node_id;
     }
+
+    /// Set multiple nodes in batch where gindices may be at different depths.
+    ///
+    /// This groups updates by `gindex.pathLen()` (i.e. depth) and applies each group via `setNodes()`.
+    /// - gindices MUST be sorted in ascending order beforehand.
+    pub fn setNodesGrouped(root_node: Id, pool: *Pool, gindices: []const Gindex, nodes: []Id) Error!Id {
+        std.debug.assert(nodes.len == gindices.len);
+        if (gindices.len == 0) {
+            return root_node;
+        }
+
+        var node_id = root_node;
+        var start: usize = 0;
+        while (start < gindices.len) {
+            const depth = gindices[start].pathLen();
+            var end: usize = start + 1;
+            while (end < gindices.len and gindices[end].pathLen() == depth) : (end += 1) {}
+
+            const prev = node_id;
+            const next = try Id.setNodes(prev, pool, gindices[start..end], nodes[start..end]);
+            if (prev != root_node and prev != next) {
+                pool.unref(prev);
+            }
+            node_id = next;
+            start = end;
+        }
+
+        return node_id;
+    }
 };
 
 /// Fill a view to the specified depth, returning the new root node id.
@@ -1004,3 +1115,166 @@ pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth) !Id {
 
     return contents[0];
 }
+
+/// Iterator to traverse all nodes at a specific depth.
+/// Use this instead of `getNodesAtDepth` when memory usage is a concern.
+pub const DepthIterator = struct {
+    pool: *Pool,
+    node_id: Id,
+    parents_buf: [max_depth]Id,
+    diffi: Depth,
+    base_gindex: Gindex,
+    index: usize,
+
+    /// Initialize a depth iterator starting from `start_index` at the specified `depth`.
+    ///
+    /// There is no `deinit` function since the iterator does not allocate any resources.
+    pub fn init(pool: *Pool, root_node: Id, depth: Depth, start_index: usize) DepthIterator {
+        return .{
+            .pool = pool,
+            .node_id = root_node,
+            .parents_buf = undefined,
+            .diffi = depth,
+            .base_gindex = Gindex.fromDepth(depth, 0),
+            .index = start_index,
+        };
+    }
+
+    pub fn next(self: *DepthIterator) Error!Id {
+        const path_len = self.base_gindex.pathLen();
+        // Depth 0: only the root exists; yield once then finish.
+        if (@intFromEnum(self.base_gindex) <= 1) {
+            if (self.index != 0) return Error.InvalidLength;
+            self.index = 1;
+            return self.node_id;
+        }
+
+        const max_length: Gindex.Uint = @intFromEnum(self.base_gindex);
+        if (self.index >= max_length) return Error.InvalidLength;
+
+        const states = self.pool.nodes.items(.state);
+        const lefts = self.pool.nodes.items(.left);
+        const rights = self.pool.nodes.items(.right);
+
+        // Compute gindex for current index at the requested depth.
+        const gindex = Gindex.fromUint(@intCast(@intFromEnum(self.base_gindex) | self.index));
+
+        // diffi: how many levels we can reuse from previous traversal (initialized to depth by caller state)
+        const d = path_len - self.diffi;
+
+        var path = gindex.toPath();
+        path.nextN(d);
+
+        var node_id = self.node_id;
+
+        // Navigate down from the shared prefix (d) to the target, updating parents.
+        for (d..path_len) |bit_i| {
+            if (node_id.noChild(states[@intFromEnum(node_id)])) {
+                return Error.InvalidNode;
+            }
+            self.parents_buf[bit_i] = node_id;
+            node_id = if (path.left())
+                lefts[@intFromEnum(node_id)]
+            else
+                rights[@intFromEnum(node_id)];
+            path.next();
+        }
+
+        // Yield current node.
+        const out_id = node_id;
+
+        // Prepare state for next index.
+        const index = self.index;
+        self.index += 1;
+
+        if (self.index >= max_length) {
+            // No next element; iterator is done after this yield.
+            return out_id;
+        }
+
+        // Same "depth diff" computation as getNodesAtDepth (underflow-safe: only used when there is a next index).
+        self.diffi = @intCast(@bitSizeOf(Gindex) - @clz(index ^ (index + 1)));
+        self.node_id = self.parents_buf[path_len - self.diffi];
+
+        return out_id;
+    }
+};
+
+/// Incrementally build a tree by appending leaves, filling missing right siblings with zero-nodes.
+/// Matches the behavior of `fillWithContents`, but optimized for incremental appends.
+pub const FillWithContentsIterator = struct {
+    pool: *Pool,
+    depth: Depth,
+    // At each level i, holds either null or the unpaired left node at that level.
+    lefts: [max_depth]?Id,
+
+    pub fn init(pool: *Pool, depth: Depth) FillWithContentsIterator {
+        return .{
+            .pool = pool,
+            .depth = depth,
+            .lefts = [_]?Id{null} ** max_depth,
+        };
+    }
+
+    /// Clean up references held by the iterator.
+    ///
+    /// This only needs to be called if the iterator is abandoned before `finish` is called.
+    pub fn deinit(self: *FillWithContentsIterator) void {
+        for (self.lefts) |left| {
+            if (left) |node_id| {
+                self.pool.unref(node_id);
+            }
+        }
+    }
+
+    /// Append a leaf (or subtree root at leaf level). Builds branches incrementally.
+    pub fn append(self: *FillWithContentsIterator, node_id: Id) Error!void {
+        // Bounds check
+        if (self.lefts[self.depth] != null) {
+            return Error.InvalidLength;
+        }
+
+        var carry = node_id;
+        for (0..self.depth) |level| {
+            if (self.lefts[level]) |left| {
+                self.lefts[level] = null;
+                carry = try self.pool.createBranch(left, carry);
+            } else {
+                self.lefts[level] = carry;
+                return;
+            }
+        }
+        // Only reaches here if the tree is full
+        self.lefts[self.depth] = carry;
+    }
+
+    /// Finalize the tree, returning the root node. Uses zero-nodes to pad missing right siblings.
+    pub fn finish(self: *FillWithContentsIterator) Error!Id {
+        if (self.lefts[self.depth]) |root| {
+            return root;
+        }
+
+        var carry: Id = @enumFromInt(self.depth);
+        var start_level: usize = self.depth;
+
+        // Find the lowest non-null as starting carry.
+        for (0..self.depth) |level| {
+            if (self.lefts[level] != null) {
+                carry = @enumFromInt(@as(u32, @intCast(level)));
+                start_level = level;
+                break;
+            }
+        }
+
+        // Starting from the lowest non-null, build upwards with zero-nodes.
+        for (start_level..self.depth) |level| {
+            if (self.lefts[level]) |left| {
+                self.lefts[level] = null;
+                carry = try self.pool.createBranch(left, carry);
+            } else {
+                carry = try self.pool.createBranch(carry, @enumFromInt(@as(u32, @intCast(level))));
+            }
+        }
+        return carry;
+    }
+};

@@ -14,7 +14,7 @@ const Slot = types.primitive.Slot.Type;
 const CachedBeaconStateAllForks = @import("cache/state_cache.zig").CachedBeaconStateAllForks;
 pub const SignedBeaconBlock = @import("types/beacon_block.zig").SignedBeaconBlock;
 const verifyProposerSignature = @import("./signature_sets/proposer.zig").verifyProposerSignature;
-const processBlock = @import("./block/process_block.zig").processBlock;
+pub const processBlock = @import("./block/process_block.zig").processBlock;
 const BeaconBlock = @import("types/beacon_block.zig").BeaconBlock;
 const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit.Type;
 const Attestation = @import("types/attestation.zig").Attestation;
@@ -107,6 +107,8 @@ pub fn processSlotsWithTransientCache(
             if (state_epoch == config.chain.FULU_FORK_EPOCH) {
                 try upgradeStateToFulu(allocator, post_state);
             }
+
+            try post_state.epoch_cache_ref.get().finalProcessEpoch(post_state);
         } else {
             state.slotPtr().* += 1;
         }

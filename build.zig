@@ -13,6 +13,15 @@ pub fn build(b: *std.Build) void {
     options_build_options.addOption([]const u8, "preset", option_preset);
     const options_module_build_options = options_build_options.createModule();
 
+    const options_download_era_options = b.addOptions();
+    const option_era_base_url = b.option([]const u8, "era_base_url", "") orelse "https://mainnet.era.nimbus.team";
+    options_download_era_options.addOption([]const u8, "era_base_url", option_era_base_url);
+    const option_era_files = b.option([]const []const u8, "era_files", "") orelse &[_][]const u8{ "mainnet-01628-47ac89fb.era", "mainnet-01629-f4b834bc.era" };
+    options_download_era_options.addOption([]const []const u8, "era_files", option_era_files);
+    const option_era_out_dir = b.option([]const u8, "era_out_dir", "") orelse "fixtures/era";
+    options_download_era_options.addOption([]const u8, "era_out_dir", option_era_out_dir);
+    const options_module_download_era_options = options_download_era_options.createModule();
+
     const options_spec_test_options = b.addOptions();
     const option_spec_test_url = b.option([]const u8, "spec_test_url", "") orelse "https://github.com/ethereum/consensus-specs";
     options_spec_test_options.addOption([]const u8, "spec_test_url", option_spec_test_url);
@@ -68,6 +77,13 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("consensus_types"), module_consensus_types) catch @panic("OOM");
 
+    const module_era = b.createModule(.{
+        .root_source_file = b.path("src/era/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("era"), module_era) catch @panic("OOM");
+
     const module_hashing = b.createModule(.{
         .root_source_file = b.path("src/hashing/root.zig"),
         .target = target,
@@ -109,6 +125,29 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     b.modules.put(b.dupe("state_transition"), module_state_transition) catch @panic("OOM");
+
+    const module_download_era_files = b.createModule(.{
+        .root_source_file = b.path("scripts/download_era_files.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("download_era_files"), module_download_era_files) catch @panic("OOM");
+
+    const exe_download_era_files = b.addExecutable(.{
+        .name = "download_era_files",
+        .root_module = module_download_era_files,
+    });
+
+    const install_exe_download_era_files = b.addInstallArtifact(exe_download_era_files, .{});
+
+    const tls_install_exe_download_era_files = b.step("build-exe:download_era_files", "Install the download_era_files executable");
+    tls_install_exe_download_era_files.dependOn(&install_exe_download_era_files.step);
+    b.getInstallStep().dependOn(&install_exe_download_era_files.step);
+
+    const run_exe_download_era_files = b.addRunArtifact(exe_download_era_files);
+    if (b.args) |args| run_exe_download_era_files.addArgs(args);
+    const tls_run_exe_download_era_files = b.step("run:download_era_files", "Run the download_era_files executable");
+    tls_run_exe_download_era_files.dependOn(&run_exe_download_era_files.step);
 
     const module_download_spec_tests = b.createModule(.{
         .root_source_file = b.path("test/spec/download_spec_tests.zig"),
@@ -340,6 +379,52 @@ pub fn build(b: *std.Build) void {
     const tls_run_exe_bench_hashing = b.step("run:bench_hashing", "Run the bench_hashing executable");
     tls_run_exe_bench_hashing.dependOn(&run_exe_bench_hashing.step);
 
+    const module_bench_process_block = b.createModule(.{
+        .root_source_file = b.path("bench/state_transition/process_block.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("bench_process_block"), module_bench_process_block) catch @panic("OOM");
+
+    const exe_bench_process_block = b.addExecutable(.{
+        .name = "bench_process_block",
+        .root_module = module_bench_process_block,
+    });
+
+    const install_exe_bench_process_block = b.addInstallArtifact(exe_bench_process_block, .{});
+
+    const tls_install_exe_bench_process_block = b.step("build-exe:bench_process_block", "Install the bench_process_block executable");
+    tls_install_exe_bench_process_block.dependOn(&install_exe_bench_process_block.step);
+    b.getInstallStep().dependOn(&install_exe_bench_process_block.step);
+
+    const run_exe_bench_process_block = b.addRunArtifact(exe_bench_process_block);
+    if (b.args) |args| run_exe_bench_process_block.addArgs(args);
+    const tls_run_exe_bench_process_block = b.step("run:bench_process_block", "Run the bench_process_block executable");
+    tls_run_exe_bench_process_block.dependOn(&run_exe_bench_process_block.step);
+
+    const module_bench_process_epoch = b.createModule(.{
+        .root_source_file = b.path("bench/state_transition/process_epoch.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("bench_process_epoch"), module_bench_process_epoch) catch @panic("OOM");
+
+    const exe_bench_process_epoch = b.addExecutable(.{
+        .name = "bench_process_epoch",
+        .root_module = module_bench_process_epoch,
+    });
+
+    const install_exe_bench_process_epoch = b.addInstallArtifact(exe_bench_process_epoch, .{});
+
+    const tls_install_exe_bench_process_epoch = b.step("build-exe:bench_process_epoch", "Install the bench_process_epoch executable");
+    tls_install_exe_bench_process_epoch.dependOn(&install_exe_bench_process_epoch.step);
+    b.getInstallStep().dependOn(&install_exe_bench_process_epoch.step);
+
+    const run_exe_bench_process_epoch = b.addRunArtifact(exe_bench_process_epoch);
+    if (b.args) |args| run_exe_bench_process_epoch.addArgs(args);
+    const tls_run_exe_bench_process_epoch = b.step("run:bench_process_epoch", "Run the bench_process_epoch executable");
+    tls_run_exe_bench_process_epoch.dependOn(&run_exe_bench_process_epoch.step);
+
     const tls_run_test = b.step("test", "Run all tests");
 
     const test_constants = b.addTest(.{
@@ -383,6 +468,20 @@ pub fn build(b: *std.Build) void {
     const tls_run_test_consensus_types = b.step("test:consensus_types", "Run the consensus_types test");
     tls_run_test_consensus_types.dependOn(&run_test_consensus_types.step);
     tls_run_test.dependOn(&run_test_consensus_types.step);
+
+    const test_era = b.addTest(.{
+        .name = "era",
+        .root_module = module_era,
+        .filters = b.option([][]const u8, "era.filters", "era test filters") orelse &[_][]const u8{},
+    });
+    const install_test_era = b.addInstallArtifact(test_era, .{});
+    const tls_install_test_era = b.step("build-test:era", "Install the era test");
+    tls_install_test_era.dependOn(&install_test_era.step);
+
+    const run_test_era = b.addRunArtifact(test_era);
+    const tls_run_test_era = b.step("test:era", "Run the era test");
+    tls_run_test_era.dependOn(&run_test_era.step);
+    tls_run_test.dependOn(&run_test_era.step);
 
     const test_hashing = b.addTest(.{
         .name = "hashing",
@@ -467,6 +566,20 @@ pub fn build(b: *std.Build) void {
     const tls_run_test_state_transition = b.step("test:state_transition", "Run the state_transition test");
     tls_run_test_state_transition.dependOn(&run_test_state_transition.step);
     tls_run_test.dependOn(&run_test_state_transition.step);
+
+    const test_download_era_files = b.addTest(.{
+        .name = "download_era_files",
+        .root_module = module_download_era_files,
+        .filters = b.option([][]const u8, "download_era_files.filters", "download_era_files test filters") orelse &[_][]const u8{},
+    });
+    const install_test_download_era_files = b.addInstallArtifact(test_download_era_files, .{});
+    const tls_install_test_download_era_files = b.step("build-test:download_era_files", "Install the download_era_files test");
+    tls_install_test_download_era_files.dependOn(&install_test_download_era_files.step);
+
+    const run_test_download_era_files = b.addRunArtifact(test_download_era_files);
+    const tls_run_test_download_era_files = b.step("test:download_era_files", "Run the download_era_files test");
+    tls_run_test_download_era_files.dependOn(&run_test_download_era_files.step);
+    tls_run_test.dependOn(&run_test_download_era_files.step);
 
     const test_download_spec_tests = b.addTest(.{
         .name = "download_spec_tests",
@@ -608,6 +721,34 @@ pub fn build(b: *std.Build) void {
     tls_run_test_bench_hashing.dependOn(&run_test_bench_hashing.step);
     tls_run_test.dependOn(&run_test_bench_hashing.step);
 
+    const test_bench_process_block = b.addTest(.{
+        .name = "bench_process_block",
+        .root_module = module_bench_process_block,
+        .filters = b.option([][]const u8, "bench_process_block.filters", "bench_process_block test filters") orelse &[_][]const u8{},
+    });
+    const install_test_bench_process_block = b.addInstallArtifact(test_bench_process_block, .{});
+    const tls_install_test_bench_process_block = b.step("build-test:bench_process_block", "Install the bench_process_block test");
+    tls_install_test_bench_process_block.dependOn(&install_test_bench_process_block.step);
+
+    const run_test_bench_process_block = b.addRunArtifact(test_bench_process_block);
+    const tls_run_test_bench_process_block = b.step("test:bench_process_block", "Run the bench_process_block test");
+    tls_run_test_bench_process_block.dependOn(&run_test_bench_process_block.step);
+    tls_run_test.dependOn(&run_test_bench_process_block.step);
+
+    const test_bench_process_epoch = b.addTest(.{
+        .name = "bench_process_epoch",
+        .root_module = module_bench_process_epoch,
+        .filters = b.option([][]const u8, "bench_process_epoch.filters", "bench_process_epoch test filters") orelse &[_][]const u8{},
+    });
+    const install_test_bench_process_epoch = b.addInstallArtifact(test_bench_process_epoch, .{});
+    const tls_install_test_bench_process_epoch = b.step("build-test:bench_process_epoch", "Install the bench_process_epoch test");
+    tls_install_test_bench_process_epoch.dependOn(&install_test_bench_process_epoch.step);
+
+    const run_test_bench_process_epoch = b.addRunArtifact(test_bench_process_epoch);
+    const tls_run_test_bench_process_epoch = b.step("test:bench_process_epoch", "Run the bench_process_epoch test");
+    tls_run_test_bench_process_epoch.dependOn(&run_test_bench_process_epoch.step);
+    tls_run_test.dependOn(&run_test_bench_process_epoch.step);
+
     const module_int = b.createModule(.{
         .root_source_file = b.path("test/int/root.zig"),
         .target = target,
@@ -628,6 +769,27 @@ pub fn build(b: *std.Build) void {
     const tls_run_test_int = b.step("test:int", "Run the int test");
     tls_run_test_int.dependOn(&run_test_int.step);
     tls_run_test.dependOn(&run_test_int.step);
+
+    const module_int_slow = b.createModule(.{
+        .root_source_file = b.path("test/int_slow/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("int_slow"), module_int_slow) catch @panic("OOM");
+
+    const test_int_slow = b.addTest(.{
+        .name = "int_slow",
+        .root_module = module_int_slow,
+        .filters = b.option([][]const u8, "int_slow.filters", "int_slow test filters") orelse &[_][]const u8{},
+    });
+    const install_test_int_slow = b.addInstallArtifact(test_int_slow, .{});
+    const tls_install_test_int_slow = b.step("build-test:int_slow", "Install the int_slow test");
+    tls_install_test_int_slow.dependOn(&install_test_int_slow.step);
+
+    const run_test_int_slow = b.addRunArtifact(test_int_slow);
+    const tls_run_test_int_slow = b.step("test:int_slow", "Run the int_slow test");
+    tls_run_test_int_slow.dependOn(&run_test_int_slow.step);
+    tls_run_test.dependOn(&run_test_int_slow.step);
 
     const module_spec_tests = b.createModule(.{
         .root_source_file = b.path("test/spec/root.zig"),
@@ -703,6 +865,12 @@ pub fn build(b: *std.Build) void {
     module_consensus_types.addImport("constants", module_constants);
     module_consensus_types.addImport("preset", module_preset);
 
+    module_era.addImport("consensus_types", module_consensus_types);
+    module_era.addImport("config", module_config);
+    module_era.addImport("preset", module_preset);
+    module_era.addImport("state_transition", module_state_transition);
+    module_era.addImport("snappy", dep_snappy.module("snappy"));
+
     module_hashing.addImport("build_options", options_module_build_options);
     module_hashing.addImport("hex", module_hex);
     module_hashing.addImport("hashtree", dep_hashtree.module("hashtree"));
@@ -727,6 +895,8 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("preset", module_preset);
     module_state_transition.addImport("constants", module_constants);
     module_state_transition.addImport("hex", module_hex);
+
+    module_download_era_files.addImport("download_era_options", options_module_download_era_options);
 
     module_download_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
 
@@ -762,16 +932,27 @@ pub fn build(b: *std.Build) void {
     module_bench_hashing.addImport("hashing", module_hashing);
     module_bench_hashing.addImport("zbench", dep_zbench.module("zbench"));
 
+    module_bench_process_block.addImport("state_transition", module_state_transition);
+    module_bench_process_block.addImport("consensus_types", module_consensus_types);
+    module_bench_process_block.addImport("config", module_config);
+    module_bench_process_block.addImport("zbench", dep_zbench.module("zbench"));
+
+    module_bench_process_epoch.addImport("state_transition", module_state_transition);
+    module_bench_process_epoch.addImport("consensus_types", module_consensus_types);
+    module_bench_process_epoch.addImport("config", module_config);
+    module_bench_process_epoch.addImport("zbench", dep_zbench.module("zbench"));
+
     module_int.addImport("build_options", options_module_build_options);
-    module_int.addImport("ssz", module_ssz);
     module_int.addImport("state_transition", module_state_transition);
     module_int.addImport("config", module_config);
     module_int.addImport("consensus_types", module_consensus_types);
     module_int.addImport("preset", module_preset);
     module_int.addImport("constants", module_constants);
-    module_int.addImport("hex", module_hex);
-    module_int.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_int.addImport("blst", dep_blst.module("blst"));
+
+    module_int_slow.addImport("config", module_config);
+    module_int_slow.addImport("download_era_options", options_module_download_era_options);
+    module_int_slow.addImport("era", module_era);
 
     module_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
     module_spec_tests.addImport("consensus_types", module_consensus_types);

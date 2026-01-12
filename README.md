@@ -76,7 +76,7 @@ test TreeView {
         .root = [_]u8{0} ** 32,
     });
 
-    var view = ssz.TreeView(checkpoint).init(std.testing.allocator, &pool, root_node);
+    var view = try checkpoint.TreeView.init(std.testing.allocator, &pool, root_node);
     try std.testing.expectEqual(
         u64,
         42,

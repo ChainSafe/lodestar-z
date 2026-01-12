@@ -2,8 +2,8 @@ const std = @import("std");
 const blst = @import("blst");
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
-const mainnet_chain_config = @import("config").mainnet_chain_config;
-const minimal_chain_config = @import("config").minimal_chain_config;
+const mainnet_chain_config = @import("config").mainnet.chain_config;
+const minimal_chain_config = @import("config").minimal.chain_config;
 const types = @import("consensus_types");
 const hex = @import("hex");
 const Epoch = types.primitive.Epoch.Type;
@@ -14,7 +14,6 @@ const preset = @import("preset").preset;
 const active_preset = @import("preset").active_preset;
 const BeaconConfig = @import("config").BeaconConfig;
 const ChainConfig = @import("config").ChainConfig;
-const mergeChainConfig = @import("config").mergeChainConfig;
 const state_transition = @import("../root.zig");
 const CachedBeaconStateAllForks = state_transition.CachedBeaconStateAllForks;
 const BeaconStateAllForks = state_transition.BeaconStateAllForks;
@@ -163,15 +162,21 @@ pub const TestCachedBeaconStateAllForks = struct {
 
     pub fn initFromState(allocator: Allocator, state: *BeaconStateAllForks, fork: ForkSeq, fork_epoch: Epoch) !TestCachedBeaconStateAllForks {
         const owned_state = try allocator.create(BeaconStateAllForks);
+        errdefer allocator.destroy(owned_state);
         owned_state.* = state.*;
 
         const pubkey_index_map = try PubkeyIndexMap.init(allocator);
-        errdefer allocator.destroy(pubkey_index_map);
+        errdefer pubkey_index_map.deinit();
         const index_pubkey_cache = try allocator.create(Index2PubkeyCache);
-        errdefer allocator.destroy(index_pubkey_cache);
+        errdefer {
+            index_pubkey_cache.deinit();
+            allocator.destroy(index_pubkey_cache);
+        }
         index_pubkey_cache.* = Index2PubkeyCache.init(allocator);
         const chain_config = getConfig(active_chain_config, fork, fork_epoch);
-        const config = try BeaconConfig.init(allocator, chain_config, owned_state.genesisValidatorsRoot());
+        const config = try allocator.create(BeaconConfig);
+        errdefer allocator.destroy(config);
+        config.* = BeaconConfig.init(chain_config, owned_state.genesisValidatorsRoot());
 
         try syncPubkeys(owned_state.validators().items, pubkey_index_map, index_pubkey_cache);
 
@@ -196,12 +201,12 @@ pub const TestCachedBeaconStateAllForks = struct {
     }
 
     pub fn deinit(self: *TestCachedBeaconStateAllForks) void {
-        self.config.deinit();
+        self.cached_state.deinit();
+        self.allocator.destroy(self.cached_state);
         self.pubkey_index_map.deinit();
         self.index_pubkey_cache.deinit();
         self.allocator.destroy(self.index_pubkey_cache);
-        self.cached_state.deinit();
-        self.allocator.destroy(self.cached_state);
+        self.allocator.destroy(self.config);
     }
 };
 
@@ -209,32 +214,32 @@ pub const TestCachedBeaconStateAllForks = struct {
 pub fn getConfig(config: ChainConfig, fork: ForkSeq, fork_epoch: Epoch) ChainConfig {
     switch (fork) {
         .phase0 => return config,
-        .altair => return mergeChainConfig(config, .{
+        .altair => return config.merge(.{
             .ALTAIR_FORK_EPOCH = fork_epoch,
         }),
-        .bellatrix => return mergeChainConfig(config, .{
+        .bellatrix => return config.merge(.{
             .ALTAIR_FORK_EPOCH = 0,
             .BELLATRIX_FORK_EPOCH = fork_epoch,
         }),
-        .capella => return mergeChainConfig(config, .{
+        .capella => return config.merge(.{
             .ALTAIR_FORK_EPOCH = 0,
             .BELLATRIX_FORK_EPOCH = 0,
             .CAPELLA_FORK_EPOCH = fork_epoch,
         }),
-        .deneb => return mergeChainConfig(config, .{
+        .deneb => return config.merge(.{
             .ALTAIR_FORK_EPOCH = 0,
             .BELLATRIX_FORK_EPOCH = 0,
             .CAPELLA_FORK_EPOCH = 0,
             .DENEB_FORK_EPOCH = fork_epoch,
         }),
-        .electra => return mergeChainConfig(config, .{
+        .electra => return config.merge(.{
             .ALTAIR_FORK_EPOCH = 0,
             .BELLATRIX_FORK_EPOCH = 0,
             .CAPELLA_FORK_EPOCH = 0,
             .DENEB_FORK_EPOCH = 0,
             .ELECTRA_FORK_EPOCH = fork_epoch,
         }),
-        .fulu => return mergeChainConfig(config, .{
+        .fulu => return config.merge(.{
             .ALTAIR_FORK_EPOCH = 0,
             .BELLATRIX_FORK_EPOCH = 0,
             .CAPELLA_FORK_EPOCH = 0,

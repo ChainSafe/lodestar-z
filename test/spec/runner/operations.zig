@@ -68,7 +68,7 @@ pub const Operation = enum {
 pub const Handler = Operation;
 
 pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
-    const ForkTypes = @field(ssz, fork.forkName());
+    const ForkTypes = @field(ssz, fork.name());
     const tc_utils = TestCaseUtils(fork);
     const OpType = @field(ForkTypes, operation.operationObject());
 
@@ -131,9 +131,9 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
             switch (operation) {
                 .attestation => {
                     const attestations_fork: ForkSeq = if (fork.gte(.electra)) .electra else .phase0;
-                    var attestations = @field(ssz, attestations_fork.forkName()).Attestations.default_value;
+                    var attestations = @field(ssz, attestations_fork.name()).Attestations.default_value;
                     defer attestations.deinit(allocator);
-                    const attestation: *@field(ssz, attestations_fork.forkName()).Attestation.Type = @ptrCast(@alignCast(&self.op));
+                    const attestation: *@field(ssz, attestations_fork.name()).Attestation.Type = @ptrCast(@alignCast(&self.op));
                     try attestations.append(allocator, attestation.*);
                     const atts = attestations;
                     const attestations_wrapper: state_transition.Attestations = if (fork.gte(.electra))

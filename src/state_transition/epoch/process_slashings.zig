@@ -45,7 +45,7 @@ pub fn processSlashings(
     for (cache.indices_to_slash.items) |index| {
         const effective_balance_increment = effective_balance_increments[index];
         const penalty: u64 = if (penalties_by_effective_balance_increment.get(effective_balance_increment)) |penalty| penalty else blk: {
-            const p = if (fork.isPostElectra())
+            const p = if (fork.gte(.electra))
                 penalty_per_effective_balance_increment * effective_balance_increment
             else
                 @divFloor(effective_balance_increment * adjusted_total_slashing_balance_by_increment, total_balance_by_increment) * increment;

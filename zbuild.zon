@@ -16,7 +16,7 @@
             .url = "git+https://github.com/chainsafe/hashtree-z#4ed9aebb6178662299ae799f6914499820ff0180",
         },
         .snappy = .{
-            .url = "git+https://github.com/chainsafe/snappy.zig#ede2ad602ac9ffa506e3724a2bf5fc14c806187f",
+            .url = "git+https://github.com/chainsafe/snappy.zig#206a3019ed9f5cb1e382bddca9a51d7c3e7d8cd3",
         },
         .yaml = .{
             .url = "git+https://github.com/chainsafe/zig-yaml#e0e5962579e990a66c21424416c7ac092b20b772",
@@ -32,6 +32,23 @@
             },
             .preset = .{
                 .default = "mainnet",
+                .type = "string",
+            },
+        },
+        .download_era_options = .{
+            .era_base_url = .{
+                .default = "https://mainnet.era.nimbus.team",
+                .type = "string",
+            },
+            .era_files = .{
+                .default = .{
+                    "mainnet-01628-47ac89fb.era",
+                    "mainnet-01629-f4b834bc.era",
+                },
+                .type = "list",
+            },
+            .era_out_dir = .{
+                .default = "fixtures/era",
                 .type = "string",
             },
         },
@@ -61,6 +78,10 @@
         .consensus_types = .{
             .root_source_file = "src/consensus_types/root.zig",
             .imports = .{ .build_options, .ssz, .constants, .preset },
+        },
+        .era = .{
+            .root_source_file = "src/era/root.zig",
+            .imports = .{ .consensus_types, .config, .preset, .state_transition, .snappy },
         },
         .hashing = .{
             .root_source_file = "src/hashing/root.zig",
@@ -96,6 +117,12 @@
         },
     },
     .executables = .{
+        .download_era_files = .{
+            .root_module = .{
+                .root_source_file = "scripts/download_era_files.zig",
+                .imports = .{.download_era_options},
+            },
+        },
         .download_spec_tests = .{
             .root_module = .{
                 .root_source_file = "test/spec/download_spec_tests.zig",
@@ -156,6 +183,18 @@
                 .imports = .{ .hashing, .zbench },
             },
         },
+        .bench_process_block = .{
+            .root_module = .{
+                .root_source_file = "bench/state_transition/process_block.zig",
+                .imports = .{ .state_transition, .consensus_types, .config, .zbench },
+            },
+        },
+        .bench_process_epoch = .{
+            .root_module = .{
+                .root_source_file = "bench/state_transition/process_epoch.zig",
+                .imports = .{ .state_transition, .consensus_types, .config, .zbench },
+            },
+        },
     },
     .tests = .{
         .int = .{
@@ -163,15 +202,23 @@
                 .root_source_file = "test/int/root.zig",
                 .imports = .{
                     .build_options,
-                    .ssz,
                     .state_transition,
                     .config,
                     .consensus_types,
                     .preset,
                     .constants,
-                    .hex,
-                    .persistent_merkle_tree,
                     .blst,
+                },
+            },
+            .filters = .{},
+        },
+        .int_slow = .{
+            .root_module = .{
+                .root_source_file = "test/int_slow/root.zig",
+                .imports = .{
+                    .config,
+                    .download_era_options,
+                    .era,
                 },
             },
             .filters = .{},

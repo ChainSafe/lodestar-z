@@ -2,7 +2,7 @@ const std = @import("std");
 const yaml = @import("yaml");
 const spec_test_options = @import("spec_test_options");
 const types = @import("generic_types.zig");
-const snappy = @import("snappy");
+const snappy = @import("snappy").raw;
 const hex = @import("hex");
 const ssz = @import("ssz");
 const Node = @import("persistent_merkle_tree").Node;
@@ -270,28 +270,40 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     try Hasher.hash(&hash_scratch, value_expected, &root_actual);
     try std.testing.expectEqualSlices(u8, &root_expected, &root_actual);
 
-    // test conversion between tree and value
-
     var pool = try Node.Pool.init(gpa, 1_000_000);
     defer pool.deinit();
 
-    const node = if (comptime ssz.isFixedType(ST))
-        try ST.tree.fromValue(&pool, value_expected)
-    else
-        try ST.tree.fromValue(allocator, &pool, value_expected);
-    defer pool.unref(node);
+    // test conversion between tree and value
+    {
+        const node = try ST.tree.fromValue(&pool, value_expected);
+        defer pool.unref(node);
 
-    try std.testing.expectEqualSlices(u8, &root_expected, node.getRoot(&pool));
+        try std.testing.expectEqualSlices(u8, &root_expected, node.getRoot(&pool));
 
-    const value_from_tree = try allocator.create(ST.Type);
-    value_from_tree.* = ST.default_value;
+        const value_from_tree = try allocator.create(ST.Type);
+        value_from_tree.* = ST.default_value;
 
-    if (comptime ssz.isFixedType(ST)) {
-        try ST.tree.toValue(node, &pool, value_from_tree);
-    } else {
-        try ST.tree.toValue(allocator, node, &pool, value_from_tree);
+        if (comptime ssz.isFixedType(ST)) {
+            try ST.tree.toValue(node, &pool, value_from_tree);
+        } else {
+            try ST.tree.toValue(allocator, node, &pool, value_from_tree);
+        }
+        try std.testing.expect(ST.equals(value_expected, value_from_tree));
     }
-    try std.testing.expect(ST.equals(value_expected, value_from_tree));
+
+    // test conversion between tree and serialized
+    {
+        const node = try ST.tree.deserializeFromBytes(&pool, serialized_expected);
+        defer pool.unref(node);
+
+        try std.testing.expectEqualSlices(u8, &root_expected, node.getRoot(&pool));
+
+        const serialized_size = if (comptime ssz.isFixedType(ST)) ST.fixed_size else try ST.tree.serializedSize(node, &pool);
+        const serialized_from_tree = try allocator.alloc(u8, serialized_size);
+        defer allocator.free(serialized_from_tree);
+        _ = try ST.tree.serializeIntoBytes(node, &pool, serialized_from_tree);
+        try std.testing.expectEqualSlices(u8, serialized_expected, serialized_from_tree);
+    }
 }
 
 pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir) !void {
