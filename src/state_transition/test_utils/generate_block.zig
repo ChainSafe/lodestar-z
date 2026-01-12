@@ -102,7 +102,6 @@ pub fn generateElectraBlock(allocator: Allocator, cached_state: *const CachedBea
 pub fn generateElectraBlindedBlock(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, out: *types.electra.SignedBlindedBeaconBlock.Type) !void {
     const state = cached_state.state;
     var attestations = types.electra.Attestations.default_value;
-    // no need to fill up to MAX_ATTESTATIONS_ELECTRA
     const att_slot: Slot = state.slot() - 2;
     const att_index = 0;
     const att_block_root = try getBlockRootAtSlot(state, att_slot);
@@ -126,14 +125,12 @@ pub fn generateElectraBlindedBlock(allocator: Allocator, cached_state: *const Ca
     }
 
     var aggregation_bits = try ssz.BitListType(preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT).Type.fromBitLen(allocator, total_committee_size);
-    // TODO: why this does not work
-    // var aggregation_bits = @field(types.electra.Attestation.Fields, "aggregation_bits").Type.fromBitLen(allocator, total_committee_size);
+
     for (0..total_committee_size) |i| {
         try aggregation_bits.set(allocator, i, true);
     }
 
     var committee_bits = ssz.BitVectorType(preset.MAX_COMMITTEES_PER_SLOT).default_value;
-    // var committee_bits = @field(types.electra.Attestation.Fields, "committee_bits").default_value;
     for (0..committee_count) |i| {
         try committee_bits.set(i, true);
     }
@@ -145,7 +142,6 @@ pub fn generateElectraBlindedBlock(allocator: Allocator, cached_state: *const Ca
         .committee_bits = committee_bits,
     });
 
-    // Compute the expected withdrawals root to match what processWithdrawals expects
     var withdrawals_result = WithdrawalsResult{ .withdrawals = try Withdrawals.initCapacity(
         allocator,
         preset.MAX_WITHDRAWALS_PER_PAYLOAD,
@@ -162,35 +158,18 @@ pub fn generateElectraBlindedBlock(allocator: Allocator, cached_state: *const Ca
     execution_payload_header.timestamp = 1737111896;
     execution_payload_header.withdrawals_root = withdrawals_root;
 
+    var body = types.electra.BlindedBeaconBlockBody.default_value;
+    body.attestations = attestations;
+    body.execution_payload_header = execution_payload_header;
+
+    var message = types.electra.BlindedBeaconBlock.default_value;
+    message.slot = state.slot() + 1;
+    message.proposer_index = 41;
+    message.parent_root = try hex.hexToRoot("0x4e647394b6f96c1cd44938483ddf14d89b35d3f67586a59cbfd410a56efbb2b1");
+    message.body = body;
+
     out.* = .{
-        .message = .{
-            .slot = state.slot() + 1,
-            // value is generated after running real state transition int test
-            .proposer_index = 41,
-            .parent_root = try hex.hexToRoot("0x4e647394b6f96c1cd44938483ddf14d89b35d3f67586a59cbfd410a56efbb2b1"),
-            // this could be computed later
-            .state_root = [_]u8{0} ** 32,
-            .body = .{
-                .randao_reveal = [_]u8{0} ** 96,
-                .eth1_data = types.phase0.Eth1Data.default_value,
-                .graffiti = [_]u8{0} ** 32,
-                // BlindedBeaconBlockBody uses different list types than BeaconBlockBody
-                // Use getFieldType() to get the correct SSZ type and its default_value
-                .proposer_slashings = types.electra.BlindedBeaconBlockBody.getFieldType("proposer_slashings").default_value,
-                .attester_slashings = types.electra.BlindedBeaconBlockBody.getFieldType("attester_slashings").default_value,
-                .attestations = attestations,
-                .deposits = types.electra.BlindedBeaconBlockBody.getFieldType("deposits").default_value,
-                .voluntary_exits = types.electra.BlindedBeaconBlockBody.getFieldType("voluntary_exits").default_value,
-                .sync_aggregate = .{
-                    .sync_committee_bits = ssz.BitVectorType(preset.SYNC_COMMITTEE_SIZE).default_value,
-                    .sync_committee_signature = types.primitive.BLSSignature.default_value,
-                },
-                .execution_payload_header = execution_payload_header,
-                .bls_to_execution_changes = types.capella.SignedBLSToExecutionChanges.default_value,
-                .blob_kzg_commitments = types.electra.BlobKzgCommitments.default_value,
-                .execution_requests = types.electra.ExecutionRequests.default_value,
-            },
-        },
+        .message = message,
         .signature = types.primitive.BLSSignature.default_value,
     };
 }
