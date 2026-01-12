@@ -62,7 +62,7 @@ pub fn processEffectiveBalanceUpdates(cached_state: *CachedBeaconState, cache: *
 
             // TODO: describe issue. Compute progressive target balances
             // Must update target balances for consistency, see comments below
-            if (state.isPostAltair()) {
+                if (state.forkSeq().gte(.altair)) {
                 if (!validator.slashed) {
                     const previous_epoch_participation = state.previousEpochParticipations().items;
                     const current_epoch_participation = state.currentEpochParticipations().items;

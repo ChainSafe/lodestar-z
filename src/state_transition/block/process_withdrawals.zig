@@ -151,7 +151,7 @@ pub fn getExpectedWithdrawals(
         const validator = validators.items[validator_index];
         const withdraw_balance_gop = try withdrawal_balances.getOrPut(validator_index);
         const withdraw_balance: u64 = if (withdraw_balance_gop.found_existing) withdraw_balance_gop.value_ptr.* else 0;
-        const balance = if (state.isPostElectra())
+        const balance = if (state.forkSeq().gte(.electra))
             // Deduct partially withdrawn balance already queued above
             if (balances.items[validator_index] > withdraw_balance) balances.items[validator_index] - withdraw_balance else 0
         else
@@ -160,7 +160,7 @@ pub fn getExpectedWithdrawals(
         const withdrawable_epoch = validator.withdrawable_epoch;
         const withdrawal_credentials = validator.withdrawal_credentials;
         const effective_balance = validator.effective_balance;
-        const has_withdrawable_credentials = if (state.isPostElectra()) hasExecutionWithdrawalCredential(withdrawal_credentials) else hasEth1WithdrawalCredential(withdrawal_credentials);
+        const has_withdrawable_credentials = if (state.forkSeq().gte(.electra)) hasExecutionWithdrawalCredential(withdrawal_credentials) else hasEth1WithdrawalCredential(withdrawal_credentials);
         // early skip for balance = 0 as its now more likely that validator has exited/slashed with
         // balance zero than not have withdrawal credentials set
         if (balance == 0 or !has_withdrawable_credentials) {
@@ -178,7 +178,7 @@ pub fn getExpectedWithdrawals(
                 .amount = balance,
             });
             withdrawal_index += 1;
-        } else if ((effective_balance == if (state.isPostElectra())
+        } else if ((effective_balance == if (state.forkSeq().gte(.electra))
             getMaxEffectiveBalance(withdrawal_credentials)
         else
             preset.MAX_EFFECTIVE_BALANCE) and balance > effective_balance)

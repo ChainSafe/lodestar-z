@@ -529,7 +529,12 @@ pub const EpochTransitionCache = struct {
 
 test "EpochTransitionCache - finalProcessEpoch" {
     const allocator = std.testing.allocator;
-    var test_state = try TestCachedBeaconState.init(allocator, 256);
+
+    const Node = @import("persistent_merkle_tree").Node;
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
     try upgradeStateToFulu(allocator, test_state.cached_state);
@@ -543,7 +548,11 @@ test "EpochTransitionCache.beforeProcessEpoch" {
     const validator_count_arr = &.{ 256, 10_000 };
 
     inline for (validator_count_arr) |validator_count| {
-        var test_state = try TestCachedBeaconState.init(allocator, validator_count);
+        const Node = @import("persistent_merkle_tree").Node;
+        var pool = try Node.Pool.init(allocator, 500_000);
+        defer pool.deinit();
+
+        var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);
         defer test_state.deinit();
 
         var epoch_transition_cache = try EpochTransitionCache.init(allocator, test_state.cached_state);

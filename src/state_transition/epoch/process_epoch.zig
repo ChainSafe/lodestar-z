@@ -25,7 +25,7 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
     const state = cached_state.state;
     try processJustificationAndFinalization(cached_state, cache);
 
-    if (state.isPostAltair()) {
+    if (state.forkSeq().gte(.altair)) {
         try processInactivityUpdates(cached_state, cache);
     }
 
@@ -61,7 +61,7 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
         try processParticipationFlagUpdates(cached_state);
     }
 
-    if (state.isPostAltair()) {
+    if (state.forkSeq().gte(.altair)) {
         try processSyncCommitteeUpdates(allocator, cached_state);
     }
 

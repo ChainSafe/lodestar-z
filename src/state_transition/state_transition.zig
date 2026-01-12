@@ -62,13 +62,14 @@ pub fn processSlotsWithTransientCache(
     slot: Slot,
     _: EpochTransitionCacheOpts,
 ) !void {
-    var state = post_state.state;
-    if (state.slot() > slot) return error.outdatedSlot;
+    var state = &post_state.state;
+    if (try state.slot() > slot) return error.outdatedSlot;
 
-    while (state.slot() < slot) {
+    while (try state.slot() < slot) {
         try processSlot(allocator, post_state);
 
-        if ((state.slot() + 1) % preset.SLOTS_PER_EPOCH == 0) {
+        const next_slot = try state.slot() + 1;
+        if (next_slot % preset.SLOTS_PER_EPOCH == 0) {
             // TODO(bing): metrics
             // const epochTransitionTimer = metrics?.epochTransitionTime.startTimer();
 
@@ -81,12 +82,12 @@ pub fn processSlotsWithTransientCache(
             try processEpoch(allocator, post_state, epoch_transition_cache);
             // TODO(bing): registerValidatorStatuses
 
-            state.slotPtr().* += 1;
+            try state.setSlot(next_slot);
 
             try post_state.epoch_cache_ref.get().afterProcessEpoch(post_state, epoch_transition_cache);
             // post_state.commit
 
-            const state_epoch = computeEpochAtSlot(state.slot());
+            const state_epoch = computeEpochAtSlot(next_slot);
 
             const config = post_state.config;
             if (state_epoch == config.chain.ALTAIR_FORK_EPOCH) {
@@ -110,7 +111,7 @@ pub fn processSlotsWithTransientCache(
 
             try post_state.epoch_cache_ref.get().finalProcessEpoch(post_state);
         } else {
-            state.slotPtr().* += 1;
+            try state.setSlot(next_slot);
         }
 
         //epochTransitionTimer
@@ -136,7 +137,7 @@ pub fn stateTransition(
         .blinded => |b| b.slot(),
     };
 
-    const post_state = try state.clone(allocator);
+    const post_state = try state.clone(allocator, .{ .transfer_cache = !opts.do_not_transfer_cache });
 
     errdefer {
         post_state.deinit();

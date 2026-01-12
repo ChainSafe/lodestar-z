@@ -76,7 +76,7 @@ pub fn slashValidator(
         // state.proposerRewards.slashing += whistleblowerReward;
     }
 
-    if (state.isPostAltair()) {
+    if (state.forkSeq().gte(.altair)) {
         if (state.previousEpochParticipations().items[slashed_index] & TIMELY_TARGET == TIMELY_TARGET) {
             epoch_cache.previous_target_unslashed_balance_increments -= @divFloor(effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT);
         }

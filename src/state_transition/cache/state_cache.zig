@@ -11,7 +11,7 @@ const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const PubkeyIndexMap = @import("pubkey_cache.zig").PubkeyIndexMap(ValidatorIndex);
 const Index2PubkeyCache = @import("pubkey_cache.zig").Index2PubkeyCache;
-const CloneOpts = @import("ssz").tree_view.BaseTreeView.CloneOpts;
+const CloneOpts = @import("ssz").BaseTreeView.CloneOpts;
 
 pub const CachedBeaconState = struct {
     allocator: Allocator,
@@ -111,10 +111,14 @@ pub const CachedBeaconState = struct {
 
 test "CachedBeaconState.clone()" {
     const allocator = std.testing.allocator;
-    var test_state = try TestCachedBeaconState.init(allocator, 256);
+    const Node = @import("persistent_merkle_tree").Node;
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
     // test clone() api works fine with no memory leak
-    const cloned_cached_state = try test_state.cached_state.clone(allocator);
+    const cloned_cached_state = try test_state.cached_state.clone(allocator, .{});
     defer {
         cloned_cached_state.deinit();
         allocator.destroy(cloned_cached_state);

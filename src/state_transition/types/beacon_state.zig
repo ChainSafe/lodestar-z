@@ -717,7 +717,7 @@ pub const BeaconState = union(ForkSeq) {
                     } else {
                         var field_view = try committed_state.get(f.name);
                         const FieldView = @TypeOf(field_view);
-                        const owned_field_view: FieldView = try field_view.clone(.{ .transfer_cache = true });
+                        const owned_field_view: FieldView = try field_view.clone(.{});
                         try upgraded.set(f.name, owned_field_view);
                     }
                 } else {

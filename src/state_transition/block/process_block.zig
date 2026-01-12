@@ -37,17 +37,17 @@ pub fn processBlock(
     opts: ProcessBlockOpts,
     // TODO: metrics
 ) !void {
-    const state = cached_state.state;
+    const state = &cached_state.state;
     const body = block.beaconBlockBody();
 
     try processBlockHeader(allocator, cached_state, block);
 
     // The call to the process_execution_payload must happen before the call to the process_randao as the former depends
     // on the randao_mix computed with the reveal of the previous block.
-    if (state.isPostBellatrix() and isExecutionEnabled(cached_state.state, block)) {
+    if (state.forkSeq().gte(.bellatrix) and isExecutionEnabled(state, block)) {
         // TODO Deneb: Allow to disable withdrawals for interop testing
         // https://github.com/ethereum/consensus-specs/blob/b62c9e877990242d63aa17a2a59a49bc649a2f2e/specs/eip4844/beacon-chain.md#disabling-withdrawals
-        if (state.isPostCapella()) {
+        if (state.forkSeq().gte(.capella)) {
             // TODO: given max withdrawals of MAX_WITHDRAWALS_PER_PAYLOAD, can use fixed size array instead of heap alloc
             var withdrawals_result = WithdrawalsResult{ .withdrawals = try Withdrawals.initCapacity(
                 allocator,
@@ -83,11 +83,11 @@ pub fn processBlock(
     try processRandao(cached_state, body, block.proposerIndex(), opts.verify_signature);
     try processEth1Data(allocator, cached_state, body.eth1Data());
     try processOperations(allocator, cached_state, body, opts);
-    if (state.isPostAltair()) {
+    if (state.forkSeq().gte(.altair)) {
         try processSyncAggregate(allocator, cached_state, body.syncAggregate(), opts.verify_signature);
     }
 
-    if (state.isPostDeneb()) {
+    if (state.forkSeq().gte(.deneb)) {
         try processBlobKzgCommitments(external_data);
         // Only throw PreData so beacon can also sync/process blocks optimistically
         // and let forkChoice handle it

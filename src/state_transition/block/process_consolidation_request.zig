@@ -31,8 +31,8 @@ pub fn processConsolidationRequest(
     const target_pubkey = consolidation.target_pubkey;
     const source_address = consolidation.source_address;
 
-    if (!isPubkeyKnown(cached_state, source_pubkey)) return;
-    if (!isPubkeyKnown(cached_state, target_pubkey)) return;
+    if (!(try isPubkeyKnown(cached_state, source_pubkey))) return;
+    if (!(try isPubkeyKnown(cached_state, target_pubkey))) return;
 
     const source_index = epoch_cache.pubkey_to_index.get(&source_pubkey) orelse return;
     const target_index = epoch_cache.pubkey_to_index.get(&target_pubkey) orelse return;
