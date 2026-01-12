@@ -54,6 +54,12 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
             value.deinit(allocator);
         }
 
+        pub fn chunkIndex(index: usize) usize {
+            if (comptime isBasicType(Element)) {
+                return (index * Element.fixed_size) / 32;
+            } else return index;
+        }
+
         pub fn chunkCount(value: *const Type) usize {
             if (comptime isBasicType(Element)) {
                 return (Element.fixed_size * value.items.len + 31) / 32;

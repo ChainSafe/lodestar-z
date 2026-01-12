@@ -181,6 +181,58 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             try self.commit();
             return try ST.tree.serializedSize(self.base_view.data.root, self.base_view.pool);
         }
+
+        /// Get a read-only iterator over the elements of the list.
+        /// This only iterates over committed elements.
+        /// It is up to the caller to ensure that the iterator doesn't run past the end of the list.
+        pub fn iteratorReadonly(self: *const Self, start_index: usize) ReadonlyIterator {
+            return ReadonlyIterator.init(self, start_index);
+        }
+
+        /// Get a read-only iterator over the elements of the list.
+        /// This only iterates over committed elements.
+        /// It is up to the caller to ensure that the iterator doesn't run past the end of the list.
+        pub const ReadonlyIterator = struct {
+            tree_view: *const Self,
+            depth_iterator: Node.DepthIterator,
+            elem_index: usize,
+            elem_node: ?Node.Id,
+
+            pub fn init(tree_view: *const Self, start_index: usize) ReadonlyIterator {
+                return .{
+                    .tree_view = tree_view,
+                    .depth_iterator = Node.DepthIterator.init(
+                        tree_view.base_view.pool,
+                        tree_view.base_view.data.root,
+                        ST.chunk_depth + 1,
+                        ST.chunkIndex(start_index),
+                    ),
+                    .elem_index = start_index,
+                    .elem_node = null,
+                };
+            }
+
+            pub fn next(self: *ReadonlyIterator) !Element {
+                const elem_index = self.elem_index;
+                const n = if (self.elem_node) |node|
+                    if (ST.chunkIndex(self.elem_index) != (self.depth_iterator.index - 1))
+                        try self.depth_iterator.next()
+                    else
+                        node
+                else
+                    try self.depth_iterator.next();
+                self.elem_node = n;
+                self.elem_index += 1;
+                var out = ST.Element.default_value;
+                try ST.Element.tree.toValuePacked(
+                    n,
+                    self.tree_view.base_view.pool,
+                    elem_index,
+                    &out,
+                );
+                return out;
+            }
+        };
     };
 }
 
@@ -919,4 +971,31 @@ test "ListBasicTreeView - sliceTo and serialize" {
 
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2 }, serialized);
     try std.testing.expectEqual(@as(usize, 2), try sliced.length());
+}
+
+test "ListBasicTreeView - ReadonlyIterator" {
+    const allocator = std.testing.allocator;
+
+    const Uint16 = UintType(16);
+    const ListU16Type = FixedListType(Uint16, 64);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    var value: ListU16Type.Type = ListU16Type.default_value;
+    defer value.deinit(allocator);
+    const test_values = &[_]u16{ 10, 20, 30, 40, 50 };
+    for (test_values) |v| {
+        try value.append(allocator, v);
+    }
+
+    const tree_node = try ListU16Type.tree.fromValue(&pool, &value);
+    var view = try ListU16Type.TreeView.init(allocator, &pool, tree_node);
+    defer view.deinit();
+
+    var iter = view.iteratorReadonly(0);
+    for (test_values) |expected| {
+        const val = try iter.next();
+        try std.testing.expectEqual(expected, val);
+    }
 }
