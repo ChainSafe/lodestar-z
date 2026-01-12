@@ -63,7 +63,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             var data = try std.ArrayListUnmanaged(u8).initCapacity(allocator, byte_len);
             data.expandToCapacity();
             @memset(data.items, 0);
-            return .{
+            return @This(){
                 .data = data,
                 .bit_len = bit_len,
             };

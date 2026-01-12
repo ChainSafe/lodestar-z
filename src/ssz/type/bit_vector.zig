@@ -27,21 +27,21 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
         pub const kind = TypeKind.vector;
         pub const Element: type = BoolType();
         pub const length: usize = _length;
-        pub const byte_len = std.math.divCeil(usize, length, 8) catch unreachable;
+        pub const byte_length = std.math.divCeil(usize, length, 8) catch unreachable;
         pub const Type: type = @This();
         pub const TreeView: type = BitVectorTreeView(@This());
-        pub const fixed_size: usize = byte_len;
+        pub const fixed_size: usize = byte_length;
         pub const chunk_count: usize = std.math.divCeil(usize, fixed_size, 32) catch unreachable;
         pub const chunk_depth: u8 = maxChunksToDepth(chunk_count);
 
-        data: [byte_len]u8,
+        data: [byte_length]u8,
 
         pub const default_value: Type = Type.empty;
 
         pub const default_root: [32]u8 = getZeroHash(chunk_depth).*;
 
         pub const empty: @This() = .{
-            .data = [_]u8{0} ** byte_len,
+            .data = [_]u8{0} ** byte_length,
         };
 
         pub fn equals(self: *const @This(), other: *const @This()) bool {
@@ -68,7 +68,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
             }
             var true_bit_count: usize = 0;
 
-            for (0..byte_len) |i_byte| {
+            for (0..byte_length) |i_byte| {
                 var b = self.data[i_byte];
 
                 while (b != 0) {
@@ -86,7 +86,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
         pub fn getSingleTrueBit(self: *const @This()) ?usize {
             var found_index: ?usize = null;
 
-            for (0..byte_len) |i_byte| {
+            for (0..byte_length) |i_byte| {
                 var b = self.data[i_byte];
 
                 while (b != 0) {
@@ -154,9 +154,9 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
             allocator: std.mem.Allocator,
             values: *const [length]T,
         ) !std.ArrayList(T) {
-            var indices = try std.ArrayList(T).initCapacity(allocator, byte_len * 8);
+            var indices = try std.ArrayList(T).initCapacity(allocator, byte_length * 8);
 
-            for (0..byte_len) |i_byte| {
+            for (0..byte_length) |i_byte| {
                 var b = self.data[i_byte];
                 // Kernighan's algorithm to count the set bits instead of going through 0..8 for every byte
                 while (b != 0) {
@@ -182,8 +182,8 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
         }
 
         pub fn serializeIntoBytes(value: *const @This(), out: []u8) usize {
-            @memcpy(out[0..byte_len], &value.data);
-            return byte_len;
+            @memcpy(out[0..byte_length], &value.data);
+            return byte_length;
         }
 
         pub fn deserializeFromBytes(data: []const u8, out: *@This()) !void {
@@ -221,7 +221,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
 
                 var chunks: [chunk_count][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** chunk_count;
                 const chunk_bytes: []u8 = @ptrCast(&chunks);
-                @memcpy(chunk_bytes[0..byte_len], data[0..byte_len]);
+                @memcpy(chunk_bytes[0..byte_length], data[0..byte_len]);
 
                 var nodes: [chunk_count]Node.Id = undefined;
                 for (&chunks, 0..) |*chunk, i| {
@@ -238,7 +238,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
 
                 for (0..chunk_count) |i| {
                     const start_idx = i * 32;
-                    const remaining_bytes = byte_len - start_idx;
+                    const remaining_bytes = byte_length - start_idx;
 
                     // Determine how many bytes to copy for this chunk
                     const bytes_to_copy = @min(remaining_bytes, 32);
@@ -255,7 +255,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
                 for (0..chunk_count) |i| {
                     var leaf_buf = [_]u8{0} ** 32;
                     const start_idx = i * 32;
-                    const remaining_bytes = byte_len - start_idx;
+                    const remaining_bytes = byte_length - start_idx;
 
                     // Determine how many bytes to copy for this chunk
                     const bytes_to_copy = @min(remaining_bytes, 32);
@@ -277,7 +277,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
 
                 for (0..chunk_count) |i| {
                     const start_idx = i * 32;
-                    const remaining_bytes = byte_len - start_idx;
+                    const remaining_bytes = byte_length - start_idx;
                     const bytes_to_copy = @min(remaining_bytes, 32);
                     if (bytes_to_copy > 0) {
                         @memcpy(out[start_idx..][0..bytes_to_copy], nodes[i].getRoot(pool)[0..bytes_to_copy]);
@@ -289,7 +289,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
 
         pub fn serializeIntoJson(writer: anytype, in: *const @This()) !void {
             const bytes = in.*.data;
-            var byte_str: [2 + 2 * byte_len]u8 = undefined;
+            var byte_str: [2 + 2 * byte_length]u8 = undefined;
 
             _ = try bytesToHex(&byte_str, &bytes);
             try writer.print("\"{s}\"", .{byte_str});
