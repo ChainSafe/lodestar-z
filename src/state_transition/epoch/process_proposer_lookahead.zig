@@ -46,7 +46,7 @@ pub fn processProposerLookahead(
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
 
     var seed: [32]u8 = undefined;
-    try getSeed(&state, new_epoch, c.DOMAIN_BEACON_PROPOSER, &seed);
+    try getSeed(state, new_epoch, c.DOMAIN_BEACON_PROPOSER, &seed);
 
     try computeProposers(
         allocator,
@@ -58,5 +58,5 @@ pub fn processProposerLookahead(
         proposer_lookahead[last_epoch_start..],
     );
 
-    try @constCast(&state).setProposerLookahead(proposer_lookahead);
+    try state.setProposerLookahead(proposer_lookahead);
 }

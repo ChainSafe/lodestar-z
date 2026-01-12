@@ -14,14 +14,14 @@ pub const RootCache = struct {
     allocator: Allocator,
     current_justified_checkpoint: Checkpoint,
     previous_justified_checkpoint: Checkpoint,
-    state: *const BeaconState,
+    state: *BeaconState,
     block_root_epoch_cache: std.AutoHashMap(Epoch, *const Root),
     block_root_slot_cache: std.AutoHashMap(Slot, *const Root),
 
-    pub fn init(allocator: Allocator, cached_state: *const CachedBeaconState) !*RootCache {
+    pub fn init(allocator: Allocator, cached_state: *CachedBeaconState) !*RootCache {
         const instance = try allocator.create(RootCache);
         errdefer allocator.destroy(instance);
-        const state = &cached_state.state;
+        const state = cached_state.state;
 
         var current_justified_checkpoint_view = try state.currentJustifiedCheckpoint();
         var previous_justified_checkpoint_view = try state.previousJustifiedCheckpoint();

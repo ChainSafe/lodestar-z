@@ -6,7 +6,7 @@ const PendingDeposit = types.electra.PendingDeposit.Type;
 const c = @import("constants");
 
 pub fn processDepositRequest(cached_state: *CachedBeaconState, deposit_request: *const DepositRequest) !void {
-    var state = &cached_state.state;
+    var state = cached_state.state;
     const deposit_requests_start_index = try state.depositRequestsStartIndex();
     if (deposit_requests_start_index == c.UNSET_DEPOSIT_REQUESTS_START_INDEX) {
         try state.setDepositRequestsStartIndex(deposit_request.index);

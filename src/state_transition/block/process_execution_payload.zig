@@ -28,7 +28,7 @@ pub fn processExecutionPayload(
     body: Body,
     external_data: BlockExternalData,
 ) !void {
-    const state = &cached_state.state;
+    const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const config = epoch_cache.config;
     var partial_payload = PartialPayload{};

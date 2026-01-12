@@ -66,7 +66,7 @@ pub fn validateAttestation(comptime AT: type, cached_state: *const CachedBeaconS
     }
 
     // post deneb, the attestations are valid till end of next epoch
-    if (!(data.slot + preset.MIN_ATTESTATION_INCLUSION_DELAY <= state_slot and isTimelyTarget(&state, state_slot - data.slot))) {
+    if (!(data.slot + preset.MIN_ATTESTATION_INCLUSION_DELAY <= state_slot and isTimelyTarget(state, state_slot - data.slot))) {
         return error.InvalidAttestationSlotNotWithInInclusionWindow;
     }
 

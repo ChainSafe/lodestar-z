@@ -56,7 +56,7 @@ pub const DepositData = union(enum) {
 };
 
 pub fn processDeposit(allocator: Allocator, cached_state: *CachedBeaconState, deposit: *const types.phase0.Deposit.Type) !void {
-    var state = &cached_state.state;
+    var state = cached_state.state;
     // verify the merkle branch
     var deposit_data_root: Root = undefined;
     try types.phase0.DepositData.hashTreeRoot(&deposit.data, &deposit_data_root);
@@ -102,7 +102,7 @@ pub fn applyDeposit(allocator: Allocator, cached_state: *CachedBeaconState, depo
         } else {
             // increase balance by deposit amount right away pre-electra
             const index = cached_index.?;
-            try increaseBalance(&state, index, amount);
+            try increaseBalance(state, index, amount);
         }
     } else {
         const pending_deposit = types.electra.PendingDeposit.Type{

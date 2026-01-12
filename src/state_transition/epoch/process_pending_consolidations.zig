@@ -21,7 +21,7 @@ pub fn processPendingConsolidations(cached_state: *CachedBeaconState, cache: *Ep
         const pending_consolidation = try pending_consolidations_it.nextValue(undefined);
         const source_index = pending_consolidation.source_index;
         const target_index = pending_consolidation.target_index;
-        const source_validator = try validators.get(source_index);
+        var source_validator = try validators.get(source_index);
 
         if (try source_validator.get("slashed")) {
             next_pending_consolidation += 1;
@@ -36,8 +36,8 @@ pub fn processPendingConsolidations(cached_state: *CachedBeaconState, cache: *Ep
         const source_effective_balance = @min(try balances.get(source_index), try source_validator.get("effective_balance"));
 
         // Move active balance to target. Excess balance is withdrawable.
-        try decreaseBalance(&state, source_index, source_effective_balance);
-        try increaseBalance(&state, target_index, source_effective_balance);
+        try decreaseBalance(state, source_index, source_effective_balance);
+        try increaseBalance(state, target_index, source_effective_balance);
         if (cache.balances) |cached_balances| {
             cached_balances.items[source_index] -= source_effective_balance;
             cached_balances.items[target_index] += source_effective_balance;

@@ -12,7 +12,7 @@ const verifySignatureSet = @import("../utils/signature_sets.zig").verifySingleSi
 
 pub fn getProposerSlashingSignatureSets(cached_state: *const CachedBeaconState, proposer_slashing: *const types.phase0.ProposerSlashing.Type) ![2]SingleSignatureSet {
     const config = cached_state.config;
-    const state = &cached_state.state;
+    const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
 
     const signed_header_1 = proposer_slashing.signed_header_1;

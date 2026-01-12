@@ -43,7 +43,6 @@ pub fn upgradeStateToBellatrix(_: Allocator, cached_state: *CachedBeaconState) !
     // -                             | new | latest_execution_payload_header
 
     var state = try altair_state.upgradeUnsafe();
-    defer altair_state.deinit();
 
     const new_fork: ct.phase0.Fork.Type = .{
         .previous_version = try altair_state.forkCurrentVersion(),
@@ -51,4 +50,7 @@ pub fn upgradeStateToBellatrix(_: Allocator, cached_state: *CachedBeaconState) !
         .epoch = cached_state.getEpochCache().epoch,
     };
     try state.setFork(&new_fork);
+
+    altair_state.deinit();
+    cached_state.state.* = state;
 }

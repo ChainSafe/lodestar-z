@@ -20,7 +20,7 @@ pub fn processVoluntaryExit(cached_state: *CachedBeaconState, signed_voluntary_e
 }
 
 pub fn isValidVoluntaryExit(cached_state: *CachedBeaconState, signed_voluntary_exit: *const SignedVoluntaryExit, verify_signature: bool) !bool {
-    const state = &cached_state.state;
+    const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const config = cached_state.config.chain;
     const voluntary_exit = signed_voluntary_exit.message;
@@ -31,14 +31,14 @@ pub fn isValidVoluntaryExit(cached_state: *CachedBeaconState, signed_voluntary_e
         return false;
     }
 
-    const validator = try validators.get(@intCast(voluntary_exit.validator_index));
+    var validator = try validators.get(@intCast(voluntary_exit.validator_index));
     const current_epoch = epoch_cache.epoch;
 
     const activation_epoch = try validator.get("activation_epoch");
     const exit_epoch = try validator.get("exit_epoch");
     return (
         // verify the validator is active
-        (try isActiveValidatorView(validator, current_epoch)) and
+        (try isActiveValidatorView(&validator, current_epoch)) and
             // verify exit has not been initiated
             exit_epoch == FAR_FUTURE_EPOCH and
             // exits must specify an epoch when they become valid; they are not valid before then

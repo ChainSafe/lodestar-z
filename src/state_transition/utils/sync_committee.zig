@@ -23,7 +23,7 @@ pub const SyncCommitteeInfo = struct {
 /// Consumer must deallocate the returned `SyncCommitteeInfo` struct
 pub fn getNextSyncCommittee(
     allocator: Allocator,
-    state: *const BeaconState,
+    state: *BeaconState,
     active_validator_indices: []const ValidatorIndex,
     effective_balance_increments: EffiectiveBalanceIncrements,
     out: *SyncCommitteeInfo,

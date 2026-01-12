@@ -64,11 +64,11 @@ pub fn queueExcessActiveBalance(
     }
 }
 
-pub fn isPubkeyKnown(cached_state: *const CachedBeaconState, pubkey: BLSPubkey) !bool {
-    return try isValidatorKnown(&cached_state.state, cached_state.getEpochCache().getValidatorIndex(&pubkey));
+pub fn isPubkeyKnown(cached_state: *CachedBeaconState, pubkey: BLSPubkey) !bool {
+    return try isValidatorKnown(cached_state.state, cached_state.getEpochCache().getValidatorIndex(&pubkey));
 }
 
-pub fn isValidatorKnown(state: *const BeaconState, index: ?ValidatorIndex) !bool {
+pub fn isValidatorKnown(state: *BeaconState, index: ?ValidatorIndex) !bool {
     const validator_index = index orelse return false;
     const validators_count = try state.validatorsCount();
     return validator_index < validators_count;

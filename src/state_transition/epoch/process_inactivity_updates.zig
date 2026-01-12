@@ -12,7 +12,7 @@ pub fn processInactivityUpdates(cached_state: *CachedBeaconState, cache: *const 
         return;
     }
 
-    const state = &cached_state.state;
+    const state = cached_state.state;
     const config = cached_state.config.chain;
     const INACTIVITY_SCORE_BIAS = config.INACTIVITY_SCORE_BIAS;
     const INACTIVITY_SCORE_RECOVERY_RATE = config.INACTIVITY_SCORE_RECOVERY_RATE;

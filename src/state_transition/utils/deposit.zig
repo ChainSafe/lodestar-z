@@ -4,8 +4,8 @@ const Eth1Data = types.phase0.Eth1Data.Type;
 const MAX_DEPOSITS = preset.MAX_DEPOSITS;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 
-pub fn getEth1DepositCount(cached_state: *const CachedBeaconState, eth1_data: ?*const Eth1Data) !u64 {
-    const state = &cached_state.state;
+pub fn getEth1DepositCount(cached_state: *CachedBeaconState, eth1_data: ?*const Eth1Data) !u64 {
+    const state = cached_state.state;
 
     const deposit_count: u64 = if (eth1_data) |d| d.deposit_count else blk: {
         var eth1_data_view = try state.eth1Data();

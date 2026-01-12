@@ -65,7 +65,7 @@ pub fn processPendingDeposits(allocator: Allocator, cached_state: *CachedBeaconS
         var is_validator_withdrawn = false;
         const validator_index = epoch_cache.getValidatorIndex(&deposit.pubkey);
 
-        if (try isValidatorKnown(&state, validator_index)) {
+        if (try isValidatorKnown(state, validator_index)) {
             var validators = try state.validators();
             const validator = try validators.getValue(undefined, validator_index.?);
             is_validator_exited = validator.exit_epoch < c.FAR_FUTURE_EPOCH;
@@ -113,14 +113,14 @@ pub fn processPendingDeposits(allocator: Allocator, cached_state: *CachedBeaconS
 /// we append EpochTransitionCache.is_compounding_validator_arr in this flow
 fn applyPendingDeposit(allocator: Allocator, cached_state: *CachedBeaconState, deposit: PendingDeposit, cache: *EpochTransitionCache) !void {
     const epoch_cache = cached_state.getEpochCache();
-    var state = cached_state.state;
+    const state = cached_state.state;
     const validator_index = epoch_cache.getValidatorIndex(&deposit.pubkey) orelse null;
     const pubkey = deposit.pubkey;
     // TODO: is this withdrawal_credential(s) the same to spec?
     const withdrawal_credentials = &deposit.withdrawal_credentials;
     const amount = deposit.amount;
     const signature = deposit.signature;
-    const is_validator_known = try isValidatorKnown(&state, validator_index);
+    const is_validator_known = try isValidatorKnown(state, validator_index);
 
     if (!is_validator_known) {
         // Verify the deposit signature (proof of possession) which is not checked by the deposit contract
@@ -137,7 +137,7 @@ fn applyPendingDeposit(allocator: Allocator, cached_state: *CachedBeaconState, d
     } else {
         if (validator_index) |val_idx| {
             // Increase balance
-            try increaseBalance(&state, val_idx, amount);
+            try increaseBalance(state, val_idx, amount);
             if (cache.balances) |*balances| {
                 balances.items[val_idx] += amount;
             }

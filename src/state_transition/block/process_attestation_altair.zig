@@ -28,7 +28,7 @@ const SLOTS_PER_EPOCH_SQRT = std.math.sqrt(preset.SLOTS_PER_EPOCH);
 /// AT = AttestationType
 /// for phase0 it's `types.phase0.Attestation.Type`
 /// for electra it's `types.electra.Attestation.Type`
-pub fn processAttestationsAltair(allocator: Allocator, cached_state: *const CachedBeaconState, comptime AT: type, attestations: []AT, verify_signature: bool) !void {
+pub fn processAttestationsAltair(allocator: Allocator, cached_state: *CachedBeaconState, comptime AT: type, attestations: []AT, verify_signature: bool) !void {
     var state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const effective_balance_increments = epoch_cache.effective_balance_increment.get().items;
@@ -65,7 +65,7 @@ pub fn processAttestationsAltair(allocator: Allocator, cached_state: *const Cach
 
         const in_current_epoch = data.target.epoch == current_epoch;
         var epoch_participation = if (in_current_epoch) try state.currentEpochParticipation() else try state.previousEpochParticipation();
-        const flags_attestation = try getAttestationParticipationStatus(&state, data, state_slot - data.slot, current_epoch, root_cache);
+        const flags_attestation = try getAttestationParticipationStatus(state, data, state_slot - data.slot, current_epoch, root_cache);
 
         // For each participant, update their participation
         // In epoch processing, this participation info is used to calculate balance updates
@@ -115,10 +115,10 @@ pub fn processAttestationsAltair(allocator: Allocator, cached_state: *const Cach
         const proposer_reward_numerator = total_increments * epoch_cache.base_reward_per_increment;
         proposer_reward += @divFloor(proposer_reward_numerator, PROPOSER_REWARD_DOMINATOR);
     }
-    try increaseBalance(&state, try cached_state.getBeaconProposer(state_slot), proposer_reward);
+    try increaseBalance(state, try cached_state.getBeaconProposer(state_slot), proposer_reward);
 }
 
-pub fn getAttestationParticipationStatus(state: *const BeaconState, data: types.phase0.AttestationData.Type, inclusion_delay: u64, current_epoch: Epoch, root_cache: *RootCache) !u8 {
+pub fn getAttestationParticipationStatus(state: *BeaconState, data: types.phase0.AttestationData.Type, inclusion_delay: u64, current_epoch: Epoch, root_cache: *RootCache) !u8 {
     const justified_checkpoint: Checkpoint = if (data.target.epoch == current_epoch)
         root_cache.current_justified_checkpoint
     else

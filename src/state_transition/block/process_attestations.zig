@@ -13,7 +13,7 @@ const processAttestationPhase0 = @import("./process_attestation_phase0.zig").pro
 const processAttestationsAltair = @import("./process_attestation_altair.zig").processAttestationsAltair;
 
 pub fn processAttestations(allocator: Allocator, cached_state: *CachedBeaconState, attestations: Attestations, verify_signatures: bool) !void {
-    const state = &cached_state.state;
+    const state = cached_state.state;
     switch (attestations) {
         .phase0 => |attestations_phase0| {
             if (state.forkSeq().gte(.altair)) {

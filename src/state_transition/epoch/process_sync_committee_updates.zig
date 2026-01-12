@@ -9,7 +9,7 @@ const getNextSyncCommittee = @import("../utils/sync_committee.zig").getNextSyncC
 const SyncCommitteeInfo = @import("../utils/sync_committee.zig").SyncCommitteeInfo;
 
 pub fn processSyncCommitteeUpdates(allocator: Allocator, cached_state: *CachedBeaconState) !void {
-    var state = &cached_state.state;
+    const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const next_epoch = epoch_cache.epoch + 1;
     if (next_epoch % preset.EPOCHS_PER_SYNC_COMMITTEE_PERIOD == 0) {

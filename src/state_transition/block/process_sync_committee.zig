@@ -26,7 +26,7 @@ pub fn processSyncAggregate(
     sync_aggregate: *const SyncAggregate,
     verify_signatures: bool,
 ) !void {
-    const state = &cached_state.state;
+    const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const committee_indices = @as(*const [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex, @ptrCast(epoch_cache.current_sync_committee_indexed.get().getValidatorIndices()));
     const sync_committee_bits = sync_aggregate.sync_committee_bits;
@@ -86,7 +86,7 @@ pub fn processSyncAggregate(
             if (index == proposer_index) {
                 proposer_balance += sync_participant_reward;
             } else {
-                try increaseBalance(&cached_state.state, index, sync_participant_reward);
+                try increaseBalance(cached_state.state, index, sync_participant_reward);
             }
 
             // Proposer reward
@@ -97,7 +97,7 @@ pub fn processSyncAggregate(
             if (index == proposer_index) {
                 proposer_balance = @max(0, proposer_balance - sync_participant_reward);
             } else {
-                try decreaseBalance(&cached_state.state, index, sync_participant_reward);
+                try decreaseBalance(cached_state.state, index, sync_participant_reward);
             }
         }
     }
@@ -109,8 +109,8 @@ pub fn processSyncAggregate(
 /// Consumers should deinit the returned pubkeys
 /// this is to be used when we implement getBlockSignatureSets
 /// see https://github.com/ChainSafe/state-transition-z/issues/72
-pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *const CachedBeaconState, block: Block, participant_indices: ?[]usize) !?AggregatedSignatureSet {
-    const state = &cached_state.state;
+pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *CachedBeaconState, block: Block, participant_indices: ?[]usize) !?AggregatedSignatureSet {
+    const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const sync_aggregate = block.beaconBlockBody().syncAggregate();
     const signature = sync_aggregate.sync_committee_signature;

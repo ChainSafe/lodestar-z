@@ -53,7 +53,7 @@ test "computeProposers - sanity" {
     try computeProposers(allocator, ForkSeq.electra, epoch_seed, 0, active_indices[0..], effective_balance_increments, &out);
 }
 
-pub fn getNextSyncCommitteeIndices(allocator: Allocator, state: *const BeaconState, active_indices: []const ValidatorIndex, effective_balance_increments: EffectiveBalanceIncrements, out: []ValidatorIndex) !void {
+pub fn getNextSyncCommitteeIndices(allocator: Allocator, state: *BeaconState, active_indices: []const ValidatorIndex, effective_balance_increments: EffectiveBalanceIncrements, out: []ValidatorIndex) !void {
     const fork_seq = state.forkSeq();
     const rand_byte_count: ByteCount = if (fork_seq.gte(.electra)) ByteCount.Two else ByteCount.One;
     const max_effective_balance: u64 = if (fork_seq.gte(.electra)) preset.MAX_EFFECTIVE_BALANCE_ELECTRA else preset.MAX_EFFECTIVE_BALANCE;
@@ -63,11 +63,12 @@ pub fn getNextSyncCommitteeIndices(allocator: Allocator, state: *const BeaconSta
     try computeSyncCommitteeIndices(allocator, &seed, active_indices, effective_balance_increments.items, rand_byte_count, max_effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT, preset.SHUFFLE_ROUND_COUNT, out);
 }
 
-pub fn getRandaoMix(state: *const BeaconState, epoch: Epoch) !*const [32]u8 {
-    return try (try state.randaoMixes()).getRoot(epoch % EPOCHS_PER_HISTORICAL_VECTOR);
+pub fn getRandaoMix(state: *BeaconState, epoch: Epoch) !*const [32]u8 {
+    var randao_mixes = try state.randaoMixes();
+    return try randao_mixes.getRoot(epoch % EPOCHS_PER_HISTORICAL_VECTOR);
 }
 
-pub fn getSeed(state: *const BeaconState, epoch: Epoch, domain_type: DomainType, out: *[32]u8) !void {
+pub fn getSeed(state: *BeaconState, epoch: Epoch, domain_type: DomainType, out: *[32]u8) !void {
     const mix = try getRandaoMix(state, epoch + EPOCHS_PER_HISTORICAL_VECTOR - MIN_SEED_LOOKAHEAD - 1);
     var epoch_buf: [8]u8 = undefined;
     std.mem.writeInt(u64, &epoch_buf, epoch, .little);

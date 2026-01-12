@@ -10,7 +10,7 @@ const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const ZERO_HASH = @import("constants").ZERO_HASH;
 
-pub fn isExecutionEnabled(state: *const BeaconState, block: Block) bool {
+pub fn isExecutionEnabled(state: *BeaconState, block: Block) bool {
     if (state.forkSeq().lt(.bellatrix)) return false;
     if (isMergeTransitionComplete(state)) return true;
 
@@ -41,7 +41,7 @@ pub fn isExecutionEnabled(state: *const BeaconState, block: Block) bool {
     }
 }
 
-pub fn isMergeTransitionBlock(state: *const BeaconState, body: *const BeaconBlockBody) bool {
+pub fn isMergeTransitionBlock(state: *BeaconState, body: *const BeaconBlockBody) bool {
     if (state.forkSeq() != .bellatrix) {
         return false;
     }
@@ -52,7 +52,7 @@ pub fn isMergeTransitionBlock(state: *const BeaconState, body: *const BeaconBloc
     });
 }
 
-pub fn isMergeTransitionComplete(state: *const BeaconState) bool {
+pub fn isMergeTransitionComplete(state: *BeaconState) bool {
     if (state.forkSeq().lt(.bellatrix)) {
         return false;
     }

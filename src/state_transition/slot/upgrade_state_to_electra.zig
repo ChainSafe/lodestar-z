@@ -94,4 +94,7 @@ pub fn upgradeStateToElectra(allocator: Allocator, cached_state: *CachedBeaconSt
             try queueExcessActiveBalance(cached_state, validator_index, &withdrawal_credentials, validator.pubkey);
         }
     }
+
+    deneb_state.deinit();
+    cached_state.state.* = state;
 }

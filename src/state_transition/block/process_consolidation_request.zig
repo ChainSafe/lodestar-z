@@ -24,7 +24,7 @@ pub fn processConsolidationRequest(
     consolidation: *const ConsolidationRequest,
 ) !void {
     _ = allocator;
-    var state = &cached_state.state;
+    var state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const config = epoch_cache.config;
 
@@ -81,7 +81,7 @@ pub fn processConsolidationRequest(
     }
 
     // Verify the source and the target are active
-    if (!(try isActiveValidatorView(source_validator, current_epoch)) or !(try isActiveValidatorView(target_validator, current_epoch))) {
+    if (!(try isActiveValidatorView(&source_validator, current_epoch)) or !(try isActiveValidatorView(&target_validator, current_epoch))) {
         return;
     }
 
@@ -118,7 +118,7 @@ pub fn processConsolidationRequest(
 }
 
 fn isValidSwitchToCompoundRequest(cached_state: *const CachedBeaconState, consolidation: *const ConsolidationRequest) !bool {
-    const state = &cached_state.state;
+    const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
 
     // this check is mainly to make the compiler happy, pubkey is checked by the consumer already
@@ -146,7 +146,7 @@ fn isValidSwitchToCompoundRequest(cached_state: *const CachedBeaconState, consol
     }
 
     // Verify the source is active
-    if (!try isActiveValidatorView(source_validator, epoch_cache.epoch)) {
+    if (!try isActiveValidatorView(&source_validator, epoch_cache.epoch)) {
         return false;
     }
 

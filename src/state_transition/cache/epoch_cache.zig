@@ -142,7 +142,7 @@ pub const EpochCache = struct {
 
     epoch: Epoch,
 
-    pub fn createFromState(allocator: Allocator, state: *const BeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*EpochCache {
+    pub fn createFromState(allocator: Allocator, state: *BeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*EpochCache {
         const config = immutable_data.config;
         const pubkey_to_index = immutable_data.pubkey_to_index;
         const index_to_pubkey = immutable_data.index_to_pubkey;
@@ -156,8 +156,7 @@ pub const EpochCache = struct {
         var exit_queue_epoch = computeActivationExitEpoch(current_epoch);
         var exit_queue_churn: u64 = 0;
 
-        var validator_view = try state.validators();
-        const validators = try validator_view.getAllReadonlyValues(allocator);
+        const validators = try state.validatorsSlice(allocator);
         defer allocator.free(validators);
 
         const validator_count = validators.len;
@@ -443,7 +442,7 @@ pub const EpochCache = struct {
         std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
         const next_shuffling = try computeEpochShuffling(
             self.allocator,
-            &state,
+            state,
             next_shuffling_active_indices,
             epoch_after_upcoming,
         );
@@ -489,7 +488,7 @@ pub const EpochCache = struct {
             }
         } else {
             var upcoming_proposer_seed: [32]u8 = undefined;
-            try getSeed(&state, self.epoch, c.DOMAIN_BEACON_PROPOSER, &upcoming_proposer_seed);
+            try getSeed(state, self.epoch, c.DOMAIN_BEACON_PROPOSER, &upcoming_proposer_seed);
             try computeProposers(
                 self.allocator,
                 self.config.forkSeqAtEpoch(self.epoch),

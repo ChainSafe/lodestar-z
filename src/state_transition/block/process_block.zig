@@ -37,7 +37,7 @@ pub fn processBlock(
     opts: ProcessBlockOpts,
     // TODO: metrics
 ) !void {
-    const state = &cached_state.state;
+    const state = cached_state.state;
     const body = block.beaconBlockBody();
 
     try processBlockHeader(allocator, cached_state, block);

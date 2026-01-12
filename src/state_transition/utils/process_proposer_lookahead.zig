@@ -16,7 +16,7 @@ const computeProposers = seed_utils.computeProposers;
 /// Uses active indices from the epoch cache shufflings.
 pub fn initializeProposerLookahead(
     allocator: Allocator,
-    cached_state: *const CachedBeaconState,
+    cached_state: *CachedBeaconState,
     out: []ValidatorIndex,
 ) !void {
     const lookahead_epochs = preset.MIN_SEED_LOOKAHEAD + 1;
@@ -39,7 +39,7 @@ pub fn initializeProposerLookahead(
         const active_indices = epoch_cache.getActiveIndicesAtEpoch(epoch) orelse return error.ActiveIndicesNotFound;
 
         var seed: [32]u8 = undefined;
-        try getSeed(&state, epoch, c.DOMAIN_BEACON_PROPOSER, &seed);
+        try getSeed(state, epoch, c.DOMAIN_BEACON_PROPOSER, &seed);
 
         try computeProposers(
             allocator,

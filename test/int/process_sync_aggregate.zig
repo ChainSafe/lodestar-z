@@ -10,7 +10,7 @@ test "process sync aggregate - sanity" {
     const state = test_state.cached_state.state;
     const config = test_state.cached_state.config;
     const previous_slot = (try state.slot()) - 1;
-    const root_signed = try state_transition.getBlockRootAtSlot(&state, previous_slot);
+    const root_signed = try state_transition.getBlockRootAtSlot(state, previous_slot);
     const domain = try config.getDomain(try state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
     var signing_root: Root = undefined;
     try computeSigningRoot(types.primitive.Root, root_signed, domain, &signing_root);

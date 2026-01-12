@@ -13,20 +13,20 @@ const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
 const getBlockRootAtSlot = state_transition.getBlockRootAtSlot;
 
 /// Generate a valid electra block for the given pre-state.
-pub fn generateElectraBlock(allocator: Allocator, cached_state: *const CachedBeaconState, out: *types.electra.SignedBeaconBlock.Type) !void {
+pub fn generateElectraBlock(allocator: Allocator, cached_state: *CachedBeaconState, out: *types.electra.SignedBeaconBlock.Type) !void {
     const state = cached_state.state;
     var attestations = types.electra.Attestations.default_value;
     // no need to fill up to MAX_ATTESTATIONS_ELECTRA
     const att_slot: Slot = (try state.slot()) - 2;
     const att_index = 0;
-    const att_block_root = try getBlockRootAtSlot(&state, att_slot);
+    const att_block_root = try getBlockRootAtSlot(state, att_slot);
     const target_epoch = cached_state.getEpochCache().epoch;
     const target_epoch_slot = computeStartSlotAtEpoch(target_epoch);
     var source_checkpoint_view = try state.currentJustifiedCheckpoint();
     var source_checkpoint: types.phase0.Checkpoint.Type = undefined;
     try source_checkpoint_view.toValue(allocator, &source_checkpoint);
 
-    const att_target_root = try getBlockRootAtSlot(&state, target_epoch_slot);
+    const att_target_root = try getBlockRootAtSlot(state, target_epoch_slot);
     const att_data: types.phase0.AttestationData.Type = .{
         .slot = att_slot,
         .index = att_index,

@@ -23,7 +23,7 @@ pub fn processSlashings(
     }
     const config = cached_state.config;
     const epoch_cache = cached_state.getEpochCache();
-    var state = &cached_state.state;
+    var state = cached_state.state;
 
     const total_balance_by_increment = cache.total_active_stake_by_increment;
     const fork = config.forkSeq(try state.slot());
@@ -56,7 +56,7 @@ pub fn processSlashings(
     }
 }
 
-pub fn getTotalSlashingsByIncrement(state: *const BeaconState) !u64 {
+pub fn getTotalSlashingsByIncrement(state: *BeaconState) !u64 {
     var total_slashings_by_increment: u64 = 0;
     var slashings = try state.slashings();
     const slashings_len = @TypeOf(slashings).length;

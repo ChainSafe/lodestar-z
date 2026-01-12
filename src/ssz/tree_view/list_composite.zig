@@ -131,7 +131,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         /// commit them beforehand.
         ///
         /// Caller owns the returned slice and must free it with the same allocator.
-        pub fn getAllReadonlyValues(self: *Self, allocator: Allocator) ![]const ST.Element.Type {
+        pub fn getAllReadonlyValues(self: *Self, allocator: Allocator) ![]ST.Element.Type {
             const list_length = try self.length();
             return try Chunks.getAllValues(&self.base_view, allocator, list_length);
         }

@@ -197,7 +197,7 @@ pub const EpochTransitionCache = struct {
     pub fn init(allocator: Allocator, cached_state: *CachedBeaconState) !*EpochTransitionCache {
         const config = cached_state.config;
         var epoch_cache = cached_state.getEpochCache();
-        const state = &cached_state.state;
+        const state = cached_state.state;
         const fork_seq = config.forkSeq(try state.slot());
         const current_epoch = epoch_cache.epoch;
         const prev_epoch = epoch_cache.getPreviousShuffling().epoch;

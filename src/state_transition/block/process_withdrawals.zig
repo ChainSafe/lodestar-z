@@ -33,7 +33,7 @@ pub fn processWithdrawals(
     expected_withdrawals_result: WithdrawalsResult,
     payload_withdrawals_root: Root,
 ) !void {
-    var state = &cached_state.state;
+    var state = cached_state.state;
     // processedPartialWithdrawalsCount is withdrawals coming from EL since electra (EIP-7002)
     const processed_partial_withdrawals_count = expected_withdrawals_result.processed_partial_withdrawals_count;
     const expected_withdrawals = expected_withdrawals_result.withdrawals.items;
@@ -155,7 +155,7 @@ pub fn getExpectedWithdrawals(
     while (n < bound) : (n += 1) {
         // Get next validator in turn
         const validator_index = (next_withdrawal_validator_index + n) % validators_count;
-        const validator = try validators.get(validator_index);
+        var validator = try validators.get(validator_index);
         const withdraw_balance_gop = try withdrawal_balances.getOrPut(validator_index);
         const withdraw_balance: u64 = if (withdraw_balance_gop.found_existing) withdraw_balance_gop.value_ptr.* else 0;
         const val_balance = try balances.get(validator_index);

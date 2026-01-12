@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const Validator = types.phase0.Validator.Type;
+const Validator = types.phase0.Validator;
 
 const Epoch = types.primitive.Epoch.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
@@ -13,28 +13,31 @@ const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const WithdrawalCredentials = types.primitive.Root.Type;
 const hasCompoundingWithdrawalCredential = @import("./electra.zig").hasCompoundingWithdrawalCredential;
 
-pub fn isActiveValidator(validator: *const Validator, epoch: Epoch) bool {
+pub fn isActiveValidator(validator: *const Validator.Type, epoch: Epoch) bool {
     return validator.activation_epoch <= epoch and epoch < validator.exit_epoch;
 }
 
-pub fn isActiveValidatorView(validator: anytype, epoch: Epoch) !bool {
+pub fn isActiveValidatorView(validator: *Validator.TreeView, epoch: Epoch) !bool {
     const activation_epoch: Epoch = @intCast(try validator.get("activation_epoch"));
     const exit_epoch: Epoch = @intCast(try validator.get("exit_epoch"));
     return activation_epoch <= epoch and epoch < exit_epoch;
 }
 
-pub fn isSlashableValidator(validator: *const Validator, epoch: Epoch) bool {
+pub fn isSlashableValidator(validator: *const Validator.Type, epoch: Epoch) bool {
     return !validator.slashed and validator.activation_epoch <= epoch and epoch < validator.withdrawable_epoch;
 }
 
-pub fn getActiveValidatorIndices(allocator: Allocator, state: *const BeaconState, epoch: Epoch) !std.ArrayList(ValidatorIndex) {
+pub fn getActiveValidatorIndices(allocator: Allocator, state: *BeaconState, epoch: Epoch) !std.ArrayList(ValidatorIndex) {
     var indices = std.ArrayList(ValidatorIndex).init(allocator);
 
     var validators = try state.validators();
+    var validators_it = validators.iteratorReadonly();
     const validators_len = try validators.length();
     for (0..validators_len) |i| {
-        const validator = try validators.get(i);
-        if (try isActiveValidatorView(validator, epoch)) {
+        var validator = try validators_it.next();
+        defer validator.deinit();
+
+        if (try isActiveValidatorView(&validator, epoch)) {
             try indices.append(@intCast(i));
         }
     }
@@ -82,13 +85,13 @@ pub fn getMaxEffectiveBalance(withdrawal_credentials: *const WithdrawalCredentia
     return preset.MIN_ACTIVATION_BALANCE;
 }
 
-pub fn getPendingBalanceToWithdraw(state: *const BeaconState, validator_index: ValidatorIndex) !u64 {
+pub fn getPendingBalanceToWithdraw(state: *BeaconState, validator_index: ValidatorIndex) !u64 {
     var total: u64 = 0;
 
     var pending_partial_withdrawals = try state.pendingPartialWithdrawals();
     const len = try pending_partial_withdrawals.length();
     for (0..len) |i| {
-        const pending_partial_withdrawal = try pending_partial_withdrawals.get(i);
+        var pending_partial_withdrawal = try pending_partial_withdrawals.get(i);
         const idx = try pending_partial_withdrawal.get("validator_index");
         if (idx == validator_index) {
             total += try pending_partial_withdrawal.get("amount");

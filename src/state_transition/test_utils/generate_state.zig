@@ -30,8 +30,11 @@ const EFFECTIVE_BALANCE = 32 * 1e9;
 const active_chain_config = if (active_preset == .mainnet) mainnet_chain_config else minimal_chain_config;
 
 /// generate, allocate BeaconState
-/// consumer has responsibility to deinit it
-pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config: ChainConfig, validator_count: usize) !BeaconState {
+/// consumer has responsibility to deinit and destroy it
+pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config: ChainConfig, validator_count: usize) !*BeaconState {
+    const beacon_state = try allocator.create(BeaconState);
+    errdefer allocator.destroy(beacon_state);
+
     const electra_state = try allocator.create(ElectraBeaconState);
     defer {
         types.electra.BeaconState.deinit(allocator, electra_state);
@@ -122,11 +125,11 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
     };
 
     // the same logic to processSyncCommitteeUpdates
-    var beacon_state = try BeaconState.fromValue(allocator, pool, .electra, electra_state);
+    beacon_state.* = try BeaconState.fromValue(allocator, pool, .electra, electra_state);
     errdefer beacon_state.deinit();
 
     var next_sync_committee_indices: [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex = undefined;
-    try getNextSyncCommitteeIndices(allocator, &beacon_state, active_validator_indices.items, effective_balance_increments, &next_sync_committee_indices);
+    try getNextSyncCommitteeIndices(allocator, beacon_state, active_validator_indices.items, effective_balance_increments, &next_sync_committee_indices);
 
     var next_sync_committee_pubkeys: [preset.SYNC_COMMITTEE_SIZE]BLSPubkey = undefined;
     var next_sync_committee_pubkeys_slices: [preset.SYNC_COMMITTEE_SIZE]blst.PublicKey = undefined;
@@ -163,14 +166,17 @@ pub const TestCachedBeaconState = struct {
 
     pub fn init(allocator: Allocator, pool: *Node.Pool, validator_count: usize) !TestCachedBeaconState {
         var state = try generateElectraState(allocator, pool, active_chain_config, validator_count);
-        errdefer state.deinit();
+        errdefer {
+            state.deinit();
+            allocator.destroy(state);
+        }
 
-        const fork_view = try state.fork();
+        var fork_view = try state.fork();
         const fork_epoch = try fork_view.get("epoch");
         return initFromState(allocator, state, ForkSeq.electra, fork_epoch);
     }
 
-    pub fn initFromState(allocator: Allocator, state: BeaconState, fork: ForkSeq, fork_epoch: Epoch) !TestCachedBeaconState {
+    pub fn initFromState(allocator: Allocator, state: *BeaconState, fork: ForkSeq, fork_epoch: Epoch) !TestCachedBeaconState {
         const pubkey_index_map = try PubkeyIndexMap.init(allocator);
         errdefer pubkey_index_map.deinit();
         const index_pubkey_cache = try allocator.create(Index2PubkeyCache);

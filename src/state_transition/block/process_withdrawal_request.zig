@@ -13,7 +13,7 @@ const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateV
 const computeExitEpochAndUpdateChurn = @import("../utils/epoch.zig").computeExitEpochAndUpdateChurn;
 
 pub fn processWithdrawalRequest(cached_state: *CachedBeaconState, withdrawal_request: *const WithdrawalRequest) !void {
-    var state = &cached_state.state;
+    var state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const config = epoch_cache.config;
 

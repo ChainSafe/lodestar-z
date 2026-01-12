@@ -21,19 +21,20 @@ pub const CachedBeaconState = struct {
     /// TODO: before an epoch transition, need to release() epoch_cache before using a new one
     epoch_cache_ref: *EpochCacheRc,
     /// this takes ownership of the state, it is expected to be deinitialized by this struct
-    state: BeaconState,
+    state: *BeaconState,
 
     // TODO: cloned_count properties, implement this once we switch to TreeView
     // TODO: proposer_rewards, looks like this is not a great place to put in, it's a result of a block state transition instead
 
     /// This class takes ownership of state after this function and has responsibility to deinit it
-    pub fn createCachedBeaconState(allocator: Allocator, state: BeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*CachedBeaconState {
-        const epoch_cache = try EpochCache.createFromState(allocator, &state, immutable_data, option);
+    pub fn createCachedBeaconState(allocator: Allocator, state: *BeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*CachedBeaconState {
+        const epoch_cache = try EpochCache.createFromState(allocator, state, immutable_data, option);
         errdefer epoch_cache.deinit();
         const epoch_cache_ref = try EpochCacheRc.init(allocator, epoch_cache);
         errdefer epoch_cache_ref.release();
         const cached_state = try allocator.create(CachedBeaconState);
         errdefer allocator.destroy(cached_state);
+
         cached_state.* = .{
             .allocator = allocator,
             .config = immutable_data.config,
@@ -55,11 +56,15 @@ pub const CachedBeaconState = struct {
         const epoch_cache_ref = self.epoch_cache_ref.acquire();
         errdefer epoch_cache_ref.release();
 
+        const state = try allocator.create(BeaconState);
+        errdefer allocator.destroy(state);
+        state.* = try self.state.clone(opts);
+
         cached_state.* = .{
             .allocator = allocator,
             .config = self.config,
             .epoch_cache_ref = epoch_cache_ref,
-            .state = try self.state.clone(opts),
+            .state = state,
         };
         return cached_state;
     }
@@ -68,6 +73,7 @@ pub const CachedBeaconState = struct {
         // should not deinit config since we don't take ownership of it, it's singleton across applications
         self.epoch_cache_ref.release();
         self.state.deinit();
+        self.allocator.destroy(self.state);
     }
 
     // TODO: implement loadCachedBeaconState

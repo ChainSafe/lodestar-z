@@ -27,7 +27,7 @@ pub fn randaoRevealSignatureSet(
     proposer_idx: u64,
 ) !SingleSignatureSet {
     const epoch_cache = cached_state.getEpochCache();
-    const state = &cached_state.state;
+    const state = cached_state.state;
     const config = cached_state.config;
 
     // should not get epoch from epoch_cache

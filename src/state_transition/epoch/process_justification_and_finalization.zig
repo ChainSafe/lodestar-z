@@ -49,7 +49,7 @@ pub fn weighJustificationAndFinalization(cached_state: *CachedBeaconState, total
     if (previous_epoch_target_balance * 3 > total_active_balance * 2) {
         const new_current_justified_checkpoint = Checkpoint{
             .epoch = previous_epoch,
-            .root = (try getBlockRoot(&state, previous_epoch)).*,
+            .root = (try getBlockRoot(state, previous_epoch)).*,
         };
         try state.setCurrentJustifiedCheckpoint(&new_current_justified_checkpoint);
         bits[1] = true;
@@ -58,7 +58,7 @@ pub fn weighJustificationAndFinalization(cached_state: *CachedBeaconState, total
     if (current_epoch_target_balance * 3 > total_active_balance * 2) {
         const new_current_justified_checkpoint = Checkpoint{
             .epoch = current_epoch,
-            .root = (try getBlockRoot(&state, current_epoch)).*,
+            .root = (try getBlockRoot(state, current_epoch)).*,
         };
         try state.setCurrentJustifiedCheckpoint(&new_current_justified_checkpoint);
         bits[0] = true;

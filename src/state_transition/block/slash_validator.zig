@@ -17,7 +17,7 @@ pub fn slashValidator(
     whistle_blower_index: ?ValidatorIndex,
 ) !void {
     const epoch_cache = cached_state.getEpochCache();
-    var state = &cached_state.state;
+    var state = cached_state.state;
     const epoch = epoch_cache.epoch;
     const effective_balance_increments = epoch_cache.effective_balance_increment;
 

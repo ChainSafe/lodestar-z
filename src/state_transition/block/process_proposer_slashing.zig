@@ -8,7 +8,7 @@ const verifySignature = @import("../utils/signature_sets.zig").verifySingleSigna
 const slashValidator = @import("./slash_validator.zig").slashValidator;
 
 pub fn processProposerSlashing(
-    cached_state: *const CachedBeaconState,
+    cached_state: *CachedBeaconState,
     proposer_slashing: *const ProposerSlashing,
     verify_signatures: bool,
 ) !void {
@@ -18,11 +18,11 @@ pub fn processProposerSlashing(
 }
 
 pub fn assertValidProposerSlashing(
-    cached_state: *const CachedBeaconState,
+    cached_state: *CachedBeaconState,
     proposer_slashing: *const ProposerSlashing,
     verify_signature: bool,
 ) !void {
-    const state = &cached_state.state;
+    const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const header_1 = proposer_slashing.signed_header_1.message;
     const header_2 = proposer_slashing.signed_header_2.message;

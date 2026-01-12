@@ -24,7 +24,7 @@ pub fn processPendingAttestations(
     head_flag: u8,
 ) !void {
     const epoch_cache = cached_state.getEpochCache();
-    const state = &cached_state.state;
+    const state = cached_state.state;
     const state_slot = try state.slot();
     const prev_epoch = epoch_cache.getPreviousShuffling().epoch;
     if (attestations.len == 0) {

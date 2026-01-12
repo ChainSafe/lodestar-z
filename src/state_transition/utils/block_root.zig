@@ -7,7 +7,7 @@ const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const SLOTS_PER_HISTORICAL_ROOT = preset.SLOTS_PER_HISTORICAL_ROOT;
 const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
 
-pub fn getBlockRootAtSlot(state: *const BeaconState, slot: Slot) !*const [32]u8 {
+pub fn getBlockRootAtSlot(state: *BeaconState, slot: Slot) !*const [32]u8 {
     const state_slot = try state.slot();
     if (slot >= state_slot) {
         return error.SlotTooBig;
@@ -19,10 +19,11 @@ pub fn getBlockRootAtSlot(state: *const BeaconState, slot: Slot) !*const [32]u8 
         return error.SlotTooSmall;
     }
 
-    return try (try state.blockRoots()).getRoot(slot % SLOTS_PER_HISTORICAL_ROOT);
+    var block_roots = try state.blockRoots();
+    return try block_roots.getRoot(slot % SLOTS_PER_HISTORICAL_ROOT);
 }
 
-pub fn getBlockRoot(state: *const BeaconState, epoch: Epoch) !*const [32]u8 {
+pub fn getBlockRoot(state: *BeaconState, epoch: Epoch) !*const [32]u8 {
     return getBlockRootAtSlot(state, computeStartSlotAtEpoch(epoch));
 }
 

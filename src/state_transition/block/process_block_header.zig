@@ -11,7 +11,7 @@ const ZERO_HASH = @import("constants").ZERO_HASH;
 const Block = @import("../types/block.zig").Block;
 
 pub fn processBlockHeader(allocator: Allocator, cached_state: *CachedBeaconState, block: Block) !void {
-    const state = &cached_state.state;
+    const state = cached_state.state;
     const slot = try state.slot();
 
     // verify that the slots match

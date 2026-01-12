@@ -9,7 +9,7 @@ const verifyBlsToExecutionChangeSignature = @import("../signature_sets/bls_to_ex
 
 pub fn processBlsToExecutionChange(cached_state: *CachedBeaconState, signed_bls_to_execution_change: *const SignedBLSToExecutionChange) !void {
     const address_change = signed_bls_to_execution_change.message;
-    var state = &cached_state.state;
+    var state = cached_state.state;
 
     try isValidBlsToExecutionChange(cached_state, signed_bls_to_execution_change, true);
 
@@ -25,7 +25,7 @@ pub fn processBlsToExecutionChange(cached_state: *CachedBeaconState, signed_bls_
 }
 
 pub fn isValidBlsToExecutionChange(cached_state: *CachedBeaconState, signed_bls_to_execution_change: *const SignedBLSToExecutionChange, verify_signature: bool) !void {
-    const state = &cached_state.state;
+    const state = cached_state.state;
     const address_change = signed_bls_to_execution_change.message;
     const validator_index = address_change.validator_index;
     var validators = try state.validators();
@@ -34,7 +34,7 @@ pub fn isValidBlsToExecutionChange(cached_state: *CachedBeaconState, signed_bls_
         return error.InvalidBlsToExecutionChange;
     }
 
-    const validator = try validators.get(@intCast(validator_index));
+    var validator = try validators.get(@intCast(validator_index));
     const withdrawal_credentials = try validator.getRoot("withdrawal_credentials");
     if (withdrawal_credentials[0] != c.BLS_WITHDRAWAL_PREFIX) {
         return error.InvalidWithdrawalCredentialsPrefix;

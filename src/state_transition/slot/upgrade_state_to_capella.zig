@@ -74,4 +74,7 @@ pub fn upgradeStateToCapella(allocator: Allocator, cached_state: *CachedBeaconSt
     new_latest_execution_payload_header.capella.withdrawals_root = [_]u8{0} ** 32;
 
     try state.setLatestExecutionPayloadHeader(&new_latest_execution_payload_header);
+
+    bellatrix_state.deinit();
+    cached_state.state.* = state;
 }

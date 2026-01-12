@@ -10,7 +10,6 @@ pub fn upgradeStateToFulu(allocator: Allocator, cached_state: *CachedBeaconState
     }
 
     var state = try electra_state.upgradeUnsafe();
-    defer electra_state.deinit();
 
     // Update fork version
     const new_fork = ct.phase0.Fork.Type{
@@ -27,4 +26,7 @@ pub fn upgradeStateToFulu(allocator: Allocator, cached_state: *CachedBeaconState
         &proposer_lookahead,
     );
     try state.setProposerLookahead(&proposer_lookahead);
+
+    electra_state.deinit();
+    cached_state.state.* = state;
 }

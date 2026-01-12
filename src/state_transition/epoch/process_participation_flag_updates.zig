@@ -7,7 +7,7 @@ const types = @import("consensus_types");
 const preset = @import("preset").preset;
 
 pub fn processParticipationFlagUpdates(cached_state: *CachedBeaconState) !void {
-    var state = &cached_state.state;
+    var state = cached_state.state;
     // rotate EpochParticipation
     try state.rotateEpochParticipation();
 
