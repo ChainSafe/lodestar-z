@@ -17,11 +17,7 @@ pub fn isBitVectorType(ST: type) bool {
 }
 
 pub fn BitVectorType(comptime _length: comptime_int) type {
-    comptime {
-        if (_length <= 0) {
-            @compileError("length must be greater than 0");
-        }
-    }
+    if (_length <= 0) @compileError("length must be greater than 0");
 
     return struct {
         pub const kind = TypeKind.vector;
