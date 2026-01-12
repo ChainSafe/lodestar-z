@@ -16,7 +16,7 @@ const Node = @import("persistent_merkle_tree").Node;
 const BitListTreeView = @import("../tree_view/root.zig").BitListTreeView;
 
 pub fn isBitListType(ST: type) bool {
-    return ST.kind == .list and ST.Element.kind == .bool and ST == BitListType(ST.limit);
+    return ST == BitListType(ST.limit);
 }
 
 pub fn BitListType(comptime _limit: comptime_int) type {
