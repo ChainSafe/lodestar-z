@@ -28,13 +28,11 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
         pub const Element: type = BoolType();
         pub const length: usize = _length;
         pub const byte_len = std.math.divCeil(usize, length, 8) catch unreachable;
-        pub const Type: type = Self;
-        pub const TreeView: type = BitVectorTreeView(Self);
+        pub const Type: type = @This();
+        pub const TreeView: type = BitVectorTreeView(@This());
         pub const fixed_size: usize = byte_len;
         pub const chunk_count: usize = std.math.divCeil(usize, fixed_size, 32) catch unreachable;
         pub const chunk_depth: u8 = maxChunksToDepth(chunk_count);
-
-        const Self = @This();
 
         data: [byte_len]u8,
 
@@ -42,15 +40,15 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
 
         pub const default_root: [32]u8 = getZeroHash(chunk_depth).*;
 
-        pub const empty: Self = .{
+        pub const empty: @This() = .{
             .data = [_]u8{0} ** byte_len,
         };
 
-        pub fn equals(self: *const Self, other: *const Self) bool {
+        pub fn equals(self: *const @This(), other: *const @This()) bool {
             return std.mem.eql(u8, &self.data, &other.data);
         }
 
-        pub fn fromBoolArray(bools: [length]bool) !Self {
+        pub fn fromBoolArray(bools: [length]bool) !@This() {
             var bv = empty;
             for (bools, 0..) |bit, i| {
                 try bv.set(i, bit);
@@ -58,13 +56,13 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
             return bv;
         }
 
-        pub fn toBoolArray(self: *const Self, out: *[length]bool) void {
+        pub fn toBoolArray(self: *const @This(), out: *[length]bool) void {
             for (0..length) |i| {
                 out[i] = self.get(i) catch unreachable;
             }
         }
 
-        pub fn getTrueBitIndexes(self: *const Self, out: []usize) !usize {
+        pub fn getTrueBitIndexes(self: *const @This(), out: []usize) !usize {
             if (out.len < length) {
                 return error.InvalidSize;
             }
@@ -85,7 +83,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
             return true_bit_count;
         }
 
-        pub fn getSingleTrueBit(self: *const Self) ?usize {
+        pub fn getSingleTrueBit(self: *const @This()) ?usize {
             var found_index: ?usize = null;
 
             for (0..byte_len) |i_byte| {
@@ -105,7 +103,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
             return found_index;
         }
 
-        pub fn get(self: *const Self, bit_index: usize) !bool {
+        pub fn get(self: *const @This(), bit_index: usize) !bool {
             if (bit_index >= length) {
                 return error.OutOfRange;
             }
@@ -117,7 +115,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
         }
 
         /// Set bit value at index `bit_index`
-        pub fn set(self: *Self, bit_index: usize, bit: bool) !void {
+        pub fn set(self: *@This(), bit_index: usize, bit: bool) !void {
             if (bit_index >= length) {
                 return error.OutOfRange;
             }
@@ -151,7 +149,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
         ///
         /// Caller must call `deinit` on the returned list
         pub fn intersectValues(
-            self: *const Self,
+            self: *const @This(),
             comptime T: type,
             allocator: std.mem.Allocator,
             values: *const [length]T,
@@ -173,22 +171,22 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
             return indices;
         }
 
-        pub fn hashTreeRoot(value: *const Self, out: *[32]u8) !void {
+        pub fn hashTreeRoot(value: *const @This(), out: *[32]u8) !void {
             var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
             _ = serializeIntoBytes(value, @ptrCast(&chunks));
             try merkleize(@ptrCast(&chunks), chunk_depth, out);
         }
 
-        pub fn clone(value: *const Self, out: *Self) !void {
+        pub fn clone(value: *const @This(), out: *@This()) !void {
             out.* = value.*;
         }
 
-        pub fn serializeIntoBytes(value: *const Self, out: []u8) usize {
+        pub fn serializeIntoBytes(value: *const @This(), out: []u8) usize {
             @memcpy(out[0..byte_len], &value.data);
             return byte_len;
         }
 
-        pub fn deserializeFromBytes(data: []const u8, out: *Self) !void {
+        pub fn deserializeFromBytes(data: []const u8, out: *@This()) !void {
             try serialized.validate(data);
 
             @memcpy(&out.data, data[0..fixed_size]);
@@ -233,7 +231,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }
 
-            pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Self) !void {
+            pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var nodes: [chunk_count]Node.Id = undefined;
 
                 try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
@@ -252,7 +250,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
                 }
             }
 
-            pub fn fromValue(pool: *Node.Pool, value: *const Self) !Node.Id {
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 var nodes: [chunk_count]Node.Id = undefined;
                 for (0..chunk_count) |i| {
                     var leaf_buf = [_]u8{0} ** 32;
@@ -289,7 +287,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
             }
         };
 
-        pub fn serializeIntoJson(writer: anytype, in: *const Self) !void {
+        pub fn serializeIntoJson(writer: anytype, in: *const @This()) !void {
             const bytes = in.*.data;
             var byte_str: [2 + 2 * byte_len]u8 = undefined;
 
@@ -297,7 +295,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
             try writer.print("\"{s}\"", .{byte_str});
         }
 
-        pub fn deserializeFromJson(source: *std.json.Scanner, out: *Self) !void {
+        pub fn deserializeFromJson(source: *std.json.Scanner, out: *@This()) !void {
             const hex_bytes = switch (try source.next()) {
                 .string => |v| v,
                 else => return error.InvalidJson,
@@ -317,7 +315,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
 test "BitVectorType - sanity" {
     const length = 44;
     const Bits = BitVectorType(length);
-    var b: Bits.Type = Bits.default_value;
+    var b: Bits = Bits.default_value;
     try b.set(0, true);
     try b.set(length - 1, true);
 
@@ -337,7 +335,7 @@ test "BitVectorType - sanity with bools" {
     const Bits = BitVectorType(16);
     const expected_bools = [_]bool{ true, false, true, true, false, true, false, true, true, false, true, true, false, false, true, false };
     const expected_true_bit_indexes = [_]usize{ 0, 2, 3, 5, 7, 8, 10, 11, 14 };
-    var b: Bits.Type = try Bits.Type.fromBoolArray(expected_bools);
+    var b: Bits = try Bits.Type.fromBoolArray(expected_bools);
 
     var actual_bools: [Bits.length]bool = undefined;
     b.toBoolArray(&actual_bools);
@@ -488,7 +486,7 @@ test "BitVectorType - tree roundtrip 512 bits" {
 
         const tree_node = try Bits.tree.fromValue(&pool, &value);
 
-        var value_from_tree: Bits.Type = undefined;
+        var value_from_tree: Bits = undefined;
         try Bits.tree.toValue(tree_node, &pool, &value_from_tree);
 
         try std.testing.expect(Bits.equals(&value, &value_from_tree));
@@ -539,7 +537,7 @@ test "BitVectorType - tree.deserializeFromBytes 128 bits" {
         const node_root = tree_node.getRoot(&pool);
         try std.testing.expectEqualSlices(u8, &tc.expected_root, node_root);
 
-        var value_from_tree: Bits.Type = undefined;
+        var value_from_tree: Bits = undefined;
         try Bits.tree.toValue(tree_node, &pool, &value_from_tree);
 
         var tree_serialized: [Bits.fixed_size]u8 = undefined;

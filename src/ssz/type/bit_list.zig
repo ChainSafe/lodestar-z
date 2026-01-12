@@ -23,13 +23,11 @@ pub fn BitListType(comptime _limit: comptime_int) type {
     if (_limit <= 0) @compileError("limit must be greater than 0");
 
     return struct {
-        const Self = @This();
-
         pub const kind = TypeKind.list;
         pub const Element: type = BoolType();
         pub const limit: usize = _limit;
-        pub const Type: type = Self;
-        pub const TreeView: type = BitListTreeView(Self);
+        pub const Type: type = @This();
+        pub const TreeView: type = BitListTreeView(@This());
         pub const min_size: usize = 1;
         pub const max_size: usize = std.math.divCeil(usize, limit + 1, 8) catch unreachable;
         pub const max_chunk_count: usize = std.math.divCeil(usize, limit, 256) catch unreachable;
@@ -38,7 +36,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         data: std.ArrayListUnmanaged(u8),
         bit_len: usize = 0,
 
-        pub const empty: Self = .{
+        pub const empty: @This() = .{
             .data = std.ArrayListUnmanaged(u8).empty,
             .bit_len = 0,
         };
@@ -55,7 +53,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             return self.bit_len == other.bit_len and std.mem.eql(u8, self.data.items, other.data.items);
         }
 
-        pub fn fromBitLen(allocator: std.mem.Allocator, bit_len: usize) !Self {
+        pub fn fromBitLen(allocator: std.mem.Allocator, bit_len: usize) !@This() {
             if (bit_len > _limit) {
                 return error.tooLarge;
             }
@@ -71,15 +69,15 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             };
         }
 
-        pub fn fromBoolSlice(allocator: std.mem.Allocator, bools: []const bool) !Self {
-            var bl = try Self.fromBitLen(allocator, bools.len);
+        pub fn fromBoolSlice(allocator: std.mem.Allocator, bools: []const bool) !@This() {
+            var bl = try @This().fromBitLen(allocator, bools.len);
             for (bools, 0..) |bit, i| {
                 try bl.set(allocator, i, bit);
             }
             return bl;
         }
 
-        pub fn toBoolSlice(self: *const Self, out: *[]bool) !void {
+        pub fn toBoolSlice(self: *const @This(), out: *[]bool) !void {
             if (out.len != self.bit_len) {
                 return error.InvalidSize;
             }
@@ -88,7 +86,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             }
         }
 
-        pub fn getTrueBitIndexes(self: *const Self, out: []usize) !usize {
+        pub fn getTrueBitIndexes(self: *const @This(), out: []usize) !usize {
             if (out.len < self.bit_len) {
                 return error.InvalidSize;
             }
@@ -122,7 +120,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             return true_bit_count;
         }
 
-        pub fn getSingleTrueBit(self: *const Self) ?usize {
+        pub fn getSingleTrueBit(self: *const @This()) ?usize {
             var found_index: ?usize = null;
 
             for (self.data.items, 0..) |byte, i_byte| {
@@ -145,7 +143,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             value.data.deinit(allocator);
         }
 
-        pub fn get(self: *const Self, bit_index: usize) !bool {
+        pub fn get(self: *const @This(), bit_index: usize) !bool {
             if (bit_index >= self.bit_len) {
                 return error.OutOfRange;
             }
@@ -156,14 +154,14 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             return (self.data.items[byte_idx] & mask) == mask;
         }
 
-        pub fn set(self: *Self, allocator: std.mem.Allocator, bit_index: usize, bit: bool) !void {
+        pub fn set(self: *@This(), allocator: std.mem.Allocator, bit_index: usize, bit: bool) !void {
             if (bit_index + 1 > self.bit_len) {
                 try self.resize(allocator, bit_index + 1);
             }
             try self.setAssumeCapacity(bit_index, bit);
         }
 
-        pub fn resize(self: *Self, allocator: std.mem.Allocator, bit_len: usize) !void {
+        pub fn resize(self: *@This(), allocator: std.mem.Allocator, bit_len: usize) !void {
             if (bit_len > _limit) {
                 return error.tooLarge;
             }
@@ -187,7 +185,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         }
 
         /// Set bit value at index `bit_index`
-        pub fn setAssumeCapacity(self: *Self, bit_index: usize, bit: bool) !void {
+        pub fn setAssumeCapacity(self: *@This(), bit_index: usize, bit: bool) !void {
             if (bit_index >= self.bit_len) {
                 return error.OutOfRange;
             }
@@ -221,7 +219,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         ///
         /// Caller must call `deinit` on the returned list
         pub fn intersectValues(
-            self: *const Self,
+            self: *const @This(),
             comptime T: type,
             allocator: std.mem.Allocator,
             values: []const T,
