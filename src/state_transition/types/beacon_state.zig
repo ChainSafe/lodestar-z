@@ -294,9 +294,15 @@ pub const BeaconState = union(ForkSeq) {
         try votes.push(child_view);
     }
 
+    pub fn resetEth1DataVotes(self: *BeaconState) !void {
+        switch (self.*) {
+            inline else => |*state| try state.setValue("eth1_data_votes", &ct.phase0.Eth1DataVotes.default_value),
+        }
+    }
+
     pub fn eth1DepositIndex(self: *const BeaconState) !u64 {
         return switch (self.*) {
-            inline else => |state| try state.get("eth1_deposit_index"),
+            inline else => |*state| try state.get("eth1_deposit_index"),
         };
     }
 
