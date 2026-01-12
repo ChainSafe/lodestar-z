@@ -1510,3 +1510,145 @@ test "VariableListType - tree.deserializeFromBytes (List<List<uint16>>)" {
         try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
     }
 }
+
+const TypeTestCase = @import("test_utils.zig").TypeTestCase;
+const testCases = [_]TypeTestCase{
+    .{ .id = "empty", .serializedHex = "0x", .json = "[]", .rootHex = "0x52e2647abc3d0c9d3be0387f3f0d925422c7a4e98cf4489066f0f43281a899f3" },
+    .{ .id = "4 values", .serializedHex = "0xa086010000000000400d030000000000e093040000000000801a060000000000a086010000000000400d030000000000e093040000000000801a060000000000", .json = 
+    \\["100000","200000","300000","400000","100000","200000","300000","400000"]
+    , .rootHex = "0xb55b8592bcac475906631481bbc746bca7339d04ab1085e84884a700c03de4b1" },
+    .{
+        .id = "8 values",
+        .serializedHex = "0xa086010000000000400d030000000000e093040000000000801a060000000000a086010000000000400d030000000000e093040000000000801a060000000000",
+        .json =
+        \\["100000","200000","300000","400000","100000","200000","300000","400000"]
+        ,
+        .rootHex = "0xb55b8592bcac475906631481bbc746bca7339d04ab1085e84884a700c03de4b1",
+    },
+};
+
+test "valid test for ListBasicType" {
+    const allocator = std.testing.allocator;
+
+    // uint of 8 bytes = u64
+    const Uint = UintType(64);
+    const List = FixedListType(Uint, 128);
+
+    const TypeTest = @import("test_utils.zig").typeTest(List);
+
+    for (testCases[0..]) |*tc| {
+        try TypeTest.run(allocator, tc);
+    }
+}
+
+test "FixedListType equals" {
+    const allocator = std.testing.allocator;
+    const List = FixedListType(UintType(8), 32);
+
+    var a: List.Type = List.Type.empty;
+    var b: List.Type = List.Type.empty;
+    var c: List.Type = List.Type.empty;
+
+    defer a.deinit(allocator);
+    defer b.deinit(allocator);
+    defer c.deinit(allocator);
+
+    try a.appendSlice(allocator, &[_]u8{ 1, 2, 3 });
+    try b.appendSlice(allocator, &[_]u8{ 1, 2, 3 });
+    try c.appendSlice(allocator, &[_]u8{ 1, 2 });
+
+    try std.testing.expect(List.equals(&a, &b));
+    try std.testing.expect(!List.equals(&a, &c));
+}
+
+test "ListCompositeType of Root" {
+    const test_cases = [_]TypeTestCase{
+        // refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listComposite/valid.test.ts#L23
+        .{
+            .id = "2 roots",
+            .serializedHex = "0xddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            .json =
+            \\["0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]
+            ,
+            .rootHex = "0x0cb947377e177f774719ead8d210af9c6461f41baf5b4082f86a3911454831b8",
+        },
+    };
+
+    const allocator = std.testing.allocator;
+    const ByteVector = ByteVectorType(32);
+    const List = FixedListType(ByteVector, 128);
+
+    const TypeTest = @import("test_utils.zig").typeTest(List);
+
+    for (test_cases[0..]) |*tc| {
+        try TypeTest.run(allocator, tc);
+    }
+}
+
+test "ListCompositeType of Container" {
+    const test_cases = [_]TypeTestCase{
+        // refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listComposite/valid.test.ts#L46
+        .{
+            .id = "2 values",
+            .serializedHex = "0x0000000000000000000000000000000040e2010000000000f1fb090000000000",
+            .json =
+            \\[{"a":"0","b":"0"},{"a":"123456","b":"654321"}]
+            ,
+            .rootHex = "0x8ff94c10d39ffa84aa937e2a077239c2742cb425a2a161744a3e9876eb3c7210",
+        },
+    };
+
+    const allocator = std.testing.allocator;
+    const Uint = UintType(64);
+    const Container = FixedContainerType(struct {
+        a: Uint,
+        b: Uint,
+    });
+    const List = FixedListType(Container, 128);
+
+    const TypeTest = @import("test_utils.zig").typeTest(List);
+
+    for (test_cases[0..]) |*tc| {
+        try TypeTest.run(allocator, tc);
+    }
+}
+
+test "VariableListType of FixedList" {
+    // refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listComposite/valid.test.ts#L59
+    const test_cases = [_]TypeTestCase{
+        .{
+            .id = "empty",
+            .serializedHex = "0x",
+            .json =
+            \\[]
+            ,
+            .rootHex = "0x7a0501f5957bdf9cb3a8ff4966f02265f968658b7a9c62642cba1165e86642f5",
+        },
+        .{
+            .id = "2 full values",
+            .serializedHex = "0x080000000c0000000100020003000400",
+            .json =
+            \\[["1","2"],["3","4"]]
+            ,
+            .rootHex = "0x58140d48f9c24545c1e3a50f1ebcca85fd40433c9859c0ac34342fc8e0a800b8",
+        },
+        .{
+            .id = "2 empty values",
+            .serializedHex = "0x0800000008000000",
+            .json =
+            \\[[],[]]
+            ,
+            .rootHex = "0xe839a22714bda05923b611d07be93b4d707027d29fd9eef7aa864ed587e462ec",
+        },
+    };
+
+    const allocator = std.testing.allocator;
+    const FixedList = FixedListType(UintType(16), 2);
+    const List = VariableListType(FixedList, 2);
+
+    const TypeTest = @import("test_utils.zig").typeTest(List);
+
+    for (test_cases[0..]) |*tc| {
+        try TypeTest.run(allocator, tc);
+    }
+}
