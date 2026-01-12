@@ -17,6 +17,12 @@ pub fn isActiveValidator(validator: *const Validator, epoch: Epoch) bool {
     return validator.activation_epoch <= epoch and epoch < validator.exit_epoch;
 }
 
+pub fn isActiveValidatorView(validator: anytype, epoch: Epoch) !bool {
+    const activation_epoch: Epoch = @intCast(try validator.get("activation_epoch"));
+    const exit_epoch: Epoch = @intCast(try validator.get("exit_epoch"));
+    return activation_epoch <= epoch and epoch < exit_epoch;
+}
+
 pub fn isSlashableValidator(validator: *const Validator, epoch: Epoch) bool {
     return !validator.slashed and validator.activation_epoch <= epoch and epoch < validator.withdrawable_epoch;
 }
@@ -24,10 +30,11 @@ pub fn isSlashableValidator(validator: *const Validator, epoch: Epoch) bool {
 pub fn getActiveValidatorIndices(allocator: Allocator, state: *const BeaconState, epoch: Epoch) !std.ArrayList(ValidatorIndex) {
     var indices = std.ArrayList(ValidatorIndex).init(allocator);
 
-    const validators = state.validators();
-    for (0..validators.items.len) |i| {
-        const validator = &validators.items[i];
-        if (isActiveValidator(validator, epoch)) {
+    var validators = try state.validators();
+    const validators_len = try validators.length();
+    for (0..validators_len) |i| {
+        const validator = try validators.get(i);
+        if (try isActiveValidatorView(validator, epoch)) {
             try indices.append(@intCast(i));
         }
     }
@@ -75,13 +82,16 @@ pub fn getMaxEffectiveBalance(withdrawal_credentials: WithdrawalCredentials) u64
     return preset.MIN_ACTIVATION_BALANCE;
 }
 
-pub fn getPendingBalanceToWithdraw(state: *const BeaconState, validator_index: ValidatorIndex) u64 {
+pub fn getPendingBalanceToWithdraw(state: *const BeaconState, validator_index: ValidatorIndex) !u64 {
     var total: u64 = 0;
-    const pending_partial_withdrawals = state.pendingPartialWithdrawals();
-    for (0..pending_partial_withdrawals.items.len) |i| {
-        const pending_partial_withdrawal = pending_partial_withdrawals.items[i];
-        if (pending_partial_withdrawal.validator_index == validator_index) {
-            total += pending_partial_withdrawal.amount;
+
+    var pending_partial_withdrawals = try state.pendingPartialWithdrawals();
+    const len = try pending_partial_withdrawals.length();
+    for (0..len) |i| {
+        const pending_partial_withdrawal = try pending_partial_withdrawals.get(i);
+        const idx = try pending_partial_withdrawal.get("validator_index");
+        if (idx == validator_index) {
+            total += try pending_partial_withdrawal.get("amount");
         }
     }
     return total;

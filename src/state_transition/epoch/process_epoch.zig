@@ -36,7 +36,7 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
 
     try processRewardsAndPenalties(allocator, cached_state, cache);
 
-    processEth1DataReset(allocator, cached_state, cache);
+    try processEth1DataReset(cached_state, cache);
 
     if (state.forkSeq().gte(.electra)) {
         try processPendingDeposits(allocator, cached_state, cache);
@@ -50,9 +50,9 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
     processRandaoMixesReset(cached_state, cache);
 
     if (state.forkSeq().gte(.capella)) {
-        try processHistoricalSummariesUpdate(allocator, cached_state, cache);
+        try processHistoricalSummariesUpdate(cached_state, cache);
     } else {
-        try processHistoricalRootsUpdate(allocator, cached_state, cache);
+        try processHistoricalRootsUpdate(cached_state, cache);
     }
 
     if (state.isPhase0()) {

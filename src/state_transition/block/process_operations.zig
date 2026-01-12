@@ -70,7 +70,7 @@ pub fn processOperations(
         }
 
         for (body.withdrawalRequests()) |*withdrawal_request| {
-            try processWithdrawalRequest(allocator, cached_state, withdrawal_request);
+            try processWithdrawalRequest(cached_state, withdrawal_request);
         }
 
         for (body.consolidationRequests()) |*consolidation_request| {

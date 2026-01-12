@@ -12,24 +12,29 @@ const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateV
 const TIMELY_TARGET = 1 << c.TIMELY_TARGET_FLAG_INDEX;
 
 pub fn slashValidator(
-    cached_state: *const CachedBeaconState,
+    cached_state: *CachedBeaconState,
     slashed_index: ValidatorIndex,
     whistle_blower_index: ?ValidatorIndex,
 ) !void {
     const epoch_cache = cached_state.getEpochCache();
-    const state = cached_state.state;
+    var state = &cached_state.state;
     const epoch = epoch_cache.epoch;
     const effective_balance_increments = epoch_cache.effective_balance_increment;
 
-    var validator = &state.validators().items[slashed_index];
+    var validators = try state.validators();
+    var validator = try validators.get(@intCast(slashed_index));
 
     // TODO: Bellatrix initiateValidatorExit validators.update() with the one below
-    try initiateValidatorExit(cached_state, validator);
+    try initiateValidatorExit(cached_state, &validator);
 
-    validator.slashed = true;
-    validator.withdrawable_epoch = @max(validator.withdrawable_epoch, epoch + preset.EPOCHS_PER_SLASHINGS_VECTOR);
+    try validator.set("slashed", true);
+    const cur_withdrawable_epoch = try validator.get("withdrawable_epoch");
+    try validator.set(
+        "withdrawable_epoch",
+        @max(cur_withdrawable_epoch, epoch + preset.EPOCHS_PER_SLASHINGS_VECTOR),
+    );
 
-    const effective_balance = validator.effective_balance;
+    const effective_balance = try validator.get("effective_balance");
 
     // state.slashings is initially a Gwei (BigInt) vector, however since Nov 2023 it's converted to UintNum64 (number) vector in the state transition because:
     //  - state.slashings[nextEpoch % EPOCHS_PER_SLASHINGS_VECTOR] is reset per epoch in processSlashingsReset()
@@ -37,9 +42,10 @@ pub fn slashValidator(
     //  - with that and 32_000_000_000 MAX_EFFECTIVE_BALANCE or 2048_000_000_000 MAX_EFFECTIVE_BALANCE_ELECTRA, it still fits in a number given that Math.floor(Number.MAX_SAFE_INTEGER / 32_000_000_000) = 281474
     //  - we don't need to compute the total slashings from state.slashings, it's handled by totalSlashingsByIncrement in EpochCache
     const slashing_index = epoch % preset.EPOCHS_PER_SLASHINGS_VECTOR;
-    const slashings = state.slashings();
-    slashings[slashing_index] = state.slashings()[slashing_index] + effective_balance;
-    epoch_cache.total_slashings_by_increment += effective_balance_increments.get().items[slashed_index];
+    var slashings = try state.slashings();
+    const cur_slashings = try slashings.get(@intCast(slashing_index));
+    try slashings.set(@intCast(slashing_index), cur_slashings + effective_balance);
+    epoch_cache.total_slashings_by_increment += effective_balance_increments.get().items[@intCast(slashed_index)];
 
     // TODO(ct): define MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA
     const min_slashing_penalty_quotient: usize = switch (state.*) {
@@ -49,7 +55,7 @@ pub fn slashValidator(
         .electra, .fulu => preset.MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA,
     };
 
-    decreaseBalance(state, slashed_index, @divFloor(effective_balance, min_slashing_penalty_quotient));
+    try decreaseBalance(state, slashed_index, @divFloor(effective_balance, min_slashing_penalty_quotient));
 
     // apply proposer and whistleblower rewards
     // TODO(ct): define WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA
@@ -63,25 +69,27 @@ pub fn slashValidator(
         else => @divFloor(whistleblower_reward * c.PROPOSER_WEIGHT, c.WEIGHT_DENOMINATOR),
     };
 
-    const proposer_index = try cached_state.getBeaconProposer(state.slot());
+    const proposer_index = try cached_state.getBeaconProposer(try state.slot());
 
     if (whistle_blower_index) |_whistle_blower_index| {
-        increaseBalance(state, proposer_index, proposer_reward);
-        increaseBalance(state, _whistle_blower_index, whistleblower_reward - proposer_reward);
+        try increaseBalance(state, proposer_index, proposer_reward);
+        try increaseBalance(state, _whistle_blower_index, whistleblower_reward - proposer_reward);
         // TODO: implement RewardCache
         // state.proposer_rewards.slashing += proposer_reward;
     } else {
-        increaseBalance(state, proposer_index, whistleblower_reward);
+        try increaseBalance(state, proposer_index, whistleblower_reward);
         // TODO: implement RewardCache
         // state.proposerRewards.slashing += whistleblowerReward;
     }
 
     if (state.forkSeq().gte(.altair)) {
-        if (state.previousEpochParticipations().items[slashed_index] & TIMELY_TARGET == TIMELY_TARGET) {
+        var previous_participation = try state.previousEpochParticipation();
+        if ((try previous_participation.get(@intCast(slashed_index))) & TIMELY_TARGET == TIMELY_TARGET) {
             epoch_cache.previous_target_unslashed_balance_increments -= @divFloor(effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT);
         }
 
-        if (state.currentEpochParticipations().items[slashed_index] & TIMELY_TARGET == TIMELY_TARGET) {
+        var current_participation = try state.currentEpochParticipation();
+        if ((try current_participation.get(@intCast(slashed_index))) & TIMELY_TARGET == TIMELY_TARGET) {
             epoch_cache.current_target_unslashed_balance_increments -= @divFloor(effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT);
         }
     }

@@ -481,8 +481,11 @@ pub const EpochCache = struct {
         // field which we already processed in `processProposerLookahead`.
         // Proposers are to be computed pre-fulu to be cached within `self`.
         if (self.epoch >= self.config.chain.FULU_FORK_EPOCH) {
-            self.proposers = state.proposerLookahead()[0..preset.SLOTS_PER_EPOCH].*;
-            self.proposers_next_epoch = state.proposerLookahead()[preset.SLOTS_PER_EPOCH .. preset.SLOTS_PER_EPOCH * 2].*;
+            var proposer_lookahead = try state.proposerLookahead();
+            for (0..preset.SLOTS_PER_EPOCH) |i| {
+                self.proposers[i] = @intCast(try proposer_lookahead.get(i));
+                self.proposers_next_epoch[i] = @intCast(try proposer_lookahead.get(preset.SLOTS_PER_EPOCH + i));
+            }
         } else {
             var upcoming_proposer_seed: [32]u8 = undefined;
             try getSeed(state, self.epoch, c.DOMAIN_BEACON_PROPOSER, &upcoming_proposer_seed);

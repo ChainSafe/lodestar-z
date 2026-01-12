@@ -29,11 +29,11 @@ pub const WithdrawalsResult = struct {
 /// refer to https://github.com/ethereum/consensus-specs/blob/dev/specs/electra/beacon-chain.md#modified-process_withdrawals
 pub fn processWithdrawals(
     allocator: Allocator,
-    cached_state: *const CachedBeaconState,
+    cached_state: *CachedBeaconState,
     expected_withdrawals_result: WithdrawalsResult,
     payload_withdrawals_root: Root,
 ) !void {
-    const state = cached_state.state;
+    var state = &cached_state.state;
     // processedPartialWithdrawalsCount is withdrawals coming from EL since electra (EIP-7002)
     const processed_partial_withdrawals_count = expected_withdrawals_result.processed_partial_withdrawals_count;
     const expected_withdrawals = expected_withdrawals_result.withdrawals.items;
@@ -48,34 +48,38 @@ pub fn processWithdrawals(
 
     for (0..num_withdrawals) |i| {
         const withdrawal = expected_withdrawals[i];
-        decreaseBalance(state, withdrawal.validator_index, withdrawal.amount);
+        try decreaseBalance(state, withdrawal.validator_index, withdrawal.amount);
     }
 
     if (state.forkSeq().gte(.electra)) {
-        const pending_partial_withdrawals = state.pendingPartialWithdrawals();
-        const keep_len = pending_partial_withdrawals.items.len - processed_partial_withdrawals_count;
+        if (processed_partial_withdrawals_count > 0) {
+            var pending_partial_withdrawals = try state.pendingPartialWithdrawals();
+            const truncated = try pending_partial_withdrawals.sliceFrom(processed_partial_withdrawals_count);
 
-        std.mem.copyForwards(PendingPartialWithdrawal, pending_partial_withdrawals.items[0..keep_len], pending_partial_withdrawals.items[processed_partial_withdrawals_count..]);
-        pending_partial_withdrawals.shrinkRetainingCapacity(keep_len);
+            try state.setPendingPartialWithdrawals(truncated);
+        }
     }
 
-    const next_withdrawal_index = state.nextWithdrawalIndex();
     // Update the nextWithdrawalIndex
     if (expected_withdrawals.len > 0) {
         const latest_withdrawal = expected_withdrawals[expected_withdrawals.len - 1];
-        next_withdrawal_index.* = latest_withdrawal.index + 1;
+        try state.setNextWithdrawalIndex(latest_withdrawal.index + 1);
     }
 
     // Update the next_withdrawal_validator_index
-    const next_withdrawal_validator_index = state.nextWithdrawalValidatorIndex();
+    const validators_len: u64 = @intCast(try state.validatorsCount());
+    const next_withdrawal_validator_index = try state.nextWithdrawalValidatorIndex();
     if (expected_withdrawals.len == preset.MAX_WITHDRAWALS_PER_PAYLOAD) {
         // All slots filled, next_withdrawal_validator_index should be validatorIndex having next turn
-        next_withdrawal_validator_index.* =
-            (expected_withdrawals[expected_withdrawals.len - 1].validator_index + 1) % state.validators().items.len;
+        try state.setNextWithdrawalValidatorIndex(
+            (expected_withdrawals[expected_withdrawals.len - 1].validator_index + 1) % validators_len,
+        );
     } else {
         // expected withdrawals came up short in the bound, so we move next_withdrawal_validator_index to
         // the next post the bound
-        next_withdrawal_validator_index.* = (next_withdrawal_validator_index.* + preset.MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP) % state.validators().items.len;
+        try state.setNextWithdrawalValidatorIndex(
+            (next_withdrawal_validator_index + preset.MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP) % validators_len,
+        );
     }
 }
 

@@ -21,11 +21,18 @@ pub const RootCache = struct {
     pub fn init(allocator: Allocator, cached_state: *const CachedBeaconState) !*RootCache {
         const instance = try allocator.create(RootCache);
         errdefer allocator.destroy(instance);
-        const state = cached_state.state;
+        const state = &cached_state.state;
+
+        var current_justified_checkpoint_view = try state.currentJustifiedCheckpoint();
+        var previous_justified_checkpoint_view = try state.previousJustifiedCheckpoint();
+        var current_justified_checkpoint: Checkpoint = undefined;
+        var previous_justified_checkpoint: Checkpoint = undefined;
+        try current_justified_checkpoint_view.toValue(allocator, &current_justified_checkpoint);
+        try previous_justified_checkpoint_view.toValue(allocator, &previous_justified_checkpoint);
         instance.* = RootCache{
             .allocator = allocator,
-            .current_justified_checkpoint = state.currentJustifiedCheckpoint().*,
-            .previous_justified_checkpoint = state.previousJustifiedCheckpoint().*,
+            .current_justified_checkpoint = current_justified_checkpoint,
+            .previous_justified_checkpoint = previous_justified_checkpoint,
             .state = state,
             .block_root_epoch_cache = std.AutoHashMap(Epoch, Root).init(allocator),
             .block_root_slot_cache = std.AutoHashMap(Slot, Root).init(allocator),

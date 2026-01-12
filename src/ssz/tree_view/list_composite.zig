@@ -117,6 +117,17 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             try self.set(index, child_view);
         }
 
+        pub fn pushValue(self: *Self, value: *const ST.Element.Type) !void {
+            const root = try ST.Element.tree.fromValue(self.base_view.pool, value);
+            errdefer self.base_view.pool.unref(root);
+            const child_view = try ST.Element.TreeView.init(
+                self.base_view.allocator,
+                self.base_view.pool,
+                root,
+            );
+            try self.push(child_view);
+        }
+
         pub fn getAllReadonly(self: *Self, allocator: Allocator) ![]Element {
             // TODO: Implement bulk read-only access after other PRs land.
             _ = self;

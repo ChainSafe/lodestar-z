@@ -56,23 +56,25 @@ pub const DepositData = union(enum) {
 };
 
 pub fn processDeposit(allocator: Allocator, cached_state: *CachedBeaconState, deposit: *const types.phase0.Deposit.Type) !void {
-    const state = cached_state.state;
+    var state = &cached_state.state;
     // verify the merkle branch
     var deposit_data_root: Root = undefined;
     try types.phase0.DepositData.hashTreeRoot(&deposit.data, &deposit_data_root);
+
+    var eth1_data = try state.eth1Data();
+    const deposit_root = try eth1_data.get("deposit_root");
     if (!verifyMerkleBranch(
         deposit_data_root,
         &deposit.proof,
         c.DEPOSIT_CONTRACT_TREE_DEPTH + 1,
-        state.eth1DepositIndex(),
-        state.eth1Data().deposit_root,
+        @intCast(try state.eth1DepositIndex()),
+        deposit_root,
     )) {
         return error.InvalidMerkleProof;
     }
 
     // deposits must be processed in order
-    const state_eth1_deposit_index = state.eth1DepositIndexPtr();
-    state_eth1_deposit_index.* += 1;
+    try state.incrementEth1DepositIndex();
     try applyDeposit(allocator, cached_state, &.{
         .phase0 = deposit.data,
     });

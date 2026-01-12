@@ -9,30 +9,33 @@ const verifyBlsToExecutionChangeSignature = @import("../signature_sets/bls_to_ex
 
 pub fn processBlsToExecutionChange(cached_state: *CachedBeaconState, signed_bls_to_execution_change: *const SignedBLSToExecutionChange) !void {
     const address_change = signed_bls_to_execution_change.message;
-    const state = cached_state.state;
+    var state = &cached_state.state;
 
     try isValidBlsToExecutionChange(cached_state, signed_bls_to_execution_change, true);
 
     var new_withdrawal_credentials: Root = [_]u8{0} ** 32;
     const validator_index = address_change.validator_index;
-    var validator = &state.validators().items[validator_index];
+    var validators = try state.validators();
+    var validator = try validators.get(@intCast(validator_index));
     new_withdrawal_credentials[0] = c.ETH1_ADDRESS_WITHDRAWAL_PREFIX;
     @memcpy(new_withdrawal_credentials[12..], &address_change.to_execution_address);
 
     // Set the new credentials back
-    validator.withdrawal_credentials = new_withdrawal_credentials;
+    try validator.setValue("withdrawal_credentials", &new_withdrawal_credentials);
 }
 
 pub fn isValidBlsToExecutionChange(cached_state: *CachedBeaconState, signed_bls_to_execution_change: *const SignedBLSToExecutionChange, verify_signature: bool) !void {
-    const state = cached_state.state;
+    const state = &cached_state.state;
     const address_change = signed_bls_to_execution_change.message;
     const validator_index = address_change.validator_index;
-    if (validator_index >= state.validators().items.len) {
+    var validators = try state.validators();
+    const validators_len = try validators.length();
+    if (validator_index >= validators_len) {
         return error.InvalidBlsToExecutionChange;
     }
 
-    const validator = state.validators().items[validator_index];
-    const withdrawal_credentials = validator.withdrawal_credentials;
+    const validator = try validators.get(@intCast(validator_index));
+    const withdrawal_credentials = try validator.get("withdrawal_credentials");
     if (withdrawal_credentials[0] != c.BLS_WITHDRAWAL_PREFIX) {
         return error.InvalidWithdrawalCredentialsPrefix;
     }

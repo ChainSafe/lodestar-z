@@ -260,6 +260,12 @@ pub const BeaconState = union(ForkSeq) {
         };
     }
 
+    pub fn setEth1DataVotes(self: *BeaconState, eth1_data_votes: ct.phase0.Eth1DataVotes.TreeView) !void {
+        switch (self.*) {
+            inline else => |*state| try state.set("eth1_data_votes", eth1_data_votes),
+        }
+    }
+
     pub fn appendEth1DataVote(self: *BeaconState, eth1_data: *const ct.phase0.Eth1Data.Type) !void {
         var votes = try self.eth1DataVotes();
         const VotesView = @TypeOf(votes);
@@ -661,10 +667,26 @@ pub const BeaconState = union(ForkSeq) {
         };
     }
 
+    pub fn setPendingPartialWithdrawals(self: *BeaconState, pending_partial_withdrawals: ct.electra.PendingPartialWithdrawals.TreeView) !void {
+        return switch (self.*) {
+            .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
+            .electra => |*state| try state.set("pending_partial_withdrawals", pending_partial_withdrawals),
+            .fulu => |*state| try state.set("pending_partial_withdrawals", pending_partial_withdrawals),
+        };
+    }
+
     pub fn pendingConsolidations(self: *const BeaconState) !ct.electra.PendingConsolidations.TreeView {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
             inline else => |state| try state.get("pending_consolidations"),
+        };
+    }
+
+    pub fn setPendingConsolidations(self: *BeaconState, pending_consolidations: ct.electra.PendingConsolidations.TreeView) !void {
+        return switch (self.*) {
+            .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
+            .electra => |*state| try state.set("pending_consolidations", pending_consolidations),
+            .fulu => |*state| try state.set("pending_consolidations", pending_consolidations),
         };
     }
 
