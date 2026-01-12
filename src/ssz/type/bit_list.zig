@@ -47,7 +47,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         }
 
         pub fn fromBitLen(allocator: std.mem.Allocator, bit_len: usize) !@This() {
-            if (bit_len > _limit) {
+            if (bit_len > limit) {
                 return error.tooLarge;
             }
 
@@ -155,7 +155,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         }
 
         pub fn resize(self: *@This(), allocator: std.mem.Allocator, bit_len: usize) !void {
-            if (bit_len > _limit) {
+            if (bit_len > limit) {
                 return error.tooLarge;
             }
 
