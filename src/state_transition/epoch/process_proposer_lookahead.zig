@@ -21,7 +21,7 @@ pub fn processProposerLookahead(
 ) !void {
     const state = cached_state.state;
 
-    const proposer_lookahead: *[64]u64 = @constCast(try state.proposerLookaheadSlice(allocator));
+    const proposer_lookahead: *[ssz.fulu.ProposerLookahead.length]u64 = @constCast(try state.proposerLookaheadSlice(allocator));
     defer allocator.free(proposer_lookahead);
 
     const epoch_cache = cached_state.epoch_cache_ref.get();

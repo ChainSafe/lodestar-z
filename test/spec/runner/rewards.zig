@@ -1,4 +1,5 @@
 const std = @import("std");
+const Node = @import("persistent_merkle_tree").Node;
 const ct = @import("consensus_types");
 const ssz = @import("ssz");
 const ForkSeq = @import("config").ForkSeq;
@@ -46,12 +47,12 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             try tc.runTest();
         }
 
-        fn init(allocator: std.mem.Allocator, dir: std.fs.Dir) !Self {
-            var pre_state = try tc_utils.loadPreState(allocator, dir);
+        fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
+            var pre_state = try tc_utils.loadPreState(allocator, pool, dir);
             errdefer pre_state.deinit();
 
             const cache_allocator = pre_state.allocator;
-            const validator_count = pre_state.cached_state.state.validators().items.len;
+            const validator_count = try pre_state.cached_state.state.validatorsCount();
             const expected = try Self.buildExpectedRewardsPenalties(cache_allocator, dir, validator_count);
 
             return .{

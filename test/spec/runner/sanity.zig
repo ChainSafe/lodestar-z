@@ -1,4 +1,5 @@
 const std = @import("std");
+const Node = @import("persistent_merkle_tree").Node;
 const ssz = @import("consensus_types");
 const ForkSeq = @import("config").ForkSeq;
 const Preset = @import("preset").Preset;
@@ -30,13 +31,13 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
 
     return struct {
         pre: TestCachedBeaconState,
-        post: BeaconState,
+        post: *BeaconState,
         slots: u64,
 
         const Self = @This();
 
-        pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
-            var tc = try Self.init(allocator, dir);
+        pub fn execute(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !void {
+            var tc = try Self.init(allocator, pool, dir);
             defer {
                 tc.deinit();
                 state_transition.deinitStateTransition();
@@ -45,7 +46,7 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
             try tc.runTest();
         }
 
-        pub fn init(allocator: std.mem.Allocator, dir: std.fs.Dir) !Self {
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
             var tc = Self{
                 .pre = undefined,
                 .post = undefined,
@@ -53,11 +54,11 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
             };
 
             // load pre state
-            tc.pre = try tc_utils.loadPreState(allocator, dir);
+            tc.pre = try tc_utils.loadPreState(allocator, pool, dir);
             errdefer tc.pre.deinit();
 
             // load post state
-            tc.post = try tc_utils.loadPostState(allocator, dir) orelse
+            tc.post = try tc_utils.loadPostState(allocator, pool, dir) orelse
                 return error.PostStateNotFound;
 
             // load slots
@@ -73,21 +74,22 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
 
         pub fn deinit(self: *Self) void {
             self.pre.deinit();
-            self.post.deinit(self.pre.allocator);
+            self.post.deinit();
+            self.pre.allocator.destroy(self.post);
         }
 
         pub fn process(self: *Self) !void {
             try state_transition.state_transition.processSlotsWithTransientCache(
                 self.pre.allocator,
                 self.pre.cached_state,
-                self.pre.cached_state.state.slot() + self.slots,
+                try self.pre.cached_state.state.slot() + self.slots,
                 undefined,
             );
         }
 
         pub fn runTest(self: *Self) !void {
             try self.process();
-            try expectEqualBeaconStates(self.post, self.pre.cached_state.state.*);
+            try expectEqualBeaconStates(self.post, self.pre.cached_state.state);
         }
     };
 }
@@ -100,14 +102,14 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
     return struct {
         pre: TestCachedBeaconState,
         // a null post state means the test is expected to fail
-        post: ?BeaconState,
+        post: ?*BeaconState,
         blocks: []SignedBeaconBlock.Type,
         bls_setting: BlsSetting,
 
         const Self = @This();
 
-        pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
-            var tc = try Self.init(allocator, dir);
+        pub fn execute(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !void {
+            var tc = try Self.init(allocator, pool, dir);
             defer {
                 tc.deinit();
                 state_transition.deinitStateTransition();
@@ -116,7 +118,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
             try tc.runTest();
         }
 
-        pub fn init(allocator: std.mem.Allocator, dir: std.fs.Dir) !Self {
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
             var tc = Self{
                 .pre = undefined,
                 .post = undefined,
@@ -125,11 +127,11 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
             };
 
             // load pre state
-            tc.pre = try tc_utils.loadPreState(allocator, dir);
+            tc.pre = try tc_utils.loadPreState(allocator, pool, dir);
             errdefer tc.pre.deinit();
 
             // load post state
-            tc.post = try tc_utils.loadPostState(allocator, dir);
+            tc.post = try tc_utils.loadPostState(allocator, pool, dir);
 
             // Load meta.yaml for blocks_count
             var meta_file = try dir.openFile("meta.yaml", .{});
@@ -171,8 +173,9 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
             }
             self.pre.allocator.free(self.blocks);
             self.pre.deinit();
-            if (self.post) |*post| {
-                post.deinit(self.pre.allocator);
+            if (self.post) |post| {
+                post.deinit();
+                self.pre.allocator.destroy(post);
             }
         }
 
@@ -218,7 +221,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
                     actual.deinit();
                     self.pre.allocator.destroy(actual);
                 }
-                try expectEqualBeaconStates(post, actual.state.*);
+                try expectEqualBeaconStates(post, actual.state);
             } else {
                 _ = self.process() catch |err| {
                     if (err == error.SkipZigTest) {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Node = @import("persistent_merkle_tree").Node;
 const ssz = @import("consensus_types");
 const ForkSeq = @import("config").ForkSeq;
 const Preset = @import("preset").Preset;
@@ -18,7 +19,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
 
     return struct {
         pre: TestCachedBeaconState,
-        post: ?BeaconState,
+        post: ?*BeaconState,
         blocks: []SignedBeaconBlock,
 
         const Self = @This();
@@ -32,7 +33,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
             try tc.runTest();
         }
 
-        pub fn init(allocator: std.mem.Allocator, dir: std.fs.Dir) !Self {
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
             var tc = Self{
                 .pre = undefined,
                 .post = undefined,
@@ -91,11 +92,11 @@ pub fn Transition(comptime fork: ForkSeq) type {
             }
 
             // load pre state
-            tc.pre = try tc_utils.loadPreStatePreFork(allocator, dir, fork_epoch);
+            tc.pre = try tc_utils.loadPreStatePreFork(allocator, pool, dir, fork_epoch);
             errdefer tc.pre.deinit();
 
             // load post state
-            tc.post = try tc_utils.loadPostState(allocator, dir);
+            tc.post = try tc_utils.loadPostState(allocator, pool, dir);
 
             return tc;
         }
@@ -108,6 +109,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
             self.pre.deinit();
             if (self.post) |*post| {
                 post.deinit(self.pre.allocator);
+                self.pre.allocator.destroy(post);
             }
         }
 
@@ -155,7 +157,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
                     actual.deinit();
                     self.pre.allocator.destroy(actual);
                 }
-                try expectEqualBeaconStates(post, actual.state.*);
+                try expectEqualBeaconStates(post, actual.state);
             } else {
                 _ = self.process() catch |err| {
                     if (err == error.SkipZigTest) {

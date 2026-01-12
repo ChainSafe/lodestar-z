@@ -1,4 +1,5 @@
 const std = @import("std");
+const Node = @import("persistent_merkle_tree").Node;
 const ForkSeq = @import("config").ForkSeq;
 const state_transition = @import("state_transition");
 const upgradeStateToAltair = state_transition.upgradeStateToAltair;
@@ -37,7 +38,7 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
 
     return struct {
         pre: TestCachedBeaconState,
-        post: ?BeaconState,
+        post: ?*BeaconState,
 
         const Self = @This();
 
@@ -51,14 +52,14 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
             try tc.runTest();
         }
 
-        fn init(allocator: Allocator, dir: std.fs.Dir) !Self {
+        fn init(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
             const meta_fork = try loadTargetFork(allocator, dir);
             if (meta_fork != target_fork) return error.InvalidMetaFile;
 
-            var pre_state = try pre_tc_utils.loadPreState(allocator, dir);
+            var pre_state = try pre_tc_utils.loadPreState(allocator, pool, dir);
             errdefer pre_state.deinit();
 
-            const post_state = try post_tc_utils.loadPostState(allocator, dir);
+            const post_state = try post_tc_utils.loadPostState(allocator, pool, dir);
 
             return .{
                 .pre = pre_state,
@@ -68,15 +69,16 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
 
         fn deinit(self: *Self) void {
             self.pre.deinit();
-            if (self.post) |*post_state| {
-                post_state.deinit(self.pre.allocator);
+            if (self.post) |*post| {
+                post.deinit();
+                self.pre.allocator.destroy(post);
             }
         }
 
         fn runTest(self: *Self) !void {
             if (self.post) |expected| {
                 try self.upgrade();
-                try expectEqualBeaconStates(expected, self.pre.cached_state.state.*);
+                try expectEqualBeaconStates(expected, self.pre.cached_state.state);
             } else {
                 self.upgrade() catch |err| {
                     if (err == error.SkipZigTest) {

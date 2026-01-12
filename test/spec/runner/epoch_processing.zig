@@ -1,4 +1,5 @@
 const ssz = @import("consensus_types");
+const Node = @import("persistent_merkle_tree").Node;
 const Allocator = std.mem.Allocator;
 const Root = ssz.primitive.Root.Type;
 const ForkSeq = @import("config").ForkSeq;
@@ -48,7 +49,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
     return struct {
         pre: TestCachedBeaconState,
         // a null post state means the test is expected to fail
-        post: ?BeaconState,
+        post: ?*BeaconState,
 
         const Self = @This();
 
@@ -59,18 +60,18 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
             try tc.runTest();
         }
 
-        pub fn init(allocator: std.mem.Allocator, dir: std.fs.Dir) !Self {
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
             var tc = Self{
                 .pre = undefined,
                 .post = undefined,
             };
 
             // load pre state
-            tc.pre = try tc_utils.loadPreState(allocator, dir);
+            tc.pre = try tc_utils.loadPreState(allocator, pool, dir);
             errdefer tc.pre.deinit();
 
             // load pre state
-            tc.post = try tc_utils.loadPostState(allocator, dir);
+            tc.post = try tc_utils.loadPostState(allocator, pool, dir);
 
             return tc;
         }
@@ -78,7 +79,8 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
         pub fn deinit(self: *Self) void {
             self.pre.deinit();
             if (self.post) |*post| {
-                post.deinit(self.pre.allocator);
+                post.deinit();
+                self.pre.allocator.destroy(post);
             }
             state_transition.deinitStateTransition();
         }
@@ -86,7 +88,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
         fn runTest(self: *Self) !void {
             if (self.post) |post| {
                 try self.process();
-                try expectEqualBeaconStates(post, self.pre.cached_state.state.*);
+                try expectEqualBeaconStates(post, self.pre.cached_state.state);
             } else {
                 self.process() catch |err| {
                     if (err == error.SkipZigTest) {

@@ -4,6 +4,7 @@ const snappy = @import("snappy").raw;
 const ForkSeq = @import("config").ForkSeq;
 const isFixedType = @import("ssz").isFixedType;
 const state_transition = @import("state_transition");
+const Node = @import("persistent_merkle_tree").Node;
 const SignedBeaconBlock = state_transition.SignedBeaconBlock;
 const BeaconState = state_transition.BeaconState;
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
@@ -46,53 +47,62 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
             };
         }
 
-        pub fn loadPreStatePreFork(allocator: Allocator, dir: std.fs.Dir, fork_epoch: Epoch) !TestCachedBeaconState {
+        pub fn loadPreStatePreFork(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir, fork_epoch: Epoch) !TestCachedBeaconState {
             const fork_pre = comptime getForkPre();
             const ForkPreTypes = @field(types, fork_pre.name());
-            const pre_state = try allocator.create(ForkPreTypes.BeaconState.Type);
-            var transfered_pre_state: bool = false;
-            errdefer {
-                if (!transfered_pre_state) {
-                    ForkPreTypes.BeaconState.deinit(allocator, pre_state);
-                    allocator.destroy(pre_state);
-                }
-            }
-            pre_state.* = ForkPreTypes.BeaconState.default_value;
-            try loadSszSnappyValue(ForkPreTypes.BeaconState, allocator, dir, "pre.ssz_snappy", pre_state);
-            transfered_pre_state = true;
+            var pre_state = ForkPreTypes.BeaconState.default_value;
+            try loadSszSnappyValue(ForkPreTypes.BeaconState, allocator, dir, "pre.ssz_snappy", &pre_state);
+            defer ForkPreTypes.BeaconState.deinit(allocator, &pre_state);
 
-            var pre_state_all_forks = try BeaconState.init(fork_pre, pre_state);
-            return try TestCachedBeaconState.initFromState(allocator, &pre_state_all_forks, fork, fork_epoch);
+            const pre_state_all_forks = try allocator.create(BeaconState);
+            errdefer allocator.destroy(pre_state_all_forks);
+
+            pre_state_all_forks.* = @unionInit(
+                BeaconState,
+                fork_pre.name(),
+                try ForkPreTypes.BeaconState.TreeView.fromValue(allocator, pool, &pre_state),
+            );
+            errdefer pre_state_all_forks.deinit();
+
+            return try TestCachedBeaconState.initFromState(allocator, pre_state_all_forks, fork, fork_epoch);
         }
 
-        pub fn loadPreState(allocator: Allocator, dir: std.fs.Dir) !TestCachedBeaconState {
-            const pre_state = try allocator.create(ForkTypes.BeaconState.Type);
-            var transfered_pre_state: bool = false;
-            errdefer {
-                if (!transfered_pre_state) {
-                    ForkTypes.BeaconState.deinit(allocator, pre_state);
-                    allocator.destroy(pre_state);
-                }
-            }
-            pre_state.* = ForkTypes.BeaconState.default_value;
-            try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "pre.ssz_snappy", pre_state);
-            transfered_pre_state = true;
+        pub fn loadPreState(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !TestCachedBeaconState {
+            var pre_state = ForkTypes.BeaconState.default_value;
+            try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "pre.ssz_snappy", &pre_state);
+            defer ForkTypes.BeaconState.deinit(allocator, &pre_state);
 
-            var pre_state_all_forks = try BeaconState.init(fork, pre_state);
-            return try TestCachedBeaconState.initFromState(allocator, &pre_state_all_forks, fork, pre_state_all_forks.fork().epoch);
+            const pre_state_all_forks = try allocator.create(BeaconState);
+            errdefer allocator.destroy(pre_state_all_forks);
+
+            pre_state_all_forks.* = @unionInit(
+                BeaconState,
+                fork.name(),
+                try ForkTypes.BeaconState.TreeView.fromValue(allocator, pool, &pre_state),
+            );
+            errdefer pre_state_all_forks.deinit();
+
+            var f = try pre_state_all_forks.fork();
+            const fork_epoch = try f.get("epoch");
+            return try TestCachedBeaconState.initFromState(allocator, pre_state_all_forks, fork, fork_epoch);
         }
 
         /// consumer should deinit the returned state and destroy the pointer
-        pub fn loadPostState(allocator: Allocator, dir: std.fs.Dir) !?BeaconState {
+        pub fn loadPostState(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !?*BeaconState {
             if (dir.statFile("post.ssz_snappy")) |_| {
-                const post_state = try allocator.create(ForkTypes.BeaconState.Type);
-                errdefer {
-                    ForkTypes.BeaconState.deinit(allocator, post_state);
-                    allocator.destroy(post_state);
-                }
-                post_state.* = ForkTypes.BeaconState.default_value;
-                try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", post_state);
-                return try BeaconState.init(fork, post_state);
+                var post_state = ForkTypes.BeaconState.default_value;
+                try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", &post_state);
+                defer ForkTypes.BeaconState.deinit(allocator, &post_state);
+
+                const post_state_all_forks = try allocator.create(BeaconState);
+                errdefer allocator.destroy(post_state_all_forks);
+
+                post_state_all_forks.* = @unionInit(
+                    BeaconState,
+                    fork.name(),
+                    try ForkTypes.BeaconState.TreeView.fromValue(allocator, pool, &post_state),
+                );
+                return post_state_all_forks;
             } else |err| {
                 if (err == error.FileNotFound) {
                     return null;
@@ -238,34 +248,12 @@ pub fn loadSszSnappyValue(comptime ST: type, allocator: std.mem.Allocator, dir: 
     }
 }
 
-pub fn expectEqualBeaconStates(expected: BeaconState, actual: BeaconState) !void {
+pub fn expectEqualBeaconStates(expected: *BeaconState, actual: *BeaconState) !void {
     if (expected.forkSeq() != actual.forkSeq()) return error.ForkMismatch;
 
-    switch (expected.forkSeq()) {
-        .phase0 => {
-            if (!phase0.BeaconState.equals(expected.phase0, actual.phase0)) return error.NotEqual;
-        },
-        .altair => {
-            if (!altair.BeaconState.equals(expected.altair, actual.altair)) return error.NotEqual;
-        },
-        .bellatrix => {
-            if (!bellatrix.BeaconState.equals(expected.bellatrix, actual.bellatrix)) return error.NotEqual;
-        },
-        .capella => {
-            if (!capella.BeaconState.equals(expected.capella, actual.capella)) return error.NotEqual;
-        },
-        .deneb => {
-            if (!deneb.BeaconState.equals(expected.deneb, actual.deneb)) return error.NotEqual;
-        },
-        .electra => {
-            if (!electra.BeaconState.equals(expected.electra, actual.electra)) {
-                // more debug
-                if (!phase0.BeaconBlockHeader.equals(&expected.electra.latest_block_header, &actual.electra.latest_block_header)) return error.LatestBlockHeaderNotEqual;
-                return error.NotEqual;
-            }
-        },
-        .fulu => {
-            if (!fulu.BeaconState.equals(expected.fulu, actual.fulu)) return error.NotEqual;
-        },
-    }
+    if (!std.mem.eql(
+        u8,
+        try expected.hashTreeRoot(),
+        try actual.hashTreeRoot(),
+    )) return error.NotEqual;
 }
