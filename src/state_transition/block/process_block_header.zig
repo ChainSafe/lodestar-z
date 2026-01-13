@@ -35,19 +35,6 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *CachedBeaconState
     // verify that the parent matches
     const header_parent_root = try latest_header_view.hashTreeRoot();
     if (!std.mem.eql(u8, &block.parentRoot(), header_parent_root)) {
-        const latest_header_state_root = try latest_header_view.getRoot("state_root");
-        const latest_header_body_root = try latest_header_view.getRoot("body_root");
-        std.debug.print(
-            "BlockParentRootMismatch at slot {} (latest_header_slot {}):\n  block.parent_root={s}\n  latest_header_root={s}\n  latest_header.state_root={s}\n  latest_header.body_root={s}\n",
-            .{
-                block.slot(),
-                latest_header_slot,
-                std.fmt.fmtSliceHexLower(block.parentRoot()[0..]),
-                std.fmt.fmtSliceHexLower(header_parent_root[0..]),
-                std.fmt.fmtSliceHexLower(latest_header_state_root[0..]),
-                std.fmt.fmtSliceHexLower(latest_header_body_root[0..]),
-            },
-        );
         return error.BlockParentRootMismatch;
     }
     var body_root: [32]u8 = undefined;
