@@ -35,8 +35,8 @@ pub const DepositData = union(enum) {
 
     pub fn withdrawalCredentials(self: *const DepositData) *const WithdrawalCredentials {
         return switch (self.*) {
-            .phase0 => |data| &data.withdrawal_credentials,
-            .electra => |data| &data.withdrawal_credentials,
+            .phase0 => |*data| &data.withdrawal_credentials,
+            .electra => |*data| &data.withdrawal_credentials,
         };
     }
 
@@ -96,8 +96,11 @@ pub fn applyDeposit(allocator: Allocator, cached_state: *CachedBeaconState, depo
 
     if (state.forkSeq().lt(.electra)) {
         if (is_new_validator) {
-            if (isValidDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
+            if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
                 try addValidatorToRegistry(allocator, cached_state, pubkey, withdrawal_credentials, amount);
+            } else |_| {
+                // invalid deposit signature, ignore the deposit
+                // TODO may be a useful metric to track
             }
         } else {
             // increase balance by deposit amount right away pre-electra
@@ -115,9 +118,12 @@ pub fn applyDeposit(allocator: Allocator, cached_state: *CachedBeaconState, depo
 
         var pending_deposits = try state.pendingDeposits();
         if (is_new_validator) {
-            if (isValidDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
+            if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
                 try addValidatorToRegistry(allocator, cached_state, pubkey, withdrawal_credentials, 0);
                 try pending_deposits.pushValue(&pending_deposit);
+            } else |_| {
+                // invalid deposit signature, ignore the deposit
+                // TODO may be a useful metric to track
             }
         } else {
             try pending_deposits.pushValue(&pending_deposit);
@@ -180,8 +186,13 @@ pub fn addValidatorToRegistry(
 }
 
 /// refer to https://github.com/ethereum/consensus-specs/blob/v1.5.0/specs/electra/beacon-chain.md#new-is_valid_deposit_signature
-/// no need to return error union since consumer does not care about the reason of failure
-pub fn isValidDepositSignature(config: *const BeaconConfig, pubkey: BLSPubkey, withdrawal_credentials: *const WithdrawalCredentials, amount: u64, deposit_signature: BLSSignature) bool {
+pub fn validateDepositSignature(
+    config: *const BeaconConfig,
+    pubkey: BLSPubkey,
+    withdrawal_credentials: *const WithdrawalCredentials,
+    amount: u64,
+    deposit_signature: BLSSignature,
+) !void {
     // verify the deposit signature (proof of posession) which is not checked by the deposit contract
     const deposit_message = DepositMessage{
         .pubkey = pubkey,
@@ -193,14 +204,14 @@ pub fn isValidDepositSignature(config: *const BeaconConfig, pubkey: BLSPubkey, w
 
     // fork-agnostic domain since deposits are valid across forks
     var domain: Domain = undefined;
-    computeDomain(DOMAIN_DEPOSIT, GENESIS_FORK_VERSION, ZERO_HASH, &domain) catch return false;
+    try computeDomain(DOMAIN_DEPOSIT, GENESIS_FORK_VERSION, ZERO_HASH, &domain);
     var signing_root: Root = undefined;
-    computeSigningRoot(types.phase0.DepositMessage, &deposit_message, &domain, &signing_root) catch return false;
+    try computeSigningRoot(types.phase0.DepositMessage, &deposit_message, &domain, &signing_root);
 
     // Pubkeys must be checked for group + inf. This must be done only once when the validator deposit is processed
-    const public_key = blst.PublicKey.uncompress(&pubkey) catch return false;
-    public_key.validate() catch return false;
-    const signature = blst.Signature.uncompress(&deposit_signature) catch return false;
-    signature.validate(true) catch return false;
-    return verify(&signing_root, &public_key, &signature, null, null);
+    const public_key = try blst.PublicKey.uncompress(&pubkey);
+    try public_key.validate();
+    const signature = try blst.Signature.uncompress(&deposit_signature);
+    try signature.validate(true);
+    try verify(&signing_root, &public_key, &signature, null, null);
 }

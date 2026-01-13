@@ -17,11 +17,10 @@ pub fn sign(secret_key: SecretKey, msg: []const u8) Signature {
 /// If `pk_validate` is `true`, the public key will be infinity and group checked.
 ///
 /// If `sig_groupcheck` is `true`, the signature will be group checked.
-pub fn verify(msg: []const u8, pk: *const PublicKey, sig: *const Signature, in_pk_validate: ?bool, in_sig_groupcheck: ?bool) bool {
+pub fn verify(msg: []const u8, pk: *const PublicKey, sig: *const Signature, in_pk_validate: ?bool, in_sig_groupcheck: ?bool) blst.BlstError!void {
     const sig_groupcheck = in_sig_groupcheck orelse false;
     const pk_validate = in_pk_validate orelse false;
-    sig.verify(sig_groupcheck, msg, DST, null, pk, pk_validate) catch return false;
-    return true;
+    try sig.verify(sig_groupcheck, msg, DST, null, pk, pk_validate);
 }
 
 threadlocal var pairing_buf: [blst.Pairing.sizeOf()]u8 = undefined;
@@ -44,7 +43,7 @@ test "bls - sanity" {
     const msg = [_]u8{1} ** 32;
     const sig = sign(sk, &msg);
     const pk = sk.toPublicKey();
-    try std.testing.expect(verify(&msg, &pk, &sig, null, null));
+    try std.testing.expect(try verify(&msg, &pk, &sig, null, null));
 
     var pks = [_]PublicKey{pk};
     var pks_slice: []const PublicKey = pks[0..1];

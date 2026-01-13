@@ -7,7 +7,7 @@ const getActivationExitChurnLimit = @import("../utils/validator.zig").getActivat
 const preset = @import("preset").preset;
 const isValidatorKnown = @import("../utils/electra.zig").isValidatorKnown;
 const ForkSeq = @import("config").ForkSeq;
-const isValidDepositSignature = @import("../block/process_deposit.zig").isValidDepositSignature;
+const validateDepositSignature = @import("../block/process_deposit.zig").validateDepositSignature;
 const addValidatorToRegistry = @import("../block/process_deposit.zig").addValidatorToRegistry;
 const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCompoundingWithdrawalCredential;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
@@ -124,7 +124,7 @@ fn applyPendingDeposit(allocator: Allocator, cached_state: *CachedBeaconState, d
 
     if (!is_validator_known) {
         // Verify the deposit signature (proof of possession) which is not checked by the deposit contract
-        if (isValidDepositSignature(cached_state.config, pubkey, withdrawal_credentials, amount, signature)) {
+        if (validateDepositSignature(cached_state.config, pubkey, withdrawal_credentials, amount, signature)) {
             try addValidatorToRegistry(allocator, cached_state, pubkey, withdrawal_credentials, amount);
             try cache.is_compounding_validator_arr.append(hasCompoundingWithdrawalCredential(withdrawal_credentials));
             // set balance, so that the next deposit of same pubkey will increase the balance correctly
@@ -133,6 +133,9 @@ fn applyPendingDeposit(allocator: Allocator, cached_state: *CachedBeaconState, d
             if (cache.balances) |*balances| {
                 try balances.append(amount);
             }
+        } else |_| {
+            // invalid deposit signature, ignore the deposit
+            // TODO may be a useful metric to track
         }
     } else {
         if (validator_index) |val_idx| {

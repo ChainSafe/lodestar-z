@@ -97,7 +97,7 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
             return ST.fixed_size;
         }
 
-        pub fn toValue(self: *Self, out: *ST.Type) !void {
+        pub fn toValue(self: *Self, _: Allocator, out: *ST.Type) !void {
             try self.commit();
             try ST.tree.toValue(self.base_view.data.root, self.base_view.pool, out);
         }

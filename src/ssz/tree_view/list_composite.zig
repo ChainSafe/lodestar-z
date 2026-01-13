@@ -254,6 +254,11 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             return try Self.init(allocator, pool, root);
         }
 
+        pub fn toValue(self: *Self, allocator: Allocator, out: *ST.Type) !void {
+            try self.commit();
+            try ST.tree.toValue(allocator, self.base_view.data.root, self.base_view.pool, out);
+        }
+
         /// Get a read-only iterator over the elements of the list.
         /// This only iterates over committed elements.
         /// It is up to the caller to ensure that the iterator doesn't run past the end of the list.

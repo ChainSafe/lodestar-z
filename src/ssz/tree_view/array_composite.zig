@@ -134,6 +134,15 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
                 return try ST.tree.serializedSize(self.base_view.data.root, self.base_view.pool);
             }
         }
+
+        pub fn toValue(self: *Self, allocator: Allocator, out: *ST.Type) !void {
+            try self.commit();
+            if (comptime isFixedType(ST)) {
+                try ST.tree.toValue(self.base_view.data.root, self.base_view.pool, out);
+            } else {
+                try ST.tree.toValue(allocator, self.base_view.data.root, self.base_view.pool, out);
+            }
+        }
     };
 }
 

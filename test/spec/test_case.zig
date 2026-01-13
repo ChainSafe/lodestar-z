@@ -255,5 +255,27 @@ pub fn expectEqualBeaconStates(expected: *BeaconState, actual: *BeaconState) !vo
         u8,
         try expected.hashTreeRoot(),
         try actual.hashTreeRoot(),
-    )) return error.NotEqual;
+    )) {
+        const allocator = std.testing.allocator;
+        var expected_view = types.phase0.BeaconState.TreeView{
+            .base_view = expected.baseView(),
+        };
+        var actual_view = types.phase0.BeaconState.TreeView{
+            .base_view = actual.baseView(),
+        };
+
+        inline for (types.phase0.BeaconState.fields) |field| {
+            // debug print field name and compare values if not equal
+            const expected_field_root = try expected_view.getRoot(field.name);
+            const actual_field_root = try actual_view.getRoot(field.name);
+            if (!std.mem.eql(u8, expected_field_root, actual_field_root)) {
+                std.debug.print("field: {s}\n", .{field.name});
+                const expected_field = try expected_view.getValue(allocator, field.name);
+                const actual_field = try actual_view.getValue(allocator, field.name);
+                std.debug.print("expected: {any}\n", .{expected_field});
+                std.debug.print("actual: {any}\n", .{actual_field});
+            }
+        }
+        return error.NotEqual;
+    }
 }

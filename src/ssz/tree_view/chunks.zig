@@ -33,16 +33,10 @@ pub fn BasicPackedChunks(
             const gindex = Gindex.fromDepth(chunk_depth, index / items_per_chunk);
             try base_view.data.changed.put(base_view.allocator, gindex, {});
             const child_node = try base_view.getChildNode(gindex);
-            const opt_old_node = try base_view.data.children_nodes.fetchPut(
-                base_view.allocator,
+            try base_view.setChildNode(
                 gindex,
                 try ST.Element.tree.fromValuePacked(child_node, base_view.pool, index, &value),
             );
-            if (opt_old_node) |old_node| {
-                if (old_node.value.getState(base_view.pool).getRefCount() == 0) {
-                    base_view.pool.unref(old_node.value);
-                }
-            }
         }
 
         pub fn getAll(

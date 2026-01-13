@@ -63,7 +63,7 @@ pub fn processSlotsWithTransientCache(
     _: EpochTransitionCacheOpts,
 ) !void {
     var state = post_state.state;
-    if (try state.slot() > slot) return error.outdatedSlot;
+    if (try state.slot() >= slot) return error.outdatedSlot;
 
     while (try state.slot() < slot) {
         try processSlot(post_state);

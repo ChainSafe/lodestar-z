@@ -177,6 +177,11 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             return try ST.tree.serializeIntoBytes(self.base_view.data.root, self.base_view.pool, out);
         }
 
+        pub fn toValue(self: *Self, allocator: Allocator, out: *ST.Type) !void {
+            try self.commit();
+            try ST.tree.toValue(allocator, self.base_view.data.root, self.base_view.pool, out);
+        }
+
         /// Get the serialized size of this tree view.
         pub fn serializedSize(self: *Self) !usize {
             try self.commit();

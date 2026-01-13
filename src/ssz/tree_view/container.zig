@@ -117,11 +117,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
             var child_view = try self.get(field_name);
             var out = ChildST.default_value;
-            if (comptime isFixedType(ChildST)) {
-                try child_view.toValue(&out);
-            } else {
-                try child_view.toValue(allocator, &out);
-            }
+            try child_view.toValue(allocator, &out);
             return out;
         }
 

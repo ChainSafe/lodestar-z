@@ -74,6 +74,11 @@ pub fn BitVectorTreeView(comptime ST: type) type {
         pub fn toBoolArrayInto(self: *Self, out: []bool) !void {
             try BitOps.fillBools(&self.base_view, out, length);
         }
+
+        pub fn toValue(self: *Self, _: Allocator, out: *ST.Type) !void {
+            try self.commit();
+            try ST.tree.toValue(self.base_view.data.root, self.base_view.pool, out);
+        }
     };
 }
 

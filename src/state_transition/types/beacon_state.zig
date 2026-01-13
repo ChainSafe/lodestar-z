@@ -6,6 +6,7 @@ const ForkSeq = @import("config").ForkSeq;
 const Node = @import("persistent_merkle_tree").Node;
 const isBasicType = @import("ssz").isBasicType;
 const isFixedType = @import("ssz").isFixedType;
+const BaseTreeView = @import("ssz").BaseTreeView;
 const CloneOpts = @import("ssz").BaseTreeView.CloneOpts;
 const ct = @import("consensus_types");
 const ExecutionPayloadHeader = @import("./execution_payload.zig").ExecutionPayloadHeader;
@@ -132,6 +133,12 @@ pub const BeaconState = union(ForkSeq) {
             inline else => {
                 try writer.print("{s} (at slot {})", .{ @tagName(self), self.slot() });
             },
+        };
+    }
+
+    pub fn baseView(self: *BeaconState) BaseTreeView {
+        return switch (self.*) {
+            inline else => |*state| state.base_view,
         };
     }
 
@@ -281,18 +288,7 @@ pub const BeaconState = union(ForkSeq) {
 
     pub fn appendEth1DataVote(self: *BeaconState, eth1_data: *const ct.phase0.Eth1Data.Type) !void {
         var votes = try self.eth1DataVotes();
-        const VotesView = @TypeOf(votes);
-        const ElemST = VotesView.SszType.Element;
-
-        const child_root = try ElemST.tree.fromValue(votes.base_view.pool, eth1_data);
-        errdefer votes.base_view.pool.unref(child_root);
-        const child_view = try ElemST.TreeView.init(
-            votes.base_view.allocator,
-            votes.base_view.pool,
-            child_root,
-        );
-
-        try votes.push(child_view);
+        try votes.pushValue(eth1_data);
     }
 
     pub fn resetEth1DataVotes(self: *BeaconState) !void {
