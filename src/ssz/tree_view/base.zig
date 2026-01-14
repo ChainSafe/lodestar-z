@@ -99,6 +99,11 @@ pub const TreeViewData = struct {
         self.root = new_root;
 
         self.changed.clearRetainingCapacity();
+
+        // The tree root has changed and any cached child nodes may now be stale (e.g. for
+        // ancestor gindices of the modified nodes). Clear cached nodes to avoid returning
+        // nodes from the previous root in subsequent reads/writes.
+        self.clearChildrenNodesCache(pool);
     }
 };
 

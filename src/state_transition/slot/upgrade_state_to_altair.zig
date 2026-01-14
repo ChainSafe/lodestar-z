@@ -62,6 +62,7 @@ pub fn upgradeStateToAltair(allocator: Allocator, cached_state: *CachedBeaconSta
     const validators = try altair_state.validatorsSlice(allocator);
     defer allocator.free(validators);
     epoch_cache.previous_target_unslashed_balance_increments = sumTargetUnslashedBalanceIncrements(previous_epoch_participation.items, previous_epoch, validators);
+    epoch_cache.current_target_unslashed_balance_increments = sumTargetUnslashedBalanceIncrements(current_epoch_participation.items, epoch_cache.epoch, validators);
 
     phase0_state.deinit();
     cached_state.state.* = altair_state;

@@ -79,14 +79,14 @@ pub fn processEffectiveBalanceUpdates(allocator: Allocator, cached_state: *Cache
             if (fork.gte(.altair)) {
                 const slashed = try validator.get("slashed");
                 if (!slashed) {
-                    if ((try previous_epoch_participation.get(i)) & TIMELY_TARGET == TIMELY_TARGET) {
+                    if (cache.is_active_prev_epoch[i] and (try previous_epoch_participation.get(i)) & TIMELY_TARGET == TIMELY_TARGET) {
                         // Use += then -= to avoid underflow when new_effective_balance_increment < effective_balance_increment
                         epoch_cache.previous_target_unslashed_balance_increments += new_effective_balance_increment;
                         epoch_cache.previous_target_unslashed_balance_increments -= effective_balance_increment;
                     }
                     // currentTargetUnslashedBalanceIncrements is transferred to previousTargetUnslashedBalanceIncrements in afterEpochTransitionCache
                     // at epoch transition of next epoch (in EpochTransitionCache), prevTargetUnslStake is calculated based on newEffectiveBalanceIncrement
-                    if ((try current_epoch_participation.get(i)) & TIMELY_TARGET == TIMELY_TARGET) {
+                    if (cache.is_active_curr_epoch[i] and (try current_epoch_participation.get(i)) & TIMELY_TARGET == TIMELY_TARGET) {
                         // Use += then -= to avoid underflow when new_effective_balance_increment < effective_balance_increment
                         epoch_cache.current_target_unslashed_balance_increments += new_effective_balance_increment;
                         epoch_cache.current_target_unslashed_balance_increments -= effective_balance_increment;
