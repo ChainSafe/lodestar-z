@@ -288,6 +288,13 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                 );
             }
 
+            /// Return the root of the next element of the iterator
+            /// Caller must not modify the returned root.
+            pub fn nextRoot(self: *ReadonlyIterator) !*const [32]u8 {
+                const node = try self.depth_iterator.next();
+                return node.getRoot(self.tree_view.base_view.pool);
+            }
+
             /// Return the next element of the iterator as a value.
             /// Caller owns the returned value.
             pub fn nextValue(self: *ReadonlyIterator, allocator: Allocator) !ST.Element.Type {
