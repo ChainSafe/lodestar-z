@@ -2,8 +2,8 @@ const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeac
 const types = @import("consensus_types");
 const c = @import("constants");
 const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit.Type;
-const isActiveValidator = @import("../utils/validator.zig").isActiveValidator;
-const getPendingBalanceToWithdraw = @import("../utils/validator.zig").getPendingBalanceToWithdraw;
+const isActiveValidator = @import("../validator.zig").isActiveValidator;
+const getPendingBalanceToWithdraw = @import("../validator.zig").getPendingBalanceToWithdraw;
 const verifyVoluntaryExitSignature = @import("../signature_sets/voluntary_exits.zig").verifyVoluntaryExitSignature;
 const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateValidatorExit;
 

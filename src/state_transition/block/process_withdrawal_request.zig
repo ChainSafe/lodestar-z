@@ -8,8 +8,8 @@ const WithdrawalRequest = types.electra.WithdrawalRequest.Type;
 const PendingPartialWithdrawal = types.electra.PendingPartialWithdrawal.Type;
 const hasExecutionWithdrawalCredential = @import("../utils/electra.zig").hasExecutionWithdrawalCredential;
 const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCompoundingWithdrawalCredential;
-const isActiveValidator = @import("../utils/validator.zig").isActiveValidator;
-const getPendingBalanceToWithdraw = @import("../utils/validator.zig").getPendingBalanceToWithdraw;
+const isActiveValidator = @import("../validator.zig").isActiveValidator;
+const getPendingBalanceToWithdraw = @import("../validator.zig").getPendingBalanceToWithdraw;
 const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateValidatorExit;
 const computeExitEpochAndUpdateChurn = @import("../utils/epoch.zig").computeExitEpochAndUpdateChurn;
 

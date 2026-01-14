@@ -39,9 +39,9 @@ const isAggregatorFromCommitteeLength = @import("../utils/aggregator.zig").isAgg
 
 const sumTargetUnslashedBalanceIncrements = @import("../utils/target_unslashed_balance.zig").sumTargetUnslashedBalanceIncrements;
 
-const isActiveValidator = @import("../utils/validator.zig").isActiveValidator;
-const getChurnLimit = @import("../utils/validator.zig").getChurnLimit;
-const getActivationChurnLimit = @import("../utils/validator.zig").getActivationChurnLimit;
+const isActiveValidator = @import("../validator.zig").isActiveValidator;
+const getChurnLimit = @import("../validator.zig").getChurnLimit;
+const getActivationChurnLimit = @import("../validator.zig").getActivationChurnLimit;
 
 const Attestation = @import("../types/attestation.zig").Attestation;
 const IndexedAttestation = @import("../types/attestation.zig").IndexedAttestation;
