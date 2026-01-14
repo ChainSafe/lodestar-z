@@ -20,11 +20,6 @@ pub fn isSlashableAttestationData(data1: *const AttestationData, data2: *const A
     return false;
 }
 
-pub fn isValidAttestationSlot(attestation_slot: Slot, current_slot: Slot) bool {
-    return attestation_slot + preset.MIN_ATTESTATION_INCLUSION_DELAY <= current_slot and
-        current_slot <= attestation_slot + preset.SLOTS_PER_EPOCH;
-}
-
 // consumer takes the ownership of the returned array
 pub fn getAttesterSlashableIndices(allocator: Allocator, attester_slashing: *const AttesterSlashing) !std.ArrayList(ValidatorIndex) {
     var att_set_1 = std.AutoArrayHashMap(ValidatorIndex, bool).init(allocator);
