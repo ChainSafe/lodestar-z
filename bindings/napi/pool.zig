@@ -10,7 +10,7 @@ const allocator = std.heap.page_allocator;
 var pool: Node.Pool = undefined;
 var initialized: bool = false;
 
-pub fn pool_init(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+pub fn poolInit(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     if (initialized) {
         return env.getUndefined();
     }
@@ -21,7 +21,7 @@ pub fn pool_init(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     return env.getUndefined();
 }
 
-pub fn pool_deinit(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
+pub fn poolDeinit(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     if (!initialized) {
         return env.getUndefined();
     }
@@ -31,28 +31,28 @@ pub fn pool_deinit(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     return env.getUndefined();
 }
 
-pub fn pool_is_initialized(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
+pub fn poolIsInitialized(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     return try env.getBoolean(initialized);
 }
 
-pub fn mod(env: napi.Env, exports: napi.Value) !void {
+pub fn register(env: napi.Env, exports: napi.Value) !void {
     const pool_obj = try env.createObject();
     try pool_obj.setNamedProperty("init", try env.createFunction(
         "init",
         1,
-        pool_init,
+        poolInit,
         null,
     ));
     try pool_obj.setNamedProperty("deinit", try env.createFunction(
         "deinit",
         0,
-        pool_deinit,
+        poolDeinit,
         null,
     ));
     try pool_obj.setNamedProperty("isInitialized", try env.createFunction(
         "isInitialized",
         0,
-        pool_is_initialized,
+        poolIsInitialized,
         null,
     ));
 

@@ -1,9 +1,9 @@
 const napi = @import("zapi:napi");
 
 comptime {
-    napi.module.register(mod);
+    napi.module.register(register);
 }
 
-fn mod(env: napi.Env, exports: napi.Value) !void {
-    try @import("./pool.zig").mod(env, exports);
+fn register(env: napi.Env, exports: napi.Value) !void {
+    try @import("./pool.zig").register(env, exports);
 }
