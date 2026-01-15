@@ -5,6 +5,9 @@
 //! Run a Prometheus instance to see the data visually.
 //!
 //! To run this example, run `zig build run:metrics_era`.
+//!
+//! Note: this example is mainly meant to test that our metrics is working; realistically we do not need
+//! such an example. The bulk of this code should be moved to our beacon node implementation once it's ready.
 
 const download_era_options = @import("download_era_options");
 const era = @import("era");
