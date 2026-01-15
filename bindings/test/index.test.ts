@@ -10,10 +10,7 @@ describe("sanity", () => {
 describe("pool bindings", () => {
   it("should initialize and deinitialize the pool", async () => {
     const bindings = (await import("../src/index.ts")).default;
-    expect(bindings.pool.isInitialized()).toBe(false);
     bindings.pool.init(4);
-    expect(bindings.pool.isInitialized()).toBe(true);
     bindings.pool.deinit();
-    expect(bindings.pool.isInitialized()).toBe(false);
   });
 });

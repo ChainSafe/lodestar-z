@@ -9,7 +9,20 @@ type Bindings = {
   pool: {
     init: (poolSize: number) => void;
     deinit: () => void;
-    isInitialized: () => boolean;
+  };
+  pubkey2index: {
+    init: (initialCapacity?: number) => void;
+    deinit: () => void;
+    get: (pubkey: Uint8Array) => number | undefined;
+  };
+  index2pubkey: {
+    init: (initialCapacity?: number) => void;
+    deinit: () => void;
+    get: (index: number) => Uint8Array | undefined;
+  };
+  config: {
+    init: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
+    deinit: () => void;
   };
 };
 

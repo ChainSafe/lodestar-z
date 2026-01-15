@@ -31,10 +31,6 @@ pub fn poolDeinit(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     return env.getUndefined();
 }
 
-pub fn poolIsInitialized(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
-    return try env.getBoolean(initialized);
-}
-
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const pool_obj = try env.createObject();
     try pool_obj.setNamedProperty("init", try env.createFunction(
@@ -47,12 +43,6 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         "deinit",
         0,
         poolDeinit,
-        null,
-    ));
-    try pool_obj.setNamedProperty("isInitialized", try env.createFunction(
-        "isInitialized",
-        0,
-        poolIsInitialized,
         null,
     ));
 
