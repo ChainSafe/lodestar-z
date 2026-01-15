@@ -4,6 +4,8 @@ const snappy = @import("snappy").raw;
 const ForkSeq = @import("config").ForkSeq;
 const isFixedType = @import("ssz").isFixedType;
 const state_transition = @import("state_transition");
+const BeaconBlock = state_transition.BeaconBlock;
+const BlindedBeaconBlock = state_transition.BlindedBeaconBlock;
 const SignedBeaconBlock = state_transition.SignedBeaconBlock;
 const BeaconStateAllForks = state_transition.BeaconStateAllForks;
 const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
@@ -268,4 +270,111 @@ pub fn expectEqualBeaconStates(expected: BeaconStateAllForks, actual: BeaconStat
             if (!fulu.BeaconState.equals(expected.fulu, actual.fulu)) return error.NotEqual;
         },
     }
+}
+
+/// Compare beacon states for blinded block tests.
+/// This ignores latest_block_header.body_root since blinded blocks have
+/// different body structure (execution_payload_header vs execution_payload).
+pub fn expectEqualBlindedBeaconStates(expected: BeaconStateAllForks, actual: BeaconStateAllForks) !void {
+    if (expected.forkSeq() != actual.forkSeq()) return error.ForkMismatch;
+
+    // Save original body_roots
+    const expected_body_root = expected.latestBlockHeader().body_root;
+    const actual_body_root = actual.latestBlockHeader().body_root;
+
+    // Temporarily zero them out for comparison
+    @memset(&expected.latestBlockHeader().body_root, 0);
+    @memset(&actual.latestBlockHeader().body_root, 0);
+
+    defer {
+        // Restore original values
+        expected.latestBlockHeader().body_root = expected_body_root;
+        actual.latestBlockHeader().body_root = actual_body_root;
+    }
+
+    // Compare states (body_root now matches since both are zeroed)
+    switch (expected.forkSeq()) {
+        .capella => {
+            if (!capella.BeaconState.equals(expected.capella, actual.capella)) return error.NotEqual;
+        },
+        .deneb => {
+            if (!deneb.BeaconState.equals(expected.deneb, actual.deneb)) return error.NotEqual;
+        },
+        .electra => {
+            if (!electra.BeaconState.equals(expected.electra, actual.electra)) return error.NotEqual;
+        },
+        else => return error.UnsupportedForkForBlindedComparison,
+    }
+}
+
+pub fn beaconBlockToBlinded(comptime fork: ForkSeq) type {
+    const ForkTypes = @field(types, fork.name());
+
+    return struct {
+        pub fn convert(
+            allocator: Allocator,
+            beacon_block: *const ForkTypes.BeaconBlock.Type,
+        ) !ForkTypes.BlindedBeaconBlock.Type {
+            const payload = &beacon_block.body.execution_payload;
+
+            var transactions_root: [32]u8 = undefined;
+            try bellatrix.Transactions.hashTreeRoot(allocator, &payload.transactions, &transactions_root);
+
+            var withdrawals_root: [32]u8 = undefined;
+            try capella.Withdrawals.hashTreeRoot(allocator, &payload.withdrawals, &withdrawals_root);
+
+            var header: ForkTypes.ExecutionPayloadHeader.Type = ForkTypes.ExecutionPayloadHeader.default_value;
+            header.parent_hash = payload.parent_hash;
+            header.fee_recipient = payload.fee_recipient;
+            header.state_root = payload.state_root;
+            header.receipts_root = payload.receipts_root;
+            header.logs_bloom = payload.logs_bloom;
+            header.prev_randao = payload.prev_randao;
+            header.block_number = payload.block_number;
+            header.gas_limit = payload.gas_limit;
+            header.gas_used = payload.gas_used;
+            header.timestamp = payload.timestamp;
+            header.extra_data = try payload.extra_data.clone(allocator); // Must clone like createPayloadHeader does
+            header.base_fee_per_gas = payload.base_fee_per_gas;
+            header.block_hash = payload.block_hash;
+            header.transactions_root = transactions_root;
+            header.withdrawals_root = withdrawals_root;
+            if (comptime @hasField(ForkTypes.ExecutionPayloadHeader.Type, "blob_gas_used")) {
+                header.blob_gas_used = payload.blob_gas_used;
+                header.excess_blob_gas = payload.excess_blob_gas;
+            }
+
+            var body: ForkTypes.BlindedBeaconBlockBody.Type = ForkTypes.BlindedBeaconBlockBody.default_value;
+            body.randao_reveal = beacon_block.body.randao_reveal;
+            body.eth1_data = beacon_block.body.eth1_data;
+            body.graffiti = beacon_block.body.graffiti;
+            body.proposer_slashings = beacon_block.body.proposer_slashings;
+            body.attester_slashings = beacon_block.body.attester_slashings;
+            body.attestations = beacon_block.body.attestations;
+            body.deposits = beacon_block.body.deposits;
+            body.voluntary_exits = beacon_block.body.voluntary_exits;
+            body.sync_aggregate = beacon_block.body.sync_aggregate;
+            body.execution_payload_header = header;
+            body.bls_to_execution_changes = beacon_block.body.bls_to_execution_changes;
+            if (comptime @hasField(ForkTypes.BlindedBeaconBlockBody.Type, "blob_kzg_commitments")) {
+                body.blob_kzg_commitments = beacon_block.body.blob_kzg_commitments;
+            }
+            if (comptime @hasField(ForkTypes.BlindedBeaconBlockBody.Type, "execution_requests")) {
+                // Must clone to avoid sharing underlying list memory
+                try ForkTypes.BeaconBlockBody.getFieldType("execution_requests").clone(
+                    allocator,
+                    &beacon_block.body.execution_requests,
+                    &body.execution_requests,
+                );
+            }
+
+            return ForkTypes.BlindedBeaconBlock.Type{
+                .slot = beacon_block.slot,
+                .proposer_index = beacon_block.proposer_index,
+                .parent_root = beacon_block.parent_root,
+                .state_root = beacon_block.state_root,
+                .body = body,
+            };
+        }
+    };
 }
