@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const m = @import("metrics");
 
-const CachedBeaconStateAllForks = @import("cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("cache/state_cache.zig").CachedBeaconState;
 
 /// Defaults to noop metrics, making this safe to use whether or not `metrics.init` is called.
 pub var state_transition = m.initializeNoop(Metrics);
@@ -84,25 +84,29 @@ const Metrics = struct {
     const PreStateClonedCount = m.Histogram(u32, &.{ 1, 2, 5, 10, 50, 250 });
     const ProposerRewardsGauge = m.GaugeVec(u64, ProposerRewardLabel);
 
-    pub fn onStateClone(self: *Metrics, state: *CachedBeaconStateAllForks, source: StateCloneSource) !void {
-        try if (state.state.balances().items.len > 0)
+    pub fn onStateClone(self: *Metrics, state: *CachedBeaconState, source: StateCloneSource) !void {
+        var balances = try state.state.balances();
+        try if (try balances.length() > 0)
             self.pre_state_balances_nodes_populated_hit.incr(.{ .source = source })
         else
             self.pre_state_balances_nodes_populated_miss.incr(.{ .source = source });
 
-        try if (state.state.validators().items.len > 0)
+        var validators = try state.state.validators();
+        try if (try validators.length() > 0)
             self.pre_state_validators_nodes_populated_hit.incr(.{ .source = source })
         else
             self.pre_state_validators_nodes_populated_miss.incr(.{ .source = source });
     }
 
-    pub fn onPostState(self: *Metrics, state: *CachedBeaconStateAllForks) void {
-        if (state.state.balances().items.len > 0)
+    pub fn onPostState(self: *Metrics, state: *CachedBeaconState) !void {
+        var balances = try state.state.balances();
+        if (try balances.length() > 0)
             self.post_state_balances_nodes_populated_hit.incr()
         else
             self.post_state_balances_nodes_populated_miss.incr();
 
-        if (state.state.validators().items.len > 0)
+        var validators = try state.state.validators();
+        if (try validators.length() > 0)
             self.post_state_validators_nodes_populated_hit.incr()
         else
             self.post_state_validators_nodes_populated_miss.incr();

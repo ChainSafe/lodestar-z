@@ -2,6 +2,7 @@ const std = @import("std");
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const Timer = std.time.Timer;
 const metrics = @import("../metrics.zig");
+
 const ForkSeq = @import("config").ForkSeq;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const processJustificationAndFinalization = @import("./process_justification_and_finalization.zig").processJustificationAndFinalization;
@@ -90,7 +91,6 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
 
     if (state.forkSeq().gte(.fulu)) {
         timer = try Timer.start();
-        timer = try metrics.state_transition.epoch_transition_step.time();
         try processProposerLookahead(allocator, cached_state, cache);
         try observeEpochTransitionStep(.{ .step = .process_proposer_lookahead }, timer.read());
     }
