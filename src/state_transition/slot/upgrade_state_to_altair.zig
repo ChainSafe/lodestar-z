@@ -90,7 +90,7 @@ fn translateParticipation(allocator: Allocator, cached_state: *CachedBeaconState
     @memset(epoch_participation.items, 0);
 
     for (pending_attestations) |*attestation| {
-        const data = attestation.data;
+        const data = &attestation.data;
         const attestation_flag = try getAttestationParticipationStatus(cached_state.state, data, attestation.inclusion_delay, epoch_cache.epoch, root_cache);
         const committee_indices = try epoch_cache.getBeaconCommittee(data.slot, data.index);
         const attesting_indices = try attestation.aggregation_bits.intersectValues(ValidatorIndex, allocator, committee_indices);

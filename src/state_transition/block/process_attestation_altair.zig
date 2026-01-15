@@ -45,7 +45,7 @@ pub fn processAttestationsAltair(allocator: Allocator, cached_state: *CachedBeac
 
     var proposer_reward: u64 = 0;
     for (attestations) |*attestation| {
-        const data = attestation.data;
+        const data = &attestation.data;
         try validateAttestation(AT, cached_state, attestation);
 
         // Retrieve the validator indices from the attestation participation bitfield
@@ -118,12 +118,12 @@ pub fn processAttestationsAltair(allocator: Allocator, cached_state: *CachedBeac
     try increaseBalance(state, try cached_state.getBeaconProposer(state_slot), proposer_reward);
 }
 
-pub fn getAttestationParticipationStatus(state: *BeaconState, data: types.phase0.AttestationData.Type, inclusion_delay: u64, current_epoch: Epoch, root_cache: *RootCache) !u8 {
-    const justified_checkpoint: Checkpoint = if (data.target.epoch == current_epoch)
-        root_cache.current_justified_checkpoint
+pub fn getAttestationParticipationStatus(state: *BeaconState, data: *const types.phase0.AttestationData.Type, inclusion_delay: u64, current_epoch: Epoch, root_cache: *RootCache) !u8 {
+    const justified_checkpoint = if (data.target.epoch == current_epoch)
+        &root_cache.current_justified_checkpoint
     else
-        root_cache.previous_justified_checkpoint;
-    const is_matching_source = checkpointValueEquals(data.source, justified_checkpoint);
+        &root_cache.previous_justified_checkpoint;
+    const is_matching_source = checkpointValueEquals(&data.source, justified_checkpoint);
     if (!is_matching_source) return error.InvalidAttestationSource;
 
     const is_matching_target = std.mem.eql(u8, &data.target.root, try root_cache.getBlockRoot(data.target.epoch));
@@ -139,6 +139,6 @@ pub fn getAttestationParticipationStatus(state: *BeaconState, data: types.phase0
     return flags;
 }
 
-pub fn checkpointValueEquals(cp1: Checkpoint, cp2: Checkpoint) bool {
+pub fn checkpointValueEquals(cp1: *const Checkpoint, cp2: *const Checkpoint) bool {
     return cp1.epoch == cp2.epoch and std.mem.eql(u8, &cp1.root, &cp2.root);
 }
