@@ -51,6 +51,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const dep_zapi = b.dependency("zapi", .{
+        .optimize = optimize,
+        .target = target,
+    });
+
     const dep_zbench = b.dependency("zbench", .{
         .optimize = optimize,
         .target = target,
@@ -427,6 +432,28 @@ pub fn build(b: *std.Build) void {
     const tls_run_exe_bench_process_epoch = b.step("run:bench_process_epoch", "Run the bench_process_epoch executable");
     tls_run_exe_bench_process_epoch.dependOn(&run_exe_bench_process_epoch.step);
 
+    const module_bindings = b.createModule(.{
+        .root_source_file = b.path("bindings/napi/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("bindings"), module_bindings) catch @panic("OOM");
+
+    const lib_bindings = b.addLibrary(.{
+        .name = "bindings",
+        .root_module = module_bindings,
+        .linkage = .dynamic,
+    });
+
+    lib_bindings.linker_allow_shlib_undefined = true;
+    const install_lib_bindings = b.addInstallArtifact(lib_bindings, .{
+        .dest_sub_path = "bindings.node",
+    });
+
+    const tls_install_lib_bindings = b.step("build-lib:bindings", "Install the bindings library");
+    tls_install_lib_bindings.dependOn(&install_lib_bindings.step);
+    b.getInstallStep().dependOn(&install_lib_bindings.step);
+
     const tls_run_test = b.step("test", "Run all tests");
 
     const test_constants = b.addTest(.{
@@ -751,6 +778,20 @@ pub fn build(b: *std.Build) void {
     tls_run_test_bench_process_epoch.dependOn(&run_test_bench_process_epoch.step);
     tls_run_test.dependOn(&run_test_bench_process_epoch.step);
 
+    const test_bindings = b.addTest(.{
+        .name = "bindings",
+        .root_module = module_bindings,
+        .filters = b.option([][]const u8, "bindings.filters", "bindings test filters") orelse &[_][]const u8{},
+    });
+    const install_test_bindings = b.addInstallArtifact(test_bindings, .{});
+    const tls_install_test_bindings = b.step("build-test:bindings", "Install the bindings test");
+    tls_install_test_bindings.dependOn(&install_test_bindings.step);
+
+    const run_test_bindings = b.addRunArtifact(test_bindings);
+    const tls_run_test_bindings = b.step("test:bindings", "Run the bindings test");
+    tls_run_test_bindings.dependOn(&run_test_bindings.step);
+    tls_run_test.dependOn(&run_test_bindings.step);
+
     const module_int = b.createModule(.{
         .root_source_file = b.path("test/int/root.zig"),
         .target = target,
@@ -951,6 +992,11 @@ pub fn build(b: *std.Build) void {
     module_bench_process_epoch.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_bench_process_epoch.addImport("download_era_options", options_module_download_era_options);
     module_bench_process_epoch.addImport("era", module_era);
+
+    module_bindings.addImport("config", module_config);
+    module_bindings.addImport("state_transition", module_state_transition);
+    module_bindings.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_bindings.addImport("zapi:napi", dep_zapi.module("napi"));
 
     module_int.addImport("build_options", options_module_build_options);
     module_int.addImport("state_transition", module_state_transition);
