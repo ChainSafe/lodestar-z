@@ -10,8 +10,9 @@ const type_root = @import("../type/root.zig");
 const itemsPerChunk = type_root.itemsPerChunk;
 const chunkDepth = type_root.chunkDepth;
 
-const BaseTreeView = @import("root.zig").BaseTreeView;
 const BasicPackedChunks = @import("chunks.zig").BasicPackedChunks;
+const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
+const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
 
 /// A specialized tree view for SSZ vector types with basic element types.
 /// Elements are packed into chunks (multiple elements per leaf node).
@@ -25,8 +26,9 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
         }
     }
 
-    return struct {
-        base_view: BaseTreeView,
+    const TreeView = struct {
+        allocator: Allocator,
+        chunks: Chunks,
 
         pub const SszType = ST;
         pub const Element = ST.Element.Type;
@@ -39,55 +41,69 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
         const items_per_chunk: usize = itemsPerChunk(ST.Element);
         const Chunks = BasicPackedChunks(ST, chunk_depth, items_per_chunk);
 
-        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
-            return Self{
-                .base_view = try BaseTreeView.init(allocator, pool, root),
-            };
+        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
+            const ptr = try allocator.create(Self);
+            errdefer allocator.destroy(ptr);
+
+            try Chunks.init(&ptr.chunks, allocator, pool, root);
+            ptr.allocator = allocator;
+            return ptr;
         }
 
-        pub fn clone(self: *Self, opts: BaseTreeView.CloneOpts) !Self {
-            return Self{ .base_view = try self.base_view.clone(opts) };
+        pub fn clone(self: *Self, opts: CloneOpts) !*Self {
+            const ptr = try self.allocator.create(Self);
+            errdefer self.allocator.destroy(ptr);
+
+            try Chunks.clone(&self.chunks, opts, &ptr.chunks);
+            ptr.allocator = self.allocator;
+            return ptr;
         }
 
         pub fn deinit(self: *Self) void {
-            self.base_view.deinit();
+            self.chunks.deinit();
+            self.allocator.destroy(self);
         }
 
         pub fn commit(self: *Self) !void {
-            try self.base_view.commit();
+            try self.chunks.commit();
         }
 
         pub fn clearCache(self: *Self) void {
-            self.base_view.clearCache();
+            self.chunks.clearCache();
         }
 
         pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
-            try self.base_view.hashTreeRoot(out);
+            try self.commit();
+            out.* = self.chunks.root.getRoot(self.chunks.pool).*;
+        }
+
+        pub fn getRoot(self: *const Self) Node.Id {
+            return self.chunks.root;
         }
 
         pub fn get(self: *Self, index: usize) !Element {
             if (index >= length) return error.IndexOutOfBounds;
-            return try Chunks.get(&self.base_view, index);
+            return self.chunks.get(index);
         }
 
         pub fn set(self: *Self, index: usize, value: Element) !void {
             if (index >= length) return error.IndexOutOfBounds;
-            try Chunks.set(&self.base_view, index, value);
+            try self.chunks.set(index, value);
         }
 
-        pub fn getAll(self: *Self, allocator: Allocator) ![]Element {
-            return try Chunks.getAll(&self.base_view, allocator, length);
+        pub fn getAll(self: *Self) ![]Element {
+            return try self.chunks.getAll(self.allocator, length);
         }
 
         pub fn getAllInto(self: *Self, values: []Element) ![]Element {
-            return try Chunks.getAllInto(&self.base_view, length, values);
+            return try self.chunks.getAllInto(length, values);
         }
 
         /// Serialize the tree view into a provided buffer.
         /// Returns the number of bytes written.
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
             try self.commit();
-            return try ST.tree.serializeIntoBytes(self.base_view.data.root, self.base_view.pool, out);
+            return try ST.tree.serializeIntoBytes(self.chunks.root, self.chunks.pool, out);
         }
 
         /// Get the serialized size of this tree view.
@@ -95,6 +111,9 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
             return ST.fixed_size;
         }
     };
+
+    assertTreeViewType(TreeView);
+    return TreeView;
 }
 
 const UintType = @import("../type/uint.zig").UintType;
@@ -135,7 +154,7 @@ test "TreeView vector element roundtrip" {
     try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
 
     var roundtrip: VectorType.Type = undefined;
-    try VectorType.tree.toValue(view.base_view.data.root, &pool, &roundtrip);
+    try VectorType.tree.toValue(view.getRoot(), &pool, &roundtrip);
     try std.testing.expectEqualSlices(u64, &expected, &roundtrip);
 }
 
@@ -178,7 +197,7 @@ test "TreeView vector getAllAlloc roundtrip" {
     var view = try VectorType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
-    const filled = try view.getAll(allocator);
+    const filled = try view.getAll();
     defer allocator.free(filled);
 
     try std.testing.expectEqualSlices(u16, values[0..], filled);
@@ -197,13 +216,13 @@ test "TreeView vector getAllAlloc repeat reflects updates" {
     var view = try VectorType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
-    const first = try view.getAll(allocator);
+    const first = try view.getAll();
     defer allocator.free(first);
     try std.testing.expectEqualSlices(u32, values[0..], first);
 
     try view.set(3, 99);
 
-    const second = try view.getAll(allocator);
+    const second = try view.getAll();
     defer allocator.free(second);
     values[3] = 99;
     try std.testing.expectEqualSlices(u32, values[0..], second);
@@ -295,13 +314,13 @@ test "TreeView vector clone(true) does not transfer cache" {
     defer v.deinit();
 
     _ = try v.get(0);
-    try std.testing.expect(v.base_view.data.children_nodes.count() > 0);
+    try std.testing.expect(v.chunks.children_nodes.count() > 0);
 
     var cloned_no_cache = try v.clone(.{ .transfer_cache = false });
     defer cloned_no_cache.deinit();
 
-    try std.testing.expect(v.base_view.data.children_nodes.count() > 0);
-    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.base_view.data.children_nodes.count());
+    try std.testing.expect(v.chunks.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.chunks.children_nodes.count());
 }
 
 test "TreeView vector clone(false) transfers cache and clears source" {
@@ -319,13 +338,13 @@ test "TreeView vector clone(false) transfers cache and clears source" {
     defer v.deinit();
 
     _ = try v.get(0);
-    try std.testing.expect(v.base_view.data.children_nodes.count() > 0);
+    try std.testing.expect(v.chunks.children_nodes.count() > 0);
 
     var cloned = try v.clone(.{});
     defer cloned.deinit();
 
-    try std.testing.expectEqual(@as(usize, 0), v.base_view.data.children_nodes.count());
-    try std.testing.expect(cloned.base_view.data.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), v.chunks.children_nodes.count());
+    try std.testing.expect(cloned.chunks.children_nodes.count() > 0);
 }
 
 // Tests ported from TypeScript ssz packages/ssz/test/unit/byType/vector/tree.test.ts

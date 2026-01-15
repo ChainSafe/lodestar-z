@@ -9,8 +9,9 @@ const Node = @import("persistent_merkle_tree").Node;
 const type_root = @import("../type/root.zig");
 const chunkDepth = type_root.chunkDepth;
 
-const BaseTreeView = @import("root.zig").BaseTreeView;
 const BitArray = @import("bit_array.zig").BitArray;
+const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
+const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
 
 pub fn BitListTreeView(comptime ST: type) type {
     comptime {
@@ -22,8 +23,9 @@ pub fn BitListTreeView(comptime ST: type) type {
         }
     }
 
-    return struct {
-        base_view: BaseTreeView,
+    const TreeView = struct {
+        allocator: Allocator,
+        data: BitOps,
 
         pub const SszType = ST;
         pub const Element = bool;
@@ -34,45 +36,60 @@ pub fn BitListTreeView(comptime ST: type) type {
         const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, ST);
         const BitOps = BitArray(chunk_depth);
 
-        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
-            return Self{ .base_view = try BaseTreeView.init(allocator, pool, root) };
+        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
+            const ptr = try allocator.create(Self);
+            errdefer allocator.destroy(ptr);
+
+            try BitOps.init(&ptr.data, allocator, pool, root);
+            ptr.allocator = allocator;
+            return ptr;
         }
 
-        pub fn clone(self: *Self, opts: BaseTreeView.CloneOpts) !Self {
-            return Self{ .base_view = try self.base_view.clone(opts) };
+        pub fn clone(self: *Self, opts: CloneOpts) !*Self {
+            const ptr = try self.allocator.create(Self);
+            errdefer self.allocator.destroy(ptr);
+
+            try self.data.clone(opts, &ptr.data);
+            ptr.allocator = self.allocator;
+            return ptr;
         }
 
         pub fn deinit(self: *Self) void {
-            self.base_view.deinit();
+            self.data.deinit();
+            self.allocator.destroy(self);
         }
 
         pub fn commit(self: *Self) !void {
-            try self.base_view.commit();
+            try self.data.commit();
         }
 
         pub fn clearCache(self: *Self) void {
-            self.base_view.clearCache();
+            self.data.clearCache();
         }
 
         pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
             try self.commit();
-            out.* = self.base_view.data.root.getRoot(self.base_view.pool).*;
+            out.* = self.data.root.getRoot(self.data.pool).*;
+        }
+
+        pub fn getRoot(self: *const Self) Node.Id {
+            return self.data.root;
         }
 
         fn readLength(self: *Self) !usize {
-            const length_node = try self.base_view.getChildNode(@enumFromInt(3));
-            const length_chunk = length_node.getRoot(self.base_view.pool);
+            const length_node = try self.data.getChildNode(@enumFromInt(3));
+            const length_chunk = length_node.getRoot(self.data.pool);
             return std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
         }
 
         pub fn get(self: *Self, index: usize) !Element {
             const list_length = try self.readLength();
-            return BitOps.get(&self.base_view, index, list_length);
+            return try self.data.get(index, list_length);
         }
 
         pub fn set(self: *Self, index: usize, value: Element) !void {
             const list_length = try self.readLength();
-            return BitOps.set(&self.base_view, index, value, list_length);
+            try self.data.set(index, value, list_length);
         }
 
         /// Caller must free the returned slice.
@@ -80,16 +97,19 @@ pub fn BitListTreeView(comptime ST: type) type {
             const list_length = try self.readLength();
             const values = try allocator.alloc(bool, list_length);
             errdefer allocator.free(values);
-            try BitOps.fillBools(&self.base_view, values, list_length);
+            try self.data.fillBools(values, list_length);
             return values;
         }
 
         pub fn toBoolArrayInto(self: *Self, out: []bool) !void {
             const list_length = try self.readLength();
             if (out.len != list_length) return error.InvalidSize;
-            try BitOps.fillBools(&self.base_view, out, list_length);
+            try self.data.fillBools(out, list_length);
         }
     };
+
+    assertTreeViewType(TreeView);
+    return TreeView;
 }
 
 const BitListType = @import("../type/bit_list.zig").BitListType;
@@ -147,13 +167,13 @@ test "BitListTreeView clone(true) does not transfer cache" {
     defer view.deinit();
 
     _ = try view.get(0);
-    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
+    try std.testing.expect(view.data.children_nodes.count() > 0);
 
     var cloned_no_cache = try view.clone(.{ .transfer_cache = false });
     defer cloned_no_cache.deinit();
 
-    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
-    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.base_view.data.children_nodes.count());
+    try std.testing.expect(view.data.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.data.children_nodes.count());
 }
 
 test "BitListTreeView clone(false) transfers cache and clears source" {
@@ -173,13 +193,13 @@ test "BitListTreeView clone(false) transfers cache and clears source" {
     defer view.deinit();
 
     _ = try view.get(0);
-    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
+    try std.testing.expect(view.data.children_nodes.count() > 0);
 
     var cloned = try view.clone(.{});
     defer cloned.deinit();
 
-    try std.testing.expectEqual(@as(usize, 0), view.base_view.data.children_nodes.count());
-    try std.testing.expect(cloned.base_view.data.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), view.data.children_nodes.count());
+    try std.testing.expect(cloned.data.children_nodes.count() > 0);
 }
 
 test "BitListTreeView clone isolates updates" {

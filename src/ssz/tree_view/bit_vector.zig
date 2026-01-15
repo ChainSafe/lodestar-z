@@ -6,8 +6,9 @@ const Depth = hashing.Depth;
 
 const Node = @import("persistent_merkle_tree").Node;
 
-const BaseTreeView = @import("root.zig").BaseTreeView;
 const BitArray = @import("bit_array.zig").BitArray;
+const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
+const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
 
 pub fn BitVectorTreeView(comptime ST: type) type {
     comptime {
@@ -19,8 +20,9 @@ pub fn BitVectorTreeView(comptime ST: type) type {
         }
     }
 
-    return struct {
-        base_view: BaseTreeView,
+    const TreeView = struct {
+        allocator: Allocator,
+        data: BitOps,
 
         pub const SszType = ST;
         pub const Element = bool;
@@ -31,36 +33,52 @@ pub fn BitVectorTreeView(comptime ST: type) type {
         const chunk_depth: Depth = @intCast(ST.chunk_depth);
         const BitOps = BitArray(chunk_depth);
 
-        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
-            return Self{ .base_view = try BaseTreeView.init(allocator, pool, root) };
+        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
+            const ptr = try allocator.create(Self);
+            errdefer allocator.destroy(ptr);
+
+            try BitOps.init(&ptr.data, allocator, pool, root);
+            ptr.allocator = allocator;
+            return ptr;
         }
 
-        pub fn clone(self: *Self, opts: BaseTreeView.CloneOpts) !Self {
-            return Self{ .base_view = try self.base_view.clone(opts) };
+        pub fn clone(self: *Self, opts: CloneOpts) !*Self {
+            const ptr = try self.allocator.create(Self);
+            errdefer self.allocator.destroy(ptr);
+
+            try self.data.clone(opts, &ptr.data);
+            ptr.allocator = self.allocator;
+            return ptr;
         }
 
         pub fn deinit(self: *Self) void {
-            self.base_view.deinit();
+            self.data.deinit();
+            self.allocator.destroy(self);
         }
 
         pub fn commit(self: *Self) !void {
-            try self.base_view.commit();
+            try self.data.commit();
         }
 
         pub fn clearCache(self: *Self) void {
-            self.base_view.clearCache();
+            self.data.clearCache();
         }
 
         pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
-            try self.base_view.hashTreeRoot(out);
+            try self.commit();
+            out.* = self.data.root.getRoot(self.data.pool).*;
+        }
+
+        pub fn getRoot(self: *const Self) Node.Id {
+            return self.data.root;
         }
 
         pub fn get(self: *Self, index: usize) !Element {
-            return BitOps.get(&self.base_view, index, length);
+            return try self.data.get(index, length);
         }
 
         pub fn set(self: *Self, index: usize, value: Element) !void {
-            return BitOps.set(&self.base_view, index, value, length);
+            return try self.data.set(index, value, length);
         }
 
         /// Caller must free the returned slice.
@@ -72,9 +90,12 @@ pub fn BitVectorTreeView(comptime ST: type) type {
         }
 
         pub fn toBoolArrayInto(self: *Self, out: []bool) !void {
-            try BitOps.fillBools(&self.base_view, out, length);
+            try self.data.fillBools(out, length);
         }
     };
+
+    assertTreeViewType(TreeView);
+    return TreeView;
 }
 
 const BitVectorType = @import("../type/bit_vector.zig").BitVectorType;
@@ -132,13 +153,13 @@ test "BitVectorTreeView clone(true) does not transfer cache" {
     defer view.deinit();
 
     _ = try view.get(0);
-    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
+    try std.testing.expect(view.data.children_nodes.count() > 0);
 
     var cloned_no_cache = try view.clone(.{ .transfer_cache = false });
     defer cloned_no_cache.deinit();
 
-    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
-    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.base_view.data.children_nodes.count());
+    try std.testing.expect(view.data.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.data.children_nodes.count());
 }
 
 test "BitVectorTreeView clone(false) transfers cache and clears source" {
@@ -158,13 +179,13 @@ test "BitVectorTreeView clone(false) transfers cache and clears source" {
     defer view.deinit();
 
     _ = try view.get(0);
-    try std.testing.expect(view.base_view.data.children_nodes.count() > 0);
+    try std.testing.expect(view.data.children_nodes.count() > 0);
 
     var cloned = try view.clone(.{});
     defer cloned.deinit();
 
-    try std.testing.expectEqual(@as(usize, 0), view.base_view.data.children_nodes.count());
-    try std.testing.expect(cloned.base_view.data.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), view.data.children_nodes.count());
+    try std.testing.expect(cloned.data.children_nodes.count() > 0);
 }
 
 test "BitVectorTreeView clone isolates updates" {

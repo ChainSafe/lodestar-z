@@ -11,8 +11,9 @@ const type_root = @import("../type/root.zig");
 const chunkDepth = type_root.chunkDepth;
 
 const tree_view_root = @import("root.zig");
-const BaseTreeView = tree_view_root.BaseTreeView;
 const CompositeChunks = @import("chunks.zig").CompositeChunks;
+const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
+const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
 
 /// A specialized tree view for SSZ list types with composite element types.
 /// Each element occupies its own subtree.
@@ -24,13 +25,19 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         if (!@hasDecl(ST, "Element") or isBasicType(ST.Element)) {
             @compileError("ListCompositeTreeView can only be used with List of composite element types");
         }
+        assertTreeViewType(ST.Element.TreeView);
     }
 
-    return struct {
-        base_view: BaseTreeView,
+    const TreeView = struct {
+        allocator: Allocator,
+        chunks: Chunks,
+        // the original length, before any modifications
+        _orig_len: usize,
+        // the current length, may differ from original until committed
+        _len: usize,
 
         pub const SszType = ST;
-        pub const Element = ST.Element.TreeView;
+        pub const Element = *ST.Element.TreeView;
 
         const Self = @This();
 
@@ -38,43 +45,60 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, ST);
         const Chunks = CompositeChunks(ST, chunk_depth);
 
-        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !Self {
-            return Self{
-                .base_view = try BaseTreeView.init(allocator, pool, root),
-            };
+        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
+            const ptr = try allocator.create(Self);
+            errdefer allocator.destroy(ptr);
+
+            try Chunks.init(&ptr.chunks, allocator, pool, root);
+            ptr.allocator = allocator;
+            ptr._orig_len = try ptr.chunks.getLength();
+            ptr._len = ptr._orig_len;
+            return ptr;
         }
 
-        pub fn clone(self: *Self, opts: BaseTreeView.CloneOpts) !Self {
-            return Self{ .base_view = try self.base_view.clone(opts) };
+        pub fn clone(self: *Self, opts: CloneOpts) !*Self {
+            const ptr = try self.allocator.create(Self);
+            errdefer self.allocator.destroy(ptr);
+
+            try self.chunks.clone(opts, &ptr.chunks);
+            ptr.allocator = self.allocator;
+            ptr._orig_len = self._orig_len;
+            ptr._len = self._len;
+            return ptr;
         }
 
         pub fn deinit(self: *Self) void {
-            self.base_view.deinit();
+            self.chunks.deinit();
+            self.allocator.destroy(self);
         }
 
         pub fn commit(self: *Self) !void {
-            try self.base_view.commit();
+            try self.updateListLength();
+            try self.chunks.commit();
+            self._orig_len = self._len;
         }
 
         pub fn clearCache(self: *Self) void {
-            self.base_view.clearCache();
+            self.chunks.clearCache();
         }
 
         pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
             try self.commit();
-            out.* = self.base_view.data.root.getRoot(self.base_view.pool).*;
+            out.* = self.chunks.root.getRoot(self.chunks.pool).*;
         }
 
-        pub fn length(self: *Self) !usize {
-            const length_node = try self.base_view.getChildNode(@enumFromInt(3));
-            const length_chunk = length_node.getRoot(self.base_view.pool);
-            return std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
+        pub fn getRoot(self: *const Self) Node.Id {
+            return self.chunks.root;
+        }
+
+        pub fn length(self: *const Self) !usize {
+            return self._len;
         }
 
         pub fn get(self: *Self, index: usize) !Element {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
-            return try Chunks.get(&self.base_view, index);
+            return self.chunks.get(index);
         }
 
         pub fn getReadonly(self: *Self, index: usize) !Element {
@@ -87,7 +111,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         pub fn set(self: *Self, index: usize, value: Element) !void {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
-            try Chunks.set(&self.base_view, index, value);
+            try self.chunks.set(index, value);
         }
 
         pub fn getAllReadonly(self: *Self, allocator: Allocator) ![]Element {
@@ -108,18 +132,18 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                 return error.LengthOverLimit;
             }
 
-            try self.updateListLength(list_length + 1);
+            self._len += 1;
             try self.set(list_length, value);
         }
 
         /// Return a new view containing all elements up to and including `index`.
         /// The caller **must** call `deinit()` on the returned view to avoid memory leaks.
-        pub fn sliceTo(self: *Self, index: usize) !Self {
+        pub fn sliceTo(self: *Self, index: usize) !*Self {
             try self.commit();
 
             const list_length = try self.length();
             if (list_length == 0 or index >= list_length - 1) {
-                return try Self.init(self.base_view.allocator, self.base_view.pool, self.base_view.data.root);
+                return try Self.init(self.allocator, self.chunks.pool, self.chunks.root);
             }
 
             const new_length = index + 1;
@@ -127,77 +151,81 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                 return error.LengthOverLimit;
             }
 
-            var chunk_root: ?Node.Id = try Node.Id.truncateAfterIndex(self.base_view.data.root, self.base_view.pool, chunk_depth, index);
-            defer if (chunk_root) |id| self.base_view.pool.unref(id);
+            var chunk_root: ?Node.Id = try Node.Id.truncateAfterIndex(self.chunks.root, self.chunks.pool, chunk_depth, index);
+            defer if (chunk_root) |id| self.chunks.pool.unref(id);
 
-            var length_node: ?Node.Id = try self.base_view.pool.createLeafFromUint(@intCast(new_length));
-            defer if (length_node) |id| self.base_view.pool.unref(id);
-            const root_with_length = try Node.Id.setNode(chunk_root.?, self.base_view.pool, @enumFromInt(3), length_node.?);
-            errdefer self.base_view.pool.unref(root_with_length);
+            var length_node: ?Node.Id = try self.chunks.pool.createLeafFromUint(@intCast(new_length));
+            defer if (length_node) |id| self.chunks.pool.unref(id);
+            const root_with_length = try Node.Id.setNode(chunk_root.?, self.chunks.pool, @enumFromInt(3), length_node.?);
+            errdefer self.chunks.pool.unref(root_with_length);
             length_node = null;
             chunk_root = null;
 
-            return try Self.init(self.base_view.allocator, self.base_view.pool, root_with_length);
+            return try Self.init(self.allocator, self.chunks.pool, root_with_length);
         }
 
         /// Return a new view containing all elements from `index` to the end.
         /// The returned view must be deinitialized by the caller using `deinit()` to avoid memory leaks.
-        pub fn sliceFrom(self: *Self, index: usize) !Self {
+        pub fn sliceFrom(self: *Self, index: usize) !*Self {
             try self.commit();
 
             const list_length = try self.length();
             if (index == 0) {
-                return try Self.init(self.base_view.allocator, self.base_view.pool, self.base_view.data.root);
+                return try Self.init(self.allocator, self.chunks.pool, self.chunks.root);
             }
 
             const target_length = if (index >= list_length) 0 else list_length - index;
 
             var chunk_root: ?Node.Id = null;
-            defer if (chunk_root) |id| self.base_view.pool.unref(id);
+            defer if (chunk_root) |id| self.chunks.pool.unref(id);
 
             if (target_length == 0) {
                 chunk_root = @enumFromInt(base_chunk_depth);
             } else {
-                const nodes = try self.base_view.allocator.alloc(Node.Id, target_length);
-                defer self.base_view.allocator.free(nodes);
-                try self.base_view.data.root.getNodesAtDepth(self.base_view.pool, chunk_depth, index, nodes);
+                const nodes = try self.allocator.alloc(Node.Id, target_length);
+                defer self.allocator.free(nodes);
+                try self.chunks.root.getNodesAtDepth(self.chunks.pool, chunk_depth, index, nodes);
 
-                chunk_root = try Node.fillWithContents(self.base_view.pool, nodes, base_chunk_depth);
+                chunk_root = try Node.fillWithContents(self.chunks.pool, nodes, base_chunk_depth);
             }
 
-            var length_node: ?Node.Id = try self.base_view.pool.createLeafFromUint(@intCast(target_length));
-            defer if (length_node) |id| self.base_view.pool.unref(id);
+            var length_node: ?Node.Id = try self.chunks.pool.createLeafFromUint(@intCast(target_length));
+            defer if (length_node) |id| self.chunks.pool.unref(id);
 
-            const new_root = try self.base_view.pool.createBranch(chunk_root.?, length_node.?);
-            errdefer self.base_view.pool.unref(new_root);
+            const new_root = try self.chunks.pool.createBranch(chunk_root.?, length_node.?);
+            errdefer self.chunks.pool.unref(new_root);
             length_node = null;
             chunk_root = null;
 
-            return try Self.init(self.base_view.allocator, self.base_view.pool, new_root);
-        }
-
-        fn updateListLength(self: *Self, new_length: usize) !void {
-            if (new_length > ST.limit) {
-                return error.LengthOverLimit;
-            }
-            const length_node = try self.base_view.pool.createLeafFromUint(@intCast(new_length));
-            errdefer self.base_view.pool.unref(length_node);
-            try self.base_view.setChildNode(@enumFromInt(3), length_node);
+            return try Self.init(self.allocator, self.chunks.pool, new_root);
         }
 
         /// Serialize the tree view into a provided buffer.
         /// Returns the number of bytes written.
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
             try self.commit();
-            return try ST.tree.serializeIntoBytes(self.base_view.data.root, self.base_view.pool, out);
+            return try ST.tree.serializeIntoBytes(self.chunks.root, self.chunks.pool, out);
         }
 
         /// Get the serialized size of this tree view.
         pub fn serializedSize(self: *Self) !usize {
             try self.commit();
-            return try ST.tree.serializedSize(self.base_view.data.root, self.base_view.pool);
+            return try ST.tree.serializedSize(self.chunks.root, self.chunks.pool);
+        }
+
+        fn updateListLength(self: *Self) !void {
+            if (self._len == self._orig_len) {
+                return;
+            }
+
+            std.debug.assert(self._len <= ST.limit);
+
+            try self.chunks.setLength(self._len);
         }
     };
+
+    assertTreeViewType(TreeView);
+    return TreeView;
 }
 
 const FixedContainerType = @import("../type/container.zig").FixedContainerType;
@@ -243,7 +271,7 @@ test "TreeView composite list sliceTo truncates elements" {
 
     var roundtrip: ListType.Type = .empty;
     defer roundtrip.deinit(allocator);
-    try ListType.tree.toValue(allocator, sliced.base_view.data.root, &pool, &roundtrip);
+    try ListType.tree.toValue(allocator, sliced.getRoot(), &pool, &roundtrip);
 
     try std.testing.expectEqual(@as(usize, 2), roundtrip.items.len);
     try std.testing.expectEqual(checkpoints[0].epoch, roundtrip.items[0].epoch);
@@ -279,7 +307,7 @@ test "TreeView composite list sliceFrom returns suffix" {
 
     var roundtrip: ListType.Type = .empty;
     defer roundtrip.deinit(allocator);
-    try ListType.tree.toValue(allocator, suffix.base_view.data.root, &pool, &roundtrip);
+    try ListType.tree.toValue(allocator, suffix.getRoot(), &pool, &roundtrip);
 
     try std.testing.expectEqual(@as(usize, 2), roundtrip.items.len);
     try std.testing.expectEqual(checkpoints[2].epoch, roundtrip.items[0].epoch);
@@ -337,7 +365,7 @@ test "TreeView composite list sliceFrom handles boundary conditions" {
 
             var actual: ListType.Type = .empty;
             defer actual.deinit(allocator);
-            try ListType.tree.toValue(allocator, sliced.base_view.data.root, &pool, &actual);
+            try ListType.tree.toValue(allocator, sliced.getRoot(), &pool, &actual);
 
             var expected: ListType.Type = .empty;
             defer expected.deinit(allocator);
@@ -395,7 +423,7 @@ test "TreeView composite list push appends element" {
 
     var roundtrip: ListType.Type = .empty;
     defer roundtrip.deinit(allocator);
-    try ListType.tree.toValue(allocator, view.base_view.data.root, &pool, &roundtrip);
+    try ListType.tree.toValue(allocator, view.getRoot(), &pool, &roundtrip);
 
     try std.testing.expectEqual(@as(usize, 2), roundtrip.items.len);
     try std.testing.expectEqual(next_checkpoint.epoch, roundtrip.items[1].epoch);
@@ -421,19 +449,19 @@ test "TreeView composite list clone isolates updates" {
 
     const replacement = Checkpoint.Type{ .epoch = 9, .root = [_]u8{9} ** 32 };
     const replacement_root = try Checkpoint.tree.fromValue(&pool, &replacement);
-    var replacement_view: ?Checkpoint.TreeView = try Checkpoint.TreeView.init(allocator, &pool, replacement_root);
-    defer if (replacement_view) |*v| v.deinit();
+    var replacement_view: ?*Checkpoint.TreeView = try Checkpoint.TreeView.init(allocator, &pool, replacement_root);
+    defer if (replacement_view) |v| v.deinit();
     try v2.set(0, replacement_view.?);
     replacement_view = null;
     try v2.commit();
 
     const v1_e0 = try v1.get(0);
     var v1_e0_value: Checkpoint.Type = undefined;
-    try Checkpoint.tree.toValue(v1_e0.base_view.data.root, &pool, &v1_e0_value);
+    try Checkpoint.tree.toValue(v1_e0.getRoot(), &pool, &v1_e0_value);
 
     const v2_e0 = try v2.get(0);
     var v2_e0_value: Checkpoint.Type = undefined;
-    try Checkpoint.tree.toValue(v2_e0.base_view.data.root, &pool, &v2_e0_value);
+    try Checkpoint.tree.toValue(v2_e0.getRoot(), &pool, &v2_e0_value);
 
     try std.testing.expectEqual(@as(u64, 1), v1_e0_value.epoch);
     try std.testing.expectEqual(@as(u64, 9), v2_e0_value.epoch);
@@ -456,8 +484,8 @@ test "TreeView composite list clone reads committed state" {
 
     const replacement = Checkpoint.Type{ .epoch = 9, .root = [_]u8{9} ** 32 };
     const replacement_root = try Checkpoint.tree.fromValue(&pool, &replacement);
-    var replacement_view: ?Checkpoint.TreeView = try Checkpoint.TreeView.init(allocator, &pool, replacement_root);
-    defer if (replacement_view) |*v| v.deinit();
+    var replacement_view: ?*Checkpoint.TreeView = try Checkpoint.TreeView.init(allocator, &pool, replacement_root);
+    defer if (replacement_view) |v| v.deinit();
     try v1.set(0, replacement_view.?);
     replacement_view = null;
     try v1.commit();
@@ -467,7 +495,7 @@ test "TreeView composite list clone reads committed state" {
 
     const v2_e0 = try v2.get(0);
     var v2_e0_value: Checkpoint.Type = undefined;
-    try Checkpoint.tree.toValue(v2_e0.base_view.data.root, &pool, &v2_e0_value);
+    try Checkpoint.tree.toValue(v2_e0.getRoot(), &pool, &v2_e0_value);
 
     try std.testing.expectEqual(@as(u64, 9), v2_e0_value.epoch);
 }
@@ -489,14 +517,14 @@ test "TreeView composite list clone drops uncommitted changes" {
 
     const replacement = Checkpoint.Type{ .epoch = 9, .root = [_]u8{9} ** 32 };
     const replacement_root = try Checkpoint.tree.fromValue(&pool, &replacement);
-    var replacement_view: ?Checkpoint.TreeView = try Checkpoint.TreeView.init(allocator, &pool, replacement_root);
-    defer if (replacement_view) |*v0| v0.deinit();
+    var replacement_view: ?*Checkpoint.TreeView = try Checkpoint.TreeView.init(allocator, &pool, replacement_root);
+    defer if (replacement_view) |v0| v0.deinit();
     try v.set(0, replacement_view.?);
     replacement_view = null;
 
     const v_e0_before = try v.get(0);
     var v_e0_before_value: Checkpoint.Type = undefined;
-    try Checkpoint.tree.toValue(v_e0_before.base_view.data.root, &pool, &v_e0_before_value);
+    try Checkpoint.tree.toValue(v_e0_before.getRoot(), &pool, &v_e0_before_value);
     try std.testing.expectEqual(@as(u64, 9), v_e0_before_value.epoch);
 
     var dropped = try v.clone(.{});
@@ -504,11 +532,11 @@ test "TreeView composite list clone drops uncommitted changes" {
 
     const v_e0_after = try v.get(0);
     var v_e0_after_value: Checkpoint.Type = undefined;
-    try Checkpoint.tree.toValue(v_e0_after.base_view.data.root, &pool, &v_e0_after_value);
+    try Checkpoint.tree.toValue(v_e0_after.getRoot(), &pool, &v_e0_after_value);
 
     const dropped_e0 = try dropped.get(0);
     var dropped_e0_value: Checkpoint.Type = undefined;
-    try Checkpoint.tree.toValue(dropped_e0.base_view.data.root, &pool, &dropped_e0_value);
+    try Checkpoint.tree.toValue(dropped_e0.getRoot(), &pool, &dropped_e0_value);
 
     try std.testing.expectEqual(@as(u64, 1), v_e0_after_value.epoch);
     try std.testing.expectEqual(@as(u64, 1), dropped_e0_value.epoch);
@@ -532,13 +560,13 @@ test "TreeView composite list clone(true) does not transfer cache" {
     _ = try view.get(0);
     try view.commit();
 
-    try std.testing.expect(view.base_view.data.children_data.count() > 0);
+    try std.testing.expect(view.chunks.children_data.count() > 0);
 
     var cloned_no_cache = try view.clone(.{ .transfer_cache = false });
     defer cloned_no_cache.deinit();
 
-    try std.testing.expect(view.base_view.data.children_data.count() > 0);
-    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.base_view.data.children_data.count());
+    try std.testing.expect(view.chunks.children_data.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.chunks.children_data.count());
 }
 
 test "TreeView composite list clone(false) transfers cache and clears source" {
@@ -559,13 +587,13 @@ test "TreeView composite list clone(false) transfers cache and clears source" {
     _ = try view.get(0);
     try view.commit();
 
-    try std.testing.expect(view.base_view.data.children_data.count() > 0);
+    try std.testing.expect(view.chunks.children_data.count() > 0);
 
     var cloned = try view.clone(.{});
     defer cloned.deinit();
 
-    try std.testing.expectEqual(@as(usize, 0), view.base_view.data.children_data.count());
-    try std.testing.expect(cloned.base_view.data.children_data.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), view.chunks.children_data.count());
+    try std.testing.expect(cloned.chunks.children_data.count() > 0);
 }
 
 test "TreeView list of list commits inner length updates" {
@@ -602,9 +630,9 @@ test "TreeView list of list commits inner length updates" {
     var e1_value: InnerElement.Type = InnerElement.default_value;
     defer InnerElement.deinit(allocator, &e1_value);
     const e1_root = try InnerElement.tree.fromValue(&pool, &e1_value);
-    var e1_view: ?InnerElement.TreeView = try InnerElement.TreeView.init(allocator, &pool, e1_root);
-    defer if (e1_view) |*view| view.deinit();
-    const e1 = &e1_view.?;
+    var e1_view: ?*InnerElement.TreeView = try InnerElement.TreeView.init(allocator, &pool, e1_root);
+    defer if (e1_view) |view| view.deinit();
+    const e1 = e1_view.?;
 
     try e1.set("id", @as(u32, 11));
 
@@ -612,15 +640,15 @@ test "TreeView list of list commits inner length updates" {
     var payload_value: Bytes.Type = Bytes.default_value;
     defer payload_value.deinit(allocator);
     const payload_root = try Bytes.tree.fromValue(&pool, &payload_value);
-    var payload_view: ?Bytes.TreeView = try Bytes.TreeView.init(allocator, &pool, payload_root);
-    defer if (payload_view) |*view| view.deinit();
-    const payload = &payload_view.?;
+    var payload_view: ?*Bytes.TreeView = try Bytes.TreeView.init(allocator, &pool, payload_root);
+    defer if (payload_view) |view| view.deinit();
+    const payload = payload_view.?;
 
     try payload.push(@as(u8, 0xAA));
     try payload.push(@as(u8, 0xAB));
     try payload.set(1, @as(u8, 0xAC));
     {
-        const all = try payload.getAll(allocator);
+        const all = try payload.getAll();
         defer allocator.free(all);
         try std.testing.expectEqualSlices(u8, &[_]u8{ 0xAA, 0xAC }, all);
 
@@ -635,15 +663,15 @@ test "TreeView list of list commits inner length updates" {
     var numbers_value: Numbers.Type = .empty;
     defer numbers_value.deinit(allocator);
     const numbers_root = try Numbers.tree.fromValue(&pool, &numbers_value);
-    var numbers_view: ?Numbers.TreeView = try Numbers.TreeView.init(allocator, &pool, numbers_root);
-    defer if (numbers_view) |*view| view.deinit();
-    const numbers = &numbers_view.?;
+    var numbers_view: ?*Numbers.TreeView = try Numbers.TreeView.init(allocator, &pool, numbers_root);
+    defer if (numbers_view) |view| view.deinit();
+    const numbers = numbers_view.?;
 
     try numbers.push(@as(u32, 1));
     try numbers.push(@as(u32, 2));
     try numbers.set(0, @as(u32, 3));
     {
-        const all = try numbers.getAll(allocator);
+        const all = try numbers.getAll();
         defer allocator.free(all);
         try std.testing.expectEqual(@as(usize, 2), all.len);
         try std.testing.expectEqual(@as(u32, 3), all[0]);
@@ -660,14 +688,14 @@ test "TreeView list of list commits inner length updates" {
 
     var vec_value: Vec2.Type = [_]u32{ 0, 0 };
     const vec_root = try Vec2.tree.fromValue(&pool, &vec_value);
-    var vec_view: ?Vec2.TreeView = try Vec2.TreeView.init(allocator, &pool, vec_root);
-    defer if (vec_view) |*view| view.deinit();
-    const vec = &vec_view.?;
+    var vec_view: ?*Vec2.TreeView = try Vec2.TreeView.init(allocator, &pool, vec_root);
+    defer if (vec_view) |view| view.deinit();
+    const vec = vec_view.?;
 
     try vec.set(0, @as(u32, 9));
     try vec.set(1, @as(u32, 10));
     {
-        const all = try vec.getAll(allocator);
+        const all = try vec.getAll();
         defer allocator.free(all);
         try std.testing.expectEqual(@as(usize, 2), all.len);
         try std.testing.expectEqual(@as(u32, 9), all[0]);
@@ -688,18 +716,18 @@ test "TreeView list of list commits inner length updates" {
     var e2_value: InnerElement.Type = InnerElement.default_value;
     defer InnerElement.deinit(allocator, &e2_value);
     const e2_root = try InnerElement.tree.fromValue(&pool, &e2_value);
-    var e2_view: ?InnerElement.TreeView = try InnerElement.TreeView.init(allocator, &pool, e2_root);
-    defer if (e2_view) |*view| view.deinit();
-    const e2 = &e2_view.?;
+    var e2_view: ?*InnerElement.TreeView = try InnerElement.TreeView.init(allocator, &pool, e2_root);
+    defer if (e2_view) |view| view.deinit();
+    const e2 = e2_view.?;
 
     try e2.set("id", @as(u32, 22));
 
     var e2_payload_value: Bytes.Type = Bytes.default_value;
     defer e2_payload_value.deinit(allocator);
     const e2_payload_root = try Bytes.tree.fromValue(&pool, &e2_payload_value);
-    var e2_payload_view: ?Bytes.TreeView = try Bytes.TreeView.init(allocator, &pool, e2_payload_root);
-    defer if (e2_payload_view) |*view| view.deinit();
-    const e2_payload = &e2_payload_view.?;
+    var e2_payload_view: ?*Bytes.TreeView = try Bytes.TreeView.init(allocator, &pool, e2_payload_root);
+    defer if (e2_payload_view) |view| view.deinit();
+    const e2_payload = e2_payload_view.?;
     try e2_payload.push(@as(u8, 0xBB));
     try e2.set("payload", e2_payload_view.?);
     e2_payload_view = null;
@@ -711,9 +739,9 @@ test "TreeView list of list commits inner length updates" {
         var e3_value: InnerElement.Type = InnerElement.default_value;
         defer InnerElement.deinit(allocator, &e3_value);
         const e3_root = try InnerElement.tree.fromValue(&pool, &e3_value);
-        var e3_view: ?InnerElement.TreeView = try InnerElement.TreeView.init(allocator, &pool, e3_root);
-        defer if (e3_view) |*view| view.deinit();
-        const e3 = &e3_view.?;
+        var e3_view: ?*InnerElement.TreeView = try InnerElement.TreeView.init(allocator, &pool, e3_root);
+        defer if (e3_view) |view| view.deinit();
+        const e3 = e3_view.?;
         try e3.set("id", @as(u32, 33));
         try inner_view.set(1, e3_view.?);
         e3_view = null;
@@ -729,7 +757,7 @@ test "TreeView list of list commits inner length updates" {
     // Roundtrip and verify nested lengths and values.
     var roundtrip: OuterListType.Type = .empty;
     defer OuterListType.deinit(allocator, &roundtrip);
-    try OuterListType.tree.toValue(allocator, outer_view.base_view.data.root, &pool, &roundtrip);
+    try OuterListType.tree.toValue(allocator, outer_view.getRoot(), &pool, &roundtrip);
 
     try std.testing.expectEqual(@as(usize, 1), roundtrip.items.len);
     try std.testing.expectEqual(@as(usize, 2), roundtrip.items[0].items.len);
@@ -781,7 +809,7 @@ test "TreeView composite list sliceTo matches incremental snapshots" {
 
         var actual: ListType.Type = .empty;
         defer actual.deinit(allocator);
-        try ListType.tree.toValue(allocator, sliced.base_view.data.root, &pool, &actual);
+        try ListType.tree.toValue(allocator, sliced.getRoot(), &pool, &actual);
 
         var expected: ListType.Type = .empty;
         defer expected.deinit(allocator);
