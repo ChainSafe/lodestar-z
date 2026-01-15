@@ -26,6 +26,14 @@
             .url = "git+https://github.com/hendriknielaender/zBench#d8c7dd485306b88b757d52005614ebcb0a336942",
             .hash = "zbench-0.10.0-YTdc714iAQDO4lTHMnIljYHPZ5v_sNTsw75vAmO1pyT-",
         },
+        .metrics = .{
+            .url = "git+https://github.com/karlseguin/metrics.zig.git#5f5420c98378a873a4bf816d69772c8f708a2273",
+            .hash = "metrics-0.0.0-W7G4eHzVAQBMD2Iz5KUoKTssfqAloxCVd7xdG0gt1j5w",
+        },
+        .httpz = .{
+            .url = "git+https://github.com/karlseguin/http.zig.git#2924ead41db9e1986db3b4909a82185c576f6361",
+            .hash = "httpz-0.0.0-PNVzrC7CBgDSMZNP7chgAczR3FyAz5Eum6Kb1_K9kmYR",
+        },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
 }
