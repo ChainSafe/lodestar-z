@@ -37,7 +37,7 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
 
     timer = try Timer.start();
     try processRegistryUpdates(cached_state, cache);
-    try observeEpochTransitionStep(.{ .step = .process_inactivity_updates }, timer.read());
+    try observeEpochTransitionStep(.{ .step = .process_registry_updates }, timer.read());
 
     // TODO(bing): In lodestar-ts we accumulate slashing penalties and only update in processRewardsAndPenalties. Do the same?
     timer = try Timer.start();
