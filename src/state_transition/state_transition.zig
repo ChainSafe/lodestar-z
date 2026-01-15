@@ -56,7 +56,7 @@ pub const BlockExternalData = struct {
     },
 };
 
-pub fn processSlotsWithTransientCache(
+pub fn processSlots(
     allocator: std.mem.Allocator,
     post_state: *CachedBeaconState,
     slot: Slot,
@@ -149,7 +149,7 @@ pub fn stateTransition(
     //  onStateCloneMetrics(postState, metrics, StateCloneSource.stateTransition);
     //}
 
-    try processSlotsWithTransientCache(allocator, post_state, block_slot, .{});
+    try processSlots(allocator, post_state, block_slot, .{});
 
     // Verify proposer signature only
     if (opts.verify_proposer and !try verifyProposerSignature(post_state, signed_block)) {

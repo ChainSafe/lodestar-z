@@ -79,7 +79,7 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
         }
 
         pub fn process(self: *Self) !void {
-            try state_transition.state_transition.processSlotsWithTransientCache(
+            try state_transition.state_transition.processSlots(
                 self.pre.allocator,
                 self.pre.cached_state,
                 try self.pre.cached_state.state.slot() + self.slots,

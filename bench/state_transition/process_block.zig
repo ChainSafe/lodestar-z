@@ -381,7 +381,7 @@ fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, pool: *Nod
         .pubkey_to_index = pubkey_index_map,
     }, .{ .skip_sync_committee_cache = !comptime fork.gte(.altair), .skip_sync_pubkeys = false });
 
-    try state_transition.state_transition.processSlotsWithTransientCache(allocator, cached_state, block_slot, .{});
+    try state_transition.state_transition.processSlots(allocator, cached_state, block_slot, .{});
     try cached_state.state.commit();
     try stdout.print("State: slot={}, validators={}\n", .{ try cached_state.state.slot(), try beacon_state.validatorsCount() });
 
