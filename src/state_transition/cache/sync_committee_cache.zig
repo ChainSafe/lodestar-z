@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const preset = @import("preset").preset;
 const types = @import("consensus_types");
-const PubkeyIndexMap = @import("../utils/pubkey_index_map.zig").PubkeyIndexMap(ValidatorIndex);
+const PubkeyIndexMap = @import("../cache/pubkey_cache.zig").PubkeyIndexMap;
 const SyncCommittee = types.altair.SyncCommittee.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const BLSPubkey = types.primitive.BLSPubkey.Type;
@@ -120,11 +120,11 @@ test "initSyncCommittee - sanity" {
         .aggregate_pubkey = [_]u8{2} ** 48,
     };
 
-    const pubkey_index_map = try PubkeyIndexMap.init(allocator);
+    var pubkey_index_map = PubkeyIndexMap.init(allocator);
     defer pubkey_index_map.deinit();
-    try pubkey_index_map.set(&sync_committee.pubkeys[0], 1000);
+    try pubkey_index_map.put(sync_committee.pubkeys[0], 1000);
 
-    var cache = try SyncCommitteeCache.initSyncCommittee(allocator, &sync_committee, pubkey_index_map);
+    var cache = try SyncCommitteeCache.initSyncCommittee(allocator, &sync_committee, &pubkey_index_map);
     defer cache.deinit();
 
     try std.testing.expectEqualSlices(
@@ -177,7 +177,7 @@ fn computeSyncCommitteeIndices(sync_committee: *const SyncCommittee, pubkey_to_i
 
     const pubkeys = sync_committee.pubkeys;
     for (pubkeys, 0..) |pubkey, i| {
-        const index = pubkey_to_index.get(&pubkey) orelse return error.PubkeyNotFound;
+        const index = pubkey_to_index.get(pubkey) orelse return error.PubkeyNotFound;
         out[i] = @intCast(index);
     }
 }
@@ -191,12 +191,12 @@ test computeSyncCommitteeIndices {
     };
 
     const allocator = std.testing.allocator;
-    const pubkey_index_map = try PubkeyIndexMap.init(allocator);
+    var pubkey_index_map = PubkeyIndexMap.init(allocator);
     defer pubkey_index_map.deinit();
-    try pubkey_index_map.set(&sync_committee.pubkeys[0], 1000);
+    try pubkey_index_map.put(sync_committee.pubkeys[0], 1000);
 
     var out: [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex = undefined;
-    try computeSyncCommitteeIndices(&sync_committee, pubkey_index_map, &out);
+    try computeSyncCommitteeIndices(&sync_committee, &pubkey_index_map, &out);
     try std.testing.expectEqualSlices(
         ValidatorIndex,
         &[_]ValidatorIndex{1000} ** preset.SYNC_COMMITTEE_SIZE,
