@@ -2,7 +2,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ct = @import("consensus_types");
-const toExecutionPayloadHeader = @import("../types/execution_payload.zig").toExecutionPayloadHeader;
 const ExecutionPayloadHeader = @import("../types/execution_payload.zig").ExecutionPayloadHeader;
 
 pub fn upgradeStateToCapella(allocator: Allocator, cached_state: *CachedBeaconState) !void {
@@ -65,9 +64,8 @@ pub fn upgradeStateToCapella(allocator: Allocator, cached_state: *CachedBeaconSt
         return error.UnexpectedLatestExecutionPayloadHeaderType;
     }
 
-    try toExecutionPayloadHeader(
+    try ct.bellatrix.ExecutionPayloadHeader.clone(
         allocator,
-        ct.capella.ExecutionPayloadHeader.Type,
         &bellatrix_latest_execution_payload_header.bellatrix,
         &new_latest_execution_payload_header.capella,
     );

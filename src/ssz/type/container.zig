@@ -79,10 +79,21 @@ pub fn FixedContainerType(comptime ST: type) type {
         }
 
         /// Creates a new `FixedContainerType` and clones all underlying fields in the container.
-        ///
+        /// `out` is a pointer to any types that contains all fields of `Type`.
         /// Caller owns the memory.
-        pub fn clone(value: *const Type, out: *Type) !void {
-            out.* = value.*;
+        pub fn clone(value: *const Type, out: anytype) !void {
+            const OutType = @TypeOf(out.*);
+            comptime {
+                const OutInfo = @typeInfo(@TypeOf(out));
+                std.debug.assert(OutInfo == .pointer);
+            }
+            if (OutType == Type) {
+                out.* = value.*;
+            } else {
+                inline for (fields) |field| {
+                    @field(out, field.name) = @field(value, field.name);
+                }
+            }
         }
 
         pub fn hashTreeRoot(value: *const Type, out: *[32]u8) !void {
@@ -373,13 +384,18 @@ pub fn VariableContainerType(comptime ST: type) type {
         }
 
         /// Creates a new `VariableContainerType` and clones all underlying fields in the container.
-        ///
+        /// `out` is a pointer to any types that contains all fields of `Type`.
         /// Caller owns the memory.
         pub fn clone(
             allocator: std.mem.Allocator,
             value: *const Type,
-            out: *Type,
+            out: anytype,
         ) !void {
+            comptime {
+                const OutInfo = @typeInfo(@TypeOf(out));
+                std.debug.assert(OutInfo == .pointer);
+            }
+
             inline for (fields) |field| {
                 if (comptime isFixedType(field.type)) {
                     try field.type.clone(&@field(value, field.name), &@field(out, field.name));
@@ -744,11 +760,15 @@ test "ContainerType - sanity" {
     try Foo.deserializeFromBytes(allocator, f_buf, &f);
 }
 
-test "clone" {
-    const allocator = std.testing.allocator;
+test "clone FixedContainerType" {
     const Checkpoint = FixedContainerType(struct {
-        slot: UintType(8),
+        epoch: UintType(8),
         root: ByteVectorType(32),
+    });
+    const CheckpointHex = FixedContainerType(struct {
+        epoch: UintType(8),
+        root: ByteVectorType(32),
+        root_hex: ByteVectorType(64),
     });
 
     var c: Checkpoint.Type = Checkpoint.default_value;
@@ -756,12 +776,28 @@ test "clone" {
     var cloned: Checkpoint.Type = undefined;
     try Checkpoint.clone(&c, &cloned);
     try std.testing.expect(&cloned != &c);
+    try std.testing.expect(Checkpoint.equals(&cloned, &c));
+
+    // clone into a larger container
+    var cloned2: CheckpointHex.Type = undefined;
+    cloned2.root_hex = ByteVectorType(64).default_value;
+    try Checkpoint.clone(&c, &cloned2);
+    try std.testing.expect(cloned2.epoch == c.epoch);
+    try std.testing.expectEqualSlices(u8, &cloned2.root, &c.root);
+    try std.testing.expectEqualSlices(u8, &cloned2.root_hex, &ByteVectorType(64).default_value);
+}
+
+test "clone VariableContainerType" {
+    const allocator = std.testing.allocator;
+    const FieldA = FixedListType(UintType(8), 32);
+    const FieldB = FixedListType(UintType(8), 32);
     const Foo = VariableContainerType(struct {
-        a: FixedListType(UintType(8), 32),
-        b: FixedListType(UintType(8), 32),
-        c: FixedListType(UintType(8), 32),
+        a: FieldA,
+        b: FieldB,
     });
     var f = Foo.default_value;
+    try f.a.append(allocator, 42);
+    try f.b.append(allocator, 42);
     defer Foo.deinit(allocator, &f);
     var cloned_f: Foo.Type = undefined;
     try Foo.clone(allocator, &f, &cloned_f);
@@ -770,7 +806,22 @@ test "clone" {
 
     try expectEqualRootsAlloc(Foo, allocator, f, cloned_f);
     try expectEqualSerializedAlloc(Foo, allocator, f, cloned_f);
-    // TODO(bing): test equals when ready
+    try std.testing.expect(Foo.equals(&cloned_f, &f));
+
+    // clone into a larger container
+    const FieldC = FixedListType(UintType(8), 32);
+    const Foo2 = VariableContainerType(struct {
+        a: FieldA,
+        b: FieldB,
+        // 1 additional field
+        c: FieldC,
+    });
+    var cloned_f2: Foo2.Type = undefined;
+    cloned_f2.c = FieldC.default_value;
+    try Foo.clone(allocator, &f, &cloned_f2);
+    defer Foo2.deinit(allocator, &cloned_f2);
+    try std.testing.expectEqualSlices(u8, f.a.items, cloned_f2.a.items);
+    try std.testing.expectEqualSlices(u8, f.b.items, cloned_f2.b.items);
 }
 
 // Refer to https://github.com/ChainSafe/ssz/blob/f5ed0b457333749b5c3f49fa5eafa096a725f033/packages/ssz/test/unit/byType/container/valid.test.ts#L9-L64

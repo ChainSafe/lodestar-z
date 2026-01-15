@@ -86,7 +86,12 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
         /// Clones the underlying `ArrayList`.
         ///
         /// Caller owns the memory.
-        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
+        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: anytype) !void {
+            comptime {
+                const OutInfo = @typeInfo(@TypeOf(out));
+                std.debug.assert(OutInfo == .pointer);
+            }
+
             try out.resize(allocator, value.items.len);
 
             for (value.items, 0..) |v, i| {
@@ -431,9 +436,13 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
         }
 
         /// Clones the underlying `ArrayList`.
-        ///
         /// Caller owns the memory.
-        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
+        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: anytype) !void {
+            comptime {
+                const OutInfo = @typeInfo(@TypeOf(out));
+                std.debug.assert(OutInfo == .pointer);
+            }
+
             try out.resize(allocator, value.items.len);
             for (0..value.items.len) |i|
                 try Element.clone(allocator, &value.items[i], &out.items[i]);
@@ -728,6 +737,7 @@ const UintType = @import("uint.zig").UintType;
 const BoolType = @import("bool.zig").BoolType;
 const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 const FixedContainerType = @import("container.zig").FixedContainerType;
+const VariableContainerType = @import("container.zig").VariableContainerType;
 
 test "ListType - sanity" {
     const allocator = std.testing.allocator;
@@ -759,33 +769,72 @@ test "ListType - sanity" {
     try BytesBytes.deserializeFromBytes(allocator, bb_buf, &bb);
 }
 
-test "clone" {
+test "clone FixedListType" {
     const allocator = std.testing.allocator;
-    const BytesFixed = FixedListType(UintType(8), 32);
-    const BytesVariable = VariableListType(BytesFixed, 32);
-
-    var b: BytesFixed.Type = BytesFixed.default_value;
-    defer b.deinit(allocator);
-    try b.append(allocator, 5);
-    var cloned: BytesFixed.Type = BytesFixed.default_value;
-    try BytesFixed.clone(allocator, &b, &cloned);
+    const Checkpoint = FixedContainerType(struct {
+        epoch: UintType(8),
+        root: ByteVectorType(32),
+    });
+    const CheckpointList = FixedListType(Checkpoint, 8);
+    var list: CheckpointList.Type = CheckpointList.default_value;
+    defer CheckpointList.deinit(allocator, &list);
+    const cp: Checkpoint.Type = .{
+        .epoch = 41,
+        .root = [_]u8{1} ** 32,
+    };
+    try list.append(allocator, cp);
+    var cloned: CheckpointList.Type = CheckpointList.default_value;
+    try CheckpointList.clone(allocator, &list, &cloned);
     defer cloned.deinit(allocator);
-    try std.testing.expect(&b != &cloned);
-    try std.testing.expect(std.mem.eql(u8, b.items[0..], cloned.items[0..]));
-    try expectEqualRootsAlloc(BytesFixed, allocator, b, cloned);
-    try expectEqualSerializedAlloc(BytesFixed, allocator, b, cloned);
+    try std.testing.expect(&list != &cloned);
+    try std.testing.expect(CheckpointList.equals(&list, &cloned));
 
-    var bv: BytesVariable.Type = BytesVariable.default_value;
-    defer bv.deinit(allocator);
-    const bb: BytesFixed.Type = BytesFixed.default_value;
-    try bv.append(allocator, bb);
-    var cloned_v: BytesVariable.Type = BytesVariable.default_value;
-    try BytesVariable.clone(allocator, &bv, &cloned_v);
-    defer cloned_v.deinit(allocator);
-    try std.testing.expect(&bv != &cloned_v);
-    try expectEqualRootsAlloc(BytesVariable, allocator, bv, cloned_v);
-    try expectEqualSerializedAlloc(BytesVariable, allocator, bv, cloned_v);
-    // TODO(bing): Equals test
+    // clone to a list of a different type
+    const CheckpointHex = FixedContainerType(struct {
+        epoch: UintType(8),
+        root: ByteVectorType(32),
+        root_hex: ByteVectorType(64),
+    });
+    const CheckpointHexList = FixedListType(CheckpointHex, 8);
+    var list_hex: CheckpointHexList.Type = CheckpointHexList.default_value;
+    defer list_hex.deinit(allocator);
+    try CheckpointList.clone(allocator, &list, &list_hex);
+    try std.testing.expect(list_hex.items.len == 1);
+    try std.testing.expect(list_hex.items[0].epoch == cp.epoch);
+    try std.testing.expectEqualSlices(u8, &list_hex.items[0].root, &cp.root);
+}
+
+test "clone VariableListType" {
+    const allocator = std.testing.allocator;
+    const FieldA = FixedListType(UintType(8), 32);
+    const Foo = VariableContainerType(struct {
+        a: FieldA,
+    });
+    const ListFoo = VariableListType(Foo, 8);
+    var list = ListFoo.default_value;
+    defer ListFoo.deinit(allocator, &list);
+    var fielda = FieldA.default_value;
+    try fielda.append(allocator, 100);
+    try list.append(allocator, .{ .a = fielda });
+
+    var cloned: ListFoo.Type = ListFoo.default_value;
+    defer ListFoo.deinit(allocator, &cloned);
+    try ListFoo.clone(allocator, &list, &cloned);
+    try std.testing.expect(&list != &cloned);
+    try std.testing.expect(cloned.items.len == 1);
+    try std.testing.expect(ListFoo.equals(&list, &cloned));
+
+    // clone to a list of a different type
+    const Bar = VariableContainerType(struct {
+        a: FieldA,
+        b: UintType(8),
+    });
+    const ListBar = VariableListType(Bar, 8);
+    var list_bar: ListBar.Type = ListBar.default_value;
+    defer ListBar.deinit(allocator, &list_bar);
+    try ListFoo.clone(allocator, &list, &list_bar);
+    try std.testing.expect(list_bar.items.len == 1);
+    try std.testing.expect(FieldA.equals(&list_bar.items[0].a, &fielda));
 }
 
 // Tests ported from TypeScript ssz packages/ssz/test/unit/byType/listBasic/valid.test.ts

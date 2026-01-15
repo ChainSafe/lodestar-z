@@ -2,7 +2,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ssz = @import("consensus_types");
-const toExecutionPayloadHeader = @import("../types/execution_payload.zig").toExecutionPayloadHeader;
 const ExecutionPayloadHeader = @import("../types/execution_payload.zig").ExecutionPayloadHeader;
 
 pub fn upgradeStateToDeneb(allocator: Allocator, cached_state: *CachedBeaconState) !void {
@@ -21,7 +20,6 @@ pub fn upgradeStateToDeneb(allocator: Allocator, cached_state: *CachedBeaconStat
     };
     try state.setFork(&new_fork);
 
-    // add excessBlobGas and blobGasUsed to latestExecutionPayloadHeader
     // ownership is transferred to BeaconState
     var new_latest_execution_payload_header: ExecutionPayloadHeader = .{ .deneb = ssz.deneb.ExecutionPayloadHeader.default_value };
     var capella_latest_execution_payload_header = try capella_state.latestExecutionPayloadHeader(allocator);
@@ -30,9 +28,8 @@ pub fn upgradeStateToDeneb(allocator: Allocator, cached_state: *CachedBeaconStat
         return error.UnexpectedLatestExecutionPayloadHeaderType;
     }
 
-    try toExecutionPayloadHeader(
+    try ssz.capella.ExecutionPayloadHeader.clone(
         allocator,
-        ssz.deneb.ExecutionPayloadHeader.Type,
         &capella_latest_execution_payload_header.capella,
         &new_latest_execution_payload_header.deneb,
     );
