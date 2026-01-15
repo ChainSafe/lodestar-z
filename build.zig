@@ -948,6 +948,9 @@ pub fn build(b: *std.Build) void {
     module_bench_process_epoch.addImport("consensus_types", module_consensus_types);
     module_bench_process_epoch.addImport("config", module_config);
     module_bench_process_epoch.addImport("zbench", dep_zbench.module("zbench"));
+    module_bench_process_epoch.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_bench_process_epoch.addImport("download_era_options", options_module_download_era_options);
+    module_bench_process_epoch.addImport("era", module_era);
 
     module_int.addImport("build_options", options_module_build_options);
     module_int.addImport("state_transition", module_state_transition);
