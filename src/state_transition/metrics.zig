@@ -123,6 +123,56 @@ const Metrics = struct {
 ///
 /// Meant to be called once on application startup.
 pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
+    var epoch_transition_step = try Metrics.EpochTransitionStep.init(
+        allocator,
+        "lodestar_stfn_epoch_transition_step_seconds",
+        .{ .help = "Time to call each step of epoch transition in seconds" },
+        opts,
+    );
+    errdefer epoch_transition_step.deinit();
+    var state_hash_tree_root = try Metrics.StateHashTreeRoot.init(
+        allocator,
+        "lodestar_stfn_hash_tree_root_seconds",
+        .{ .help = "Time to compute the hash tree root of a post state in seconds" },
+        opts,
+    );
+    errdefer state_hash_tree_root.deinit();
+    var pre_state_balances_nodes_populated_miss = try Metrics.GaugeVecSource.init(
+        allocator,
+        "lodestar_stfn_balances_nodes_populated_miss_total",
+        .{ .help = "Total count state.balances nodesPopulated is false on stfn" },
+        opts,
+    );
+    errdefer pre_state_balances_nodes_populated_miss.deinit();
+    var pre_state_balances_nodes_populated_hit = try Metrics.GaugeVecSource.init(
+        allocator,
+        "lodestar_stfn_balances_nodes_populated_hit_total",
+        .{ .help = "Total count state.balances nodesPopulated is true on stfn" },
+        opts,
+    );
+    errdefer pre_state_balances_nodes_populated_hit.deinit();
+    var pre_state_validators_nodes_populated_miss = try Metrics.GaugeVecSource.init(
+        allocator,
+        "lodestar_stfn_validators_nodes_populated_miss_total",
+        .{ .help = "Total count state.validators nodesPopulated is false on stfn" },
+        opts,
+    );
+    errdefer pre_state_validators_nodes_populated_miss.deinit();
+    var pre_state_validators_nodes_populated_hit = try Metrics.GaugeVecSource.init(
+        allocator,
+        "lodestar_stfn_validators_nodes_populated_hit_total",
+        .{ .help = "Total count state.validators nodesPopulated is true on stfn" },
+        opts,
+    );
+    errdefer pre_state_validators_nodes_populated_hit.deinit();
+    var proposer_rewards = try Metrics.ProposerRewardsGauge.init(
+        allocator,
+        "lodestar_stfn_proposer_rewards_total",
+        .{ .help = "Proposer reward by type per block" },
+        opts,
+    );
+    errdefer proposer_rewards.deinit();
+
     state_transition = .{
         .epoch_transition = Metrics.EpochTransition.init(
             "lodestar_stfn_epoch_transition_seconds",
@@ -134,12 +184,7 @@ pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
             .{ .help = "Time to call commit after process a single epoch transition in seconds" },
             opts,
         ),
-        .epoch_transition_step = try Metrics.EpochTransitionStep.init(
-            allocator,
-            "lodestar_stfn_epoch_transition_step_seconds",
-            .{ .help = "Time to call each step of epoch transition in seconds" },
-            opts,
-        ),
+        .epoch_transition_step = epoch_transition_step,
         .process_block = Metrics.ProcessBlock.init(
             "lodestar_stfn_process_block_seconds",
             .{ .help = "Time to process a single block in seconds" },
@@ -150,12 +195,7 @@ pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
             .{ .help = "Time to call commit after process a single block in seconds" },
             opts,
         ),
-        .state_hash_tree_root = try Metrics.StateHashTreeRoot.init(
-            allocator,
-            "lodestar_stfn_hash_tree_root_seconds",
-            .{ .help = "Time to compute the hash tree root of a post state in seconds" },
-            opts,
-        ),
+        .state_hash_tree_root = state_hash_tree_root,
         .num_effective_balance_updates = Metrics.CountGauge.init(
             "lodestar_stfn_effective_balance_updates_count",
             .{ .help = "Total count of effective balance updates" },
@@ -171,30 +211,10 @@ pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
             .{ .help = "Current number of validators in the exit queue" },
             opts,
         ),
-        .pre_state_balances_nodes_populated_miss = try Metrics.GaugeVecSource.init(
-            allocator,
-            "lodestar_stfn_balances_nodes_populated_miss_total",
-            .{ .help = "Total count state.balances nodesPopulated is false on stfn" },
-            opts,
-        ),
-        .pre_state_balances_nodes_populated_hit = try Metrics.GaugeVecSource.init(
-            allocator,
-            "lodestar_stfn_balances_nodes_populated_hit_total",
-            .{ .help = "Total count state.balances nodesPopulated is true on stfn" },
-            opts,
-        ),
-        .pre_state_validators_nodes_populated_miss = try Metrics.GaugeVecSource.init(
-            allocator,
-            "lodestar_stfn_validators_nodes_populated_miss_total",
-            .{ .help = "Total count state.validators nodesPopulated is false on stfn" },
-            opts,
-        ),
-        .pre_state_validators_nodes_populated_hit = try Metrics.GaugeVecSource.init(
-            allocator,
-            "lodestar_stfn_validators_nodes_populated_hit_total",
-            .{ .help = "Total count state.validators nodesPopulated is true on stfn" },
-            opts,
-        ),
+        .pre_state_balances_nodes_populated_miss = pre_state_balances_nodes_populated_miss,
+        .pre_state_balances_nodes_populated_hit = pre_state_balances_nodes_populated_hit,
+        .pre_state_validators_nodes_populated_miss = pre_state_validators_nodes_populated_miss,
+        .pre_state_validators_nodes_populated_hit = pre_state_validators_nodes_populated_hit,
         .pre_state_cloned_count = Metrics.PreStateClonedCount.init(
             "lodestar_stfn_state_cloned_count",
             .{ .help = "Histogram of cloned count per state every time state.clone() is called" },
@@ -235,12 +255,7 @@ pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
             .{ .help = "Total count of attestations per block" },
             opts,
         ),
-        .proposer_rewards = try Metrics.ProposerRewardsGauge.init(
-            allocator,
-            "lodestar_stfn_proposer_rewards_total",
-            .{ .help = "Proposer reward by type per block" },
-            opts,
-        ),
+        .proposer_rewards = proposer_rewards,
     };
 }
 
