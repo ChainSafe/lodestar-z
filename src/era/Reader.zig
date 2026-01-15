@@ -200,9 +200,9 @@ pub fn validate(self: Reader, allocator: std.mem.Allocator) !void {
                     var prev_root: [32]u8 = undefined;
                     var curr_root: [32]u8 = undefined;
                     var prev_view = try blockRoots.get(@intCast((slot - 1) % preset.SLOTS_PER_HISTORICAL_ROOT));
-                    try prev_view.toValue(&prev_root);
+                    try prev_view.toValue(allocator, &prev_root);
                     var curr_view = try blockRoots.get(@intCast(slot % preset.SLOTS_PER_HISTORICAL_ROOT));
-                    try curr_view.toValue(&curr_root);
+                    try curr_view.toValue(allocator, &curr_root);
 
                     if (std.mem.eql(u8, &prev_root, &curr_root)) {
                         continue;
@@ -216,7 +216,7 @@ pub fn validate(self: Reader, allocator: std.mem.Allocator) !void {
 
                 var expected_root: [32]u8 = undefined;
                 var expected_view = try blockRoots.get(@intCast(slot % preset.SLOTS_PER_HISTORICAL_ROOT));
-                try expected_view.toValue(&expected_root);
+                try expected_view.toValue(allocator, &expected_root);
 
                 if (!std.mem.eql(u8, &expected_root, &block_root)) {
                     return error.BlockRootMismatch;

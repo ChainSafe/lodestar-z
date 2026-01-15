@@ -134,6 +134,7 @@ pub fn computeStartBlockSlotFromEraNumber(era_number: u64) !u64 {
 }
 
 pub fn getShortHistoricalRoot(state: state_transition.BeaconState) ![8]u8 {
+    const allocator = std.heap.page_allocator;
     var short_historical_root: [8]u8 = undefined;
     var s = state;
     var historical_root: [32]u8 = undefined;
@@ -150,7 +151,7 @@ pub fn getShortHistoricalRoot(state: state_transition.BeaconState) ![8]u8 {
         const len = try roots.length();
         if (len == 0) return error.EmptyHistoricalRoots;
         var last = try roots.get(len - 1);
-        try last.toValue(&historical_root);
+        try last.toValue(allocator, &historical_root);
     }
 
     _ = try std.fmt.bufPrint(&short_historical_root, "{x}", .{std.fmt.fmtSliceHexLower(historical_root[0..4])});

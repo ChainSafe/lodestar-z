@@ -43,7 +43,7 @@ test "bls - sanity" {
     const msg = [_]u8{1} ** 32;
     const sig = sign(sk, &msg);
     const pk = sk.toPublicKey();
-    try std.testing.expect(try verify(&msg, &pk, &sig, null, null));
+    try verify(&msg, &pk, &sig, null, null);
 
     var pks = [_]PublicKey{pk};
     var pks_slice: []const PublicKey = pks[0..1];
