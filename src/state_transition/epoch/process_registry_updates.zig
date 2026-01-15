@@ -3,7 +3,7 @@ const types = @import("consensus_types");
 const Epoch = types.primitive.Epoch.Type;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const ForkSeq = @import("config").ForkSeq;
-const computeActivationExitEpoch = @import("../utils/epoch.zig").computeActivationExitEpoch;
+const computeActivationExitEpoch = @import("../epoch.zig").computeActivationExitEpoch;
 const initiateValidatorExit = @import("../block/initiate_validator_exit.zig").initiateValidatorExit;
 
 pub fn processRegistryUpdates(cached_state: *CachedBeaconStateAllForks, cache: *const EpochTransitionCache) !void {

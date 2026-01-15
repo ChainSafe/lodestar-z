@@ -11,7 +11,7 @@ const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCo
 const isActiveValidator = @import("../validator.zig").isActiveValidator;
 const getPendingBalanceToWithdraw = @import("../validator.zig").getPendingBalanceToWithdraw;
 const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateValidatorExit;
-const computeExitEpochAndUpdateChurn = @import("../utils/epoch.zig").computeExitEpochAndUpdateChurn;
+const computeExitEpochAndUpdateChurn = @import("../epoch.zig").computeExitEpochAndUpdateChurn;
 
 pub fn processWithdrawalRequest(allocator: std.mem.Allocator, cached_state: *CachedBeaconStateAllForks, withdrawal_request: *const WithdrawalRequest) !void {
     const state = cached_state.state;

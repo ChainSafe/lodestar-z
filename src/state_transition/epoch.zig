@@ -1,14 +1,14 @@
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconStateAllForks = @import("cache/state_cache.zig").CachedBeaconStateAllForks;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const Slot = types.primitive.Slot.Type;
 const Epoch = types.primitive.Epoch.Type;
 const SyncPeriod = types.primitive.SyncPeriod.Type;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
+const BeaconStateAllForks = @import("types/beacon_state.zig").BeaconStateAllForks;
 const Gwei = types.primitive.Gwei.Type;
-const getActivationExitChurnLimit = @import("../validator.zig").getActivationExitChurnLimit;
-const getConsolidationChurnLimit = @import("../validator.zig").getConsolidationChurnLimit;
+const getActivationExitChurnLimit = @import("validator.zig").getActivationExitChurnLimit;
+const getConsolidationChurnLimit = @import("validator.zig").getConsolidationChurnLimit;
 
 pub fn computeEpochAtSlot(slot: Slot) Epoch {
     return @divFloor(slot, preset.SLOTS_PER_EPOCH);
