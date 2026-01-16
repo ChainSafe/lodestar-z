@@ -2,6 +2,7 @@ const napi = @import("zapi:napi");
 const pool = @import("./pool.zig");
 const pubkey2index = @import("./pubkey2index.zig");
 const config = @import("./config.zig");
+const shuffle = @import("./shuffle.zig");
 
 comptime {
     napi.module.register(register);
@@ -19,6 +20,7 @@ fn register(env: napi.Env, exports: napi.Value) !void {
     try pool.register(env, exports);
     try pubkey2index.register(env, exports);
     try config.register(env, exports);
+    try shuffle.register(env, exports);
 
     try exports.setNamedProperty("deinit", try env.createFunction(
         "deinit",
