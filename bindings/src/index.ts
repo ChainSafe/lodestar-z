@@ -25,6 +25,7 @@ type Bindings = {
     computeStartSlotAtEpoch: (epoch: number) => number;
     computeCheckpointEpochAtStateSlot: (slot: number) => number;
     computeEndSlotAtEpoch: (epoch: number) => number;
+    computeActivationExitEpoch: (epoch: number) => number;
   };
   deinit: () => void;
 };

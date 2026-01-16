@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 
 const bindings = await import("../src/index.ts");
-const {computeEpochAtSlot, computeStartSlotAtEpoch, computeCheckpointEpochAtStateSlot, computeEndSlotAtEpoch} = bindings.default.epoch;
+const {computeEpochAtSlot, computeStartSlotAtEpoch, computeCheckpointEpochAtStateSlot, computeEndSlotAtEpoch, computeActivationExitEpoch} = bindings.default.epoch;
 
 const SLOTS_PER_EPOCH = 32;
 
@@ -84,6 +84,17 @@ describe("epoch", () => {
 
     it("should throw for negative epoch", () => {
       expect(() => computeEndSlotAtEpoch(-1)).toThrow("InvalidEpoch");
+    });
+  });
+
+  describe("computeActivationExitEpoch", () => {
+    it("should return epoch + 5 for mainnet", () => {
+      expect(computeActivationExitEpoch(0)).toBe(5);
+      expect(computeActivationExitEpoch(10)).toBe(15);
+    });
+
+    it("should throw for negative epoch", () => {
+      expect(() => computeActivationExitEpoch(-1)).toThrow("InvalidEpoch");
     });
   });
 });

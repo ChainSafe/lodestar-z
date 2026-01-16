@@ -4,6 +4,7 @@ const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
 const computeCheckpointEpochAtStateSlot = state_transition.computeCheckpointEpochAtStateSlot;
 const computeEndSlotAtEpoch = state_transition.computeEndSlotAtEpoch;
+const computeActivationExitEpoch = state_transition.computeActivationExitEpoch;
 
 pub fn Epoch_computeEpochAtSlot(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const slot_i64 = try cb.arg(0).getValueInt64();
@@ -45,6 +46,16 @@ pub fn Epoch_computeEndSlotAtEpoch(env: napi.Env, cb: napi.CallbackInfo(1)) !nap
     return try env.createInt64(@intCast(slot));
 }
 
+pub fn Epoch_computeActivationExitEpoch(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const epoch_i64 = try cb.arg(0).getValueInt64();
+    if (epoch_i64 < 0) {
+        return error.InvalidEpoch;
+    }
+    const epoch: u64 = @intCast(epoch_i64);
+    const result = computeActivationExitEpoch(epoch);
+    return try env.createInt64(@intCast(result));
+}
+
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const epoch_obj = try env.createObject();
     try epoch_obj.setNamedProperty("computeEpochAtSlot", try env.createFunction(
@@ -69,6 +80,12 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         "computeEndSlotAtEpoch",
         1,
         Epoch_computeEndSlotAtEpoch,
+        null,
+    ));
+    try epoch_obj.setNamedProperty("computeActivationExitEpoch", try env.createFunction(
+        "computeActivationExitEpoch",
+        1,
+        Epoch_computeActivationExitEpoch,
         null,
     ));
     try exports.setNamedProperty("epoch", epoch_obj);
