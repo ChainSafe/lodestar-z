@@ -8,7 +8,7 @@ const require = createRequire(import.meta.url);
 type Bindings = {
   pool: {
     ensureCapacity: (capacity: number) => void;
-  },
+  };
   pubkey2index: {
     ensureCapacity: (capacity: number) => void;
     get: (pubkey: Uint8Array) => number | undefined;
