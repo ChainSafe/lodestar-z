@@ -809,32 +809,24 @@ pub const BeaconState = union(ForkSeq) {
         errdefer upgraded.deinit();
 
         inline for (F.fields) |f| {
-            // const field_name: []const u8 = comptime f.name[0..f.name.len];
             if (comptime T.hasField(f.name)) {
-                if (comptime isFixedType(f.type)) {
-                    // For fixed composite fields, get() returns a borrowed TreeView backed by committed_state caches.
-                    // Clone it to create an owned view, then transfer ownership to upgraded.
-                    if (comptime isBasicType(f.type)) {
-                        try upgraded.set(f.name, try committed_state.get(f.name));
-                    } else {
-                        var field_view = try committed_state.get(f.name);
-                        const FieldView = @TypeOf(field_view);
-                        var owned_field_view: FieldView = try field_view.clone(.{});
-                        errdefer owned_field_view.deinit();
-                        try upgraded.set(f.name, owned_field_view);
-                    }
+                if (T.getFieldType(f.name) != f.type) {
+                    // BeaconState of prev_fork and cur_fork has the same field name but different types
+                    // for example latest_execution_payload_header changed from Bellatrix to Capella
+                    // In this case we just skip copying this field and leave it to caller to set properly
+                    continue;
+                }
+
+                if (comptime isBasicType(f.type)) {
+                    // For basic fields, get() returns a copy, so we can directly set it.
+                    try upgraded.set(f.name, try committed_state.get(f.name));
                 } else {
-                    if (T.getFieldType(f.name) != f.type) {
-                        // BeaconState of prev_fork and cur_fork has the same field name but different types
-                        // for example latest_execution_payload_header changed from Bellatrix to Capella
-                        // In this case we just skip copying this field and leave it to caller to set properly
-                    } else {
-                        var field_view = try committed_state.get(f.name);
-                        const FieldView = @TypeOf(field_view);
-                        var owned_field_view: FieldView = try field_view.clone(.{});
-                        errdefer owned_field_view.deinit();
-                        try upgraded.set(f.name, owned_field_view);
-                    }
+                    // For composite fields, get() returns a borrowed TreeView backed by committed_state caches.
+                    // Clone it to create an owned view, then transfer ownership to upgraded.
+                    var field_view = try committed_state.get(f.name);
+                    var owned_field_view = try field_view.clone(.{ .transfer_cache = true });
+                    errdefer owned_field_view.deinit();
+                    try upgraded.set(f.name, owned_field_view);
                 }
             }
         }
