@@ -531,6 +531,17 @@ pub const BeaconState = union(ForkSeq) {
         };
     }
 
+    pub fn rotateSyncCommittees(self: *BeaconState, next_sync_committee: *const ct.altair.SyncCommittee.Type) !void {
+        return switch (self.*) {
+            .phase0 => error.InvalidAtFork,
+            inline else => |*state| {
+                const next_sync_committee_root = try state.getRootNode("next_sync_committee");
+                try state.setRootNode("current_sync_committee", next_sync_committee_root);
+                try state.setValue("next_sync_committee", next_sync_committee);
+            },
+        };
+    }
+
     pub fn latestExecutionPayloadHeader(self: *BeaconState, allocator: Allocator) !ExecutionPayloadHeader {
         return switch (self.*) {
             .phase0, .altair => error.InvalidAtFork,

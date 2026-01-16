@@ -16,19 +16,12 @@ pub fn processSyncCommitteeUpdates(allocator: Allocator, cached_state: *CachedBe
         const active_validator_indices = epoch_cache.getNextEpochShuffling().active_indices;
         const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
 
-        // Rotate syncCommittee in state
-        // Set current to next
-        var next_sync_committee_view = try state.nextSyncCommittee();
-        var next_sync_committee: types.altair.SyncCommittee.Type = undefined;
-        try next_sync_committee_view.toValue(allocator, &next_sync_committee);
-
-        try state.setCurrentSyncCommittee(&next_sync_committee);
-
         // Compute next
         var next_sync_committee_info: SyncCommitteeInfo = undefined;
         try getNextSyncCommittee(allocator, state, active_validator_indices, effective_balance_increments, &next_sync_committee_info);
 
-        try state.setNextSyncCommittee(&next_sync_committee_info.sync_committee);
+        // Rotate syncCommittee in state
+        try state.rotateSyncCommittees(&next_sync_committee_info.sync_committee);
 
         // Rotate syncCommittee cache
         // next_sync_committee_indices ownership is transferred to epoch_cache
