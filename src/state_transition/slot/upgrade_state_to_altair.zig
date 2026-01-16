@@ -8,7 +8,7 @@ const sumTargetUnslashedBalanceIncrements = @import("../utils/target_unslashed_b
 const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
 const types = @import("consensus_types");
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const RootCache = @import("../utils/root_cache.zig").RootCache;
+const RootCache = @import("../cache/RootCache.zig");
 const getAttestationParticipationStatus = @import("../block//process_attestation_altair.zig").getAttestationParticipationStatus;
 
 pub fn upgradeStateToAltair(allocator: Allocator, cached_state: *CachedBeaconStateAllForks) !void {
