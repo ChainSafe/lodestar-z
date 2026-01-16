@@ -31,7 +31,6 @@ pub fn BasicPackedChunks(
 
         pub fn set(base_view: *BaseTreeView, index: usize, value: Element) !void {
             const gindex = Gindex.fromDepth(chunk_depth, index / items_per_chunk);
-            try base_view.data.changed.put(base_view.allocator, gindex, {});
             const child_node = try base_view.getChildNode(gindex);
             try base_view.setChildNode(
                 gindex,
@@ -205,6 +204,14 @@ pub fn CompositeChunks(
             try base_view.data.root.getNodesAtDepth(base_view.pool, chunk_depth, 0, nodes);
 
             for (nodes, 0..) |node, i| {
+                if (comptime @hasDecl(ST.Element, "deinit")) {
+                    errdefer {
+                        for (values[0..i]) |*value| {
+                            ST.Element.deinit(allocator, value);
+                        }
+                    }
+                }
+
                 // Some variable-size value types (e.g. BitList) expect the output value to start in a valid
                 // initialized state because `toValue()` may call methods like `resize()` which assume internal
                 // buffers/sentinels are well-formed. Initialize with `default_value` to avoid mutating
