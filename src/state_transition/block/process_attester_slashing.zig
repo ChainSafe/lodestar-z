@@ -24,7 +24,9 @@ pub fn processAttesterSlashing(comptime AS: type, cached_state: *CachedBeaconSta
     var validators = try state.validators();
     // Spec requires to sort indices beforehand but we validated sorted asc AttesterSlashing in the above functions
     for (intersecting_indices.items) |validator_index| {
-        const validator = try validators.getValue(undefined, validator_index);
+        var validator: types.phase0.Validator.Type = undefined;
+        try validators.getValue(undefined, validator_index, &validator);
+
         if (isSlashableValidator(&validator, epoch)) {
             try slashValidator(cached_state, validator_index, null);
             slashed_any = true;

@@ -20,14 +20,16 @@ pub fn processRewardsAndPenalties(allocator: Allocator, cached_state: *CachedBea
     const penalties = cache.penalties;
     try getRewardsAndPenalties(allocator, cached_state, cache, rewards, penalties);
 
-    var balances = try state.balances();
-    for (rewards, 0..) |reward, i| {
-        const balance = try balances.get(i);
-        const result = balance + reward -| penalties[i];
-        try balances.set(i, result);
+    const balances = try state.balancesSlice(allocator);
+    defer allocator.free(balances);
+
+    for (rewards, penalties, balances) |reward, penalty, *balance| {
+        const result = balance.* + reward -| penalty;
+        balance.* = result;
     }
 
-    // TODO this is naive version, consider caching balances here when switching to TreeView
+    var balances_arraylist: std.ArrayListUnmanaged(u64) = .fromOwnedSlice(balances);
+    try state.setBalances(&balances_arraylist);
 }
 
 pub fn getRewardsAndPenalties(

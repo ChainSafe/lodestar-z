@@ -28,15 +28,15 @@ pub fn processRandao(
     // mix in RANDAO reveal
     var randao_reveal_digest: [32]u8 = undefined;
     digest(&randao_reveal, &randao_reveal_digest);
+
+    var randao_mix: [32]u8 = undefined;
     const current_mix = try getRandaoMix(state, epoch);
-    const randao_mix = xor(current_mix.*, randao_reveal_digest);
+    xor(current_mix, &randao_reveal_digest, &randao_mix);
     try state.setRandaoMix(epoch, &randao_mix);
 }
 
-fn xor(a: Bytes32, b: Bytes32) Bytes32 {
-    var result: Bytes32 = undefined;
-    for (0..types.primitive.Bytes32.length) |i| {
-        result[i] = a[i] ^ b[i];
+fn xor(a: *const [32]u8, b: *const [32]u8, out: *[32]u8) void {
+    inline for (a, b, out) |a_i, b_i, *out_i| {
+        out_i.* = a_i ^ b_i;
     }
-    return result;
 }

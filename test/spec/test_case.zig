@@ -285,7 +285,8 @@ pub fn expectEqualBeaconStates(expected: *BeaconState, actual: *BeaconState) !vo
                                     .{try expected_field_view.length()},
                                 );
                             }
-                            var expected_field_value = try expected_view.getValue(allocator, field.name);
+                            var expected_field_value: FieldST.Type = undefined;
+                            try expected_view.getValue(allocator, field.name, &expected_field_value);
                             defer if (@hasDecl(FieldST, "deinit"))
                                 FieldST.deinit(allocator, &expected_field_value);
 
@@ -302,7 +303,8 @@ pub fn expectEqualBeaconStates(expected: *BeaconState, actual: *BeaconState) !vo
                                     .{try actual_field_view.length()},
                                 );
                             }
-                            var actual_field_value = try actual_view.getValue(allocator, field.name);
+                            var actual_field_value: FieldST.Type = undefined;
+                            try actual_view.getValue(allocator, field.name, &actual_field_value);
                             defer if (@hasDecl(FieldST, "deinit"))
                                 FieldST.deinit(allocator, &actual_field_value);
 

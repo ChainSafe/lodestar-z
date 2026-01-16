@@ -74,7 +74,7 @@ pub fn processOperations(
         }
 
         for (body.consolidationRequests()) |*consolidation_request| {
-            try processConsolidationRequest(allocator, cached_state, consolidation_request);
+            try processConsolidationRequest(cached_state, consolidation_request);
         }
     }
 }

@@ -19,11 +19,9 @@ const isActiveValidatorView = validator_utils.isActiveValidatorView;
 
 // TODO Electra: Clean up necessary as there is a lot of overlap with isValidSwitchToCompoundRequest
 pub fn processConsolidationRequest(
-    allocator: std.mem.Allocator,
     cached_state: *CachedBeaconState,
     consolidation: *const ConsolidationRequest,
 ) !void {
-    _ = allocator;
     var state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const config = epoch_cache.config;

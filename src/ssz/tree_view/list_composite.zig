@@ -79,7 +79,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         pub fn getRoot(self: *Self, index: usize) !*const [32]u8 {
             const field_data = try self.base_view.getChildData(Gindex.fromDepth(chunk_depth, index));
             try field_data.commit(self.base_view.allocator, self.base_view.pool);
-            return field_data.base_view.root.getRoot(self.base_view.pool);
+            return field_data.root.getRoot(self.base_view.pool);
         }
 
         pub fn get(self: *Self, index: usize) !Element {
@@ -94,10 +94,10 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             return try Chunks.getReadonly(&self.base_view, index);
         }
 
-        pub fn getValue(self: *Self, allocator: Allocator, index: usize) !ST.Element.Type {
+        pub fn getValue(self: *Self, allocator: Allocator, index: usize, out: *ST.Element.Type) !void {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
-            return try Chunks.getValue(&self.base_view, allocator, index);
+            return try Chunks.getValue(&self.base_view, allocator, index, out);
         }
 
         pub fn set(self: *Self, index: usize, value: Element) !void {
@@ -243,6 +243,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
         pub fn fromValue(allocator: Allocator, pool: *Node.Pool, value: *const ST.Type) !Self {
             const root = try ST.tree.fromValue(pool, value);
+            errdefer pool.unref(root);
             return try Self.init(allocator, pool, root);
         }
 
@@ -254,7 +255,9 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         /// Get a read-only iterator over the elements of the list.
         /// This only iterates over committed elements.
         /// It is up to the caller to ensure that the iterator doesn't run past the end of the list.
-        pub inline fn iteratorReadonly(self: *const Self, start_index: usize) ReadonlyIterator {
+        ///
+        /// Convenience wrapper around `ReadonlyIterator.init`.
+        pub fn iteratorReadonly(self: *const Self, start_index: usize) ReadonlyIterator {
             return ReadonlyIterator.init(self, start_index);
         }
 

@@ -249,6 +249,7 @@ pub const BaseTreeView = struct {
         if (gop.found_existing) {
             return gop.value_ptr.*;
         }
+        errdefer _ = self.data.children_data.remove(gindex);
         const child_node = try self.data.root.getNode(self.pool, gindex);
         const child_data = try TreeViewData.init(self.allocator, self.pool, child_node);
         gop.value_ptr.* = child_data;

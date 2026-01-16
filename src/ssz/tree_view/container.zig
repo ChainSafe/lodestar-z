@@ -127,16 +127,14 @@ pub fn ContainerTreeView(comptime ST: type) type {
             }
         }
 
-        pub fn getValue(self: *Self, allocator: Allocator, comptime field_name: []const u8) !FieldValue(field_name) {
+        pub fn getValue(self: *Self, allocator: Allocator, comptime field_name: []const u8, out: *FieldValue(field_name)) !void {
             const ChildST = ST.getFieldType(field_name);
             if (comptime isBasicType(ChildST)) {
-                return self.getReadonly(field_name);
+                out.* = try self.getReadonly(field_name);
+            } else {
+                var child_view = try self.getReadonly(field_name);
+                try child_view.toValue(allocator, out);
             }
-
-            var child_view = try self.getReadonly(field_name);
-            var out = ChildST.default_value;
-            try child_view.toValue(allocator, &out);
-            return out;
         }
 
         /// Get a field by name. If the field is a basic type, returns the value directly.
@@ -234,11 +232,12 @@ pub fn ContainerTreeView(comptime ST: type) type {
             } else {
                 const root = try ChildST.tree.fromValue(self.base_view.pool, value);
                 errdefer self.base_view.pool.unref(root);
-                const child_view = try ChildST.TreeView.init(
+                var child_view = try ChildST.TreeView.init(
                     self.base_view.allocator,
                     self.base_view.pool,
                     root,
                 );
+                errdefer child_view.deinit();
                 try self.set(field_name, child_view);
             }
         }

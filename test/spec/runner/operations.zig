@@ -164,7 +164,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     try state_transition.processBlsToExecutionChange(self.pre.cached_state, &self.op);
                 },
                 .consolidation_request => {
-                    try state_transition.processConsolidationRequest(allocator, self.pre.cached_state, &self.op);
+                    try state_transition.processConsolidationRequest(self.pre.cached_state, &self.op);
                 },
                 .deposit => {
                     try state_transition.processDeposit(allocator, self.pre.cached_state, &self.op);
