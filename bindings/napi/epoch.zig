@@ -1,5 +1,7 @@
 const napi = @import("zapi:napi");
-const computeEpochAtSlot = @import("state_transition").computeEpochAtSlot;
+const state_transition = @import("state_transition");
+const computeEpochAtSlot = state_transition.computeEpochAtSlot;
+const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
 
 pub fn Epoch_computeEpochAtSlot(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const slot_i64 = try cb.arg(0).getValueInt64();
@@ -11,12 +13,28 @@ pub fn Epoch_computeEpochAtSlot(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.V
     return try env.createInt64(@intCast(epoch));
 }
 
+pub fn Epoch_computeStartSlotAtEpoch(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const epoch_i64 = try cb.arg(0).getValueInt64();
+    if (epoch_i64 < 0) {
+        return error.InvalidEpoch;
+    }
+    const epoch: u64 = @intCast(epoch_i64);
+    const slot = computeStartSlotAtEpoch(epoch);
+    return try env.createInt64(@intCast(slot));
+}
+
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const epoch_obj = try env.createObject();
     try epoch_obj.setNamedProperty("computeEpochAtSlot", try env.createFunction(
         "computeEpochAtSlot",
         1,
         Epoch_computeEpochAtSlot,
+        null,
+    ));
+    try epoch_obj.setNamedProperty("computeStartSlotAtEpoch", try env.createFunction(
+        "computeStartSlotAtEpoch",
+        1,
+        Epoch_computeStartSlotAtEpoch,
         null,
     ));
     try exports.setNamedProperty("epoch", epoch_obj);

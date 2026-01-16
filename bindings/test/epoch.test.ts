@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 
 const bindings = await import("../src/index.ts");
-const {computeEpochAtSlot} = bindings.default.epoch;
+const {computeEpochAtSlot, computeStartSlotAtEpoch} = bindings.default.epoch;
 
 const SLOTS_PER_EPOCH = 32;
 
@@ -32,6 +32,35 @@ describe("epoch", () => {
     it("should throw for negative slot -1", () => {
       expect(() => computeEpochAtSlot(-1)).toThrow("InvalidSlot");
     });
+  });
 
+  describe("computeStartSlotAtEpoch", () => {
+    it("should return slot 0 for epoch 0", () => {
+      expect(computeStartSlotAtEpoch(0)).toBe(0);
+    });
+
+    it("should return slot 32 for epoch 1", () => {
+      expect(computeStartSlotAtEpoch(1)).toBe(SLOTS_PER_EPOCH);
+    });
+
+    it("should return slot 64 for epoch 2", () => {
+      expect(computeStartSlotAtEpoch(2)).toBe(SLOTS_PER_EPOCH * 2);
+    });
+
+    it("should handle large epoch numbers", () => {
+      const largeEpoch = 100000;
+      expect(computeStartSlotAtEpoch(largeEpoch)).toBe(largeEpoch * SLOTS_PER_EPOCH);
+    });
+
+    it("should throw for negative epoch -1", () => {
+      expect(() => computeStartSlotAtEpoch(-1)).toThrow("InvalidEpoch");
+    });
+
+    it("should be inverse of computeEpochAtSlot", () => {
+      for (const epoch of [0, 1, 10, 100, 1000]) {
+        const slot = computeStartSlotAtEpoch(epoch);
+        expect(computeEpochAtSlot(slot)).toBe(epoch);
+      }
+    });
   });
 });
