@@ -7,8 +7,6 @@ const ComputeIndexUtils = state_transition.committee_indices.ComputeIndexUtils(u
 const ByteCount = state_transition.committee_indices.ByteCount;
 const preset = state_transition.preset;
 
-const allocator = std.heap.page_allocator;
-
 pub fn ProposerIndex_computeProposerIndex(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.Value {
     // arg 0: fork (string)
     var fork_name_buf: [16]u8 = undefined;
@@ -35,12 +33,23 @@ pub fn ProposerIndex_computeProposerIndex(env: napi.Env, cb: napi.CallbackInfo(4
         return error.InvalidSeedLength;
     }
 
+    // Validate indices don't exceed effective_balance_increments bounds
+    for (indices) |idx| {
+        if (idx >= effective_balance_increments.len) {
+            return error.IndexOutOfBounds;
+        }
+    }
+
     // Derive fork-dependent parameters
     const rand_byte_count: ByteCount = if (fork.gte(.electra)) .Two else .One;
     const max_effective_balance: u64 = if (fork.gte(.electra)) preset.MAX_EFFECTIVE_BALANCE_ELECTRA else preset.MAX_EFFECTIVE_BALANCE;
 
+    // Use arena allocator scoped to this function call
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
     const proposer_index = try ComputeIndexUtils.computeProposerIndex(
-        allocator,
+        arena.allocator(),
         seed_info.data,
         indices,
         effective_balance_increments,
