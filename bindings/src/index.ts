@@ -5,6 +5,11 @@ import {join} from "node:path";
 
 const require = createRequire(import.meta.url);
 
+declare class BeaconStateView {
+  static createFromBytes(fork: string, bytes: Uint8Array): BeaconStateView;
+  slot: number;
+}
+
 type Bindings = {
   pool: {
     ensureCapacity: (capacity: number) => void;
@@ -20,6 +25,7 @@ type Bindings = {
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
+  BeaconStateView: typeof BeaconStateView;
   deinit: () => void;
 };
 

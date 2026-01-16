@@ -17,6 +17,10 @@ pub fn deinit(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
 }
 
 fn register(env: napi.Env, exports: napi.Value) !void {
+    try pool.init();
+    try pubkey2index.init();
+    config.init();
+
     try pool.register(env, exports);
     try pubkey2index.register(env, exports);
     try config.register(env, exports);
