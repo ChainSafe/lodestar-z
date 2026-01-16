@@ -20,6 +20,9 @@ type Bindings = {
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
+  shuffle: {
+    innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
+  };
   deinit: () => void;
 };
 
