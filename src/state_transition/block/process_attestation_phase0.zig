@@ -9,7 +9,6 @@ const ForkSeq = @import("config").ForkSeq;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const isValidIndexedAttestation = @import("./is_valid_indexed_attestation.zig").isValidIndexedAttestation;
 const Slot = types.primitive.Slot.Type;
-const Checkpoint = types.phase0.Checkpoint.Type;
 const Phase0Attestation = types.phase0.Attestation.Type;
 const ElectraAttestation = types.electra.Attestation.Type;
 const PendingAttestation = types.phase0.PendingAttestation.Type;
@@ -29,12 +28,17 @@ pub fn processAttestationPhase0(allocator: Allocator, cached_state: *CachedBeaco
         .proposer_index = try epoch_cache.getBeaconProposer(slot),
     };
 
-    var justified_checkpoint, var epoch_pending_attestations = if (data.target.epoch == epoch_cache.epoch)
-        .{ try state.currentJustifiedCheckpoint(), try state.currentEpochPendingAttestations() }
-    else
-        .{ try state.previousJustifiedCheckpoint(), try state.previousEpochPendingAttestations() };
+    var justified_checkpoint: types.phase0.Checkpoint.Type = undefined;
+    var epoch_pending_attestations: types.phase0.EpochAttestations.TreeView = undefined;
+    if (data.target.epoch == epoch_cache.epoch) {
+        try state.currentJustifiedCheckpoint(&justified_checkpoint);
+        epoch_pending_attestations = try state.currentEpochPendingAttestations();
+    } else {
+        try state.previousJustifiedCheckpoint(&justified_checkpoint);
+        epoch_pending_attestations = try state.previousEpochPendingAttestations();
+    }
 
-    if ((data.source.epoch != try justified_checkpoint.get("epoch")) or !std.mem.eql(u8, &data.source.root, try justified_checkpoint.getRoot("root"))) {
+    if (!types.phase0.Checkpoint.equals(&data.source, &justified_checkpoint)) {
         return error.InvalidAttestationSourceNotEqualToJustifiedCheckpoint;
     }
     try epoch_pending_attestations.pushValue(&pending_attestation);

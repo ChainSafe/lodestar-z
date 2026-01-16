@@ -144,11 +144,9 @@ pub fn CompositeChunks(
             };
         }
 
-        pub fn getValue(base_view: *BaseTreeView, allocator: Allocator, index: usize) !ST.Element.Type {
+        pub fn getValue(base_view: *BaseTreeView, allocator: Allocator, index: usize, out: *ST.Element.Type) !void {
             var child_view = try getReadonly(base_view, index);
-            var out = ST.Element.default_value;
-            try child_view.toValue(allocator, &out);
-            return out;
+            try child_view.toValue(allocator, out);
         }
 
         pub fn set(base_view: *BaseTreeView, index: usize, value: Element) !void {

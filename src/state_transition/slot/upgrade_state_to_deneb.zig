@@ -22,7 +22,8 @@ pub fn upgradeStateToDeneb(allocator: Allocator, cached_state: *CachedBeaconStat
 
     // ownership is transferred to BeaconState
     var new_latest_execution_payload_header: ExecutionPayloadHeader = .{ .deneb = ssz.deneb.ExecutionPayloadHeader.default_value };
-    var capella_latest_execution_payload_header = try capella_state.latestExecutionPayloadHeader(allocator);
+    var capella_latest_execution_payload_header: ExecutionPayloadHeader = undefined;
+    try capella_state.latestExecutionPayloadHeader(allocator, &capella_latest_execution_payload_header);
     defer capella_latest_execution_payload_header.deinit(allocator);
     if (capella_latest_execution_payload_header != .capella) {
         return error.UnexpectedLatestExecutionPayloadHeaderType;

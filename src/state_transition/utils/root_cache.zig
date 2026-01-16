@@ -23,12 +23,10 @@ pub const RootCache = struct {
         errdefer allocator.destroy(instance);
         const state = cached_state.state;
 
-        var current_justified_checkpoint_view = try state.currentJustifiedCheckpoint();
-        var previous_justified_checkpoint_view = try state.previousJustifiedCheckpoint();
         var current_justified_checkpoint: Checkpoint = undefined;
         var previous_justified_checkpoint: Checkpoint = undefined;
-        try current_justified_checkpoint_view.toValue(allocator, &current_justified_checkpoint);
-        try previous_justified_checkpoint_view.toValue(allocator, &previous_justified_checkpoint);
+        try state.currentJustifiedCheckpoint(&current_justified_checkpoint);
+        try state.previousJustifiedCheckpoint(&previous_justified_checkpoint);
         instance.* = RootCache{
             .allocator = allocator,
             .current_justified_checkpoint = current_justified_checkpoint,

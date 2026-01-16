@@ -474,21 +474,21 @@ pub const BeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn previousJustifiedCheckpoint(self: *BeaconState) !ct.phase0.Checkpoint.TreeView {
+    pub fn previousJustifiedCheckpoint(self: *BeaconState, out: *ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.get("previous_justified_checkpoint"),
+            inline else => |*state| try state.getValue(undefined, "previous_justified_checkpoint", out),
         };
     }
 
-    pub fn setPreviousJustifiedCheckpoint(self: *BeaconState, checkpoint: ct.phase0.Checkpoint.TreeView) !void {
+    pub fn setPreviousJustifiedCheckpoint(self: *BeaconState, checkpoint: *const ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.set("previous_justified_checkpoint", checkpoint),
+            inline else => |*state| try state.setValue("previous_justified_checkpoint", checkpoint),
         };
     }
 
-    pub fn currentJustifiedCheckpoint(self: *BeaconState) !ct.phase0.Checkpoint.TreeView {
+    pub fn currentJustifiedCheckpoint(self: *BeaconState, out: *ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.get("current_justified_checkpoint"),
+            inline else => |*state| try state.getValue(undefined, "current_justified_checkpoint", out),
         };
     }
 
@@ -498,22 +498,22 @@ pub const BeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn finalizedCheckpoint(self: *BeaconState) !ct.phase0.Checkpoint.TreeView {
+    pub fn finalizedCheckpoint(self: *BeaconState, out: *ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.get("finalized_checkpoint"),
+            inline else => |*state| try state.getValue(undefined, "finalized_checkpoint", out),
         };
     }
 
-    pub fn setFinalizedCheckpoint(self: *BeaconState, checkpoint: ct.phase0.Checkpoint.TreeView) !void {
+    pub fn setFinalizedCheckpoint(self: *BeaconState, checkpoint: *const ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.set("finalized_checkpoint", checkpoint),
+            inline else => |*state| try state.setValue("finalized_checkpoint", checkpoint),
         };
     }
 
     pub fn finalizedEpoch(self: *BeaconState) !u64 {
         return switch (self.*) {
             inline else => |*state| {
-                var checkpoint_view = try state.get("finalized_checkpoint");
+                var checkpoint_view = try state.getReadonly("finalized_checkpoint");
                 return try checkpoint_view.get("epoch");
             },
         };
@@ -565,23 +565,23 @@ pub const BeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn latestExecutionPayloadHeader(self: *BeaconState, allocator: Allocator) !ExecutionPayloadHeader {
+    pub fn latestExecutionPayloadHeader(self: *BeaconState, allocator: Allocator, out: *ExecutionPayloadHeader) !void {
         return switch (self.*) {
             .phase0, .altair => error.InvalidAtFork,
-            .bellatrix => |*state| .{
-                .bellatrix = try state.getValue(allocator, "latest_execution_payload_header"),
+            .bellatrix => |*state| {
+                try state.getValue(allocator, "latest_execution_payload_header", &out.bellatrix);
             },
-            .capella => |*state| .{
-                .capella = try state.getValue(allocator, "latest_execution_payload_header"),
+            .capella => |*state| {
+                try state.getValue(allocator, "latest_execution_payload_header", &out.capella);
             },
-            .deneb => |*state| .{
-                .deneb = try state.getValue(allocator, "latest_execution_payload_header"),
+            .deneb => |*state| {
+                try state.getValue(allocator, "latest_execution_payload_header", &out.deneb);
             },
-            .electra => |*state| .{
-                .deneb = try state.getValue(allocator, "latest_execution_payload_header"),
+            .electra => |*state| {
+                try state.getValue(allocator, "latest_execution_payload_header", &out.electra);
             },
-            .fulu => |*state| .{
-                .deneb = try state.getValue(allocator, "latest_execution_payload_header"),
+            .fulu => |*state| {
+                try state.getValue(allocator, "latest_execution_payload_header", &out.fulu);
             },
         };
     }

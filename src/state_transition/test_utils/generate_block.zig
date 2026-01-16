@@ -22,9 +22,8 @@ pub fn generateElectraBlock(allocator: Allocator, cached_state: *CachedBeaconSta
     const att_block_root = try getBlockRootAtSlot(state, att_slot);
     const target_epoch = cached_state.getEpochCache().epoch;
     const target_epoch_slot = computeStartSlotAtEpoch(target_epoch);
-    var source_checkpoint_view = try state.currentJustifiedCheckpoint();
     var source_checkpoint: types.phase0.Checkpoint.Type = undefined;
-    try source_checkpoint_view.toValue(allocator, &source_checkpoint);
+    try state.currentJustifiedCheckpoint(&source_checkpoint);
 
     const att_target_root = try getBlockRootAtSlot(state, target_epoch_slot);
     const att_data: types.phase0.AttestationData.Type = .{

@@ -94,10 +94,10 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             return try Chunks.getReadonly(&self.base_view, index);
         }
 
-        pub fn getValue(self: *Self, allocator: Allocator, index: usize) !ST.Element.Type {
+        pub fn getValue(self: *Self, allocator: Allocator, index: usize, out: *ST.Element.Type) !void {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
-            return try Chunks.getValue(&self.base_view, allocator, index);
+            return try Chunks.getValue(&self.base_view, allocator, index, out);
         }
 
         pub fn set(self: *Self, index: usize, value: Element) !void {
