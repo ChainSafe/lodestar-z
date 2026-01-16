@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 
 const bindings = await import("../src/index.ts");
-const {computeEpochAtSlot, computeStartSlotAtEpoch, computeCheckpointEpochAtStateSlot, computeEndSlotAtEpoch, computeActivationExitEpoch} = bindings.default.epoch;
+const {computeEpochAtSlot, computeStartSlotAtEpoch, computeCheckpointEpochAtStateSlot, computeEndSlotAtEpoch, computeActivationExitEpoch, computePreviousEpoch} = bindings.default.epoch;
 
 const SLOTS_PER_EPOCH = 32;
 
@@ -95,6 +95,18 @@ describe("epoch", () => {
 
     it("should throw for negative epoch", () => {
       expect(() => computeActivationExitEpoch(-1)).toThrow("InvalidEpoch");
+    });
+  });
+
+  describe("computePreviousEpoch", () => {
+    it("should return previous epoch, minimum 0", () => {
+      expect(computePreviousEpoch(0)).toBe(0);
+      expect(computePreviousEpoch(1)).toBe(0);
+      expect(computePreviousEpoch(10)).toBe(9);
+    });
+
+    it("should throw for negative epoch", () => {
+      expect(() => computePreviousEpoch(-1)).toThrow("InvalidEpoch");
     });
   });
 });
