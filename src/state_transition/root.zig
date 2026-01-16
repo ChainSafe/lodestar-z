@@ -76,6 +76,7 @@ pub const computeEndSlotAtEpoch = @import("./utils/epoch.zig").computeEndSlotAtE
 pub const computeActivationExitEpoch = @import("./utils/epoch.zig").computeActivationExitEpoch;
 pub const computePreviousEpoch = @import("./utils/epoch.zig").computePreviousEpoch;
 pub const computeSyncPeriodAtSlot = @import("./utils/epoch.zig").computeSyncPeriodAtSlot;
+pub const computeSyncPeriodAtEpoch = @import("./utils/epoch.zig").computeSyncPeriodAtEpoch;
 pub const deinitStateTransition = @import("./state_transition.zig").deinitStateTransition;
 
 pub const WithdrawalsResult = @import("./block/process_withdrawals.zig").WithdrawalsResult;
