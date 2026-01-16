@@ -8,7 +8,7 @@ const require = createRequire(import.meta.url);
 type Bindings = {
   pool: {
     ensureCapacity: (capacity: number) => void;
-  },
+  };
   pubkey2index: {
     ensureCapacity: (capacity: number) => void;
     get: (pubkey: Uint8Array) => number | undefined;
@@ -20,6 +20,12 @@ type Bindings = {
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
+  computeProposerIndex: (
+    fork: "phase0" | "altair" | "bellatrix" | "capella" | "deneb" | "electra" | "fulu",
+    effectiveBalanceIncrements: Uint16Array,
+    indices: Uint32Array,
+    seed: Uint8Array
+  ) => number;
   deinit: () => void;
 };
 
