@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 
 const bindings = await import("../src/index.ts");
-const {computeEpochAtSlot, computeStartSlotAtEpoch, computeCheckpointEpochAtStateSlot, computeEndSlotAtEpoch, computeActivationExitEpoch, computePreviousEpoch} = bindings.default.epoch;
+const {computeEpochAtSlot, computeStartSlotAtEpoch, computeCheckpointEpochAtStateSlot, computeEndSlotAtEpoch, computeActivationExitEpoch, computePreviousEpoch, computeSyncPeriodAtSlot} = bindings.default.epoch;
 
 const SLOTS_PER_EPOCH = 32;
 
@@ -107,6 +107,19 @@ describe("epoch", () => {
 
     it("should throw for negative epoch", () => {
       expect(() => computePreviousEpoch(-1)).toThrow("InvalidEpoch");
+    });
+  });
+
+  describe("computeSyncPeriodAtSlot", () => {
+    // EPOCHS_PER_SYNC_COMMITTEE_PERIOD = 256, so period = slot / 8192(256 * 32)
+    it("should return sync period for slot", () => {
+      expect(computeSyncPeriodAtSlot(0)).toBe(0);
+      expect(computeSyncPeriodAtSlot(8191)).toBe(0);
+      expect(computeSyncPeriodAtSlot(8192)).toBe(1);
+    });
+
+    it("should throw for negative slot", () => {
+      expect(() => computeSyncPeriodAtSlot(-1)).toThrow("InvalidSlot");
     });
   });
 });
