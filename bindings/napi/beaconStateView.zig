@@ -166,6 +166,20 @@ pub fn BeaconStateView_proposers(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.
     return arr;
 }
 
+pub fn BeaconStateView_proposersNextEpoch(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const epoch_cache = cached_state.getEpochCache();
+
+    if (epoch_cache.proposers_next_epoch) |proposers| {
+        const arr = try env.createArrayWithLength(preset.SLOTS_PER_EPOCH);
+        for (0..preset.SLOTS_PER_EPOCH) |i| {
+            try arr.setElement(@intCast(i), try env.createInt64(@intCast(proposers[i])));
+        }
+        return arr;
+    }
+    return env.getNull();
+}
+
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const beacon_state_view_ctor = try env.defineClass(
         "BeaconStateView",
@@ -183,6 +197,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "currentJustifiedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_currentJustifiedCheckpoint) },
             .{ .utf8name = "finalizedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_finalizedCheckpoint) },
             .{ .utf8name = "proposers", .getter = napi.wrapCallback(0, BeaconStateView_proposers) },
+            .{ .utf8name = "proposersNextEpoch", .getter = napi.wrapCallback(0, BeaconStateView_proposersNextEpoch) },
         },
     );
     try beacon_state_view_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{.{
