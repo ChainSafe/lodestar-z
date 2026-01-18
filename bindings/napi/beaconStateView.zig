@@ -154,6 +154,18 @@ pub fn BeaconStateView_finalizedCheckpoint(env: napi.Env, cb: napi.CallbackInfo(
     return checkpointToObject(env, &cp);
 }
 
+pub fn BeaconStateView_proposers(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const epoch_cache = cached_state.getEpochCache();
+    const proposers = epoch_cache.proposers;
+
+    const arr = try env.createArrayWithLength(preset.SLOTS_PER_EPOCH);
+    for (0..preset.SLOTS_PER_EPOCH) |i| {
+        try arr.setElement(@intCast(i), try env.createInt64(@intCast(proposers[i])));
+    }
+    return arr;
+}
+
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const beacon_state_view_ctor = try env.defineClass(
         "BeaconStateView",
@@ -170,6 +182,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "previousJustifiedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_previousJustifiedCheckpoint) },
             .{ .utf8name = "currentJustifiedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_currentJustifiedCheckpoint) },
             .{ .utf8name = "finalizedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_finalizedCheckpoint) },
+            .{ .utf8name = "proposers", .getter = napi.wrapCallback(0, BeaconStateView_proposers) },
         },
     );
     try beacon_state_view_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{.{

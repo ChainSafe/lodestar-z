@@ -29,6 +29,7 @@ declare class BeaconStateView {
   previousJustifiedCheckpoint: Checkpoint;
   currentJustifiedCheckpoint: Checkpoint;
   finalizedCheckpoint: Checkpoint;
+  proposers: number[];
 }
 
 type Bindings = {

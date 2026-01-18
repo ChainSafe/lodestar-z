@@ -30,3 +30,4 @@ console.log('latestBlockHeader:', state.latestBlockHeader);
 console.log('previousJustifiedCheckpoint:', state.previousJustifiedCheckpoint);
 console.log('currentJustifiedCheckpoint:', state.currentJustifiedCheckpoint);
 console.log('finalizedCheckpoint:', state.finalizedCheckpoint);
+console.log('proposers:', state.proposers);
