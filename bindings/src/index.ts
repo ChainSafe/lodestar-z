@@ -32,6 +32,7 @@ declare class BeaconStateView {
   proposers: number[];
   proposersNextEpoch: number[] | null;
   getBalance(index: number): bigint;
+  isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   getFinalizedRootProof(): Uint8Array[];
 }
 

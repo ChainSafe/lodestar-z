@@ -1,8 +1,12 @@
 const std = @import("std");
 const napi = @import("zapi:napi");
 const c = @import("config");
-const BeaconState = @import("state_transition").BeaconState;
-const CachedBeaconState = @import("state_transition").CachedBeaconState;
+const state_transition = @import("state_transition");
+const BeaconState = state_transition.BeaconState;
+const CachedBeaconState = state_transition.CachedBeaconState;
+const SignedBeaconBlock = state_transition.SignedBeaconBlock;
+const SignedBlock = state_transition.SignedBlock;
+const isExecutionEnabledFunc = state_transition.isExecutionEnabled;
 const preset = @import("preset").preset;
 const types = @import("consensus_types");
 const pool = @import("./pool.zig");
@@ -189,6 +193,27 @@ pub fn BeaconStateView_getBalance(env: napi.Env, cb: napi.CallbackInfo(1)) !napi
     return try env.createBigintUint64(balance);
 }
 
+// isExecutionEnabled(forkName: string, signedBlockBytes: Uint8Array): boolean
+pub fn BeaconStateView_isExecutionEnabled(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+
+    // arg 0: fork name
+    var fork_name_buf: [16]u8 = undefined;
+    const fork_name = try cb.arg(0).getValueStringUtf8(&fork_name_buf);
+    const fork = c.ForkSeq.fromName(fork_name);
+
+    // arg 1: signed block bytes
+    const bytes_info = try cb.arg(1).getTypedarrayInfo();
+
+    // Deserialize the signed block
+    const signed_block = try SignedBeaconBlock.deserialize(allocator, fork, bytes_info.data);
+    defer signed_block.deinit(allocator);
+
+    const signed = SignedBlock{ .regular = signed_block };
+    const result = isExecutionEnabledFunc(cached_state.state, signed.message());
+    return try env.getBoolean(result);
+}
+
 pub fn BeaconStateView_getFinalizedRootProof(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     var proof = try cached_state.state.getFinalizedRootProof(allocator);
@@ -223,6 +248,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "proposers", .getter = napi.wrapCallback(0, BeaconStateView_proposers) },
             .{ .utf8name = "proposersNextEpoch", .getter = napi.wrapCallback(0, BeaconStateView_proposersNextEpoch) },
             .{ .utf8name = "getBalance", .method = napi.wrapCallback(1, BeaconStateView_getBalance) },
+            .{ .utf8name = "isExecutionEnabled", .method = napi.wrapCallback(2, BeaconStateView_isExecutionEnabled) },
             .{ .utf8name = "getFinalizedRootProof", .method = napi.wrapCallback(0, BeaconStateView_getFinalizedRootProof) },
         },
     );
