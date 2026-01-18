@@ -34,6 +34,10 @@ declare class BeaconStateView {
   getBalance(index: number): bigint;
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   getFinalizedRootProof(): Uint8Array[];
+  computeUnrealizedCheckpoints(): {
+    justifiedCheckpoint: Checkpoint;
+    finalizedCheckpoint: Checkpoint;
+  };
 }
 
 type Bindings = {

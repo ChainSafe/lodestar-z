@@ -7,6 +7,7 @@ const CachedBeaconState = state_transition.CachedBeaconState;
 const SignedBeaconBlock = state_transition.SignedBeaconBlock;
 const SignedBlock = state_transition.SignedBlock;
 const isExecutionEnabledFunc = state_transition.isExecutionEnabled;
+const computeUnrealizedCheckpoints = state_transition.computeUnrealizedCheckpoints;
 const preset = @import("preset").preset;
 const types = @import("consensus_types");
 const pool = @import("./pool.zig");
@@ -229,6 +230,16 @@ pub fn BeaconStateView_getFinalizedRootProof(env: napi.Env, cb: napi.CallbackInf
     return arr;
 }
 
+pub fn BeaconStateView_computeUnrealizedCheckpoints(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const result = try computeUnrealizedCheckpoints(cached_state, allocator);
+
+    const obj = try env.createObject();
+    try obj.setNamedProperty("justifiedCheckpoint", try checkpointToObject(env, &result.justified_checkpoint));
+    try obj.setNamedProperty("finalizedCheckpoint", try checkpointToObject(env, &result.finalized_checkpoint));
+    return obj;
+}
+
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const beacon_state_view_ctor = try env.defineClass(
         "BeaconStateView",
@@ -250,6 +261,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "getBalance", .method = napi.wrapCallback(1, BeaconStateView_getBalance) },
             .{ .utf8name = "isExecutionEnabled", .method = napi.wrapCallback(2, BeaconStateView_isExecutionEnabled) },
             .{ .utf8name = "getFinalizedRootProof", .method = napi.wrapCallback(0, BeaconStateView_getFinalizedRootProof) },
+            .{ .utf8name = "computeUnrealizedCheckpoints", .method = napi.wrapCallback(0, BeaconStateView_computeUnrealizedCheckpoints) },
         },
     );
     // Static method on constructor
