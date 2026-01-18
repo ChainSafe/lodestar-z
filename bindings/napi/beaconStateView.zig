@@ -189,6 +189,21 @@ pub fn BeaconStateView_getBalance(env: napi.Env, cb: napi.CallbackInfo(1)) !napi
     return try env.createBigintUint64(balance);
 }
 
+pub fn BeaconStateView_getFinalizedRootProof(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var proof = try cached_state.state.getFinalizedRootProof(allocator);
+    defer proof.deinit(allocator);
+
+    const arr = try env.createArrayWithLength(proof.witnesses.len);
+    for (proof.witnesses, 0..) |witness, i| {
+        var bytes: [*]u8 = undefined;
+        const buf = try env.createArrayBuffer(32, &bytes);
+        @memcpy(bytes[0..32], &witness);
+        try arr.setElement(@intCast(i), try env.createTypedarray(.uint8, 32, buf, 0));
+    }
+    return arr;
+}
+
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const beacon_state_view_ctor = try env.defineClass(
         "BeaconStateView",
@@ -208,6 +223,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "proposers", .getter = napi.wrapCallback(0, BeaconStateView_proposers) },
             .{ .utf8name = "proposersNextEpoch", .getter = napi.wrapCallback(0, BeaconStateView_proposersNextEpoch) },
             .{ .utf8name = "getBalance", .method = napi.wrapCallback(1, BeaconStateView_getBalance) },
+            .{ .utf8name = "getFinalizedRootProof", .method = napi.wrapCallback(0, BeaconStateView_getFinalizedRootProof) },
         },
     );
     // Static method on constructor

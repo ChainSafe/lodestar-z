@@ -32,6 +32,7 @@ declare class BeaconStateView {
   proposers: number[];
   proposersNextEpoch: number[] | null;
   getBalance(index: number): bigint;
+  getFinalizedRootProof(): Uint8Array[];
 }
 
 type Bindings = {

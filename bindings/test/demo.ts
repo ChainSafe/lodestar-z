@@ -34,3 +34,4 @@ console.log("proposers:", state.proposers);
 console.log("proposersNextEpoch:", state.proposersNextEpoch);
 console.log("getBalance(0):", state.getBalance(0));
 console.log("getBalance(100):", state.getBalance(100));
+console.log("getFinalizedRootProof():", state.getFinalizedRootProof());
