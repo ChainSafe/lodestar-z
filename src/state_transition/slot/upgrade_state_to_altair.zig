@@ -5,10 +5,10 @@ const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllF
 const getNextSyncCommittee = @import("../utils/sync_committee.zig").getNextSyncCommittee;
 const SyncCommitteeInfo = @import("../utils/sync_committee.zig").SyncCommitteeInfo;
 const sumTargetUnslashedBalanceIncrements = @import("../utils/target_unslashed_balance.zig").sumTargetUnslashedBalanceIncrements;
-const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
+const computePreviousEpoch = @import("../epoch.zig").computePreviousEpoch;
 const types = @import("consensus_types");
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const RootCache = @import("../utils/root_cache.zig").RootCache;
+const RootCache = @import("../cache/RootCache.zig");
 const getAttestationParticipationStatus = @import("../block//process_attestation_altair.zig").getAttestationParticipationStatus;
 
 pub fn upgradeStateToAltair(allocator: Allocator, cached_state: *CachedBeaconStateAllForks) !void {

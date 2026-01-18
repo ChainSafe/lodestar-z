@@ -18,7 +18,7 @@ const blst = @import("blst");
 const verify = @import("../utils/bls.zig").verify;
 const ForkSeq = types.primitive.ForkSeq.Type;
 const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const getMaxEffectiveBalance = @import("../utils/validator.zig").getMaxEffectiveBalance;
+const getMaxEffectiveBalance = @import("../validator.zig").getMaxEffectiveBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 const verifyMerkleBranch = @import("../utils/verify_merkle_branch.zig").verifyMerkleBranch;
 

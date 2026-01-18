@@ -1,6 +1,6 @@
 const std = @import("std");
 const types = @import("consensus_types");
-const digest = @import("./sha256.zig").digest;
+const Sha256 = std.crypto.hash.sha2.Sha256;
 const Root = types.primitive.Root.Type;
 
 pub fn verifyMerkleBranch(leaf: Root, proof: *const [33]Root, depth: usize, index: usize, root: Root) bool {
@@ -14,7 +14,7 @@ pub fn verifyMerkleBranch(leaf: Root, proof: *const [33]Root, depth: usize, inde
             @memcpy(tmp[0..32], &value);
             @memcpy(tmp[32..], &proof[i]);
         }
-        digest(&tmp, &value);
+        Sha256.hash(&tmp, &value, .{});
     }
     return std.mem.eql(u8, &root, &value);
 }

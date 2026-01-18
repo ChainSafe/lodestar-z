@@ -12,7 +12,7 @@ const SignedBlindedBeaconBlock = @import("../types/beacon_block.zig").SignedBlin
 const BlockExternalData = @import("../state_transition.zig").BlockExternalData;
 const BeaconConfig = @import("config").BeaconConfig;
 const isMergeTransitionComplete = @import("../utils/execution.zig").isMergeTransitionComplete;
-const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
+const computeEpochAtSlot = @import("../epoch.zig").computeEpochAtSlot;
 const getRandaoMix = @import("../utils/seed.zig").getRandaoMix;
 
 const PartialPayload = struct {

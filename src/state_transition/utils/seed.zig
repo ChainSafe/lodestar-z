@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
-const digest = @import("./sha256.zig").digest;
+const Sha256 = std.crypto.hash.sha2.Sha256;
 const Epoch = types.primitive.Epoch.Type;
 const Bytes32 = types.primitive.Bytes32.Type;
 const DomainType = types.primitive.DomainType.Type;
@@ -13,11 +13,11 @@ const EPOCHS_PER_HISTORICAL_VECTOR = preset.EPOCHS_PER_HISTORICAL_VECTOR;
 const MIN_SEED_LOOKAHEAD = preset.MIN_SEED_LOOKAHEAD;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const EffectiveBalanceIncrements = @import("../cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
-const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
+const computeStartSlotAtEpoch = @import("../epoch.zig").computeStartSlotAtEpoch;
 const ComputeIndexUtils = @import("./committee_indices.zig").ComputeIndexUtils(ValidatorIndex);
 const computeProposerIndex = ComputeIndexUtils.computeProposerIndex;
 const computeSyncCommitteeIndices = ComputeIndexUtils.computeSyncCommitteeIndices;
-const computeEpochAtSlot = @import("./epoch.zig").computeEpochAtSlot;
+const computeEpochAtSlot = @import("../epoch.zig").computeEpochAtSlot;
 const ByteCount = @import("./committee_indices.zig").ByteCount;
 
 pub fn computeProposers(allocator: Allocator, fork_seq: ForkSeq, epoch_seed: [32]u8, epoch: Epoch, active_indices: []const ValidatorIndex, effective_balance_increments: EffectiveBalanceIncrements, out: []ValidatorIndex) !void {
@@ -30,7 +30,7 @@ pub fn computeProposers(allocator: Allocator, fork_seq: ForkSeq, epoch_seed: [32
         std.mem.copyForwards(u8, buffer[0..32], epoch_seed[0..]);
         std.mem.copyForwards(u8, buffer[32..], slot_buf[0..]);
         var seed: [32]u8 = undefined;
-        digest(buffer[0..], &seed);
+        Sha256.hash(buffer[0..], &seed, .{});
 
         const rand_byte_count: ByteCount = if (fork_seq.gte(.electra)) ByteCount.Two else ByteCount.One;
         const max_effective_balance: u64 = if (fork_seq.gte(.electra)) preset.MAX_EFFECTIVE_BALANCE_ELECTRA else preset.MAX_EFFECTIVE_BALANCE;
@@ -74,5 +74,5 @@ pub fn getSeed(state: *const BeaconStateAllForks, epoch: Epoch, domain_type: Dom
     std.mem.copyForwards(u8, buffer[0..domain_type.len], domain_type[0..]);
     std.mem.copyForwards(u8, buffer[domain_type.len..(domain_type.len + 8)], epoch_buf[0..]);
     std.mem.copyForwards(u8, buffer[(domain_type.len + 8)..], mix[0..]);
-    digest(buffer[0..], out);
+    Sha256.hash(buffer[0..], out, .{});
 }

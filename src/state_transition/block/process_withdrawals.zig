@@ -14,7 +14,7 @@ const PendingPartialWithdrawal = types.electra.PendingPartialWithdrawal.Type;
 const ExecutionPayload = @import("../types/execution_payload.zig").ExecutionPayload;
 const hasExecutionWithdrawalCredential = @import("../utils/electra.zig").hasExecutionWithdrawalCredential;
 const hasEth1WithdrawalCredential = @import("../utils/capella.zig").hasEth1WithdrawalCredential;
-const getMaxEffectiveBalance = @import("../utils/validator.zig").getMaxEffectiveBalance;
+const getMaxEffectiveBalance = @import("../validator.zig").getMaxEffectiveBalance;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
 
 pub const WithdrawalsResult = struct {

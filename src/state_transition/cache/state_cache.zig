@@ -83,7 +83,7 @@ pub const CachedBeaconStateAllForks = struct {
     /// For earlier forks, this uses `EpochCache.getBeaconProposer()`.
     pub fn getBeaconProposer(self: *const CachedBeaconStateAllForks, slot: types.primitive.Slot.Type) !ValidatorIndex {
         const preset_import = @import("preset").preset;
-        const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
+        const computeEpochAtSlot = @import("../epoch.zig").computeEpochAtSlot;
 
         // For Fulu, use proposer_lookahead from state
         if (self.state.isFulu()) {

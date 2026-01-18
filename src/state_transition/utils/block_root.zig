@@ -5,7 +5,7 @@ const Slot = types.primitive.Slot.Type;
 const Epoch = types.primitive.Epoch.Type;
 const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
 const SLOTS_PER_HISTORICAL_ROOT = preset.SLOTS_PER_HISTORICAL_ROOT;
-const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
+const computeStartSlotAtEpoch = @import("../epoch.zig").computeStartSlotAtEpoch;
 
 pub fn getBlockRootAtSlot(state: *const BeaconStateAllForks, slot: Slot) !Root {
     const state_slot = state.slot();
