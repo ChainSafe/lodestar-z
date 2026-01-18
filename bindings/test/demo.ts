@@ -28,3 +28,4 @@ console.log(state.genesisTime);
 console.log(state.genesisValidatorsRoot);
 console.log(state.latestBlockHeader);
 console.log(state.previousJustifiedCheckpoint);
+console.log(state.currentJustifiedCheckpoint);

@@ -27,6 +27,7 @@ declare class BeaconStateView {
   genesisValidatorsRoot: Uint8Array;
   latestBlockHeader: BeaconBlockHeader;
   previousJustifiedCheckpoint: Checkpoint;
+  currentJustifiedCheckpoint: Checkpoint;
 }
 
 type Bindings = {

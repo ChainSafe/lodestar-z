@@ -123,10 +123,7 @@ pub fn BeaconStateView_latestBlockHeader(env: napi.Env, cb: napi.CallbackInfo(0)
     return obj;
 }
 
-pub fn BeaconStateView_previousJustifiedCheckpoint(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    var cp: types.phase0.Checkpoint.Type = undefined;
-    try cached_state.state.previousJustifiedCheckpoint(&cp);
+fn checkpointToObject(env: napi.Env, cp: *const types.phase0.Checkpoint.Type) !napi.Value {
     const obj = try env.createObject();
     try obj.setNamedProperty("epoch", try env.createInt64(@intCast(cp.epoch)));
     var bytes: [*]u8 = undefined;
@@ -134,6 +131,20 @@ pub fn BeaconStateView_previousJustifiedCheckpoint(env: napi.Env, cb: napi.Callb
     @memcpy(bytes[0..32], &cp.root);
     try obj.setNamedProperty("root", try env.createTypedarray(.uint8, 32, buf, 0));
     return obj;
+}
+
+pub fn BeaconStateView_previousJustifiedCheckpoint(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var cp: types.phase0.Checkpoint.Type = undefined;
+    try cached_state.state.previousJustifiedCheckpoint(&cp);
+    return checkpointToObject(env, &cp);
+}
+
+pub fn BeaconStateView_currentJustifiedCheckpoint(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var cp: types.phase0.Checkpoint.Type = undefined;
+    try cached_state.state.currentJustifiedCheckpoint(&cp);
+    return checkpointToObject(env, &cp);
 }
 
 pub fn register(env: napi.Env, exports: napi.Value) !void {
@@ -150,6 +161,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "genesisValidatorsRoot", .getter = napi.wrapCallback(0, BeaconStateView_genesisValidatorsRoot) },
             .{ .utf8name = "latestBlockHeader", .getter = napi.wrapCallback(0, BeaconStateView_latestBlockHeader) },
             .{ .utf8name = "previousJustifiedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_previousJustifiedCheckpoint) },
+            .{ .utf8name = "currentJustifiedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_currentJustifiedCheckpoint) },
         },
     );
     try beacon_state_view_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{.{
