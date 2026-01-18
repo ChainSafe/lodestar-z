@@ -997,6 +997,7 @@ pub fn build(b: *std.Build) void {
     module_bindings.addImport("config", module_config);
     module_bindings.addImport("state_transition", module_state_transition);
     module_bindings.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_bindings.addImport("consensus_types", module_consensus_types);
     module_bindings.addImport("zapi:napi", dep_zapi.module("napi"));
 
     module_int.addImport("build_options", options_module_build_options);

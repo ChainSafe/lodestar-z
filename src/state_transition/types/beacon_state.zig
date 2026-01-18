@@ -4,12 +4,16 @@ const expect = std.testing.expect;
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const Node = @import("persistent_merkle_tree").Node;
+const Gindex = @import("persistent_merkle_tree").Gindex;
+const createSingleProof = @import("persistent_merkle_tree").proof.createSingleProof;
+const SingleProof = @import("persistent_merkle_tree").proof.SingleProof;
 const isBasicType = @import("ssz").isBasicType;
 const isFixedType = @import("ssz").isFixedType;
 const BaseTreeView = @import("ssz").BaseTreeView;
 const CloneOpts = @import("ssz").BaseTreeView.CloneOpts;
 const ct = @import("consensus_types");
 const ExecutionPayloadHeader = @import("./execution_payload.zig").ExecutionPayloadHeader;
+const constants = @import("constants");
 
 /// wrapper for all BeaconState types across forks so that we don't have to do switch/case for all methods
 pub const BeaconState = union(ForkSeq) {
@@ -158,6 +162,24 @@ pub const BeaconState = union(ForkSeq) {
         switch (self.*) {
             inline else => |*state| try state.commit(),
         }
+    }
+
+    /// Get a Merkle proof for the finalized root in the beacon state.
+    pub fn getFinalizedRootProof(self: *BeaconState, allocator: Allocator) !SingleProof {
+        try self.commit();
+        const gindex_value: u64 = switch (self.*) {
+            .electra, .fulu => constants.FINALIZED_ROOT_GINDEX_ELECTRA,
+            else => constants.FINALIZED_ROOT_GINDEX,
+        };
+        const gindex: Gindex = @enumFromInt(gindex_value);
+        return switch (self.*) {
+            inline else => |*state| try createSingleProof(
+                allocator,
+                state.base_view.pool,
+                state.base_view.data.root,
+                gindex,
+            ),
+        };
     }
 
     pub fn hashTreeRoot(self: *BeaconState) !*const [32]u8 {

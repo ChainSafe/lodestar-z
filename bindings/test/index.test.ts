@@ -6,4 +6,3 @@ describe("sanity", () => {
     expect(bindings).toBeDefined();
   });
 });
-
