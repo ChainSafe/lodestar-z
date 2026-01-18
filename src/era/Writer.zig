@@ -184,8 +184,9 @@ pub fn writeSerializedState(self: *Writer, allocator: std.mem.Allocator, slot: u
     try self.writeCompressedState(allocator, slot, short_historical_root, compressed);
 }
 
-pub fn writeState(self: *Writer, allocator: std.mem.Allocator, state: state_transition.BeaconStateAllForks) !void {
-    const slot = state.slot();
+pub fn writeState(self: *Writer, allocator: std.mem.Allocator, state: state_transition.BeaconState) !void {
+    var s = state;
+    const slot = try s.slot();
     const short_historical_root = try era.getShortHistoricalRoot(state);
     const serialized = try state.serialize(allocator);
     defer allocator.free(serialized);

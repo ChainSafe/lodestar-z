@@ -1,69 +1,83 @@
 const std = @import("std");
 const c = @import("constants");
 const COMPOUNDING_WITHDRAWAL_PREFIX = c.COMPOUNDING_WITHDRAWAL_PREFIX;
-const types = @import("consensus_types");
+const ct = @import("consensus_types");
 const MIN_ACTIVATION_BALANCE = @import("preset").preset.MIN_ACTIVATION_BALANCE;
 const GENESIS_SLOT = @import("preset").GENESIS_SLOT;
 
-pub const WithdrawalCredentials = types.primitive.Root.Type;
-pub const WithdrawalCredentialsLength = types.primitive.Root.length;
-const BLSPubkey = types.primitive.BLSPubkey.Type;
-const ValidatorIndex = types.primitive.ValidatorIndex.Type;
+pub const WithdrawalCredentials = ct.primitive.Root.Type;
+const BLSPubkey = ct.primitive.BLSPubkey.Type;
+const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
 
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const hasEth1WithdrawalCredential = @import("./capella.zig").hasEth1WithdrawalCredential;
 const G2_POINT_AT_INFINITY = @import("constants").G2_POINT_AT_INFINITY;
 const Allocator = std.mem.Allocator;
 
-pub fn hasCompoundingWithdrawalCredential(withdrawal_credentials: WithdrawalCredentials) bool {
+pub fn hasCompoundingWithdrawalCredential(withdrawal_credentials: *const WithdrawalCredentials) bool {
     return withdrawal_credentials[0] == COMPOUNDING_WITHDRAWAL_PREFIX;
 }
 
-pub fn hasExecutionWithdrawalCredential(withdrawal_credentials: WithdrawalCredentials) bool {
+pub fn hasExecutionWithdrawalCredential(withdrawal_credentials: *const WithdrawalCredentials) bool {
     return hasCompoundingWithdrawalCredential(withdrawal_credentials) or hasEth1WithdrawalCredential(withdrawal_credentials);
 }
 
-pub fn switchToCompoundingValidator(allocator: Allocator, state_cache: *CachedBeaconStateAllForks, index: ValidatorIndex) !void {
-    var validator = &state_cache.state.validators().items[index];
+pub fn switchToCompoundingValidator(state_cache: *CachedBeaconState, index: ValidatorIndex) !void {
+    var validators = try state_cache.state.validators();
+    var validator = try validators.get(index);
+    const old_withdrawal_credentials = try validator.getRoot("withdrawal_credentials");
 
-    // directly modifying the byte leads to types.primitive missing the modification resulting into
-    // wrong root compute, although slicing can be avoided but anyway this is not going
-    // to be a hot path so its better to clean slice and avoid side effects
-    var new_withdrawal_credentials = [_]u8{0} ** WithdrawalCredentialsLength;
-    std.mem.copyForwards(u8, new_withdrawal_credentials[0..], validator.withdrawal_credentials[0..]);
+    var new_withdrawal_credentials: [32]u8 = undefined;
+    @memcpy(new_withdrawal_credentials[0..], old_withdrawal_credentials[0..]);
     new_withdrawal_credentials[0] = COMPOUNDING_WITHDRAWAL_PREFIX;
-    @memcpy(validator.withdrawal_credentials[0..], new_withdrawal_credentials[0..]);
-    try queueExcessActiveBalance(allocator, state_cache, index);
+
+    try validator.setValue("withdrawal_credentials", &new_withdrawal_credentials);
+
+    var pubkey: ct.primitive.BLSPubkey.Type = undefined;
+    try validator.getValue(undefined, "pubkey", &pubkey);
+
+    try queueExcessActiveBalance(
+        state_cache,
+        index,
+        &new_withdrawal_credentials,
+        pubkey,
+    );
 }
 
-pub fn queueExcessActiveBalance(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, index: ValidatorIndex) !void {
+pub fn queueExcessActiveBalance(
+    cached_state: *CachedBeaconState,
+    index: ValidatorIndex,
+    withdrawal_credentials: *const WithdrawalCredentials,
+    pubkey: ct.primitive.BLSPubkey.Type,
+) !void {
     const state = cached_state.state;
-    const balance = &state.balances().items[index];
-    if (balance.* > MIN_ACTIVATION_BALANCE) {
-        const validator = state.validators().items[index];
-        const excess_balance = balance.* - MIN_ACTIVATION_BALANCE;
-        balance.* = MIN_ACTIVATION_BALANCE;
+    var balances = try state.balances();
+    const balance = try balances.get(index);
+    if (balance > MIN_ACTIVATION_BALANCE) {
+        const excess_balance = balance - MIN_ACTIVATION_BALANCE;
+        try balances.set(index, MIN_ACTIVATION_BALANCE);
 
-        const pending_deposit = types.electra.PendingDeposit.Type{
-            .pubkey = validator.pubkey,
-            .withdrawal_credentials = validator.withdrawal_credentials,
+        const pending_deposit = ct.electra.PendingDeposit.Type{
+            .pubkey = pubkey,
+            .withdrawal_credentials = withdrawal_credentials.*,
             .amount = excess_balance,
             // Use bls.G2_POINT_AT_INFINITY as a signature field placeholder
             .signature = G2_POINT_AT_INFINITY,
             //  Use GENESIS_SLOT to distinguish from a pending deposit request
             .slot = GENESIS_SLOT,
         };
-
-        try state.pendingDeposits().append(allocator, pending_deposit);
+        var pending_deposits = try state.pendingDeposits();
+        try pending_deposits.pushValue(&pending_deposit);
     }
 }
 
-pub fn isPubkeyKnown(cached_state: *const CachedBeaconStateAllForks, pubkey: BLSPubkey) bool {
-    return isValidatorKnown(cached_state.state, cached_state.getEpochCache().getValidatorIndex(&pubkey));
+pub fn isPubkeyKnown(cached_state: *CachedBeaconState, pubkey: BLSPubkey) !bool {
+    return try isValidatorKnown(cached_state.state, cached_state.getEpochCache().getValidatorIndex(&pubkey));
 }
 
-pub fn isValidatorKnown(state: *const BeaconStateAllForks, index: ?ValidatorIndex) bool {
+pub fn isValidatorKnown(state: *BeaconState, index: ?ValidatorIndex) !bool {
     const validator_index = index orelse return false;
-    return validator_index < state.validators().items.len;
+    const validators_count = try state.validatorsCount();
+    return validator_index < validators_count;
 }

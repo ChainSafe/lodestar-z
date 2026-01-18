@@ -1,13 +1,15 @@
 const ssz = @import("consensus_types");
+const Node = @import("persistent_merkle_tree").Node;
 const Allocator = std.mem.Allocator;
 const Root = ssz.primitive.Root.Type;
 const ForkSeq = @import("config").ForkSeq;
 const Preset = @import("preset").Preset;
 const preset = @import("preset").preset;
+const active_preset = @import("preset").active_preset;
 const std = @import("std");
 const state_transition = @import("state_transition");
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
-const BeaconStateAllForks = state_transition.BeaconStateAllForks;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+const BeaconState = state_transition.BeaconState;
 const EpochTransitionCache = state_transition.EpochTransitionCache;
 const Withdrawals = ssz.capella.Withdrawals.Type;
 const WithdrawalsResult = state_transition.WithdrawalsResult;
@@ -46,39 +48,44 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
     const tc_utils = TestCaseUtils(fork);
 
     return struct {
-        pre: TestCachedBeaconStateAllForks,
+        pre: TestCachedBeaconState,
         // a null post state means the test is expected to fail
-        post: ?BeaconStateAllForks,
+        post: ?*BeaconState,
 
         const Self = @This();
 
         pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
-            var tc = try Self.init(allocator, dir);
+            const pool_size = if (active_preset == .mainnet) 10_000_000 else 1_000_000;
+            var pool = try Node.Pool.init(allocator, pool_size);
+            defer pool.deinit();
+
+            var tc = try Self.init(allocator, &pool, dir);
             defer tc.deinit();
 
             try tc.runTest();
         }
 
-        pub fn init(allocator: std.mem.Allocator, dir: std.fs.Dir) !Self {
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
             var tc = Self{
                 .pre = undefined,
                 .post = undefined,
             };
 
             // load pre state
-            tc.pre = try tc_utils.loadPreState(allocator, dir);
+            tc.pre = try tc_utils.loadPreState(allocator, pool, dir);
             errdefer tc.pre.deinit();
 
             // load pre state
-            tc.post = try tc_utils.loadPostState(allocator, dir);
+            tc.post = try tc_utils.loadPostState(allocator, pool, dir);
 
             return tc;
         }
 
         pub fn deinit(self: *Self) void {
             self.pre.deinit();
-            if (self.post) |*post| {
-                post.deinit(self.pre.allocator);
+            if (self.post) |post| {
+                post.deinit();
+                self.pre.allocator.destroy(post);
             }
             state_transition.deinitStateTransition();
         }
@@ -86,7 +93,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
         fn runTest(self: *Self) !void {
             if (self.post) |post| {
                 try self.process();
-                try expectEqualBeaconStates(post, self.pre.cached_state.state.*);
+                try expectEqualBeaconStates(post, self.pre.cached_state.state);
             } else {
                 self.process() catch |err| {
                     if (err == error.SkipZigTest) {
@@ -108,22 +115,22 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
             }
 
             switch (epoch_process_fn) {
-                .effective_balance_updates => _ = try state_transition.processEffectiveBalanceUpdates(pre, epoch_transition_cache),
-                .eth1_data_reset => state_transition.processEth1DataReset(allocator, pre, epoch_transition_cache),
-                .historical_roots_update => try state_transition.processHistoricalRootsUpdate(allocator, pre, epoch_transition_cache),
+                .effective_balance_updates => _ = try state_transition.processEffectiveBalanceUpdates(allocator, pre, epoch_transition_cache),
+                .eth1_data_reset => try state_transition.processEth1DataReset(pre, epoch_transition_cache),
+                .historical_roots_update => try state_transition.processHistoricalRootsUpdate(pre, epoch_transition_cache),
                 .inactivity_updates => try state_transition.processInactivityUpdates(pre, epoch_transition_cache),
                 .justification_and_finalization => try state_transition.processJustificationAndFinalization(pre, epoch_transition_cache),
-                .participation_flag_updates => try state_transition.processParticipationFlagUpdates(allocator, pre),
-                .participation_record_updates => state_transition.processParticipationRecordUpdates(allocator, pre),
-                .randao_mixes_reset => state_transition.processRandaoMixesReset(pre, epoch_transition_cache),
+                .participation_flag_updates => try state_transition.processParticipationFlagUpdates(pre),
+                .participation_record_updates => try state_transition.processParticipationRecordUpdates(pre),
+                .randao_mixes_reset => try state_transition.processRandaoMixesReset(pre, epoch_transition_cache),
                 .registry_updates => try state_transition.processRegistryUpdates(pre, epoch_transition_cache),
                 .rewards_and_penalties => try state_transition.processRewardsAndPenalties(allocator, pre, epoch_transition_cache),
                 .slashings => try state_transition.processSlashings(allocator, pre, epoch_transition_cache),
-                .slashings_reset => state_transition.processSlashingsReset(pre, epoch_transition_cache),
+                .slashings_reset => try state_transition.processSlashingsReset(pre, epoch_transition_cache),
                 .sync_committee_updates => try state_transition.processSyncCommitteeUpdates(allocator, pre),
-                .historical_summaries_update => try state_transition.processHistoricalSummariesUpdate(allocator, pre, epoch_transition_cache),
+                .historical_summaries_update => try state_transition.processHistoricalSummariesUpdate(pre, epoch_transition_cache),
                 .pending_deposits => try state_transition.processPendingDeposits(allocator, pre, epoch_transition_cache),
-                .pending_consolidations => try state_transition.processPendingConsolidations(allocator, pre, epoch_transition_cache),
+                .pending_consolidations => try state_transition.processPendingConsolidations(pre, epoch_transition_cache),
                 .proposer_lookahead => {
                     try state_transition.processProposerLookahead(allocator, pre, epoch_transition_cache);
                 },

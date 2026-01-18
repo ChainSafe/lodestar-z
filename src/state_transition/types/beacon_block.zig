@@ -428,11 +428,11 @@ pub const BeaconBlockBody = union(enum) {
     // bellatrix fields
     pub fn executionPayload(self: *const BeaconBlockBody) ExecutionPayload {
         return switch (self.*) {
-            .bellatrix => |body| .{ .bellatrix = &body.execution_payload },
-            .capella => |body| .{ .capella = &body.execution_payload },
-            .deneb => |body| .{ .deneb = &body.execution_payload },
-            .electra => |body| .{ .electra = &body.execution_payload },
-            .fulu => |body| .{ .electra = &body.execution_payload },
+            .bellatrix => |body| .{ .bellatrix = body.execution_payload },
+            .capella => |body| .{ .capella = body.execution_payload },
+            .deneb => |body| .{ .deneb = body.execution_payload },
+            .electra => |body| .{ .electra = body.execution_payload },
+            .fulu => |body| .{ .fulu = body.execution_payload },
             else => panic("ExecutionPayload is not available in {}", .{self}),
         };
     }
@@ -557,9 +557,9 @@ pub const BlindedBeaconBlockBody = union(enum) {
     // bellatrix fields
     pub fn executionPayloadHeader(self: *const BlindedBeaconBlockBody) ExecutionPayloadHeader {
         return switch (self.*) {
-            .capella => |body| .{ .capella = &body.execution_payload_header },
-            .deneb => |body| .{ .deneb = &body.execution_payload_header },
-            .electra => |body| .{ .electra = &body.execution_payload_header },
+            .capella => |body| .{ .capella = body.execution_payload_header },
+            .deneb => |body| .{ .deneb = body.execution_payload_header },
+            .electra => |body| .{ .electra = body.execution_payload_header },
         };
     }
 
@@ -667,11 +667,9 @@ fn testBlockSanity(Block: type) !void {
     if (is_blinded) {
         // Blinded blocks do not have the execution payload in plain
         try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 32, &block_body.executionPayloadHeader().electra.parent_hash);
-        // another way to access the parent_hash
         try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 32, &block_body.executionPayloadHeader().getParentHash());
     } else {
         try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 32, &block_body.executionPayload().electra.parent_hash);
-        // another way to access the parent_hash
         try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 32, &block_body.executionPayload().getParentHash());
     }
 

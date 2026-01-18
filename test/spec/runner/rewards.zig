@@ -1,9 +1,10 @@
 const std = @import("std");
+const Node = @import("persistent_merkle_tree").Node;
 const ct = @import("consensus_types");
 const ssz = @import("ssz");
 const ForkSeq = @import("config").ForkSeq;
 const state_transition = @import("state_transition");
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const TestCaseUtils = @import("../test_case.zig").TestCaseUtils;
 const loadSszValue = @import("../test_case.zig").loadSszSnappyValue;
 
@@ -11,6 +12,7 @@ const EpochTransitionCache = state_transition.EpochTransitionCache;
 const getRewardsAndPenaltiesFn = state_transition.getRewardsAndPenalties;
 
 const preset = @import("preset").preset;
+const active_preset = @import("preset").active_preset;
 
 pub const Handler = enum {
     basic,
@@ -28,7 +30,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
     const tc_utils = TestCaseUtils(fork);
 
     return struct {
-        pre: TestCachedBeaconStateAllForks,
+        pre: TestCachedBeaconState,
         expected_rewards: []u64,
         expected_penalties: []u64,
         actual_rewards: []u64,
@@ -37,7 +39,11 @@ pub fn TestCase(comptime fork: ForkSeq) type {
         const Self = @This();
 
         pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
-            var tc = try Self.init(allocator, dir);
+            const pool_size = if (active_preset == .mainnet) 10_000_000 else 1_000_000;
+            var pool = try Node.Pool.init(allocator, pool_size);
+            defer pool.deinit();
+
+            var tc = try Self.init(allocator, &pool, dir);
             defer {
                 tc.deinit();
                 state_transition.deinitStateTransition();
@@ -46,12 +52,12 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             try tc.runTest();
         }
 
-        fn init(allocator: std.mem.Allocator, dir: std.fs.Dir) !Self {
-            var pre_state = try tc_utils.loadPreState(allocator, dir);
+        fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
+            var pre_state = try tc_utils.loadPreState(allocator, pool, dir);
             errdefer pre_state.deinit();
 
             const cache_allocator = pre_state.allocator;
-            const validator_count = pre_state.cached_state.state.validators().items.len;
+            const validator_count = try pre_state.cached_state.state.validatorsCount();
             const expected = try Self.buildExpectedRewardsPenalties(cache_allocator, dir, validator_count);
 
             return .{
@@ -159,7 +165,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
         fn process(self: *Self) !void {
             const allocator = self.pre.allocator;
-            const cloned_state = try self.pre.cached_state.clone(allocator);
+            const cloned_state = try self.pre.cached_state.clone(allocator, .{ .transfer_cache = false });
             defer {
                 cloned_state.deinit();
                 allocator.destroy(cloned_state);

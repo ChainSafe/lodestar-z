@@ -1,8 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const state_transition = @import("state_transition");
 const EpochTransitionCache = state_transition.EpochTransitionCache;
+const Node = @import("persistent_merkle_tree").Node;
 
 pub const TestOpt = struct {
     alloc: bool = false,
@@ -17,8 +18,11 @@ pub fn TestRunner(process_epoch_fn: anytype, opt: TestOpt) type {
             const allocator = std.testing.allocator;
             const validator_count_arr = &.{ 256, 10_000 };
 
+            var pool = try Node.Pool.init(allocator, 1024);
+            defer pool.deinit();
+
             inline for (validator_count_arr) |validator_count| {
-                var test_state = try TestCachedBeaconStateAllForks.init(allocator, validator_count);
+                var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);
                 defer test_state.deinit();
 
                 if (opt.fulu) {

@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const getBlockRootFn = @import("../utils/block_root.zig").getBlockRoot;
 const getBlockRootAtSlotFn = @import("../utils/block_root.zig").getBlockRootAtSlot;
 const types = @import("consensus_types");
@@ -14,27 +14,32 @@ pub const RootCache = struct {
     allocator: Allocator,
     current_justified_checkpoint: Checkpoint,
     previous_justified_checkpoint: Checkpoint,
-    state: *const BeaconStateAllForks,
-    block_root_epoch_cache: std.AutoHashMap(Epoch, Root),
-    block_root_slot_cache: std.AutoHashMap(Slot, Root),
+    state: *BeaconState,
+    block_root_epoch_cache: std.AutoHashMap(Epoch, *const Root),
+    block_root_slot_cache: std.AutoHashMap(Slot, *const Root),
 
-    pub fn init(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks) !*RootCache {
+    pub fn init(allocator: Allocator, cached_state: *CachedBeaconState) !*RootCache {
         const instance = try allocator.create(RootCache);
         errdefer allocator.destroy(instance);
         const state = cached_state.state;
+
+        var current_justified_checkpoint: Checkpoint = undefined;
+        var previous_justified_checkpoint: Checkpoint = undefined;
+        try state.currentJustifiedCheckpoint(&current_justified_checkpoint);
+        try state.previousJustifiedCheckpoint(&previous_justified_checkpoint);
         instance.* = RootCache{
             .allocator = allocator,
-            .current_justified_checkpoint = state.currentJustifiedCheckpoint().*,
-            .previous_justified_checkpoint = state.previousJustifiedCheckpoint().*,
+            .current_justified_checkpoint = current_justified_checkpoint,
+            .previous_justified_checkpoint = previous_justified_checkpoint,
             .state = state,
-            .block_root_epoch_cache = std.AutoHashMap(Epoch, Root).init(allocator),
-            .block_root_slot_cache = std.AutoHashMap(Slot, Root).init(allocator),
+            .block_root_epoch_cache = std.AutoHashMap(Epoch, *const Root).init(allocator),
+            .block_root_slot_cache = std.AutoHashMap(Slot, *const Root).init(allocator),
         };
 
         return instance;
     }
 
-    pub fn getBlockRoot(self: *RootCache, epoch: Epoch) !Root {
+    pub fn getBlockRoot(self: *RootCache, epoch: Epoch) !*const Root {
         if (self.block_root_epoch_cache.get(epoch)) |root| {
             return root;
         } else {
@@ -44,7 +49,7 @@ pub const RootCache = struct {
         }
     }
 
-    pub fn getBlockRootAtSlot(self: *RootCache, slot: Slot) !Root {
+    pub fn getBlockRootAtSlot(self: *RootCache, slot: Slot) !*const Root {
         if (self.block_root_slot_cache.get(slot)) |root| {
             return root;
         } else {

@@ -3,6 +3,7 @@
 const std = @import("std");
 const c = @import("config");
 const preset = @import("preset").preset;
+const Node = @import("persistent_merkle_tree").Node;
 const state_transition = @import("state_transition");
 const snappy = @import("snappy").frame;
 const e2s = @import("e2s.zig");
@@ -17,19 +18,37 @@ era_number: u64,
 short_historical_root: [8]u8,
 /// An array of state and block indices, one per group
 group_indices: []era.GroupIndex,
+/// Persistent merkle tree pool used by TreeViews (must outlive returned views)
+pool: *Node.Pool,
 
 const Reader = @This();
 
 pub fn open(allocator: std.mem.Allocator, config: c.BeaconConfig, path: []const u8) !Reader {
     const file = try std.fs.cwd().openFile(path, .{});
+    errdefer file.close();
     const era_file_name = try era.EraFileName.parse(path);
     const group_indices = try era.readAllGroupIndices(allocator, file);
+    errdefer {
+        for (group_indices) |group_index| {
+            allocator.free(group_index.state_index.offsets);
+            if (group_index.blocks_index) |bi| {
+                allocator.free(bi.offsets);
+            }
+        }
+        allocator.free(group_indices);
+    }
+
+    const pool = try allocator.create(Node.Pool);
+    errdefer allocator.destroy(pool);
+    pool.* = try Node.Pool.init(allocator, 500_000);
+    errdefer pool.deinit();
     return .{
         .config = config,
         .file = file,
         .era_number = era_file_name.era_number,
         .short_historical_root = era_file_name.short_historical_root,
         .group_indices = group_indices,
+        .pool = pool,
     };
 }
 
@@ -42,6 +61,11 @@ pub fn close(self: *Reader, allocator: std.mem.Allocator) void {
         }
     }
     allocator.free(self.group_indices);
+
+    self.pool.deinit();
+    allocator.destroy(self.pool);
+
+    self.* = undefined;
 }
 
 pub fn readCompressedState(self: Reader, allocator: std.mem.Allocator, era_number: ?u64) ![]const u8 {
@@ -67,14 +91,14 @@ pub fn readSerializedState(self: Reader, allocator: std.mem.Allocator, era_numbe
     return try snappy.uncompress(allocator, compressed) orelse error.InvalidE2SHeader;
 }
 
-pub fn readState(self: Reader, allocator: std.mem.Allocator, era_number: ?u64) !state_transition.BeaconStateAllForks {
+pub fn readState(self: Reader, allocator: std.mem.Allocator, era_number: ?u64) !state_transition.BeaconState {
     const serialized = try self.readSerializedState(allocator, era_number);
     defer allocator.free(serialized);
 
     const state_slot = era.readSlotFromBeaconStateBytes(serialized);
     const state_fork = self.config.forkSeq(state_slot);
 
-    return try state_transition.BeaconStateAllForks.deserialize(allocator, state_fork, serialized);
+    return try state_transition.BeaconState.deserialize(allocator, self.pool, state_fork, serialized);
 }
 
 pub fn readCompressedBlock(self: Reader, allocator: std.mem.Allocator, slot: u64) !?[]const u8 {
@@ -143,9 +167,9 @@ pub fn validate(self: Reader, allocator: std.mem.Allocator) !void {
         // validate state
         // the state is loadable and consistent with the given config
         var state = try self.readState(allocator, era_number);
-        defer state.deinit(allocator);
+        defer state.deinit();
 
-        if (!std.mem.eql(u8, &self.config.genesis_validator_root, &state.genesisValidatorsRoot())) {
+        if (!std.mem.eql(u8, &self.config.genesis_validator_root, try state.genesisValidatorsRoot())) {
             return error.GenesisValidatorRootMismatch;
         }
 
@@ -166,18 +190,21 @@ pub fn validate(self: Reader, allocator: std.mem.Allocator) !void {
                 return error.InvalidBlockIndex;
             }
 
-            const blockRoots = state.blockRoots();
+            var blockRoots = try state.blockRoots();
             for (start_slot..end_slot) |slot| {
                 const block = try self.readBlock(allocator, slot) orelse {
                     if (slot == start_slot) {
                         // first slot in the era can't be easily validated
                         continue;
                     }
-                    if (std.mem.eql(
-                        u8,
-                        &blockRoots[(slot - 1) % preset.SLOTS_PER_HISTORICAL_ROOT],
-                        &blockRoots[slot % preset.SLOTS_PER_HISTORICAL_ROOT],
-                    )) {
+                    var prev_root: [32]u8 = undefined;
+                    var curr_root: [32]u8 = undefined;
+                    var prev_view = try blockRoots.get(@intCast((slot - 1) % preset.SLOTS_PER_HISTORICAL_ROOT));
+                    try prev_view.toValue(allocator, &prev_root);
+                    var curr_view = try blockRoots.get(@intCast(slot % preset.SLOTS_PER_HISTORICAL_ROOT));
+                    try curr_view.toValue(allocator, &curr_root);
+
+                    if (std.mem.eql(u8, &prev_root, &curr_root)) {
                         continue;
                     }
                     return error.MissingBlock;
@@ -187,11 +214,11 @@ pub fn validate(self: Reader, allocator: std.mem.Allocator) !void {
                 var block_root: [32]u8 = undefined;
                 try block.beaconBlock().hashTreeRoot(allocator, &block_root);
 
-                if (!std.mem.eql(
-                    u8,
-                    &blockRoots[slot % preset.SLOTS_PER_HISTORICAL_ROOT],
-                    &block_root,
-                )) {
+                var expected_root: [32]u8 = undefined;
+                var expected_view = try blockRoots.get(@intCast(slot % preset.SLOTS_PER_HISTORICAL_ROOT));
+                try expected_view.toValue(allocator, &expected_root);
+
+                if (!std.mem.eql(u8, &expected_root, &block_root)) {
                     return error.BlockRootMismatch;
                 }
             }

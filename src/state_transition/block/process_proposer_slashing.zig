@@ -1,4 +1,4 @@
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
 const ProposerSlashing = types.phase0.ProposerSlashing.Type;
@@ -8,7 +8,7 @@ const verifySignature = @import("../utils/signature_sets.zig").verifySingleSigna
 const slashValidator = @import("./slash_validator.zig").slashValidator;
 
 pub fn processProposerSlashing(
-    cached_state: *const CachedBeaconStateAllForks,
+    cached_state: *CachedBeaconState,
     proposer_slashing: *const ProposerSlashing,
     verify_signatures: bool,
 ) !void {
@@ -18,7 +18,7 @@ pub fn processProposerSlashing(
 }
 
 pub fn assertValidProposerSlashing(
-    cached_state: *const CachedBeaconStateAllForks,
+    cached_state: *CachedBeaconState,
     proposer_slashing: *const ProposerSlashing,
     verify_signature: bool,
 ) !void {
@@ -37,7 +37,9 @@ pub fn assertValidProposerSlashing(
         return error.InvalidProposerSlashingProposerIndexMismatch;
     }
 
-    if (header_1.proposer_index >= state.validators().items.len) {
+    var validators_view = try state.validators();
+    const validators_len = try validators_view.length();
+    if (header_1.proposer_index >= validators_len) {
         return error.InvalidProposerSlashingProposerIndexOutOfRange;
     }
 
@@ -47,7 +49,9 @@ pub fn assertValidProposerSlashing(
     }
 
     // verify the proposer is slashable
-    const proposer = state.validators().items[header_1.proposer_index];
+    var proposer_view = try validators_view.get(header_1.proposer_index);
+    var proposer: types.phase0.Validator.Type = undefined;
+    try proposer_view.toValue(cached_state.allocator, &proposer);
     if (!isSlashableValidator(&proposer, epoch_cache.epoch)) {
         return error.InvalidProposerSlashingProposerNotSlashable;
     }

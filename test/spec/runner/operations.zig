@@ -1,12 +1,14 @@
+const std = @import("std");
+const Node = @import("persistent_merkle_tree").Node;
 const ssz = @import("consensus_types");
 const Root = ssz.primitive.Root.Type;
 const ForkSeq = @import("config").ForkSeq;
 const Preset = @import("preset").Preset;
 const preset = @import("preset").preset;
-const std = @import("std");
+const active_preset = @import("preset").active_preset;
 const state_transition = @import("state_transition");
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
-const BeaconStateAllForks = state_transition.BeaconStateAllForks;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+const BeaconState = state_transition.BeaconState;
 const Withdrawals = ssz.capella.Withdrawals.Type;
 const WithdrawalsResult = state_transition.WithdrawalsResult;
 const test_case = @import("../test_case.zig");
@@ -73,22 +75,29 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
     const OpType = @field(ForkTypes, operation.operationObject());
 
     return struct {
-        pre: TestCachedBeaconStateAllForks,
+        pre: TestCachedBeaconState,
         // a null post state means the test is expected to fail
-        post: ?BeaconStateAllForks,
+        post: ?*BeaconState,
         op: OpType.Type,
         bls_setting: BlsSetting,
 
         const Self = @This();
 
         pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
-            var tc = try Self.init(allocator, dir);
-            defer tc.deinit();
+            const pool_size = if (active_preset == .mainnet) 10_000_000 else 1_000_000;
+            var pool = try Node.Pool.init(allocator, pool_size);
+            defer pool.deinit();
+
+            var tc = try Self.init(allocator, &pool, dir);
+            defer {
+                tc.deinit();
+                state_transition.deinitStateTransition();
+            }
 
             try tc.runTest();
         }
 
-        pub fn init(allocator: std.mem.Allocator, dir: std.fs.Dir) !Self {
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
             var tc = Self{
                 .pre = undefined,
                 .post = undefined,
@@ -97,11 +106,11 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
             };
 
             // load pre state
-            tc.pre = try tc_utils.loadPreState(allocator, dir);
+            tc.pre = try tc_utils.loadPreState(allocator, pool, dir);
             errdefer tc.pre.deinit();
 
             // load pre state
-            tc.post = try tc_utils.loadPostState(allocator, dir);
+            tc.post = try tc_utils.loadPostState(allocator, pool, dir);
 
             // load the op
             try loadSszValue(OpType, allocator, dir, comptime operation.inputName() ++ ".ssz_snappy", &tc.op);
@@ -119,8 +128,9 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 OpType.deinit(self.pre.allocator, &self.op);
             }
             self.pre.deinit();
-            if (self.post) |*post| {
-                post.deinit(self.pre.allocator);
+            if (self.post) |post| {
+                post.deinit();
+                self.pre.allocator.destroy(post);
             }
         }
 
@@ -154,13 +164,13 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     try state_transition.processBlsToExecutionChange(self.pre.cached_state, &self.op);
                 },
                 .consolidation_request => {
-                    try state_transition.processConsolidationRequest(allocator, self.pre.cached_state, &self.op);
+                    try state_transition.processConsolidationRequest(self.pre.cached_state, &self.op);
                 },
                 .deposit => {
                     try state_transition.processDeposit(allocator, self.pre.cached_state, &self.op);
                 },
                 .deposit_request => {
-                    try state_transition.processDepositRequest(allocator, self.pre.cached_state, &self.op);
+                    try state_transition.processDepositRequest(self.pre.cached_state, &self.op);
                 },
                 .execution_payload => {
                     try state_transition.processExecutionPayload(
@@ -180,7 +190,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     try state_transition.processVoluntaryExit(self.pre.cached_state, &self.op, verify);
                 },
                 .withdrawal_request => {
-                    try state_transition.processWithdrawalRequest(allocator, self.pre.cached_state, &self.op);
+                    try state_transition.processWithdrawalRequest(self.pre.cached_state, &self.op);
                 },
                 .withdrawals => {
                     var withdrawals_result = WithdrawalsResult{
@@ -208,7 +218,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
         pub fn runTest(self: *Self) !void {
             if (self.post) |post| {
                 try self.process();
-                try expectEqualBeaconStates(post, self.pre.cached_state.state.*);
+                try expectEqualBeaconStates(post, self.pre.cached_state.state);
             } else {
                 self.process() catch |err| {
                     if (err == error.SkipZigTest) {

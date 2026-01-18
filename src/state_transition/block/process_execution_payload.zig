@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
@@ -24,7 +24,7 @@ const PartialPayload = struct {
 
 pub fn processExecutionPayload(
     allocator: Allocator,
-    cached_state: *const CachedBeaconStateAllForks,
+    cached_state: *CachedBeaconState,
     body: Body,
     external_data: BlockExternalData,
 ) !void {
@@ -54,15 +54,15 @@ pub fn processExecutionPayload(
     // Verify consistency of the parent hash, block number, base fee per gas and gas limit
     // with respect to the previous execution payload header
     if (isMergeTransitionComplete(state)) {
-        const latest_header = state.latestExecutionPayloadHeader();
-        if (!std.mem.eql(u8, &partial_payload.parent_hash, &latest_header.getBlockHash())) {
+        const latest_block_hash = try state.latestExecutionPayloadHeaderBlockHash();
+        if (!std.mem.eql(u8, &partial_payload.parent_hash, latest_block_hash)) {
             return error.InvalidExecutionPayloadParentHash;
         }
     }
 
     // Verify random
-    const expected_random = getRandaoMix(state, epoch_cache.epoch);
-    if (!std.mem.eql(u8, &partial_payload.prev_randao, &expected_random)) {
+    const expected_random = try getRandaoMix(state, epoch_cache.epoch);
+    if (!std.mem.eql(u8, &partial_payload.prev_randao, expected_random)) {
         return error.InvalidExecutionPayloadRandom;
     }
 
@@ -72,12 +72,12 @@ pub fn processExecutionPayload(
     // def compute_timestamp_at_slot(state: BeaconState, slot: Slot) -> uint64:
     //   slots_since_genesis = slot - GENESIS_SLOT
     //   return uint64(state.genesis_time + slots_since_genesis * SECONDS_PER_SLOT)
-    if (partial_payload.timestamp != state.genesisTime() + state.slot() * config.chain.SECONDS_PER_SLOT) {
+    if (partial_payload.timestamp != (try state.genesisTime()) + (try state.slot()) * config.chain.SECONDS_PER_SLOT) {
         return error.InvalidExecutionPayloadTimestamp;
     }
 
-    if (state.isPostDeneb()) {
-        const max_blobs_per_block = config.getMaxBlobsPerBlock(computeEpochAtSlot(state.slot()));
+    if (state.forkSeq().gte(.deneb)) {
+        const max_blobs_per_block = config.getMaxBlobsPerBlock(computeEpochAtSlot(try state.slot()));
         if (body.blobKzgCommitmentsLen() > max_blobs_per_block) {
             return error.BlobKzgCommitmentsExceedsLimit;
         }
@@ -96,12 +96,12 @@ pub fn processExecutionPayload(
         return error.InvalidExecutionPayload;
     }
 
-    var payload_header: ExecutionPayloadHeader = undefined;
+    var payload_header = try ExecutionPayloadHeader.init(state.forkSeq());
     switch (body) {
         .regular => |b| try b.executionPayload().createPayloadHeader(allocator, &payload_header),
         .blinded => |b| try b.executionPayloadHeader().clone(allocator, &payload_header),
     }
-    defer payload_header.destroy(allocator);
+    defer payload_header.deinit(allocator);
 
-    state.setLatestExecutionPayloadHeader(allocator, payload_header);
+    try state.setLatestExecutionPayloadHeader(&payload_header);
 }

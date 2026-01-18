@@ -8,6 +8,7 @@ const OffsetIterator = @import("offsets.zig").OffsetIterator;
 const merkleize = @import("hashing").merkleize;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
+const getZeroHash = @import("hashing").getZeroHash;
 const Node = @import("persistent_merkle_tree").Node;
 const tree_view = @import("../tree_view/root.zig");
 const ListBasicTreeView = tree_view.ListBasicTreeView;
@@ -38,6 +39,12 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
 
         pub const default_value: Type = Type.empty;
 
+        pub const default_root: [32]u8 = blk: {
+            var buf = getZeroHash(chunk_depth).*;
+            mixInLength(0, &buf);
+            break :blk buf;
+        };
+
         pub fn equals(a: *const Type, b: *const Type) bool {
             if (a.items.len != b.items.len) {
                 return false;
@@ -52,6 +59,12 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
 
         pub fn deinit(allocator: std.mem.Allocator, value: *Type) void {
             value.deinit(allocator);
+        }
+
+        pub fn chunkIndex(index: usize) usize {
+            if (comptime isBasicType(Element)) {
+                return (index * Element.fixed_size) / 32;
+            } else return index;
         }
 
         pub fn chunkCount(value: *const Type) usize {
@@ -199,6 +212,42 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
         };
 
         pub const tree = struct {
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                return try pool.createBranch(
+                    @enumFromInt(chunk_depth),
+                    @enumFromInt(0),
+                );
+            }
+
+            pub fn zeros(pool: *Node.Pool, len: usize) !Node.Id {
+                if (len > limit) {
+                    return error.gtLimit;
+                }
+
+                const len_mixin = try pool.createLeafFromUint(len);
+                errdefer pool.unref(len_mixin);
+
+                if (comptime isBasicType(Element)) {
+                    const content_root: Node.Id = @enumFromInt(chunk_depth);
+                    return try pool.createBranch(content_root, len_mixin);
+                } else {
+                    var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                    errdefer it.deinit();
+
+                    const element_zero = try Element.tree.default(pool);
+                    errdefer pool.unref(element_zero);
+
+                    for (0..len) |_| {
+                        try it.append(element_zero);
+                    }
+
+                    const content_root = try it.finish();
+                    errdefer pool.unref(content_root);
+
+                    return try pool.createBranch(content_root, len_mixin);
+                }
+            }
+
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 const len = try std.math.divExact(usize, data.len, Element.fixed_size);
                 if (len > limit) {
@@ -410,6 +459,12 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
 
         pub const default_value: Type = Type.empty;
 
+        pub const default_root: [32]u8 = blk: {
+            var buf = getZeroHash(chunk_depth).*;
+            mixInLength(0, &buf);
+            break :blk buf;
+        };
+
         pub fn equals(a: *const Type, b: *const Type) bool {
             if (a.items.len != b.items.len) {
                 return false;
@@ -571,6 +626,37 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
         };
 
         pub const tree = struct {
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                return try pool.createBranch(
+                    @enumFromInt(chunk_depth),
+                    @enumFromInt(0),
+                );
+            }
+
+            pub fn zeros(pool: *Node.Pool, len: usize) !Node.Id {
+                if (len > limit) {
+                    return error.gtLimit;
+                }
+
+                const len_mixin = try pool.createLeafFromUint(len);
+                errdefer pool.unref(len_mixin);
+
+                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                errdefer it.deinit();
+
+                const element_zero = try Element.tree.default(pool);
+                errdefer pool.unref(element_zero);
+
+                for (0..len) |_| {
+                    try it.append(element_zero);
+                }
+
+                const content_root = try it.finish();
+                errdefer pool.unref(content_root);
+
+                return try pool.createBranch(content_root, len_mixin);
+            }
+
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 var iterator = OffsetIterator(Self).init(data);
                 const first_offset = if (data.len == 0) 0 else try iterator.next();
@@ -1699,5 +1785,83 @@ test "VariableListType of FixedList" {
 
     for (test_cases[0..]) |*tc| {
         try TypeTest.run(allocator, tc);
+    }
+}
+
+test "FixedListType - default_root" {
+    const ListU32 = FixedListType(UintType(32), 16);
+    var expected_root: [32]u8 = undefined;
+
+    try ListU32.hashTreeRoot(std.testing.allocator, &ListU32.default_value, &expected_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &ListU32.default_root);
+
+    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    defer pool.deinit();
+
+    const node = try ListU32.tree.default(&pool);
+    try std.testing.expectEqualSlices(u8, &expected_root, node.getRoot(&pool));
+}
+
+test "VariableListType - default_root" {
+    const ListU32 = FixedListType(UintType(32), 16);
+    const ListListU32 = VariableListType(ListU32, 16);
+    var expected_root: [32]u8 = undefined;
+
+    try ListListU32.hashTreeRoot(std.testing.allocator, &ListListU32.default_value, &expected_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &ListListU32.default_root);
+
+    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    defer pool.deinit();
+
+    const node = try ListListU32.tree.default(&pool);
+    try std.testing.expectEqualSlices(u8, &expected_root, node.getRoot(&pool));
+}
+
+test "FixedListType - tree.zeros" {
+    const allocator = std.testing.allocator;
+
+    const ListU16 = FixedListType(UintType(16), 8);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    for (0..ListU16.limit) |len| {
+        const tree_node = try ListU16.tree.zeros(&pool, len);
+        defer pool.unref(tree_node);
+
+        var value = ListU16.default_value;
+        defer ListU16.deinit(allocator, &value);
+        try value.resize(allocator, len);
+        @memset(value.items, 0);
+
+        var expected_root: [32]u8 = undefined;
+        try ListU16.hashTreeRoot(allocator, &value, &expected_root);
+
+        try std.testing.expectEqualSlices(u8, &expected_root, tree_node.getRoot(&pool));
+    }
+}
+
+test "VariableListType - tree.zeros" {
+    const allocator = std.testing.allocator;
+
+    const ListU32 = FixedListType(UintType(32), 16);
+    const ListListU32 = VariableListType(ListU32, 16);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    for (0..ListListU32.limit) |len| {
+        const tree_node = try ListListU32.tree.zeros(&pool, len);
+        defer pool.unref(tree_node);
+
+        var value = ListListU32.default_value;
+        defer ListListU32.deinit(allocator, &value);
+        try value.resize(allocator, len);
+        @memset(value.items, ListListU32.Element.default_value);
+
+        var expected_root: [32]u8 = undefined;
+        try ListListU32.hashTreeRoot(allocator, &value, &expected_root);
+
+        try std.testing.expectEqualSlices(u8, &expected_root, tree_node.getRoot(&pool));
     }
 }

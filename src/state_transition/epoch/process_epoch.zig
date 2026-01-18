@@ -1,5 +1,5 @@
 const std = @import("std");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const processJustificationAndFinalization = @import("./process_justification_and_finalization.zig").processJustificationAndFinalization;
@@ -21,11 +21,11 @@ const processSyncCommitteeUpdates = @import("./process_sync_committee_updates.zi
 const processProposerLookahead = @import("./process_proposer_lookahead.zig").processProposerLookahead;
 
 // TODO: add metrics
-pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconStateAllForks, cache: *EpochTransitionCache) !void {
+pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconState, cache: *EpochTransitionCache) !void {
     const state = cached_state.state;
     try processJustificationAndFinalization(cached_state, cache);
 
-    if (state.isPostAltair()) {
+    if (state.forkSeq().gte(.altair)) {
         try processInactivityUpdates(cached_state, cache);
     }
 
@@ -36,36 +36,36 @@ pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconSta
 
     try processRewardsAndPenalties(allocator, cached_state, cache);
 
-    processEth1DataReset(allocator, cached_state, cache);
+    try processEth1DataReset(cached_state, cache);
 
-    if (state.isPostElectra()) {
+    if (state.forkSeq().gte(.electra)) {
         try processPendingDeposits(allocator, cached_state, cache);
-        try processPendingConsolidations(allocator, cached_state, cache);
+        try processPendingConsolidations(cached_state, cache);
     }
 
     // const numUpdate = processEffectiveBalanceUpdates(fork, state, cache);
-    _ = try processEffectiveBalanceUpdates(cached_state, cache);
+    _ = try processEffectiveBalanceUpdates(allocator, cached_state, cache);
 
-    processSlashingsReset(cached_state, cache);
-    processRandaoMixesReset(cached_state, cache);
+    try processSlashingsReset(cached_state, cache);
+    try processRandaoMixesReset(cached_state, cache);
 
-    if (state.isPostCapella()) {
-        try processHistoricalSummariesUpdate(allocator, cached_state, cache);
+    if (state.forkSeq().gte(.capella)) {
+        try processHistoricalSummariesUpdate(cached_state, cache);
     } else {
-        try processHistoricalRootsUpdate(allocator, cached_state, cache);
+        try processHistoricalRootsUpdate(cached_state, cache);
     }
 
-    if (state.isPhase0()) {
-        processParticipationRecordUpdates(allocator, cached_state);
+    if (state.forkSeq() == .phase0) {
+        try processParticipationRecordUpdates(cached_state);
     } else {
-        try processParticipationFlagUpdates(allocator, cached_state);
+        try processParticipationFlagUpdates(cached_state);
     }
 
-    if (state.isPostAltair()) {
+    if (state.forkSeq().gte(.altair)) {
         try processSyncCommitteeUpdates(allocator, cached_state);
     }
 
-    if (state.isFulu()) {
+    if (state.forkSeq().gte(.fulu)) {
         try processProposerLookahead(allocator, cached_state, cache);
     }
 }

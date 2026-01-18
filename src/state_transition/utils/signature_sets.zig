@@ -28,7 +28,11 @@ pub const AggregatedSignatureSet = struct {
 pub fn verifySingleSignatureSet(set: *const SingleSignatureSet) !bool {
     // All signatures are not trusted and must be group checked (p2.subgroup_check)
     const signature = try Signature.uncompress(&set.signature);
-    return verify(&set.signing_root, &set.pubkey, &signature, null, null);
+    if (verify(&set.signing_root, &set.pubkey, &signature, null, null)) {
+        return true;
+    } else |_| {
+        return false;
+    }
 }
 
 pub fn verifyAggregatedSignatureSet(set: *const AggregatedSignatureSet) !bool {

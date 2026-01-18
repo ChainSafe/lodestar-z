@@ -13,7 +13,7 @@ pub const Index2PubkeyCache = std.ArrayList(PublicKey);
 
 /// consumers should deinit each item inside Index2PubkeyCache
 pub fn syncPubkeys(
-    validators: []Validator,
+    validators: []const Validator,
     pubkey_to_index: *PubkeyIndexMap,
     index_to_pubkey: *Index2PubkeyCache,
 ) !void {

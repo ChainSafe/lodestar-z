@@ -11,7 +11,7 @@ const ExecutionPayload = @import("types/execution_payload.zig").ExecutionPayload
 
 const Slot = types.primitive.Slot.Type;
 
-const CachedBeaconStateAllForks = @import("cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("cache/state_cache.zig").CachedBeaconState;
 pub const SignedBeaconBlock = @import("types/beacon_block.zig").SignedBeaconBlock;
 const verifyProposerSignature = @import("./signature_sets/proposer.zig").verifyProposerSignature;
 pub const processBlock = @import("./block/process_block.zig").processBlock;
@@ -56,19 +56,20 @@ pub const BlockExternalData = struct {
     },
 };
 
-pub fn processSlotsWithTransientCache(
+pub fn processSlots(
     allocator: std.mem.Allocator,
-    post_state: *CachedBeaconStateAllForks,
+    post_state: *CachedBeaconState,
     slot: Slot,
     _: EpochTransitionCacheOpts,
 ) !void {
     var state = post_state.state;
-    if (state.slot() > slot) return error.outdatedSlot;
+    if (try state.slot() > slot) return error.outdatedSlot;
 
-    while (state.slot() < slot) {
-        try processSlot(allocator, post_state);
+    while (try state.slot() < slot) {
+        try processSlot(post_state);
 
-        if ((state.slot() + 1) % preset.SLOTS_PER_EPOCH == 0) {
+        const next_slot = try state.slot() + 1;
+        if (next_slot % preset.SLOTS_PER_EPOCH == 0) {
             // TODO(bing): metrics
             // const epochTransitionTimer = metrics?.epochTransitionTime.startTimer();
 
@@ -81,12 +82,12 @@ pub fn processSlotsWithTransientCache(
             try processEpoch(allocator, post_state, epoch_transition_cache);
             // TODO(bing): registerValidatorStatuses
 
-            state.slotPtr().* += 1;
+            try state.setSlot(next_slot);
 
             try post_state.epoch_cache_ref.get().afterProcessEpoch(post_state, epoch_transition_cache);
             // post_state.commit
 
-            const state_epoch = computeEpochAtSlot(state.slot());
+            const state_epoch = computeEpochAtSlot(next_slot);
 
             const config = post_state.config;
             if (state_epoch == config.chain.ALTAIR_FORK_EPOCH) {
@@ -110,7 +111,7 @@ pub fn processSlotsWithTransientCache(
 
             try post_state.epoch_cache_ref.get().finalProcessEpoch(post_state);
         } else {
-            state.slotPtr().* += 1;
+            try state.setSlot(next_slot);
         }
 
         //epochTransitionTimer
@@ -126,17 +127,17 @@ pub const TransitionOpt = struct {
 
 pub fn stateTransition(
     allocator: std.mem.Allocator,
-    state: *CachedBeaconStateAllForks,
+    state: *CachedBeaconState,
     signed_block: SignedBlock,
     opts: TransitionOpt,
-) !*CachedBeaconStateAllForks {
+) !*CachedBeaconState {
     const block = signed_block.message();
     const block_slot = switch (block) {
         .regular => |b| b.slot(),
         .blinded => |b| b.slot(),
     };
 
-    const post_state = try state.clone(allocator);
+    const post_state = try state.clone(allocator, .{ .transfer_cache = !opts.do_not_transfer_cache });
 
     errdefer {
         post_state.deinit();
@@ -148,7 +149,7 @@ pub fn stateTransition(
     //  onStateCloneMetrics(postState, metrics, StateCloneSource.stateTransition);
     //}
 
-    try processSlotsWithTransientCache(allocator, post_state, block_slot, .{});
+    try processSlots(allocator, post_state, block_slot, .{});
 
     // Verify proposer signature only
     if (opts.verify_proposer and !try verifyProposerSignature(post_state, signed_block)) {
@@ -183,20 +184,22 @@ pub fn stateTransition(
 
     // Verify state root
     if (opts.verify_state_root) {
-        var post_state_root: [32]u8 = undefined;
         //    const hashTreeRootTimer = metrics?.stateHashTreeRootTime.startTimer({
         //      source: StateHashTreeRootSource.stateTransition,
         //    });
-        try post_state.state.hashTreeRoot(allocator, &post_state_root);
+        const post_state_root = try post_state.state.hashTreeRoot();
         //    hashTreeRootTimer?.();
 
         const block_state_root = switch (block) {
             .regular => |b| b.stateRoot(),
             .blinded => |b| b.stateRoot(),
         };
-        if (!std.mem.eql(u8, &post_state_root, &block_state_root)) {
+        if (!std.mem.eql(u8, post_state_root, &block_state_root)) {
             return error.InvalidStateRoot;
         }
+    } else {
+        // Even if we don't verify the state_root, commit the tree changes
+        try post_state.state.commit();
     }
 
     return post_state;

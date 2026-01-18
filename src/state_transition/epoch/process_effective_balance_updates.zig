@@ -1,5 +1,6 @@
 const std = @import("std");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const Allocator = std.mem.Allocator;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const types = @import("consensus_types");
@@ -14,10 +15,11 @@ const DOWNWARD_THRESHOLD = HYSTERESIS_INCREMENT * preset.HYSTERESIS_DOWNWARD_MUL
 const UPWARD_THRESHOLD = HYSTERESIS_INCREMENT * preset.HYSTERESIS_UPWARD_MULTIPLIER;
 
 /// this function also update EpochTransitionCache
-pub fn processEffectiveBalanceUpdates(cached_state: *CachedBeaconStateAllForks, cache: *EpochTransitionCache) !usize {
+pub fn processEffectiveBalanceUpdates(allocator: Allocator, cached_state: *CachedBeaconState, cache: *EpochTransitionCache) !usize {
     const state = cached_state.state;
+    const fork = state.forkSeq();
     const epoch_cache = cached_state.getEpochCache();
-    const validators = state.validators();
+    var validators = try state.validators();
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements().items;
     var next_epoch_total_active_balance_by_increment: u64 = 0;
 
@@ -26,15 +28,27 @@ pub fn processEffectiveBalanceUpdates(cached_state: *CachedBeaconStateAllForks, 
     // epochTransitionCache.balances is initialized in processRewardsAndPenalties()
     // and updated in processPendingDeposits() and processPendingConsolidations()
     // so it's recycled here for performance.
-    const balances = if (cache.balances) |balances_arr| balances_arr.items else state.balances().items;
+    const balances = if (cache.balances) |balances_arr|
+        balances_arr.items
+    else
+        try state.balancesSlice(allocator);
+    defer if (cache.balances == null) {
+        allocator.free(balances);
+    };
     const is_compounding_validator_arr = cache.is_compounding_validator_arr.items;
+
+    var previous_epoch_participation: types.altair.EpochParticipation.TreeView = undefined;
+    var current_epoch_participation: types.altair.EpochParticipation.TreeView = undefined;
+    if (fork.gte(.altair)) {
+        previous_epoch_participation = try state.previousEpochParticipation();
+        current_epoch_participation = try state.currentEpochParticipation();
+    }
 
     var num_update: usize = 0;
     for (balances, 0..) |balance, i| {
-        // PERF: It's faster to access to get() every single element (4ms) than to convert to regular array then loop (9ms)
         var effective_balance_increment = effective_balance_increments[i];
         var effective_balance = @as(u64, effective_balance_increment) * preset.EFFECTIVE_BALANCE_INCREMENT;
-        const effective_balance_limit: u64 = if (state.isPreElectra()) preset.MAX_EFFECTIVE_BALANCE else blk: {
+        const effective_balance_limit: u64 = if (fork.lt(.electra)) preset.MAX_EFFECTIVE_BALANCE else blk: {
             // from electra, effectiveBalanceLimit is per validator
             if (is_compounding_validator_arr[i]) {
                 break :blk preset.MAX_EFFECTIVE_BALANCE_ELECTRA;
@@ -51,30 +65,28 @@ pub fn processEffectiveBalanceUpdates(cached_state: *CachedBeaconStateAllForks, 
         {
             // Update the state tree
             // Should happen rarely, so it's fine to update the tree
-            var validator = &validators.items[i];
+            var validator = try validators.get(i);
             effective_balance = @min(
                 balance - (balance % preset.EFFECTIVE_BALANCE_INCREMENT),
                 effective_balance_limit,
             );
-            validator.effective_balance = effective_balance;
+            try validator.set("effective_balance", effective_balance);
             // Also update the fast cached version
             const new_effective_balance_increment: u16 = @intCast(@divFloor(effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT));
 
             // TODO: describe issue. Compute progressive target balances
             // Must update target balances for consistency, see comments below
-            if (state.isPostAltair()) {
-                if (!validator.slashed) {
-                    const previous_epoch_participation = state.previousEpochParticipations().items;
-                    const current_epoch_participation = state.currentEpochParticipations().items;
-
-                    if (previous_epoch_participation[i] & TIMELY_TARGET == TIMELY_TARGET) {
+            if (fork.gte(.altair)) {
+                const slashed = try validator.get("slashed");
+                if (!slashed) {
+                    if ((try previous_epoch_participation.get(i)) & TIMELY_TARGET == TIMELY_TARGET) {
                         // Use += then -= to avoid underflow when new_effective_balance_increment < effective_balance_increment
                         epoch_cache.previous_target_unslashed_balance_increments += new_effective_balance_increment;
                         epoch_cache.previous_target_unslashed_balance_increments -= effective_balance_increment;
                     }
                     // currentTargetUnslashedBalanceIncrements is transferred to previousTargetUnslashedBalanceIncrements in afterEpochTransitionCache
                     // at epoch transition of next epoch (in EpochTransitionCache), prevTargetUnslStake is calculated based on newEffectiveBalanceIncrement
-                    if (current_epoch_participation[i] & TIMELY_TARGET == TIMELY_TARGET) {
+                    if ((try current_epoch_participation.get(i)) & TIMELY_TARGET == TIMELY_TARGET) {
                         // Use += then -= to avoid underflow when new_effective_balance_increment < effective_balance_increment
                         epoch_cache.current_target_unslashed_balance_increments += new_effective_balance_increment;
                         epoch_cache.current_target_unslashed_balance_increments -= effective_balance_increment;

@@ -2,15 +2,15 @@ const std = @import("std");
 const types = @import("consensus_types");
 
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const SignedBlock = @import("../types/block.zig").SignedBlock;
 const SignedBeaconBlock = @import("../state_transition.zig").SignedBeaconBlock;
-const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const randaoRevealSignatureSet = @import("./randao.zig").randaoRevealSignatureSet;
 const proposerSlashingsSignatureSets = @import("./proposer_slashings.zig").proposerSlashingsSignatureSets;
 
 pub fn blockSignatureSets(
-    state: CachedBeaconStateAllForks,
+    state: CachedBeaconState,
     signed_block: SignedBlock,
 ) SingleSignatureSet {
     _ = state;
@@ -20,7 +20,7 @@ pub fn blockSignatureSets(
 test "blockSignatureSets" {
     const allocator = std.testing.allocator;
     const validator_count = 256;
-    const test_state = try TestCachedBeaconStateAllForks.init(allocator, validator_count);
+    const test_state = try TestCachedBeaconState.init(allocator, validator_count);
 
     const signature_sets = try std.ArrayList(SingleSignatureSet).init(allocator);
 

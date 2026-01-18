@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const attester_status = @import("../utils/attester_status.zig");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const preset = @import("preset").preset;
 const c = @import("constants");
@@ -34,7 +34,7 @@ const RewardPenaltyItem = struct {
     finality_delay_penalty: u64,
 };
 
-pub fn getAttestationDeltas(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, cache: *const EpochTransitionCache, rewards: []u64, penalties: []u64) !void {
+pub fn getAttestationDeltas(allocator: Allocator, cached_state: *const CachedBeaconState, cache: *const EpochTransitionCache, rewards: []u64, penalties: []u64) !void {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
 
@@ -63,7 +63,7 @@ pub fn getAttestationDeltas(allocator: Allocator, cached_state: *const CachedBea
     const total_balance_in_gwei_f64: f64 = @floatFromInt(total_balance_in_gwei);
     const total_balance_in_gwei_sqrt: f64 = @sqrt(total_balance_in_gwei_f64);
     const balance_sq_root: u64 = @intFromFloat(total_balance_in_gwei_sqrt);
-    const finality_delay = cache.prev_epoch - state.finalizedCheckpoint().epoch;
+    const finality_delay = cache.prev_epoch - try state.finalizedEpoch();
 
     const BASE_REWARDS_PER_EPOCH = BASE_REWARDS_PER_EPOCH_CONST;
     const proposer_reward_quotient = PROPOSER_REWARD_QUOTIENT;
@@ -77,7 +77,6 @@ pub fn getAttestationDeltas(allocator: Allocator, cached_state: *const CachedBea
     defer reward_penalty_item_cache.deinit();
 
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
-    std.debug.assert(flags.len == state.validators().items.len);
     std.debug.assert(flags.len <= effective_balance_increments.items.len);
     for (0..flags.len) |i| {
         const flag = flags[i];
