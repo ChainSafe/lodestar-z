@@ -24,3 +24,4 @@ console.log('loaded state view');
 console.log(state.slot);
 console.log(state.root);
 console.log(state.epoch);
+console.log(state.genesisTime);

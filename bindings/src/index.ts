@@ -10,6 +10,7 @@ declare class BeaconStateView {
   slot: number;
   root: Uint8Array;
   epoch: number;
+  genesisTime: number;
 }
 
 type Bindings = {
