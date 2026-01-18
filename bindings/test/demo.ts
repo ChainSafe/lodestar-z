@@ -22,3 +22,4 @@ const state = bindings.BeaconStateView.createFromBytes('fulu', stateBytes);
 console.log('loaded state view');
 
 console.log(state.slot);
+console.log(state.root)

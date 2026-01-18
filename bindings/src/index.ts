@@ -8,6 +8,7 @@ const require = createRequire(import.meta.url);
 declare class BeaconStateView {
   static createFromBytes(fork: string, bytes: Uint8Array): BeaconStateView;
   slot: number;
+  root: Uint8Array;
 }
 
 type Bindings = {

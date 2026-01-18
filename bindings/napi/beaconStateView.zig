@@ -68,16 +68,26 @@ pub fn BeaconStateView_slot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value
     return try env.createInt64(@intCast(slot));
 }
 
+pub fn BeaconStateView_root(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const root = try cached_state.state.hashTreeRoot();
+    var arraybuffer_bytes: [*]u8 = undefined;
+    const arraybuffer = try env.createArrayBuffer(32, &arraybuffer_bytes);
+    const typedarray = try env.createTypedarray(.uint8, 32, arraybuffer, 0);
+    @memcpy(arraybuffer_bytes[0..32], root);
+    return typedarray;
+}
+
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const beacon_state_view_ctor = try env.defineClass(
         "BeaconStateView",
         0,
         BeaconStateView_ctor,
         null,
-        &[_]napi.c.napi_property_descriptor{.{
-            .utf8name = "slot",
-            .getter = napi.wrapCallback(0, BeaconStateView_slot),
-        }},
+        &[_]napi.c.napi_property_descriptor{
+            .{ .utf8name = "slot", .getter = napi.wrapCallback(0, BeaconStateView_slot) },
+            .{ .utf8name = "root", .getter = napi.wrapCallback(0, BeaconStateView_root) },
+        },
     );
     try beacon_state_view_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{.{
         .utf8name = "createFromBytes",
