@@ -147,6 +147,13 @@ pub fn BeaconStateView_currentJustifiedCheckpoint(env: napi.Env, cb: napi.Callba
     return checkpointToObject(env, &cp);
 }
 
+pub fn BeaconStateView_finalizedCheckpoint(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var cp: types.phase0.Checkpoint.Type = undefined;
+    try cached_state.state.finalizedCheckpoint(&cp);
+    return checkpointToObject(env, &cp);
+}
+
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const beacon_state_view_ctor = try env.defineClass(
         "BeaconStateView",
@@ -162,6 +169,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "latestBlockHeader", .getter = napi.wrapCallback(0, BeaconStateView_latestBlockHeader) },
             .{ .utf8name = "previousJustifiedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_previousJustifiedCheckpoint) },
             .{ .utf8name = "currentJustifiedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_currentJustifiedCheckpoint) },
+            .{ .utf8name = "finalizedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_finalizedCheckpoint) },
         },
     );
     try beacon_state_view_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{.{

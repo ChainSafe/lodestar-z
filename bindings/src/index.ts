@@ -28,6 +28,7 @@ declare class BeaconStateView {
   latestBlockHeader: BeaconBlockHeader;
   previousJustifiedCheckpoint: Checkpoint;
   currentJustifiedCheckpoint: Checkpoint;
+  finalizedCheckpoint: Checkpoint;
 }
 
 type Bindings = {

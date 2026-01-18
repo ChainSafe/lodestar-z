@@ -21,11 +21,12 @@ const state = bindings.BeaconStateView.createFromBytes('fulu', stateBytes);
 
 console.log('loaded state view');
 
-console.log(state.slot);
-console.log(state.root);
-console.log(state.epoch);
-console.log(state.genesisTime);
-console.log(state.genesisValidatorsRoot);
-console.log(state.latestBlockHeader);
-console.log(state.previousJustifiedCheckpoint);
-console.log(state.currentJustifiedCheckpoint);
+console.log('slot:', state.slot);
+console.log('root:', state.root);
+console.log('epoch:', state.epoch);
+console.log('genesisTime:', state.genesisTime);
+console.log('genesisValidatorsRoot:', state.genesisValidatorsRoot);
+console.log('latestBlockHeader:', state.latestBlockHeader);
+console.log('previousJustifiedCheckpoint:', state.previousJustifiedCheckpoint);
+console.log('currentJustifiedCheckpoint:', state.currentJustifiedCheckpoint);
+console.log('finalizedCheckpoint:', state.finalizedCheckpoint);
