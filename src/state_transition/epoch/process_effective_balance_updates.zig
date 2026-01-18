@@ -98,3 +98,15 @@ pub fn processEffectiveBalanceUpdates(cached_state: *CachedBeaconStateAllForks, 
     cache.next_epoch_total_active_balance_by_increment = next_epoch_total_active_balance_by_increment;
     return num_update;
 }
+
+test "processEffectiveBalanceUpdates - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(
+        processEffectiveBalanceUpdates,
+        .{
+            .alloc = false,
+            .err_return = true,
+            .void_return = false,
+        },
+    ).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}

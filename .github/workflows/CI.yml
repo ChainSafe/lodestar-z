@@ -99,9 +99,6 @@ jobs:
       - name: Run state-transition tests
         run: |
           zig build test:state_transition
-      - name: Run Int Tests
-        run: |
-          zig build test:int
 
   build-test-slow:
     name: slow tests 
@@ -126,7 +123,7 @@ jobs:
           zig build run:download_era_files
       - name: Run slow int tests
         run: |
-          zig build test:int_slow
+          zig build test:int
 
   spec-test-ssz:
     name: spec tests - ssz

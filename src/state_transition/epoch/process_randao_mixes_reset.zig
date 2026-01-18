@@ -14,3 +14,12 @@ pub fn processRandaoMixesReset(cached_state: *CachedBeaconStateAllForks, cache: 
     state_randao_mixes[next_epoch % preset.EPOCHS_PER_HISTORICAL_VECTOR] =
         state_randao_mixes[current_epoch % preset.EPOCHS_PER_HISTORICAL_VECTOR];
 }
+
+test "processRandaoMixesReset - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processRandaoMixesReset, .{
+        .alloc = false,
+        .err_return = false,
+        .void_return = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}

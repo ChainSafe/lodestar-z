@@ -63,3 +63,12 @@ pub fn processPendingConsolidations(allocator: Allocator, cached_state: *CachedB
         try pending_consolidations.resize(allocator, new_len);
     }
 }
+
+test "processPendingConsolidations - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processPendingConsolidations, .{
+        .alloc = true,
+        .err_return = true,
+        .void_return = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}

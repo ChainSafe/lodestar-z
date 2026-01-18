@@ -81,3 +81,12 @@ pub fn weighJustificationAndFinalization(cached_state: *CachedBeaconStateAllFork
         finalized_checkpoint.* = old_current_justified_checkpoint;
     }
 }
+
+test "processJustificationAndFinalization - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processJustificationAndFinalization, .{
+        .alloc = false,
+        .err_return = true,
+        .void_return = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}

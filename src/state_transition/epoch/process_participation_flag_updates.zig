@@ -25,3 +25,16 @@ pub fn processParticipationFlagUpdates(allocator: std.mem.Allocator, cached_stat
 
     // state.currentEpochParticipation = types.altair.EpochParticipation.getViewDU(currentEpochParticipationNode);
 }
+
+test "processParticipationFlagUpdates - sanity" {
+    const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
+    const allocator = std.testing.allocator;
+    const validator_count_arr = &.{ 256, 10_000 };
+
+    inline for (validator_count_arr) |validator_count| {
+        var test_state = try TestCachedBeaconStateAllForks.init(allocator, validator_count);
+        defer test_state.deinit();
+        try processParticipationFlagUpdates(allocator, test_state.cached_state);
+    }
+    defer @import("../state_transition.zig").deinitStateTransition();
+}

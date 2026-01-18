@@ -24,3 +24,12 @@ pub fn processHistoricalSummariesUpdate(allocator: Allocator, cached_state: *Cac
         });
     }
 }
+
+test "processHistoricalSummariesUpdate - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processHistoricalSummariesUpdate, .{
+        .alloc = true,
+        .err_return = true,
+        .void_return = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}
