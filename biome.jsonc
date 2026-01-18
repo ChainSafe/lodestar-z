@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "extends": [
+    "@chainsafe/biomejs-config",
+    "@chainsafe/biomejs-config/recommended",
+    "@chainsafe/biomejs-config/nodejs",
+    "@chainsafe/biomejs-config/esm"
+  ],
+  "files": {
+    "includes": ["bindings/**/*.ts"]
+  },
+  "vcs": {
+    "defaultBranch": "unstable"
+  }
+}

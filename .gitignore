@@ -11,3 +11,6 @@ test/spec/ssz/static_tests.zig
 flamegraph.html
 perf.data
 perf.data.old
+
+# js
+node_modules/

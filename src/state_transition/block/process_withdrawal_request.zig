@@ -33,7 +33,7 @@ pub fn processWithdrawalRequest(cached_state: *CachedBeaconState, withdrawal_req
 
     // bail out if validator is not in beacon state
     // note that we don't need to check for 6110 unfinalized vals as they won't be eligible for withdraw/exit anyway
-    const validator_index = pubkey_to_index.get(&withdrawal_request.validator_pubkey) orelse return;
+    const validator_index = pubkey_to_index.get(withdrawal_request.validator_pubkey) orelse return;
 
     var validators = try state.validators();
     if (validator_index >= try validators.length()) return;
