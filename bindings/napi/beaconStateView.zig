@@ -18,6 +18,21 @@ const pubkey = @import("./pubkey2index.zig");
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = gpa.allocator();
 
+fn rootToTypedArray(env: napi.Env, data: *const [32]u8) !napi.Value {
+    var bytes: [*]u8 = undefined;
+    const buf = try env.createArrayBuffer(32, &bytes);
+    @memcpy(bytes[0..32], data);
+    return try env.createTypedarray(.uint8, 32, buf, 0);
+}
+
+fn validatorIndicesToNapiArray(env: napi.Env, indices: *const [preset.SLOTS_PER_EPOCH]u64) !napi.Value {
+    const arr = try env.createArrayWithLength(preset.SLOTS_PER_EPOCH);
+    for (0..preset.SLOTS_PER_EPOCH) |i| {
+        try arr.setElement(@intCast(i), try env.createInt64(@intCast(indices[i])));
+    }
+    return arr;
+}
+
 pub fn BeaconStateView_finalize(_: napi.Env, cached_state: *CachedBeaconState, _: ?*anyopaque) void {
     cached_state.deinit();
     allocator.destroy(cached_state);
@@ -78,12 +93,7 @@ pub fn BeaconStateView_slot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value
 
 pub fn BeaconStateView_root(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const root = try cached_state.state.hashTreeRoot();
-    var arraybuffer_bytes: [*]u8 = undefined;
-    const arraybuffer = try env.createArrayBuffer(32, &arraybuffer_bytes);
-    const typedarray = try env.createTypedarray(.uint8, 32, arraybuffer, 0);
-    @memcpy(arraybuffer_bytes[0..32], root);
-    return typedarray;
+    return rootToTypedArray(env, try cached_state.state.hashTreeRoot());
 }
 
 pub fn BeaconStateView_epoch(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
@@ -99,11 +109,7 @@ pub fn BeaconStateView_genesisTime(env: napi.Env, cb: napi.CallbackInfo(0)) !nap
 
 pub fn BeaconStateView_genesisValidatorsRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const root = try cached_state.state.genesisValidatorsRoot();
-    var bytes: [*]u8 = undefined;
-    const buf = try env.createArrayBuffer(32, &bytes);
-    @memcpy(bytes[0..32], root);
-    return try env.createTypedarray(.uint8, 32, buf, 0);
+    return rootToTypedArray(env, try cached_state.state.genesisValidatorsRoot());
 }
 
 pub fn BeaconStateView_latestBlockHeader(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
@@ -114,28 +120,16 @@ pub fn BeaconStateView_latestBlockHeader(env: napi.Env, cb: napi.CallbackInfo(0)
     const obj = try env.createObject();
     try obj.setNamedProperty("slot", try env.createInt64(@intCast(header.slot)));
     try obj.setNamedProperty("proposerIndex", try env.createInt64(@intCast(header.proposer_index)));
-    var pr: [*]u8 = undefined;
-    const pr_buf = try env.createArrayBuffer(32, &pr);
-    @memcpy(pr[0..32], &header.parent_root);
-    try obj.setNamedProperty("parentRoot", try env.createTypedarray(.uint8, 32, pr_buf, 0));
-    var sr: [*]u8 = undefined;
-    const sr_buf = try env.createArrayBuffer(32, &sr);
-    @memcpy(sr[0..32], &header.state_root);
-    try obj.setNamedProperty("stateRoot", try env.createTypedarray(.uint8, 32, sr_buf, 0));
-    var br: [*]u8 = undefined;
-    const br_buf = try env.createArrayBuffer(32, &br);
-    @memcpy(br[0..32], &header.body_root);
-    try obj.setNamedProperty("bodyRoot", try env.createTypedarray(.uint8, 32, br_buf, 0));
+    try obj.setNamedProperty("parentRoot", try rootToTypedArray(env, &header.parent_root));
+    try obj.setNamedProperty("stateRoot", try rootToTypedArray(env, &header.state_root));
+    try obj.setNamedProperty("bodyRoot", try rootToTypedArray(env, &header.body_root));
     return obj;
 }
 
 fn checkpointToObject(env: napi.Env, cp: *const types.phase0.Checkpoint.Type) !napi.Value {
     const obj = try env.createObject();
     try obj.setNamedProperty("epoch", try env.createInt64(@intCast(cp.epoch)));
-    var bytes: [*]u8 = undefined;
-    const buf = try env.createArrayBuffer(32, &bytes);
-    @memcpy(bytes[0..32], &cp.root);
-    try obj.setNamedProperty("root", try env.createTypedarray(.uint8, 32, buf, 0));
+    try obj.setNamedProperty("root", try rootToTypedArray(env, &cp.root));
     return obj;
 }
 
@@ -162,26 +156,13 @@ pub fn BeaconStateView_finalizedCheckpoint(env: napi.Env, cb: napi.CallbackInfo(
 
 pub fn BeaconStateView_proposers(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const epoch_cache = cached_state.getEpochCache();
-    const proposers = epoch_cache.proposers;
-
-    const arr = try env.createArrayWithLength(preset.SLOTS_PER_EPOCH);
-    for (0..preset.SLOTS_PER_EPOCH) |i| {
-        try arr.setElement(@intCast(i), try env.createInt64(@intCast(proposers[i])));
-    }
-    return arr;
+    return validatorIndicesToNapiArray(env, &cached_state.getEpochCache().proposers);
 }
 
 pub fn BeaconStateView_proposersNextEpoch(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const epoch_cache = cached_state.getEpochCache();
-
-    if (epoch_cache.proposers_next_epoch) |proposers| {
-        const arr = try env.createArrayWithLength(preset.SLOTS_PER_EPOCH);
-        for (0..preset.SLOTS_PER_EPOCH) |i| {
-            try arr.setElement(@intCast(i), try env.createInt64(@intCast(proposers[i])));
-        }
-        return arr;
+    if (cached_state.getEpochCache().proposers_next_epoch) |*proposers| {
+        return validatorIndicesToNapiArray(env, proposers);
     }
     return env.getNull();
 }
@@ -244,10 +225,7 @@ pub fn BeaconStateView_getFinalizedRootProof(env: napi.Env, cb: napi.CallbackInf
 
     const arr = try env.createArrayWithLength(proof.witnesses.len);
     for (proof.witnesses, 0..) |witness, i| {
-        var bytes: [*]u8 = undefined;
-        const buf = try env.createArrayBuffer(32, &bytes);
-        @memcpy(bytes[0..32], &witness);
-        try arr.setElement(@intCast(i), try env.createTypedarray(.uint8, 32, buf, 0));
+        try arr.setElement(@intCast(i), try rootToTypedArray(env, &witness));
     }
     return arr;
 }
