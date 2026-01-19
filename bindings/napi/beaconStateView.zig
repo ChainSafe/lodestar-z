@@ -10,28 +10,15 @@ const isExecutionEnabledFunc = state_transition.isExecutionEnabled;
 const computeUnrealizedCheckpoints = state_transition.computeUnrealizedCheckpoints;
 const getEffectiveBalanceIncrementsZeroInactiveFn = state_transition.getEffectiveBalanceIncrementsZeroInactive;
 const preset = @import("preset").preset;
-const types = @import("consensus_types");
+const ct = @import("consensus_types");
 const pool = @import("./pool.zig");
 const config = @import("./config.zig");
 const pubkey = @import("./pubkey2index.zig");
+const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
+const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiValue;
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = gpa.allocator();
-
-fn rootToTypedArray(env: napi.Env, data: *const [32]u8) !napi.Value {
-    var bytes: [*]u8 = undefined;
-    const buf = try env.createArrayBuffer(32, &bytes);
-    @memcpy(bytes[0..32], data);
-    return try env.createTypedarray(.uint8, 32, buf, 0);
-}
-
-fn validatorIndicesToNapiArray(env: napi.Env, indices: *const [preset.SLOTS_PER_EPOCH]u64) !napi.Value {
-    const arr = try env.createArrayWithLength(preset.SLOTS_PER_EPOCH);
-    for (0..preset.SLOTS_PER_EPOCH) |i| {
-        try arr.setElement(@intCast(i), try env.createInt64(@intCast(indices[i])));
-    }
-    return arr;
-}
 
 pub fn BeaconStateView_finalize(_: napi.Env, cached_state: *CachedBeaconState, _: ?*anyopaque) void {
     cached_state.deinit();
@@ -93,7 +80,7 @@ pub fn BeaconStateView_slot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value
 
 pub fn BeaconStateView_root(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    return rootToTypedArray(env, try cached_state.state.hashTreeRoot());
+    return sszValueToNapiValue(env, ct.primitive.Root, try cached_state.state.hashTreeRoot());
 }
 
 pub fn BeaconStateView_epoch(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
@@ -109,60 +96,57 @@ pub fn BeaconStateView_genesisTime(env: napi.Env, cb: napi.CallbackInfo(0)) !nap
 
 pub fn BeaconStateView_genesisValidatorsRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    return rootToTypedArray(env, try cached_state.state.genesisValidatorsRoot());
+    return sszValueToNapiValue(env, ct.primitive.Root, try cached_state.state.genesisValidatorsRoot());
 }
 
 pub fn BeaconStateView_latestBlockHeader(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     var header_view = try cached_state.state.latestBlockHeader();
-    var header: types.phase0.BeaconBlockHeader.Type = undefined;
+    var header: ct.phase0.BeaconBlockHeader.Type = undefined;
     try header_view.toValue(allocator, &header);
-    const obj = try env.createObject();
-    try obj.setNamedProperty("slot", try env.createInt64(@intCast(header.slot)));
-    try obj.setNamedProperty("proposerIndex", try env.createInt64(@intCast(header.proposer_index)));
-    try obj.setNamedProperty("parentRoot", try rootToTypedArray(env, &header.parent_root));
-    try obj.setNamedProperty("stateRoot", try rootToTypedArray(env, &header.state_root));
-    try obj.setNamedProperty("bodyRoot", try rootToTypedArray(env, &header.body_root));
-    return obj;
-}
-
-fn checkpointToObject(env: napi.Env, cp: *const types.phase0.Checkpoint.Type) !napi.Value {
-    const obj = try env.createObject();
-    try obj.setNamedProperty("epoch", try env.createInt64(@intCast(cp.epoch)));
-    try obj.setNamedProperty("root", try rootToTypedArray(env, &cp.root));
-    return obj;
+    return try sszValueToNapiValue(env, ct.phase0.BeaconBlockHeader, &header);
 }
 
 pub fn BeaconStateView_previousJustifiedCheckpoint(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    var cp: types.phase0.Checkpoint.Type = undefined;
+    var cp: ct.phase0.Checkpoint.Type = undefined;
     try cached_state.state.previousJustifiedCheckpoint(&cp);
-    return checkpointToObject(env, &cp);
+    return try sszValueToNapiValue(env, ct.phase0.Checkpoint, &cp);
 }
 
 pub fn BeaconStateView_currentJustifiedCheckpoint(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    var cp: types.phase0.Checkpoint.Type = undefined;
+    var cp: ct.phase0.Checkpoint.Type = undefined;
     try cached_state.state.currentJustifiedCheckpoint(&cp);
-    return checkpointToObject(env, &cp);
+    return try sszValueToNapiValue(env, ct.phase0.Checkpoint, &cp);
 }
 
 pub fn BeaconStateView_finalizedCheckpoint(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    var cp: types.phase0.Checkpoint.Type = undefined;
+    var cp: ct.phase0.Checkpoint.Type = undefined;
     try cached_state.state.finalizedCheckpoint(&cp);
-    return checkpointToObject(env, &cp);
+    return try sszValueToNapiValue(env, ct.phase0.Checkpoint, &cp);
 }
 
 pub fn BeaconStateView_proposers(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    return validatorIndicesToNapiArray(env, &cached_state.getEpochCache().proposers);
+    return numberSliceToNapiValue(
+        env,
+        u64,
+        &cached_state.getEpochCache().proposers,
+        .{},
+    );
 }
 
 pub fn BeaconStateView_proposersNextEpoch(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     if (cached_state.getEpochCache().proposers_next_epoch) |*proposers| {
-        return validatorIndicesToNapiArray(env, proposers);
+        return numberSliceToNapiValue(
+            env,
+            u64,
+            proposers,
+            .{},
+        );
     }
     return env.getNull();
 }
@@ -223,11 +207,8 @@ pub fn BeaconStateView_getFinalizedRootProof(env: napi.Env, cb: napi.CallbackInf
     var proof = try cached_state.state.getFinalizedRootProof(allocator);
     defer proof.deinit(allocator);
 
-    const arr = try env.createArrayWithLength(proof.witnesses.len);
-    for (proof.witnesses, 0..) |witness, i| {
-        try arr.setElement(@intCast(i), try rootToTypedArray(env, &witness));
-    }
-    return arr;
+    const witnesses = std.ArrayListUnmanaged([32]u8).fromOwnedSlice(proof.witnesses);
+    return try sszValueToNapiValue(env, ct.misc.Roots, &witnesses);
 }
 
 pub fn BeaconStateView_computeUnrealizedCheckpoints(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
@@ -235,8 +216,14 @@ pub fn BeaconStateView_computeUnrealizedCheckpoints(env: napi.Env, cb: napi.Call
     const result = try computeUnrealizedCheckpoints(cached_state, allocator);
 
     const obj = try env.createObject();
-    try obj.setNamedProperty("justifiedCheckpoint", try checkpointToObject(env, &result.justified_checkpoint));
-    try obj.setNamedProperty("finalizedCheckpoint", try checkpointToObject(env, &result.finalized_checkpoint));
+    try obj.setNamedProperty(
+        "justifiedCheckpoint",
+        try sszValueToNapiValue(env, ct.phase0.Checkpoint, &result.justified_checkpoint),
+    );
+    try obj.setNamedProperty(
+        "finalizedCheckpoint",
+        try sszValueToNapiValue(env, ct.phase0.Checkpoint, &result.finalized_checkpoint),
+    );
     return obj;
 }
 
