@@ -1,7 +1,11 @@
 const std = @import("std");
-const BeaconState = @import("consensus_types").deneb.BeaconState;
+// TODO make this fork-agnostic
+const BeaconState = @import("consensus_types").fulu.BeaconState;
 const ssz = @import("ssz");
 const zbench = @import("zbench");
+const download_era_options = @import("download_era_options");
+const era = @import("era");
+const config = @import("config");
 
 // printf "Date: %s\nKernel: %s\nCPU: %s\nCPUs: %s\nMemory: %s\n" "$(date)" "$(uname -r)" "$(lscpu | grep 'Model name' | awk -F: '{print $2}' | xargs)" "$(lscpu | grep '^CPU(s):' | awk '{print $2}')" "$(free -h | grep Mem | awk '{print $2}')"
 // Date: Mon Apr 21 12:59:32 PM EDT 2025
@@ -107,9 +111,16 @@ pub fn main() !void {
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
-    const state_file = try std.fs.cwd().openFile("bench/state.ssz", .{});
-    defer state_file.close();
-    const state_bytes = try state_file.readToEndAlloc(allocator, 1_000_000_000);
+    const era_path = try std.fs.path.join(
+        allocator,
+        &[_][]const u8{ download_era_options.era_out_dir, download_era_options.era_files[0] },
+    );
+    defer allocator.free(era_path);
+    var era_reader = try era.Reader.open(allocator, config.mainnet.config, era_path);
+    defer era_reader.close(allocator);
+
+    const state_bytes: []u8 = @constCast(try era_reader.readSerializedState(allocator, null));
+    defer allocator.free(state_bytes);
 
     const state = allocator.create(BeaconState.Type) catch unreachable;
     state.* = BeaconState.default_value;
