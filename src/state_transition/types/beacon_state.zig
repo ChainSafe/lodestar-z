@@ -591,18 +591,23 @@ pub const BeaconState = union(ForkSeq) {
         return switch (self.*) {
             .phase0, .altair => error.InvalidAtFork,
             .bellatrix => |*state| {
+                out.* = .{ .bellatrix = undefined };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.bellatrix);
             },
             .capella => |*state| {
+                out.* = .{ .capella = undefined };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.capella);
             },
             .deneb => |*state| {
+                out.* = .{ .deneb = undefined };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.deneb);
             },
             .electra => |*state| {
+                out.* = .{ .electra = undefined };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.electra);
             },
             .fulu => |*state| {
+                out.* = .{ .fulu = undefined };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.fulu);
             },
         };
