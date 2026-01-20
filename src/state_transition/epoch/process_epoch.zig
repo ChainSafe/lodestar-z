@@ -2,6 +2,7 @@ const std = @import("std");
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const Timer = std.time.Timer;
 const metrics = @import("../metrics.zig");
+const observeEpochTransitionStep = metrics.observeEpochTransitionStep;
 
 const ForkSeq = @import("config").ForkSeq;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
