@@ -49,6 +49,8 @@ const IndexedAttestation = @import("../types/attestation.zig").IndexedAttestatio
 const syncPubkeys = @import("./pubkey_cache.zig").syncPubkeys;
 
 const ReferenceCount = @import("../utils/reference_count.zig").ReferenceCount;
+const SlashedFlags = std.ArrayList(u8);
+const SlashedFlagsRc = ReferenceCount(SlashedFlags);
 
 pub const EpochCacheImmutableData = struct {
     config: *const BeaconConfig,
@@ -65,6 +67,12 @@ const proposer_weight: f64 = @floatFromInt(c.PROPOSER_WEIGHT);
 const weight_denominator: f64 = @floatFromInt(c.WEIGHT_DENOMINATOR);
 
 pub const proposer_weight_factor: f64 = proposer_weight / (weight_denominator - proposer_weight);
+
+fn initSlashedFlags(allocator: Allocator, validator_count: usize) !SlashedFlags {
+    var flags = try SlashedFlags.initCapacity(allocator, validator_count);
+    flags.appendNTimesAssumeCapacity(0, validator_count);
+    return flags;
+}
 
 /// an EpochCache is shared by multiple CachedBeaconState instances
 /// a CachedBeaconState should increase the reference count of EpochCache when it is created
@@ -110,6 +118,7 @@ pub const EpochCache = struct {
 
     // EpochCache does not take ownership of EffectiveBalanceIncrements, it is shared across EpochCache instances
     effective_balance_increment: *EffectiveBalanceIncrementsRc,
+    slashed_flags: *SlashedFlagsRc,
 
     total_slashings_by_increment: u64,
 
@@ -160,6 +169,8 @@ pub const EpochCache = struct {
         defer allocator.free(validators);
 
         const validator_count = validators.len;
+        var slashed_flags = try initSlashedFlags(allocator, validator_count);
+        errdefer slashed_flags.deinit();
 
         // syncPubkeys here to ensure EpochCacheImmutableData is popualted before computing the rest of caches
         // - computeSyncCommitteeCache() needs a fully populated pubkey2index cache
@@ -182,6 +193,7 @@ pub const EpochCache = struct {
 
         for (0..validator_count) |i| {
             const validator = validators[i];
+            slashed_flags.items[i] = @intFromBool(validator.slashed);
 
             // Note: Not usable for fork-choice balances since in-active validators are not zero'ed
             effective_balance_increment.items[i] = @intCast(@divFloor(validator.effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT));
@@ -325,6 +337,7 @@ pub const EpochCache = struct {
             .current_shuffling = try EpochShufflingRc.init(allocator, current_shuffling),
             .next_shuffling = try EpochShufflingRc.init(allocator, next_shuffling),
             .effective_balance_increment = try EffectiveBalanceIncrementsRc.init(allocator, effective_balance_increment),
+            .slashed_flags = try SlashedFlagsRc.init(allocator, slashed_flags),
             .total_slashings_by_increment = total_slashings_by_increment,
             .sync_participant_reward = sync_participant_reward,
             .sync_proposer_reward = sync_proposer_reward,
@@ -355,6 +368,7 @@ pub const EpochCache = struct {
 
         // unref the effective balance increments
         self.effective_balance_increment.release();
+        self.slashed_flags.release();
 
         // unref the sync committee caches
         self.current_sync_committee_indexed.release();
@@ -378,6 +392,7 @@ pub const EpochCache = struct {
             .next_shuffling = self.next_shuffling.acquire(),
             // reuse the same instances, increase reference count, cloned only when necessary before an epoch transition
             .effective_balance_increment = self.effective_balance_increment.acquire(),
+            .slashed_flags = self.slashed_flags.acquire(),
             .total_slashings_by_increment = self.total_slashings_by_increment,
             // Basic types (numbers) cloned implicitly
             .sync_participant_reward = self.sync_participant_reward,
@@ -667,9 +682,36 @@ pub const EpochCache = struct {
         const pk = try blst.PublicKey.uncompress(&pubkey);
         if (index == self.index_to_pubkey.items.len) {
             try self.index_to_pubkey.append(pk);
+            try self.ensureSlashedFlagsLen(@intCast(index + 1));
+            self.slashed_flags.get().items[@intCast(index)] = 0;
             return;
         }
         self.index_to_pubkey.items[index] = pk;
+        self.slashed_flags.get().items[@intCast(index)] = 0;
+    }
+
+    pub fn isSlashed(self: *const EpochCache, index: ValidatorIndex) bool {
+        const idx: usize = @intCast(index);
+        const flags = self.slashed_flags.get().items;
+        return idx < flags.len and flags[idx] != 0;
+    }
+
+    pub fn setSlashed(self: *EpochCache, index: ValidatorIndex, slashed: bool) !void {
+        const idx: usize = @intCast(index);
+        try self.ensureSlashedFlagsLen(idx + 1);
+        self.slashed_flags.get().items[idx] = @intFromBool(slashed);
+    }
+
+    fn ensureSlashedFlagsLen(self: *EpochCache, len: usize) !void {
+        const current_len = self.slashed_flags.get().items.len;
+        if (len <= current_len) return;
+        var next_flags = try SlashedFlags.initCapacity(self.allocator, len);
+        errdefer next_flags.deinit();
+        try next_flags.appendSlice(self.slashed_flags.get().items);
+        next_flags.appendNTimesAssumeCapacity(0, len - current_len);
+        const next_rc = try SlashedFlagsRc.init(self.allocator, next_flags);
+        self.slashed_flags.release();
+        self.slashed_flags = next_rc;
     }
 
     // TODO: getBeaconCommittee
