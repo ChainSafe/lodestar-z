@@ -133,15 +133,26 @@ pub fn computeStartBlockSlotFromEraNumber(era_number: u64) !u64 {
     return (try std.math.sub(u64, era_number, 1)) * preset.SLOTS_PER_HISTORICAL_ROOT;
 }
 
-pub fn getShortHistoricalRoot(state: state_transition.BeaconStateAllForks) ![8]u8 {
+pub fn getShortHistoricalRoot(state: state_transition.BeaconState) ![8]u8 {
+    const allocator = std.heap.page_allocator;
     var short_historical_root: [8]u8 = undefined;
-    const historical_root = if (state.slot() == 0)
-        state.genesisValidatorsRoot()
-    else if (state.forkSeq().gte(.capella)) blk: {
-        var root: [32]u8 = undefined;
-        try ct.capella.HistoricalSummary.hashTreeRoot(&state.historicalSummaries().getLast(), &root);
-        break :blk root;
-    } else state.historicalRoots().getLast();
+    var s = state;
+    var historical_root: [32]u8 = undefined;
+    if (try s.slot() == 0) {
+        historical_root = (try s.genesisValidatorsRoot()).*;
+    } else if (s.forkSeq().gte(.capella)) {
+        var summaries = try s.historicalSummaries();
+        const len = try summaries.length();
+        if (len == 0) return error.EmptyHistoricalSummaries;
+        var last = try summaries.get(len - 1);
+        historical_root = (try last.hashTreeRoot()).*;
+    } else {
+        var roots = try s.historicalRoots();
+        const len = try roots.length();
+        if (len == 0) return error.EmptyHistoricalRoots;
+        var last = try roots.get(len - 1);
+        try last.toValue(allocator, &historical_root);
+    }
 
     _ = try std.fmt.bufPrint(&short_historical_root, "{x}", .{std.fmt.fmtSliceHexLower(historical_root[0..4])});
     return short_historical_root;

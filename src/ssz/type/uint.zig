@@ -22,6 +22,8 @@ pub fn UintType(comptime bits: comptime_int) type {
 
         pub const default_value: Type = 0;
 
+        pub const default_root: [32]u8 = [_]u8{0} ** 32;
+
         pub fn equals(a: *const Type, b: *const Type) bool {
             return a.* == b.*;
         }
@@ -306,4 +308,12 @@ test "UintType(256) - max" {
         &[_]u8{0xff} ** 32,
         &[_]u8{0xff} ** 32,
     );
+}
+
+test "UintType - default_root" {
+    const Uint16 = UintType(16);
+    var expected_root: [32]u8 = undefined;
+
+    try Uint16.hashTreeRoot(&Uint16.default_value, &expected_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &Uint16.default_root);
 }

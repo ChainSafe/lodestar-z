@@ -4,9 +4,10 @@ const snappy = @import("snappy").raw;
 const ForkSeq = @import("config").ForkSeq;
 const isFixedType = @import("ssz").isFixedType;
 const state_transition = @import("state_transition");
+const Node = @import("persistent_merkle_tree").Node;
 const SignedBeaconBlock = state_transition.SignedBeaconBlock;
-const BeaconStateAllForks = state_transition.BeaconStateAllForks;
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
+const BeaconState = state_transition.BeaconState;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 
 const types = @import("consensus_types");
 const Epoch = types.primitive.Epoch.Type;
@@ -46,53 +47,62 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
             };
         }
 
-        pub fn loadPreStatePreFork(allocator: Allocator, dir: std.fs.Dir, fork_epoch: Epoch) !TestCachedBeaconStateAllForks {
+        pub fn loadPreStatePreFork(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir, fork_epoch: Epoch) !TestCachedBeaconState {
             const fork_pre = comptime getForkPre();
             const ForkPreTypes = @field(types, fork_pre.name());
-            const pre_state = try allocator.create(ForkPreTypes.BeaconState.Type);
-            var transfered_pre_state: bool = false;
-            errdefer {
-                if (!transfered_pre_state) {
-                    ForkPreTypes.BeaconState.deinit(allocator, pre_state);
-                    allocator.destroy(pre_state);
-                }
-            }
-            pre_state.* = ForkPreTypes.BeaconState.default_value;
-            try loadSszSnappyValue(ForkPreTypes.BeaconState, allocator, dir, "pre.ssz_snappy", pre_state);
-            transfered_pre_state = true;
+            var pre_state = ForkPreTypes.BeaconState.default_value;
+            try loadSszSnappyValue(ForkPreTypes.BeaconState, allocator, dir, "pre.ssz_snappy", &pre_state);
+            defer ForkPreTypes.BeaconState.deinit(allocator, &pre_state);
 
-            var pre_state_all_forks = try BeaconStateAllForks.init(fork_pre, pre_state);
-            return try TestCachedBeaconStateAllForks.initFromState(allocator, &pre_state_all_forks, fork, fork_epoch);
+            const pre_state_all_forks = try allocator.create(BeaconState);
+            errdefer allocator.destroy(pre_state_all_forks);
+
+            pre_state_all_forks.* = @unionInit(
+                BeaconState,
+                fork_pre.name(),
+                try ForkPreTypes.BeaconState.TreeView.fromValue(allocator, pool, &pre_state),
+            );
+            errdefer pre_state_all_forks.deinit();
+
+            return try TestCachedBeaconState.initFromState(allocator, pre_state_all_forks, fork, fork_epoch);
         }
 
-        pub fn loadPreState(allocator: Allocator, dir: std.fs.Dir) !TestCachedBeaconStateAllForks {
-            const pre_state = try allocator.create(ForkTypes.BeaconState.Type);
-            var transfered_pre_state: bool = false;
-            errdefer {
-                if (!transfered_pre_state) {
-                    ForkTypes.BeaconState.deinit(allocator, pre_state);
-                    allocator.destroy(pre_state);
-                }
-            }
-            pre_state.* = ForkTypes.BeaconState.default_value;
-            try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "pre.ssz_snappy", pre_state);
-            transfered_pre_state = true;
+        pub fn loadPreState(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !TestCachedBeaconState {
+            var pre_state = ForkTypes.BeaconState.default_value;
+            try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "pre.ssz_snappy", &pre_state);
+            defer ForkTypes.BeaconState.deinit(allocator, &pre_state);
 
-            var pre_state_all_forks = try BeaconStateAllForks.init(fork, pre_state);
-            return try TestCachedBeaconStateAllForks.initFromState(allocator, &pre_state_all_forks, fork, pre_state_all_forks.fork().epoch);
+            const pre_state_all_forks = try allocator.create(BeaconState);
+            errdefer allocator.destroy(pre_state_all_forks);
+
+            pre_state_all_forks.* = @unionInit(
+                BeaconState,
+                fork.name(),
+                try ForkTypes.BeaconState.TreeView.fromValue(allocator, pool, &pre_state),
+            );
+            errdefer pre_state_all_forks.deinit();
+
+            var f = try pre_state_all_forks.fork();
+            const fork_epoch = try f.get("epoch");
+            return try TestCachedBeaconState.initFromState(allocator, pre_state_all_forks, fork, fork_epoch);
         }
 
         /// consumer should deinit the returned state and destroy the pointer
-        pub fn loadPostState(allocator: Allocator, dir: std.fs.Dir) !?BeaconStateAllForks {
+        pub fn loadPostState(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !?*BeaconState {
             if (dir.statFile("post.ssz_snappy")) |_| {
-                const post_state = try allocator.create(ForkTypes.BeaconState.Type);
-                errdefer {
-                    ForkTypes.BeaconState.deinit(allocator, post_state);
-                    allocator.destroy(post_state);
-                }
-                post_state.* = ForkTypes.BeaconState.default_value;
-                try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", post_state);
-                return try BeaconStateAllForks.init(fork, post_state);
+                var post_state = ForkTypes.BeaconState.default_value;
+                try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", &post_state);
+                defer ForkTypes.BeaconState.deinit(allocator, &post_state);
+
+                const post_state_all_forks = try allocator.create(BeaconState);
+                errdefer allocator.destroy(post_state_all_forks);
+
+                post_state_all_forks.* = @unionInit(
+                    BeaconState,
+                    fork.name(),
+                    try ForkTypes.BeaconState.TreeView.fromValue(allocator, pool, &post_state),
+                );
+                return post_state_all_forks;
             } else |err| {
                 if (err == error.FileNotFound) {
                     return null;
@@ -238,34 +248,85 @@ pub fn loadSszSnappyValue(comptime ST: type, allocator: std.mem.Allocator, dir: 
     }
 }
 
-pub fn expectEqualBeaconStates(expected: BeaconStateAllForks, actual: BeaconStateAllForks) !void {
+pub fn expectEqualBeaconStates(expected: *BeaconState, actual: *BeaconState) !void {
     if (expected.forkSeq() != actual.forkSeq()) return error.ForkMismatch;
 
-    switch (expected.forkSeq()) {
-        .phase0 => {
-            if (!phase0.BeaconState.equals(expected.phase0, actual.phase0)) return error.NotEqual;
-        },
-        .altair => {
-            if (!altair.BeaconState.equals(expected.altair, actual.altair)) return error.NotEqual;
-        },
-        .bellatrix => {
-            if (!bellatrix.BeaconState.equals(expected.bellatrix, actual.bellatrix)) return error.NotEqual;
-        },
-        .capella => {
-            if (!capella.BeaconState.equals(expected.capella, actual.capella)) return error.NotEqual;
-        },
-        .deneb => {
-            if (!deneb.BeaconState.equals(expected.deneb, actual.deneb)) return error.NotEqual;
-        },
-        .electra => {
-            if (!electra.BeaconState.equals(expected.electra, actual.electra)) {
-                // more debug
-                if (!phase0.BeaconBlockHeader.equals(&expected.electra.latest_block_header, &actual.electra.latest_block_header)) return error.LatestBlockHeaderNotEqual;
-                return error.NotEqual;
+    if (!std.mem.eql(
+        u8,
+        try expected.hashTreeRoot(),
+        try actual.hashTreeRoot(),
+    )) {
+        const Debug = struct {
+            fn printDiff(comptime StateST: type, expected_state: *BeaconState, actual_state: *BeaconState) !void {
+                var expected_view = StateST.TreeView{ .base_view = expected_state.baseView() };
+                var actual_view = StateST.TreeView{ .base_view = actual_state.baseView() };
+
+                inline for (StateST.fields) |field| {
+                    const expected_field_root = try expected_view.getRoot(field.name);
+                    const actual_field_root = try actual_view.getRoot(field.name);
+                    if (!std.mem.eql(u8, expected_field_root, actual_field_root)) {
+                        std.debug.print(
+                            "field: {s}\n  expected_root: {s}\n  actual_root:   {s}\n",
+                            .{
+                                field.name,
+                                std.fmt.fmtSliceHexLower(expected_field_root),
+                                std.fmt.fmtSliceHexLower(actual_field_root),
+                            },
+                        );
+
+                        @setEvalBranchQuota(100000);
+                        const FieldST = StateST.getFieldType(field.name);
+                        const allocator = std.testing.allocator;
+                        {
+                            var expected_field_view = try expected_view.get(field.name);
+                            if (comptime @hasDecl(FieldST, "TreeView") and @hasDecl(FieldST.TreeView, "length") and @typeInfo(@TypeOf(FieldST.TreeView.length)) == .@"fn") {
+                                std.debug.print(
+                                    "  expected_value_length: {any}\n",
+                                    .{try expected_field_view.length()},
+                                );
+                            }
+                            var expected_field_value: FieldST.Type = undefined;
+                            try expected_view.getValue(allocator, field.name, &expected_field_value);
+                            defer if (@hasDecl(FieldST, "deinit"))
+                                FieldST.deinit(allocator, &expected_field_value);
+
+                            std.debug.print(
+                                "  expected_value: {any}\n",
+                                .{expected_field_value},
+                            );
+                        }
+                        {
+                            var actual_field_view = try actual_view.get(field.name);
+                            if (comptime @hasDecl(FieldST, "TreeView") and @hasDecl(FieldST.TreeView, "length") and @typeInfo(@TypeOf(FieldST.TreeView.length)) == .@"fn") {
+                                std.debug.print(
+                                    "  actual_value_length:   {any}\n",
+                                    .{try actual_field_view.length()},
+                                );
+                            }
+                            var actual_field_value: FieldST.Type = undefined;
+                            try actual_view.getValue(allocator, field.name, &actual_field_value);
+                            defer if (@hasDecl(FieldST, "deinit"))
+                                FieldST.deinit(allocator, &actual_field_value);
+
+                            std.debug.print(
+                                "  actual_value:   {any}\n",
+                                .{actual_field_value},
+                            );
+                        }
+                    }
+                }
             }
-        },
-        .fulu => {
-            if (!fulu.BeaconState.equals(expected.fulu, actual.fulu)) return error.NotEqual;
-        },
+        };
+
+        switch (expected.forkSeq()) {
+            .phase0 => try Debug.printDiff(types.phase0.BeaconState, expected, actual),
+            .altair => try Debug.printDiff(types.altair.BeaconState, expected, actual),
+            .bellatrix => try Debug.printDiff(types.bellatrix.BeaconState, expected, actual),
+            .capella => try Debug.printDiff(types.capella.BeaconState, expected, actual),
+            .deneb => try Debug.printDiff(types.deneb.BeaconState, expected, actual),
+            .electra => try Debug.printDiff(types.electra.BeaconState, expected, actual),
+            .fulu => try Debug.printDiff(types.fulu.BeaconState, expected, actual),
+        }
+        return error.NotEqual;
     }
 }

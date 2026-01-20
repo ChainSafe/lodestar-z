@@ -51,8 +51,10 @@ pub fn BitVectorTreeView(comptime ST: type) type {
             self.base_view.clearCache();
         }
 
-        pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
-            try self.base_view.hashTreeRoot(out);
+        /// Return the root hash of the tree.
+        /// The returned array is owned by the internal pool and must not be modified.
+        pub fn hashTreeRoot(self: *Self) !*const [32]u8 {
+            return try self.base_view.hashTreeRoot();
         }
 
         pub fn get(self: *Self, index: usize) !Element {
@@ -63,16 +65,19 @@ pub fn BitVectorTreeView(comptime ST: type) type {
             return BitOps.set(&self.base_view, index, value, length);
         }
 
-        /// Caller must free the returned slice.
-        pub fn toBoolArray(self: *Self, allocator: Allocator) ![]bool {
-            const values = try allocator.alloc(bool, length);
-            errdefer allocator.free(values);
-            try self.toBoolArrayInto(values);
+        pub fn toBoolArray(self: *Self) ![length]bool {
+            var values: [length]bool = undefined;
+            try self.toBoolArrayInto(&values);
             return values;
         }
 
         pub fn toBoolArrayInto(self: *Self, out: []bool) !void {
             try BitOps.fillBools(&self.base_view, out, length);
+        }
+
+        pub fn toValue(self: *Self, _: Allocator, out: *ST.Type) !void {
+            try self.commit();
+            try ST.tree.toValue(self.base_view.data.root, self.base_view.pool, out);
         }
     };
 }

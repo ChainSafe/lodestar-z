@@ -1,5 +1,5 @@
 const std = @import("std");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const Body = @import("../types/block.zig").Body;
@@ -18,14 +18,14 @@ const ProcessBlockOpts = @import("./process_block.zig").ProcessBlockOpts;
 
 pub fn processOperations(
     allocator: std.mem.Allocator,
-    cached_state: *CachedBeaconStateAllForks,
+    cached_state: *CachedBeaconState,
     body: Body,
     opts: ProcessBlockOpts,
 ) !void {
     const state = cached_state.state;
 
     // verify that outstanding deposits are processed up to the maximum number of deposits
-    const max_deposits = getEth1DepositCount(cached_state, null);
+    const max_deposits = try getEth1DepositCount(cached_state, null);
     if (body.deposits().len != max_deposits) {
         return error.InvalidDepositCount;
     }
@@ -58,23 +58,23 @@ pub fn processOperations(
         try processVoluntaryExit(cached_state, voluntary_exit, opts.verify_signature);
     }
 
-    if (state.isPostCapella()) {
+    if (state.forkSeq().gte(.capella)) {
         for (body.blsToExecutionChanges()) |*bls_to_execution_change| {
             try processBlsToExecutionChange(cached_state, bls_to_execution_change);
         }
     }
 
-    if (state.isPostElectra()) {
+    if (state.forkSeq().gte(.electra)) {
         for (body.depositRequests()) |*deposit_request| {
-            try processDepositRequest(allocator, cached_state, deposit_request);
+            try processDepositRequest(cached_state, deposit_request);
         }
 
         for (body.withdrawalRequests()) |*withdrawal_request| {
-            try processWithdrawalRequest(allocator, cached_state, withdrawal_request);
+            try processWithdrawalRequest(cached_state, withdrawal_request);
         }
 
         for (body.consolidationRequests()) |*consolidation_request| {
-            try processConsolidationRequest(allocator, cached_state, consolidation_request);
+            try processConsolidationRequest(cached_state, consolidation_request);
         }
     }
 }

@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const ssz = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
@@ -16,17 +16,13 @@ const computeProposers = seed_utils.computeProposers;
 /// Uses active indices from the epoch transition cache for the new epoch.
 pub fn processProposerLookahead(
     allocator: Allocator,
-    cached_state: *CachedBeaconStateAllForks,
+    cached_state: *CachedBeaconState,
     epoch_transition_cache: *const EpochTransitionCache,
 ) !void {
     const state = cached_state.state;
 
-    const fulu_state = switch (state.*) {
-        .fulu => |s| s,
-        // We already check for `state.isFulu()` in `processEpoch`
-        // but if we do get in here we simply return.
-        else => return,
-    };
+    const proposer_lookahead: *[ssz.fulu.ProposerLookahead.length]u64 = try state.proposerLookaheadSlice(allocator);
+    defer allocator.free(proposer_lookahead);
 
     const epoch_cache = cached_state.epoch_cache_ref.get();
     const lookahead_epochs = preset.MIN_SEED_LOOKAHEAD + 1;
@@ -35,13 +31,13 @@ pub fn processProposerLookahead(
     // Shift out proposers in the first epoch
     std.mem.copyForwards(
         ValidatorIndex,
-        fulu_state.proposer_lookahead[0..last_epoch_start],
-        fulu_state.proposer_lookahead[preset.SLOTS_PER_EPOCH..],
+        proposer_lookahead[0..last_epoch_start],
+        proposer_lookahead[preset.SLOTS_PER_EPOCH..],
     );
 
     // Fill in the last epoch with new proposer indices
     // The new epoch is current_epoch + MIN_SEED_LOOKAHEAD + 1 = current_epoch + 2
-    const current_epoch = computeEpochAtSlot(state.slot());
+    const current_epoch = computeEpochAtSlot(try state.slot());
     const new_epoch = current_epoch + preset.MIN_SEED_LOOKAHEAD + 1;
 
     // Active indices for the new epoch come from the epoch transition cache
@@ -59,6 +55,8 @@ pub fn processProposerLookahead(
         new_epoch,
         active_indices,
         effective_balance_increments,
-        fulu_state.proposer_lookahead[last_epoch_start..],
+        proposer_lookahead[last_epoch_start..],
     );
+
+    try state.setProposerLookahead(proposer_lookahead);
 }

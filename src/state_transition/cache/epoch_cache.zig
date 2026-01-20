@@ -19,8 +19,8 @@ const EpochShuffling = @import("../utils//epoch_shuffling.zig").EpochShuffling;
 const EpochShufflingRc = @import("../utils/epoch_shuffling.zig").EpochShufflingRc;
 const EffectiveBalanceIncrementsRc = @import("./effective_balance_increments.zig").EffectiveBalanceIncrementsRc;
 const EffectiveBalanceIncrements = @import("./effective_balance_increments.zig").EffectiveBalanceIncrements;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
@@ -31,7 +31,7 @@ const computeEpochShuffling = @import("../utils/epoch_shuffling.zig").computeEpo
 const getSeed = @import("../utils/seed.zig").getSeed;
 const computeProposers = @import("../utils/seed.zig").computeProposers;
 const SyncCommitteeCacheRc = @import("./sync_committee_cache.zig").SyncCommitteeCacheRc;
-const SyncCommitteeCacheAllForks = @import("./sync_committee_cache.zig").SyncCommitteeCacheAllForks;
+const SyncCommitteeCacheAllForks = @import("./sync_committee_cache.zig").SyncCommitteeCache;
 const computeSyncParticipantReward = @import("../utils/sync_committee.zig").computeSyncParticipantReward;
 const computeBaseRewardPerIncrement = @import("../utils/sync_committee.zig").computeBaseRewardPerIncrement;
 const computeSyncPeriodAtEpoch = @import("../utils/epoch.zig").computeSyncPeriodAtEpoch;
@@ -66,8 +66,8 @@ const weight_denominator: f64 = @floatFromInt(c.WEIGHT_DENOMINATOR);
 
 pub const proposer_weight_factor: f64 = proposer_weight / (weight_denominator - proposer_weight);
 
-/// an EpochCache is shared by multiple CachedBeaconStateAllForks instances
-/// a CachedBeaconStateAllForks should increase the reference count of EpochCache when it is created
+/// an EpochCache is shared by multiple CachedBeaconState instances
+/// a CachedBeaconState should increase the reference count of EpochCache when it is created
 /// and decrease the reference count when it is deinitialized
 pub const EpochCacheRc = ReferenceCount(*EpochCache);
 
@@ -142,12 +142,12 @@ pub const EpochCache = struct {
 
     epoch: Epoch,
 
-    pub fn createFromState(allocator: Allocator, state: *const BeaconStateAllForks, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*EpochCache {
+    pub fn createFromState(allocator: Allocator, state: *BeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*EpochCache {
         const config = immutable_data.config;
         const pubkey_to_index = immutable_data.pubkey_to_index;
         const index_to_pubkey = immutable_data.index_to_pubkey;
 
-        const current_epoch = computeEpochAtSlot(state.slot());
+        const current_epoch = computeEpochAtSlot(try state.slot());
         const is_genesis = current_epoch == GENESIS_EPOCH;
         const previous_epoch = if (is_genesis) GENESIS_EPOCH else current_epoch - 1;
         const next_epoch = current_epoch + 1;
@@ -156,7 +156,9 @@ pub const EpochCache = struct {
         var exit_queue_epoch = computeActivationExitEpoch(current_epoch);
         var exit_queue_churn: u64 = 0;
 
-        const validators = state.validators().items;
+        const validators = try state.validatorsSlice(allocator);
+        defer allocator.free(validators);
+
         const validator_count = validators.len;
 
         // syncPubkeys here to ensure EpochCacheImmutableData is popualted before computing the rest of caches
@@ -167,7 +169,7 @@ pub const EpochCache = struct {
         }
 
         const effective_balance_increment = try getEffectiveBalanceIncrementsWithLen(allocator, validator_count);
-        const total_slashings_by_increment = getTotalSlashingsByIncrement(state);
+        const total_slashings_by_increment = try getTotalSlashingsByIncrement(state);
         var previous_active_indices_array_list = std.ArrayList(ValidatorIndex).init(allocator);
         defer previous_active_indices_array_list.deinit();
         try previous_active_indices_array_list.ensureTotalCapacity(validator_count);
@@ -248,8 +250,20 @@ pub const EpochCache = struct {
         const sync_proposer_reward: u64 = @intFromFloat(std.math.floor(sync_participant_reward_f64 * proposer_weight_factor));
         const base_reward_pre_increment = computeBaseRewardPerIncrement(total_active_balance_increments);
         const skip_sync_committee_cache = if (option) |opt| opt.skip_sync_committee_cache else !after_altair_fork;
-        var current_sync_committee_indexed = if (skip_sync_committee_cache) SyncCommitteeCacheAllForks.initEmpty() else try SyncCommitteeCacheAllForks.initSyncCommittee(allocator, state.currentSyncCommittee(), pubkey_to_index);
-        var next_sync_committee_indexed = if (skip_sync_committee_cache) SyncCommitteeCacheAllForks.initEmpty() else try SyncCommitteeCacheAllForks.initSyncCommittee(allocator, state.nextSyncCommittee(), pubkey_to_index);
+        var current_sync_committee_indexed = blk: {
+            if (skip_sync_committee_cache) break :blk SyncCommitteeCacheAllForks.initEmpty();
+            var current_sc_view = try state.currentSyncCommittee();
+            var current_sc: types.altair.SyncCommittee.Type = undefined;
+            try current_sc_view.toValue(allocator, &current_sc);
+            break :blk try SyncCommitteeCacheAllForks.initSyncCommittee(allocator, &current_sc, pubkey_to_index);
+        };
+        var next_sync_committee_indexed = blk: {
+            if (skip_sync_committee_cache) break :blk SyncCommitteeCacheAllForks.initEmpty();
+            var next_sc_view = try state.nextSyncCommittee();
+            var next_sc: types.altair.SyncCommittee.Type = undefined;
+            try next_sc_view.toValue(allocator, &next_sc);
+            break :blk try SyncCommitteeCacheAllForks.initSyncCommittee(allocator, &next_sc, pubkey_to_index);
+        };
 
         errdefer {
             current_sync_committee_indexed.deinit();
@@ -283,8 +297,13 @@ pub const EpochCache = struct {
         var current_target_unslashed_balance_increments: u64 = 0;
 
         if (fork_seq.gte(.altair)) {
-            const previous_epoch_participation = state.previousEpochParticipations().items;
-            const current_epoch_participation = state.currentEpochParticipations().items;
+            var previous_epoch_participation_view = try state.previousEpochParticipation();
+            const previous_epoch_participation = try previous_epoch_participation_view.getAll(allocator);
+            defer allocator.free(previous_epoch_participation);
+
+            var current_epoch_participation_view = try state.currentEpochParticipation();
+            const current_epoch_participation = try current_epoch_participation_view.getAll(allocator);
+            defer allocator.free(current_epoch_participation);
 
             previous_target_unslashed_balance_increments = sumTargetUnslashedBalanceIncrements(previous_epoch_participation, previous_epoch, validators);
             current_target_unslashed_balance_increments = sumTargetUnslashedBalanceIncrements(current_epoch_participation, current_epoch, validators);
@@ -408,7 +427,7 @@ pub const EpochCache = struct {
         return self.effective_balance_increment.get();
     }
 
-    pub fn afterProcessEpoch(self: *EpochCache, cached_state: *const CachedBeaconStateAllForks, epoch_transition_cache: *const EpochTransitionCache) !void {
+    pub fn afterProcessEpoch(self: *EpochCache, cached_state: *const CachedBeaconState, epoch_transition_cache: *const EpochTransitionCache) !void {
         const state = cached_state.state;
         const upcoming_epoch = self.epoch + 1;
         const epoch_after_upcoming = upcoming_epoch + 1;
@@ -430,7 +449,7 @@ pub const EpochCache = struct {
         self.next_shuffling = try EpochShufflingRc.init(self.allocator, next_shuffling);
 
         self.churn_limit = getChurnLimit(self.config, self.current_shuffling.get().active_indices.len);
-        self.activation_churn_limit = getActivationChurnLimit(self.config, self.config.forkSeq(state.slot()), self.current_shuffling.get().active_indices.len);
+        self.activation_churn_limit = getActivationChurnLimit(self.config, self.config.forkSeq(try state.slot()), self.current_shuffling.get().active_indices.len);
 
         const exit_queue_epoch = computeActivationExitEpoch(upcoming_epoch);
         if (exit_queue_epoch > self.exit_queue_epoch) {
@@ -448,12 +467,12 @@ pub const EpochCache = struct {
 
         self.previous_target_unslashed_balance_increments = self.current_target_unslashed_balance_increments;
         self.current_target_unslashed_balance_increments = 0;
-        self.epoch = computeEpochAtSlot(state.slot());
+        self.epoch = computeEpochAtSlot(try state.slot());
         self.sync_period = computeSyncPeriodAtEpoch(self.epoch);
     }
 
     /// At fork boundary, this runs post-fork logic and after `upgradeState*`.
-    pub fn finalProcessEpoch(self: *EpochCache, cached_state: *const CachedBeaconStateAllForks) !void {
+    pub fn finalProcessEpoch(self: *EpochCache, cached_state: *const CachedBeaconState) !void {
         const state = cached_state.state;
 
         self.proposers_prev_epoch = self.proposers;
@@ -461,8 +480,12 @@ pub const EpochCache = struct {
         // field which we already processed in `processProposerLookahead`.
         // Proposers are to be computed pre-fulu to be cached within `self`.
         if (self.epoch >= self.config.chain.FULU_FORK_EPOCH) {
-            self.proposers = state.proposerLookahead()[0..preset.SLOTS_PER_EPOCH].*;
-            self.proposers_next_epoch = state.proposerLookahead()[preset.SLOTS_PER_EPOCH .. preset.SLOTS_PER_EPOCH * 2].*;
+            var proposer_lookahead = try state.proposerLookahead();
+            self.proposers_next_epoch = undefined;
+            for (0..preset.SLOTS_PER_EPOCH) |i| {
+                self.proposers[i] = @intCast(try proposer_lookahead.get(i));
+                self.proposers_next_epoch.?[i] = @intCast(try proposer_lookahead.get(preset.SLOTS_PER_EPOCH + i));
+            }
         } else {
             var upcoming_proposer_seed: [32]u8 = undefined;
             try getSeed(state, self.epoch, c.DOMAIN_BEACON_PROPOSER, &upcoming_proposer_seed);
@@ -511,7 +534,7 @@ pub const EpochCache = struct {
     }
 
     /// Gets the beacon proposer for a slot. This is for pre-Fulu forks only.
-    /// NOTE: For the Fulu fork, use `CachedBeaconStateAllForks.getBeaconProposer()` instead,
+    /// NOTE: For the Fulu fork, use `CachedBeaconState.getBeaconProposer()` instead,
     /// which properly accesses `proposer_lookahead` from the state.
     pub fn getBeaconProposer(self: *const EpochCache, slot: Slot) !ValidatorIndex {
         const epoch = computeEpochAtSlot(slot);

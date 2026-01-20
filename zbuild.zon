@@ -81,7 +81,7 @@
         },
         .era = .{
             .root_source_file = "src/era/root.zig",
-            .imports = .{ .consensus_types, .config, .preset, .state_transition, .snappy },
+            .imports = .{ .consensus_types, .config, .preset, .state_transition, .snappy, .persistent_merkle_tree },
         },
         .hashing = .{
             .root_source_file = "src/hashing/root.zig",
@@ -114,6 +114,7 @@
                 .preset,
                 .constants,
                 .hex,
+                .persistent_merkle_tree,
             },
         },
     },
@@ -187,13 +188,15 @@
         .bench_process_block = .{
             .root_module = .{
                 .root_source_file = "bench/state_transition/process_block.zig",
-                .imports = .{ .state_transition, .consensus_types, .config, .zbench },
+                .imports = .{ .state_transition, .consensus_types, .config, .zbench, .persistent_merkle_tree, .download_era_options, .era },
+                .strip = false,
+                .omit_frame_pointer = false,
             },
         },
         .bench_process_epoch = .{
             .root_module = .{
                 .root_source_file = "bench/state_transition/process_epoch.zig",
-                .imports = .{ .state_transition, .consensus_types, .config, .zbench },
+                .imports = .{ .state_transition, .consensus_types, .config, .zbench, .persistent_merkle_tree, .download_era_options, .era },
             },
         },
     },
@@ -209,6 +212,7 @@
                     .preset,
                     .constants,
                     .blst,
+                    .persistent_merkle_tree,
                 },
             },
             .filters = .{},

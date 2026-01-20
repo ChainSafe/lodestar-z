@@ -63,7 +63,7 @@ test "write an era file from an existing era file" {
         try writer.writeBlock(allocator, block);
     }
     var state = try reader.readState(allocator, null);
-    defer state.deinit(allocator);
+    defer state.deinit();
 
     try writer.writeState(allocator, state);
 
@@ -104,7 +104,7 @@ test "write an era file from an existing era file" {
     }
     // Compare state
     var out_state = try out_reader.readState(allocator, null);
-    defer out_state.deinit(allocator);
+    defer out_state.deinit();
 
     const serialized = try state.serialize(allocator);
     defer allocator.free(serialized);

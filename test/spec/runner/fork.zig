@@ -1,4 +1,5 @@
 const std = @import("std");
+const Node = @import("persistent_merkle_tree").Node;
 const ForkSeq = @import("config").ForkSeq;
 const state_transition = @import("state_transition");
 const upgradeStateToAltair = state_transition.upgradeStateToAltair;
@@ -7,11 +8,12 @@ const upgradeStateToCapella = state_transition.upgradeStateToCapella;
 const upgradeStateToDeneb = state_transition.upgradeStateToDeneb;
 const upgradeStateToElectra = state_transition.upgradeStateToElectra;
 const upgradeStateToFulu = state_transition.upgradeStateToFulu;
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
-const BeaconStateAllForks = state_transition.BeaconStateAllForks;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+const BeaconState = state_transition.BeaconState;
 const test_case = @import("../test_case.zig");
 const TestCaseUtils = test_case.TestCaseUtils;
 const expectEqualBeaconStates = test_case.expectEqualBeaconStates;
+const active_preset = @import("preset").active_preset;
 
 pub const Handler = enum {
     fork,
@@ -36,13 +38,17 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
     const post_tc_utils = TestCaseUtils(target_fork);
 
     return struct {
-        pre: TestCachedBeaconStateAllForks,
-        post: ?BeaconStateAllForks,
+        pre: TestCachedBeaconState,
+        post: ?*BeaconState,
 
         const Self = @This();
 
         pub fn execute(allocator: Allocator, dir: std.fs.Dir) !void {
-            var tc = try Self.init(allocator, dir);
+            const pool_size = if (active_preset == .mainnet) 10_000_000 else 1_000_000;
+            var pool = try Node.Pool.init(allocator, pool_size);
+            defer pool.deinit();
+
+            var tc = try Self.init(allocator, &pool, dir);
             defer {
                 tc.deinit();
                 state_transition.deinitStateTransition();
@@ -51,14 +57,14 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
             try tc.runTest();
         }
 
-        fn init(allocator: Allocator, dir: std.fs.Dir) !Self {
+        fn init(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
             const meta_fork = try loadTargetFork(allocator, dir);
             if (meta_fork != target_fork) return error.InvalidMetaFile;
 
-            var pre_state = try pre_tc_utils.loadPreState(allocator, dir);
+            var pre_state = try pre_tc_utils.loadPreState(allocator, pool, dir);
             errdefer pre_state.deinit();
 
-            const post_state = try post_tc_utils.loadPostState(allocator, dir);
+            const post_state = try post_tc_utils.loadPostState(allocator, pool, dir);
 
             return .{
                 .pre = pre_state,
@@ -68,15 +74,16 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
 
         fn deinit(self: *Self) void {
             self.pre.deinit();
-            if (self.post) |*post_state| {
-                post_state.deinit(self.pre.allocator);
+            if (self.post) |post| {
+                post.deinit();
+                self.pre.allocator.destroy(post);
             }
         }
 
         fn runTest(self: *Self) !void {
             if (self.post) |expected| {
                 try self.upgrade();
-                try expectEqualBeaconStates(expected, self.pre.cached_state.state.*);
+                try expectEqualBeaconStates(expected, self.pre.cached_state.state);
             } else {
                 self.upgrade() catch |err| {
                     if (err == error.SkipZigTest) {

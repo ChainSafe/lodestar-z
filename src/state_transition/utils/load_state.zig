@@ -262,12 +262,12 @@ fn loadValidators(
     for (modified_validators.items) |validator_index| {
         const i: usize = @intCast(validator_index);
 
-        var seed_validator = try seed_validators.get(i);
-        defer seed_validator.deinit();
-
         const start = i * ssz_bytes.VALIDATOR_BYTES_SIZE;
         const new_bytes = new_validators_bytes[start .. start + ssz_bytes.VALIDATOR_BYTES_SIZE];
         const seed_val_bytes = seed_bytes[start .. start + ssz_bytes.VALIDATOR_BYTES_SIZE];
+
+        var seed_validator = try seed_validators.get(i);
+        // seed_validator is borrowed from seed_validators; do not deinit.
 
         var new_validator = try loadValidatorWithSeedReuse(
             allocator,
@@ -468,9 +468,9 @@ test "loadValidatorWithSeedReuse: reuse vs rebuild" {
     const gen = @import("../test_utils/generate_state.zig");
     const chain_config = gen.getConfig(@import("config").minimal.chain_config, .electra, 0);
 
-    const state_ptr = try gen.generateElectraState(allocator, chain_config, 64);
+    const state_ptr = try gen.generateElectraState(allocator, &pool, chain_config, 64);
     defer {
-        state_ptr.deinit(allocator);
+        state_ptr.deinit();
         allocator.destroy(state_ptr);
     }
 
@@ -488,7 +488,7 @@ test "loadValidatorWithSeedReuse: reuse vs rebuild" {
 
     const target_index: usize = 3;
     var seed_validator = try seed_validators.get(target_index);
-    defer seed_validator.deinit();
+    // seed_validator is borrowed from seed_validators; do not deinit.
 
     var seed_validator_bytes: [ssz_bytes.VALIDATOR_BYTES_SIZE]u8 = undefined;
     _ = try seed_validator.serializeIntoBytes(&seed_validator_bytes);
@@ -563,13 +563,13 @@ test "loadState scenarios" {
         var pool = try Node.Pool.init(allocator, 8192);
         defer pool.deinit();
 
-        const state_ptr = try gen.generateElectraState(allocator, chain_config, 64);
+        const state_ptr = try gen.generateElectraState(allocator, &pool, chain_config, 64);
         defer {
-            state_ptr.deinit(allocator);
+            state_ptr.deinit();
             allocator.destroy(state_ptr);
         }
 
-        const genesis_root = state_ptr.electra.genesis_validators_root;
+        const genesis_root = (try state_ptr.genesisValidatorsRoot()).*;
         const beacon_config = @import("config").BeaconConfig.init(chain_config, genesis_root);
 
         const seed_bytes = try state_ptr.serialize(allocator);
@@ -603,31 +603,55 @@ test "loadState scenarios" {
                     break :blk out;
                 },
                 .scores_struct => |m| {
-                    state_ptr.electra.inactivity_scores.items[m.index] = m.value;
+                    var scores = try state_ptr.inactivityScores();
+                    try scores.set(m.index, m.value);
                     break :blk try state_ptr.serialize(allocator);
                 },
                 .append_one_validator_struct => |m| {
-                    const PubkeyT = @TypeOf(state_ptr.electra.validators.items[0].pubkey);
-                    var v = state_ptr.electra.validators.items[0];
-                    v.pubkey = @as(PubkeyT, [_]u8{m.pub_fill} ** 48);
-                    try state_ptr.electra.validators.append(allocator, v);
-                    try state_ptr.electra.balances.append(allocator, state_ptr.electra.balances.items[0]);
-                    try state_ptr.electra.inactivity_scores.append(allocator, state_ptr.electra.inactivity_scores.items[0]);
-                    try state_ptr.electra.previous_epoch_participation.append(allocator, state_ptr.electra.previous_epoch_participation.items[0]);
-                    try state_ptr.electra.current_epoch_participation.append(allocator, state_ptr.electra.current_epoch_participation.items[0]);
-                    state_ptr.electra.eth1_data.deposit_count += 1;
-                    state_ptr.electra.eth1_deposit_index += 1;
+                    var validators = try state_ptr.validators();
+                    var v: types.phase0.Validator.Type = undefined;
+                    try validators.getValue(allocator, 0, &v);
+                    v.pubkey = @as(@TypeOf(v.pubkey), [_]u8{m.pub_fill} ** 48);
+                    try validators.pushValue(&v);
+
+                    var balances = try state_ptr.balances();
+                    try balances.push(try balances.get(0));
+
+                    var scores = try state_ptr.inactivityScores();
+                    try scores.push(try scores.get(0));
+
+                    var previous_epoch_participation = try state_ptr.previousEpochParticipation();
+                    try previous_epoch_participation.push(try previous_epoch_participation.get(0));
+
+                    var current_epoch_participation = try state_ptr.currentEpochParticipation();
+                    try current_epoch_participation.push(try current_epoch_participation.get(0));
+
+                    var eth1_data = try state_ptr.eth1Data();
+                    const deposit_count = try eth1_data.get("deposit_count");
+                    try eth1_data.set("deposit_count", deposit_count + 1);
+                    try state_ptr.setEth1DepositIndex(try state_ptr.eth1DepositIndex() + 1);
                     break :blk try state_ptr.serialize(allocator);
                 },
                 .trim_struct => |m| {
-                    try state_ptr.electra.validators.resize(allocator, m.new_len);
-                    try state_ptr.electra.balances.resize(allocator, m.new_len);
-                    try state_ptr.electra.inactivity_scores.resize(allocator, m.new_len);
-                    try state_ptr.electra.previous_epoch_participation.resize(allocator, m.new_len);
-                    try state_ptr.electra.current_epoch_participation.resize(allocator, m.new_len);
+                    var validators = try state_ptr.validators();
+                    try validators.setLength(m.new_len);
+
+                    var balances = try state_ptr.balances();
+                    try balances.setLength(m.new_len);
+
+                    var scores = try state_ptr.inactivityScores();
+                    try scores.setLength(m.new_len);
+
+                    var previous_epoch_participation = try state_ptr.previousEpochParticipation();
+                    try previous_epoch_participation.setLength(m.new_len);
+
+                    var current_epoch_participation = try state_ptr.currentEpochParticipation();
+                    try current_epoch_participation.setLength(m.new_len);
+
                     if (m.new_len == 0) {
-                        state_ptr.electra.eth1_data.deposit_count = 0;
-                        state_ptr.electra.eth1_deposit_index = 0;
+                        var eth1_data = try state_ptr.eth1Data();
+                        try eth1_data.set("deposit_count", 0);
+                        try state_ptr.setEth1DepositIndex(0);
                     }
                     break :blk try state_ptr.serialize(allocator);
                 },
@@ -665,7 +689,7 @@ test "loadState scenarios" {
             const validators_range = ranges[validators_field_index];
             const base = validators_range[0] + exp.index * ssz_bytes.VALIDATOR_BYTES_SIZE;
             var mv = try migrated_validators.get(exp.index);
-            defer mv.deinit();
+            // mv is borrowed from migrated_validators; do not deinit.
             var mv_bytes: [ssz_bytes.VALIDATOR_BYTES_SIZE]u8 = undefined;
             _ = try mv.serializeIntoBytes(&mv_bytes);
             try std.testing.expectEqualSlices(u8, mutated_bytes[base .. base + ssz_bytes.VALIDATOR_BYTES_SIZE], mv_bytes[0..]);

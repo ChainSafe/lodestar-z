@@ -9,6 +9,7 @@ const isFixedType = @import("type_kind.zig").isFixedType;
 const OffsetIterator = @import("offsets.zig").OffsetIterator;
 const merkleize = @import("hashing").merkleize;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
+const getZeroHash = @import("hashing").getZeroHash;
 const Node = @import("persistent_merkle_tree").Node;
 const tree_view = @import("../tree_view/root.zig");
 const ArrayBasicTreeView = tree_view.ArrayBasicTreeView;
@@ -38,6 +39,8 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
 
         pub const default_value: Type = [_]Element.Type{Element.default_value} ** length;
 
+        pub const default_root: [32]u8 = getZeroHash(chunk_depth).*;
+
         pub fn equals(a: *const Type, b: *const Type) bool {
             for (a, b) |a_elem, b_elem| {
                 if (!Element.equals(&a_elem, &b_elem)) {
@@ -59,8 +62,21 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
             try merkleize(@ptrCast(&chunks), chunk_depth, out);
         }
 
-        pub fn clone(value: *const Type, out: *Type) !void {
-            out.* = value.*;
+        pub fn clone(value: *const Type, out: anytype) !void {
+            comptime {
+                const OutInfo = @typeInfo(@TypeOf(out.*));
+                std.debug.assert(OutInfo == .array);
+                std.debug.assert(OutInfo.array.len == length);
+            }
+
+            const OutType = @TypeOf(out.*);
+            if (OutType == Type) {
+                out.* = value.*;
+            } else {
+                inline for (value, 0..) |*element, i| {
+                    try Element.clone(element, &out[i]);
+                }
+            }
         }
 
         pub fn serializeIntoBytes(value: *const Type, out: []u8) usize {
@@ -111,6 +127,23 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
         };
 
         pub const tree = struct {
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                if (comptime isBasicType(Element)) {
+                    return @enumFromInt(chunk_depth);
+                } else {
+                    var nodes: [chunk_count]Node.Id = undefined;
+
+                    const element_default = try Element.tree.default(pool);
+                    defer pool.free(&element_default);
+
+                    for (0..chunk_count) |i| {
+                        nodes[i] = element_default;
+                    }
+
+                    return try Node.fillWithContents(pool, &nodes, chunk_depth);
+                }
+            }
+
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 if (data.len != fixed_size) {
                     return error.InvalidSize;
@@ -263,6 +296,14 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
 
         pub const default_value: Type = [_]Element.Type{Element.default_value} ** length;
 
+        pub const default_root: [32]u8 = blk: {
+            var buf: [32]u8 = undefined;
+            var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
+            @memset(chunks[0..length], Element.default_root);
+            merkleize(@ptrCast(&chunks), chunk_depth, &buf) catch unreachable;
+            break :blk buf;
+        };
+
         pub fn equals(a: *const Type, b: *const Type) bool {
             for (a, b) |a_elem, b_elem| {
                 if (!Element.equals(&a_elem, &b_elem)) {
@@ -286,8 +327,16 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
             try merkleize(@ptrCast(&chunks), chunk_depth, out);
         }
 
-        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
-            for (0..length) |i| try Element.clone(allocator, &value[i], &out[i]);
+        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: anytype) !void {
+            comptime {
+                const OutInfo = @typeInfo(@TypeOf(out.*));
+                std.debug.assert(OutInfo == .array);
+                std.debug.assert(OutInfo.array.len == length);
+            }
+
+            for (value, 0..) |*element, i| {
+                try Element.clone(allocator, element, &out[i]);
+            }
         }
 
         pub fn serializedSize(value: *const Type) usize {
@@ -354,6 +403,19 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
         };
 
         pub const tree = struct {
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                var nodes: [chunk_count]Node.Id = undefined;
+
+                const element_default = try Element.tree.default(pool);
+                defer pool.unref(element_default);
+
+                for (0..chunk_count) |i| {
+                    nodes[i] = element_default;
+                }
+
+                return try Node.fillWithContents(pool, &nodes, chunk_depth);
+            }
+
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 if (data.len > max_size or data.len < min_size) {
                     return error.InvalidSize;
@@ -457,6 +519,7 @@ const BitListType = @import("bit_list.zig").BitListType;
 const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 const FixedContainerType = @import("container.zig").FixedContainerType;
 const FixedListType = @import("list.zig").FixedListType;
+const VariableContainerType = @import("container.zig").VariableContainerType;
 
 test "vector - sanity" {
     // create a fixed vector type and instance and round-trip serialize
@@ -468,31 +531,62 @@ test "vector - sanity" {
     try Bytes32.deserializeFromBytes(&b0_buf, &b0);
 }
 
-test "clone" {
+test "clone FixedVectorType" {
+    const Checkpoint = FixedContainerType(struct {
+        epoch: UintType(8),
+        root: ByteVectorType(32),
+    });
+    const CheckpointVector = FixedVectorType(Checkpoint, 4);
+    var vector: CheckpointVector.Type = CheckpointVector.default_value;
+    vector[0].epoch = 42;
+
+    var cloned: CheckpointVector.Type = undefined;
+    try CheckpointVector.clone(&vector, &cloned);
+    try std.testing.expect(&vector != &cloned);
+    try std.testing.expect(CheckpointVector.equals(&vector, &cloned));
+
+    // clone into another type
+    const CheckpointHex = FixedContainerType(struct {
+        epoch: UintType(8),
+        root: ByteVectorType(32),
+        root_hex: ByteVectorType(64),
+    });
+    const CheckpointHexVector = FixedVectorType(CheckpointHex, 4);
+    var cloned2: CheckpointHexVector.Type = undefined;
+    try CheckpointVector.clone(&vector, &cloned2);
+    try std.testing.expect(cloned2[0].epoch == 42);
+}
+
+test "clone VariableVectorType" {
     const allocator = std.testing.allocator;
-    const BoolVectorFixed = FixedVectorType(BoolType(), 8);
-    var bvf: BoolVectorFixed.Type = BoolVectorFixed.default_value;
+    const FieldA = FixedListType(UintType(8), 32);
+    const Foo = VariableContainerType(struct {
+        a: FieldA,
+    });
+    const FooVector = VariableVectorType(Foo, 4);
+    var foo_vector: FooVector.Type = FooVector.default_value;
+    defer FooVector.deinit(allocator, &foo_vector);
+    try foo_vector[0].a.append(allocator, 100);
 
-    var cloned: BoolVectorFixed.Type = undefined;
-    try BoolVectorFixed.clone(&bvf, &cloned);
-    try expectEqualRoots(BoolVectorFixed, bvf, cloned);
-    try expectEqualSerialized(BoolVectorFixed, bvf, cloned);
+    var cloned: FooVector.Type = undefined;
+    defer FooVector.deinit(allocator, &cloned);
+    try FooVector.clone(allocator, &foo_vector, &cloned);
+    try std.testing.expect(&foo_vector != &cloned);
+    try std.testing.expect(FooVector.equals(&foo_vector, &cloned));
+    try std.testing.expect(cloned[0].a.items.len == 1);
+    try std.testing.expect(cloned[0].a.items[0] == 100);
 
-    try std.testing.expect(&bvf != &cloned);
-    try std.testing.expect(std.mem.eql(bool, bvf[0..], cloned[0..]));
-
-    const limit = 16;
-    const BitList = BitListType(limit);
-    const bl = BitList.default_value;
-    const BoolVectorVariable = VariableVectorType(BitList, 8);
-    var bvv: BoolVectorVariable.Type = BoolVectorVariable.default_value;
-    bvv[0] = bl;
-
-    var cloned_v: BoolVectorVariable.Type = undefined;
-    try BoolVectorVariable.clone(allocator, &bvv, &cloned_v);
-    try std.testing.expect(&bvv != &cloned_v);
-    try expectEqualRootsAlloc(BoolVectorVariable, allocator, bvv, cloned_v);
-    try expectEqualSerializedAlloc(BoolVectorVariable, allocator, bvv, cloned_v);
+    // clone into another type
+    const Bar = VariableContainerType(struct {
+        a: FieldA,
+        b: UintType(8),
+    });
+    const BarVector = VariableVectorType(Bar, 4);
+    var cloned2: BarVector.Type = undefined;
+    defer BarVector.deinit(allocator, &cloned2);
+    try FooVector.clone(allocator, &foo_vector, &cloned2);
+    try std.testing.expect(cloned2[0].a.items.len == 1);
+    try std.testing.expect(cloned2[0].a.items[0] == 100);
 }
 
 // Refer to https://github.com/ChainSafe/ssz/blob/f5ed0b457333749b5c3f49fa5eafa096a725f033/packages/ssz/test/unit/byType/vector/valid.test.ts#L15-L85
@@ -900,4 +994,33 @@ test "VectorCompositeType of Container" {
     for (test_cases[0..]) |*tc| {
         try TypeTest.run(allocator, tc);
     }
+}
+
+test "FixedVectorType - default_root" {
+    const VectorU64 = FixedVectorType(UintType(64), 4);
+    var expected_root: [32]u8 = undefined;
+
+    try VectorU64.hashTreeRoot(&VectorU64.default_value, &expected_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &VectorU64.default_root);
+
+    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    defer pool.deinit();
+
+    const node = try VectorU64.tree.default(&pool);
+    try std.testing.expectEqualSlices(u8, &expected_root, node.getRoot(&pool));
+}
+
+test "VariableVectorType - default_root" {
+    const ListU64 = FixedListType(UintType(64), 8);
+    const VectorList = VariableVectorType(ListU64, 2);
+    var expected_root: [32]u8 = undefined;
+
+    try VectorList.hashTreeRoot(std.testing.allocator, &VectorList.default_value, &expected_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &VectorList.default_root);
+
+    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    defer pool.deinit();
+
+    const node = try VectorList.tree.default(&pool);
+    try std.testing.expectEqualSlices(u8, &expected_root, node.getRoot(&pool));
 }

@@ -6,9 +6,9 @@ const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const ForkSeq = @import("config").ForkSeq;
 const Epoch = types.primitive.Epoch.Type;
 const preset = @import("preset").preset;
-const CachedBeaconStateAllForks = @import("./state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("./state_cache.zig").CachedBeaconState;
 
-const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
 const deinitStateTransition = @import("../root.zig").deinitStateTransition;
 
@@ -194,11 +194,11 @@ pub const EpochTransitionCache = struct {
 
     // TODO: no need EpochTransitionCacheOpts for zig version
     // this is the same to beforeProcessEpoch in typesript version
-    pub fn init(allocator: Allocator, cached_state: *CachedBeaconStateAllForks) !*EpochTransitionCache {
+    pub fn init(allocator: Allocator, cached_state: *CachedBeaconState) !*EpochTransitionCache {
         const config = cached_state.config;
         var epoch_cache = cached_state.getEpochCache();
         const state = cached_state.state;
-        const fork_seq = config.forkSeq(state.slot());
+        const fork_seq = config.forkSeq(try state.slot());
         const current_epoch = epoch_cache.epoch;
         const prev_epoch = epoch_cache.getPreviousShuffling().epoch;
         const next_epoch = current_epoch + 1;
@@ -215,7 +215,9 @@ pub const EpochTransitionCache = struct {
         var indices_to_eject = std.ArrayList(ValidatorIndex).init(allocator);
 
         var total_active_stake_by_increment: u64 = 0;
-        const validator_count = state.validators().items.len;
+        const validators = try state.validatorsSlice(allocator);
+        defer allocator.free(validators);
+        const validator_count = validators.len;
 
         // Clone before being mutated in processEffectiveBalanceUpdates
         try epoch_cache.beforeEpochTransition();
@@ -225,8 +227,7 @@ pub const EpochTransitionCache = struct {
         var next_epoch_shuffling_active_indices_length: usize = 0;
 
         var reused_cache = try getReusedEpochTransitionCache(allocator, validator_count);
-        for (0..validator_count) |i| {
-            const validator = state.validators().items[i];
+        for (validators, 0..) |validator, i| {
             var flag: u8 = 0;
 
             if (validator.slashed) {
@@ -258,7 +259,7 @@ pub const EpochTransitionCache = struct {
             reused_cache.flags.items[i] = flag;
 
             if (fork_seq.gte(.electra)) {
-                reused_cache.is_compounding_validator_arr.items[i] = hasCompoundingWithdrawalCredential(validator.withdrawal_credentials);
+                reused_cache.is_compounding_validator_arr.items[i] = hasCompoundingWithdrawalCredential(&validator.withdrawal_credentials);
             }
 
             if (is_active_curr) {
@@ -352,6 +353,24 @@ pub const EpochTransitionCache = struct {
             @memset(reused_cache.proposer_indices.items, validator_count);
             try reused_cache.inclusion_delays.resize(validator_count);
             @memset(reused_cache.inclusion_delays.items, 0);
+
+            var previous_epoch_pending_attestations_view = try state.previousEpochPendingAttestations();
+            const previous_epoch_pending_attestations = try previous_epoch_pending_attestations_view.getAllReadonlyValues(allocator);
+            defer {
+                for (previous_epoch_pending_attestations) |*att| {
+                    types.phase0.PendingAttestation.deinit(allocator, att);
+                }
+                allocator.free(previous_epoch_pending_attestations);
+            }
+            var current_epoch_pending_attestations_view = try state.currentEpochPendingAttestations();
+            const current_epoch_pending_attestations = try current_epoch_pending_attestations_view.getAllReadonlyValues(allocator);
+            defer {
+                for (current_epoch_pending_attestations) |*att| {
+                    types.phase0.PendingAttestation.deinit(allocator, att);
+                }
+                allocator.free(current_epoch_pending_attestations);
+            }
+
             try processPendingAttestations(
                 allocator,
                 cached_state,
@@ -359,7 +378,7 @@ pub const EpochTransitionCache = struct {
                 validator_count,
                 reused_cache.inclusion_delays.items,
                 reused_cache.flags.items,
-                state.previousEpochPendingAttestations().items,
+                previous_epoch_pending_attestations,
                 prev_epoch,
                 FLAG_PREV_SOURCE_ATTESTER,
                 FLAG_PREV_TARGET_ATTESTER,
@@ -372,7 +391,7 @@ pub const EpochTransitionCache = struct {
                 validator_count,
                 reused_cache.inclusion_delays.items,
                 reused_cache.flags.items,
-                state.currentEpochPendingAttestations().items,
+                current_epoch_pending_attestations,
                 current_epoch,
                 FLAG_CURR_SOURCE_ATTESTER,
                 FLAG_CURR_TARGET_ATTESTER,
@@ -381,9 +400,17 @@ pub const EpochTransitionCache = struct {
         } else {
             try reused_cache.previous_epoch_participation.resize(validator_count);
             try reused_cache.current_epoch_participation.resize(validator_count);
-            // TODO: does not work for TreeView
-            @memcpy(reused_cache.previous_epoch_participation.items[0..validator_count], state.previousEpochParticipations().items);
-            @memcpy(reused_cache.current_epoch_participation.items[0..validator_count], state.currentEpochParticipations().items);
+
+            var previous_epoch_participation_view = try state.previousEpochParticipation();
+            const previous_epoch_participation = try previous_epoch_participation_view.getAll(allocator);
+            defer allocator.free(previous_epoch_participation);
+            var current_epoch_participation_view = try state.currentEpochParticipation();
+            const current_epoch_participation = try current_epoch_participation_view.getAll(allocator);
+            defer allocator.free(current_epoch_participation);
+
+            @memcpy(reused_cache.previous_epoch_participation.items[0..validator_count], previous_epoch_participation);
+            @memcpy(reused_cache.current_epoch_participation.items[0..validator_count], current_epoch_participation);
+
             for (0..validator_count) |i| {
                 reused_cache.flags.items[i] |=
                     // checking active status first is required to pass random spec tests in altair
@@ -511,7 +538,12 @@ pub const EpochTransitionCache = struct {
 
 test "EpochTransitionCache - finalProcessEpoch" {
     const allocator = std.testing.allocator;
-    var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+
+    const Node = @import("persistent_merkle_tree").Node;
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
     try upgradeStateToFulu(allocator, test_state.cached_state);
@@ -525,7 +557,11 @@ test "EpochTransitionCache.beforeProcessEpoch" {
     const validator_count_arr = &.{ 256, 10_000 };
 
     inline for (validator_count_arr) |validator_count| {
-        var test_state = try TestCachedBeaconStateAllForks.init(allocator, validator_count);
+        const Node = @import("persistent_merkle_tree").Node;
+        var pool = try Node.Pool.init(allocator, 500_000);
+        defer pool.deinit();
+
+        var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);
         defer test_state.deinit();
 
         var epoch_transition_cache = try EpochTransitionCache.init(allocator, test_state.cached_state);

@@ -1,9 +1,9 @@
 const std = @import("std");
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
 const decreaseBalance = @import("../utils//balance.zig").decreaseBalance;
 const EFFECTIVE_BALANCE_INCREMENT = preset.EFFECTIVE_BALANCE_INCREMENT;
@@ -14,7 +14,7 @@ const PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX = preset.PROPORTIONAL_SLASHING_
 /// TODO: consider returning number[] when we switch to TreeView
 pub fn processSlashings(
     allocator: std.mem.Allocator,
-    cached_state: *CachedBeaconStateAllForks,
+    cached_state: *CachedBeaconState,
     cache: *const EpochTransitionCache,
 ) !void {
     // Return early if there no index to slash
@@ -23,10 +23,10 @@ pub fn processSlashings(
     }
     const config = cached_state.config;
     const epoch_cache = cached_state.getEpochCache();
-    const state = cached_state.state;
+    var state = cached_state.state;
 
     const total_balance_by_increment = cache.total_active_stake_by_increment;
-    const fork = config.forkSeq(state.slot());
+    const fork = config.forkSeq(try state.slot());
     const proportional_slashing_multiplier: u64 =
         if (fork == ForkSeq.phase0) PROPORTIONAL_SLASHING_MULTIPLIER else if (fork == ForkSeq.altair)
             PROPORTIONAL_SLASHING_MULTIPLIER_ALTAIR
@@ -34,7 +34,7 @@ pub fn processSlashings(
             PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX;
 
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements().items;
-    const adjusted_total_slashing_balance_by_increment = @min(getTotalSlashingsByIncrement(state) * proportional_slashing_multiplier, total_balance_by_increment);
+    const adjusted_total_slashing_balance_by_increment = @min((try getTotalSlashingsByIncrement(state)) * proportional_slashing_multiplier, total_balance_by_increment);
     const increment = EFFECTIVE_BALANCE_INCREMENT;
 
     const penalty_per_effective_balance_increment = @divFloor((adjusted_total_slashing_balance_by_increment * increment), total_balance_by_increment);
@@ -52,16 +52,16 @@ pub fn processSlashings(
             try penalties_by_effective_balance_increment.put(effective_balance_increment, p);
             break :blk p;
         };
-        decreaseBalance(state, index, penalty);
+        try decreaseBalance(state, index, penalty);
     }
 }
 
-pub fn getTotalSlashingsByIncrement(state: *const BeaconStateAllForks) u64 {
+pub fn getTotalSlashingsByIncrement(state: *BeaconState) !u64 {
     var total_slashings_by_increment: u64 = 0;
-    const count = state.slashings().len;
-
-    for (0..count) |i| {
-        const slashing = state.slashings()[i];
+    var slashings = try state.slashings();
+    const slashings_len = @TypeOf(slashings).length;
+    for (0..slashings_len) |i| {
+        const slashing = try slashings.get(i);
         total_slashings_by_increment += @divFloor(slashing, preset.EFFECTIVE_BALANCE_INCREMENT);
     }
 

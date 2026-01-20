@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const blst = @import("blst");
 const PublicKey = blst.PublicKey;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
 const SignedBeaconBlock = @import("../types/beacon_block.zig").SignedBeaconBlock;
 const c = @import("constants");
@@ -17,11 +17,11 @@ const AggregatedSignatureSet = @import("../utils/signature_sets.zig").Aggregated
 const createAggregateSignatureSetFromComponents = @import("../utils/signature_sets.zig").createAggregateSignatureSetFromComponents;
 const IndexedAttestation = @import("../types/attestation.zig").IndexedAttestation;
 
-pub fn getAttestationDataSigningRoot(cached_state: *const CachedBeaconStateAllForks, data: *const AttestationData, out: *[32]u8) !void {
+pub fn getAttestationDataSigningRoot(cached_state: *const CachedBeaconState, data: *const AttestationData, out: *[32]u8) !void {
     const slot = computeStartSlotAtEpoch(data.target.epoch);
     const config = cached_state.config;
     const state = cached_state.state;
-    const domain = try config.getDomain(state.slot(), c.DOMAIN_BEACON_ATTESTER, slot);
+    const domain = try config.getDomain(try state.slot(), c.DOMAIN_BEACON_ATTESTER, slot);
 
     try computeSigningRoot(types.phase0.AttestationData, data, domain, out);
 }
@@ -29,7 +29,7 @@ pub fn getAttestationDataSigningRoot(cached_state: *const CachedBeaconStateAllFo
 /// Consumer need to free the returned pubkeys array
 pub fn getAttestationWithIndicesSignatureSet(
     allocator: Allocator,
-    cached_state: *const CachedBeaconStateAllForks,
+    cached_state: *const CachedBeaconState,
     data: *const AttestationData,
     signature: BLSSignature,
     attesting_indices: []u64,
@@ -48,14 +48,14 @@ pub fn getAttestationWithIndicesSignatureSet(
 }
 
 /// Consumer need to free the returned pubkeys array
-pub fn getIndexedAttestationSignatureSet(comptime IA: type, allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, indexed_attestation: *const IA) !AggregatedSignatureSet {
+pub fn getIndexedAttestationSignatureSet(comptime IA: type, allocator: Allocator, cached_state: *const CachedBeaconState, indexed_attestation: *const IA) !AggregatedSignatureSet {
     return try getAttestationWithIndicesSignatureSet(allocator, cached_state, &indexed_attestation.data, indexed_attestation.signature, indexed_attestation.attesting_indices.items);
 }
 
 /// Appends to out all the AggregatedSignatureSet for each attestation in the signed_block
 /// Consumer need to free the pubkeys arrays in each AggregatedSignatureSet in out
 /// TODO: consume in https://github.com/ChainSafe/state-transition-z/issues/72
-pub fn attestationsSignatureSets(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, signed_block: *const SignedBeaconBlock, out: std.ArrayList(AggregatedSignatureSet)) !void {
+pub fn attestationsSignatureSets(allocator: Allocator, cached_state: *const CachedBeaconState, signed_block: *const SignedBeaconBlock, out: std.ArrayList(AggregatedSignatureSet)) !void {
     const epoch_cache = cached_state.getEpochCache();
     const attestation_items = signed_block.beaconBlock().beaconBlockBody().attestations().items();
 

@@ -112,6 +112,8 @@ pub const BlindedBeaconBlockBody = electra.BlindedBeaconBlockBody;
 pub const BlindedBeaconBlock = electra.BlindedBeaconBlock;
 pub const SignedBlindedBeaconBlock = electra.SignedBlindedBeaconBlock;
 
+pub const ProposerLookahead = ssz.FixedVectorType(p.ValidatorIndex, (preset.MIN_SEED_LOOKAHEAD + 1) * preset.SLOTS_PER_EPOCH);
+
 // BeaconState with new proposer_lookahead field
 pub const BeaconState = ssz.VariableContainerType(struct {
     genesis_time: p.Uint64,
@@ -151,7 +153,7 @@ pub const BeaconState = ssz.VariableContainerType(struct {
     pending_deposits: ssz.FixedListType(PendingDeposit, preset.PENDING_DEPOSITS_LIMIT),
     pending_partial_withdrawals: ssz.FixedListType(PendingPartialWithdrawal, preset.PENDING_PARTIAL_WITHDRAWALS_LIMIT),
     pending_consolidations: ssz.FixedListType(PendingConsolidation, preset.PENDING_CONSOLIDATIONS_LIMIT),
-    proposer_lookahead: ssz.FixedVectorType(p.ValidatorIndex, (preset.MIN_SEED_LOOKAHEAD + 1) * preset.SLOTS_PER_EPOCH),
+    proposer_lookahead: ProposerLookahead,
 });
 
 pub const SignedBeaconBlock = ssz.VariableContainerType(struct {

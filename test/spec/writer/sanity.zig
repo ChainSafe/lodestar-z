@@ -11,18 +11,21 @@ pub const header =
     \\// Do not commit changes by hand.
     \\
     \\const std = @import("std");
+    \\const Node = @import("persistent_merkle_tree").Node;
     \\const ForkSeq = @import("config").ForkSeq;
     \\const active_preset = @import("preset").active_preset;
     \\const spec_test_options = @import("spec_test_options");
     \\const Sanity = @import("../runner/sanity.zig");
     \\
     \\const allocator = std.testing.allocator;
-    \\
+    \\const pool_size = if (active_preset == .mainnet) 10_000_000 else 1_000_000;
     \\
 ;
 
 const test_template =
     \\test "{s} sanity {s} {s}" {{
+    \\    var pool = try Node.Pool.init(allocator, pool_size);
+    \\    defer pool.deinit();
     \\    const test_dir_name = try std.fs.path.join(allocator, &[_][]const u8{{
     \\        spec_test_options.spec_test_out_dir,
     \\        spec_test_options.spec_test_version,
@@ -48,8 +51,8 @@ pub fn writeTest(
     test_case_name: []const u8,
 ) !void {
     const execute_call = switch (handler) {
-        .slots => std.fmt.allocPrint(std.heap.page_allocator, "try Sanity.SlotsTestCase(.{s}).execute(allocator, test_dir);", .{@tagName(fork)}) catch unreachable,
-        .blocks => std.fmt.allocPrint(std.heap.page_allocator, "try Sanity.BlocksTestCase(.{s}).execute(allocator, test_dir);", .{@tagName(fork)}) catch unreachable,
+        .slots => std.fmt.allocPrint(std.heap.page_allocator, "try Sanity.SlotsTestCase(.{s}).execute(allocator, &pool, test_dir);", .{@tagName(fork)}) catch unreachable,
+        .blocks => std.fmt.allocPrint(std.heap.page_allocator, "try Sanity.BlocksTestCase(.{s}).execute(allocator, &pool, test_dir);", .{@tagName(fork)}) catch unreachable,
     };
     defer std.heap.page_allocator.free(execute_call);
     try writer.print(test_template, .{
