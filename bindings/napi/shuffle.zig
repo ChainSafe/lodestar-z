@@ -4,7 +4,6 @@ const innerShuffleList = @import("state_transition").shuffle.innerShuffleList;
 
 pub fn Shuffle_shuffleList(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.Value {
     const list_info = try cb.arg(0).getTypedarrayInfo();
-    // TODO: should we still put the check here because ts already specify it to be a Uint32Array
     if (list_info.array_type != .uint32) {
         return error.InvalidShuffleListType;
     }
