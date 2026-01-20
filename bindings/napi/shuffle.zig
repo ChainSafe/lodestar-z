@@ -12,7 +12,7 @@ pub fn Shuffle_shuffleList(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.Value 
     const seed = seed_info.data;
 
     const rounds_u32 = try cb.arg(2).getValueUint32();
-    if (rounds_u32 > 255 or rounds_u32 < 0) {
+    if (rounds_u32 > 255) {
         return error.InvalidRoundsSize;
     }
     const rounds: u8 = @intCast(rounds_u32);
