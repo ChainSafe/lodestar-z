@@ -24,7 +24,7 @@ test "state_transition utils" {
     _ = @import("utils/process_proposer_lookahead.zig");
     _ = @import("utils/pubkey_index_map.zig");
     _ = @import("utils/reference_count.zig");
-    _ = @import("utils/root_cache.zig");
+    _ = @import("cache/RootCache.zig");
     _ = @import("utils/seed.zig");
     _ = @import("utils/sha256.zig");
     _ = @import("utils/shuffle.zig");
