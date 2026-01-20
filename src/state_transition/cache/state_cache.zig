@@ -12,6 +12,19 @@ const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const PubkeyIndexMap = @import("pubkey_cache.zig").PubkeyIndexMap(ValidatorIndex);
 const Index2PubkeyCache = @import("pubkey_cache.zig").Index2PubkeyCache;
 const CloneOpts = @import("ssz").BaseTreeView.CloneOpts;
+const SlashedFlags = std.ArrayList(u8);
+
+fn initSlashedFlags(allocator: Allocator, state: *BeaconState) !SlashedFlags {
+    const validators = try state.validatorsSlice(allocator);
+    defer allocator.free(validators);
+
+    var flags = try SlashedFlags.initCapacity(allocator, validators.len);
+    errdefer flags.deinit();
+    for (validators) |validator| {
+        try flags.append(@intFromBool(validator.slashed));
+    }
+    return flags;
+}
 
 pub const CachedBeaconState = struct {
     allocator: Allocator,
@@ -20,6 +33,7 @@ pub const CachedBeaconState = struct {
     /// only a reference to the shared EpochCache instance
     /// TODO: before an epoch transition, need to release() epoch_cache before using a new one
     epoch_cache_ref: *EpochCacheRc,
+    slashed_flags: SlashedFlags,
     /// this takes ownership of the state, it is expected to be deinitialized by this struct
     state: *BeaconState,
 
@@ -28,6 +42,8 @@ pub const CachedBeaconState = struct {
 
     /// This class takes ownership of state after this function and has responsibility to deinit it
     pub fn createCachedBeaconState(allocator: Allocator, state: *BeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*CachedBeaconState {
+        var slashed_flags = try initSlashedFlags(allocator, state);
+        errdefer slashed_flags.deinit();
         const epoch_cache = try EpochCache.createFromState(allocator, state, immutable_data, option);
         errdefer epoch_cache.deinit();
         const epoch_cache_ref = try EpochCacheRc.init(allocator, epoch_cache);
@@ -39,6 +55,7 @@ pub const CachedBeaconState = struct {
             .allocator = allocator,
             .config = immutable_data.config,
             .epoch_cache_ref = epoch_cache_ref,
+            .slashed_flags = slashed_flags,
             .state = state,
         };
 
@@ -56,6 +73,10 @@ pub const CachedBeaconState = struct {
         const epoch_cache_ref = self.epoch_cache_ref.acquire();
         errdefer epoch_cache_ref.release();
 
+        var slashed_flags = try SlashedFlags.initCapacity(allocator, self.slashed_flags.items.len);
+        errdefer slashed_flags.deinit();
+        try slashed_flags.appendSlice(self.slashed_flags.items);
+
         const state = try allocator.create(BeaconState);
         errdefer allocator.destroy(state);
         state.* = try self.state.clone(opts);
@@ -64,6 +85,7 @@ pub const CachedBeaconState = struct {
             .allocator = allocator,
             .config = self.config,
             .epoch_cache_ref = epoch_cache_ref,
+            .slashed_flags = slashed_flags,
             .state = state,
         };
         return cached_state;
@@ -72,8 +94,26 @@ pub const CachedBeaconState = struct {
     pub fn deinit(self: *CachedBeaconState) void {
         // should not deinit config since we don't take ownership of it, it's singleton across applications
         self.epoch_cache_ref.release();
+        self.slashed_flags.deinit();
         self.state.deinit();
         self.allocator.destroy(self.state);
+    }
+
+    pub fn isSlashed(self: *const CachedBeaconState, index: ValidatorIndex) bool {
+        const idx: usize = @intCast(index);
+        return idx < self.slashed_flags.items.len and self.slashed_flags.items[idx] != 0;
+    }
+
+    pub fn setSlashedFlag(self: *CachedBeaconState, index: ValidatorIndex, slashed: bool) !void {
+        const idx: usize = @intCast(index);
+        try self.ensureSlashedFlagsLen(idx + 1);
+        self.slashed_flags.items[idx] = @intFromBool(slashed);
+    }
+
+    fn ensureSlashedFlagsLen(self: *CachedBeaconState, len: usize) !void {
+        const current_len = self.slashed_flags.items.len;
+        if (len <= current_len) return;
+        try self.slashed_flags.appendNTimes(0, len - current_len);
     }
 
     // TODO: implement loadCachedBeaconState

@@ -166,6 +166,7 @@ pub fn addValidatorToRegistry(
     // - Keep related code together to reduce risk of breaking this cache
     // - Should have equal performance since it sets a value in a flat array
     try epoch_cache.effectiveBalanceIncrementsSet(allocator, validator_index, effective_balance);
+    try cached_state.setSlashedFlag(validator_index, false);
 
     // now that there is a new validator, update the epoch context with the new pubkey
     try epoch_cache.addPubkey(validator_index, pubkey);

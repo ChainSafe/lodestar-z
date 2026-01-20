@@ -98,7 +98,7 @@ pub fn processAttestationsAltair(allocator: Allocator, cached_state: *CachedBeac
             // TODO: describe issue. Compute progressive target balances
             // When processing each attestation, increase the cummulative target balance. Only applies post-altair
             if ((flags_new_set & TIMELY_TARGET) == TIMELY_TARGET) {
-                if (!epoch_cache.isSlashed(validator_index)) {
+                if (!cached_state.isSlashed(validator_index)) {
                     if (in_current_epoch) {
                         epoch_cache.current_target_unslashed_balance_increments += effective_balance_increments[validator_index];
                     } else {
