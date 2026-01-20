@@ -31,6 +31,7 @@ pub fn slashValidator(
     try initiateValidatorExit(cached_state, &validator);
 
     try validator.set("slashed", true);
+    try epoch_cache.setSlashed(slashed_index, true);
     const cur_withdrawable_epoch = try validator.get("withdrawable_epoch");
     try validator.set(
         "withdrawable_epoch",

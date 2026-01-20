@@ -70,7 +70,6 @@ pub fn processAttestationsAltair(allocator: Allocator, cached_state: *CachedBeac
         // For each participant, update their participation
         // In epoch processing, this participation info is used to calculate balance updates
         var total_balance_increments_with_weight: u64 = 0;
-        var validators = try state.validators();
         for (attesting_indices.items) |validator_index| {
             const flags = try epoch_participation.get(validator_index);
 
@@ -99,9 +98,7 @@ pub fn processAttestationsAltair(allocator: Allocator, cached_state: *CachedBeac
             // TODO: describe issue. Compute progressive target balances
             // When processing each attestation, increase the cummulative target balance. Only applies post-altair
             if ((flags_new_set & TIMELY_TARGET) == TIMELY_TARGET) {
-                var validator = try validators.get(validator_index);
-                const slashed = try validator.get("slashed");
-                if (!slashed) {
+                if (!epoch_cache.isSlashed(validator_index)) {
                     if (in_current_epoch) {
                         epoch_cache.current_target_unslashed_balance_increments += effective_balance_increments[validator_index];
                     } else {
