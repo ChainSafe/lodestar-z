@@ -164,22 +164,26 @@ pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *CachedB
     };
 }
 
-const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const test_utils = @import("../test_utils/root.zig");
+const Node = @import("persistent_merkle_tree").Node;
 
 test "process sync aggregate - sanity" {
     const allocator = std.testing.allocator;
 
-    var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
     const state = test_state.cached_state.state;
     const config = test_state.cached_state.config;
-    const previous_slot = state.slot() - 1;
+    const previous_slot = try state.slot() - 1;
     const root_signed = try getBlockRootAtSlot(state, previous_slot);
-    const domain = try config.getDomain(state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
+    const domain = try config.getDomain(try state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
     var signing_root: Root = undefined;
-    try computeSigningRoot(types.primitive.Root, &root_signed, domain, &signing_root);
+    try computeSigningRoot(types.primitive.Root, root_signed, domain, &signing_root);
 
     const committee_indices = @as(*const [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex, @ptrCast(test_state.cached_state.getEpochCache().current_sync_committee_indexed.get().getValidatorIndices()));
     // validator 0 signs

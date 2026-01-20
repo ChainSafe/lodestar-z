@@ -214,9 +214,10 @@ const TestCase = struct {
     expect_error: bool,
 };
 
-const TestCachedBeaconStateAllForks = @import("test_utils/root.zig").TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = @import("test_utils/root.zig").TestCachedBeaconState;
 const generateElectraBlock = @import("test_utils/generate_block.zig").generateElectraBlock;
 const testing = std.testing;
+const Node = @import("persistent_merkle_tree").Node;
 
 test "state transition - electra block" {
     const test_cases = [_]TestCase{
@@ -226,10 +227,13 @@ test "state transition - electra block" {
         // this runs through epoch transition + process block without verifications
         .{ .transition_opt = .{ .verify_signatures = false, .verify_proposer = false, .verify_state_root = false }, .expect_error = false },
     };
+
     inline for (test_cases) |tc| {
         const allocator = std.testing.allocator;
 
-        var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+        var pool = try Node.Pool.init(allocator, 1024);
+        defer pool.deinit();
+        var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
         defer test_state.deinit();
         const electra_block_ptr = try allocator.create(types.electra.SignedBeaconBlock.Type);
         try generateElectraBlock(allocator, test_state.cached_state, electra_block_ptr);

@@ -218,12 +218,18 @@ pub fn getExpectedWithdrawals(
     withdrawals_result.sampled_validators = n;
     withdrawals_result.processed_partial_withdrawals_count = processed_partial_withdrawals_count;
 }
-const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Node = @import("persistent_merkle_tree").Node;
+
 test "process withdrawals - sanity" {
     const allocator = std.testing.allocator;
 
-    var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
+
     var withdrawals_result = WithdrawalsResult{
         .withdrawals = try Withdrawals.initCapacity(
             allocator,

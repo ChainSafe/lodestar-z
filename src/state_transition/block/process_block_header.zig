@@ -68,13 +68,17 @@ pub fn blockToHeader(allocator: Allocator, signed_block: SignedBlock, out: *Beac
     try block.hashTreeRoot(allocator, &out.body_root);
 }
 
-const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const preset = @import("preset").preset;
+const Node = @import("persistent_merkle_tree").Node;
 
 test "process block header - sanity" {
     const allocator = std.testing.allocator;
 
-    var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     const slot = config.mainnet.chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
     defer test_state.deinit();
 
@@ -83,12 +87,12 @@ test "process block header - sanity" {
     var message: types.electra.BeaconBlock.Type = types.electra.BeaconBlock.default_value;
     const proposer_index = proposers[slot % preset.SLOTS_PER_EPOCH];
 
-    var header_parent_root: [32]u8 = undefined;
-    try types.phase0.BeaconBlockHeader.hashTreeRoot(test_state.cached_state.state.latestBlockHeader(), &header_parent_root);
+    var header = try test_state.cached_state.state.latestBlockHeader();
+    const header_parent_root = try header.hashTreeRoot();
 
     message.slot = slot;
     message.proposer_index = proposer_index;
-    message.parent_root = header_parent_root;
+    message.parent_root = header_parent_root.*;
 
     const beacon_block = BeaconBlock{ .electra = &message };
 

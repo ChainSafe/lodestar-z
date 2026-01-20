@@ -31,7 +31,6 @@ pub fn processExecutionPayload(
 ) !void {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
-    const epoch_cache_config = epoch_cache.config;
     var partial_payload = PartialPayload{};
     switch (body) {
         .regular => |b| {
@@ -73,12 +72,12 @@ pub fn processExecutionPayload(
     // def compute_timestamp_at_slot(state: BeaconState, slot: Slot) -> uint64:
     //   slots_since_genesis = slot - GENESIS_SLOT
     //   return uint64(state.genesis_time + slots_since_genesis * SECONDS_PER_SLOT)
-    if (partial_payload.timestamp != state.genesisTime() + state.slot() * config.chain.SECONDS_PER_SLOT) {
+    if (partial_payload.timestamp != try state.genesisTime() + try state.slot() * config.mainnet.chain_config.SECONDS_PER_SLOT) {
         return error.InvalidExecutionPayloadTimestamp;
     }
 
     if (state.forkSeq().gte(.deneb)) {
-        const max_blobs_per_block = config.getMaxBlobsPerBlock(computeEpochAtSlot(try state.slot()));
+        const max_blobs_per_block = config.mainnet.config.getMaxBlobsPerBlock(computeEpochAtSlot(try state.slot()));
         if (body.blobKzgCommitmentsLen() > max_blobs_per_block) {
             return error.BlobKzgCommitmentsExceedsLimit;
         }
@@ -109,15 +108,20 @@ pub fn processExecutionPayload(
 
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
 const Block = @import("../types/block.zig").Block;
-const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Node = @import("persistent_merkle_tree").Node;
+
 test "process execution payload - sanity" {
     const allocator = std.testing.allocator;
 
-    var test_state = try TestCachedBeaconStateAllForks.init(allocator, 256);
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
     var execution_payload: types.electra.ExecutionPayload.Type = types.electra.ExecutionPayload.default_value;
-    execution_payload.timestamp = test_state.cached_state.state.genesisTime() + test_state.cached_state.state.slot() * config.mainnet.chain_config.SECONDS_PER_SLOT;
+    execution_payload.timestamp = try test_state.cached_state.state.genesisTime() + try test_state.cached_state.state.slot() * config.mainnet.chain_config.SECONDS_PER_SLOT;
     var body: types.electra.BeaconBlockBody.Type = types.electra.BeaconBlockBody.default_value;
     body.execution_payload = execution_payload;
 

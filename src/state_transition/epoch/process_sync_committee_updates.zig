@@ -29,13 +29,17 @@ pub fn processSyncCommitteeUpdates(allocator: Allocator, cached_state: *CachedBe
     }
 }
 
+const Node = @import("persistent_merkle_tree").Node;
 test "processSyncCommitteeUpdates - sanity" {
-    const TestCachedBeaconStateAllForks = @import("../test_utils/root.zig").TestCachedBeaconStateAllForks;
+    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
     const allocator = std.testing.allocator;
     const validator_count_arr = &.{ 256, 10_000 };
 
     inline for (validator_count_arr) |validator_count| {
-        var test_state = try TestCachedBeaconStateAllForks.init(allocator, validator_count);
+        var pool = try Node.Pool.init(allocator, 1024);
+        defer pool.deinit();
+
+        var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);
         defer test_state.deinit();
         try processSyncCommitteeUpdates(allocator, test_state.cached_state);
     }
