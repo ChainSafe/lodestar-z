@@ -202,7 +202,7 @@
     .tests = .{
         .int = .{
             .root_module = .{
-                .root_source_file = "test/int/root.zig",
+                .root_source_file = "test/int/era/root.zig",
                 .imports = .{
                     .config,
                     .download_era_options,
