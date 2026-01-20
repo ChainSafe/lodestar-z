@@ -752,7 +752,7 @@ pub fn build(b: *std.Build) void {
     tls_run_test.dependOn(&run_test_bench_process_epoch.step);
 
     const module_int = b.createModule(.{
-        .root_source_file = b.path("test/int/root.zig"),
+        .root_source_file = b.path("test/int/era/root.zig"),
         .target = target,
         .optimize = optimize,
     });
