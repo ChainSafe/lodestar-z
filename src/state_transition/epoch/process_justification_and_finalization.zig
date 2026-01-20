@@ -1,3 +1,4 @@
+const std = @import("std");
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const types = @import("consensus_types");
 const Epoch = types.primitive.Epoch.Type;
@@ -7,6 +8,12 @@ const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").Epoc
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const getBlockRoot = @import("../utils/block_root.zig").getBlockRoot;
+const ForkSeq = @import("config").ForkSeq;
+
+pub const UnrealizedCheckpoints = struct {
+    justified_checkpoint: Checkpoint,
+    finalized_checkpoint: Checkpoint,
+};
 
 /// Update justified and finalized checkpoints depending on network participation.
 ///
@@ -25,17 +32,16 @@ pub fn weighJustificationAndFinalization(cached_state: *CachedBeaconState, total
     const current_epoch = computeEpochAtSlot(try state.slot());
     const previous_epoch = if (current_epoch == GENESIS_EPOCH) GENESIS_EPOCH else current_epoch - 1;
 
-    var old_previous_justified_checkpoint = try state.previousJustifiedCheckpoint();
-    var old_current_justified_checkpoint = try state.currentJustifiedCheckpoint();
-    var old_previous_justified_checkpoint_clone: ?types.phase0.Checkpoint.TreeView = try old_previous_justified_checkpoint.clone(.{});
-    defer if (old_previous_justified_checkpoint_clone) |*v| v.deinit();
-    var old_current_justified_checkpoint_clone: ?types.phase0.Checkpoint.TreeView = try old_current_justified_checkpoint.clone(.{});
-    defer if (old_current_justified_checkpoint_clone) |*v| v.deinit();
-    const old_previous_justified_checkpoint_epoch = try old_previous_justified_checkpoint.get("epoch");
-    const old_current_justified_checkpoint_epoch = try old_current_justified_checkpoint.get("epoch");
+    var old_previous_justified_checkpoint: types.phase0.Checkpoint.Type = undefined;
+    try state.previousJustifiedCheckpoint(&old_previous_justified_checkpoint);
+    var old_current_justified_checkpoint: types.phase0.Checkpoint.Type = undefined;
+    try state.currentJustifiedCheckpoint(&old_current_justified_checkpoint);
+
+    const old_previous_justified_checkpoint_epoch = old_previous_justified_checkpoint.epoch;
+    const old_current_justified_checkpoint_epoch = old_current_justified_checkpoint.epoch;
 
     // Process justifications
-    try state.setPreviousJustifiedCheckpoint(try old_current_justified_checkpoint.clone(.{}));
+    try state.setPreviousJustifiedCheckpoint(&old_current_justified_checkpoint);
     var justification_bits = try state.justificationBits();
     var bits = try justification_bits.toBoolArray();
 
@@ -68,37 +74,88 @@ pub fn weighJustificationAndFinalization(cached_state: *CachedBeaconState, total
     try state.setJustificationBits(&new_justification_bits);
 
     // Process finalizations
-    var finalized_previous_justified = false;
-    var finalized_current_justified = false;
     // The 2nd/3rd/4th most recent epochs are all justified, the 2nd using the 4th as source
     if (bits[1] and bits[2] and bits[3] and old_previous_justified_checkpoint_epoch + 3 == current_epoch) {
-        try state.setFinalizedCheckpoint(old_previous_justified_checkpoint_clone.?);
-        finalized_previous_justified = true;
+        try state.setFinalizedCheckpoint(&old_previous_justified_checkpoint);
     }
     // The 2nd/3rd most recent epochs are both justified, the 2nd using the 3rd as source
     if (bits[1] and bits[2] and old_previous_justified_checkpoint_epoch + 2 == current_epoch) {
-        try state.setFinalizedCheckpoint(old_previous_justified_checkpoint_clone.?);
-        finalized_previous_justified = true;
+        try state.setFinalizedCheckpoint(&old_previous_justified_checkpoint);
     }
     // The 1st/2nd/3rd most recent epochs are all justified, the 1st using the 3rd as source
     if (bits[0] and bits[1] and bits[2] and old_current_justified_checkpoint_epoch + 2 == current_epoch) {
-        try state.setFinalizedCheckpoint(old_current_justified_checkpoint_clone.?);
-        finalized_current_justified = true;
+        try state.setFinalizedCheckpoint(&old_current_justified_checkpoint);
     }
     // The 1st/2nd most recent epochs are both justified, the 1st using the 2nd as source
     if (bits[0] and bits[1] and old_current_justified_checkpoint_epoch + 1 == current_epoch) {
-        try state.setFinalizedCheckpoint(old_current_justified_checkpoint_clone.?);
-        finalized_current_justified = true;
+        try state.setFinalizedCheckpoint(&old_current_justified_checkpoint);
+    }
+}
+
+/// Compute on-the-fly justified / finalized checkpoints.
+///   - For phase0, we need to create the cache through beforeProcessEpoch
+///   - For other forks, use the progressive balances inside EpochCache
+pub fn computeUnrealizedCheckpoints(cached_state: *CachedBeaconState, allocator: std.mem.Allocator) !UnrealizedCheckpoints {
+    // For phase0, we need to create the cache through beforeProcessEpoch
+    if (cached_state.state.forkSeq() == .phase0) {
+        // Clone state to mutate below         true = do not transfer cache
+        const cloned_state = try cached_state.clone(allocator, .{ .transfer_cache = false });
+        defer cloned_state.deinit();
+        defer allocator.destroy(cloned_state);
+
+        const epoch_transition_cache = try EpochTransitionCache.init(allocator, cloned_state);
+        defer epoch_transition_cache.deinit();
+        defer allocator.destroy(epoch_transition_cache);
+
+        try processJustificationAndFinalization(cloned_state, epoch_transition_cache);
+
+        var justified: Checkpoint = undefined;
+        try cloned_state.state.currentJustifiedCheckpoint(&justified);
+        var finalized: Checkpoint = undefined;
+        try cloned_state.state.finalizedCheckpoint(&finalized);
+
+        return .{
+            .justified_checkpoint = justified,
+            .finalized_checkpoint = finalized,
+        };
     }
 
-    // TODO this function exposes a nasty UX issue with the current TreeView design
-    // Currently, you're able to get a subview, which then gets deleted.
-    // leading to use-after-free if the caller still holds a reference.
-    // To avoid that, we pre-clone the subviews and then selectively drop them if they get reincorporated into the state.
-    if (finalized_previous_justified) {
-        old_previous_justified_checkpoint_clone = null;
+    // For other forks, use the progressive balances inside EpochCache
+    const epoch_cache = cached_state.getEpochCache();
+    const current_epoch = epoch_cache.epoch;
+
+    // same logic to processJustificationAndFinalization
+    if (current_epoch <= GENESIS_EPOCH + 1) {
+        var justified: Checkpoint = undefined;
+        try cached_state.state.currentJustifiedCheckpoint(&justified);
+        var finalized: Checkpoint = undefined;
+        try cached_state.state.finalizedCheckpoint(&finalized);
+        return .{
+            .justified_checkpoint = justified,
+            .finalized_checkpoint = finalized,
+        };
     }
-    if (finalized_current_justified) {
-        old_current_justified_checkpoint_clone = null;
-    }
+
+    // Clone state and use progressive balances
+    // Clone state to mutate below         true = do not transfer cache
+    const cloned_state = try cached_state.clone(allocator, .{ .transfer_cache = false });
+    defer cloned_state.deinit();
+    defer allocator.destroy(cloned_state);
+
+    const total_active_balance = epoch_cache.total_active_balance_increments;
+    // minimum of total progressive unslashed balance should be 1
+    const previous_epoch_target_balance = @max(epoch_cache.previous_target_unslashed_balance_increments, 1);
+    const current_epoch_target_balance = @max(epoch_cache.current_target_unslashed_balance_increments, 1);
+
+    try weighJustificationAndFinalization(cloned_state, total_active_balance, previous_epoch_target_balance, current_epoch_target_balance);
+
+    var justified: Checkpoint = undefined;
+    try cloned_state.state.currentJustifiedCheckpoint(&justified);
+    var finalized: Checkpoint = undefined;
+    try cloned_state.state.finalizedCheckpoint(&finalized);
+
+    return .{
+        .justified_checkpoint = justified,
+        .finalized_checkpoint = finalized,
+    };
 }

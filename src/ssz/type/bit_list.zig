@@ -11,6 +11,7 @@ const hexLenFromBytes = @import("hex").hexLenFromBytes;
 const merkleize = @import("hashing").merkleize;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
+const getZeroHash = @import("hashing").getZeroHash;
 const Node = @import("persistent_merkle_tree").Node;
 const BitListTreeView = @import("../tree_view/root.zig").BitListTreeView;
 
@@ -257,6 +258,12 @@ pub fn BitListType(comptime _limit: comptime_int) type {
 
         pub const default_value: Type = Type.empty;
 
+        pub const default_root: [32]u8 = blk: {
+            var buf = getZeroHash(chunk_depth).*;
+            mixInLength(0, &buf);
+            break :blk buf;
+        };
+
         pub fn equals(a: *const Type, b: *const Type) bool {
             return a.equals(b);
         }
@@ -415,6 +422,26 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         };
 
         pub const tree = struct {
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                return try pool.createBranch(
+                    @enumFromInt(chunk_depth),
+                    @enumFromInt(0),
+                );
+            }
+
+            pub fn zeros(pool: *Node.Pool, bit_len: usize) !Node.Id {
+                if (bit_len > limit) {
+                    return error.tooLarge;
+                }
+                const len_mixin = try pool.createLeafFromUint(bit_len);
+                errdefer pool.unref(len_mixin);
+
+                return try pool.createBranch(
+                    @enumFromInt(chunk_depth),
+                    len_mixin,
+                );
+            }
+
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 const bit_len = try serialized.length(data);
                 const chunk_count = (bit_len + 255) / 256;
@@ -943,4 +970,42 @@ test "BitListType equals" {
 
     try std.testing.expect(BL.equals(&a, &b));
     try std.testing.expect(!BL.equals(&a, &c));
+}
+
+test "BitListType - default_root" {
+    const Bits2048 = BitListType(2048);
+    var expected_root: [32]u8 = undefined;
+
+    try Bits2048.hashTreeRoot(std.testing.allocator, &Bits2048.default_value, &expected_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &Bits2048.default_root);
+
+    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    defer pool.deinit();
+
+    const node = try Bits2048.tree.default(&pool);
+    try std.testing.expectEqualSlices(u8, &expected_root, node.getRoot(&pool));
+}
+
+test "BitListType - tree.zeros" {
+    const allocator = std.testing.allocator;
+
+    const Bits257 = BitListType(257);
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    for (Bits257.limit / 2..Bits257.limit) |len| {
+        const tree_node = try Bits257.tree.zeros(&pool, len);
+        defer pool.unref(tree_node);
+
+        var value = Bits257.default_value;
+        defer Bits257.deinit(allocator, &value);
+        // Implicitly set all bits to 0
+        try value.resize(allocator, len);
+
+        var expected_root: [32]u8 = undefined;
+        try Bits257.hashTreeRoot(allocator, &value, &expected_root);
+
+        try std.testing.expectEqualSlices(u8, &expected_root, tree_node.getRoot(&pool));
+    }
 }

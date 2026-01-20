@@ -69,6 +69,16 @@ pub fn FixedContainerType(comptime ST: type) type {
             break :blk out;
         };
 
+        pub const default_root: [32]u8 = blk: {
+            var buf: [32]u8 = undefined;
+            var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
+            for (fields, 0..) |field, i| {
+                @memcpy(&chunks[i], &field.type.default_root);
+            }
+            merkleize(@ptrCast(&chunks), chunk_depth, &buf) catch unreachable;
+            break :blk buf;
+        };
+
         pub fn equals(a: *const Type, b: *const Type) bool {
             inline for (fields) |field| {
                 if (!field.type.equals(&@field(a, field.name), &@field(b, field.name))) {
@@ -148,6 +158,19 @@ pub fn FixedContainerType(comptime ST: type) type {
         };
 
         pub const tree = struct {
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                var nodes: [chunk_count]Node.Id = undefined;
+                errdefer pool.free(&nodes);
+                inline for (fields, 0..) |field, i| {
+                    if (comptime isBasicType(field.type)) {
+                        nodes[i] = @enumFromInt(0);
+                    } else {
+                        nodes[i] = try field.type.tree.default(pool);
+                    }
+                }
+                return try Node.fillWithContents(pool, &nodes, chunk_depth);
+            }
+
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 if (data.len != fixed_size) {
                     return error.InvalidSize;
@@ -352,6 +375,16 @@ pub fn VariableContainerType(comptime ST: type) type {
                 @field(out, field.name) = field.type.default_value;
             }
             break :blk out;
+        };
+
+        pub const default_root: [32]u8 = blk: {
+            var buf: [32]u8 = undefined;
+            var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
+            for (fields, 0..) |field, i| {
+                @memcpy(&chunks[i], &field.type.default_root);
+            }
+            merkleize(@ptrCast(&chunks), chunk_depth, &buf) catch unreachable;
+            break :blk buf;
         };
 
         pub fn equals(a: *const Type, b: *const Type) bool {
@@ -584,6 +617,19 @@ pub fn VariableContainerType(comptime ST: type) type {
         };
 
         pub const tree = struct {
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                var nodes: [chunk_count]Node.Id = undefined;
+                errdefer pool.free(&nodes);
+                inline for (fields, 0..) |field, i| {
+                    if (comptime isBasicType(field.type)) {
+                        nodes[i] = @enumFromInt(0);
+                    } else {
+                        nodes[i] = try field.type.tree.default(pool);
+                    }
+                }
+                return try Node.fillWithContents(pool, &nodes, chunk_depth);
+            }
+
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 if (data.len > max_size or data.len < min_size) {
                     return error.InvalidSize;
@@ -1205,4 +1251,39 @@ test "VariableContainerType equals" {
 
     try std.testing.expect(Container.equals(&a, &b));
     try std.testing.expect(!Container.equals(&a, &c));
+}
+
+test "FixedContainerType - default_root" {
+    const Container = FixedContainerType(struct {
+        a: UintType(64),
+        b: UintType(64),
+        c: UintType(16),
+    });
+    var expected_root: [32]u8 = undefined;
+
+    try Container.hashTreeRoot(&Container.default_value, &expected_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &Container.default_root);
+
+    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    defer pool.deinit();
+
+    const node = try Container.tree.default(&pool);
+    try std.testing.expectEqualSlices(u8, &expected_root, node.getRoot(&pool));
+}
+
+test "VariableContainerType - default_root" {
+    var expected_root: [32]u8 = undefined;
+    const Container = VariableContainerType(struct {
+        a: FixedListType(UintType(64), 128),
+        b: UintType(64),
+    });
+
+    try Container.hashTreeRoot(std.testing.allocator, &Container.default_value, &expected_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &Container.default_root);
+
+    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    defer pool.deinit();
+
+    const node = try Container.tree.default(&pool);
+    try std.testing.expectEqualSlices(u8, &expected_root, node.getRoot(&pool));
 }

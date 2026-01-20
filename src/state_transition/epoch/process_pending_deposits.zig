@@ -67,9 +67,9 @@ pub fn processPendingDeposits(allocator: Allocator, cached_state: *CachedBeaconS
 
         if (try isValidatorKnown(state, validator_index)) {
             var validators = try state.validators();
-            const validator = try validators.getValue(undefined, validator_index.?);
-            is_validator_exited = validator.exit_epoch < c.FAR_FUTURE_EPOCH;
-            is_validator_withdrawn = validator.withdrawable_epoch < next_epoch;
+            var validator = try validators.get(validator_index.?);
+            is_validator_exited = try validator.get("exit_epoch") < c.FAR_FUTURE_EPOCH;
+            is_validator_withdrawn = try validator.get("withdrawable_epoch") < next_epoch;
         }
 
         if (is_validator_withdrawn) {

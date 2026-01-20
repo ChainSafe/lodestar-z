@@ -16,7 +16,9 @@ pub fn processSlot(cached_state: *CachedBeaconState) !void {
 
     // Cache latest block header state root
     var latest_block_header = try state.latestBlockHeader();
-    const latest_header_state_root = try latest_block_header.getValue(cached_state.allocator, "state_root");
+    var latest_header_state_root: [32]u8 = undefined;
+    try latest_block_header.getValue(cached_state.allocator, "state_root", &latest_header_state_root);
+
     if (std.mem.eql(u8, latest_header_state_root[0..], ZERO_HASH[0..])) {
         try latest_block_header.setValue("state_root", previous_state_root);
     }

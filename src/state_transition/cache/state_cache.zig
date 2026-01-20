@@ -28,21 +28,25 @@ pub const CachedBeaconState = struct {
 
     /// This class takes ownership of state after this function and has responsibility to deinit it
     pub fn createCachedBeaconState(allocator: Allocator, state: *BeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*CachedBeaconState {
+        const cached_state = try allocator.create(CachedBeaconState);
+        errdefer allocator.destroy(cached_state);
+
+        try cached_state.init(allocator, state, immutable_data, option);
+
+        return cached_state;
+    }
+
+    pub fn init(self: *CachedBeaconState, allocator: Allocator, state: *BeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !void {
         const epoch_cache = try EpochCache.createFromState(allocator, state, immutable_data, option);
         errdefer epoch_cache.deinit();
         const epoch_cache_ref = try EpochCacheRc.init(allocator, epoch_cache);
         errdefer epoch_cache_ref.release();
-        const cached_state = try allocator.create(CachedBeaconState);
-        errdefer allocator.destroy(cached_state);
-
-        cached_state.* = .{
+        self.* = .{
             .allocator = allocator,
             .config = immutable_data.config,
             .epoch_cache_ref = epoch_cache_ref,
             .state = state,
         };
-
-        return cached_state;
     }
 
     // TODO: do we need another getConst()?

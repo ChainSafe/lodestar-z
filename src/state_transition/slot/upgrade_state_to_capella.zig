@@ -58,7 +58,8 @@ pub fn upgradeStateToCapella(allocator: Allocator, cached_state: *CachedBeaconSt
     try state.setFork(&new_fork);
 
     var new_latest_execution_payload_header: ExecutionPayloadHeader = .{ .capella = ct.capella.ExecutionPayloadHeader.default_value };
-    var bellatrix_latest_execution_payload_header = try bellatrix_state.latestExecutionPayloadHeader(allocator);
+    var bellatrix_latest_execution_payload_header: ExecutionPayloadHeader = undefined;
+    try bellatrix_state.latestExecutionPayloadHeader(allocator, &bellatrix_latest_execution_payload_header);
     defer bellatrix_latest_execution_payload_header.deinit(allocator);
     if (bellatrix_latest_execution_payload_header != .bellatrix) {
         return error.UnexpectedLatestExecutionPayloadHeaderType;

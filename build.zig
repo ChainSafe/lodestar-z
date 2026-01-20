@@ -993,9 +993,13 @@ pub fn build(b: *std.Build) void {
     module_bench_process_epoch.addImport("download_era_options", options_module_download_era_options);
     module_bench_process_epoch.addImport("era", module_era);
 
+    module_bindings.addImport("blst", dep_blst.module("blst"));
+    module_bindings.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_bindings.addImport("ssz", module_ssz);
+    module_bindings.addImport("consensus_types", module_consensus_types);
+    module_bindings.addImport("preset", module_preset);
     module_bindings.addImport("config", module_config);
     module_bindings.addImport("state_transition", module_state_transition);
-    module_bindings.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_bindings.addImport("zapi:napi", dep_zapi.module("napi"));
 
     module_int.addImport("build_options", options_module_build_options);

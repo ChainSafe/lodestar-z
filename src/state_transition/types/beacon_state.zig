@@ -4,12 +4,16 @@ const expect = std.testing.expect;
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const Node = @import("persistent_merkle_tree").Node;
+const Gindex = @import("persistent_merkle_tree").Gindex;
+const createSingleProof = @import("persistent_merkle_tree").proof.createSingleProof;
+const SingleProof = @import("persistent_merkle_tree").proof.SingleProof;
 const isBasicType = @import("ssz").isBasicType;
 const isFixedType = @import("ssz").isFixedType;
 const BaseTreeView = @import("ssz").BaseTreeView;
 const CloneOpts = @import("ssz").BaseTreeView.CloneOpts;
 const ct = @import("consensus_types");
 const ExecutionPayloadHeader = @import("./execution_payload.zig").ExecutionPayloadHeader;
+const constants = @import("constants");
 
 /// wrapper for all BeaconState types across forks so that we don't have to do switch/case for all methods
 pub const BeaconState = union(ForkSeq) {
@@ -158,6 +162,24 @@ pub const BeaconState = union(ForkSeq) {
         switch (self.*) {
             inline else => |*state| try state.commit(),
         }
+    }
+
+    /// Get a Merkle proof for the finalized root in the beacon state.
+    pub fn getFinalizedRootProof(self: *BeaconState, allocator: Allocator) !SingleProof {
+        try self.commit();
+        const gindex_value: u64 = switch (self.*) {
+            .electra, .fulu => constants.FINALIZED_ROOT_GINDEX_ELECTRA,
+            else => constants.FINALIZED_ROOT_GINDEX,
+        };
+        const gindex: Gindex = @enumFromInt(gindex_value);
+        return switch (self.*) {
+            inline else => |*state| try createSingleProof(
+                allocator,
+                state.base_view.pool,
+                state.base_view.data.root,
+                gindex,
+            ),
+        };
     }
 
     pub fn hashTreeRoot(self: *BeaconState) !*const [32]u8 {
@@ -330,8 +352,9 @@ pub const BeaconState = union(ForkSeq) {
         };
     }
 
-    // Returns a read-only slice of validators.
-    // Caller owns the returned slice and must free it with the same allocator.
+    /// Returns a read-only slice of validators.
+    /// This is read-only in the sense that modifications will not be reflected back to the state.
+    /// Caller owns the returned slice and must free it with the same allocator.
     pub fn validatorsSlice(self: *BeaconState, allocator: Allocator) ![]ct.phase0.Validator.Type {
         return switch (self.*) {
             inline else => |*state| {
@@ -344,6 +367,25 @@ pub const BeaconState = union(ForkSeq) {
     pub fn balances(self: *BeaconState) !ct.phase0.Balances.TreeView {
         return switch (self.*) {
             inline else => |*state| try state.get("balances"),
+        };
+    }
+
+    /// Returns a read-only slice of balances.
+    /// This is read-only in the sense that modifications will not be reflected back to the state.
+    /// Caller owns the returned slice and must free it with the same allocator.
+    pub fn balancesSlice(self: *BeaconState, allocator: Allocator) ![]u64 {
+        return switch (self.*) {
+            inline else => |*state| {
+                var balances_view = try state.get("balances");
+                try balances_view.commit();
+                return balances_view.getAll(allocator);
+            },
+        };
+    }
+
+    pub fn setBalances(self: *BeaconState, b: *const ct.phase0.Balances.Type) !void {
+        return switch (self.*) {
+            inline else => |*state| try state.setValue("balances", b),
         };
     }
 
@@ -424,16 +466,19 @@ pub const BeaconState = union(ForkSeq) {
                 var current_epoch_participation = try state.get("current_epoch_participation");
                 try current_epoch_participation.commit();
                 const length = try current_epoch_participation.length();
-                try state.set("previous_epoch_participation", try current_epoch_participation.clone(.{}));
+                try state.set(
+                    "previous_epoch_participation",
+                    // cannot set without cloning because the original is owned by the tree
+                    // we need to clone it to create an owned tree
+                    try current_epoch_participation.clone(.{ .transfer_cache = true }),
+                );
 
                 // Reset current_epoch_participation by rebuilding a zeroed SSZ List of the same length.
-                // SSZ List root is a branch node:
-                // - left = chunks subtree
-                // - right = length leaf
-                const new_current_root = try state.base_view.pool.createBranch(
-                    @enumFromInt(ct.altair.EpochParticipation.chunk_depth),
-                    try state.base_view.pool.createLeafFromUint(length),
+                const new_current_root = try ct.altair.EpochParticipation.tree.zeros(
+                    state.base_view.pool,
+                    length,
                 );
+                errdefer state.base_view.pool.unref(new_current_root);
                 try state.setRootNode("current_epoch_participation", new_current_root);
             },
         };
@@ -451,21 +496,21 @@ pub const BeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn previousJustifiedCheckpoint(self: *BeaconState) !ct.phase0.Checkpoint.TreeView {
+    pub fn previousJustifiedCheckpoint(self: *BeaconState, out: *ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.get("previous_justified_checkpoint"),
+            inline else => |*state| try state.getValue(undefined, "previous_justified_checkpoint", out),
         };
     }
 
-    pub fn setPreviousJustifiedCheckpoint(self: *BeaconState, checkpoint: ct.phase0.Checkpoint.TreeView) !void {
+    pub fn setPreviousJustifiedCheckpoint(self: *BeaconState, checkpoint: *const ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.set("previous_justified_checkpoint", checkpoint),
+            inline else => |*state| try state.setValue("previous_justified_checkpoint", checkpoint),
         };
     }
 
-    pub fn currentJustifiedCheckpoint(self: *BeaconState) !ct.phase0.Checkpoint.TreeView {
+    pub fn currentJustifiedCheckpoint(self: *BeaconState, out: *ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.get("current_justified_checkpoint"),
+            inline else => |*state| try state.getValue(undefined, "current_justified_checkpoint", out),
         };
     }
 
@@ -475,22 +520,22 @@ pub const BeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn finalizedCheckpoint(self: *BeaconState) !ct.phase0.Checkpoint.TreeView {
+    pub fn finalizedCheckpoint(self: *BeaconState, out: *ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.get("finalized_checkpoint"),
+            inline else => |*state| try state.getValue(undefined, "finalized_checkpoint", out),
         };
     }
 
-    pub fn setFinalizedCheckpoint(self: *BeaconState, checkpoint: ct.phase0.Checkpoint.TreeView) !void {
+    pub fn setFinalizedCheckpoint(self: *BeaconState, checkpoint: *const ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.set("finalized_checkpoint", checkpoint),
+            inline else => |*state| try state.setValue("finalized_checkpoint", checkpoint),
         };
     }
 
     pub fn finalizedEpoch(self: *BeaconState) !u64 {
         return switch (self.*) {
             inline else => |*state| {
-                var checkpoint_view = try state.get("finalized_checkpoint");
+                var checkpoint_view = try state.getReadonly("finalized_checkpoint");
                 return try checkpoint_view.get("epoch");
             },
         };
@@ -531,23 +576,39 @@ pub const BeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn latestExecutionPayloadHeader(self: *BeaconState, allocator: Allocator) !ExecutionPayloadHeader {
+    pub fn rotateSyncCommittees(self: *BeaconState, next_sync_committee: *const ct.altair.SyncCommittee.Type) !void {
+        return switch (self.*) {
+            .phase0 => error.InvalidAtFork,
+            inline else => |*state| {
+                const next_sync_committee_root = try state.getRootNode("next_sync_committee");
+                try state.setRootNode("current_sync_committee", next_sync_committee_root);
+                try state.setValue("next_sync_committee", next_sync_committee);
+            },
+        };
+    }
+
+    pub fn latestExecutionPayloadHeader(self: *BeaconState, allocator: Allocator, out: *ExecutionPayloadHeader) !void {
         return switch (self.*) {
             .phase0, .altair => error.InvalidAtFork,
-            .bellatrix => |*state| .{
-                .bellatrix = try state.getValue(allocator, "latest_execution_payload_header"),
+            .bellatrix => |*state| {
+                out.* = .{ .bellatrix = undefined };
+                try state.getValue(allocator, "latest_execution_payload_header", &out.bellatrix);
             },
-            .capella => |*state| .{
-                .capella = try state.getValue(allocator, "latest_execution_payload_header"),
+            .capella => |*state| {
+                out.* = .{ .capella = undefined };
+                try state.getValue(allocator, "latest_execution_payload_header", &out.capella);
             },
-            .deneb => |*state| .{
-                .deneb = try state.getValue(allocator, "latest_execution_payload_header"),
+            .deneb => |*state| {
+                out.* = .{ .deneb = undefined };
+                try state.getValue(allocator, "latest_execution_payload_header", &out.deneb);
             },
-            .electra => |*state| .{
-                .deneb = try state.getValue(allocator, "latest_execution_payload_header"),
+            .electra => |*state| {
+                out.* = .{ .electra = undefined };
+                try state.getValue(allocator, "latest_execution_payload_header", &out.electra);
             },
-            .fulu => |*state| .{
-                .deneb = try state.getValue(allocator, "latest_execution_payload_header"),
+            .fulu => |*state| {
+                out.* = .{ .fulu = undefined };
+                try state.getValue(allocator, "latest_execution_payload_header", &out.fulu);
             },
         };
     }
@@ -562,8 +623,6 @@ pub const BeaconState = union(ForkSeq) {
         };
     }
 
-    // `header` ownership is transferred to BeaconState and will be deinit when state is deinit
-    // caller must guarantee that `header` is properly initialized and allocated/cloned with `allocator` and no longer used after this call
     pub fn setLatestExecutionPayloadHeader(self: *BeaconState, header: *const ExecutionPayloadHeader) !void {
         switch (self.*) {
             .bellatrix => |*state| try state.setValue("latest_execution_payload_header", &header.bellatrix),
@@ -775,30 +834,24 @@ pub const BeaconState = union(ForkSeq) {
         errdefer upgraded.deinit();
 
         inline for (F.fields) |f| {
-            // const field_name: []const u8 = comptime f.name[0..f.name.len];
             if (comptime T.hasField(f.name)) {
-                if (comptime isFixedType(f.type)) {
-                    // For fixed composite fields, get() returns a borrowed TreeView backed by committed_state caches.
-                    // Clone it to create an owned view, then transfer ownership to upgraded.
-                    if (comptime isBasicType(f.type)) {
-                        try upgraded.set(f.name, try committed_state.get(f.name));
-                    } else {
-                        var field_view = try committed_state.get(f.name);
-                        const FieldView = @TypeOf(field_view);
-                        const owned_field_view: FieldView = try field_view.clone(.{});
-                        try upgraded.set(f.name, owned_field_view);
-                    }
+                if (T.getFieldType(f.name) != f.type) {
+                    // BeaconState of prev_fork and cur_fork has the same field name but different types
+                    // for example latest_execution_payload_header changed from Bellatrix to Capella
+                    // In this case we just skip copying this field and leave it to caller to set properly
+                    continue;
+                }
+
+                if (comptime isBasicType(f.type)) {
+                    // For basic fields, get() returns a copy, so we can directly set it.
+                    try upgraded.set(f.name, try committed_state.get(f.name));
                 } else {
-                    if (T.getFieldType(f.name) != f.type) {
-                        // BeaconState of prev_fork and cur_fork has the same field name but different types
-                        // for example latest_execution_payload_header changed from Bellatrix to Capella
-                        // In this case we just skip copying this field and leave it to caller to set properly
-                    } else {
-                        var field_view = try committed_state.get(f.name);
-                        const FieldView = @TypeOf(field_view);
-                        const owned_field_view: FieldView = try field_view.clone(.{});
-                        try upgraded.set(f.name, owned_field_view);
-                    }
+                    // For composite fields, get() returns a borrowed TreeView backed by committed_state caches.
+                    // Clone it to create an owned view, then transfer ownership to upgraded.
+                    var field_view = try committed_state.get(f.name);
+                    var owned_field_view = try field_view.clone(.{ .transfer_cache = true });
+                    errdefer owned_field_view.deinit();
+                    try upgraded.set(f.name, owned_field_view);
                 }
             }
         }

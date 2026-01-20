@@ -191,6 +191,8 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         /// Get a read-only iterator over the elements of the list.
         /// This only iterates over committed elements.
         /// It is up to the caller to ensure that the iterator doesn't run past the end of the list.
+        ///
+        /// Convenience wrapper around `ReadonlyIterator.init`.
         pub fn iteratorReadonly(self: *const Self, start_index: usize) ReadonlyIterator {
             return ReadonlyIterator.init(self, start_index);
         }

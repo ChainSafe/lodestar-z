@@ -120,7 +120,9 @@ pub fn getExpectedWithdrawals(
                 break;
             }
 
-            const validator = try validators.getValue(undefined, withdrawal.validator_index);
+            var validator: types.phase0.Validator.Type = undefined;
+            try validators.getValue(undefined, withdrawal.validator_index, &validator);
+
             const total_withdrawn_gop = try withdrawal_balances.getOrPut(withdrawal.validator_index);
 
             const total_withdrawn: u64 = if (total_withdrawn_gop.found_existing) total_withdrawn_gop.value_ptr.* else 0;

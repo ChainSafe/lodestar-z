@@ -34,7 +34,15 @@ pub fn switchToCompoundingValidator(state_cache: *CachedBeaconState, index: Vali
 
     try validator.setValue("withdrawal_credentials", &new_withdrawal_credentials);
 
-    try queueExcessActiveBalance(state_cache, index, &new_withdrawal_credentials, try validator.getValue(undefined, "pubkey"));
+    var pubkey: ct.primitive.BLSPubkey.Type = undefined;
+    try validator.getValue(undefined, "pubkey", &pubkey);
+
+    try queueExcessActiveBalance(
+        state_cache,
+        index,
+        &new_withdrawal_credentials,
+        pubkey,
+    );
 }
 
 pub fn queueExcessActiveBalance(
