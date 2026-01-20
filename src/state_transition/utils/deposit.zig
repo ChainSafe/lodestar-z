@@ -1,12 +1,11 @@
-const types = @import("consensus_types");
 const preset = @import("preset").preset;
+const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const types = @import("consensus_types");
 const Eth1Data = types.phase0.Eth1Data.Type;
 const MAX_DEPOSITS = preset.MAX_DEPOSITS;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 
-pub fn getEth1DepositCount(cached_state: *CachedBeaconState, eth1_data: ?*const Eth1Data) !u64 {
-    const state = cached_state.state;
-
+pub fn getEth1DepositCount(comptime fork: ForkSeq, state: *ForkBeaconState(fork), eth1_data: ?*const Eth1Data) !u64 {
     const deposit_count: u64 = if (eth1_data) |d| d.deposit_count else blk: {
         var eth1_data_view = try state.eth1Data();
         break :blk try eth1_data_view.get("deposit_count");

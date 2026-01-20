@@ -3,8 +3,8 @@ const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const Node = @import("persistent_merkle_tree").Node;
 const isBasicType = @import("ssz").isBasicType;
+
 const ForkTypes = @import("./fork_types.zig").ForkTypes;
-const ExecutionPayloadHeader = @import("./execution_payload.zig").ExecutionPayloadHeader;
 
 pub fn ForkBeaconState(comptime f: ForkSeq) type {
     return struct {

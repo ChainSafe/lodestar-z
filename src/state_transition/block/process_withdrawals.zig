@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const types = @import("consensus_types");
 const Root = types.primitive.Root.Type;
 const preset = @import("preset").preset;
@@ -28,12 +29,12 @@ pub const WithdrawalsResult = struct {
 /// TODO: spec and implementation should be the same
 /// refer to https://github.com/ethereum/consensus-specs/blob/dev/specs/electra/beacon-chain.md#modified-process_withdrawals
 pub fn processWithdrawals(
+    comptime fork: ForkSeq,
     allocator: Allocator,
-    cached_state: *CachedBeaconState,
+    state: *ForkBeaconState(fork),
     expected_withdrawals_result: WithdrawalsResult,
     payload_withdrawals_root: Root,
 ) !void {
-    var state = cached_state.state;
     // processedPartialWithdrawalsCount is withdrawals coming from EL since electra (EIP-7002)
     const processed_partial_withdrawals_count = expected_withdrawals_result.processed_partial_withdrawals_count;
     const expected_withdrawals = expected_withdrawals_result.withdrawals.items;
@@ -85,17 +86,16 @@ pub fn processWithdrawals(
 
 // Consumer should deinit WithdrawalsResult with .deinit() after use
 pub fn getExpectedWithdrawals(
+    comptime fork: ForkSeq,
     allocator: Allocator,
+    epoch_cache: *const EpochCache,
+    state: ForkBeaconState(fork),
     withdrawals_result: *WithdrawalsResult,
     withdrawal_balances: *std.AutoHashMap(ValidatorIndex, usize),
-    cached_state: *const CachedBeaconState,
 ) !void {
-    var state = cached_state.state;
-    if (state.forkSeq().lt(.capella)) {
+    if (comptime fork.lt(.capella)) {
         return error.InvalidForkSequence;
     }
-
-    const epoch_cache = cached_state.getEpochCache();
 
     const epoch = epoch_cache.epoch;
     var withdrawal_index = try state.nextWithdrawalIndex();
@@ -106,7 +106,7 @@ pub fn getExpectedWithdrawals(
     // partial_withdrawals_count is withdrawals coming from EL since electra (EIP-7002)
     var processed_partial_withdrawals_count: u64 = 0;
 
-    if (state.forkSeq().gte(.electra)) {
+    if (comptime fork.gte(.electra)) {
         // MAX_PENDING_PARTIALS_PER_WITHDRAWALS_SWEEP = 8, PENDING_PARTIAL_WITHDRAWALS_LIMIT: 134217728 so we should just lazily iterate thru state.pending_partial_withdrawals.
         // pending_partial_withdrawals comes from EIP-7002 smart contract where it takes fee so it's more likely than not validator is in correct condition to withdraw
         // also we may break early if withdrawableEpoch > epoch

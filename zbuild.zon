@@ -90,6 +90,10 @@
         .hex = .{
             .root_source_file = "src/hex.zig",
         },
+        .fork_types = .{
+            .root_source_file = "src/fork_types/root.zig",
+            .imports = .{ .consensus_types, .config, .persistent_merkle_tree, .preset, .ssz },
+        },
         .persistent_merkle_tree = .{
             .root_source_file = "src/persistent_merkle_tree/root.zig",
             .imports = .{ .build_options, .hex, .hashing },
@@ -110,6 +114,7 @@
                 .config,
                 .consensus_types,
                 .blst,
+                .fork_types,
                 .preset,
                 .constants,
                 .hex,

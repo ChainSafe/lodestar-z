@@ -1,21 +1,30 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
+const ForkSeq = @import("config").ForkSeq;
+const ForkTypes = @import("fork_types").ForkTypes;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BlockType = @import("fork_types").BlockType;
+const ForkBeaconBlock = @import("fork_types").ForkBeaconBlock;
 const BeaconConfig = @import("config").BeaconConfig;
 const BeaconBlockHeader = types.phase0.BeaconBlockHeader.Type;
 const Root = types.primitive.Root;
-const SignedBlock = @import("../types/block.zig").SignedBlock;
+const EpochCache = @import("../cache/state_cache.zig").EpochCache;
 const ZERO_HASH = @import("constants").ZERO_HASH;
-const Block = @import("../types/block.zig").Block;
+const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconProposer;
 
-pub fn processBlockHeader(allocator: Allocator, cached_state: *CachedBeaconState, block: Block) !void {
-    const state = cached_state.state;
+pub fn processBlockHeader(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
+    comptime block_type: BlockType,
+    block: ForkBeaconBlock(fork, block_type),
+) !void {
     const slot = try state.slot();
 
     // verify that the slots match
-    if (block.slot() != slot) {
+    if (block.slot != slot) {
         return error.BlockSlotMismatch;
     }
 
@@ -27,23 +36,24 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *CachedBeaconState
     }
 
     // verify that proposer index is the correct index
-    const proposer_index = try cached_state.getBeaconProposer(slot);
+    const proposer_index = try getBeaconProposer(fork, epoch_cache, state, slot);
     if (block.proposerIndex() != proposer_index) {
         return error.BlockProposerIndexMismatch;
     }
 
     // verify that the parent matches
     const header_parent_root = try latest_header_view.hashTreeRoot();
-    if (!std.mem.eql(u8, &block.parentRoot(), header_parent_root)) {
+    if (!std.mem.eql(u8, block.parentRoot(), header_parent_root)) {
         return error.BlockParentRootMismatch;
     }
+
     var body_root: [32]u8 = undefined;
-    try block.beaconBlockBody().hashTreeRoot(allocator, &body_root);
+    try ForkTypes(fork).BeaconBlockBody.hashTreeRoot(allocator, block.body(), &body_root);
     // cache current block as the new latest block
     const latest_block_header: BeaconBlockHeader = .{
         .slot = slot,
         .proposer_index = proposer_index,
-        .parent_root = block.parentRoot(),
+        .parent_root = block.parentRoot().*,
         .state_root = ZERO_HASH,
         .body_root = body_root,
     };
@@ -56,13 +66,4 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *CachedBeaconState
     if (proposer_slashed) {
         return error.BlockProposerSlashed;
     }
-}
-
-pub fn blockToHeader(allocator: Allocator, signed_block: SignedBlock, out: *BeaconBlockHeader) !void {
-    const block = signed_block.message();
-    out.slot = block.slot();
-    out.proposer_index = block.proposerIndex();
-    out.parent_root = block.parentRoot();
-    out.state_root = block.stateRoot();
-    try block.hashTreeRoot(allocator, &out.body_root);
 }

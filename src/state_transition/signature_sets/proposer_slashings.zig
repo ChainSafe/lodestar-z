@@ -6,7 +6,6 @@ const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatur
 const c = @import("constants");
 const types = @import("consensus_types");
 const Root = types.primitive.Root;
-const computeBlockSigningRoot = @import("../utils/signing_root.zig").computeBlockSigningRoot;
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const verifySignatureSet = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
 

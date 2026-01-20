@@ -1,25 +1,29 @@
+const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateValidatorExit;
 const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
 const isActiveValidatorView = @import("../utils/validator.zig").isActiveValidatorView;
+const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconProposer;
 
 /// Same to https://github.com/ethereum/eth2.0-specs/blob/v1.1.0-alpha.5/specs/altair/beacon-chain.md#has_flag
 const TIMELY_TARGET = 1 << c.TIMELY_TARGET_FLAG_INDEX;
 
 pub fn slashValidator(
-    cached_state: *CachedBeaconState,
+    comptime fork: ForkSeq,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
     slashed_index: ValidatorIndex,
     whistle_blower_index: ?ValidatorIndex,
 ) !void {
-    const epoch_cache = cached_state.getEpochCache();
-    var state = cached_state.state;
     const epoch = epoch_cache.epoch;
     const effective_balance_increments = epoch_cache.effective_balance_increment;
     const slashed_effective_balance_increments = effective_balance_increments.get().items[@intCast(slashed_index)];
@@ -28,7 +32,7 @@ pub fn slashValidator(
     var validator = try validators.get(@intCast(slashed_index));
 
     // TODO: Bellatrix initiateValidatorExit validators.update() with the one below
-    try initiateValidatorExit(cached_state, &validator);
+    try initiateValidatorExit(fork, config, epoch_cache, state, &validator);
 
     try validator.set("slashed", true);
     const cur_withdrawable_epoch = try validator.get("withdrawable_epoch");
@@ -58,7 +62,7 @@ pub fn slashValidator(
         .electra, .fulu => preset.MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA,
     };
 
-    try decreaseBalance(state, slashed_index, @divFloor(effective_balance, min_slashing_penalty_quotient));
+    try decreaseBalance(fork, state, slashed_index, @divFloor(effective_balance, min_slashing_penalty_quotient));
 
     // apply proposer and whistleblower rewards
     // TODO(ct): define WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA
@@ -72,7 +76,7 @@ pub fn slashValidator(
         else => @divFloor(whistleblower_reward * c.PROPOSER_WEIGHT, c.WEIGHT_DENOMINATOR),
     };
 
-    const proposer_index = try cached_state.getBeaconProposer(try state.slot());
+    const proposer_index = try getBeaconProposer(fork, epoch_cache, state, try state.slot());
 
     if (whistle_blower_index) |_whistle_blower_index| {
         try increaseBalance(state, proposer_index, proposer_reward);

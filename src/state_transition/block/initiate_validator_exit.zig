@@ -1,9 +1,11 @@
 const std = @import("std");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
+const BeaconConfig = @import("config").BeaconConfig;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const types = @import("consensus_types");
 const c = @import("constants");
 const FAR_FUTURE_EPOCH = c.FAR_FUTURE_EPOCH;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const computeExitEpochAndUpdateChurn = @import("../utils/epoch.zig").computeExitEpochAndUpdateChurn;
 
 /// Initiate the exit of the validator with index ``index``
@@ -25,17 +27,19 @@ const computeExitEpochAndUpdateChurn = @import("../utils/epoch.zig").computeExit
 /// ```
 /// Forcing consumers to pass the SubTree of `validator` directly mitigates this issue.
 ///
-pub fn initiateValidatorExit(cached_state: *const CachedBeaconState, validator: *types.phase0.Validator.TreeView) !void {
-    const config = cached_state.config.chain;
-    const epoch_cache = cached_state.getEpochCache();
-    const state = cached_state.state;
-
+pub fn initiateValidatorExit(
+    comptime fork: ForkSeq,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: ForkBeaconState(fork),
+    validator: *types.phase0.Validator.TreeView,
+) !void {
     // return if validator already initiated exit
     if ((try validator.get("exit_epoch")) != FAR_FUTURE_EPOCH) {
         return;
     }
 
-    if (state.forkSeq().lt(.electra)) {
+    if (comptime fork.lt(.electra)) {
         // Limits the number of validators that can exit on each epoch.
         // Expects all state.validators to follow this rule, i.e. no validator.exitEpoch is greater than exitQueueEpoch.
         // If there the churnLimit is reached at this current exitQueueEpoch, advance epoch and reset churn.
@@ -55,7 +59,7 @@ pub fn initiateValidatorExit(cached_state: *const CachedBeaconState, validator: 
         // Note we don't use epochCtx.exitQueueChurn and exitQueueEpoch anymore
         try validator.set(
             "exit_epoch",
-            try computeExitEpochAndUpdateChurn(cached_state, try validator.get("effective_balance")),
+            try computeExitEpochAndUpdateChurn(fork, epoch_cache, state, try validator.get("effective_balance")),
         );
     }
 

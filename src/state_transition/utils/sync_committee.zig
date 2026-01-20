@@ -2,8 +2,8 @@ const std = @import("std");
 const blst = @import("blst");
 const AggregatePublicKey = blst.AggregatePublicKey;
 const Allocator = std.mem.Allocator;
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
-const EffiectiveBalanceIncrements = @import("../cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EffectiveBalanceIncrements = @import("../cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
@@ -22,10 +22,11 @@ pub const SyncCommitteeInfo = struct {
 
 /// Consumer must deallocate the returned `SyncCommitteeInfo` struct
 pub fn getNextSyncCommittee(
+    comptime fork: ForkSeq,
     allocator: Allocator,
-    state: *BeaconState,
+    state: *ForkBeaconState(fork),
     active_validator_indices: []const ValidatorIndex,
-    effective_balance_increments: EffiectiveBalanceIncrements,
+    effective_balance_increments: EffectiveBalanceIncrements,
     out: *SyncCommitteeInfo,
 ) !void {
     const indices = &out.indices;

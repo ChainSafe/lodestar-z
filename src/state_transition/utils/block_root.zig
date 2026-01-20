@@ -4,8 +4,8 @@ const Root = types.primitive.Root.Type;
 const Slot = types.primitive.Slot.Type;
 const Epoch = types.primitive.Epoch.Type;
 const ForkSeq = @import("config").ForkSeq;
-const ForkTypes = @import("../types/fork_types.zig").ForkTypes;
-const ForkBeaconState = @import("../types/fork_beacon_state.zig").ForkBeaconState;
+const ForkTypes = @import("fork_types").ForkTypes;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const SLOTS_PER_HISTORICAL_ROOT = preset.SLOTS_PER_HISTORICAL_ROOT;
 const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
 

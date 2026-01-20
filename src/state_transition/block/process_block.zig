@@ -1,6 +1,10 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const BeaconConfig = @import("config").BeaconConfig;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BlockType = @import("fork_types").BlockType;
+const ForkBeaconBlock = @import("fork_types").ForkBeaconBlock;
 const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
 const Root = types.primitive.Root.Type;
@@ -30,24 +34,25 @@ pub const ProcessBlockOpts = struct {
 
 /// Process a block and update the state following Ethereum Consensus specifications.
 pub fn processBlock(
+    comptime fork: ForkSeq,
     allocator: Allocator,
-    cached_state: *CachedBeaconState,
-    block: Block,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
+    comptime block_type: BlockType,
+    block: ForkBeaconBlock(fork, block_type),
     external_data: BlockExternalData,
     opts: ProcessBlockOpts,
     // TODO: metrics
 ) !void {
-    const state = cached_state.state;
-    const body = block.beaconBlockBody();
-
-    try processBlockHeader(allocator, cached_state, block);
+    try processBlockHeader(fork, allocator, epoch_cache, state, block_type, block);
 
     // The call to the process_execution_payload must happen before the call to the process_randao as the former depends
     // on the randao_mix computed with the reveal of the previous block.
-    if (state.forkSeq().gte(.bellatrix) and isExecutionEnabled(state, block)) {
+    if (comptime fork.gte(.bellatrix) and isExecutionEnabled(fork, state, block_type, block)) {
         // TODO Deneb: Allow to disable withdrawals for interop testing
         // https://github.com/ethereum/consensus-specs/blob/b62c9e877990242d63aa17a2a59a49bc649a2f2e/specs/eip4844/beacon-chain.md#disabling-withdrawals
-        if (state.forkSeq().gte(.capella)) {
+        if (comptime fork.gte(.capella)) {
             // TODO: given max withdrawals of MAX_WITHDRAWALS_PER_PAYLOAD, can use fixed size array instead of heap alloc
             var withdrawals_result = WithdrawalsResult{ .withdrawals = try Withdrawals.initCapacity(
                 allocator,
@@ -56,20 +61,27 @@ pub fn processBlock(
             var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
             defer withdrawal_balances.deinit();
 
-            try getExpectedWithdrawals(allocator, &withdrawals_result, &withdrawal_balances, cached_state);
+            try getExpectedWithdrawals(
+                fork,
+                allocator,
+                epoch_cache,
+                state,
+                &withdrawals_result,
+                &withdrawal_balances,
+            );
             defer withdrawals_result.withdrawals.deinit(allocator);
 
-            const payload_withdrawals_root = switch (body) {
-                .regular => |b| blk: {
-                    const actual_withdrawals = b.executionPayload().getWithdrawals();
+            const payload_withdrawals_root = switch (block_type) {
+                .full => blk: {
+                    const actual_withdrawals = block.body().executionPayload().withdrawals;
                     std.debug.assert(withdrawals_result.withdrawals.items.len == actual_withdrawals.items.len);
                     var root: Root = undefined;
                     try types.capella.Withdrawals.hashTreeRoot(allocator, &actual_withdrawals, &root);
                     break :blk root;
                 },
-                .blinded => |b| b.executionPayloadHeader().getWithdrawalsRoot(),
+                .blinded => block.body().executionPayloadHeader().withdrawals_root,
             };
-            try processWithdrawals(allocator, cached_state, withdrawals_result, payload_withdrawals_root);
+            try processWithdrawals(fork, allocator, state, withdrawals_result, payload_withdrawals_root);
         }
 
         try processExecutionPayload(
@@ -83,11 +95,11 @@ pub fn processBlock(
     try processRandao(cached_state, body, block.proposerIndex(), opts.verify_signature);
     try processEth1Data(allocator, cached_state, body.eth1Data());
     try processOperations(allocator, cached_state, body, opts);
-    if (state.forkSeq().gte(.altair)) {
+    if (comptime fork.gte(.altair)) {
         try processSyncAggregate(allocator, cached_state, body.syncAggregate(), opts.verify_signature);
     }
 
-    if (state.forkSeq().gte(.deneb)) {
+    if (comptime fork.gte(.deneb)) {
         try processBlobKzgCommitments(external_data);
         // Only throw PreData so beacon can also sync/process blocks optimistically
         // and let forkChoice handle it

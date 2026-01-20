@@ -3,8 +3,9 @@ const Allocator = std.mem.Allocator;
 const ssz = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
 const computeEpochAtSlot = @import("./epoch.zig").computeEpochAtSlot;
 const seed_utils = @import("./seed.zig");
@@ -15,20 +16,18 @@ const computeProposers = seed_utils.computeProposers;
 /// Fills the `proposer_lookahead` field with `(MIN_SEED_LOOKAHEAD + 1)` epochs worth of proposer indices.
 /// Uses active indices from the epoch cache shufflings.
 pub fn initializeProposerLookahead(
+    comptime fork: ForkSeq,
     allocator: Allocator,
-    cached_state: *CachedBeaconState,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
     out: []ValidatorIndex,
 ) !void {
     const lookahead_epochs = preset.MIN_SEED_LOOKAHEAD + 1;
     const expected_len = lookahead_epochs * preset.SLOTS_PER_EPOCH;
     if (out.len != expected_len) return error.InvalidProposerLookaheadLength;
 
-    const epoch_cache = cached_state.epoch_cache_ref.get();
-    const state = cached_state.state;
-
     const current_epoch = computeEpochAtSlot(try state.slot());
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
-    const fork_seq = state.forkSeq();
 
     // Fill proposer_lookahead with current epoch through current_epoch + MIN_SEED_LOOKAHEAD
     for (0..lookahead_epochs) |i| {
@@ -39,11 +38,11 @@ pub fn initializeProposerLookahead(
         const active_indices = epoch_cache.getActiveIndicesAtEpoch(epoch) orelse return error.ActiveIndicesNotFound;
 
         var seed: [32]u8 = undefined;
-        try getSeed(state, epoch, c.DOMAIN_BEACON_PROPOSER, &seed);
+        try getSeed(fork, state, epoch, c.DOMAIN_BEACON_PROPOSER, &seed);
 
         try computeProposers(
             allocator,
-            fork_seq,
+            fork,
             seed,
             epoch,
             active_indices,
