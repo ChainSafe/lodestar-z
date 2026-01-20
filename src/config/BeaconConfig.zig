@@ -238,18 +238,17 @@ pub fn getMaxRequestBlobSidecars(self: *const BeaconConfig, fork: ForkSeq) u64 {
 ///
 /// When the message epoch is before the state's active fork epoch, the domain is computed
 /// using the previous fork sequence (per spec rules around fork boundaries).
-pub fn getDomain(self: *const BeaconConfig, state_slot: Slot, domain_type: DomainType, message_slot: ?Slot) !*const [32]u8 {
-    const slot = if (message_slot) |s| s else state_slot;
-    const epoch = @divFloor(slot, preset.SLOTS_PER_EPOCH);
-    const state_fork_info = self.forkInfo(state_slot);
+pub fn getDomain(self: *const BeaconConfig, state_epoch: Epoch, domain_type: DomainType, message_slot: ?Slot) !*const [32]u8 {
+    const epoch = if (message_slot) |s| @divFloor(s, preset.SLOTS_PER_EPOCH) else state_epoch;
+    const state_fork_info = self.forkInfoAtEpoch(state_epoch);
     const fork_seq = if (epoch < state_fork_info.epoch) state_fork_info.prev_fork_seq else state_fork_info.fork_seq;
 
     return self.domain_cache.get(fork_seq, domain_type);
 }
 
-pub fn getDomainForVoluntaryExit(self: *const BeaconConfig, state_slot: Slot, message_slot: ?Slot) !*const [32]u8 {
-    if (@divFloor(state_slot, preset.SLOTS_PER_EPOCH) < self.chain.DENEB_FORK_EPOCH) {
-        return self.getDomain(state_slot, DOMAIN_VOLUNTARY_EXIT, message_slot);
+pub fn getDomainForVoluntaryExit(self: *const BeaconConfig, state_epoch: Epoch, message_slot: ?Slot) !*const [32]u8 {
+    if (state_epoch < self.chain.DENEB_FORK_EPOCH) {
+        return self.getDomain(state_epoch, DOMAIN_VOLUNTARY_EXIT, message_slot);
     } else {
         return self.domain_cache.get(.capella, DOMAIN_VOLUNTARY_EXIT);
     }
