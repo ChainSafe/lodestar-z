@@ -17,7 +17,7 @@ const httpz = @import("httpz");
 const state_transition = @import("state_transition");
 const types = @import("consensus_types");
 
-const CachedBeaconStateAllForks = state_transition.CachedBeaconStateAllForks;
+const CachedBeaconState = state_transition.CachedBeaconState;
 const SignedBlock = state_transition.SignedBlock;
 const active_preset = @import("preset").active_preset;
 const mainnet_chain_config = @import("config").mainnet.chain_config;
@@ -94,7 +94,7 @@ pub fn main() !void {
     defer reader_blocks.close(allocator);
 
     std.debug.print("Reading state\n", .{});
-    var state_ptr = try allocator.create(state_transition.BeaconStateAllForks);
+    var state_ptr = try allocator.create(state_transition.BeaconState);
     errdefer allocator.destroy(state_ptr);
     state_ptr.* = try reader_state.readState(allocator, null);
     const blocks_index = reader_blocks.group_indices[0].blocks_index orelse return error.NoBlockIndex;
@@ -109,7 +109,7 @@ pub fn main() !void {
 
     const config = try allocator.create(BeaconConfig);
     errdefer allocator.destroy(config);
-    config.* = BeaconConfig.init(chain_config, state_ptr.genesisValidatorsRoot());
+    config.* = BeaconConfig.init(chain_config, (try state_ptr.genesisValidatorsRoot()).*);
 
     const immutable_data = state_transition.EpochCacheImmutableData{
         .config = config,
@@ -118,12 +118,12 @@ pub fn main() !void {
     };
 
     std.debug.print("Creating cached beacon state\n", .{});
-    var cached_state = try CachedBeaconStateAllForks.createCachedBeaconState(
+    var cached_state = try CachedBeaconState.createCachedBeaconState(
         allocator,
         state_ptr,
         immutable_data,
         .{
-            .skip_sync_committee_cache = state_ptr.isPhase0(),
+            .skip_sync_committee_cache = state_ptr.forkSeq() == .phase0,
             .skip_sync_pubkeys = false,
         },
     );
@@ -138,7 +138,7 @@ pub fn main() !void {
             .regular => |b| b.executionPayload().getBlockNumber(),
             .blinded => |b| b.executionPayloadHeader().getBlockNumber(),
         };
-        std.debug.print("state slot = {}, block number = {}\n", .{ cached_state.state.slot(), block_num });
+        std.debug.print("state slot = {}, block number = {}\n", .{ try cached_state.state.slot(), block_num });
 
         const next = try state_transition.stateTransition(
             allocator,
