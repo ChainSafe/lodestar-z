@@ -19,5 +19,3 @@ const types = @import("consensus_types");
 const state_transition = @import("state_transition");
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const processEth1Data = state_transition.processEth1Data;
-const SignedBlock = state_transition.SignedBlock;
-const SignedBeaconBlock = state_transition.SignedBeaconBlock;

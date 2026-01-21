@@ -6,7 +6,6 @@ const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").Epoc
 const getActivationExitChurnLimit = @import("../utils/validator.zig").getActivationExitChurnLimit;
 const preset = @import("preset").preset;
 const isValidatorKnown = @import("../utils/electra.zig").isValidatorKnown;
-const ForkSeq = @import("config").ForkSeq;
 const validateDepositSignature = @import("../block/process_deposit.zig").validateDepositSignature;
 const addValidatorToRegistry = @import("../block/process_deposit.zig").addValidatorToRegistry;
 const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCompoundingWithdrawalCredential;

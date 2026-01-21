@@ -31,7 +31,6 @@ const std = @import("std");
 const types = @import("consensus_types");
 const config = @import("config");
 
-const Allocator = std.mem.Allocator;
 const state_transition = @import("state_transition");
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 

@@ -1,4 +1,3 @@
-const std = @import("std");
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 
 pub fn processParticipationFlagUpdates(cached_state: *CachedBeaconState) !void {

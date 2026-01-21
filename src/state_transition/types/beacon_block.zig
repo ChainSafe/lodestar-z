@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const panic = std.debug.panic;
-const Allocator = std.mem.Allocator;
 const expect = std.testing.expect;
 const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
@@ -15,12 +14,10 @@ const WithdrawalRequest = types.electra.WithdrawalRequest.Type;
 const ConsolidationRequest = types.electra.ConsolidationRequest.Type;
 const Root = types.primitive.Root.Type;
 const ProposerSlashing = types.phase0.ProposerSlashing.Type;
-const ProposerSlashings = types.phase0.ProposerSlashings.Type;
 const ExecutionPayload = @import("./execution_payload.zig").ExecutionPayload;
 const ExecutionPayloadHeader = @import("./execution_payload.zig").ExecutionPayloadHeader;
 const Attestations = @import("./attestation.zig").Attestations;
 const AttesterSlashings = @import("./attester_slashing.zig").AttesterSlashings;
-const AttesterSlashing = @import("./attester_slashing.zig").AttesterSlashing;
 
 pub const SignedBeaconBlock = union(enum) {
     phase0: *types.phase0.SignedBeaconBlock.Type,

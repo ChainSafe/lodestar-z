@@ -144,8 +144,6 @@ pub const Body = union(enum) {
 
 const std = @import("std");
 const types = @import("consensus_types");
-const preset = @import("preset").preset;
-const ZERO_HASH = @import("constants").ZERO_HASH;
 
 const Root = types.primitive.Root.Type;
 const Deposit = types.phase0.Deposit.Type;
@@ -153,9 +151,7 @@ const DepositRequest = types.electra.DepositRequest.Type;
 const WithdrawalRequest = types.electra.WithdrawalRequest.Type;
 const ConsolidationRequest = types.electra.ConsolidationRequest.Type;
 
-const Attestation = @import("attestation.zig").Attestation;
 const Attestations = @import("attestation.zig").Attestations;
-const SyncAggregate = types.altair.SyncAggregate.Type;
 const AttesterSlashings = @import("attester_slashing.zig").AttesterSlashings;
 const ProposerSlashing = types.phase0.ProposerSlashing.Type;
 const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit.Type;

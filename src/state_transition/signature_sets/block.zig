@@ -6,7 +6,6 @@ const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const SignedBlock = @import("../types/block.zig").SignedBlock;
 const SignedBeaconBlock = @import("../state_transition.zig").SignedBeaconBlock;
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
-const randaoRevealSignatureSet = @import("./randao.zig").randaoRevealSignatureSet;
 const proposerSlashingsSignatureSets = @import("./proposer_slashings.zig").proposerSlashingsSignatureSets;
 
 pub fn blockSignatureSets(

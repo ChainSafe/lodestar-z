@@ -35,7 +35,6 @@ const BoolArray = std.ArrayList(bool);
 const UsizeArray = std.ArrayList(usize);
 const U8Array = std.ArrayList(u8);
 const U64Array = std.ArrayList(u64);
-const U32Array = std.ArrayList(u32);
 
 const ValidatorActivation = struct {
     validator_index: ValidatorIndex,

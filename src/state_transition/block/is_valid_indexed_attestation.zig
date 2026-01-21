@@ -1,5 +1,4 @@
 const std = @import("std");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
@@ -7,7 +6,6 @@ const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const ForkTypes = @import("fork_types").ForkTypes;
 const EpochCache = @import("../cache/state_cache.zig").EpochCache;
-const verifySingleSignatureSet = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
 const verifyAggregatedSignatureSet = @import("../utils/signature_sets.zig").verifyAggregatedSignatureSet;
 const getIndexedAttestationSignatureSet = @import("../signature_sets/indexed_attestation.zig").getIndexedAttestationSignatureSet;
 

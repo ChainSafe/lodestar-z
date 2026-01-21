@@ -1,4 +1,3 @@
-const std = @import("std");
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const types = @import("consensus_types");
 const DepositRequest = types.electra.DepositRequest.Type;

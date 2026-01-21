@@ -2,7 +2,6 @@ const std = @import("std");
 const Node = @import("persistent_merkle_tree").Node;
 const ssz = @import("consensus_types");
 const ForkSeq = @import("config").ForkSeq;
-const Preset = @import("preset").Preset;
 const state_transition = @import("state_transition");
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const BeaconState = state_transition.BeaconState;

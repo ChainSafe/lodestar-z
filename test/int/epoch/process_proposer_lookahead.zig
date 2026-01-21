@@ -1,4 +1,3 @@
-const std = @import("std");
 const state_transition = @import("state_transition");
 const TestRunner = @import("./test_runner.zig").TestRunner;
 

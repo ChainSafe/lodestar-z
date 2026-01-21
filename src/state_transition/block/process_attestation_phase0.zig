@@ -1,8 +1,5 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
-const ssz = @import("ssz");
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
@@ -13,8 +10,6 @@ const isValidIndexedAttestation = @import("./is_valid_indexed_attestation.zig").
 const ForkTypes = @import("fork_types").ForkTypes;
 const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const Slot = types.primitive.Slot.Type;
-const Phase0Attestation = types.phase0.Attestation.Type;
-const ElectraAttestation = types.electra.Attestation.Type;
 const PendingAttestation = types.phase0.PendingAttestation.Type;
 
 pub fn processAttestationPhase0(

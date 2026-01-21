@@ -1,8 +1,6 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const state_transition = @import("state_transition");
-const EpochTransitionCache = state_transition.EpochTransitionCache;
 const processSyncCommitteeUpdates = state_transition.processSyncCommitteeUpdates;
 const Node = @import("persistent_merkle_tree").Node;
 // this function runs without EpochTransionCache so cannot use getTestProcessFn

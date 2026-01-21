@@ -9,8 +9,6 @@ const EpochCacheImmutableData = @import("./epoch_cache.zig").EpochCacheImmutable
 const EpochCacheOpts = @import("./epoch_cache.zig").EpochCacheOpts;
 const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const PubkeyIndexMap = @import("pubkey_cache.zig").PubkeyIndexMap(ValidatorIndex);
-const Index2PubkeyCache = @import("pubkey_cache.zig").Index2PubkeyCache;
 const CloneOpts = @import("ssz").BaseTreeView.CloneOpts;
 
 pub const CachedBeaconState = struct {

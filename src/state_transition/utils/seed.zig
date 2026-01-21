@@ -6,7 +6,6 @@ const ForkSeq = @import("config").ForkSeq;
 const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const digest = @import("./sha256.zig").digest;
 const Epoch = types.primitive.Epoch.Type;
-const Bytes32 = types.primitive.Bytes32.Type;
 const DomainType = types.primitive.DomainType.Type;
 const c = @import("constants");
 const EPOCHS_PER_HISTORICAL_VECTOR = preset.EPOCHS_PER_HISTORICAL_VECTOR;

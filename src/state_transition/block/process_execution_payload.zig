@@ -1,17 +1,12 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const types = @import("consensus_types");
-const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const BlockType = @import("fork_types").BlockType;
 const ForkBeaconBlockBody = @import("fork_types").ForkBeaconBlockBody;
-const SignedBlindedBeaconBlock = @import("../types/beacon_block.zig").SignedBlindedBeaconBlock;
 const BlockExternalData = @import("../state_transition.zig").BlockExternalData;
 const BeaconConfig = @import("config").BeaconConfig;
 const isMergeTransitionComplete = @import("../utils/execution.zig").isMergeTransitionComplete;
-const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const getRandaoMix = @import("../utils/seed.zig").getRandaoMix;
 
 pub fn processExecutionPayload(

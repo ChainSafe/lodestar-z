@@ -5,7 +5,6 @@ const ForkSeq = @import("config").ForkSeq;
 const ForkTypes = @import("fork_types").ForkTypes;
 const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const types = @import("consensus_types");
-const AttesterSlashing = types.phase0.AttesterSlashing.Type;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const isSlashableAttestationData = @import("../utils/attestation.zig").isSlashableAttestationData;
 const getAttesterSlashableIndices = @import("../utils/attestation.zig").getAttesterSlashableIndices;

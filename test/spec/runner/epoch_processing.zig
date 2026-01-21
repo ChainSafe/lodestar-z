@@ -1,24 +1,14 @@
-const ssz = @import("consensus_types");
 const Node = @import("persistent_merkle_tree").Node;
-const Allocator = std.mem.Allocator;
-const Root = ssz.primitive.Root.Type;
 const ForkSeq = @import("config").ForkSeq;
-const Preset = @import("preset").Preset;
-const preset = @import("preset").preset;
 const active_preset = @import("preset").active_preset;
 const std = @import("std");
 const state_transition = @import("state_transition");
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const BeaconState = state_transition.BeaconState;
 const EpochTransitionCache = state_transition.EpochTransitionCache;
-const Withdrawals = ssz.capella.Withdrawals.Type;
-const WithdrawalsResult = state_transition.WithdrawalsResult;
 const test_case = @import("../test_case.zig");
 const TestCaseUtils = test_case.TestCaseUtils;
-const loadSszValue = test_case.loadSszSnappyValue;
-const loadBlsSetting = test_case.loadBlsSetting;
 const expectEqualBeaconStates = test_case.expectEqualBeaconStates;
-const BlsSetting = test_case.BlsSetting;
 
 pub const EpochProcessingFn = enum {
     effective_balance_updates,

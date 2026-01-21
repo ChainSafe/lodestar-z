@@ -1,5 +1,3 @@
-const std = @import("std");
-const native_endian = @import("builtin").cpu.arch.endian();
 
 pub const TypeKind = enum {
     uint,

@@ -1,10 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const ReferenceCount = @import("../utils/reference_count.zig").ReferenceCount;
-const EFFECTIVE_BALANCE_INCREMENT = preset.EFFECTIVE_BALANCE_INCREMENT;
 
 pub const EffectiveBalanceIncrements = std.ArrayList(u16);
 pub const EffectiveBalanceIncrementsRc = ReferenceCount(EffectiveBalanceIncrements);

@@ -1,7 +1,5 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const types = @import("consensus_types");
 const Epoch = types.primitive.Epoch.Type;
 const preset = @import("preset").preset;
@@ -16,8 +14,6 @@ const validateAttestation = @import("./process_attestation_phase0.zig").validate
 const getAttestationWithIndicesSignatureSet = @import("../signature_sets/indexed_attestation.zig").getAttestationWithIndicesSignatureSet;
 const verifyAggregatedSignatureSet = @import("../utils/signature_sets.zig").verifyAggregatedSignatureSet;
 const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconProposer;
-const Phase0Attestation = types.phase0.Attestation.Type;
-const ElectraAttestation = types.electra.Attestation.Type;
 const Checkpoint = types.phase0.Checkpoint.Type;
 const isTimelyTarget = @import("./process_attestation_phase0.zig").isTimelyTarget;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;

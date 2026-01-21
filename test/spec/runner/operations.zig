@@ -3,7 +3,6 @@ const Node = @import("persistent_merkle_tree").Node;
 const ssz = @import("consensus_types");
 const Root = ssz.primitive.Root.Type;
 const ForkSeq = @import("config").ForkSeq;
-const Preset = @import("preset").Preset;
 const preset = @import("preset").preset;
 const active_preset = @import("preset").active_preset;
 const state_transition = @import("state_transition");

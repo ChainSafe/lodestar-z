@@ -11,7 +11,6 @@ const BLSSignature = types.primitive.BLSSignature.Type;
 const SyncPeriod = types.primitive.SyncPeriod.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const CommitteeIndex = types.primitive.CommitteeIndex.Type;
-const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
 const PubkeyIndexMap = @import("../utils/pubkey_index_map.zig").PubkeyIndexMap(ValidatorIndex);
 const Index2PubkeyCache = @import("./pubkey_cache.zig").Index2PubkeyCache;
@@ -44,7 +43,6 @@ const getChurnLimit = @import("../utils/validator.zig").getChurnLimit;
 const getActivationChurnLimit = @import("../utils/validator.zig").getActivationChurnLimit;
 
 const Attestation = @import("../types/attestation.zig").Attestation;
-const IndexedAttestation = @import("../types/attestation.zig").IndexedAttestation;
 
 const syncPubkeys = @import("./pubkey_cache.zig").syncPubkeys;
 

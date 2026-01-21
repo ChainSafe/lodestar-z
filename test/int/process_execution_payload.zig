@@ -35,7 +35,5 @@ const config = @import("config");
 const state_transition = @import("state_transition");
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const processExecutionPayload = state_transition.processExecutionPayload;
-const SignedBlock = state_transition.SignedBlock;
 const Block = state_transition.Block;
-const SignedBeaconBlock = state_transition.SignedBeaconBlock;
 const BeaconBlock = state_transition.BeaconBlock;

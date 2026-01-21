@@ -1,13 +1,10 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const SignedBeaconBlock = @import("../types/beacon_block.zig").SignedBeaconBlock;
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
 const c = @import("constants");
 const types = @import("consensus_types");
-const Root = types.primitive.Root;
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
-const verifySignatureSet = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
 
 pub fn getProposerSlashingSignatureSets(cached_state: *const CachedBeaconState, proposer_slashing: *const types.phase0.ProposerSlashing.Type) ![2]SingleSignatureSet {
     const config = cached_state.config;

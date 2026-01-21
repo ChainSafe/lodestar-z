@@ -1,7 +1,4 @@
-const std = @import("std");
-const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
-const isBasicType = @import("ssz").isBasicType;
 
 const ForkTypes = @import("./fork_types.zig").ForkTypes;
 

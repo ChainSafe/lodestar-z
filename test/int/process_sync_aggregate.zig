@@ -41,7 +41,6 @@ const blst = @import("blst");
 const preset = @import("preset").preset;
 const c = @import("constants");
 
-const Allocator = std.mem.Allocator;
 const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
 const Node = @import("persistent_merkle_tree").Node;
 
@@ -49,9 +48,4 @@ const state_transition = @import("state_transition");
 const processSyncAggregate = state_transition.processSyncAggregate;
 const Root = types.primitive.Root.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const Block = state_transition.Block;
-const SignedBlock = state_transition.SignedBlock;
-const BeaconBlock = state_transition.BeaconBlock;
-const SignedBeaconBlock = state_transition.SignedBeaconBlock;
 const computeSigningRoot = state_transition.computeSigningRoot;
-const G2_POINT_AT_INFINITY = @import("constants").G2_POINT_AT_INFINITY;

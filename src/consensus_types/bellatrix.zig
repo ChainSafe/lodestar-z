@@ -1,7 +1,5 @@
-const std = @import("std");
 const ssz = @import("ssz");
 const p = @import("primitive.zig");
-const c = @import("constants");
 const preset = @import("preset").preset;
 const phase0 = @import("phase0.zig");
 const altair = @import("altair.zig");

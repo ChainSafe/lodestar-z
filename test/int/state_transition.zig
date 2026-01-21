@@ -1,18 +1,14 @@
 const std = @import("std");
 const testing = std.testing;
-const Allocator = std.mem.Allocator;
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const generateElectraBlock = state_transition.test_utils.generateElectraBlock;
 const types = @import("consensus_types");
-const Root = types.primitive.Root.Type;
-const ZERO_HASH = @import("constants").ZERO_HASH;
 
 const state_transition = @import("state_transition");
 const Node = @import("persistent_merkle_tree").Node;
 const stateTransition = state_transition.state_transition.stateTransition;
 const TransitionOpt = state_transition.state_transition.TransitionOpt;
 const SignedBeaconBlock = state_transition.state_transition.SignedBeaconBlock;
-const CachedBeaconState = state_transition.CachedBeaconState;
 const SignedBlock = state_transition.SignedBlock;
 
 const TestCase = struct {

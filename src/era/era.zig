@@ -1,8 +1,6 @@
 const std = @import("std");
-const config = @import("config");
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
-const ct = @import("consensus_types");
 const e2s = @import("e2s.zig");
 
 /// Parsed components of an .era file name.

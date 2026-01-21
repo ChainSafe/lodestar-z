@@ -2,7 +2,6 @@ const types = @import("consensus_types");
 const Slot = types.primitive.Slot.Type;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const Root = types.primitive.Root.Type;
-const Epoch = types.primitive.Epoch.Type;
 const Body = @import("../types/block.zig").Body;
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;

@@ -1,6 +1,5 @@
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const types = @import("consensus_types");
-const Epoch = types.primitive.Epoch.Type;
 const Checkpoint = types.phase0.Checkpoint.Type;
 const JustificationBits = types.phase0.JustificationBits.Type;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;

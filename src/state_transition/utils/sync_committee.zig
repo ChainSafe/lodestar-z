@@ -9,7 +9,6 @@ const preset = @import("preset").preset;
 const c = @import("constants");
 const SyncCommittee = types.altair.SyncCommittee.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const PublicKey = types.primitive.BLSPubkey.Type;
 const ForkSeq = @import("config").ForkSeq;
 const intSqrt = @import("../utils/math.zig").intSqrt;
 

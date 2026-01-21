@@ -1,9 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
-const Node = @import("persistent_merkle_tree").Node;
-const isBasicType = @import("ssz").isBasicType;
 
 const ForkTypes = @import("./fork_types.zig").ForkTypes;
 

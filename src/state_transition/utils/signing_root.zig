@@ -4,7 +4,6 @@ const Domain = types.primitive.Domain.Type;
 const Root = types.primitive.Root.Type;
 const types = @import("consensus_types");
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
-const SignedBeaconBlock = @import("../state_transition.zig").SignedBeaconBlock;
 const Block = @import("../types/block.zig").Block;
 
 const SigningData = types.phase0.SigningData.Type;

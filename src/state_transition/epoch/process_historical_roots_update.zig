@@ -1,5 +1,4 @@
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const ForkSeq = @import("config").ForkSeq;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;

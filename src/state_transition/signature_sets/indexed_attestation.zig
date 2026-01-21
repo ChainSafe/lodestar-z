@@ -5,14 +5,12 @@ const PublicKey = blst.PublicKey;
 const types = @import("consensus_types");
 const Epoch = types.primitive.Epoch.Type;
 const AttestationData = types.phase0.AttestationData.Type;
-const Attestation = types.primitive.Attestation.Type;
 const BLSSignature = types.primitive.BLSSignature.Type;
 const Root = types.primitive.Root.Type;
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const EpochCache = @import("../cache/state_cache.zig").EpochCache;
-const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
 const SignedBeaconBlock = @import("../types/beacon_block.zig").SignedBeaconBlock;
 const ForkTypes = @import("fork_types").ForkTypes;
 const c = @import("constants");
@@ -20,7 +18,6 @@ const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRo
 const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAtEpoch;
 const AggregatedSignatureSet = @import("../utils/signature_sets.zig").AggregatedSignatureSet;
 const createAggregateSignatureSetFromComponents = @import("../utils/signature_sets.zig").createAggregateSignatureSetFromComponents;
-const IndexedAttestation = @import("../types/attestation.zig").IndexedAttestation;
 
 pub fn getAttestationDataSigningRoot(config: *const BeaconConfig, state_epoch: Epoch, data: *const AttestationData, out: *[32]u8) !void {
     const slot = computeStartSlotAtEpoch(data.target.epoch);

@@ -1,9 +1,6 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const Root = types.primitive.Root.Type;
 const ZERO_HASH = @import("constants").ZERO_HASH;
 
 pub fn processSlot(cached_state: *CachedBeaconState) !void {

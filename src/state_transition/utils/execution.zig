@@ -5,13 +5,7 @@ const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const ForkBeaconBlock = @import("fork_types").ForkBeaconBlock;
 const BlockType = @import("fork_types").BlockType;
 const types = @import("consensus_types");
-const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
-const Block = @import("../types/block.zig").Block;
-const BeaconBlockBody = @import("../types/beacon_block.zig").BeaconBlockBody;
-const ExecutionPayload = @import("../types/beacon_block.zig").ExecutionPayload;
 // const ExecutionPayloadHeader
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const ZERO_HASH = @import("constants").ZERO_HASH;
 
 pub fn isExecutionEnabled(comptime fork: ForkSeq, state: *ForkBeaconState(fork), comptime block_type: BlockType, block: ForkBeaconBlock(fork, block_type)) bool {

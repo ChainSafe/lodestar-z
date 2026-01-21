@@ -5,7 +5,6 @@ const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const Node = @import("persistent_merkle_tree").Node;
 const isBasicType = @import("ssz").isBasicType;
-const isFixedType = @import("ssz").isFixedType;
 const BaseTreeView = @import("ssz").BaseTreeView;
 const CloneOpts = @import("ssz").BaseTreeView.CloneOpts;
 const ct = @import("consensus_types");

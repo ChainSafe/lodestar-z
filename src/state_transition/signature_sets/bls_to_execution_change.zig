@@ -4,7 +4,6 @@ const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const SignedBLSToExecutionChange = types.capella.SignedBLSToExecutionChange.Type;
 const BeaconConfig = @import("config").BeaconConfig;
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
-const ForkSeq = @import("config").ForkSeq;
 const c = @import("constants");
 const blst = @import("blst");
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;

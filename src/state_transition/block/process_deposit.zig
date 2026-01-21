@@ -16,7 +16,6 @@ const computeDomain = @import("../utils/domain.zig").computeDomain;
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const blst = @import("blst");
 const verify = @import("../utils/bls.zig").verify;
-const ForkSeq = types.primitive.ForkSeq.Type;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const getMaxEffectiveBalance = @import("../utils/validator.zig").getMaxEffectiveBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;

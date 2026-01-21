@@ -1,7 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
 const Block = @import("../types/block.zig").Block;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const AggregatedSignatureSet = @import("../utils/signature_sets.zig").AggregatedSignatureSet;
@@ -12,7 +11,6 @@ const Root = types.primitive.Root.Type;
 const G2_POINT_AT_INFINITY = @import("constants").G2_POINT_AT_INFINITY;
 const c = @import("constants");
 const blst = @import("blst");
-const BLSPubkey = types.primitive.BLSPubkey.Type;
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const verifyAggregatedSignatureSet = @import("../utils/signature_sets.zig").verifyAggregatedSignatureSet;
 const balance_utils = @import("../utils/balance.zig");
