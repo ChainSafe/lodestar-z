@@ -1,7 +1,11 @@
 const std = @import("std");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const types = @import("consensus_types");
-const Body = @import("../types/block.zig").Body;
+const BeaconConfig = @import("config").BeaconConfig;
+const ForkSeq = @import("config").ForkSeq;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BlockType = @import("fork_types").BlockType;
+const ForkBeaconBlockBody = @import("fork_types").ForkBeaconBlockBody;
+const ForkTypes = @import("fork_types").ForkTypes;
 
 const getEth1DepositCount = @import("../utils/deposit.zig").getEth1DepositCount;
 const processAttestations = @import("./process_attestations.zig").processAttestations;
@@ -16,64 +20,59 @@ const processWithdrawalRequest = @import("./process_withdrawal_request.zig").pro
 const ProcessBlockOpts = @import("./process_block.zig").ProcessBlockOpts;
 
 pub fn processOperations(
+    comptime fork: ForkSeq,
     allocator: std.mem.Allocator,
-    cached_state: *CachedBeaconState,
-    body: Body,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
+    comptime block_type: BlockType,
+    body: ForkBeaconBlockBody(fork, block_type),
     opts: ProcessBlockOpts,
 ) !void {
-    const state = cached_state.state;
-
     // verify that outstanding deposits are processed up to the maximum number of deposits
-    const max_deposits = try getEth1DepositCount(cached_state, null);
-    if (body.deposits().len != max_deposits) {
+    const max_deposits = try getEth1DepositCount(fork, state, null);
+    if (body.inner.deposits.items.len != max_deposits) {
         return error.InvalidDepositCount;
     }
 
-    for (body.proposerSlashings()) |*proposer_slashing| {
-        try processProposerSlashing(cached_state, proposer_slashing, opts.verify_signature);
+    const current_epoch = epoch_cache.epoch;
+
+    for (body.inner.proposer_slashings.items) |*proposer_slashing| {
+        try processProposerSlashing(fork, allocator, config, epoch_cache, state, proposer_slashing, opts.verify_signature);
     }
 
-    const attester_slashings = body.attesterSlashings().items();
-    switch (attester_slashings) {
-        .phase0 => |attester_slashings_phase0| {
-            for (attester_slashings_phase0) |*attester_slashing| {
-                try processAttesterSlashing(types.phase0.AttesterSlashing.Type, cached_state, attester_slashing, opts.verify_signature);
-            }
-        },
-        .electra => |attester_slashings_electra| {
-            for (attester_slashings_electra) |*attester_slashing| {
-                try processAttesterSlashing(types.electra.AttesterSlashing.Type, cached_state, attester_slashing, opts.verify_signature);
-            }
-        },
+    for (body.inner.attester_slashings.items) |*attester_slashing| {
+        try processAttesterSlashing(fork, allocator, config, epoch_cache, state, current_epoch, attester_slashing, opts.verify_signature);
     }
 
-    try processAttestations(allocator, cached_state, body.attestations(), opts.verify_signature);
+    try processAttestations(fork, allocator, config, epoch_cache, state, body.inner.attestations.items, opts.verify_signature);
 
-    for (body.deposits()) |*deposit| {
-        try processDeposit(allocator, cached_state, deposit);
+    for (body.inner.deposits.items) |*deposit| {
+        try processDeposit(fork, allocator, config, epoch_cache, state, deposit);
     }
 
-    for (body.voluntaryExits()) |*voluntary_exit| {
-        try processVoluntaryExit(cached_state, voluntary_exit, opts.verify_signature);
+    for (body.inner.voluntary_exits.items) |*voluntary_exit| {
+        try processVoluntaryExit(fork, config, epoch_cache, state, voluntary_exit, opts.verify_signature);
     }
 
-    if (state.forkSeq().gte(.capella)) {
-        for (body.blsToExecutionChanges()) |*bls_to_execution_change| {
-            try processBlsToExecutionChange(cached_state, bls_to_execution_change);
+    if (comptime fork.gte(.capella)) {
+        for (body.inner.bls_to_execution_changes.items) |*bls_to_execution_change| {
+            try processBlsToExecutionChange(fork, config, state, bls_to_execution_change);
         }
     }
 
-    if (state.forkSeq().gte(.electra)) {
-        for (body.depositRequests()) |*deposit_request| {
-            try processDepositRequest(cached_state, deposit_request);
+    if (comptime fork.gte(.electra)) {
+        const execution_requests = &body.inner.execution_requests;
+        for (execution_requests.deposits.items) |*deposit_request| {
+            try processDepositRequest(fork, state, deposit_request);
         }
 
-        for (body.withdrawalRequests()) |*withdrawal_request| {
-            try processWithdrawalRequest(cached_state, withdrawal_request);
+        for (execution_requests.withdrawals.items) |*withdrawal_request| {
+            try processWithdrawalRequest(fork, config, epoch_cache, state, withdrawal_request);
         }
 
-        for (body.consolidationRequests()) |*consolidation_request| {
-            try processConsolidationRequest(cached_state, consolidation_request);
+        for (execution_requests.consolidations.items) |*consolidation_request| {
+            try processConsolidationRequest(fork, config, epoch_cache, state, consolidation_request);
         }
     }
 }

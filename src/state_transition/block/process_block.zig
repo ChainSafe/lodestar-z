@@ -44,6 +44,8 @@ pub fn processBlock(
     // TODO: metrics
 ) !void {
     try processBlockHeader(fork, allocator, epoch_cache, state, block_type, block);
+    const body = block.body();
+    const current_epoch = epoch_cache.epoch;
 
     // The call to the process_execution_payload must happen before the call to the process_randao as the former depends
     // on the randao_mix computed with the reveal of the previous block.
@@ -83,18 +85,22 @@ pub fn processBlock(
         }
 
         try processExecutionPayload(
+            fork,
             allocator,
-            cached_state,
-            body,
+            config,
+            state,
+            current_epoch,
+            block_type,
+            body.*,
             external_data,
         );
     }
 
-    try processRandao(cached_state, body, block.proposerIndex(), opts.verify_signature);
-    try processEth1Data(allocator, cached_state, body.eth1Data());
-    try processOperations(allocator, cached_state, body, opts);
+    try processRandao(fork, config, epoch_cache, state, block_type, body.*, block.proposerIndex(), opts.verify_signature);
+    try processEth1Data(fork, allocator, state, body.eth1Data());
+    try processOperations(fork, allocator, config, epoch_cache, state, block_type, body.*, opts);
     if (comptime fork.gte(.altair)) {
-        try processSyncAggregate(allocator, cached_state, body.syncAggregate(), opts.verify_signature);
+        try processSyncAggregate(fork, allocator, config, epoch_cache, state, body.syncAggregate(), opts.verify_signature);
     }
 
     if (comptime fork.gte(.deneb)) {

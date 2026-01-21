@@ -1,12 +1,16 @@
 const std = @import("std");
+const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const types = @import("consensus_types");
 const Eth1Data = types.phase0.Eth1Data.Type;
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const preset = @import("preset").preset;
 
-pub fn processEth1Data(allocator: std.mem.Allocator, cached_state: *CachedBeaconState, eth1_data: *const Eth1Data) !void {
-    const state = cached_state.state;
+pub fn processEth1Data(
+    comptime fork: ForkSeq,
+    allocator: std.mem.Allocator,
+    state: *ForkBeaconState(fork),
+    eth1_data: *const Eth1Data,
+) !void {
     if (try becomesNewEth1Data(allocator, state, eth1_data)) {
         try state.setEth1Data(eth1_data);
     }
@@ -14,7 +18,11 @@ pub fn processEth1Data(allocator: std.mem.Allocator, cached_state: *CachedBeacon
     try state.appendEth1DataVote(eth1_data);
 }
 
-pub fn becomesNewEth1Data(allocator: std.mem.Allocator, state: *BeaconState, new_eth1_data: *const Eth1Data) !bool {
+pub fn becomesNewEth1Data(
+    allocator: std.mem.Allocator,
+    state: *ForkBeaconState(fork),
+    new_eth1_data: *const Eth1Data,
+) !bool {
     const SLOTS_PER_ETH1_VOTING_PERIOD = preset.EPOCHS_PER_ETH1_VOTING_PERIOD * preset.SLOTS_PER_EPOCH;
 
     // If there are not more than 50% votes, then we do not have to count to find a winner.
