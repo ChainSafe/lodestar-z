@@ -19,8 +19,8 @@ interface Checkpoint {
 }
 
 interface SyncCommittee {
-  pubkeys: Uint8Array,
-  aggregate_pubkey: Uint8Array,
+  pubkeys: Uint8Array;
+  aggregate_pubkey: Uint8Array;
 }
 
 declare class BeaconStateView {
