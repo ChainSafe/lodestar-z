@@ -52,7 +52,7 @@ type Bindings = {
     ensureCapacity: (capacity: number) => void;
     pubkey2index: {
       get: (pubkey: Uint8Array) => number | undefined;
-    }
+    };
     index2pubkey: {
       get: (index: number) => Uint8Array | undefined;
     };
