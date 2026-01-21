@@ -40,6 +40,7 @@ declare class BeaconStateView {
     justifiedCheckpoint: Checkpoint;
     finalizedCheckpoint: Checkpoint;
   };
+  hashTreeRoot(): Uint8Array;
 }
 
 type Bindings = {
