@@ -61,6 +61,7 @@ printDuration("get currentJustifiedCheckpoint", () => state.currentJustifiedChec
 printDuration("proposers", () => state.proposers);
 printDuration("proposersNextEpoch", () => state.proposersNextEpoch);
 printDuration("currentSyncCommittee", () => state.currentSyncCommittee);
+printDuration("nextSyncCommittee", () => state.nextSyncCommittee);
 printDuration("getBalance(0)", () => state.getBalance(0));
 printDuration("getBalance(100)", () => state.getBalance(100));
 printDuration("getFinalizedRootProof()", () => state.getFinalizedRootProof());
