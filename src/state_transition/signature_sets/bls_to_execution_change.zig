@@ -1,6 +1,5 @@
 const std = @import("std");
 const types = @import("consensus_types");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const SignedBLSToExecutionChange = types.capella.SignedBLSToExecutionChange.Type;
 const BeaconConfig = @import("config").BeaconConfig;
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
@@ -11,8 +10,7 @@ const Root = types.primitive.Root.Type;
 const SignedBeaconBlock = @import("../types/beacon_block.zig").SignedBeaconBlock;
 const verifySingleSignatureSet = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
 
-pub fn verifyBlsToExecutionChangeSignature(cached_state: *const CachedBeaconState, signed_bls_to_execution_change: *const SignedBLSToExecutionChange) !bool {
-    const config = cached_state.config;
+pub fn verifyBlsToExecutionChangeSignature(config: *const BeaconConfig, signed_bls_to_execution_change: *const SignedBLSToExecutionChange) !bool {
     const signature_set = try getBlsToExecutionChangeSignatureSet(config, signed_bls_to_execution_change);
     return verifySingleSignatureSet(&signature_set);
 }

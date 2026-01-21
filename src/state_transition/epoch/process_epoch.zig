@@ -1,5 +1,8 @@
 const std = @import("std");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const BeaconConfig = @import("config").BeaconConfig;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const processJustificationAndFinalization = @import("./process_justification_and_finalization.zig").processJustificationAndFinalization;
 const processInactivityUpdates = @import("./process_inactivity_updates.zig").processInactivityUpdates;
@@ -20,8 +23,14 @@ const processSyncCommitteeUpdates = @import("./process_sync_committee_updates.zi
 const processProposerLookahead = @import("./process_proposer_lookahead.zig").processProposerLookahead;
 
 // TODO: add metrics
-pub fn processEpoch(allocator: std.mem.Allocator, cached_state: *CachedBeaconState, cache: *EpochTransitionCache) !void {
-    const state = cached_state.state;
+pub fn processEpoch(
+    comptime fork: ForkSeq,
+    allocator: std.mem.Allocator,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
+    cache: *EpochTransitionCache,
+) !void {
     try processJustificationAndFinalization(cached_state, cache);
 
     if (state.forkSeq().gte(.altair)) {

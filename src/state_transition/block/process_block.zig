@@ -91,14 +91,14 @@ pub fn processBlock(
             state,
             current_epoch,
             block_type,
-            body.*,
+            body,
             external_data,
         );
     }
 
     try processRandao(fork, config, epoch_cache, state, block_type, body.*, block.proposerIndex(), opts.verify_signature);
-    try processEth1Data(fork, allocator, state, body.eth1Data());
-    try processOperations(fork, allocator, config, epoch_cache, state, block_type, body.*, opts);
+    try processEth1Data(fork, state, body.eth1Data());
+    try processOperations(fork, allocator, config, epoch_cache, state, block_type, body, opts);
     if (comptime fork.gte(.altair)) {
         try processSyncAggregate(fork, allocator, config, epoch_cache, state, body.syncAggregate(), opts.verify_signature);
     }

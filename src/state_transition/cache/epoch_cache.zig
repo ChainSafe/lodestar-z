@@ -425,8 +425,7 @@ pub const EpochCache = struct {
         return self.effective_balance_increment.get();
     }
 
-    pub fn afterProcessEpoch(self: *EpochCache, cached_state: *const CachedBeaconState, epoch_transition_cache: *const EpochTransitionCache) !void {
-        const state = cached_state.state;
+    pub fn afterProcessEpoch(self: *EpochCache, state: *BeaconState, epoch_transition_cache: *const EpochTransitionCache) !void {
         const upcoming_epoch = self.epoch + 1;
         const epoch_after_upcoming = upcoming_epoch + 1;
 

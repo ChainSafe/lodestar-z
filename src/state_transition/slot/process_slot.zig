@@ -1,10 +1,9 @@
 const std = @import("std");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const preset = @import("preset").preset;
 const ZERO_HASH = @import("constants").ZERO_HASH;
 
-pub fn processSlot(cached_state: *CachedBeaconState) !void {
-    const state = cached_state.state;
+pub fn processSlot(state: *BeaconState) !void {
 
     // Cache state root
     const previous_state_root = try state.hashTreeRoot();
@@ -13,8 +12,7 @@ pub fn processSlot(cached_state: *CachedBeaconState) !void {
 
     // Cache latest block header state root
     var latest_block_header = try state.latestBlockHeader();
-    var latest_header_state_root: [32]u8 = undefined;
-    try latest_block_header.getValue(cached_state.allocator, "state_root", &latest_header_state_root);
+    var latest_header_state_root = try latest_block_header.getRoot("state_root");
 
     if (std.mem.eql(u8, latest_header_state_root[0..], ZERO_HASH[0..])) {
         try latest_block_header.setValue("state_root", previous_state_root);

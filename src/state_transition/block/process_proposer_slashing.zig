@@ -12,21 +12,19 @@ const slashValidator = @import("./slash_validator.zig").slashValidator;
 
 pub fn processProposerSlashing(
     comptime fork: ForkSeq,
-    allocator: std.mem.Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *ForkBeaconState(fork),
     proposer_slashing: *const ForkTypes(fork).ProposerSlashing.Type,
     verify_signatures: bool,
 ) !void {
-    try assertValidProposerSlashing(fork, allocator, config, epoch_cache, state, proposer_slashing, verify_signatures);
+    try assertValidProposerSlashing(fork, config, epoch_cache, state, proposer_slashing, verify_signatures);
     const proposer_index = proposer_slashing.signed_header_1.message.proposer_index;
     try slashValidator(fork, config, epoch_cache, state, proposer_index, null);
 }
 
 pub fn assertValidProposerSlashing(
     comptime fork: ForkSeq,
-    allocator: std.mem.Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *ForkBeaconState(fork),
@@ -60,7 +58,7 @@ pub fn assertValidProposerSlashing(
     // verify the proposer is slashable
     var proposer_view = try validators_view.get(header_1.proposer_index);
     var proposer: types.phase0.Validator.Type = undefined;
-    try proposer_view.toValue(allocator, &proposer);
+    try proposer_view.toValue(undefined, &proposer);
     if (!isSlashableValidator(&proposer, epoch_cache.epoch)) {
         return error.InvalidProposerSlashingProposerNotSlashable;
     }

@@ -5,7 +5,9 @@ const preset = @import("preset").preset;
 
 const Slot = types.primitive.Slot.Type;
 
-const CachedBeaconState = @import("cache/state_cache.zig").CachedBeaconState;
+const BeaconConfig = @import("config").BeaconConfig;
+const BeaconState = @import("types/beacon_state.zig").BeaconState;
+const EpochCache = @import("./cache/epoch_cache.zig").EpochCache;
 pub const SignedBeaconBlock = @import("types/beacon_block.zig").SignedBeaconBlock;
 const verifyProposerSignature = @import("./signature_sets/proposer.zig").verifyProposerSignature;
 pub const processBlock = @import("./block/process_block.zig").processBlock;
@@ -41,15 +43,16 @@ pub const BlockExternalData = struct {
 
 pub fn processSlots(
     allocator: std.mem.Allocator,
-    post_state: *CachedBeaconState,
+    config: *const BeaconConfig,
+    epoch_cache: *EpochCache,
+    state: *BeaconState,
     slot: Slot,
     _: EpochTransitionCacheOpts,
 ) !void {
-    var state = post_state.state;
     if (try state.slot() > slot) return error.outdatedSlot;
 
     while (try state.slot() < slot) {
-        try processSlot(post_state);
+        try processSlot(state);
 
         const next_slot = try state.slot() + 1;
         if (next_slot % preset.SLOTS_PER_EPOCH == 0) {
@@ -57,42 +60,69 @@ pub fn processSlots(
             // const epochTransitionTimer = metrics?.epochTransitionTime.startTimer();
 
             // TODO(bing): metrics: time beforeProcessEpoch
-            var epoch_transition_cache = try EpochTransitionCache.init(allocator, post_state);
+            var epoch_transition_cache = try EpochTransitionCache.init(
+                allocator,
+                config,
+                epoch_cache,
+                state,
+            );
             defer {
                 epoch_transition_cache.deinit();
                 allocator.destroy(epoch_transition_cache);
             }
-            try processEpoch(allocator, post_state, epoch_transition_cache);
+            switch (state.forkSeq()) {
+                inline else => |f| {
+                    try processEpoch(
+                        f,
+                        allocator,
+                        config,
+                        epoch_cache,
+                        &@field(state, f),
+                        epoch_transition_cache,
+                    );
+                },
+            }
             // TODO(bing): registerValidatorStatuses
 
             try state.setSlot(next_slot);
 
-            try post_state.epoch_cache_ref.get().afterProcessEpoch(post_state, epoch_transition_cache);
-            // post_state.commit
+            try epoch_cache.afterProcessEpoch(state, epoch_transition_cache);
+            // state.commit
 
             const state_epoch = computeEpochAtSlot(next_slot);
 
-            const config = post_state.config;
             if (state_epoch == config.chain.ALTAIR_FORK_EPOCH) {
-                try upgradeStateToAltair(allocator, post_state);
+                state.* = .{ .altair = try upgradeStateToAltair(
+                    allocator,
+                    config,
+                    epoch_cache,
+                    @ptrCast(&state.phase0),
+                ) };
             }
             if (state_epoch == config.chain.BELLATRIX_FORK_EPOCH) {
-                try upgradeStateToBellatrix(allocator, post_state);
+                state.* = .{ .bellatrix = try upgradeStateToBellatrix(
+                    config,
+                    epoch_cache,
+                    state,
+                ) };
             }
             if (state_epoch == config.chain.CAPELLA_FORK_EPOCH) {
-                try upgradeStateToCapella(allocator, post_state);
+                state.* = .{ .capella = try upgradeStateToCapella(
+                    allocator,
+                    state,
+                ) };
             }
             if (state_epoch == config.chain.DENEB_FORK_EPOCH) {
-                try upgradeStateToDeneb(allocator, post_state);
+                state.* = .{ .deneb = try upgradeStateToDeneb(allocator, state) };
             }
             if (state_epoch == config.chain.ELECTRA_FORK_EPOCH) {
-                try upgradeStateToElectra(allocator, post_state);
+                state.* = .{ .electra = try upgradeStateToElectra(allocator, state) };
             }
             if (state_epoch == config.chain.FULU_FORK_EPOCH) {
-                try upgradeStateToFulu(allocator, post_state);
+                state.* = .{ .fulu = try upgradeStateToFulu(allocator, state) };
             }
 
-            try post_state.epoch_cache_ref.get().finalProcessEpoch(post_state);
+            try epoch_cache.finalProcessEpoch(state);
         } else {
             try state.setSlot(next_slot);
         }
@@ -110,10 +140,12 @@ pub const TransitionOpt = struct {
 
 pub fn stateTransition(
     allocator: std.mem.Allocator,
-    state: *CachedBeaconState,
+    config: *const BeaconConfig,
+    epoch_cache: *EpochCache,
+    state: *BeaconState,
     signed_block: SignedBlock,
     opts: TransitionOpt,
-) !*CachedBeaconState {
+) !*BeaconState {
     const block = signed_block.message();
     const block_slot = switch (block) {
         .regular => |b| b.slot(),

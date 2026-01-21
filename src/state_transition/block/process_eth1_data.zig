@@ -7,11 +7,10 @@ const preset = @import("preset").preset;
 
 pub fn processEth1Data(
     comptime fork: ForkSeq,
-    allocator: std.mem.Allocator,
     state: *ForkBeaconState(fork),
     eth1_data: *const Eth1Data,
 ) !void {
-    if (try becomesNewEth1Data(allocator, state, eth1_data)) {
+    if (try becomesNewEth1Data(fork, state, eth1_data)) {
         try state.setEth1Data(eth1_data);
     }
 
@@ -19,7 +18,7 @@ pub fn processEth1Data(
 }
 
 pub fn becomesNewEth1Data(
-    allocator: std.mem.Allocator,
+    comptime fork: ForkSeq,
     state: *ForkBeaconState(fork),
     new_eth1_data: *const Eth1Data,
 ) !bool {
@@ -33,7 +32,7 @@ pub fn becomesNewEth1Data(
     // Nothing to do if the state already has this as eth1data (happens a lot after majority vote is in)
     var state_eth1_data_view = try state.eth1Data();
     var state_eth1_data: Eth1Data = undefined;
-    try state_eth1_data_view.toValue(allocator, &state_eth1_data);
+    try state_eth1_data_view.toValue(undefined, &state_eth1_data);
     if (types.phase0.Eth1Data.equals(&state_eth1_data, new_eth1_data)) return false;
 
     var new_eth1_data_root: [32]u8 = undefined;

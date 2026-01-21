@@ -26,7 +26,7 @@ pub fn processOperations(
     epoch_cache: *const EpochCache,
     state: *ForkBeaconState(fork),
     comptime block_type: BlockType,
-    body: ForkBeaconBlockBody(fork, block_type),
+    body: *const ForkBeaconBlockBody(fork, block_type),
     opts: ProcessBlockOpts,
 ) !void {
     // verify that outstanding deposits are processed up to the maximum number of deposits
@@ -38,7 +38,7 @@ pub fn processOperations(
     const current_epoch = epoch_cache.epoch;
 
     for (body.inner.proposer_slashings.items) |*proposer_slashing| {
-        try processProposerSlashing(fork, allocator, config, epoch_cache, state, proposer_slashing, opts.verify_signature);
+        try processProposerSlashing(fork, config, epoch_cache, state, proposer_slashing, opts.verify_signature);
     }
 
     for (body.inner.attester_slashings.items) |*attester_slashing| {

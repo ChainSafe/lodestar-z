@@ -105,7 +105,9 @@ test EpochShuffling {
 /// active_indices is allocated at consumer side and transfer ownership to EpochShuffling
 pub fn computeEpochShuffling(allocator: Allocator, state: *BeaconState, active_indices: []ValidatorIndex, epoch: Epoch) !*EpochShuffling {
     var seed = [_]u8{0} ** 32;
-    try getSeed(state, epoch, c.DOMAIN_BEACON_ATTESTER, &seed);
+    switch (state.forkSeq()) {
+        inline else => |f| try getSeed(f, @field(state, f), epoch, c.DOMAIN_BEACON_ATTESTER, &seed),
+    }
     return EpochShuffling.init(allocator, seed, epoch, active_indices);
 }
 

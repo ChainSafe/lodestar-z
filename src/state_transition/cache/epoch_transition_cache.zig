@@ -6,7 +6,9 @@ const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const ForkSeq = @import("config").ForkSeq;
 const Epoch = types.primitive.Epoch.Type;
 const preset = @import("preset").preset;
-const CachedBeaconState = @import("./state_cache.zig").CachedBeaconState;
+const BeaconConfig = @import("config").BeaconConfig;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
@@ -193,11 +195,13 @@ pub const EpochTransitionCache = struct {
 
     // TODO: no need EpochTransitionCacheOpts for zig version
     // this is the same to beforeProcessEpoch in typesript version
-    pub fn init(allocator: Allocator, cached_state: *CachedBeaconState) !*EpochTransitionCache {
-        const config = cached_state.config;
-        var epoch_cache = cached_state.getEpochCache();
-        const state = cached_state.state;
-        const fork_seq = config.forkSeq(try state.slot());
+    pub fn init(
+        allocator: Allocator,
+        config: *const BeaconConfig,
+        epoch_cache: *const EpochCache,
+        state: *BeaconState,
+    ) !*EpochTransitionCache {
+        const fork_seq = state.forkSeq();
         const current_epoch = epoch_cache.epoch;
         const prev_epoch = epoch_cache.getPreviousShuffling().epoch;
         const next_epoch = current_epoch + 1;

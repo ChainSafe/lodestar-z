@@ -1,7 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const Block = @import("../types/block.zig").Block;
+const ForkSeq = @import("config").ForkSeq;
+const BeaconConfig = @import("config").BeaconConfig;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const AggregatedSignatureSet = @import("../utils/signature_sets.zig").AggregatedSignatureSet;
 const types = @import("consensus_types");
@@ -13,19 +15,21 @@ const c = @import("constants");
 const blst = @import("blst");
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const verifyAggregatedSignatureSet = @import("../utils/signature_sets.zig").verifyAggregatedSignatureSet;
+const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconProposer;
 const balance_utils = @import("../utils/balance.zig");
 const getBlockRootAtSlot = @import("../utils/block_root.zig").getBlockRootAtSlot;
 const increaseBalance = balance_utils.increaseBalance;
 const decreaseBalance = balance_utils.decreaseBalance;
 
 pub fn processSyncAggregate(
+    comptime fork: ForkSeq,
     allocator: Allocator,
-    cached_state: *CachedBeaconState,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
     sync_aggregate: *const SyncAggregate,
     verify_signatures: bool,
 ) !void {
-    const state = cached_state.state;
-    const epoch_cache = cached_state.getEpochCache();
     const committee_indices = @as(*const [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex, @ptrCast(epoch_cache.current_sync_committee_indexed.get().getValidatorIndices()));
     const sync_committee_bits = sync_aggregate.sync_committee_bits;
     const signature = sync_aggregate.sync_committee_signature;
@@ -43,7 +47,7 @@ pub fn processSyncAggregate(
         if (participant_indices.items.len > 0) {
             const previous_slot = @max(try state.slot(), 1) - 1;
             const root_signed = try getBlockRootAtSlot(state, previous_slot);
-            const domain = try cached_state.config.getDomain(try state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
+            const domain = try config.getDomain(epoch_cache.epoch, c.DOMAIN_SYNC_COMMITTEE, previous_slot);
 
             const pubkeys = try allocator.alloc(blst.PublicKey, participant_indices.items.len);
             defer allocator.free(pubkeys);
@@ -72,7 +76,7 @@ pub fn processSyncAggregate(
 
     const sync_participant_reward = epoch_cache.sync_participant_reward;
     const sync_proposer_reward = epoch_cache.sync_proposer_reward;
-    const proposer_index = try cached_state.getBeaconProposer(try state.slot());
+    const proposer_index = try getBeaconProposer(fork, epoch_cache, state, try state.slot());
     var balances = try state.balances();
     var proposer_balance = try balances.get(proposer_index);
 
@@ -84,7 +88,7 @@ pub fn processSyncAggregate(
             if (index == proposer_index) {
                 proposer_balance += sync_participant_reward;
             } else {
-                try increaseBalance(cached_state.state, index, sync_participant_reward);
+                try increaseBalance(fork, state, index, sync_participant_reward);
             }
 
             // Proposer reward
@@ -95,7 +99,7 @@ pub fn processSyncAggregate(
             if (index == proposer_index) {
                 proposer_balance = @max(0, proposer_balance - sync_participant_reward);
             } else {
-                try decreaseBalance(cached_state.state, index, sync_participant_reward);
+                try decreaseBalance(fork, state, index, sync_participant_reward);
             }
         }
     }
@@ -107,10 +111,17 @@ pub fn processSyncAggregate(
 /// Consumers should deinit the returned pubkeys
 /// this is to be used when we implement getBlockSignatureSets
 /// see https://github.com/ChainSafe/state-transition-z/issues/72
-pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *CachedBeaconState, block: Block, participant_indices: ?[]usize) !?AggregatedSignatureSet {
-    const state = cached_state.state;
-    const epoch_cache = cached_state.getEpochCache();
-    const sync_aggregate = block.beaconBlockBody().syncAggregate();
+pub fn getSyncCommitteeSignatureSet(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
+    sync_aggregate: *const SyncAggregate,
+    block_slot: u64,
+    block_parent_root: *const Root,
+    participant_indices: ?[]usize,
+) !?AggregatedSignatureSet {
     const signature = sync_aggregate.sync_committee_signature;
 
     const participant_indices_ = if (participant_indices) |pi| pi else blk: {
@@ -133,7 +144,7 @@ pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *CachedB
     // ```
     // However we need to run the function getSyncCommitteeSignatureSet() for all the blocks in a epoch
     // with the same state when verifying blocks in batch on RangeSync. Therefore we use the block.slot.
-    const previous_slot = @max(block.slot(), 1) - 1;
+    const previous_slot = block_slot -| 1;
 
     // The spec uses the state to get the root at previousSlot
     // ```python
@@ -144,9 +155,9 @@ pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *CachedB
     //
     // On skipped slots state block roots just copy the latest block, so using the parentRoot here is equivalent.
     // So getSyncCommitteeSignatureSet() can be called with a state in any slot (with the correct shuffling)
-    const root_signed = block.parentRoot();
+    const root_signed = block_parent_root;
 
-    const domain = try cached_state.config.getDomain(try state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
+    const domain = try config.getDomain(try state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
 
     const pubkeys = try allocator.alloc(blst.PublicKey, participant_indices_.len);
     for (0..participant_indices_.len) |i| {

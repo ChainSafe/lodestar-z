@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
+const ForkTypes = @import("fork_types").ForkTypes;
 const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const BlockType = @import("fork_types").BlockType;
 const ForkBeaconBlockBody = @import("fork_types").ForkBeaconBlockBody;
@@ -16,18 +17,18 @@ pub fn processExecutionPayload(
     state: *ForkBeaconState(fork),
     current_epoch: u64,
     comptime block_type: BlockType,
-    body: ForkBeaconBlockBody(fork, block_type),
+    body: *const ForkBeaconBlockBody(fork, block_type),
     external_data: BlockExternalData,
 ) !void {
     const parent_hash, const prev_randao, const timestamp = switch (block_type) {
         .full => .{
-            &body.executionPayload().parent_hash,
-            &body.executionPayload().prev_randao,
-            body.executionPayload().timestamp,
+            &body.executionPayload().parentHash(),
+            &body.executionPayload().prevRandao(),
+            body.executionPayload().timestamp(),
         },
         .blinded => .{
-            &body.executionPayloadHeader().parent_hash,
-            &body.executionPayloadHeader().prev_randao,
+            &body.executionPayloadHeader().parentHash(),
+            &body.executionPayloadHeader().prevRandao(),
             body.executionPayloadHeader().timestamp,
         },
     };
@@ -77,10 +78,10 @@ pub fn processExecutionPayload(
         return error.InvalidExecutionPayload;
     }
 
-    var payload_header = try ExecutionPayloadHeader.init(state.forkSeq());
-    switch (body) {
-        .regular => |b| try b.executionPayload().createPayloadHeader(allocator, &payload_header),
-        .blinded => |b| try b.executionPayloadHeader().clone(allocator, &payload_header),
+    var payload_header = ForkTypes(fork).ExecutionPayloadHeader.default_value;
+    switch (block_type) {
+        .full => try body.executionPayload().createPayloadHeader(allocator, &payload_header),
+        .blinded => payload_header = body.executionPayloadHeader().*,
     }
     defer payload_header.deinit(allocator);
 
