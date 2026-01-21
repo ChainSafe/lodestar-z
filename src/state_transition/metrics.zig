@@ -84,6 +84,7 @@ const Metrics = struct {
     const PreStateClonedCount = m.Histogram(u32, &.{ 1, 2, 5, 10, 50, 250 });
     const ProposerRewardsGauge = m.GaugeVec(u64, ProposerRewardLabel);
 
+    //TODO: replace length checks with checks for populated nodes like in lodestar-ts
     pub fn onStateClone(self: *Metrics, state: *CachedBeaconState, source: StateCloneSource) !void {
         var balances = try state.state.balances();
         try if (try balances.length() > 0)
@@ -98,6 +99,7 @@ const Metrics = struct {
             self.pre_state_validators_nodes_populated_miss.incr(.{ .source = source });
     }
 
+    //TODO: replace length checks with checks for populated nodes like in lodestar-ts
     pub fn onPostState(self: *Metrics, state: *CachedBeaconState) !void {
         var balances = try state.state.balances();
         if (try balances.length() > 0)
