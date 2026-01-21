@@ -178,7 +178,7 @@ pub fn stateTransition(
     if (opts.verify_state_root) {
         timer = try Timer.start();
         const post_state_root = try post_state.state.hashTreeRoot();
-        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .compute_new_state_root }, readSeconds(&timer));
+        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .block_transition }, readSeconds(&timer));
 
         const block_state_root = switch (block) {
             .regular => |b| b.stateRoot(),
