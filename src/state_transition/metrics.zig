@@ -273,12 +273,12 @@ pub fn readSeconds(timer: *std.time.Timer) f64 {
     return @as(f64, @floatFromInt(timer.read())) / std.time.ns_per_s;
 }
 
-/// Observe a value in seconds for the `epoch_transition` histogram.
+/// Observe a value in ns for the `epoch_transition` histogram.
 pub fn observeEpochTransition(ns: u64) !void {
     try state_transition.epoch_transition.observe(@as(f64, @floatFromInt(ns)) / std.time.ns_per_s);
 }
 
-/// Observe a value in seconds for the `epoch_transition_step` labelled histogram.
+/// Observe a value in ns for the `epoch_transition_step` labelled histogram.
 pub fn observeEpochTransitionStep(
     labels: EpochTransitionStepLabel,
     ns: u64,
