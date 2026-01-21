@@ -13,7 +13,7 @@ const preset = @import("preset").preset;
 const ct = @import("consensus_types");
 const pool = @import("./pool.zig");
 const config = @import("./config.zig");
-const pubkey = @import("./pubkey2index.zig");
+const pubkey = @import("./pubkeys.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
 const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiValue;
 
