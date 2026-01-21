@@ -1,6 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
+const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const BLSPubkey = types.primitive.BLSPubkey.Type;
 const WithdrawalCredentials = types.primitive.Root.Type;
 const BLSSignature = types.primitive.BLSSignature.Type;
@@ -16,7 +19,6 @@ const computeDomain = @import("../utils/domain.zig").computeDomain;
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const blst = @import("blst");
 const verify = @import("../utils/bls.zig").verify;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const getMaxEffectiveBalance = @import("../utils/validator.zig").getMaxEffectiveBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 const verifyMerkleBranch = @import("../utils/verify_merkle_branch.zig").verifyMerkleBranch;
@@ -54,8 +56,14 @@ pub const DepositData = union(enum) {
     }
 };
 
-pub fn processDeposit(allocator: Allocator, cached_state: *CachedBeaconState, deposit: *const types.phase0.Deposit.Type) !void {
-    var state = cached_state.state;
+pub fn processDeposit(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
+    deposit: *const types.phase0.Deposit.Type,
+) !void {
     // verify the merkle branch
     var deposit_data_root: Root = undefined;
     try types.phase0.DepositData.hashTreeRoot(&deposit.data, &deposit_data_root);
@@ -74,17 +82,21 @@ pub fn processDeposit(allocator: Allocator, cached_state: *CachedBeaconState, de
 
     // deposits must be processed in order
     try state.incrementEth1DepositIndex();
-    try applyDeposit(allocator, cached_state, &.{
+    try applyDeposit(fork, allocator, config, epoch_cache, state, &.{
         .phase0 = deposit.data,
     });
 }
 
 /// Adds a new validator into the registry. Or increase balance if already exist.
 /// Follows applyDeposit() in consensus spec. Will be used by processDeposit() and processDepositRequest()
-pub fn applyDeposit(allocator: Allocator, cached_state: *CachedBeaconState, deposit: *const DepositData) !void {
-    const config = cached_state.config;
-    var state = cached_state.state;
-    const epoch_cache = cached_state.getEpochCache();
+pub fn applyDeposit(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
+    deposit: *const DepositData,
+) !void {
     const pubkey = deposit.pubkey();
     const withdrawal_credentials = deposit.withdrawalCredentials();
     const amount = deposit.amount();
@@ -96,7 +108,7 @@ pub fn applyDeposit(allocator: Allocator, cached_state: *CachedBeaconState, depo
     if (state.forkSeq().lt(.electra)) {
         if (is_new_validator) {
             if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
-                try addValidatorToRegistry(allocator, cached_state, pubkey, withdrawal_credentials, amount);
+                try addValidatorToRegistry(fork, allocator, epoch_cache, state, pubkey, withdrawal_credentials, amount);
             } else |_| {
                 // invalid deposit signature, ignore the deposit
                 // TODO may be a useful metric to track
@@ -118,7 +130,7 @@ pub fn applyDeposit(allocator: Allocator, cached_state: *CachedBeaconState, depo
         var pending_deposits = try state.pendingDeposits();
         if (is_new_validator) {
             if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
-                try addValidatorToRegistry(allocator, cached_state, pubkey, withdrawal_credentials, 0);
+                try addValidatorToRegistry(fork, allocator, epoch_cache, state, pubkey, withdrawal_credentials, 0);
                 try pending_deposits.pushValue(&pending_deposit);
             } else |_| {
                 // invalid deposit signature, ignore the deposit
@@ -131,14 +143,14 @@ pub fn applyDeposit(allocator: Allocator, cached_state: *CachedBeaconState, depo
 }
 
 pub fn addValidatorToRegistry(
+    comptime fork: ForkSeq,
     allocator: Allocator,
-    cached_state: *CachedBeaconState,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
     pubkey: BLSPubkey,
     withdrawal_credentials: *const WithdrawalCredentials,
     amount: u64,
 ) !void {
-    const epoch_cache = cached_state.getEpochCache();
-    const state = cached_state.state;
     var validators = try state.validators();
     // add validator and balance entries
     const effective_balance = @min(

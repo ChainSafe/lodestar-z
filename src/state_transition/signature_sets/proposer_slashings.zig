@@ -1,16 +1,21 @@
 const std = @import("std");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const SignedBeaconBlock = @import("../types/beacon_block.zig").SignedBeaconBlock;
+const BeaconConfig = @import("config").BeaconConfig;
+const ForkSeq = @import("config").ForkSeq;
+const ForkTypes = @import("fork_types").ForkTypes;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
 const c = @import("constants");
 const types = @import("consensus_types");
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 
-pub fn getProposerSlashingSignatureSets(cached_state: *const CachedBeaconState, proposer_slashing: *const types.phase0.ProposerSlashing.Type) ![2]SingleSignatureSet {
-    const config = cached_state.config;
-    const state = cached_state.state;
-    const epoch_cache = cached_state.getEpochCache();
-
+pub fn getProposerSlashingSignatureSets(
+    comptime fork: ForkSeq,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *const ForkBeaconState(fork),
+    proposer_slashing: *const ForkTypes(fork).ProposerSlashing.Type,
+) ![2]SingleSignatureSet {
     const signed_header_1 = proposer_slashing.signed_header_1;
     const signed_header_2 = proposer_slashing.signed_header_2;
     // In state transition, ProposerSlashing headers are only partially validated. Their slot could be higher than the
@@ -38,10 +43,17 @@ pub fn getProposerSlashingSignatureSets(cached_state: *const CachedBeaconState, 
     return result;
 }
 
-pub fn proposerSlashingsSignatureSets(cached_state: *const CachedBeaconState, signed_block: *const SignedBeaconBlock, out: std.ArrayList(SingleSignatureSet)) !void {
-    const proposer_slashings = signed_block.beaconBlock().beaconBlockBody().proposerSlashings().items;
-    for (proposer_slashings) |proposer_slashing| {
-        const signature_sets = try getProposerSlashingSignatureSets(cached_state, proposer_slashing);
+pub fn proposerSlashingsSignatureSets(
+    comptime fork: ForkSeq,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *const ForkBeaconState(fork),
+    signed_block: *const ForkTypes(fork).SignedBeaconBlock.Type,
+    out: std.ArrayList(SingleSignatureSet),
+) !void {
+    const proposer_slashings = signed_block.message.body.proposer_slashings.items;
+    for (proposer_slashings) |*proposer_slashing| {
+        const signature_sets = try getProposerSlashingSignatureSets(fork, config, epoch_cache, state, proposer_slashing);
         try out.append(signature_sets[0]);
         try out.append(signature_sets[1]);
     }
