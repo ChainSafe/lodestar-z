@@ -13,7 +13,7 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
             if (comptime ssz.isByteVectorType(ST)) {
                 var bytes: [*]u8 = undefined;
                 const buf = try env.createArrayBuffer(ST.length, &bytes);
-                @memcpy(bytes[0..32], value);
+                @memcpy(bytes[0..ST.length], value);
                 return try env.createTypedarray(.uint8, ST.length, buf, 0);
             } else {
                 const arr = try env.createArrayWithLength(ST.length);
