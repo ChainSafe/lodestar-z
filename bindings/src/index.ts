@@ -18,6 +18,11 @@ interface Checkpoint {
   root: Uint8Array;
 }
 
+interface SyncCommittee {
+  pubkeys: Uint8Array,
+  aggregate_pubkey: Uint8Array,
+}
+
 declare class BeaconStateView {
   static createFromBytes(fork: string, bytes: Uint8Array): BeaconStateView;
   slot: number;
@@ -31,6 +36,7 @@ declare class BeaconStateView {
   finalizedCheckpoint: Checkpoint;
   proposers: number[];
   proposersNextEpoch: number[] | null;
+  currentSyncCommittee: SyncCommittee;
   getBalance(index: number): bigint;
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   isExecutionStateType(): boolean;

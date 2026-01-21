@@ -151,6 +151,14 @@ pub fn BeaconStateView_proposersNextEpoch(env: napi.Env, cb: napi.CallbackInfo(0
     return env.getNull();
 }
 
+pub fn BeaconStateView_currentSyncCommittee(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var current_sync_committee = try cached_state.state.currentSyncCommittee();
+    var result: ct.altair.SyncCommittee.Type = undefined;
+    try current_sync_committee.toValue(allocator, &result);
+    return try sszValueToNapiValue(env, ct.altair.SyncCommittee, &result);
+}
+
 pub fn BeaconStateView_getBalance(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const index: u64 = @intCast(try cb.arg(0).getValueInt64());
@@ -251,6 +259,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "finalizedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_finalizedCheckpoint) },
             .{ .utf8name = "proposers", .getter = napi.wrapCallback(0, BeaconStateView_proposers) },
             .{ .utf8name = "proposersNextEpoch", .getter = napi.wrapCallback(0, BeaconStateView_proposersNextEpoch) },
+            .{ .utf8name = "currentSyncCommittee", .getter = napi.wrapCallback(0, BeaconStateView_currentSyncCommittee) },
             .{ .utf8name = "getBalance", .method = napi.wrapCallback(1, BeaconStateView_getBalance) },
             .{ .utf8name = "isExecutionEnabled", .method = napi.wrapCallback(2, BeaconStateView_isExecutionEnabled) },
             .{ .utf8name = "isExecutionStateType", .method = napi.wrapCallback(0, BeaconStateView_isExecutionStateType) },
