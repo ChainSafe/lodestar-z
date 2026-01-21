@@ -1,3 +1,4 @@
+const std = @import("std");
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const types = @import("consensus_types");
 const Epoch = types.primitive.Epoch.Type;
@@ -7,6 +8,12 @@ const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").Epoc
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const getBlockRoot = @import("../utils/block_root.zig").getBlockRoot;
+const ForkSeq = @import("config").ForkSeq;
+
+pub const UnrealizedCheckpoints = struct {
+    justified_checkpoint: Checkpoint,
+    finalized_checkpoint: Checkpoint,
+};
 
 /// Update justified and finalized checkpoints depending on network participation.
 ///
@@ -83,4 +90,72 @@ pub fn weighJustificationAndFinalization(cached_state: *CachedBeaconState, total
     if (bits[0] and bits[1] and old_current_justified_checkpoint_epoch + 1 == current_epoch) {
         try state.setFinalizedCheckpoint(&old_current_justified_checkpoint);
     }
+}
+
+/// Compute on-the-fly justified / finalized checkpoints.
+///   - For phase0, we need to create the cache through beforeProcessEpoch
+///   - For other forks, use the progressive balances inside EpochCache
+pub fn computeUnrealizedCheckpoints(cached_state: *CachedBeaconState, allocator: std.mem.Allocator) !UnrealizedCheckpoints {
+    // For phase0, we need to create the cache through beforeProcessEpoch
+    if (cached_state.state.forkSeq() == .phase0) {
+        // Clone state to mutate below         true = do not transfer cache
+        const cloned_state = try cached_state.clone(allocator, .{ .transfer_cache = false });
+        defer cloned_state.deinit();
+        defer allocator.destroy(cloned_state);
+
+        const epoch_transition_cache = try EpochTransitionCache.init(allocator, cloned_state);
+        defer epoch_transition_cache.deinit();
+        defer allocator.destroy(epoch_transition_cache);
+
+        try processJustificationAndFinalization(cloned_state, epoch_transition_cache);
+
+        var justified: Checkpoint = undefined;
+        try cloned_state.state.currentJustifiedCheckpoint(&justified);
+        var finalized: Checkpoint = undefined;
+        try cloned_state.state.finalizedCheckpoint(&finalized);
+
+        return .{
+            .justified_checkpoint = justified,
+            .finalized_checkpoint = finalized,
+        };
+    }
+
+    // For other forks, use the progressive balances inside EpochCache
+    const epoch_cache = cached_state.getEpochCache();
+    const current_epoch = epoch_cache.epoch;
+
+    // same logic to processJustificationAndFinalization
+    if (current_epoch <= GENESIS_EPOCH + 1) {
+        var justified: Checkpoint = undefined;
+        try cached_state.state.currentJustifiedCheckpoint(&justified);
+        var finalized: Checkpoint = undefined;
+        try cached_state.state.finalizedCheckpoint(&finalized);
+        return .{
+            .justified_checkpoint = justified,
+            .finalized_checkpoint = finalized,
+        };
+    }
+
+    // Clone state and use progressive balances
+    // Clone state to mutate below         true = do not transfer cache
+    const cloned_state = try cached_state.clone(allocator, .{ .transfer_cache = false });
+    defer cloned_state.deinit();
+    defer allocator.destroy(cloned_state);
+
+    const total_active_balance = epoch_cache.total_active_balance_increments;
+    // minimum of total progressive unslashed balance should be 1
+    const previous_epoch_target_balance = @max(epoch_cache.previous_target_unslashed_balance_increments, 1);
+    const current_epoch_target_balance = @max(epoch_cache.current_target_unslashed_balance_increments, 1);
+
+    try weighJustificationAndFinalization(cloned_state, total_active_balance, previous_epoch_target_balance, current_epoch_target_balance);
+
+    var justified: Checkpoint = undefined;
+    try cloned_state.state.currentJustifiedCheckpoint(&justified);
+    var finalized: Checkpoint = undefined;
+    try cloned_state.state.finalizedCheckpoint(&finalized);
+
+    return .{
+        .justified_checkpoint = justified,
+        .finalized_checkpoint = finalized,
+    };
 }

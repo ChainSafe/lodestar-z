@@ -6,6 +6,7 @@ test/spec/test_case/
 test/spec/ssz/generic_tests.zig
 test/spec/ssz/static_tests.zig
 *.era
+*.pkix
 
 # perf
 flamegraph.html
