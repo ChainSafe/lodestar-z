@@ -23,28 +23,17 @@ describe("innerShuffleList", () => {
     expect(input).toEqual(expected);
   });
 
-  it("should do nothing with list length <= 1", async () => {
-    const inputs = [new Uint32Array([]), new Uint32Array([5566])];
-    const expected = [new Uint32Array([]), new Uint32Array([5566])];
+  it("should do nothing", async () => {
+    const testCases = [
+      {expected: new Uint32Array([]), input: new Uint32Array([]), rounds: 3}, // list length = 0
+      {expected: new Uint32Array([0, 1, 2, 3, 4]), input: new Uint32Array([0, 1, 2, 3, 4]), rounds: 0}, // rounds = 0
+    ];
     const seed = new Uint8Array(SEED_SIZE).fill(0);
-    const rounds = 3;
     const forwards = false;
-
-    for (let i = 0; i < inputs.length; i++) {
-      innerShuffleList(inputs[i], seed, rounds, forwards);
-      expect(inputs[i]).toEqual(expected[i]);
+    for (const testCase of testCases) {
+      innerShuffleList(testCase.input, seed, testCase.rounds, forwards);
+      expect(testCase.input).toEqual(testCase.expected);
     }
-  });
-
-  it("should do nothing with round = 0", async () => {
-    const input = new Uint32Array([0, 1, 2, 3, 4, 5, 6, 7, 8]);
-    const expected = new Uint32Array([0, 1, 2, 3, 4, 5, 6, 7, 8]);
-    const seed = new Uint8Array(SEED_SIZE).fill(0);
-    const rounds = 0;
-    const forwards = false;
-
-    innerShuffleList(input, seed, rounds, forwards);
-    expect(input).toEqual(expected);
   });
 
   it("should fail with invalid input type", async () => {
@@ -63,7 +52,7 @@ describe("innerShuffleList", () => {
     const invalidNumRounds = [-1, 256];
     const forwards = false;
 
-    for (let r of invalidNumRounds) {
+    for (const r of invalidNumRounds) {
       expect(() => {
         innerShuffleList(validInput, seed, r, forwards);
       }).toThrow("InvalidRoundsSize");
