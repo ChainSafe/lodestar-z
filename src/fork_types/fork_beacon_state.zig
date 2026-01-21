@@ -3,6 +3,7 @@ const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const Node = @import("persistent_merkle_tree").Node;
 const isBasicType = @import("ssz").isBasicType;
+const BaseTreeView = @import("ssz").BaseTreeView;
 
 const ForkTypes = @import("./fork_types.zig").ForkTypes;
 
@@ -14,11 +15,15 @@ pub fn ForkBeaconState(comptime f: ForkSeq) type {
 
         pub const fork_seq = f;
 
-        pub fn baseView(self: *Self) @import("ssz").BaseTreeView {
+        pub fn fromBaseView(base_view: BaseTreeView) !Self {
+            return .{ .inner = try ForkTypes(f).BeaconState.tree.viewFromBaseView(base_view) };
+        }
+
+        pub fn baseView(self: *Self) BaseTreeView {
             return self.inner.base_view;
         }
 
-        pub fn clone(self: *Self, opts: @import("ssz").BaseTreeView.CloneOpts) !Self {
+        pub fn clone(self: *Self, opts: BaseTreeView.CloneOpts) !Self {
             return .{ .inner = try self.inner.clone(opts) };
         }
 

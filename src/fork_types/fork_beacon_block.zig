@@ -1,6 +1,8 @@
 const ForkSeq = @import("config").ForkSeq;
 
 const ForkTypes = @import("./fork_types.zig").ForkTypes;
+const ForkExecutionPayload = @import("./fork_execution_payload.zig").ForkExecutionPayload;
+const ForkExecutionPayloadHeader = @import("./fork_execution_payload.zig").ForkExecutionPayloadHeader;
 
 pub const BlockType = enum {
     full,
@@ -49,20 +51,24 @@ pub fn ForkBeaconBlockBody(comptime f: ForkSeq, comptime bt: BlockType) type {
         pub const fork_seq = f;
         pub const block_type = bt;
 
-        pub inline fn executionPayload(self: *const Self) *const ForkTypes(f).ExecutionPayload {
+        pub inline fn eth1Data(self: *const Self) *const ForkTypes(f).Eth1Data {
+            return &self.inner.eth1_data;
+        }
+
+        pub inline fn executionPayload(self: *const Self) *const ForkExecutionPayload(f) {
             if (bt != .full) {
                 @compileError("executionPayload is only available for full blocks");
             }
 
-            return &self.inner.execution_payload;
+            return @ptrCast(&self.inner.execution_payload);
         }
 
-        pub inline fn executionPayloadHeader(self: *const Self) *const ForkTypes(f).ExecutionPayloadHeader {
+        pub inline fn executionPayloadHeader(self: *const Self) *const ForkExecutionPayloadHeader(f) {
             if (bt != .blinded) {
                 @compileError("executionPayloadHeader is only available for blinded blocks");
             }
 
-            return &self.inner.execution_payload_header;
+            return @ptrCast(&self.inner.execution_payload_header);
         }
     };
 }

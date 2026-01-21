@@ -49,6 +49,10 @@ pub fn ForkExecutionPayload(comptime f: ForkSeq) type {
             if (comptime f.gte(.capella)) {
                 try ForkTypes(f).Withdrawals.hashTreeRoot(allocator, &self.inner.withdrawals, &out.withdrawals_root);
             }
+            if (comptime f.gte(.deneb)) {
+                out.blob_gas_used = self.inner.blob_gas_used;
+                out.excess_blob_gas = self.inner.excess_blob_gas;
+            }
         }
     };
 }
