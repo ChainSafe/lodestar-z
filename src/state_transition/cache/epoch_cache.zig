@@ -231,7 +231,7 @@ pub const EpochCache = struct {
         // ownership of the active indices is transferred to EpochShuffling
         const next_active_indices = try allocator.alloc(ValidatorIndex, next_active_indices_array_list.items.len);
         var next_seed = [_]u8{0} ** 32;
-        try getSeed(state, current_epoch, c.DOMAIN_BEACON_ATTESTER, &next_seed);
+        try getSeed(state, next_epoch, c.DOMAIN_BEACON_ATTESTER, &next_seed);
         std.mem.copyForwards(ValidatorIndex, next_active_indices, next_active_indices_array_list.items);
         const next_shuffling: *EpochShuffling = try EpochShuffling.init(allocator, next_seed, next_epoch, next_active_indices);
 
