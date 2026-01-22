@@ -20,7 +20,7 @@ interface Checkpoint {
 
 interface SyncCommittee {
   pubkeys: Uint8Array;
-  aggregate_pubkey: Uint8Array;
+  aggregatePubkey: Uint8Array;
 }
 
 // reference: https://github.com/ChainSafe/lodestar/blob/b6d377a93c39aa17d19408e119208a0733dcba3c/packages/state-transition/src/cache/syncCommitteeCache.ts#L8-L20
