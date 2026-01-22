@@ -26,7 +26,6 @@ test "state_transition utils" {
     _ = @import("utils/reference_count.zig");
     _ = @import("utils/root_cache.zig");
     _ = @import("utils/seed.zig");
-    _ = @import("utils/sha256.zig");
     _ = @import("utils/shuffle.zig");
     _ = @import("utils/signature_sets.zig");
     _ = @import("utils/signing_root.zig");

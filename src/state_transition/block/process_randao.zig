@@ -9,7 +9,7 @@ const Body = @import("../types/block.zig").Body;
 const Bytes32 = types.primitive.Bytes32.Type;
 const getRandaoMix = @import("../utils/seed.zig").getRandaoMix;
 const verifyRandaoSignature = @import("../signature_sets/randao.zig").verifyRandaoSignature;
-const digest = @import("../utils/sha256.zig").digest;
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub fn processRandao(
     cached_state: *CachedBeaconState,
@@ -31,7 +31,7 @@ pub fn processRandao(
 
     // mix in RANDAO reveal
     var randao_reveal_digest: [32]u8 = undefined;
-    digest(&randao_reveal, &randao_reveal_digest);
+    Sha256.hash(&randao_reveal, &randao_reveal_digest, .{});
 
     var randao_mix: [32]u8 = undefined;
     const current_mix = try getRandaoMix(state, epoch);
