@@ -1,3 +1,4 @@
+const std = @import("std");
 const ForkSeq = @import("config").ForkSeq;
 const ForkBeaconState = @import("fork_types").ForkBeaconState;
 
@@ -25,7 +26,7 @@ test "processParticipationFlagUpdates - sanity" {
         const state = test_state.cached_state.state;
         switch (state.forkSeq()) {
             inline else => |f| {
-                try processParticipationFlagUpdates(f, &@field(state, f));
+                try processParticipationFlagUpdates(f, &@field(state, @tagName(f)));
             },
         }
     }

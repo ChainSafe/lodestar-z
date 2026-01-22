@@ -4,7 +4,6 @@ const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const ct = @import("consensus_types");
-const ExecutionPayloadHeader = @import("../types/execution_payload.zig").ExecutionPayloadHeader;
 
 pub fn upgradeStateToCapella(
     allocator: Allocator,

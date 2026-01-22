@@ -6,6 +6,7 @@ const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const BlockType = @import("fork_types").BlockType;
 const ForkBeaconBlockBody = @import("fork_types").ForkBeaconBlockBody;
 const ForkTypes = @import("fork_types").ForkTypes;
+const ct = @import("consensus_types");
 
 const getEth1DepositCount = @import("../utils/deposit.zig").getEth1DepositCount;
 const processAttestations = @import("./process_attestations.zig").processAttestations;
@@ -91,7 +92,7 @@ test "process operations" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
-    const electra_block = types.electra.BeaconBlock.default_value;
+    const electra_block = ct.electra.BeaconBlock.default_value;
     const beacon_block = BeaconBlock{ .electra = &electra_block };
 
     const block = Block{ .regular = beacon_block };

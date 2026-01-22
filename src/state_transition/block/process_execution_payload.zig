@@ -90,8 +90,6 @@ pub fn processExecutionPayload(
     try state.setLatestExecutionPayloadHeader(&payload_header);
 }
 
-const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
-const Block = @import("../types/block.zig").Block;
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const Node = @import("persistent_merkle_tree").Node;
 
@@ -112,9 +110,6 @@ test "process execution payload - sanity" {
 
     var message: types.electra.BeaconBlock.Type = types.electra.BeaconBlock.default_value;
     message.body = body;
-
-    const beacon_block = BeaconBlock{ .electra = &message };
-    const block = Block{ .regular = beacon_block };
 
     const fork_state = switch (test_state.cached_state.state.*) {
         .electra => |*state_view| @as(*ForkBeaconState(.electra), @ptrCast(state_view)),

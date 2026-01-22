@@ -52,7 +52,7 @@ pub fn TestRunner(process_epoch_fn: anytype, opt: TestOpt) type {
 
                 switch (state.forkSeq()) {
                     inline else => |f| {
-                        const fork_state = &@field(state, f);
+                        const fork_state = &@field(state, @tagName(f));
                         const ForkStatePtr = @TypeOf(fork_state);
                         const ForkStateVal = @TypeOf(fork_state.*);
                         var args: Args = undefined;

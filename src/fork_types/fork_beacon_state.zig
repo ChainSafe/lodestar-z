@@ -302,9 +302,9 @@ pub fn ForkBeaconState(comptime f: ForkSeq) type {
             try self.inner.setValue("next_sync_committee", next_sync_committee);
         }
 
-        pub fn latestExecutionPayloadHeader(self: *Self, allocator: std.mem.Allocator, out: *ForkTypes(f).ExecutionPayloadHeader) !void {
+        pub fn latestExecutionPayloadHeader(self: *Self, allocator: std.mem.Allocator, out: *ForkTypes(f).ExecutionPayloadHeader.Type) !void {
             if (comptime (f.lt(.bellatrix))) return error.InvalidAtFork;
-            try self.inner.getValue(allocator, "latest_execution_payload_header", &out);
+            try self.inner.getValue(allocator, "latest_execution_payload_header", out);
         }
 
         pub fn latestExecutionPayloadHeaderBlockHash(self: *Self) !*const [32]u8 {
@@ -313,9 +313,9 @@ pub fn ForkBeaconState(comptime f: ForkSeq) type {
             return try header.getRoot("block_hash");
         }
 
-        pub fn setLatestExecutionPayloadHeader(self: *Self, header: *const ForkTypes(f).ExecutionPayloadHeader) !void {
+        pub fn setLatestExecutionPayloadHeader(self: *Self, header: *const ForkTypes(f).ExecutionPayloadHeader.Type) !void {
             if (comptime (f.lt(.bellatrix))) return error.InvalidAtFork;
-            try self.inner.setValue("latest_execution_payload_header", &header);
+            try self.inner.setValue("latest_execution_payload_header", header);
         }
 
         pub fn nextWithdrawalIndex(self: *Self) !u64 {

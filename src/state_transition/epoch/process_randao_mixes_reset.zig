@@ -8,7 +8,6 @@ pub fn processRandaoMixesReset(
     state: *ForkBeaconState(fork),
     cache: *const EpochTransitionCache,
 ) !void {
-    _ = fork;
     const current_epoch = cache.current_epoch;
     const next_epoch = current_epoch + 1;
 

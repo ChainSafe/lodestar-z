@@ -95,7 +95,7 @@ pub fn upgradeStateToElectra(allocator: Allocator, cached_state: *CachedBeaconSt
         // [EIP-7251]: Ensure early adopters of compounding credentials go through the activation churn
         const withdrawal_credentials = validator.withdrawal_credentials;
         if (hasCompoundingWithdrawalCredential(&withdrawal_credentials)) {
-            try queueExcessActiveBalance(cached_state, validator_index, &withdrawal_credentials, validator.pubkey);
+            try queueExcessActiveBalance(.electra, &state, validator_index, &withdrawal_credentials, validator.pubkey);
         }
     }
 

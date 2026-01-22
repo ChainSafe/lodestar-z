@@ -24,7 +24,7 @@ pub fn getBlockRootAtSlot(comptime fork: ForkSeq, state: *ForkBeaconState(fork),
 }
 
 pub fn getBlockRoot(comptime fork: ForkSeq, state: *ForkBeaconState(fork), epoch: Epoch) !*const [32]u8 {
-    return getBlockRootAtSlot(state, computeStartSlotAtEpoch(epoch));
+    return getBlockRootAtSlot(fork, state, computeStartSlotAtEpoch(epoch));
 }
 
 // TODO: getTemporaryBlockHeader

@@ -15,7 +15,7 @@ const getAttestationParticipationStatus = @import("../block//process_attestation
 pub fn upgradeStateToAltair(
     allocator: Allocator,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     phase0_state: *ForkBeaconState(.phase0),
 ) !ForkBeaconState(.altair) {
     var altair_state = try phase0_state.upgradeUnsafe();
@@ -42,7 +42,7 @@ pub fn upgradeStateToAltair(
     const active_indices = epoch_cache.next_shuffling.get().active_indices;
 
     var sync_committee_info: SyncCommitteeInfo = undefined;
-    try getNextSyncCommittee(allocator, &altair_state, active_indices, epoch_cache.getEffectiveBalanceIncrements(), &sync_committee_info);
+    try getNextSyncCommittee(.altair, allocator, &altair_state, active_indices, epoch_cache.getEffectiveBalanceIncrements(), &sync_committee_info);
 
     try altair_state.setCurrentSyncCommittee(&sync_committee_info.sync_committee);
     try altair_state.setNextSyncCommittee(&sync_committee_info.sync_committee);

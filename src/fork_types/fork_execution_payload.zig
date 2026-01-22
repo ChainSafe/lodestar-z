@@ -30,7 +30,7 @@ pub fn ForkExecutionPayload(comptime f: ForkSeq) type {
 
         /// Creates an ExecutionPayloadHeader from this ExecutionPayload
         /// Caller is responsible for properly deallocating the execution payload header
-        pub fn createExecutionPayloadHeader(self: *const Self, allocator: Allocator, out: *ForkTypes(f).ExecutionPayloadHeader) !void {
+        pub fn createExecutionPayloadHeader(self: *const Self, allocator: Allocator, out: *ForkTypes(f).ExecutionPayloadHeader.Type) !void {
             out.parent_hash = self.inner.parent_hash;
             out.fee_recipient = self.inner.fee_recipient;
             out.state_root = self.inner.state_root;

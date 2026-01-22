@@ -9,6 +9,7 @@ const Node = @import("persistent_merkle_tree").Node;
 const state_transition = @import("state_transition");
 const types = @import("consensus_types");
 const config = @import("config");
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const download_era_options = @import("download_era_options");
 const era = @import("era");
 const ForkSeq = config.ForkSeq;
@@ -28,7 +29,7 @@ const ProcessJustificationAndFinalizationBench = struct {
             cloned.deinit();
             allocator.destroy(cloned);
         }
-        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
         defer {
             cache.deinit();
             allocator.destroy(cache);
@@ -46,7 +47,7 @@ const ProcessInactivityUpdatesBench = struct {
             cloned.deinit();
             allocator.destroy(cloned);
         }
-        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
         defer {
             cache.deinit();
             allocator.destroy(cache);
@@ -64,7 +65,7 @@ const ProcessRewardsAndPenaltiesBench = struct {
             cloned.deinit();
             allocator.destroy(cloned);
         }
-        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
         defer {
             cache.deinit();
             allocator.destroy(cache);
@@ -82,7 +83,7 @@ const ProcessRegistryUpdatesBench = struct {
             cloned.deinit();
             allocator.destroy(cloned);
         }
-        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
         defer {
             cache.deinit();
             allocator.destroy(cache);
@@ -100,7 +101,7 @@ const ProcessSlashingsBench = struct {
             cloned.deinit();
             allocator.destroy(cloned);
         }
-        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
         defer {
             cache.deinit();
             allocator.destroy(cache);
@@ -118,7 +119,7 @@ const ProcessEth1DataResetBench = struct {
             cloned.deinit();
             allocator.destroy(cloned);
         }
-        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
         defer {
             cache.deinit();
             allocator.destroy(cache);
@@ -136,7 +137,7 @@ const ProcessPendingDepositsBench = struct {
             cloned.deinit();
             allocator.destroy(cloned);
         }
-        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
         defer {
             cache.deinit();
             allocator.destroy(cache);
@@ -154,7 +155,7 @@ const ProcessPendingConsolidationsBench = struct {
             cloned.deinit();
             allocator.destroy(cloned);
         }
-        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
         defer {
             cache.deinit();
             allocator.destroy(cache);
@@ -172,7 +173,7 @@ const ProcessEffectiveBalanceUpdatesBench = struct {
             cloned.deinit();
             allocator.destroy(cloned);
         }
-        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
         defer {
             cache.deinit();
             allocator.destroy(cache);
@@ -190,7 +191,7 @@ const ProcessSlashingsResetBench = struct {
             cloned.deinit();
             allocator.destroy(cloned);
         }
-        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
         defer {
             cache.deinit();
             allocator.destroy(cache);
@@ -208,7 +209,7 @@ const ProcessRandaoMixesResetBench = struct {
             cloned.deinit();
             allocator.destroy(cloned);
         }
-        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
         defer {
             cache.deinit();
             allocator.destroy(cache);
@@ -226,7 +227,7 @@ const ProcessHistoricalSummariesUpdateBench = struct {
             cloned.deinit();
             allocator.destroy(cloned);
         }
-        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
         defer {
             cache.deinit();
             allocator.destroy(cache);
@@ -270,7 +271,7 @@ const ProcessProposerLookaheadBench = struct {
             cloned.deinit();
             allocator.destroy(cloned);
         }
-        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
         defer cache.deinit();
         state_transition.processProposerLookahead(allocator, cloned, cache) catch unreachable;
     }
@@ -348,7 +349,7 @@ const ProcessEpochBench = struct {
             allocator.destroy(cloned);
         }
 
-        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
         defer {
             cache.deinit();
             allocator.destroy(cache);
@@ -368,7 +369,7 @@ const ProcessEpochSegmentedBench = struct {
             allocator.destroy(cloned);
         }
 
-        var cache = EpochTransitionCache.init(allocator, cloned) catch unreachable;
+        var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
         defer {
             cache.deinit();
             allocator.destroy(cache);

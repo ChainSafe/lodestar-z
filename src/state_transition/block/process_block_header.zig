@@ -80,8 +80,6 @@ pub fn blockToHeader(allocator: Allocator, signed_block: SignedBlock, out: *Beac
     try block.hashTreeRoot(allocator, &out.body_root);
 }
 
-const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
-const Block = @import("../types/block.zig").Block;
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const preset = @import("preset").preset;
 const Node = @import("persistent_merkle_tree").Node;
@@ -108,14 +106,11 @@ test "process block header - sanity" {
     message.proposer_index = proposer_index;
     message.parent_root = header_parent_root.*;
 
-    const beacon_block = BeaconBlock{ .electra = &message };
-    const block = Block{ .regular = beacon_block };
-
     const fork_state = switch (test_state.cached_state.state.*) {
         .electra => |*state_view| @as(*ForkBeaconState(.electra), @ptrCast(state_view)),
         else => return error.UnexpectedForkSeq,
     };
-    var fork_block = ForkBeaconBlock(.electra, .full){ .inner = message };
+    const fork_block = ForkBeaconBlock(.electra, .full){ .inner = message };
 
     try processBlockHeader(.electra, allocator, test_state.cached_state.getEpochCache(), fork_state, .full, fork_block);
 }

@@ -77,7 +77,7 @@ pub fn processSlots(
                         allocator,
                         config,
                         epoch_cache,
-                        &@field(state, f),
+                        &@field(state, @tagName(f)),
                         epoch_transition_cache,
                     );
                 },
@@ -146,6 +146,8 @@ pub fn stateTransition(
     signed_block: SignedBlock,
     opts: TransitionOpt,
 ) !*BeaconState {
+    _ = config;
+    _ = epoch_cache;
     const block = signed_block.message();
     const block_slot = switch (block) {
         .regular => |b| b.slot(),

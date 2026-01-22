@@ -49,7 +49,6 @@ pub fn getRewardsAndPenalties(
     penalties: []u64,
 ) !void {
     if (comptime fork == .phase0) {
-        _ = config;
         return try getAttestationDeltas(allocator, epoch_cache, cache, try state.finalizedEpoch(), rewards, penalties);
     }
     return try getRewardsAndPenaltiesAltair(fork, allocator, config, epoch_cache, state, cache, rewards, penalties);

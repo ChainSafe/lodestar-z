@@ -10,7 +10,6 @@ pub fn processEth1DataReset(
     state: *ForkBeaconState(fork),
     cache: *const EpochTransitionCache,
 ) !void {
-    _ = fork;
     const next_epoch = cache.current_epoch + 1;
 
     // reset eth1 data votes

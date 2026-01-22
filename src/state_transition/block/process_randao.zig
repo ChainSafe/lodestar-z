@@ -11,7 +11,7 @@ const digest = @import("../utils/sha256.zig").digest;
 
 pub fn processRandao(
     comptime fork: ForkSeq,
-    config: *const BeaconConfig,
+    beacon_config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *ForkBeaconState(fork),
     comptime block_type: BlockType,
@@ -24,7 +24,7 @@ pub fn processRandao(
 
     // verify RANDAO reveal
     if (verify_signature) {
-        if (!try verifyRandaoSignature(fork, config, epoch_cache, state, block_type, body, try state.slot(), proposer_idx)) {
+        if (!try verifyRandaoSignature(fork, beacon_config, epoch_cache, state, block_type, body, try state.slot(), proposer_idx)) {
             return error.InvalidRandaoSignature;
         }
     }

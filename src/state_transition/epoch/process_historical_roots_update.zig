@@ -10,7 +10,6 @@ pub fn processHistoricalRootsUpdate(
     state: *ForkBeaconState(fork),
     cache: *const EpochTransitionCache,
 ) !void {
-    _ = fork;
     const next_epoch = cache.current_epoch + 1;
 
     // set historical root accumulator

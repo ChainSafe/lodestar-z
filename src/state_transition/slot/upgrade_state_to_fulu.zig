@@ -22,9 +22,11 @@ pub fn upgradeStateToFulu(allocator: Allocator, cached_state: *CachedBeaconState
 
     var proposer_lookahead = ct.fulu.ProposerLookahead.default_value;
     try initializeProposerLookahead(
+        .fulu,
         allocator,
-        cached_state,
-        &proposer_lookahead,
+        cached_state.getEpochCache(),
+        &state,
+        proposer_lookahead[0..],
     );
     try state.setProposerLookahead(&proposer_lookahead);
 

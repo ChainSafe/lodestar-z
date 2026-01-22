@@ -198,7 +198,7 @@ pub const EpochTransitionCache = struct {
     pub fn init(
         allocator: Allocator,
         config: *const BeaconConfig,
-        epoch_cache: *const EpochCache,
+        epoch_cache: *EpochCache,
         state: *BeaconState,
     ) !*EpochTransitionCache {
         const fork_seq = state.forkSeq();

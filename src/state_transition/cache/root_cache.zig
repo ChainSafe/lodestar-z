@@ -4,7 +4,7 @@ const getBlockRootFn = @import("../utils/block_root.zig").getBlockRoot;
 const getBlockRootAtSlotFn = @import("../utils/block_root.zig").getBlockRootAtSlot;
 const types = @import("consensus_types");
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("../types/fork_beacon_state.zig").ForkBeaconState;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const Checkpoint = types.phase0.Checkpoint.Type;
 const Epoch = types.primitive.Epoch.Type;
 const Slot = types.primitive.Slot.Type;
@@ -43,7 +43,7 @@ pub fn RootCache(comptime fork: ForkSeq) type {
             if (self.block_root_epoch_cache.get(epoch)) |root| {
                 return root;
             } else {
-                const root = try getBlockRootFn(self.state, epoch);
+                const root = try getBlockRootFn(fork, self.state, epoch);
                 try self.block_root_epoch_cache.put(epoch, root);
                 return root;
             }
@@ -53,7 +53,7 @@ pub fn RootCache(comptime fork: ForkSeq) type {
             if (self.block_root_slot_cache.get(slot)) |root| {
                 return root;
             } else {
-                const root = try getBlockRootAtSlotFn(self.state, slot);
+                const root = try getBlockRootAtSlotFn(fork, self.state, slot);
                 try self.block_root_slot_cache.put(slot, root);
                 return root;
             }

@@ -4,6 +4,7 @@ const types = @import("consensus_types");
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const preset = @import("preset").preset;
 const BeaconState = @import("../types/beacon_state.zig").BeaconState;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const getSeed = @import("./seed.zig").getSeed;
 const c = @import("constants");
 const innerShuffleList = @import("./shuffle.zig").innerShuffleList;
@@ -106,7 +107,11 @@ test EpochShuffling {
 pub fn computeEpochShuffling(allocator: Allocator, state: *BeaconState, active_indices: []ValidatorIndex, epoch: Epoch) !*EpochShuffling {
     var seed = [_]u8{0} ** 32;
     switch (state.forkSeq()) {
-        inline else => |f| try getSeed(f, @field(state, f), epoch, c.DOMAIN_BEACON_ATTESTER, &seed),
+        inline else => |f| {
+            const fork_state = &@field(state, @tagName(f));
+            const fork_state_ptr = @as(*ForkBeaconState(f), @ptrCast(fork_state));
+            try getSeed(f, fork_state_ptr, epoch, c.DOMAIN_BEACON_ATTESTER, &seed);
+        },
     }
     return EpochShuffling.init(allocator, seed, epoch, active_indices);
 }

@@ -20,6 +20,7 @@ const EffectiveBalanceIncrementsRc = @import("./effective_balance_increments.zig
 const EffectiveBalanceIncrements = @import("./effective_balance_increments.zig").EffectiveBalanceIncrements;
 const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
@@ -167,7 +168,14 @@ pub const EpochCache = struct {
         }
 
         const effective_balance_increment = try getEffectiveBalanceIncrementsWithLen(allocator, validator_count);
-        const total_slashings_by_increment = try getTotalSlashingsByIncrement(state);
+        const state_fork_seq = state.forkSeq();
+        const total_slashings_by_increment = switch (state_fork_seq) {
+            inline else => |f| blk: {
+                const fork_state = &@field(state, @tagName(f));
+                const fork_state_ptr = @as(*ForkBeaconState(f), @ptrCast(fork_state));
+                break :blk try getTotalSlashingsByIncrement(f, fork_state_ptr);
+            },
+        };
         var previous_active_indices_array_list = std.ArrayList(ValidatorIndex).init(allocator);
         defer previous_active_indices_array_list.deinit();
         try previous_active_indices_array_list.ensureTotalCapacity(validator_count);
@@ -232,10 +240,26 @@ pub const EpochCache = struct {
         // TODO: implement proposerLookahead in fulu
         const fork_seq = config.forkSeqAtEpoch(current_epoch);
         var current_proposer_seed: [32]u8 = undefined;
-        try getSeed(state, current_epoch, c.DOMAIN_BEACON_PROPOSER, &current_proposer_seed);
+        switch (state.forkSeq()) {
+            inline else => |f| {
+                const fork_state = &@field(state, @tagName(f));
+                const fork_state_ptr = @as(*ForkBeaconState(f), @ptrCast(fork_state));
+                try getSeed(f, fork_state_ptr, current_epoch, c.DOMAIN_BEACON_PROPOSER, &current_proposer_seed);
+            },
+        }
         var proposers = [_]ValidatorIndex{0} ** preset.SLOTS_PER_EPOCH;
         if (current_shuffling.active_indices.len > 0) {
-            try computeProposers(allocator, fork_seq, current_proposer_seed, current_epoch, current_shuffling.active_indices, effective_balance_increment, &proposers);
+            switch (fork_seq) {
+                inline else => |f| try computeProposers(
+                    f,
+                    allocator,
+                    current_proposer_seed,
+                    current_epoch,
+                    current_shuffling.active_indices,
+                    effective_balance_increment,
+                    &proposers,
+                ),
+            }
         }
 
         // Only after altair, compute the indices of the current sync committee
@@ -485,16 +509,25 @@ pub const EpochCache = struct {
             }
         } else {
             var upcoming_proposer_seed: [32]u8 = undefined;
-            try getSeed(state, self.epoch, c.DOMAIN_BEACON_PROPOSER, &upcoming_proposer_seed);
-            try computeProposers(
-                self.allocator,
-                self.config.forkSeqAtEpoch(self.epoch),
-                upcoming_proposer_seed,
-                self.epoch,
-                self.current_shuffling.get().active_indices,
-                self.effective_balance_increment.get(),
-                &self.proposers,
-            );
+            switch (state.forkSeq()) {
+                inline else => |f| {
+                    const fork_state = &@field(state, @tagName(f));
+                    const fork_state_ptr = @as(*ForkBeaconState(f), @ptrCast(fork_state));
+                    try getSeed(f, fork_state_ptr, self.epoch, c.DOMAIN_BEACON_PROPOSER, &upcoming_proposer_seed);
+                },
+            }
+            const fork_seq = self.config.forkSeqAtEpoch(self.epoch);
+            switch (fork_seq) {
+                inline else => |f| try computeProposers(
+                    f,
+                    self.allocator,
+                    upcoming_proposer_seed,
+                    self.epoch,
+                    self.current_shuffling.get().active_indices,
+                    self.effective_balance_increment.get(),
+                    &self.proposers,
+                ),
+            }
         }
     }
 
