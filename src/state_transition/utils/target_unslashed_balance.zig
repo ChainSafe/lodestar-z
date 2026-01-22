@@ -4,7 +4,7 @@ const Validator = types.phase0.Validator.Type;
 const Epoch = types.primitive.Epoch.Type;
 const preset = @import("preset").preset;
 const c = @import("constants");
-const isActiveValidator = @import("./validator.zig").isActiveValidator;
+const isActiveValidator = @import("../validator.zig").isActiveValidator;
 
 const TIMELY_TARGET = 1 << c.TIMELY_TARGET_FLAG_INDEX;
 

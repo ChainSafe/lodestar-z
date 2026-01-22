@@ -1,3 +1,4 @@
+//! Utility functions related to validators.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
@@ -6,12 +7,12 @@ const Validator = types.phase0.Validator;
 
 const Epoch = types.primitive.Epoch.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
+const BeaconState = @import("./types/beacon_state.zig").BeaconState;
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
-const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const EpochCache = @import("./cache/epoch_cache.zig").EpochCache;
 const WithdrawalCredentials = types.primitive.Root.Type;
-const hasCompoundingWithdrawalCredential = @import("./electra.zig").hasCompoundingWithdrawalCredential;
+const hasCompoundingWithdrawalCredential = @import("./utils/electra.zig").hasCompoundingWithdrawalCredential;
 
 pub fn isActiveValidator(validator: *const Validator.Type, epoch: Epoch) bool {
     return validator.activation_epoch <= epoch and epoch < validator.exit_epoch;
