@@ -2,6 +2,7 @@ const napi = @import("zapi:napi");
 const pool = @import("./pool.zig");
 const pubkeys = @import("./pubkeys.zig");
 const config = @import("./config.zig");
+const proposer_index = @import("./proposer_index.zig");
 const beaconStateView = @import("./beacon_state_view.zig");
 
 comptime {
@@ -24,6 +25,7 @@ fn register(env: napi.Env, exports: napi.Value) !void {
     try pool.register(env, exports);
     try pubkeys.register(env, exports);
     try config.register(env, exports);
+    try proposer_index.register(env, exports);
     try beaconStateView.register(env, exports);
 
     try exports.setNamedProperty("deinit", try env.createFunction(
