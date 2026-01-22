@@ -1,7 +1,8 @@
 const std = @import("std");
-const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
-const state_transition = @import("state_transition");
-const EpochTransitionCache = state_transition.EpochTransitionCache;
+const Allocator = std.mem.Allocator;
+const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
+const TestCachedBeaconState = @import("generate_state.zig").TestCachedBeaconState;
+const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const Node = @import("persistent_merkle_tree").Node;
 
 pub const TestOpt = struct {
@@ -25,7 +26,7 @@ pub fn TestRunner(process_epoch_fn: anytype, opt: TestOpt) type {
                 defer test_state.deinit();
 
                 if (opt.fulu) {
-                    try state_transition.upgradeStateToFulu(allocator, test_state.cached_state);
+                    try upgradeStateToFulu(allocator, test_state.cached_state);
                 }
 
                 var epoch_transition_cache = try EpochTransitionCache.init(

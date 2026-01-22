@@ -773,7 +773,7 @@ pub fn build(b: *std.Build) void {
     tls_run_test.dependOn(&run_test_bench_process_epoch.step);
 
     const module_int = b.createModule(.{
-        .root_source_file = b.path("test/int/root.zig"),
+        .root_source_file = b.path("test/int/era/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -792,27 +792,6 @@ pub fn build(b: *std.Build) void {
     const tls_run_test_int = b.step("test:int", "Run the int test");
     tls_run_test_int.dependOn(&run_test_int.step);
     tls_run_test.dependOn(&run_test_int.step);
-
-    const module_int_slow = b.createModule(.{
-        .root_source_file = b.path("test/int_slow/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    b.modules.put(b.dupe("int_slow"), module_int_slow) catch @panic("OOM");
-
-    const test_int_slow = b.addTest(.{
-        .name = "int_slow",
-        .root_module = module_int_slow,
-        .filters = b.option([][]const u8, "int_slow.filters", "int_slow test filters") orelse &[_][]const u8{},
-    });
-    const install_test_int_slow = b.addInstallArtifact(test_int_slow, .{});
-    const tls_install_test_int_slow = b.step("build-test:int_slow", "Install the int_slow test");
-    tls_install_test_int_slow.dependOn(&install_test_int_slow.step);
-
-    const run_test_int_slow = b.addRunArtifact(test_int_slow);
-    const tls_run_test_int_slow = b.step("test:int_slow", "Run the int_slow test");
-    tls_run_test_int_slow.dependOn(&run_test_int_slow.step);
-    tls_run_test.dependOn(&run_test_int_slow.step);
 
     const module_spec_tests = b.createModule(.{
         .root_source_file = b.path("test/spec/root.zig"),
@@ -980,18 +959,9 @@ pub fn build(b: *std.Build) void {
     module_bench_process_epoch.addImport("download_era_options", options_module_download_era_options);
     module_bench_process_epoch.addImport("era", module_era);
 
-    module_int.addImport("build_options", options_module_build_options);
-    module_int.addImport("state_transition", module_state_transition);
     module_int.addImport("config", module_config);
-    module_int.addImport("consensus_types", module_consensus_types);
-    module_int.addImport("preset", module_preset);
-    module_int.addImport("constants", module_constants);
-    module_int.addImport("blst", dep_blst.module("blst"));
-    module_int.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
-
-    module_int_slow.addImport("config", module_config);
-    module_int_slow.addImport("download_era_options", options_module_download_era_options);
-    module_int_slow.addImport("era", module_era);
+    module_int.addImport("download_era_options", options_module_download_era_options);
+    module_int.addImport("era", module_era);
 
     module_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
     module_spec_tests.addImport("consensus_types", module_consensus_types);

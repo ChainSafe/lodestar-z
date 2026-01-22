@@ -19,3 +19,12 @@ pub fn processHistoricalSummariesUpdate(cached_state: *CachedBeaconState, cache:
         try historical_summaries.pushValue(&new_historical_summary);
     }
 }
+
+test "processHistoricalSummariesUpdate - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processHistoricalSummariesUpdate, .{
+        .alloc = false,
+        .err_return = true,
+        .void_return = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}

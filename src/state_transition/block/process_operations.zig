@@ -76,3 +76,24 @@ pub fn processOperations(
         }
     }
 }
+
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Block = @import("../types/block.zig").Block;
+const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
+const Node = @import("persistent_merkle_tree").Node;
+
+test "process operations" {
+    const allocator = std.testing.allocator;
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    const electra_block = types.electra.BeaconBlock.default_value;
+    const beacon_block = BeaconBlock{ .electra = &electra_block };
+
+    const block = Block{ .regular = beacon_block };
+    try processOperations(allocator, test_state.cached_state, block.beaconBlockBody(), .{});
+}

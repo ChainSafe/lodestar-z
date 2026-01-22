@@ -49,3 +49,12 @@ pub fn processPendingConsolidations(cached_state: *CachedBeaconState, cache: *Ep
         try state.setPendingConsolidations(new_pending_consolidations);
     }
 }
+
+test "processPendingConsolidations - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processPendingConsolidations, .{
+        .alloc = false,
+        .err_return = true,
+        .void_return = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}

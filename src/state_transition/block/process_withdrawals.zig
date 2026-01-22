@@ -215,3 +215,31 @@ pub fn getExpectedWithdrawals(
     withdrawals_result.sampled_validators = n;
     withdrawals_result.processed_partial_withdrawals_count = processed_partial_withdrawals_count;
 }
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Node = @import("persistent_merkle_tree").Node;
+
+test "process withdrawals - sanity" {
+    const allocator = std.testing.allocator;
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var withdrawals_result = WithdrawalsResult{
+        .withdrawals = try Withdrawals.initCapacity(
+            allocator,
+            preset.MAX_WITHDRAWALS_PER_PAYLOAD,
+        ),
+    };
+    defer withdrawals_result.withdrawals.deinit(allocator);
+    var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
+    defer withdrawal_balances.deinit();
+
+    var root: Root = undefined;
+    try types.capella.Withdrawals.hashTreeRoot(allocator, &withdrawals_result.withdrawals, &root);
+
+    try getExpectedWithdrawals(allocator, &withdrawals_result, &withdrawal_balances, test_state.cached_state);
+    try processWithdrawals(allocator, test_state.cached_state, withdrawals_result, root);
+}

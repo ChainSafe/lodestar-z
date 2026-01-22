@@ -45,3 +45,12 @@ pub fn getRewardsAndPenalties(
     else
         try getRewardsAndPenaltiesAltair(allocator, cached_state, cache, rewards, penalties);
 }
+
+test "processRewardsAndPenalties - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processRewardsAndPenalties, .{
+        .alloc = true,
+        .err_return = true,
+        .void_return = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
+}

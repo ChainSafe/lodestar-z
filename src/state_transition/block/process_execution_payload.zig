@@ -1,19 +1,21 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ForkSeq = @import("config").ForkSeq;
+const types = @import("consensus_types");
+const config = @import("config");
+const ForkSeq = config.ForkSeq;
 const ForkTypes = @import("fork_types").ForkTypes;
 const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const BlockType = @import("fork_types").BlockType;
 const ForkBeaconBlockBody = @import("fork_types").ForkBeaconBlockBody;
 const BlockExternalData = @import("../state_transition.zig").BlockExternalData;
-const BeaconConfig = @import("config").BeaconConfig;
+const BeaconConfig = config.BeaconConfig;
 const isMergeTransitionComplete = @import("../utils/execution.zig").isMergeTransitionComplete;
 const getRandaoMix = @import("../utils/seed.zig").getRandaoMix;
 
 pub fn processExecutionPayload(
     comptime fork: ForkSeq,
     allocator: Allocator,
-    config: *const BeaconConfig,
+    beacon_config: *const BeaconConfig,
     state: *ForkBeaconState(fork),
     current_epoch: u64,
     comptime block_type: BlockType,
@@ -54,12 +56,12 @@ pub fn processExecutionPayload(
     // def compute_timestamp_at_slot(state: BeaconState, slot: Slot) -> uint64:
     //   slots_since_genesis = slot - GENESIS_SLOT
     //   return uint64(state.genesis_time + slots_since_genesis * SECONDS_PER_SLOT)
-    if (timestamp != (try state.genesisTime()) + (try state.slot()) * config.chain.SECONDS_PER_SLOT) {
+    if (timestamp != (try state.genesisTime()) + (try state.slot()) * beacon_config.chain.SECONDS_PER_SLOT) {
         return error.InvalidExecutionPayloadTimestamp;
     }
 
     if (comptime fork.gte(.deneb)) {
-        const max_blobs_per_block = config.getMaxBlobsPerBlock(current_epoch);
+        const max_blobs_per_block = beacon_config.getMaxBlobsPerBlock(current_epoch);
         if (body.blobKzgCommitmentsLen() > max_blobs_per_block) {
             return error.BlobKzgCommitmentsExceedsLimit;
         }
@@ -83,7 +85,51 @@ pub fn processExecutionPayload(
         .full => try body.executionPayload().createPayloadHeader(allocator, &payload_header),
         .blinded => payload_header = body.executionPayloadHeader().*,
     }
-    defer payload_header.deinit(allocator);
+    defer ForkTypes(fork).ExecutionPayloadHeader.deinit(allocator, &payload_header);
 
     try state.setLatestExecutionPayloadHeader(&payload_header);
+}
+
+const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
+const Block = @import("../types/block.zig").Block;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Node = @import("persistent_merkle_tree").Node;
+
+test "process execution payload - sanity" {
+    const allocator = std.testing.allocator;
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var execution_payload: types.electra.ExecutionPayload.Type = types.electra.ExecutionPayload.default_value;
+    const beacon_config = test_state.cached_state.config;
+    execution_payload.timestamp = try test_state.cached_state.state.genesisTime() + try test_state.cached_state.state.slot() * beacon_config.chain.SECONDS_PER_SLOT;
+    var body: types.electra.BeaconBlockBody.Type = types.electra.BeaconBlockBody.default_value;
+    body.execution_payload = execution_payload;
+
+    var message: types.electra.BeaconBlock.Type = types.electra.BeaconBlock.default_value;
+    message.body = body;
+
+    const beacon_block = BeaconBlock{ .electra = &message };
+    const block = Block{ .regular = beacon_block };
+
+    const fork_state = switch (test_state.cached_state.state.*) {
+        .electra => |*state_view| @as(*ForkBeaconState(.electra), @ptrCast(state_view)),
+        else => return error.UnexpectedForkSeq,
+    };
+    const fork_body = ForkBeaconBlockBody(.electra, .full){ .inner = body };
+
+    try processExecutionPayload(
+        .electra,
+        allocator,
+        beacon_config,
+        fork_state,
+        test_state.cached_state.getEpochCache().epoch,
+        .full,
+        &fork_body,
+        .{ .execution_payload_status = .valid, .data_availability_status = .available },
+    );
 }
