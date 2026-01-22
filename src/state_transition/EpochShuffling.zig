@@ -234,31 +234,6 @@ pub fn innerShuffleList(comptime T: type, out: []T, seed: []const u8, rounds: u8
     }
 }
 
-test innerShuffleList {
-    var input = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 };
-    const seed = [_]u8{0} ** SEED_SIZE;
-    const rounds = 32;
-    // unshuffle
-    const forwards = false;
-
-    const shuffled_input = input[0..];
-    try innerShuffleList(u32, shuffled_input, seed[0..], rounds, forwards);
-
-    // Check that the input is shuffled
-    try std.testing.expect(shuffled_input.len == input.len);
-    // result is checked against @chainsafe/swap-or-not-shuffle
-    const expected = [_]u32{ 6, 2, 3, 5, 1, 7, 8, 0, 4 };
-    try std.testing.expectEqualSlices(u32, expected[0..], shuffled_input);
-
-    // shuffle back
-    const backwards = true;
-    try innerShuffleList(u32, shuffled_input, seed[0..], rounds, backwards);
-
-    // Check that the input is back to original
-    const expected_input = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 };
-    try std.testing.expectEqualSlices(u32, expected_input[0..], shuffled_input);
-}
-
 pub fn deinit(self: *EpochShuffling) void {
     for (self.committees) |committees_per_slot| {
         // no need to free each committee since they are slices of `shuffling`
@@ -290,6 +265,18 @@ fn buildCommitteesFromShuffling(allocator: Allocator, shuffling: []const Validat
     return epoch_committees;
 }
 
+/// unshuffle the `active_indices` array in place synchronously
+fn unshuffleList(active_indices_to_shuffle: []ValidatorIndex, seed: []const u8, rounds: u8) !void {
+    const forwards = false;
+    return innerShuffleList(ValidatorIndex, active_indices_to_shuffle, seed, rounds, forwards);
+}
+
+fn computeCommitteeCount(active_validator_count: usize) usize {
+    const validators_per_slot = @divFloor(active_validator_count, preset.SLOTS_PER_EPOCH);
+    const committees_per_slot = @divFloor(validators_per_slot, preset.TARGET_COMMITTEE_SIZE);
+    return @max(1, @min(preset.MAX_COMMITTEES_PER_SLOT, committees_per_slot));
+}
+
 test EpochShuffling {
     const validator_count_arr = comptime [_]usize{ 256, 2_000_000 };
     inline for (validator_count_arr) |validator_count| {
@@ -306,10 +293,29 @@ test EpochShuffling {
     }
 }
 
-/// unshuffle the `active_indices` array in place synchronously
-fn unshuffleList(active_indices_to_shuffle: []ValidatorIndex, seed: []const u8, rounds: u8) !void {
+test innerShuffleList {
+    var input = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+    const seed = [_]u8{0} ** SEED_SIZE;
+    const rounds = 32;
+    // unshuffle
     const forwards = false;
-    return innerShuffleList(ValidatorIndex, active_indices_to_shuffle, seed, rounds, forwards);
+
+    const shuffled_input = input[0..];
+    try innerShuffleList(u32, shuffled_input, seed[0..], rounds, forwards);
+
+    // Check that the input is shuffled
+    try std.testing.expect(shuffled_input.len == input.len);
+    // result is checked against @chainsafe/swap-or-not-shuffle
+    const expected = [_]u32{ 6, 2, 3, 5, 1, 7, 8, 0, 4 };
+    try std.testing.expectEqualSlices(u32, expected[0..], shuffled_input);
+
+    // shuffle back
+    const backwards = true;
+    try innerShuffleList(u32, shuffled_input, seed[0..], rounds, backwards);
+
+    // Check that the input is back to original
+    const expected_input = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+    try std.testing.expectEqualSlices(u32, expected_input[0..], shuffled_input);
 }
 
 test unshuffleList {
@@ -317,12 +323,6 @@ test unshuffleList {
     const seed: [32]u8 = [_]u8{0} ** 32;
 
     try unshuffleList(&active_indices, &seed, 32);
-}
-
-fn computeCommitteeCount(active_validator_count: usize) usize {
-    const validators_per_slot = @divFloor(active_validator_count, preset.SLOTS_PER_EPOCH);
-    const committees_per_slot = @divFloor(validators_per_slot, preset.TARGET_COMMITTEE_SIZE);
-    return @max(1, @min(preset.MAX_COMMITTEES_PER_SLOT, committees_per_slot));
 }
 
 test computeCommitteeCount {
