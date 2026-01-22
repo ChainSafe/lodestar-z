@@ -18,6 +18,26 @@ interface Checkpoint {
   root: Uint8Array;
 }
 
+interface ExecutionPayloadHeader {
+  parentHash: Uint8Array;
+  feeRecipient: Uint8Array;
+  stateRoot: Uint8Array;
+  receiptsRoot: Uint8Array;
+  logsBloom: Uint8Array;
+  prevRandao: Uint8Array;
+  blockNumber: number;
+  gasLimit: number;
+  gasUsed: number;
+  timestamp: number;
+  extraData: Uint8Array;
+  baseFeePerGas: number;
+  blockHash: Uint8Array;
+  transactionsRoot: Uint8Array;
+  withdrawalsRoot?: Uint8Array; // capella+
+  blobGasUsed?: number; // deneb+
+  excessBlobGas?: number; // deneb+
+}
+
 interface SyncCommittee {
   pubkeys: Uint8Array;
   aggregatePubkey: Uint8Array;
@@ -37,6 +57,7 @@ declare class BeaconStateView {
   genesisTime: number;
   genesisValidatorsRoot: Uint8Array;
   latestBlockHeader: BeaconBlockHeader;
+  latestExecutionPayloadHeader: ExecutionPayloadHeader;
   previousJustifiedCheckpoint: Checkpoint;
   currentJustifiedCheckpoint: Checkpoint;
   finalizedCheckpoint: Checkpoint;

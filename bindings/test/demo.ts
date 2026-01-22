@@ -63,6 +63,7 @@ printDuration("currentSyncCommittee", () => state.currentSyncCommittee);
 printDuration("nextSyncCommittee", () => state.nextSyncCommittee);
 printDuration("currentSyncCommitteeIndexed", () => state.currentSyncCommitteeIndexed);
 printDuration("effectiveBalanceIncrements", () => state.effectiveBalanceIncrements);
+printDuration("latestExecutionPayloadHeader", () => state.latestExecutionPayloadHeader);
 printDuration("syncProposerReward", () => state.syncProposerReward);
 printDuration("previousEpochParticipation", () => state.previousEpochParticipation);
 printDuration("currentEpochParticipation", () => state.currentEpochParticipation);

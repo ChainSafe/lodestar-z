@@ -4,6 +4,7 @@ const c = @import("config");
 const state_transition = @import("state_transition");
 const BeaconState = state_transition.BeaconState;
 const CachedBeaconState = state_transition.CachedBeaconState;
+const ExecutionPayloadHeader = state_transition.ExecutionPayloadHeader;
 const SignedBeaconBlock = state_transition.SignedBeaconBlock;
 const SignedBlock = state_transition.SignedBlock;
 const isExecutionEnabledFunc = state_transition.isExecutionEnabled;
@@ -219,6 +220,21 @@ pub fn BeaconStateView_effectiveBalanceIncrements(env: napi.Env, cb: napi.Callba
     return try numberSliceToNapiValue(env, u16, increments.items, .{ .typed_array = .uint16 });
 }
 
+pub fn BeaconStateView_latestExecutionPayloadHeader(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var header: ExecutionPayloadHeader = undefined;
+    try cached_state.state.latestExecutionPayloadHeader(allocator, &header);
+    defer header.deinit(allocator);
+
+    return switch (header) {
+        .bellatrix => |*h| try sszValueToNapiValue(env, ct.bellatrix.ExecutionPayloadHeader, h),
+        .capella => |*h| try sszValueToNapiValue(env, ct.capella.ExecutionPayloadHeader, h),
+        .deneb => |*h| try sszValueToNapiValue(env, ct.deneb.ExecutionPayloadHeader, h),
+        .electra => |*h| try sszValueToNapiValue(env, ct.electra.ExecutionPayloadHeader, h),
+        .fulu => |*h| try sszValueToNapiValue(env, ct.fulu.ExecutionPayloadHeader, h),
+    };
+}
+
 pub fn BeaconStateView_syncProposerReward(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const sync_proposer_reward = cached_state.getEpochCache().sync_proposer_reward;
@@ -338,6 +354,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "genesisTime", .getter = napi.wrapCallback(0, BeaconStateView_genesisTime) },
             .{ .utf8name = "genesisValidatorsRoot", .getter = napi.wrapCallback(0, BeaconStateView_genesisValidatorsRoot) },
             .{ .utf8name = "latestBlockHeader", .getter = napi.wrapCallback(0, BeaconStateView_latestBlockHeader) },
+            .{ .utf8name = "latestExecutionPayloadHeader", .getter = napi.wrapCallback(0, BeaconStateView_latestExecutionPayloadHeader) },
             .{ .utf8name = "previousJustifiedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_previousJustifiedCheckpoint) },
             .{ .utf8name = "currentJustifiedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_currentJustifiedCheckpoint) },
             .{ .utf8name = "finalizedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_finalizedCheckpoint) },
