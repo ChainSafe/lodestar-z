@@ -67,13 +67,16 @@ type Bindings = {
     ensureCapacity: (capacity: number) => void;
     pubkey2index: {
       get: (pubkey: Uint8Array) => number | undefined;
-    }
+    };
     index2pubkey: {
       get: (index: number) => Uint8Array | undefined;
     };
   };
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
+  };
+  shuffle: {
+    innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
   };
   computeProposerIndex: (
     fork: "phase0" | "altair" | "bellatrix" | "capella" | "deneb" | "electra" | "fulu",

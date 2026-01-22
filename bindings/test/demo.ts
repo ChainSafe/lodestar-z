@@ -1,7 +1,7 @@
 import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
-import bindings from "../src/index.ts";
 import * as fs from "fs";
+import bindings from "../src/index.ts";
 
 console.log("loaded bindings");
 
@@ -20,7 +20,7 @@ async function printDurationAsync<R>(label: string, fn: () => Promise<R>): Promi
 }
 
 const PKIX_FILE = "./mainnet.pkix";
-let hasPkix = printDuration("check for pkix file", () => {
+const hasPkix = printDuration("check for pkix file", () => {
   try {
     fs.accessSync(PKIX_FILE);
     return true;
@@ -44,9 +44,7 @@ const reader = await printDurationAsync("load era reader", () =>
 
 const stateBytes = await printDurationAsync("read serialized state", () => reader.readSerializedState());
 
-const state = printDuration("create state view",
-  () => bindings.BeaconStateView.createFromBytes("fulu", stateBytes)
-);
+const state = printDuration("create state view", () => bindings.BeaconStateView.createFromBytes("fulu", stateBytes));
 
 printDuration("write pkix to disk", () => bindings.pubkeys.save(PKIX_FILE));
 
