@@ -4,7 +4,9 @@
 //! while we continuously run the state transition function using data from 2 consecutive era files.
 //! Run a Prometheus instance to see the data visually.
 //!
-//! To run this example, run `zig build run:metrics_era`.
+//! To run this example, we first require era files: `zig build run:download_era_files`.
+//!
+//! Then, run `zig build run:metrics_era`.
 //!
 //! Note: this example is mainly meant to test that our metrics is working; realistically we do not need
 //! such an example. The bulk of this code should be moved to our beacon node implementation once it's ready.
