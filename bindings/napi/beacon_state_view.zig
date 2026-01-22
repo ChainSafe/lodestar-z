@@ -167,6 +167,39 @@ pub fn BeaconStateView_nextSyncCommittee(env: napi.Env, cb: napi.CallbackInfo(0)
     return try sszValueToNapiValue(env, ct.altair.SyncCommittee, &result);
 }
 
+pub fn BeaconStateView_currentSyncCommitteeIndexed(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const result = cached_state.getEpochCache().current_sync_committee_indexed.get();
+    const validator_indices = result.getValidatorIndices();
+    const validator_index_map = result.getValidatorIndexMap();
+    const obj = try env.createObject();
+    try obj.setNamedProperty(
+        "validatorIndices",
+        try numberSliceToNapiValue(env, u32, @as([]const u32, @ptrCast(validator_indices)), .{ .typed_array = .uint32 }),
+    );
+
+    const global = try env.getGlobal();
+    const map_ctor = try global.getNamedProperty("Map");
+    const map = try env.newInstance(map_ctor, .{});
+    const set_fn = try map.getNamedProperty("set");
+
+    // TODO: might need to check the perf here; another way is to send a array instead and convert them in js side.
+    var iterator = validator_index_map.iterator();
+    while (iterator.next()) |entry| {
+        const idx = entry.key_ptr.*;
+        const positions = entry.value_ptr;
+
+        const key_value_napi = try env.createInt64(@intCast(idx));
+        const positions_napi = try numberSliceToNapiValue(env, u32, @as([]const u32, @ptrCast(positions.items)), .{ .typed_array = .uint32 });
+
+        _ = try env.callFunction(set_fn, map, .{ key_value_napi, positions_napi });
+    }
+
+    try obj.setNamedProperty("validatorIndexMap", map);
+
+    return obj;
+}
+
 pub fn BeaconStateView_getBalance(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const index: u64 = @intCast(try cb.arg(0).getValueInt64());
@@ -269,6 +302,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "proposersNextEpoch", .getter = napi.wrapCallback(0, BeaconStateView_proposersNextEpoch) },
             .{ .utf8name = "currentSyncCommittee", .getter = napi.wrapCallback(0, BeaconStateView_currentSyncCommittee) },
             .{ .utf8name = "nextSyncCommittee", .getter = napi.wrapCallback(0, BeaconStateView_nextSyncCommittee) },
+            .{ .utf8name = "currentSyncCommitteeIndexed", .getter = napi.wrapCallback(0, BeaconStateView_currentSyncCommitteeIndexed) },
             .{ .utf8name = "getBalance", .method = napi.wrapCallback(1, BeaconStateView_getBalance) },
             .{ .utf8name = "isExecutionEnabled", .method = napi.wrapCallback(2, BeaconStateView_isExecutionEnabled) },
             .{ .utf8name = "isExecutionStateType", .method = napi.wrapCallback(0, BeaconStateView_isExecutionStateType) },

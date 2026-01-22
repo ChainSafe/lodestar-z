@@ -23,6 +23,12 @@ interface SyncCommittee {
   aggregate_pubkey: Uint8Array;
 }
 
+// reference: https://github.com/ChainSafe/lodestar/blob/b6d377a93c39aa17d19408e119208a0733dcba3c/packages/state-transition/src/cache/syncCommitteeCache.ts#L8-L20
+interface SyncCommitteeCache {
+  validatorIndices: Uint32Array;
+  validatorIndexMap: Map<number, number[]>;
+}
+
 declare class BeaconStateView {
   static createFromBytes(fork: string, bytes: Uint8Array): BeaconStateView;
   slot: number;
@@ -38,6 +44,7 @@ declare class BeaconStateView {
   proposersNextEpoch: number[] | null;
   currentSyncCommittee: SyncCommittee;
   nextSyncCommittee: SyncCommittee;
+  currentSyncCommitteeIndexed: SyncCommitteeCache;
   getBalance(index: number): bigint;
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   isExecutionStateType(): boolean;
