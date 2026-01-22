@@ -48,6 +48,7 @@ declare class BeaconStateView {
   currentSyncCommitteeIndexed: SyncCommitteeCache;
   syncProposerReward: number;
   previousEpochParticipation: number[];
+  currentEpochParticipation: number[];
   getBalance(index: number): bigint;
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   isExecutionStateType(): boolean;

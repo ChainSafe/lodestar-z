@@ -64,6 +64,7 @@ printDuration("nextSyncCommittee", () => state.nextSyncCommittee);
 printDuration("currentSyncCommitteeIndexed", () => state.currentSyncCommitteeIndexed);
 printDuration("syncProposerReward", () => state.syncProposerReward);
 printDuration("previousEpochParticipation", () => state.previousEpochParticipation);
+printDuration("currentEpochParticipation", () => state.currentEpochParticipation);
 printDuration("getBalance(0)", () => state.getBalance(0));
 printDuration("getBalance(100)", () => state.getBalance(100));
 printDuration("getFinalizedRootProof()", () => state.getFinalizedRootProof());
