@@ -75,4 +75,11 @@ printDuration("getEffectiveBalanceIncrementsZeroInactive()", () => state.getEffe
 printDuration("computeUnrealizedCheckpoints()", () => state.computeUnrealizedCheckpoints());
 printDuration("serialize", () => state.serialize());
 printDuration("serializedSize", () => state.serializedSize());
+printDuration("serializeToBytes", () => {
+  const size = state.serializedSize();
+  const output = new Uint8Array(size);
+  const bytesWritten = state.serializeToBytes(output, 0);
+  console.log(`  wrote ${bytesWritten} bytes`);
+  return output;
+});
 printDuration("hashTreeRoot", () => state.hashTreeRoot());

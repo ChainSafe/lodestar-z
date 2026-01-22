@@ -82,6 +82,7 @@ declare class BeaconStateView {
   };
   serialize(): Uint8Array;
   serializedSize(): number;
+  serializeToBytes(output: Uint8Array, offset: number): number;
   hashTreeRoot(): Uint8Array;
 }
 
