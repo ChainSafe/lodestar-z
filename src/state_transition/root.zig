@@ -5,6 +5,7 @@ pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSignin
 pub const BeaconBlock = @import("./types/beacon_block.zig").BeaconBlock;
 pub const BeaconBlockBody = @import("./types/beacon_block.zig").BeaconBlockBody;
 pub const BeaconState = @import("./types/beacon_state.zig").BeaconState;
+pub const ExecutionPayloadHeader = @import("./types/execution_payload.zig").ExecutionPayloadHeader;
 pub const CachedBeaconState = @import("./cache/state_cache.zig").CachedBeaconState;
 pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
 
