@@ -213,6 +213,12 @@ pub fn BeaconStateView_currentSyncCommitteeIndexed(env: napi.Env, cb: napi.Callb
     return obj;
 }
 
+pub fn BeaconStateView_syncProposerReward(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const sync_proposer_reward = cached_state.getEpochCache().sync_proposer_reward;
+    return try env.createInt64(@intCast(sync_proposer_reward));
+}
+
 pub fn BeaconStateView_getBalance(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const index: u64 = @intCast(try cb.arg(0).getValueInt64());
@@ -317,6 +323,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "currentSyncCommittee", .getter = napi.wrapCallback(0, BeaconStateView_currentSyncCommittee) },
             .{ .utf8name = "nextSyncCommittee", .getter = napi.wrapCallback(0, BeaconStateView_nextSyncCommittee) },
             .{ .utf8name = "currentSyncCommitteeIndexed", .getter = napi.wrapCallback(0, BeaconStateView_currentSyncCommitteeIndexed) },
+            .{ .utf8name = "syncProposerReward", .getter = napi.wrapCallback(0, BeaconStateView_syncProposerReward) },
             .{ .utf8name = "getBalance", .method = napi.wrapCallback(1, BeaconStateView_getBalance) },
             .{ .utf8name = "isExecutionEnabled", .method = napi.wrapCallback(2, BeaconStateView_isExecutionEnabled) },
             .{ .utf8name = "isExecutionStateType", .method = napi.wrapCallback(0, BeaconStateView_isExecutionStateType) },
