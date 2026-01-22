@@ -9,7 +9,7 @@ const sumTargetUnslashedBalanceIncrements = @import("../utils/target_unslashed_b
 const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
 const types = @import("consensus_types");
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const RootCache = @import("../cache/root_cache.zig");
+const RootCache = @import("../cache/root_cache.zig").RootCache;
 const getAttestationParticipationStatus = @import("../block//process_attestation_altair.zig").getAttestationParticipationStatus;
 
 pub fn upgradeStateToAltair(
@@ -55,7 +55,7 @@ pub fn upgradeStateToAltair(
     var previous_epoch_participation = try translateParticipation(
         allocator,
         epoch_cache,
-        &root_cache,
+        root_cache,
         validators_count,
         try phase0_state.previousEpochPendingAttestations(),
     );
@@ -65,7 +65,7 @@ pub fn upgradeStateToAltair(
     var current_epoch_participation = try translateParticipation(
         allocator,
         epoch_cache,
-        &root_cache,
+        root_cache,
         validators_count,
         try phase0_state.currentEpochPendingAttestations(),
     );

@@ -7,7 +7,7 @@ const c = @import("constants");
 const blst = @import("blst");
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const Root = types.primitive.Root.Type;
-const SignedBeaconBlock = @import("../types/beacon_block.zig").SignedBeaconBlock;
+const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 const verifySingleSignatureSet = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
 
 pub fn verifyBlsToExecutionChangeSignature(config: *const BeaconConfig, signed_bls_to_execution_change: *const SignedBLSToExecutionChange) !bool {
@@ -28,7 +28,7 @@ pub fn getBlsToExecutionChangeSignatureSet(config: *const BeaconConfig, signed_b
     };
 }
 
-pub fn getBlsToExecutionChangeSignatureSets(config: *const BeaconConfig, signed_block: *const SignedBeaconBlock, out: std.ArrayList(SingleSignatureSet)) !void {
+pub fn getBlsToExecutionChangeSignatureSets(config: *const BeaconConfig, signed_block: *const AnySignedBeaconBlock, out: std.ArrayList(SingleSignatureSet)) !void {
     const bls_to_execution_changes = signed_block.beaconBlock().beaconBlockBody().blsToExecutionChanges().items;
     for (bls_to_execution_changes) |signed_bls_to_execution_change| {
         const signature_set = try getBlsToExecutionChangeSignatureSet(config, signed_bls_to_execution_change);

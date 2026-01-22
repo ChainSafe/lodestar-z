@@ -27,7 +27,7 @@ pub fn processEpoch(
     comptime fork: ForkSeq,
     allocator: std.mem.Allocator,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
     cache: *EpochTransitionCache,
 ) !void {
@@ -78,11 +78,20 @@ pub fn processEpoch(
     }
 }
 
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
 test "processEpoch - sanity" {
-    try @import("../test_utils/test_runner.zig").TestRunner(processEpoch, .{
-        .alloc = true,
-        .err_return = true,
-        .void_return = true,
-    }).testProcessEpochFn();
-    defer @import("../state_transition.zig").deinitStateTransition();
+    const allocator = std.testing.allocator;
+
+    var test_state = try TestCachedBeaconState.init(allocator, 10_000);
+    defer test_state.deinit();
+
+    try processEpoch(
+        .electra,
+        allocator,
+        test_state.cached_state.config,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+    );
 }

@@ -5,8 +5,8 @@ const ForkSeq = @import("config").ForkSeq;
 const isFixedType = @import("ssz").isFixedType;
 const state_transition = @import("state_transition");
 const Node = @import("persistent_merkle_tree").Node;
-const SignedBeaconBlock = state_transition.SignedBeaconBlock;
-const BeaconState = state_transition.BeaconState;
+const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 
 const types = @import("consensus_types");
@@ -54,11 +54,11 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
             try loadSszSnappyValue(ForkPreTypes.BeaconState, allocator, dir, "pre.ssz_snappy", &pre_state);
             defer ForkPreTypes.BeaconState.deinit(allocator, &pre_state);
 
-            const pre_state_all_forks = try allocator.create(BeaconState);
+            const pre_state_all_forks = try allocator.create(AnyBeaconState);
             errdefer allocator.destroy(pre_state_all_forks);
 
             pre_state_all_forks.* = @unionInit(
-                BeaconState,
+                AnyBeaconState,
                 fork_pre.name(),
                 try ForkPreTypes.BeaconState.TreeView.fromValue(allocator, pool, &pre_state),
             );
@@ -72,11 +72,11 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
             try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "pre.ssz_snappy", &pre_state);
             defer ForkTypes.BeaconState.deinit(allocator, &pre_state);
 
-            const pre_state_all_forks = try allocator.create(BeaconState);
+            const pre_state_all_forks = try allocator.create(AnyBeaconState);
             errdefer allocator.destroy(pre_state_all_forks);
 
             pre_state_all_forks.* = @unionInit(
-                BeaconState,
+                AnyBeaconState,
                 fork.name(),
                 try ForkTypes.BeaconState.TreeView.fromValue(allocator, pool, &pre_state),
             );
@@ -88,17 +88,17 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
         }
 
         /// consumer should deinit the returned state and destroy the pointer
-        pub fn loadPostState(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !?*BeaconState {
+        pub fn loadPostState(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !?*AnyBeaconState {
             if (dir.statFile("post.ssz_snappy")) |_| {
                 var post_state = ForkTypes.BeaconState.default_value;
                 try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", &post_state);
                 defer ForkTypes.BeaconState.deinit(allocator, &post_state);
 
-                const post_state_all_forks = try allocator.create(BeaconState);
+                const post_state_all_forks = try allocator.create(AnyBeaconState);
                 errdefer allocator.destroy(post_state_all_forks);
 
                 post_state_all_forks.* = @unionInit(
-                    BeaconState,
+                    AnyBeaconState,
                     fork.name(),
                     try ForkTypes.BeaconState.TreeView.fromValue(allocator, pool, &post_state),
                 );
@@ -134,13 +134,13 @@ pub fn loadBlsSetting(allocator: std.mem.Allocator, dir: std.fs.Dir) BlsSetting 
 
 /// load SignedBeaconBlock from file using runtime fork
 /// consumer should deinit the returned block and destroy the pointer
-pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: std.fs.Dir, file_name: []const u8) !SignedBeaconBlock {
+pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: std.fs.Dir, file_name: []const u8) !AnySignedBeaconBlock {
     return switch (fork) {
         .phase0 => blk: {
             const out = try allocator.create(phase0.SignedBeaconBlock.Type);
             out.* = phase0.SignedBeaconBlock.default_value;
             try loadSszSnappyValue(types.phase0.SignedBeaconBlock, allocator, dir, file_name, out);
-            break :blk SignedBeaconBlock{
+            break :blk AnySignedBeaconBlock{
                 .phase0 = out,
             };
         },
@@ -148,7 +148,7 @@ pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: s
             const out = try allocator.create(altair.SignedBeaconBlock.Type);
             out.* = altair.SignedBeaconBlock.default_value;
             try loadSszSnappyValue(types.altair.SignedBeaconBlock, allocator, dir, file_name, out);
-            break :blk SignedBeaconBlock{
+            break :blk AnySignedBeaconBlock{
                 .altair = out,
             };
         },
@@ -156,47 +156,47 @@ pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: s
             const out = try allocator.create(bellatrix.SignedBeaconBlock.Type);
             out.* = bellatrix.SignedBeaconBlock.default_value;
             try loadSszSnappyValue(types.bellatrix.SignedBeaconBlock, allocator, dir, file_name, out);
-            break :blk SignedBeaconBlock{
-                .bellatrix = out,
+            break :blk AnySignedBeaconBlock{
+                .full_bellatrix = out,
             };
         },
         .capella => blk: {
             const out = try allocator.create(capella.SignedBeaconBlock.Type);
             out.* = capella.SignedBeaconBlock.default_value;
             try loadSszSnappyValue(types.capella.SignedBeaconBlock, allocator, dir, file_name, out);
-            break :blk SignedBeaconBlock{
-                .capella = out,
+            break :blk AnySignedBeaconBlock{
+                .full_capella = out,
             };
         },
         .deneb => blk: {
             const out = try allocator.create(deneb.SignedBeaconBlock.Type);
             out.* = deneb.SignedBeaconBlock.default_value;
             try loadSszSnappyValue(types.deneb.SignedBeaconBlock, allocator, dir, file_name, out);
-            break :blk SignedBeaconBlock{
-                .deneb = out,
+            break :blk AnySignedBeaconBlock{
+                .full_deneb = out,
             };
         },
         .electra => blk: {
             const out = try allocator.create(electra.SignedBeaconBlock.Type);
             out.* = electra.SignedBeaconBlock.default_value;
             try loadSszSnappyValue(types.electra.SignedBeaconBlock, allocator, dir, file_name, out);
-            break :blk SignedBeaconBlock{
-                .electra = out,
+            break :blk AnySignedBeaconBlock{
+                .full_electra = out,
             };
         },
         .fulu => blk: {
             const out = try allocator.create(fulu.SignedBeaconBlock.Type);
             out.* = fulu.SignedBeaconBlock.default_value;
             try loadSszSnappyValue(types.fulu.SignedBeaconBlock, allocator, dir, file_name, out);
-            break :blk SignedBeaconBlock{
-                .fulu = out,
+            break :blk AnySignedBeaconBlock{
+                .full_fulu = out,
             };
         },
     };
 }
 
 /// TODO: move this to SignedBeaconBlock deinit method if this is useful there
-pub fn deinitSignedBeaconBlock(signed_block: SignedBeaconBlock, allocator: std.mem.Allocator) void {
+pub fn deinitSignedBeaconBlock(signed_block: AnySignedBeaconBlock, allocator: std.mem.Allocator) void {
     switch (signed_block) {
         .phase0 => |b| {
             phase0.SignedBeaconBlock.deinit(allocator, @constCast(b));
@@ -248,7 +248,7 @@ pub fn loadSszSnappyValue(comptime ST: type, allocator: std.mem.Allocator, dir: 
     }
 }
 
-pub fn expectEqualBeaconStates(expected: *BeaconState, actual: *BeaconState) !void {
+pub fn expectEqualBeaconStates(expected: *AnyBeaconState, actual: *AnyBeaconState) !void {
     if (expected.forkSeq() != actual.forkSeq()) return error.ForkMismatch;
 
     if (!std.mem.eql(
@@ -257,7 +257,7 @@ pub fn expectEqualBeaconStates(expected: *BeaconState, actual: *BeaconState) !vo
         try actual.hashTreeRoot(),
     )) {
         const Debug = struct {
-            fn printDiff(comptime StateST: type, expected_state: *BeaconState, actual_state: *BeaconState) !void {
+            fn printDiff(comptime StateST: type, expected_state: *AnyBeaconState, actual_state: *AnyBeaconState) !void {
                 var expected_view = StateST.TreeView{ .base_view = expected_state.baseView() };
                 var actual_view = StateST.TreeView{ .base_view = actual_state.baseView() };
 

@@ -120,7 +120,7 @@ pub fn processConsolidationRequest(
 fn isValidSwitchToCompoundRequest(
     comptime fork: ForkSeq,
     epoch_cache: *const EpochCache,
-    state: ForkBeaconState(fork),
+    state: *ForkBeaconState(fork),
     consolidation: *const ConsolidationRequest,
 ) !bool {
     // this check is mainly to make the compiler happy, pubkey is checked by the consumer already

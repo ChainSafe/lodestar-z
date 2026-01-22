@@ -1,27 +1,44 @@
 const ForkSeq = @import("config").ForkSeq;
 
+const BlockType = @import("./block_type.zig").BlockType;
 const ForkTypes = @import("./fork_types.zig").ForkTypes;
 const ForkExecutionPayload = @import("./fork_execution_payload.zig").ForkExecutionPayload;
 const ForkExecutionPayloadHeader = @import("./fork_execution_payload.zig").ForkExecutionPayloadHeader;
 
-pub const BlockType = enum {
-    full,
-    blinded,
-};
+pub fn ForkSignedBeaconBlock(comptime f: ForkSeq, comptime bt: BlockType) type {
+    return struct {
+        const Self = @This();
+
+        inner: switch (bt) {
+            .full => ForkTypes(f).SignedBeaconBlock.Type,
+            .blinded => ForkTypes(f).SignedBlindedBeaconBlock.Type,
+        },
+
+        pub const fork_seq = f;
+        pub const block_type = bt;
+
+        pub inline fn message(self: *const Self) *const ForkBeaconBlock(f, bt) {
+            return @ptrCast(&self.inner.body);
+        }
+    };
+}
 
 pub fn ForkBeaconBlock(comptime f: ForkSeq, comptime bt: BlockType) type {
     return struct {
         const Self = @This();
 
         inner: switch (bt) {
-            .full => ForkTypes(f).BeaconBlock,
-            .blinded => ForkTypes(f).BlindedBeaconBlock,
+            .full => ForkTypes(f).BeaconBlock.Type,
+            .blinded => switch (f) {
+                .phase0, .altair => @compileError("Blinded blocks are not defined for phase0 and altair forks"),
+                else => ForkTypes(f).BlindedBeaconBlock.Type,
+            },
         },
 
         pub const fork_seq = f;
         pub const block_type = bt;
 
-        pub inline fn slot(self: *const Self) ForkTypes(f).Slot {
+        pub inline fn slot(self: *const Self) u64 {
             return self.inner.slot;
         }
 
@@ -29,11 +46,11 @@ pub fn ForkBeaconBlock(comptime f: ForkSeq, comptime bt: BlockType) type {
             return self.inner.proposer_index;
         }
 
-        pub inline fn parentRoot(self: *const Self) ForkTypes(f).Root {
-            return self.inner.parent_root;
+        pub inline fn parentRoot(self: *const Self) *const [32]u8 {
+            return &self.inner.parent_root;
         }
 
-        pub inline fn body(self: *const Self) *const ForkBeaconBlockBody(f) {
+        pub inline fn body(self: *const Self) *const ForkBeaconBlockBody(f, bt) {
             return @ptrCast(&self.inner.body);
         }
     };
@@ -44,14 +61,14 @@ pub fn ForkBeaconBlockBody(comptime f: ForkSeq, comptime bt: BlockType) type {
         const Self = @This();
 
         inner: switch (bt) {
-            .full => ForkTypes(f).BeaconBlockBody,
-            .blinded => ForkTypes(f).BlindedBeaconBlockBody,
+            .full => ForkTypes(f).BeaconBlockBody.Type,
+            .blinded => ForkTypes(f).BlindedBeaconBlockBody.Type,
         },
 
         pub const fork_seq = f;
         pub const block_type = bt;
 
-        pub inline fn eth1Data(self: *const Self) *const ForkTypes(f).Eth1Data {
+        pub inline fn eth1Data(self: *const Self) *const ForkTypes(f).Eth1Data.Type {
             return &self.inner.eth1_data;
         }
 
@@ -69,6 +86,17 @@ pub fn ForkBeaconBlockBody(comptime f: ForkSeq, comptime bt: BlockType) type {
             }
 
             return @ptrCast(&self.inner.execution_payload_header);
+        }
+
+        pub inline fn randaoReveal(self: *const Self) *const [96]u8 {
+            return &self.inner.randao_reveal;
+        }
+
+        pub inline fn blobKzgCommitments(self: *const Self) []const [48]u8 {
+            if (f.lt(.deneb)) {
+                @compileError("blobKzgCommitments is only available for deneb and later forks");
+            }
+            return self.inner.blob_kzg_commitments.items;
         }
     };
 }

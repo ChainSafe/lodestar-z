@@ -31,11 +31,18 @@ pub fn processSyncCommitteeUpdates(
     }
 }
 
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
 test "processSyncCommitteeUpdates - sanity" {
-    try @import("../test_utils/test_runner.zig").TestRunner(processSyncCommitteeUpdates, .{
-        .alloc = true,
-        .err_return = true,
-        .void_return = true,
-    }).testProcessEpochFn();
-    defer @import("../state_transition.zig").deinitStateTransition();
+    const allocator = std.testing.allocator;
+
+    var test_state = try TestCachedBeaconState.init(allocator, 10_000);
+    defer test_state.deinit();
+
+    try processSyncCommitteeUpdates(
+        .electra,
+        allocator,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+    );
 }

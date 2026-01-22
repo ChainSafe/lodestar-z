@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
+const ct = @import("consensus_types");
 
 const ForkTypes = @import("./fork_types.zig").ForkTypes;
 
@@ -42,12 +43,12 @@ pub fn ForkExecutionPayload(comptime f: ForkSeq) type {
             out.gas_used = self.inner.gas_used;
             out.timestamp = self.inner.timestamp;
             out.extra_data = try self.inner.extra_data.clone(allocator);
-            errdefer allocator.free(out.extra_data);
+            errdefer out.extra_data.deinit(allocator);
             out.base_fee_per_gas = self.inner.base_fee_per_gas;
             out.block_hash = self.inner.block_hash;
-            try ForkTypes(f).Transactions.hashTreeRoot(allocator, &self.inner.transactions, &out.transactions_root);
+            try ct.bellatrix.Transactions.hashTreeRoot(allocator, &self.inner.transactions, &out.transactions_root);
             if (comptime f.gte(.capella)) {
-                try ForkTypes(f).Withdrawals.hashTreeRoot(allocator, &self.inner.withdrawals, &out.withdrawals_root);
+                try ct.capella.Withdrawals.hashTreeRoot(allocator, &self.inner.withdrawals, &out.withdrawals_root);
             }
             if (comptime f.gte(.deneb)) {
                 out.blob_gas_used = self.inner.blob_gas_used;

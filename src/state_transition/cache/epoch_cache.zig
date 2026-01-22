@@ -18,7 +18,7 @@ const EpochShuffling = @import("../utils//epoch_shuffling.zig").EpochShuffling;
 const EpochShufflingRc = @import("../utils/epoch_shuffling.zig").EpochShufflingRc;
 const EffectiveBalanceIncrementsRc = @import("./effective_balance_increments.zig").EffectiveBalanceIncrementsRc;
 const EffectiveBalanceIncrements = @import("./effective_balance_increments.zig").EffectiveBalanceIncrements;
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
@@ -43,7 +43,8 @@ const isActiveValidator = @import("../utils/validator.zig").isActiveValidator;
 const getChurnLimit = @import("../utils/validator.zig").getChurnLimit;
 const getActivationChurnLimit = @import("../utils/validator.zig").getActivationChurnLimit;
 
-const Attestation = @import("../types/attestation.zig").Attestation;
+const ForkSeq = @import("config").ForkSeq;
+const ForkTypes = @import("fork_types").ForkTypes;
 
 const syncPubkeys = @import("./pubkey_cache.zig").syncPubkeys;
 
@@ -141,7 +142,7 @@ pub const EpochCache = struct {
 
     epoch: Epoch,
 
-    pub fn createFromState(allocator: Allocator, state: *BeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*EpochCache {
+    pub fn createFromState(allocator: Allocator, state: *AnyBeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*EpochCache {
         const config = immutable_data.config;
         const pubkey_to_index = immutable_data.pubkey_to_index;
         const index_to_pubkey = immutable_data.index_to_pubkey;
@@ -170,11 +171,7 @@ pub const EpochCache = struct {
         const effective_balance_increment = try getEffectiveBalanceIncrementsWithLen(allocator, validator_count);
         const state_fork_seq = state.forkSeq();
         const total_slashings_by_increment = switch (state_fork_seq) {
-            inline else => |f| blk: {
-                const fork_state = &@field(state, @tagName(f));
-                const fork_state_ptr = @as(*ForkBeaconState(f), @ptrCast(fork_state));
-                break :blk try getTotalSlashingsByIncrement(f, fork_state_ptr);
-            },
+            inline else => |f| try getTotalSlashingsByIncrement(f, state.castToFork(f)),
         };
         var previous_active_indices_array_list = std.ArrayList(ValidatorIndex).init(allocator);
         defer previous_active_indices_array_list.deinit();
@@ -241,11 +238,7 @@ pub const EpochCache = struct {
         const fork_seq = config.forkSeqAtEpoch(current_epoch);
         var current_proposer_seed: [32]u8 = undefined;
         switch (state.forkSeq()) {
-            inline else => |f| {
-                const fork_state = &@field(state, @tagName(f));
-                const fork_state_ptr = @as(*ForkBeaconState(f), @ptrCast(fork_state));
-                try getSeed(f, fork_state_ptr, current_epoch, c.DOMAIN_BEACON_PROPOSER, &current_proposer_seed);
-            },
+            inline else => |f| try getSeed(f, state.castToFork(f), current_epoch, c.DOMAIN_BEACON_PROPOSER, &current_proposer_seed),
         }
         var proposers = [_]ValidatorIndex{0} ** preset.SLOTS_PER_EPOCH;
         if (current_shuffling.active_indices.len > 0) {
@@ -385,7 +378,7 @@ pub const EpochCache = struct {
     }
 
     pub fn clone(self: *const EpochCache, allocator: Allocator) !*EpochCache {
-        const epoch_cache = .EpochCache{
+        const epoch_cache = EpochCache{
             .allocator = self.allocator,
             .config = self.config,
             // Common append-only structures shared with all states, no need to clone
@@ -394,6 +387,7 @@ pub const EpochCache = struct {
             // Immutable data
             .proposers = self.proposers,
             .proposers_prev_epoch = self.proposers_prev_epoch,
+            .proposers_next_epoch = self.proposers_next_epoch,
             // reuse the same instances, increase reference count
             .previous_shuffling = self.previous_shuffling.acquire(),
             .current_shuffling = self.current_shuffling.acquire(),
@@ -449,7 +443,7 @@ pub const EpochCache = struct {
         return self.effective_balance_increment.get();
     }
 
-    pub fn afterProcessEpoch(self: *EpochCache, state: *BeaconState, epoch_transition_cache: *const EpochTransitionCache) !void {
+    pub fn afterProcessEpoch(self: *EpochCache, state: *AnyBeaconState, epoch_transition_cache: *const EpochTransitionCache) !void {
         const upcoming_epoch = self.epoch + 1;
         const epoch_after_upcoming = upcoming_epoch + 1;
 
@@ -493,41 +487,41 @@ pub const EpochCache = struct {
     }
 
     /// At fork boundary, this runs post-fork logic and after `upgradeState*`.
-    pub fn finalProcessEpoch(self: *EpochCache, cached_state: *const CachedBeaconState) !void {
-        const state = cached_state.state;
-
+    pub fn finalProcessEpoch(self: *EpochCache, state: *AnyBeaconState) !void {
         self.proposers_prev_epoch = self.proposers;
-        // Post-Fulu, EIP-7917 introduced the `proposer_lookahead`
-        // field which we already processed in `processProposerLookahead`.
-        // Proposers are to be computed pre-fulu to be cached within `self`.
-        if (self.epoch >= self.config.chain.FULU_FORK_EPOCH) {
-            var proposer_lookahead = try state.proposerLookahead();
-            self.proposers_next_epoch = undefined;
-            for (0..preset.SLOTS_PER_EPOCH) |i| {
-                self.proposers[i] = @intCast(try proposer_lookahead.get(i));
-                self.proposers_next_epoch.?[i] = @intCast(try proposer_lookahead.get(preset.SLOTS_PER_EPOCH + i));
-            }
-        } else {
-            var upcoming_proposer_seed: [32]u8 = undefined;
-            switch (state.forkSeq()) {
-                inline else => |f| {
-                    const fork_state = &@field(state, @tagName(f));
-                    const fork_state_ptr = @as(*ForkBeaconState(f), @ptrCast(fork_state));
-                    try getSeed(f, fork_state_ptr, self.epoch, c.DOMAIN_BEACON_PROPOSER, &upcoming_proposer_seed);
-                },
-            }
-            const fork_seq = self.config.forkSeqAtEpoch(self.epoch);
-            switch (fork_seq) {
-                inline else => |f| try computeProposers(
-                    f,
-                    self.allocator,
-                    upcoming_proposer_seed,
-                    self.epoch,
-                    self.current_shuffling.get().active_indices,
-                    self.effective_balance_increment.get(),
-                    &self.proposers,
-                ),
-            }
+        switch (state.forkSeq()) {
+            inline else => |fork| {
+                const fork_state = state.castToFork(fork);
+                if (comptime fork.gte(.fulu)) {
+                    // Post-Fulu, EIP-7917 introduced the `proposer_lookahead`
+                    // field which we already processed in `processProposerLookahead`.
+                    // Proposers are to be computed pre-fulu to be cached within `self`.
+                    var proposer_lookahead = try fork_state.proposerLookahead();
+                    self.proposers_next_epoch = undefined;
+                    for (0..preset.SLOTS_PER_EPOCH) |i| {
+                        self.proposers[i] = @intCast(try proposer_lookahead.get(i));
+                        self.proposers_next_epoch.?[i] = @intCast(try proposer_lookahead.get(preset.SLOTS_PER_EPOCH + i));
+                    }
+                } else {
+                    var upcoming_proposer_seed: [32]u8 = undefined;
+                    try getSeed(
+                        fork,
+                        fork_state,
+                        self.epoch,
+                        c.DOMAIN_BEACON_PROPOSER,
+                        &upcoming_proposer_seed,
+                    );
+                    try computeProposers(
+                        fork,
+                        self.allocator,
+                        upcoming_proposer_seed,
+                        self.epoch,
+                        self.current_shuffling.get().active_indices,
+                        self.effective_balance_increment.get(),
+                        &self.proposers,
+                    );
+                }
+            },
         }
     }
 
@@ -623,10 +617,14 @@ pub const EpochCache = struct {
         };
     }
 
-    pub fn getAttestingIndices(self: *const EpochCache, attestation: Attestation) !std.ArrayList(ValidatorIndex) {
-        return switch (attestation.*) {
-            .phase0 => |phase0_attestation| self.getAttestingIndicesPhase0(&phase0_attestation),
-            .electra => |electra_attestation| self.getAttestingIndicesElectra(&electra_attestation),
+    pub fn getAttestingIndices(
+        self: *const EpochCache,
+        comptime fork: ForkSeq,
+        attestation: *const ForkTypes(fork).Attestation.Type,
+    ) !std.ArrayList(ValidatorIndex) {
+        return switch (fork) {
+            .phase0 => self.getAttestingIndicesPhase0(attestation),
+            .electra => self.getAttestingIndicesElectra(attestation),
         };
     }
 

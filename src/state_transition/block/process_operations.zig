@@ -24,7 +24,7 @@ pub fn processOperations(
     comptime fork: ForkSeq,
     allocator: std.mem.Allocator,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
     comptime block_type: BlockType,
     body: *const ForkBeaconBlockBody(fork, block_type),
@@ -43,7 +43,16 @@ pub fn processOperations(
     }
 
     for (body.inner.attester_slashings.items) |*attester_slashing| {
-        try processAttesterSlashing(fork, allocator, config, epoch_cache, state, current_epoch, attester_slashing, opts.verify_signature);
+        try processAttesterSlashing(
+            fork,
+            allocator,
+            config,
+            epoch_cache,
+            state,
+            current_epoch,
+            attester_slashing,
+            opts.verify_signature,
+        );
     }
 
     try processAttestations(fork, allocator, config, epoch_cache, state, body.inner.attestations.items, opts.verify_signature);
@@ -79,29 +88,25 @@ pub fn processOperations(
 }
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
-const Block = @import("../types/block.zig").Block;
-const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
-const Node = @import("persistent_merkle_tree").Node;
+const AnyBeaconBlock = @import("fork_types").AnyBeaconBlock;
 
 test "process operations" {
     const allocator = std.testing.allocator;
 
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, 256);
     defer test_state.deinit();
 
-    const electra_block = ct.electra.BeaconBlock.default_value;
-    const beacon_block = BeaconBlock{ .electra = &electra_block };
+    var electra_block = ct.electra.BeaconBlock.default_value;
+    const beacon_block = AnyBeaconBlock{ .full_electra = &electra_block };
 
-    const block = Block{ .regular = beacon_block };
-    const config = test_state.cached_state.config;
-    const epoch_cache = test_state.cached_state.getEpochCache();
-    const fork_state = switch (test_state.cached_state.state.*) {
-        .electra => |*state_view| @as(*ForkBeaconState(.electra), @ptrCast(state_view)),
-        else => return error.UnexpectedForkSeq,
-    };
-    const body = @as(*const ForkBeaconBlockBody(.electra, .full), @ptrCast(block.beaconBlockBody()));
-    try processOperations(.electra, allocator, config, epoch_cache, fork_state, .full, body, .{});
+    try processOperations(
+        .electra,
+        allocator,
+        test_state.cached_state.config,
+        test_state.cached_state.getEpochCache(),
+        try test_state.cached_state.state.tryCastToFork(.electra),
+        .full,
+        beacon_block.beaconBlockBody().castToFork(.full, .electra),
+        .{},
+    );
 }

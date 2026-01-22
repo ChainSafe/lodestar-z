@@ -13,7 +13,7 @@ pub fn getEth1DepositCount(comptime fork: ForkSeq, state: *ForkBeaconState(fork)
 
     const eth1_deposit_index = try state.eth1DepositIndex();
 
-    if (state.forkSeq().gte(.electra)) {
+    if (comptime fork.gte(.electra)) {
         const deposit_requests_start_index = try state.depositRequestsStartIndex();
         const eth1_data_index_limit: u64 = if (deposit_count < deposit_requests_start_index)
             deposit_count

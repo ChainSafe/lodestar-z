@@ -2,10 +2,10 @@ const std = @import("std");
 const Node = @import("persistent_merkle_tree").Node;
 const ForkSeq = @import("config").ForkSeq;
 const state_transition = @import("state_transition");
-const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
-const SignedBeaconBlock = state_transition.SignedBeaconBlock;
-const BeaconState = state_transition.BeaconState;
 const CachedBeaconState = state_transition.CachedBeaconState;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const test_case = @import("../test_case.zig");
 const expectEqualBeaconStates = test_case.expectEqualBeaconStates;
 const TestCaseUtils = test_case.TestCaseUtils;
@@ -17,8 +17,8 @@ pub fn Transition(comptime fork: ForkSeq) type {
 
     return struct {
         pre: TestCachedBeaconState,
-        post: ?*BeaconState,
-        blocks: []SignedBeaconBlock,
+        post: ?*AnyBeaconState,
+        blocks: []AnySignedBeaconBlock,
 
         const Self = @This();
 
@@ -77,7 +77,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
             } else null;
 
             // load blocks
-            tc.blocks = try allocator.alloc(SignedBeaconBlock, blocks_count);
+            tc.blocks = try allocator.alloc(AnySignedBeaconBlock, blocks_count);
             errdefer {
                 for (tc.blocks) |block| {
                     test_case.deinitSignedBeaconBlock(block, allocator);

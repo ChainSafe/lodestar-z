@@ -8,7 +8,8 @@ const Epoch = types.primitive.Epoch.Type;
 const preset = @import("preset").preset;
 const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
@@ -199,8 +200,8 @@ pub const EpochTransitionCache = struct {
         allocator: Allocator,
         config: *const BeaconConfig,
         epoch_cache: *EpochCache,
-        state: *BeaconState,
-    ) !*EpochTransitionCache {
+        state: *AnyBeaconState,
+    ) !EpochTransitionCache {
         const fork_seq = state.forkSeq();
         const current_epoch = epoch_cache.epoch;
         const prev_epoch = epoch_cache.getPreviousShuffling().epoch;
@@ -351,7 +352,7 @@ pub const EpochTransitionCache = struct {
         std.mem.sort(ValidatorActivation, validator_activation_list.items, {}, sort_fn);
 
         if (fork_seq == ForkSeq.phase0) {
-            const fork_state = &state.phase0;
+            const fork_state = try state.tryCastToFork(.phase0);
             try reused_cache.proposer_indices.resize(validator_count);
             // in typescript we prefill with -1 as unset value, in zig we use  validator_count
             @memset(reused_cache.proposer_indices.items, validator_count);
@@ -490,10 +491,7 @@ pub const EpochTransitionCache = struct {
             try indices_eligible_for_activation.append(activation.validator_index);
         }
 
-        const epoch_transition_cache = try allocator.create(EpochTransitionCache);
-        errdefer allocator.destroy(epoch_transition_cache);
-
-        epoch_transition_cache.* = .{
+        return .{
             .prev_epoch = prev_epoch,
             .current_epoch = current_epoch,
             .total_active_stake_by_increment = total_active_stake_by_increment,
@@ -521,8 +519,6 @@ pub const EpochTransitionCache = struct {
             // Will be assigned in processRewardsAndPenalties()
             .balances = null,
         };
-
-        return epoch_transition_cache;
     }
 
     pub fn deinit(self: *EpochTransitionCache) void {
@@ -547,17 +543,19 @@ pub const EpochTransitionCache = struct {
 test "EpochTransitionCache - finalProcessEpoch" {
     const allocator = std.testing.allocator;
 
-    const Node = @import("persistent_merkle_tree").Node;
-    var pool = try Node.Pool.init(allocator, 500_000);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, 256);
     defer test_state.deinit();
 
-    try upgradeStateToFulu(allocator, test_state.cached_state);
+    var fulu_state = try upgradeStateToFulu(
+        allocator,
+        test_state.cached_state.config,
+        test_state.cached_state.getEpochCache(),
+        try test_state.cached_state.state.tryCastToFork(.electra),
+    );
+    defer fulu_state.deinit();
 
     const epoch_cache = test_state.cached_state.getEpochCache();
-    try epoch_cache.finalProcessEpoch(test_state.cached_state);
+    try epoch_cache.finalProcessEpoch(test_state.cached_state.state);
 }
 
 test "EpochTransitionCache.beforeProcessEpoch" {
@@ -565,18 +563,16 @@ test "EpochTransitionCache.beforeProcessEpoch" {
     const validator_count_arr = &.{ 256, 10_000 };
 
     inline for (validator_count_arr) |validator_count| {
-        const Node = @import("persistent_merkle_tree").Node;
-        var pool = try Node.Pool.init(allocator, 500_000);
-        defer pool.deinit();
-
-        var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);
+        var test_state = try TestCachedBeaconState.init(allocator, validator_count);
         defer test_state.deinit();
 
-        var epoch_transition_cache = try EpochTransitionCache.init(allocator, test_state.cached_state);
-        defer {
-            epoch_transition_cache.deinit();
-            allocator.destroy(epoch_transition_cache);
-        }
+        var epoch_transition_cache = try EpochTransitionCache.init(
+            allocator,
+            test_state.cached_state.config,
+            test_state.cached_state.getEpochCache(),
+            test_state.cached_state.state,
+        );
+        defer epoch_transition_cache.deinit();
     }
 
     deinitStateTransition();

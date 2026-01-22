@@ -4,7 +4,7 @@ const active_preset = @import("preset").active_preset;
 const std = @import("std");
 const state_transition = @import("state_transition");
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
-const BeaconState = state_transition.BeaconState;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const EpochTransitionCache = state_transition.EpochTransitionCache;
 const test_case = @import("../test_case.zig");
 const TestCaseUtils = test_case.TestCaseUtils;
@@ -40,7 +40,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
     return struct {
         pre: TestCachedBeaconState,
         // a null post state means the test is expected to fail
-        post: ?*BeaconState,
+        post: ?*AnyBeaconState,
 
         const Self = @This();
 

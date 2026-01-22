@@ -4,7 +4,7 @@ const ssz = @import("consensus_types");
 const ForkSeq = @import("config").ForkSeq;
 const state_transition = @import("state_transition");
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
-const BeaconState = state_transition.BeaconState;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const CachedBeaconState = state_transition.CachedBeaconState;
 const test_case = @import("../test_case.zig");
 const loadSszValue = test_case.loadSszSnappyValue;
@@ -30,7 +30,7 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
 
     return struct {
         pre: TestCachedBeaconState,
-        post: *BeaconState,
+        post: *AnyBeaconState,
         slots: u64,
 
         const Self = @This();
@@ -101,7 +101,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
     return struct {
         pre: TestCachedBeaconState,
         // a null post state means the test is expected to fail
-        post: ?*BeaconState,
+        post: ?*AnyBeaconState,
         blocks: []SignedBeaconBlock.Type,
         bls_setting: BlsSetting,
 

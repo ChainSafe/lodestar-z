@@ -18,7 +18,7 @@ const computeExitEpochAndUpdateChurn = @import("../utils/epoch.zig").computeExit
 pub fn processWithdrawalRequest(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
     withdrawal_request: *const WithdrawalRequest,
 ) !void {
@@ -53,7 +53,7 @@ pub fn processWithdrawalRequest(
     }
 
     // TODO Electra: Consider caching pendingPartialWithdrawals
-    const pending_balance_to_withdraw = try getPendingBalanceToWithdraw(state, validator_index);
+    const pending_balance_to_withdraw = try getPendingBalanceToWithdraw(fork, state, validator_index);
     var balances = try state.balances();
     const validator_balance = try balances.get(@intCast(validator_index));
 

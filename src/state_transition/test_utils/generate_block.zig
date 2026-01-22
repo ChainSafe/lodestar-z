@@ -14,10 +14,7 @@ const ForkBeaconState = @import("fork_types").ForkBeaconState;
 /// Generate a valid electra block for the given pre-state.
 pub fn generateElectraBlock(allocator: Allocator, cached_state: *CachedBeaconState, out: *types.electra.SignedBeaconBlock.Type) !void {
     const state = cached_state.state;
-    const fork_state = switch (state.*) {
-        .electra => |*state_view| @as(*ForkBeaconState(.electra), @ptrCast(state_view)),
-        else => return error.UnexpectedForkSeq,
-    };
+    const fork_state = try state.tryCastToFork(.electra);
     var attestations = types.electra.Attestations.default_value;
     // no need to fill up to MAX_ATTESTATIONS_ELECTRA
     const att_slot: Slot = (try state.slot()) - 2;

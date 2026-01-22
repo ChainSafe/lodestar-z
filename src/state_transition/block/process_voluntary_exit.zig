@@ -15,7 +15,7 @@ const FAR_FUTURE_EPOCH = c.FAR_FUTURE_EPOCH;
 pub fn processVoluntaryExit(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
     signed_voluntary_exit: *const SignedVoluntaryExit,
     verify_signature: bool,
@@ -59,9 +59,17 @@ pub fn isValidVoluntaryExit(
             current_epoch >= voluntary_exit.epoch and
             // verify the validator had been active long enough
             current_epoch >= activation_epoch + config.chain.SHARD_COMMITTEE_PERIOD and
-            (if (state.forkSeq().gte(.electra)) try getPendingBalanceToWithdraw(state, voluntary_exit.validator_index) == 0 else true) and
+            (if (comptime fork.gte(.electra)) try getPendingBalanceToWithdraw(
+                fork,
+                state,
+                voluntary_exit.validator_index,
+            ) == 0 else true) and
             // verify signature
-            if (verify_signature) try verifyVoluntaryExitSignature(fork, config, epoch_cache, state, signed_voluntary_exit) else true);
+            if (verify_signature) try verifyVoluntaryExitSignature(
+                config,
+                epoch_cache,
+                signed_voluntary_exit,
+            ) else true);
 }
 
 // TODO: unit test

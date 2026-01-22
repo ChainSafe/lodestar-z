@@ -41,8 +41,8 @@ pub fn initializeProposerLookahead(
         try getSeed(fork, state, epoch, c.DOMAIN_BEACON_PROPOSER, &seed);
 
         try computeProposers(
-            allocator,
             fork,
+            allocator,
             seed,
             epoch,
             active_indices,

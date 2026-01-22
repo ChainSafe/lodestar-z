@@ -9,7 +9,7 @@ const upgradeStateToDeneb = state_transition.upgradeStateToDeneb;
 const upgradeStateToElectra = state_transition.upgradeStateToElectra;
 const upgradeStateToFulu = state_transition.upgradeStateToFulu;
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
-const BeaconState = state_transition.BeaconState;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const test_case = @import("../test_case.zig");
 const TestCaseUtils = test_case.TestCaseUtils;
 const expectEqualBeaconStates = test_case.expectEqualBeaconStates;
@@ -39,7 +39,7 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
 
     return struct {
         pre: TestCachedBeaconState,
-        post: ?*BeaconState,
+        post: ?*AnyBeaconState,
 
         const Self = @This();
 

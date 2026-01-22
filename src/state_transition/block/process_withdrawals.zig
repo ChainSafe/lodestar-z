@@ -46,10 +46,10 @@ pub fn processWithdrawals(
 
     for (0..num_withdrawals) |i| {
         const withdrawal = expected_withdrawals[i];
-        try decreaseBalance(state, withdrawal.validator_index, withdrawal.amount);
+        try decreaseBalance(fork, state, withdrawal.validator_index, withdrawal.amount);
     }
 
-    if (state.forkSeq().gte(.electra)) {
+    if (comptime fork.gte(.electra)) {
         if (processed_partial_withdrawals_count > 0) {
             var pending_partial_withdrawals = try state.pendingPartialWithdrawals();
             const truncated = try pending_partial_withdrawals.sliceFrom(processed_partial_withdrawals_count);
@@ -86,7 +86,7 @@ pub fn getExpectedWithdrawals(
     comptime fork: ForkSeq,
     allocator: Allocator,
     epoch_cache: *const EpochCache,
-    state: ForkBeaconState(fork),
+    state: *ForkBeaconState(fork),
     withdrawals_result: *WithdrawalsResult,
     withdrawal_balances: *std.AutoHashMap(ValidatorIndex, usize),
 ) !void {
@@ -158,7 +158,7 @@ pub fn getExpectedWithdrawals(
         const withdraw_balance_gop = try withdrawal_balances.getOrPut(validator_index);
         const withdraw_balance: u64 = if (withdraw_balance_gop.found_existing) withdraw_balance_gop.value_ptr.* else 0;
         const val_balance = try balances.get(validator_index);
-        const balance = if (state.forkSeq().gte(.electra))
+        const balance = if (comptime fork.gte(.electra))
             // Deduct partially withdrawn balance already queued above
             if (val_balance > withdraw_balance) val_balance - withdraw_balance else 0
         else
@@ -167,7 +167,7 @@ pub fn getExpectedWithdrawals(
         const withdrawable_epoch = try validator.get("withdrawable_epoch");
         const withdrawal_credentials = try validator.getRoot("withdrawal_credentials");
         const effective_balance = try validator.get("effective_balance");
-        const has_withdrawable_credentials = if (state.forkSeq().gte(.electra)) hasExecutionWithdrawalCredential(withdrawal_credentials) else hasEth1WithdrawalCredential(withdrawal_credentials);
+        const has_withdrawable_credentials = if (comptime fork.gte(.electra)) hasExecutionWithdrawalCredential(withdrawal_credentials) else hasEth1WithdrawalCredential(withdrawal_credentials);
         // early skip for balance = 0 as its now more likely that validator has exited/slashed with
         // balance zero than not have withdrawal credentials set
         if (balance == 0 or !has_withdrawable_credentials) {
@@ -185,7 +185,7 @@ pub fn getExpectedWithdrawals(
                 .amount = balance,
             });
             withdrawal_index += 1;
-        } else if ((effective_balance == if (state.forkSeq().gte(.electra))
+        } else if ((effective_balance == if (comptime fork.gte(.electra))
             getMaxEffectiveBalance(withdrawal_credentials)
         else
             preset.MAX_EFFECTIVE_BALANCE) and balance > effective_balance)
@@ -216,22 +216,12 @@ pub fn getExpectedWithdrawals(
     withdrawals_result.processed_partial_withdrawals_count = processed_partial_withdrawals_count;
 }
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
-const Node = @import("persistent_merkle_tree").Node;
 
 test "process withdrawals - sanity" {
     const allocator = std.testing.allocator;
 
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, 256);
     defer test_state.deinit();
-
-    const epoch_cache = test_state.cached_state.getEpochCache();
-    const fork_state = switch (test_state.cached_state.state.*) {
-        .electra => |*state_view| @as(*ForkBeaconState(.electra), @ptrCast(state_view)),
-        else => return error.UnexpectedForkSeq,
-    };
 
     var withdrawals_result = WithdrawalsResult{
         .withdrawals = try Withdrawals.initCapacity(
@@ -246,6 +236,19 @@ test "process withdrawals - sanity" {
     var root: Root = undefined;
     try types.capella.Withdrawals.hashTreeRoot(allocator, &withdrawals_result.withdrawals, &root);
 
-    try getExpectedWithdrawals(.electra, allocator, epoch_cache, fork_state.*, &withdrawals_result, &withdrawal_balances);
-    try processWithdrawals(.electra, allocator, fork_state, withdrawals_result, root);
+    try getExpectedWithdrawals(
+        .electra,
+        allocator,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+        &withdrawals_result,
+        &withdrawal_balances,
+    );
+    try processWithdrawals(
+        .electra,
+        allocator,
+        test_state.cached_state.state.castToFork(.electra),
+        withdrawals_result,
+        root,
+    );
 }

@@ -30,8 +30,8 @@ const computeExitEpochAndUpdateChurn = @import("../utils/epoch.zig").computeExit
 pub fn initiateValidatorExit(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
-    state: ForkBeaconState(fork),
+    epoch_cache: *EpochCache,
+    state: *ForkBeaconState(fork),
     validator: *types.phase0.Validator.TreeView,
 ) !void {
     // return if validator already initiated exit
@@ -65,6 +65,6 @@ pub fn initiateValidatorExit(
 
     try validator.set(
         "withdrawable_epoch",
-        try std.math.add(u64, try validator.get("exit_epoch"), config.MIN_VALIDATOR_WITHDRAWABILITY_DELAY),
+        try std.math.add(u64, try validator.get("exit_epoch"), config.chain.MIN_VALIDATOR_WITHDRAWABILITY_DELAY),
     );
 }

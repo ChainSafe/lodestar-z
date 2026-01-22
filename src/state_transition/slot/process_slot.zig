@@ -1,9 +1,9 @@
 const std = @import("std");
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const preset = @import("preset").preset;
 const ZERO_HASH = @import("constants").ZERO_HASH;
 
-pub fn processSlot(state: *BeaconState) !void {
+pub fn processSlot(state: *AnyBeaconState) !void {
 
     // Cache state root
     const previous_state_root = try state.hashTreeRoot();

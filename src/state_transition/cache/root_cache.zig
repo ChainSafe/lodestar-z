@@ -19,15 +19,17 @@ pub fn RootCache(comptime fork: ForkSeq) type {
         block_root_epoch_cache: std.AutoHashMap(Epoch, *const Root),
         block_root_slot_cache: std.AutoHashMap(Slot, *const Root),
 
-        pub fn init(allocator: Allocator, state: *ForkBeaconState(fork)) !*RootCache {
-            const instance = try allocator.create(RootCache);
+        const Self = @This();
+
+        pub fn init(allocator: Allocator, state: *ForkBeaconState(fork)) !*Self {
+            const instance = try allocator.create(Self);
             errdefer allocator.destroy(instance);
 
             var current_justified_checkpoint: Checkpoint = undefined;
             var previous_justified_checkpoint: Checkpoint = undefined;
             try state.currentJustifiedCheckpoint(&current_justified_checkpoint);
             try state.previousJustifiedCheckpoint(&previous_justified_checkpoint);
-            instance.* = RootCache{
+            instance.* = Self{
                 .allocator = allocator,
                 .current_justified_checkpoint = current_justified_checkpoint,
                 .previous_justified_checkpoint = previous_justified_checkpoint,
@@ -39,7 +41,7 @@ pub fn RootCache(comptime fork: ForkSeq) type {
             return instance;
         }
 
-        pub fn getBlockRoot(self: *RootCache, epoch: Epoch) !*const Root {
+        pub fn getBlockRoot(self: *Self, epoch: Epoch) !*const Root {
             if (self.block_root_epoch_cache.get(epoch)) |root| {
                 return root;
             } else {
@@ -49,7 +51,7 @@ pub fn RootCache(comptime fork: ForkSeq) type {
             }
         }
 
-        pub fn getBlockRootAtSlot(self: *RootCache, slot: Slot) !*const Root {
+        pub fn getBlockRootAtSlot(self: *Self, slot: Slot) !*const Root {
             if (self.block_root_slot_cache.get(slot)) |root| {
                 return root;
             } else {
@@ -59,7 +61,7 @@ pub fn RootCache(comptime fork: ForkSeq) type {
             }
         }
 
-        pub fn deinit(self: *RootCache) void {
+        pub fn deinit(self: *Self) void {
             self.block_root_epoch_cache.deinit();
             self.block_root_slot_cache.deinit();
             self.allocator.destroy(self);

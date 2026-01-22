@@ -17,7 +17,7 @@ pub fn processBlsToExecutionChange(
 ) !void {
     const address_change = signed_bls_to_execution_change.message;
 
-    try isValidBlsToExecutionChange(fork, config, signed_bls_to_execution_change, true);
+    try isValidBlsToExecutionChange(fork, config, state, signed_bls_to_execution_change, true);
 
     var new_withdrawal_credentials: Root = [_]u8{0} ** 32;
     const validator_index = address_change.validator_index;

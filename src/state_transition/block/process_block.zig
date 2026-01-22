@@ -35,10 +35,10 @@ pub fn processBlock(
     comptime fork: ForkSeq,
     allocator: Allocator,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
     comptime block_type: BlockType,
-    block: ForkBeaconBlock(fork, block_type),
+    block: *const ForkBeaconBlock(fork, block_type),
     external_data: BlockExternalData,
     opts: ProcessBlockOpts,
     // TODO: metrics
@@ -96,7 +96,7 @@ pub fn processBlock(
         );
     }
 
-    try processRandao(fork, config, epoch_cache, state, block_type, body.*, block.proposerIndex(), opts.verify_signature);
+    try processRandao(fork, config, epoch_cache, state, block_type, body, block.proposerIndex(), opts.verify_signature);
     try processEth1Data(fork, state, body.eth1Data());
     try processOperations(fork, allocator, config, epoch_cache, state, block_type, body, opts);
     if (comptime fork.gte(.altair)) {

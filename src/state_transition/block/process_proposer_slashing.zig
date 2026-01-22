@@ -13,7 +13,7 @@ const slashValidator = @import("./slash_validator.zig").slashValidator;
 pub fn processProposerSlashing(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
     proposer_slashing: *const ForkTypes(fork).ProposerSlashing.Type,
     verify_signatures: bool,
@@ -65,7 +65,11 @@ pub fn assertValidProposerSlashing(
 
     // verify signatures
     if (verify_signature) {
-        const signature_sets = try getProposerSlashingSignatureSets(fork, config, epoch_cache, state, proposer_slashing);
+        const signature_sets = try getProposerSlashingSignatureSets(
+            config,
+            epoch_cache,
+            proposer_slashing,
+        );
         if (!try verifySignature(&signature_sets[0]) or !try verifySignature(&signature_sets[1])) {
             return error.InvalidProposerSlashingSignature;
         }

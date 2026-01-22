@@ -24,11 +24,18 @@ pub fn processHistoricalSummariesUpdate(
     }
 }
 
+const std = @import("std");
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
 test "processHistoricalSummariesUpdate - sanity" {
-    try @import("../test_utils/test_runner.zig").TestRunner(processHistoricalSummariesUpdate, .{
-        .alloc = false,
-        .err_return = true,
-        .void_return = true,
-    }).testProcessEpochFn();
-    defer @import("../state_transition.zig").deinitStateTransition();
+    const allocator = std.testing.allocator;
+
+    var test_state = try TestCachedBeaconState.init(allocator, 10_000);
+    defer test_state.deinit();
+
+    try processHistoricalSummariesUpdate(
+        .electra,
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+    );
 }

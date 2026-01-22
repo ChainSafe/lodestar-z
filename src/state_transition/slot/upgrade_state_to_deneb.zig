@@ -22,7 +22,7 @@ pub fn upgradeStateToDeneb(
     try state.setFork(&new_fork);
 
     // ownership is transferred to BeaconState
-    var new_latest_execution_payload_header = ct.bellatrix.ExecutionPayloadHeader.default_value;
+    var new_latest_execution_payload_header = ct.deneb.ExecutionPayloadHeader.default_value;
     var capella_latest_execution_payload_header = ct.capella.ExecutionPayloadHeader.default_value;
     try capella_state.latestExecutionPayloadHeader(allocator, &capella_latest_execution_payload_header);
     defer ct.capella.ExecutionPayloadHeader.deinit(allocator, &capella_latest_execution_payload_header);

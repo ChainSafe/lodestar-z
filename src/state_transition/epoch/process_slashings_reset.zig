@@ -23,11 +23,19 @@ pub fn processSlashingsReset(
     epoch_cache.total_slashings_by_increment = @max(0, epoch_cache.total_slashings_by_increment - old_slashing_value_by_increment);
 }
 
+const std = @import("std");
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
 test "processSlashingsReset - sanity" {
-    try @import("../test_utils/test_runner.zig").TestRunner(processSlashingsReset, .{
-        .alloc = false,
-        .err_return = true,
-        .void_return = true,
-    }).testProcessEpochFn();
-    defer @import("../state_transition.zig").deinitStateTransition();
+    const allocator = std.testing.allocator;
+
+    var test_state = try TestCachedBeaconState.init(allocator, 10_000);
+    defer test_state.deinit();
+
+    try processSlashingsReset(
+        .electra,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+    );
 }

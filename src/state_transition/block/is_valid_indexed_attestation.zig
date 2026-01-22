@@ -5,7 +5,7 @@ const BeaconConfig = @import("config").BeaconConfig;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const ForkTypes = @import("fork_types").ForkTypes;
-const EpochCache = @import("../cache/state_cache.zig").EpochCache;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const verifyAggregatedSignatureSet = @import("../utils/signature_sets.zig").verifyAggregatedSignatureSet;
 const getIndexedAttestationSignatureSet = @import("../signature_sets/indexed_attestation.zig").getIndexedAttestationSignatureSet;
 

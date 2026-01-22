@@ -61,20 +61,17 @@ pub fn becomesNewEth1Data(
 }
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
-const Node = @import("persistent_merkle_tree").Node;
 
 test "process eth1 data - sanity" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, 256);
     defer test_state.deinit();
 
-    const fork_state = switch (test_state.cached_state.state.*) {
-        .electra => |*state_view| @as(*ForkBeaconState(.electra), @ptrCast(state_view)),
-        else => return error.UnexpectedForkSeq,
-    };
     const block = types.electra.BeaconBlock.default_value;
-    try processEth1Data(.electra, fork_state, &block.body.eth1_data);
+    try processEth1Data(
+        .electra,
+        test_state.cached_state.state.castToFork(.electra),
+        &block.body.eth1_data,
+    );
 }

@@ -9,7 +9,7 @@ const initiateValidatorExit = @import("../block/initiate_validator_exit.zig").in
 pub fn processRegistryUpdates(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
     cache: *const EpochTransitionCache,
 ) !void {
@@ -52,11 +52,20 @@ pub fn processRegistryUpdates(
     }
 }
 
+const std = @import("std");
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
 test "processRegistryUpdates - sanity" {
-    try @import("../test_utils/test_runner.zig").TestRunner(processRegistryUpdates, .{
-        .alloc = false,
-        .err_return = true,
-        .void_return = true,
-    }).testProcessEpochFn();
-    defer @import("../state_transition.zig").deinitStateTransition();
+    const allocator = std.testing.allocator;
+
+    var test_state = try TestCachedBeaconState.init(allocator, 10_000);
+    defer test_state.deinit();
+
+    try processRegistryUpdates(
+        .electra,
+        test_state.cached_state.config,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+    );
 }

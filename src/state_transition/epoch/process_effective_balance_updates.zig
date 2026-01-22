@@ -115,14 +115,19 @@ pub fn processEffectiveBalanceUpdates(
     return num_update;
 }
 
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
 test "processEffectiveBalanceUpdates - sanity" {
-    try @import("../test_utils/test_runner.zig").TestRunner(
-        processEffectiveBalanceUpdates,
-        .{
-            .alloc = true,
-            .err_return = true,
-            .void_return = false,
-        },
-    ).testProcessEpochFn();
-    defer @import("../state_transition.zig").deinitStateTransition();
+    const allocator = std.testing.allocator;
+
+    var test_state = try TestCachedBeaconState.init(allocator, 10_000);
+    defer test_state.deinit();
+
+    _ = try processEffectiveBalanceUpdates(
+        .electra,
+        allocator,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+    );
 }

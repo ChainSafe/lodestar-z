@@ -60,7 +60,7 @@ pub fn processDeposit(
     comptime fork: ForkSeq,
     allocator: Allocator,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
     deposit: *const types.phase0.Deposit.Type,
 ) !void {
@@ -93,7 +93,7 @@ pub fn applyDeposit(
     comptime fork: ForkSeq,
     allocator: Allocator,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
     deposit: *const DepositData,
 ) !void {
@@ -105,7 +105,7 @@ pub fn applyDeposit(
     const cached_index = epoch_cache.getValidatorIndex(&pubkey);
     const is_new_validator = cached_index == null or cached_index.? >= try state.validatorsCount();
 
-    if (state.forkSeq().lt(.electra)) {
+    if (comptime fork.lt(.electra)) {
         if (is_new_validator) {
             if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
                 try addValidatorToRegistry(fork, allocator, epoch_cache, state, pubkey, withdrawal_credentials, amount);
@@ -116,7 +116,7 @@ pub fn applyDeposit(
         } else {
             // increase balance by deposit amount right away pre-electra
             const index = cached_index.?;
-            try increaseBalance(state, index, amount);
+            try increaseBalance(fork, state, index, amount);
         }
     } else {
         const pending_deposit = types.electra.PendingDeposit.Type{
@@ -145,7 +145,7 @@ pub fn applyDeposit(
 pub fn addValidatorToRegistry(
     comptime fork: ForkSeq,
     allocator: Allocator,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
     pubkey: BLSPubkey,
     withdrawal_credentials: *const WithdrawalCredentials,
@@ -155,7 +155,7 @@ pub fn addValidatorToRegistry(
     // add validator and balance entries
     const effective_balance = @min(
         amount - (amount % preset.EFFECTIVE_BALANCE_INCREMENT),
-        if (state.forkSeq().lt(.electra)) preset.MAX_EFFECTIVE_BALANCE else getMaxEffectiveBalance(withdrawal_credentials),
+        if (comptime fork.lt(.electra)) preset.MAX_EFFECTIVE_BALANCE else getMaxEffectiveBalance(withdrawal_credentials),
     );
 
     const validator: types.phase0.Validator.Type = .{
@@ -182,7 +182,7 @@ pub fn addValidatorToRegistry(
     try epoch_cache.addPubkey(validator_index, pubkey);
 
     // Only after altair:
-    if (state.forkSeq().gte(.altair)) {
+    if (comptime fork.gte(.altair)) {
         var inactivity_scores = try state.inactivityScores();
         try inactivity_scores.push(0);
 

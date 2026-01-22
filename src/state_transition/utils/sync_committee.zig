@@ -29,7 +29,7 @@ pub fn getNextSyncCommittee(
     out: *SyncCommitteeInfo,
 ) !void {
     const indices = &out.indices;
-    try getNextSyncCommitteeIndices(allocator, state, active_validator_indices, effective_balance_increments, indices);
+    try getNextSyncCommitteeIndices(fork, allocator, state, active_validator_indices, effective_balance_increments, indices);
     var validators_view = try state.validators();
 
     // Using the index2pubkey cache is slower because it needs the serialized pubkey.

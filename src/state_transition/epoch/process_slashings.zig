@@ -69,11 +69,19 @@ pub fn getTotalSlashingsByIncrement(
     return total_slashings_by_increment;
 }
 
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
 test "processSlashings - sanity" {
-    try @import("../test_utils/test_runner.zig").TestRunner(processSlashings, .{
-        .alloc = true,
-        .err_return = true,
-        .void_return = true,
-    }).testProcessEpochFn();
-    defer @import("../state_transition.zig").deinitStateTransition();
+    const allocator = std.testing.allocator;
+
+    var test_state = try TestCachedBeaconState.init(allocator, 10_000);
+    defer test_state.deinit();
+
+    try processSlashings(
+        .electra,
+        allocator,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+    );
 }

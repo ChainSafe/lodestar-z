@@ -6,8 +6,8 @@ const preset = @import("preset").preset;
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const ForkTypes = @import("ForkTypes").ForkTypes;
-const ForkBeaconState = @import("ForkTypes").ForkBeaconState;
+const ForkTypes = @import("fork_types").ForkTypes;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const c = @import("constants");
 const RootCache = @import("../cache/root_cache.zig").RootCache;
 const validateAttestation = @import("./process_attestation_phase0.zig").validateAttestation;
@@ -33,9 +33,9 @@ pub fn processAttestationsAltair(
     comptime fork: ForkSeq,
     allocator: Allocator,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
-    attestations: []ForkTypes(fork).Attestation.Type,
+    attestations: []const ForkTypes(fork).Attestation.Type,
     verify_signature: bool,
 ) !void {
     const effective_balance_increments = epoch_cache.effective_balance_increment.get().items;
@@ -129,7 +129,7 @@ pub fn processAttestationsAltair(
         const proposer_reward_numerator = total_increments * epoch_cache.base_reward_per_increment;
         proposer_reward += @divFloor(proposer_reward_numerator, PROPOSER_REWARD_DOMINATOR);
     }
-    try increaseBalance(state, try getBeaconProposer(fork, epoch_cache, state, state_slot), proposer_reward);
+    try increaseBalance(fork, state, try getBeaconProposer(fork, epoch_cache, state, state_slot), proposer_reward);
 }
 
 pub fn getAttestationParticipationStatus(
@@ -137,7 +137,7 @@ pub fn getAttestationParticipationStatus(
     data: *const types.phase0.AttestationData.Type,
     inclusion_delay: u64,
     current_epoch: Epoch,
-    root_cache: *RootCache,
+    root_cache: *RootCache(fork),
 ) !u8 {
     const justified_checkpoint = if (data.target.epoch == current_epoch)
         &root_cache.current_justified_checkpoint

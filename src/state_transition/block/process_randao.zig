@@ -15,23 +15,29 @@ pub fn processRandao(
     epoch_cache: *const EpochCache,
     state: *ForkBeaconState(fork),
     comptime block_type: BlockType,
-    body: ForkBeaconBlockBody(fork, block_type),
+    body: *const ForkBeaconBlockBody(fork, block_type),
     proposer_idx: u64,
     verify_signature: bool,
 ) !void {
     const epoch = epoch_cache.epoch;
-    const randao_reveal = body.inner.randao_reveal;
+    const randao_reveal = body.randaoReveal();
 
     // verify RANDAO reveal
     if (verify_signature) {
-        if (!try verifyRandaoSignature(fork, beacon_config, epoch_cache, state, block_type, body, try state.slot(), proposer_idx)) {
+        if (!try verifyRandaoSignature(
+            beacon_config,
+            epoch_cache,
+            randao_reveal,
+            try state.slot(),
+            proposer_idx,
+        )) {
             return error.InvalidRandaoSignature;
         }
     }
 
     // mix in RANDAO reveal
     var randao_reveal_digest: [32]u8 = undefined;
-    digest(&randao_reveal, &randao_reveal_digest);
+    digest(randao_reveal, &randao_reveal_digest);
 
     var randao_mix: [32]u8 = undefined;
     const current_mix = try getRandaoMix(fork, state, epoch);
@@ -48,20 +54,16 @@ fn xor(a: *const [32]u8, b: *const [32]u8, out: *[32]u8) void {
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const config = @import("config");
-const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
-const Block = @import("../types/block.zig").Block;
+const AnyBeaconBlock = @import("fork_types").AnyBeaconBlock;
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
-const Node = @import("persistent_merkle_tree").Node;
 
 test "process randao - sanity" {
     const allocator = std.testing.allocator;
 
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
-    const slot = config.mainnet.chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
+    var test_state = try TestCachedBeaconState.init(allocator, 256);
     defer test_state.deinit();
+
+    const slot = config.mainnet.chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
 
     const proposers = test_state.cached_state.getEpochCache().proposers;
 
@@ -74,23 +76,18 @@ test "process randao - sanity" {
     message.proposer_index = proposer_index;
     message.parent_root = header_parent_root.*;
 
-    const beacon_block = BeaconBlock{ .electra = &message };
-    const block = Block{ .regular = beacon_block };
+    const beacon_block = AnyBeaconBlock{ .full_electra = &message };
 
-    const fork_state = switch (test_state.cached_state.state.*) {
-        .electra => |*state_view| @as(*ForkBeaconState(.electra), @ptrCast(state_view)),
-        else => return error.UnexpectedForkSeq,
-    };
     const fork_body = ForkBeaconBlockBody(.electra, .full){ .inner = message.body };
 
     try processRandao(
         .electra,
         test_state.cached_state.config,
         test_state.cached_state.getEpochCache(),
-        fork_state,
+        test_state.cached_state.state.castToFork(.electra),
         .full,
-        fork_body,
-        block.proposerIndex(),
+        &fork_body,
+        beacon_block.proposerIndex(),
         false,
     );
 }

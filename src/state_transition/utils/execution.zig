@@ -8,7 +8,7 @@ const types = @import("consensus_types");
 // const ExecutionPayloadHeader
 const ZERO_HASH = @import("constants").ZERO_HASH;
 
-pub fn isExecutionEnabled(comptime fork: ForkSeq, state: *ForkBeaconState(fork), comptime block_type: BlockType, block: ForkBeaconBlock(fork, block_type)) bool {
+pub fn isExecutionEnabled(comptime fork: ForkSeq, state: *ForkBeaconState(fork), comptime block_type: BlockType, block: *const ForkBeaconBlock(fork, block_type)) bool {
     if (comptime fork.lt(.bellatrix)) return false;
     if (isMergeTransitionComplete(fork, state)) return true;
 
@@ -22,7 +22,11 @@ pub fn isExecutionEnabled(comptime fork: ForkSeq, state: *ForkBeaconState(fork),
     }
 }
 
-pub fn isMergeTransitionBlock(comptime fork: ForkSeq, state: *ForkBeaconState(fork), body: *const ForkTypes(fork).BeaconBlockBody) bool {
+pub fn isMergeTransitionBlock(
+    comptime fork: ForkSeq,
+    state: *ForkBeaconState(fork),
+    body: *const ForkTypes(fork).BeaconBlockBody.Type,
+) bool {
     if (comptime fork != .bellatrix) {
         return false;
     }

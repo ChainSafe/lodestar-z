@@ -24,13 +24,13 @@ pub fn processExecutionPayload(
 ) !void {
     const parent_hash, const prev_randao, const timestamp = switch (block_type) {
         .full => .{
-            &body.executionPayload().parentHash(),
-            &body.executionPayload().prevRandao(),
+            body.executionPayload().parentHash(),
+            body.executionPayload().prevRandao(),
             body.executionPayload().timestamp(),
         },
         .blinded => .{
-            &body.executionPayloadHeader().parentHash(),
-            &body.executionPayloadHeader().prevRandao(),
+            body.executionPayloadHeader().parentHash(),
+            body.executionPayloadHeader().prevRandao(),
             body.executionPayloadHeader().timestamp,
         },
     };
@@ -62,7 +62,7 @@ pub fn processExecutionPayload(
 
     if (comptime fork.gte(.deneb)) {
         const max_blobs_per_block = beacon_config.getMaxBlobsPerBlock(current_epoch);
-        if (body.blobKzgCommitmentsLen() > max_blobs_per_block) {
+        if (body.blobKzgCommitments().len > max_blobs_per_block) {
             return error.BlobKzgCommitmentsExceedsLimit;
         }
     }
@@ -82,7 +82,7 @@ pub fn processExecutionPayload(
 
     var payload_header = ForkTypes(fork).ExecutionPayloadHeader.default_value;
     switch (block_type) {
-        .full => try body.executionPayload().createPayloadHeader(allocator, &payload_header),
+        .full => try body.executionPayload().createExecutionPayloadHeader(allocator, &payload_header),
         .blinded => payload_header = body.executionPayloadHeader().*,
     }
     defer ForkTypes(fork).ExecutionPayloadHeader.deinit(allocator, &payload_header);
@@ -91,15 +91,11 @@ pub fn processExecutionPayload(
 }
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
-const Node = @import("persistent_merkle_tree").Node;
 
 test "process execution payload - sanity" {
     const allocator = std.testing.allocator;
 
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, 256);
     defer test_state.deinit();
 
     var execution_payload: types.electra.ExecutionPayload.Type = types.electra.ExecutionPayload.default_value;
@@ -111,17 +107,13 @@ test "process execution payload - sanity" {
     var message: types.electra.BeaconBlock.Type = types.electra.BeaconBlock.default_value;
     message.body = body;
 
-    const fork_state = switch (test_state.cached_state.state.*) {
-        .electra => |*state_view| @as(*ForkBeaconState(.electra), @ptrCast(state_view)),
-        else => return error.UnexpectedForkSeq,
-    };
     const fork_body = ForkBeaconBlockBody(.electra, .full){ .inner = body };
 
     try processExecutionPayload(
         .electra,
         allocator,
         beacon_config,
-        fork_state,
+        test_state.cached_state.state.castToFork(.electra),
         test_state.cached_state.getEpochCache().epoch,
         .full,
         &fork_body,

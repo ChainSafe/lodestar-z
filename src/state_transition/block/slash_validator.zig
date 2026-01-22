@@ -19,7 +19,7 @@ const TIMELY_TARGET = 1 << c.TIMELY_TARGET_FLAG_INDEX;
 pub fn slashValidator(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
     slashed_index: ValidatorIndex,
     whistle_blower_index: ?ValidatorIndex,
@@ -55,7 +55,7 @@ pub fn slashValidator(
     epoch_cache.total_slashings_by_increment += slashed_effective_balance_increments;
 
     // TODO(ct): define MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA
-    const min_slashing_penalty_quotient: usize = switch (state.*) {
+    const min_slashing_penalty_quotient: usize = switch (fork) {
         .phase0 => preset.MIN_SLASHING_PENALTY_QUOTIENT,
         .altair => preset.MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR,
         .bellatrix, .capella, .deneb => preset.MIN_SLASHING_PENALTY_QUOTIENT_BELLATRIX,
@@ -66,12 +66,12 @@ pub fn slashValidator(
 
     // apply proposer and whistleblower rewards
     // TODO(ct): define WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA
-    const whistleblower_reward = switch (state.*) {
+    const whistleblower_reward = switch (fork) {
         .electra, .fulu => @divFloor(effective_balance, preset.WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA),
         else => @divFloor(effective_balance, preset.WHISTLEBLOWER_REWARD_QUOTIENT),
     };
 
-    const proposer_reward = switch (state.*) {
+    const proposer_reward = switch (fork) {
         .phase0 => @divFloor(whistleblower_reward, preset.PROPOSER_REWARD_QUOTIENT),
         else => @divFloor(whistleblower_reward * c.PROPOSER_WEIGHT, c.WEIGHT_DENOMINATOR),
     };
@@ -79,17 +79,17 @@ pub fn slashValidator(
     const proposer_index = try getBeaconProposer(fork, epoch_cache, state, try state.slot());
 
     if (whistle_blower_index) |_whistle_blower_index| {
-        try increaseBalance(state, proposer_index, proposer_reward);
-        try increaseBalance(state, _whistle_blower_index, whistleblower_reward - proposer_reward);
+        try increaseBalance(fork, state, proposer_index, proposer_reward);
+        try increaseBalance(fork, state, _whistle_blower_index, whistleblower_reward - proposer_reward);
         // TODO: implement RewardCache
         // state.proposer_rewards.slashing += proposer_reward;
     } else {
-        try increaseBalance(state, proposer_index, whistleblower_reward);
+        try increaseBalance(fork, state, proposer_index, whistleblower_reward);
         // TODO: implement RewardCache
         // state.proposerRewards.slashing += whistleblowerReward;
     }
 
-    if (state.forkSeq().gte(.altair)) {
+    if (fork.gte(.altair)) {
         const previous_epoch = computePreviousEpoch(epoch);
         const is_active_previous_epoch = try isActiveValidatorView(&validator, previous_epoch);
         const is_active_current_epoch = try isActiveValidatorView(&validator, epoch);

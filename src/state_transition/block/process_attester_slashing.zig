@@ -19,13 +19,21 @@ pub fn processAttesterSlashing(
     comptime fork: ForkSeq,
     allocator: Allocator,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
     current_epoch: u64,
-    attester_slashing: *const ForkTypes(fork).AttesterSlashing,
+    attester_slashing: *const ForkTypes(fork).AttesterSlashing.Type,
     verify_signature: bool,
 ) !void {
-    try assertValidAttesterSlashing(fork, allocator, config, epoch_cache, attester_slashing, verify_signature);
+    try assertValidAttesterSlashing(
+        fork,
+        allocator,
+        config,
+        epoch_cache,
+        try state.validatorsCount(),
+        attester_slashing,
+        verify_signature,
+    );
 
     const intersecting_indices = try getAttesterSlashableIndices(allocator, attester_slashing);
     defer intersecting_indices.deinit();
@@ -56,7 +64,8 @@ pub fn assertValidAttesterSlashing(
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    attester_slashing: *const ForkTypes(fork).AttesterSlashing,
+    validators_count: usize,
+    attester_slashing: *const ForkTypes(fork).AttesterSlashing.Type,
     verify_signatures: bool,
 ) !void {
     const attestations = &.{ attester_slashing.attestation_1, attester_slashing.attestation_2 };
@@ -69,6 +78,7 @@ pub fn assertValidAttesterSlashing(
         allocator,
         config,
         epoch_cache,
+        validators_count,
         &attestations[0],
         verify_signatures,
     )) {
@@ -79,6 +89,7 @@ pub fn assertValidAttesterSlashing(
         allocator,
         config,
         epoch_cache,
+        validators_count,
         &attestations[1],
         verify_signatures,
     )) {

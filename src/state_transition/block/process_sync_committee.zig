@@ -112,11 +112,9 @@ pub fn processSyncAggregate(
 /// this is to be used when we implement getBlockSignatureSets
 /// see https://github.com/ChainSafe/state-transition-z/issues/72
 pub fn getSyncCommitteeSignatureSet(
-    comptime fork: ForkSeq,
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
     sync_aggregate: *const SyncAggregate,
     block_slot: u64,
     block_parent_root: *const Root,
@@ -157,7 +155,7 @@ pub fn getSyncCommitteeSignatureSet(
     // So getSyncCommitteeSignatureSet() can be called with a state in any slot (with the correct shuffling)
     const root_signed = block_parent_root;
 
-    const domain = try config.getDomain(try state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
+    const domain = try config.getDomain(epoch_cache.epoch, c.DOMAIN_SYNC_COMMITTEE, previous_slot);
 
     const pubkeys = try allocator.alloc(blst.PublicKey, participant_indices_.len);
     for (0..participant_indices_.len) |i| {
@@ -175,27 +173,20 @@ pub fn getSyncCommitteeSignatureSet(
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const test_utils = @import("../test_utils/root.zig");
-const Node = @import("persistent_merkle_tree").Node;
 
 test "process sync aggregate - sanity" {
     const allocator = std.testing.allocator;
 
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, 256);
     defer test_state.deinit();
 
     const state = test_state.cached_state.state;
     const config = test_state.cached_state.config;
     const epoch_cache = test_state.cached_state.getEpochCache();
-    const fork_state = switch (state.*) {
-        .electra => |*state_view| @as(*ForkBeaconState(.electra), @ptrCast(state_view)),
-        else => return error.UnexpectedForkSeq,
-    };
+    const fork_state = state.castToFork(.electra);
     const previous_slot = try state.slot() - 1;
     const root_signed = try getBlockRootAtSlot(.electra, fork_state, previous_slot);
-    const domain = try config.getDomain(try state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
+    const domain = try config.getDomain(epoch_cache.epoch, c.DOMAIN_SYNC_COMMITTEE, previous_slot);
     var signing_root: Root = undefined;
     try computeSigningRoot(types.primitive.Root, root_signed, domain, &signing_root);
 
@@ -211,10 +202,26 @@ test "process sync aggregate - sanity" {
     try sync_aggregate.sync_committee_bits.set(0, true);
     // don't set bit 1 yet
 
-    const res = processSyncAggregate(.electra, allocator, config, epoch_cache, fork_state, &sync_aggregate, true);
+    const res = processSyncAggregate(
+        .electra,
+        allocator,
+        config,
+        epoch_cache,
+        fork_state,
+        &sync_aggregate,
+        true,
+    );
     try std.testing.expect(res == error.SyncCommitteeSignatureInvalid);
 
     // now set bit 1
     try sync_aggregate.sync_committee_bits.set(1, true);
-    try processSyncAggregate(.electra, allocator, config, epoch_cache, fork_state, &sync_aggregate, true);
+    try processSyncAggregate(
+        .electra,
+        allocator,
+        config,
+        epoch_cache,
+        fork_state,
+        &sync_aggregate,
+        true,
+    );
 }

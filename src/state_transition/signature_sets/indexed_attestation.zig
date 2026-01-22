@@ -10,8 +10,8 @@ const Root = types.primitive.Root.Type;
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const EpochCache = @import("../cache/state_cache.zig").EpochCache;
-const SignedBeaconBlock = @import("../types/beacon_block.zig").SignedBeaconBlock;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 const ForkTypes = @import("fork_types").ForkTypes;
 const c = @import("constants");
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
@@ -68,7 +68,7 @@ pub fn getIndexedAttestationSignatureSet(
 /// Appends to out all the AggregatedSignatureSet for each attestation in the signed_block
 /// Consumer need to free the pubkeys arrays in each AggregatedSignatureSet in out
 /// TODO: consume in https://github.com/ChainSafe/state-transition-z/issues/72
-pub fn attestationsSignatureSets(allocator: Allocator, cached_state: *const CachedBeaconState, signed_block: *const SignedBeaconBlock, out: std.ArrayList(AggregatedSignatureSet)) !void {
+pub fn attestationsSignatureSets(allocator: Allocator, cached_state: *const CachedBeaconState, signed_block: *const AnySignedBeaconBlock, out: std.ArrayList(AggregatedSignatureSet)) !void {
     const epoch_cache = cached_state.getEpochCache();
     const attestation_items = signed_block.beaconBlock().beaconBlockBody().attestations().items();
 

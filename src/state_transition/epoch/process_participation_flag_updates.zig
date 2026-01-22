@@ -15,20 +15,12 @@ const Node = @import("persistent_merkle_tree").Node;
 
 test "processParticipationFlagUpdates - sanity" {
     const allocator = std.testing.allocator;
-    const validator_count_arr = &.{ 256, 10_000 };
 
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, 10_000);
+    defer test_state.deinit();
 
-    inline for (validator_count_arr) |validator_count| {
-        var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);
-        defer test_state.deinit();
-        const state = test_state.cached_state.state;
-        switch (state.forkSeq()) {
-            inline else => |f| {
-                try processParticipationFlagUpdates(f, &@field(state, @tagName(f)));
-            },
-        }
-    }
-    defer @import("../root.zig").deinitStateTransition();
+    try processParticipationFlagUpdates(
+        .electra,
+        test_state.cached_state.state.castToFork(.electra),
+    );
 }

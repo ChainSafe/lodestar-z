@@ -7,7 +7,7 @@ const EpochCacheRc = @import("./epoch_cache.zig").EpochCacheRc;
 const EpochCache = @import("./epoch_cache.zig").EpochCache;
 const EpochCacheImmutableData = @import("./epoch_cache.zig").EpochCacheImmutableData;
 const EpochCacheOpts = @import("./epoch_cache.zig").EpochCacheOpts;
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const CloneOpts = @import("ssz").BaseTreeView.CloneOpts;
 
@@ -19,13 +19,13 @@ pub const CachedBeaconState = struct {
     /// TODO: before an epoch transition, need to release() epoch_cache before using a new one
     epoch_cache_ref: *EpochCacheRc,
     /// this takes ownership of the state, it is expected to be deinitialized by this struct
-    state: *BeaconState,
+    state: *AnyBeaconState,
 
     // TODO: cloned_count properties, implement this once we switch to TreeView
     // TODO: proposer_rewards, looks like this is not a great place to put in, it's a result of a block state transition instead
 
     /// This class takes ownership of state after this function and has responsibility to deinit it
-    pub fn createCachedBeaconState(allocator: Allocator, state: *BeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*CachedBeaconState {
+    pub fn createCachedBeaconState(allocator: Allocator, state: *AnyBeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*CachedBeaconState {
         const epoch_cache = try EpochCache.createFromState(allocator, state, immutable_data, option);
         errdefer epoch_cache.deinit();
         const epoch_cache_ref = try EpochCacheRc.init(allocator, epoch_cache);
@@ -54,7 +54,7 @@ pub const CachedBeaconState = struct {
         const epoch_cache_ref = self.epoch_cache_ref.acquire();
         errdefer epoch_cache_ref.release();
 
-        const state = try allocator.create(BeaconState);
+        const state = try allocator.create(AnyBeaconState);
         errdefer allocator.destroy(state);
         state.* = try self.state.clone(opts);
 
@@ -115,11 +115,8 @@ pub const CachedBeaconState = struct {
 
 test "CachedBeaconState.clone()" {
     const allocator = std.testing.allocator;
-    const Node = @import("persistent_merkle_tree").Node;
-    var pool = try Node.Pool.init(allocator, 500_000);
-    defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, 256);
     defer test_state.deinit();
     // test clone() api works fine with no memory leak
     const cloned_cached_state = try test_state.cached_state.clone(allocator, .{});

@@ -4,6 +4,7 @@ const ForkSeq = @import("config").ForkSeq;
 const Node = @import("persistent_merkle_tree").Node;
 const isBasicType = @import("ssz").isBasicType;
 const BaseTreeView = @import("ssz").BaseTreeView;
+const ct = @import("consensus_types");
 
 const ForkTypes = @import("./fork_types.zig").ForkTypes;
 
@@ -95,7 +96,7 @@ pub fn ForkBeaconState(comptime f: ForkSeq) type {
             return try self.inner.getRoot("state_roots");
         }
 
-        pub fn historicalRoots(self: *Self) !ForkTypes(f).HistoricalRoots.TreeView {
+        pub fn historicalRoots(self: *Self) !ct.phase0.HistoricalRoots.TreeView {
             return try self.inner.get("historical_roots");
         }
 
@@ -168,7 +169,7 @@ pub fn ForkBeaconState(comptime f: ForkSeq) type {
             return try self.inner.get("randao_mixes");
         }
 
-        pub fn setRandaoMix(self: *Self, epoch: u64, randao_mix: *const ForkTypes(f).Bytes32.Type) !void {
+        pub fn setRandaoMix(self: *Self, epoch: u64, randao_mix: *const [32]u8) !void {
             var mixes = try self.randaoMixes();
             try mixes.setValue(epoch % preset.EPOCHS_PER_HISTORICAL_VECTOR, randao_mix);
         }
@@ -233,11 +234,11 @@ pub fn ForkBeaconState(comptime f: ForkSeq) type {
             try self.inner.setRootNode("current_epoch_participation", new_current_root);
         }
 
-        pub fn justificationBits(self: *Self) !ForkTypes(f).JustificationBits.TreeView {
+        pub fn justificationBits(self: *Self) !ct.phase0.JustificationBits.TreeView {
             return try self.inner.get("justification_bits");
         }
 
-        pub fn setJustificationBits(self: *Self, bits: *const ForkTypes(f).JustificationBits.Type) !void {
+        pub fn setJustificationBits(self: *Self, bits: *const ct.phase0.JustificationBits.Type) !void {
             try self.inner.setValue("justification_bits", bits);
         }
 
