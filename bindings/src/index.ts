@@ -46,6 +46,7 @@ declare class BeaconStateView {
   currentSyncCommittee: SyncCommittee;
   nextSyncCommittee: SyncCommittee;
   currentSyncCommitteeIndexed: SyncCommitteeCache;
+  effectiveBalanceIncrements: Uint16Array;
   syncProposerReward: number;
   previousEpochParticipation: number[];
   currentEpochParticipation: number[];

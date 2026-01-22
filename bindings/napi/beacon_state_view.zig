@@ -213,6 +213,12 @@ pub fn BeaconStateView_currentSyncCommitteeIndexed(env: napi.Env, cb: napi.Callb
     return obj;
 }
 
+pub fn BeaconStateView_effectiveBalanceIncrements(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const increments = cached_state.getEpochCache().getEffectiveBalanceIncrements();
+    return try numberSliceToNapiValue(env, u16, increments.items, .{ .typed_array = .uint16 });
+}
+
 pub fn BeaconStateView_syncProposerReward(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const sync_proposer_reward = cached_state.getEpochCache().sync_proposer_reward;
@@ -342,6 +348,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "nextSyncCommittee", .getter = napi.wrapCallback(0, BeaconStateView_nextSyncCommittee) },
             .{ .utf8name = "currentSyncCommitteeIndexed", .getter = napi.wrapCallback(0, BeaconStateView_currentSyncCommitteeIndexed) },
             .{ .utf8name = "syncProposerReward", .getter = napi.wrapCallback(0, BeaconStateView_syncProposerReward) },
+            .{ .utf8name = "effectiveBalanceIncrements", .getter = napi.wrapCallback(0, BeaconStateView_effectiveBalanceIncrements) },
             .{ .utf8name = "previousEpochParticipation", .getter = napi.wrapCallback(0, BeaconStateView_previousEpochParticipation) },
             .{ .utf8name = "currentEpochParticipation", .getter = napi.wrapCallback(0, BeaconStateView_currentEpochParticipation) },
             .{ .utf8name = "getBalance", .method = napi.wrapCallback(1, BeaconStateView_getBalance) },
