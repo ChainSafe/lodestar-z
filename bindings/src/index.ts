@@ -63,6 +63,12 @@ type Bindings = {
   shuffle: {
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
   };
+  computeProposerIndex: (
+    fork: "phase0" | "altair" | "bellatrix" | "capella" | "deneb" | "electra" | "fulu",
+    effectiveBalanceIncrements: Uint16Array,
+    indices: Uint32Array,
+    seed: Uint8Array
+  ) => number;
   BeaconStateView: typeof BeaconStateView;
   deinit: () => void;
 };
