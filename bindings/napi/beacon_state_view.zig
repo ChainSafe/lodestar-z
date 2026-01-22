@@ -335,12 +335,6 @@ pub fn BeaconStateView_computeUnrealizedCheckpoints(env: napi.Env, cb: napi.Call
     return obj;
 }
 
-pub fn BeaconStateView_hashTreeRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const root = try cached_state.state.hashTreeRoot();
-    return try numberSliceToNapiValue(env, u8, root, .{ .typed_array = .uint8 });
-}
-
 pub fn BeaconStateView_serialize(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const result = try cached_state.state.serialize(allocator);
@@ -353,6 +347,12 @@ pub fn BeaconStateView_serializedSize(env: napi.Env, cb: napi.CallbackInfo(0)) !
         inline else => |*state| try state.serializedSize(),
     };
     return try env.createInt64(@intCast(size));
+}
+
+pub fn BeaconStateView_hashTreeRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const root = try cached_state.state.hashTreeRoot();
+    return try numberSliceToNapiValue(env, u8, root, .{ .typed_array = .uint8 });
 }
 
 pub fn register(env: napi.Env, exports: napi.Value) !void {
