@@ -1,6 +1,6 @@
+import * as fs from "node:fs";
 import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
-import * as fs from "fs";
 import bindings from "../src/index.ts";
 
 console.log("loaded bindings");
@@ -58,6 +58,7 @@ printDuration("get previousJustifiedCheckpoint", () => state.previousJustifiedCh
 printDuration("get currentJustifiedCheckpoint", () => state.currentJustifiedCheckpoint);
 printDuration("proposers", () => state.proposers);
 printDuration("proposersNextEpoch", () => state.proposersNextEpoch);
+printDuration("proposersPrevEpoch", () => state.proposersPrevEpoch);
 printDuration("currentSyncCommittee", () => state.currentSyncCommittee);
 printDuration("nextSyncCommittee", () => state.nextSyncCommittee);
 printDuration("currentSyncCommitteeIndexed", () => state.currentSyncCommitteeIndexed);

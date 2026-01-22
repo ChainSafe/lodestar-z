@@ -151,6 +151,19 @@ pub fn BeaconStateView_proposersNextEpoch(env: napi.Env, cb: napi.CallbackInfo(0
     return env.getNull();
 }
 
+pub fn BeaconStateView_proposersPrevEpoch(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    if (cached_state.getEpochCache().proposers_prev_epoch) |*proposers| {
+        return numberSliceToNapiValue(
+            env,
+            u64,
+            proposers,
+            .{},
+        );
+    }
+    return env.getNull();
+}
+
 pub fn BeaconStateView_currentSyncCommittee(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     var current_sync_committee = try cached_state.state.currentSyncCommittee();
@@ -300,6 +313,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "finalizedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_finalizedCheckpoint) },
             .{ .utf8name = "proposers", .getter = napi.wrapCallback(0, BeaconStateView_proposers) },
             .{ .utf8name = "proposersNextEpoch", .getter = napi.wrapCallback(0, BeaconStateView_proposersNextEpoch) },
+            .{ .utf8name = "proposersPrevEpoch", .getter = napi.wrapCallback(0, BeaconStateView_proposersPrevEpoch) },
             .{ .utf8name = "currentSyncCommittee", .getter = napi.wrapCallback(0, BeaconStateView_currentSyncCommittee) },
             .{ .utf8name = "nextSyncCommittee", .getter = napi.wrapCallback(0, BeaconStateView_nextSyncCommittee) },
             .{ .utf8name = "currentSyncCommitteeIndexed", .getter = napi.wrapCallback(0, BeaconStateView_currentSyncCommitteeIndexed) },

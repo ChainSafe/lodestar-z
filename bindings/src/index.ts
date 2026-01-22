@@ -42,6 +42,7 @@ declare class BeaconStateView {
   finalizedCheckpoint: Checkpoint;
   proposers: number[];
   proposersNextEpoch: number[] | null;
+  proposersPrevEpoch: number[] | null;
   currentSyncCommittee: SyncCommittee;
   nextSyncCommittee: SyncCommittee;
   currentSyncCommitteeIndexed: SyncCommitteeCache;
