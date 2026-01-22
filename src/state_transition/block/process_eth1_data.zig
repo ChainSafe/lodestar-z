@@ -71,6 +71,10 @@ test "process eth1 data - sanity" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
+    const fork_state = switch (test_state.cached_state.state.*) {
+        .electra => |*state_view| @as(*ForkBeaconState(.electra), @ptrCast(state_view)),
+        else => return error.UnexpectedForkSeq,
+    };
     const block = types.electra.BeaconBlock.default_value;
-    try processEth1Data(allocator, test_state.cached_state, &block.body.eth1_data);
+    try processEth1Data(.electra, fork_state, &block.body.eth1_data);
 }

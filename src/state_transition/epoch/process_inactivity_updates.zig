@@ -1,22 +1,29 @@
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-
+const std = @import("std");
+const ForkSeq = @import("config").ForkSeq;
+const BeaconConfig = @import("config").BeaconConfig;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const isInInactivityLeak = @import("../utils/finality.zig").isInInactivityLeak;
 const attester_status_utils = @import("../utils/attester_status.zig");
 const hasMarkers = attester_status_utils.hasMarkers;
 
-pub fn processInactivityUpdates(cached_state: *CachedBeaconState, cache: *const EpochTransitionCache) !void {
-    if (cached_state.getEpochCache().epoch == GENESIS_EPOCH) {
+pub fn processInactivityUpdates(
+    comptime fork: ForkSeq,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
+    cache: *const EpochTransitionCache,
+) !void {
+    if (epoch_cache.epoch == GENESIS_EPOCH) {
         return;
     }
 
-    const state = cached_state.state;
-    const config = cached_state.config.chain;
-    const INACTIVITY_SCORE_BIAS = config.INACTIVITY_SCORE_BIAS;
-    const INACTIVITY_SCORE_RECOVERY_RATE = config.INACTIVITY_SCORE_RECOVERY_RATE;
+    const INACTIVITY_SCORE_BIAS = config.chain.INACTIVITY_SCORE_BIAS;
+    const INACTIVITY_SCORE_RECOVERY_RATE = config.chain.INACTIVITY_SCORE_RECOVERY_RATE;
     const flags = cache.flags;
-    const is_in_activity_leak = try isInInactivityLeak(cached_state);
+    const is_in_activity_leak = isInInactivityLeak(epoch_cache.epoch, try state.finalizedEpoch());
 
     // this avoids importing FLAG_ELIGIBLE_ATTESTER inside the for loop, check the compiled code
     const FLAG_PREV_TARGET_ATTESTER_UNSLASHED = attester_status_utils.FLAG_PREV_TARGET_ATTESTER_UNSLASHED;

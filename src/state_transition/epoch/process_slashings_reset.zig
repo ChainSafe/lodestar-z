@@ -1,12 +1,18 @@
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const preset = @import("preset").preset;
 
 /// Resets slashings for the next epoch.
 /// PERF: Almost no (constant) cost
-pub fn processSlashingsReset(cached_state: *CachedBeaconState, cache: *const EpochTransitionCache) !void {
-    const state = cached_state.state;
-    const epoch_cache = cached_state.getEpochCache();
+pub fn processSlashingsReset(
+    comptime fork: ForkSeq,
+    epoch_cache: *EpochCache,
+    state: *ForkBeaconState(fork),
+    cache: *const EpochTransitionCache,
+) !void {
+    _ = fork;
     const next_epoch = cache.current_epoch + 1;
 
     // reset slashings

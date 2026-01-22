@@ -227,6 +227,12 @@ test "process withdrawals - sanity" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
+    const epoch_cache = test_state.cached_state.getEpochCache();
+    const fork_state = switch (test_state.cached_state.state.*) {
+        .electra => |*state_view| @as(*ForkBeaconState(.electra), @ptrCast(state_view)),
+        else => return error.UnexpectedForkSeq,
+    };
+
     var withdrawals_result = WithdrawalsResult{
         .withdrawals = try Withdrawals.initCapacity(
             allocator,
@@ -240,6 +246,6 @@ test "process withdrawals - sanity" {
     var root: Root = undefined;
     try types.capella.Withdrawals.hashTreeRoot(allocator, &withdrawals_result.withdrawals, &root);
 
-    try getExpectedWithdrawals(allocator, &withdrawals_result, &withdrawal_balances, test_state.cached_state);
-    try processWithdrawals(allocator, test_state.cached_state, withdrawals_result, root);
+    try getExpectedWithdrawals(.electra, allocator, epoch_cache, fork_state.*, &withdrawals_result, &withdrawal_balances);
+    try processWithdrawals(.electra, allocator, fork_state, withdrawals_result, root);
 }

@@ -95,5 +95,12 @@ test "process operations" {
     const beacon_block = BeaconBlock{ .electra = &electra_block };
 
     const block = Block{ .regular = beacon_block };
-    try processOperations(allocator, test_state.cached_state, block.beaconBlockBody(), .{});
+    const config = test_state.cached_state.config;
+    const epoch_cache = test_state.cached_state.getEpochCache();
+    const fork_state = switch (test_state.cached_state.state.*) {
+        .electra => |*state_view| @as(*ForkBeaconState(.electra), @ptrCast(state_view)),
+        else => return error.UnexpectedForkSeq,
+    };
+    const body = @as(*const ForkBeaconBlockBody(.electra, .full), @ptrCast(block.beaconBlockBody()));
+    try processOperations(.electra, allocator, config, epoch_cache, fork_state, .full, body, .{});
 }

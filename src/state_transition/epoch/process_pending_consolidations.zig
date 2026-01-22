@@ -1,12 +1,17 @@
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 
 /// also modify balances inside EpochTransitionCache
-pub fn processPendingConsolidations(cached_state: *CachedBeaconState, cache: *EpochTransitionCache) !void {
-    const epoch_cache = cached_state.getEpochCache();
-    var state = cached_state.state;
+pub fn processPendingConsolidations(
+    comptime fork: ForkSeq,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
+    cache: *EpochTransitionCache,
+) !void {
     const next_epoch = epoch_cache.epoch + 1;
     var next_pending_consolidation: usize = 0;
     var validators = try state.validators();
@@ -34,8 +39,8 @@ pub fn processPendingConsolidations(cached_state: *CachedBeaconState, cache: *Ep
         const source_effective_balance = @min(try balances.get(source_index), try source_validator.get("effective_balance"));
 
         // Move active balance to target. Excess balance is withdrawable.
-        try decreaseBalance(state, source_index, source_effective_balance);
-        try increaseBalance(state, target_index, source_effective_balance);
+        try decreaseBalance(fork, state, source_index, source_effective_balance);
+        try increaseBalance(fork, state, target_index, source_effective_balance);
         if (cache.balances) |cached_balances| {
             cached_balances.items[source_index] -= source_effective_balance;
             cached_balances.items[target_index] += source_effective_balance;

@@ -1,9 +1,14 @@
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const preset = @import("preset").preset;
 
-pub fn processRandaoMixesReset(cached_state: *CachedBeaconState, cache: *const EpochTransitionCache) !void {
-    const state = cached_state.state;
+pub fn processRandaoMixesReset(
+    comptime fork: ForkSeq,
+    state: *ForkBeaconState(fork),
+    cache: *const EpochTransitionCache,
+) !void {
+    _ = fork;
     const current_epoch = cache.current_epoch;
     const next_epoch = current_epoch + 1;
 

@@ -3,7 +3,9 @@ const Allocator = std.mem.Allocator;
 const ssz = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
@@ -15,16 +17,15 @@ const computeProposers = seed_utils.computeProposers;
 /// Shifts out the oldest epoch and appends the new epoch at the end.
 /// Uses active indices from the epoch transition cache for the new epoch.
 pub fn processProposerLookahead(
+    comptime fork: ForkSeq,
     allocator: Allocator,
-    cached_state: *CachedBeaconState,
+    epoch_cache: *EpochCache,
+    state: *ForkBeaconState(fork),
     epoch_transition_cache: *const EpochTransitionCache,
 ) !void {
-    const state = cached_state.state;
-
     const proposer_lookahead: *[ssz.fulu.ProposerLookahead.length]u64 = try state.proposerLookaheadSlice(allocator);
     defer allocator.free(proposer_lookahead);
 
-    const epoch_cache = cached_state.epoch_cache_ref.get();
     const lookahead_epochs = preset.MIN_SEED_LOOKAHEAD + 1;
     const last_epoch_start = (lookahead_epochs - 1) * preset.SLOTS_PER_EPOCH;
 
@@ -46,11 +47,11 @@ pub fn processProposerLookahead(
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
 
     var seed: [32]u8 = undefined;
-    try getSeed(state, new_epoch, c.DOMAIN_BEACON_PROPOSER, &seed);
+    try getSeed(fork, state, new_epoch, c.DOMAIN_BEACON_PROPOSER, &seed);
 
     try computeProposers(
+        fork,
         allocator,
-        state.forkSeq(),
         seed,
         new_epoch,
         active_indices,

@@ -351,6 +351,7 @@ pub const EpochTransitionCache = struct {
         std.mem.sort(ValidatorActivation, validator_activation_list.items, {}, sort_fn);
 
         if (fork_seq == ForkSeq.phase0) {
+            const fork_state = &state.phase0;
             try reused_cache.proposer_indices.resize(validator_count);
             // in typescript we prefill with -1 as unset value, in zig we use  validator_count
             @memset(reused_cache.proposer_indices.items, validator_count);
@@ -375,8 +376,10 @@ pub const EpochTransitionCache = struct {
             }
 
             try processPendingAttestations(
+                .phase0,
                 allocator,
-                cached_state,
+                epoch_cache,
+                fork_state,
                 reused_cache.proposer_indices.items,
                 validator_count,
                 reused_cache.inclusion_delays.items,
@@ -388,8 +391,10 @@ pub const EpochTransitionCache = struct {
                 FLAG_PREV_HEAD_ATTESTER,
             );
             try processPendingAttestations(
+                .phase0,
                 allocator,
-                cached_state,
+                epoch_cache,
+                fork_state,
                 reused_cache.proposer_indices.items,
                 validator_count,
                 reused_cache.inclusion_delays.items,

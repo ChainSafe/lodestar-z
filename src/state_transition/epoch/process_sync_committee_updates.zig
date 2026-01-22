@@ -1,13 +1,18 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const preset = @import("preset").preset;
 const getNextSyncCommittee = @import("../utils/sync_committee.zig").getNextSyncCommittee;
 const SyncCommitteeInfo = @import("../utils/sync_committee.zig").SyncCommitteeInfo;
 
-pub fn processSyncCommitteeUpdates(allocator: Allocator, cached_state: *CachedBeaconState) !void {
-    const state = cached_state.state;
-    const epoch_cache = cached_state.getEpochCache();
+pub fn processSyncCommitteeUpdates(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    epoch_cache: *EpochCache,
+    state: *ForkBeaconState(fork),
+) !void {
     const next_epoch = epoch_cache.epoch + 1;
     if (next_epoch % preset.EPOCHS_PER_SYNC_COMMITTEE_PERIOD == 0) {
         const active_validator_indices = epoch_cache.getNextEpochShuffling().active_indices;
@@ -15,7 +20,7 @@ pub fn processSyncCommitteeUpdates(allocator: Allocator, cached_state: *CachedBe
 
         // Compute next
         var next_sync_committee_info: SyncCommitteeInfo = undefined;
-        try getNextSyncCommittee(allocator, state, active_validator_indices, effective_balance_increments, &next_sync_committee_info);
+        try getNextSyncCommittee(fork, allocator, state, active_validator_indices, effective_balance_increments, &next_sync_committee_info);
 
         // Rotate syncCommittee in state
         try state.rotateSyncCommittees(&next_sync_committee_info.sync_committee);
@@ -26,19 +31,11 @@ pub fn processSyncCommitteeUpdates(allocator: Allocator, cached_state: *CachedBe
     }
 }
 
-const Node = @import("persistent_merkle_tree").Node;
 test "processSyncCommitteeUpdates - sanity" {
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
-    const allocator = std.testing.allocator;
-    const validator_count_arr = &.{ 256, 10_000 };
-
-    inline for (validator_count_arr) |validator_count| {
-        var pool = try Node.Pool.init(allocator, 1024);
-        defer pool.deinit();
-
-        var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);
-        defer test_state.deinit();
-        try processSyncCommitteeUpdates(allocator, test_state.cached_state);
-    }
+    try @import("../test_utils/test_runner.zig").TestRunner(processSyncCommitteeUpdates, .{
+        .alloc = true,
+        .err_return = true,
+        .void_return = true,
+    }).testProcessEpochFn();
     defer @import("../state_transition.zig").deinitStateTransition();
 }

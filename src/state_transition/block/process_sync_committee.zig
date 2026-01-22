@@ -46,7 +46,7 @@ pub fn processSyncAggregate(
         // When there's no participation we cons ider the signature valid and just ignore it
         if (participant_indices.items.len > 0) {
             const previous_slot = @max(try state.slot(), 1) - 1;
-            const root_signed = try getBlockRootAtSlot(state, previous_slot);
+            const root_signed = try getBlockRootAtSlot(fork, state, previous_slot);
             const domain = try config.getDomain(epoch_cache.epoch, c.DOMAIN_SYNC_COMMITTEE, previous_slot);
 
             const pubkeys = try allocator.alloc(blst.PublicKey, participant_indices.items.len);
@@ -188,13 +188,18 @@ test "process sync aggregate - sanity" {
 
     const state = test_state.cached_state.state;
     const config = test_state.cached_state.config;
+    const epoch_cache = test_state.cached_state.getEpochCache();
+    const fork_state = switch (state.*) {
+        .electra => |*state_view| @as(*ForkBeaconState(.electra), @ptrCast(state_view)),
+        else => return error.UnexpectedForkSeq,
+    };
     const previous_slot = try state.slot() - 1;
-    const root_signed = try getBlockRootAtSlot(state, previous_slot);
+    const root_signed = try getBlockRootAtSlot(.electra, fork_state, previous_slot);
     const domain = try config.getDomain(try state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
     var signing_root: Root = undefined;
     try computeSigningRoot(types.primitive.Root, root_signed, domain, &signing_root);
 
-    const committee_indices = @as(*const [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex, @ptrCast(test_state.cached_state.getEpochCache().current_sync_committee_indexed.get().getValidatorIndices()));
+    const committee_indices = @as(*const [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex, @ptrCast(epoch_cache.current_sync_committee_indexed.get().getValidatorIndices()));
     // validator 0 signs
     const sig0 = try test_utils.interopSign(committee_indices[0], &signing_root);
     // validator 1 signs
@@ -206,10 +211,10 @@ test "process sync aggregate - sanity" {
     try sync_aggregate.sync_committee_bits.set(0, true);
     // don't set bit 1 yet
 
-    const res = processSyncAggregate(allocator, test_state.cached_state, &sync_aggregate, true);
+    const res = processSyncAggregate(.electra, allocator, config, epoch_cache, fork_state, &sync_aggregate, true);
     try std.testing.expect(res == error.SyncCommitteeSignatureInvalid);
 
     // now set bit 1
     try sync_aggregate.sync_committee_bits.set(1, true);
-    try processSyncAggregate(allocator, test_state.cached_state, &sync_aggregate, true);
+    try processSyncAggregate(.electra, allocator, config, epoch_cache, fork_state, &sync_aggregate, true);
 }

@@ -31,50 +31,50 @@ pub fn processEpoch(
     state: *ForkBeaconState(fork),
     cache: *EpochTransitionCache,
 ) !void {
-    try processJustificationAndFinalization(cached_state, cache);
+    try processJustificationAndFinalization(fork, state, cache);
 
-    if (state.forkSeq().gte(.altair)) {
-        try processInactivityUpdates(cached_state, cache);
+    if (comptime fork.gte(.altair)) {
+        try processInactivityUpdates(fork, config, epoch_cache, state, cache);
     }
 
-    try processRegistryUpdates(cached_state, cache);
+    try processRegistryUpdates(fork, config, epoch_cache, state, cache);
 
     // TODO(bing): In lodestar-ts we accumulate slashing penalties and only update in processRewardsAndPenalties. Do the same?
-    try processSlashings(allocator, cached_state, cache);
+    try processSlashings(fork, allocator, epoch_cache, state, cache);
 
-    try processRewardsAndPenalties(allocator, cached_state, cache);
+    try processRewardsAndPenalties(fork, allocator, config, epoch_cache, state, cache);
 
-    try processEth1DataReset(cached_state, cache);
+    try processEth1DataReset(fork, state, cache);
 
-    if (state.forkSeq().gte(.electra)) {
-        try processPendingDeposits(allocator, cached_state, cache);
-        try processPendingConsolidations(cached_state, cache);
+    if (comptime fork.gte(.electra)) {
+        try processPendingDeposits(fork, allocator, config, epoch_cache, state, cache);
+        try processPendingConsolidations(fork, epoch_cache, state, cache);
     }
 
     // const numUpdate = processEffectiveBalanceUpdates(fork, state, cache);
-    _ = try processEffectiveBalanceUpdates(allocator, cached_state, cache);
+    _ = try processEffectiveBalanceUpdates(fork, allocator, epoch_cache, state, cache);
 
-    try processSlashingsReset(cached_state, cache);
-    try processRandaoMixesReset(cached_state, cache);
+    try processSlashingsReset(fork, epoch_cache, state, cache);
+    try processRandaoMixesReset(fork, state, cache);
 
-    if (state.forkSeq().gte(.capella)) {
-        try processHistoricalSummariesUpdate(cached_state, cache);
+    if (comptime fork.gte(.capella)) {
+        try processHistoricalSummariesUpdate(fork, state, cache);
     } else {
-        try processHistoricalRootsUpdate(cached_state, cache);
+        try processHistoricalRootsUpdate(fork, state, cache);
     }
 
-    if (state.forkSeq() == .phase0) {
-        try processParticipationRecordUpdates(cached_state);
+    if (comptime fork == .phase0) {
+        try processParticipationRecordUpdates(fork, state);
     } else {
-        try processParticipationFlagUpdates(cached_state);
+        try processParticipationFlagUpdates(fork, state);
     }
 
-    if (state.forkSeq().gte(.altair)) {
-        try processSyncCommitteeUpdates(allocator, cached_state);
+    if (comptime fork.gte(.altair)) {
+        try processSyncCommitteeUpdates(fork, allocator, epoch_cache, state);
     }
 
-    if (state.forkSeq().gte(.fulu)) {
-        try processProposerLookahead(allocator, cached_state, cache);
+    if (comptime fork.gte(.fulu)) {
+        try processProposerLookahead(fork, allocator, epoch_cache, state, cache);
     }
 }
 
