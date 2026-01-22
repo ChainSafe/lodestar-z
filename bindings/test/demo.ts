@@ -73,4 +73,5 @@ printDuration("getFinalizedRootProof()", () => state.getFinalizedRootProof());
 printDuration("isExecutionStateType()", () => state.isExecutionStateType());
 printDuration("getEffectiveBalanceIncrementsZeroInactive()", () => state.getEffectiveBalanceIncrementsZeroInactive());
 printDuration("computeUnrealizedCheckpoints()", () => state.computeUnrealizedCheckpoints());
+printDuration("serialize", () => state.serialize());
 printDuration("hashTreeRoot", () => state.hashTreeRoot());
