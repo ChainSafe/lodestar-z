@@ -239,11 +239,12 @@ pub fn BeaconStateView_processSlots(env: napi.Env, cb: napi.CallbackInfo(1)) !na
 
     var dont_transfer_cache = false;
     if (cb.getArg(1)) |options_arg| {
-        if (try options_arg.typeof() == .object and try options_arg.hasNamedProperty("dontTransferCache")) {
-            dont_transfer_cache = try (try options_arg.getNamedProperty("dontTransferCache")).getValueBool();
+        if (try options_arg.typeof() == .object) {
+            if (try options_arg.hasNamedProperty("dontTransferCache")) {
+                dont_transfer_cache = try (try options_arg.getNamedProperty("dontTransferCache")).getValueBool();
+            }
         }
     }
-
     const post_state = try cached_state.clone(allocator, .{ .transfer_cache = !dont_transfer_cache });
     errdefer {
         post_state.deinit();
