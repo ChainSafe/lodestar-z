@@ -81,6 +81,7 @@ declare class BeaconStateView {
     finalizedCheckpoint: Checkpoint;
   };
   serialize(): Uint8Array;
+  serializedSize(): number;
   hashTreeRoot(): Uint8Array;
 }
 

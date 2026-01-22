@@ -347,6 +347,14 @@ pub fn BeaconStateView_serialize(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.
     return try numberSliceToNapiValue(env, u8, result, .{ .typed_array = .uint8 });
 }
 
+pub fn BeaconStateView_serializedSize(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const size = switch (cached_state.state.*) {
+        inline else => |*state| try state.serializedSize(),
+    };
+    return try env.createInt64(@intCast(size));
+}
+
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const beacon_state_view_ctor = try env.defineClass(
         "BeaconStateView",
@@ -381,6 +389,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "getFinalizedRootProof", .method = napi.wrapCallback(0, BeaconStateView_getFinalizedRootProof) },
             .{ .utf8name = "computeUnrealizedCheckpoints", .method = napi.wrapCallback(0, BeaconStateView_computeUnrealizedCheckpoints) },
             .{ .utf8name = "serialize", .method = napi.wrapCallback(0, BeaconStateView_serialize) },
+            .{ .utf8name = "serializedSize", .method = napi.wrapCallback(0, BeaconStateView_serializedSize) },
             .{ .utf8name = "hashTreeRoot", .method = napi.wrapCallback(0, BeaconStateView_hashTreeRoot) },
         },
     );
