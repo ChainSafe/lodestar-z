@@ -1,9 +1,11 @@
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 
-pub fn processParticipationFlagUpdates(cached_state: *CachedBeaconState) !void {
-    const state = cached_state.state;
-
-    if (state.forkSeq().lt(.altair)) return;
+pub fn processParticipationFlagUpdates(
+    comptime fork: ForkSeq,
+    state: *ForkBeaconState(fork),
+) !void {
+    if (comptime fork.lt(.altair)) return;
     try state.rotateEpochParticipation();
 }
 
@@ -20,7 +22,12 @@ test "processParticipationFlagUpdates - sanity" {
     inline for (validator_count_arr) |validator_count| {
         var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);
         defer test_state.deinit();
-        try processParticipationFlagUpdates(test_state.cached_state);
+        const state = test_state.cached_state.state;
+        switch (state.forkSeq()) {
+            inline else => |f| {
+                try processParticipationFlagUpdates(f, &@field(state, f));
+            },
+        }
     }
     defer @import("../root.zig").deinitStateTransition();
 }
