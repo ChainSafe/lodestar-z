@@ -17,7 +17,6 @@ test "state_transition utils" {
     _ = @import("utils/domain.zig");
     _ = @import("utils/electra.zig");
     _ = @import("utils/epoch.zig");
-    _ = @import("utils/epoch_shuffling.zig");
     _ = @import("utils/execution.zig");
     _ = @import("utils/finality.zig");
     _ = @import("utils/math.zig");
@@ -27,7 +26,6 @@ test "state_transition utils" {
     _ = @import("utils/root_cache.zig");
     _ = @import("utils/seed.zig");
     _ = @import("utils/sha256.zig");
-    _ = @import("utils/shuffle.zig");
     _ = @import("utils/signature_sets.zig");
     _ = @import("utils/signing_root.zig");
     _ = @import("utils/sync_committee.zig");

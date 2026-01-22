@@ -15,8 +15,7 @@ const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
 const PubkeyIndexMap = @import("../utils/pubkey_index_map.zig").PubkeyIndexMap(ValidatorIndex);
 const Index2PubkeyCache = @import("./pubkey_cache.zig").Index2PubkeyCache;
-const EpochShuffling = @import("../utils//epoch_shuffling.zig").EpochShuffling;
-const EpochShufflingRc = @import("../utils/epoch_shuffling.zig").EpochShufflingRc;
+const EpochShuffling = @import("../EpochShuffling.zig");
 const EffectiveBalanceIncrementsRc = @import("./effective_balance_increments.zig").EffectiveBalanceIncrementsRc;
 const EffectiveBalanceIncrements = @import("./effective_balance_increments.zig").EffectiveBalanceIncrements;
 const BeaconState = @import("../types/beacon_state.zig").BeaconState;
@@ -27,7 +26,6 @@ const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
 const computeActivationExitEpoch = @import("../utils/epoch.zig").computeActivationExitEpoch;
 const getEffectiveBalanceIncrementsWithLen = @import("./effective_balance_increments.zig").getEffectiveBalanceIncrementsWithLen;
 const getTotalSlashingsByIncrement = @import("../epoch/process_slashings.zig").getTotalSlashingsByIncrement;
-const computeEpochShuffling = @import("../utils/epoch_shuffling.zig").computeEpochShuffling;
 const getSeed = @import("../utils/seed.zig").getSeed;
 const computeProposers = @import("../utils/seed.zig").computeProposers;
 const SyncCommitteeCacheRc = @import("./sync_committee_cache.zig").SyncCommitteeCacheRc;
@@ -99,11 +97,11 @@ pub const EpochCache = struct {
     // next_decision_root
 
     // EpochCache does not take ownership of EpochShuffling, it is shared across EpochCache instances
-    previous_shuffling: *EpochShufflingRc,
+    previous_shuffling: *EpochShuffling.Rc,
 
-    current_shuffling: *EpochShufflingRc,
+    current_shuffling: *EpochShuffling.Rc,
 
-    next_shuffling: *EpochShufflingRc,
+    next_shuffling: *EpochShuffling.Rc,
 
     // TODO: not needed, maybe just get from the next shuffling?
     // next_active_indices
@@ -219,17 +217,23 @@ pub const EpochCache = struct {
         // ownership of the active indices is transferred to EpochShuffling
         const previous_active_indices = try allocator.alloc(ValidatorIndex, previous_active_indices_array_list.items.len);
         std.mem.copyForwards(ValidatorIndex, previous_active_indices, previous_active_indices_array_list.items);
-        const previous_shuffling: *EpochShuffling = try computeEpochShuffling(allocator, state, previous_active_indices, previous_epoch);
+        var previous_seed = [_]u8{0} ** 32;
+        try getSeed(state, previous_epoch, c.DOMAIN_BEACON_ATTESTER, &previous_seed);
+        const previous_shuffling: *EpochShuffling = try EpochShuffling.init(allocator, previous_seed, previous_epoch, previous_active_indices);
 
         // ownership of the active indices is transferred to EpochShuffling
         const current_active_indices = try allocator.alloc(ValidatorIndex, current_active_indices_array_list.items.len);
+        var current_seed = [_]u8{0} ** 32;
+        try getSeed(state, current_epoch, c.DOMAIN_BEACON_ATTESTER, &current_seed);
         std.mem.copyForwards(ValidatorIndex, current_active_indices, current_active_indices_array_list.items);
-        const current_shuffling: *EpochShuffling = try computeEpochShuffling(allocator, state, current_active_indices, current_epoch);
+        const current_shuffling: *EpochShuffling = try EpochShuffling.init(allocator, current_seed, current_epoch, current_active_indices);
 
         // ownership of the active indices is transferred to EpochShuffling
         const next_active_indices = try allocator.alloc(ValidatorIndex, next_active_indices_array_list.items.len);
+        var next_seed = [_]u8{0} ** 32;
+        try getSeed(state, current_epoch, c.DOMAIN_BEACON_ATTESTER, &next_seed);
         std.mem.copyForwards(ValidatorIndex, next_active_indices, next_active_indices_array_list.items);
-        const next_shuffling: *EpochShuffling = try computeEpochShuffling(allocator, state, next_active_indices, next_epoch);
+        const next_shuffling: *EpochShuffling = try EpochShuffling.init(allocator, next_seed, next_epoch, next_active_indices);
 
         // TODO: implement proposerLookahead in fulu
         const fork_seq = config.forkSeqAtEpoch(current_epoch);
@@ -321,9 +325,9 @@ pub const EpochCache = struct {
             // On first epoch, set to null to prevent unnecessary work since this is only used for metrics
             .proposers_prev_epoch = null,
             .proposers_next_epoch = null,
-            .previous_shuffling = try EpochShufflingRc.init(allocator, previous_shuffling),
-            .current_shuffling = try EpochShufflingRc.init(allocator, current_shuffling),
-            .next_shuffling = try EpochShufflingRc.init(allocator, next_shuffling),
+            .previous_shuffling = try EpochShuffling.Rc.init(allocator, previous_shuffling),
+            .current_shuffling = try EpochShuffling.Rc.init(allocator, current_shuffling),
+            .next_shuffling = try EpochShuffling.Rc.init(allocator, next_shuffling),
             .effective_balance_increment = try EffectiveBalanceIncrementsRc.init(allocator, effective_balance_increment),
             .total_slashings_by_increment = total_slashings_by_increment,
             .sync_participant_reward = sync_participant_reward,
@@ -440,13 +444,15 @@ pub const EpochCache = struct {
         // allocate next_shuffling_active_indices here and transfer owner ship to EpochShuffling
         const next_shuffling_active_indices = try self.allocator.alloc(ValidatorIndex, epoch_transition_cache.next_shuffling_active_indices.len);
         std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
-        const next_shuffling = try computeEpochShuffling(
+        var seed = [_]u8{0} ** 32;
+        try getSeed(state, epoch_after_upcoming, c.DOMAIN_BEACON_ATTESTER, &seed);
+        const next_shuffling = try EpochShuffling.init(
             self.allocator,
-            state,
-            next_shuffling_active_indices,
+            seed,
             epoch_after_upcoming,
+            next_shuffling_active_indices,
         );
-        self.next_shuffling = try EpochShufflingRc.init(self.allocator, next_shuffling);
+        self.next_shuffling = try EpochShuffling.Rc.init(self.allocator, next_shuffling);
 
         self.churn_limit = getChurnLimit(self.config, self.current_shuffling.get().active_indices.len);
         self.activation_churn_limit = getActivationChurnLimit(self.config, self.config.forkSeq(try state.slot()), self.current_shuffling.get().active_indices.len);
