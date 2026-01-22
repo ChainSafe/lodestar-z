@@ -3,7 +3,7 @@ const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
-const isInInactivityLeak = @import("../utils/finality.zig").isInInactivityLeak;
+const isInInactivityLeak = @import("inactivity_leak.zig").isInInactivityLeak;
 const attester_status_utils = @import("../utils/attester_status.zig");
 const hasMarkers = attester_status_utils.hasMarkers;
 
