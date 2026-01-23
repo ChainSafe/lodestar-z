@@ -54,6 +54,7 @@ printDuration("get root", () => state.root);
 printDuration("get epoch", () => state.epoch);
 printDuration("get genesisTime", () => state.genesisTime);
 printDuration("get genesisValidatorsRoot", () => state.genesisValidatorsRoot);
+printDuration("get eth1Data", () => state.eth1Data);
 printDuration("get latestBlockHeader", () => state.latestBlockHeader);
 printDuration("get previousJustifiedCheckpoint", () => state.previousJustifiedCheckpoint);
 printDuration("get currentJustifiedCheckpoint", () => state.currentJustifiedCheckpoint);

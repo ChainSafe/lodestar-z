@@ -18,6 +18,12 @@ interface Checkpoint {
   root: Uint8Array;
 }
 
+interface Eth1Data {
+  depositRoot: Uint8Array;
+  depositCount: number;
+  blockHash: Uint8Array;
+}
+
 interface ExecutionPayloadHeader {
   parentHash: Uint8Array;
   feeRecipient: Uint8Array;
@@ -63,6 +69,7 @@ declare class BeaconStateView {
   epoch: number;
   genesisTime: number;
   genesisValidatorsRoot: Uint8Array;
+  eth1Data: Eth1Data;
   latestBlockHeader: BeaconBlockHeader;
   latestExecutionPayloadHeader: ExecutionPayloadHeader;
   previousJustifiedCheckpoint: Checkpoint;

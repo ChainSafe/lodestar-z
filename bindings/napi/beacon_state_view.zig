@@ -108,6 +108,14 @@ pub fn BeaconStateView_genesisValidatorsRoot(env: napi.Env, cb: napi.CallbackInf
     return sszValueToNapiValue(env, ct.primitive.Root, try cached_state.state.genesisValidatorsRoot());
 }
 
+pub fn BeaconStateView_eth1Data(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var eth1_data_view = try cached_state.state.eth1Data();
+    var eth1_data: ct.phase0.Eth1Data.Type = undefined;
+    try eth1_data_view.toValue(allocator, &eth1_data);
+    return try sszValueToNapiValue(env, ct.phase0.Eth1Data, &eth1_data);
+}
+
 pub fn BeaconStateView_latestBlockHeader(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     var header_view = try cached_state.state.latestBlockHeader();
@@ -400,6 +408,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "genesisTime", .getter = napi.wrapCallback(0, BeaconStateView_genesisTime) },
             .{ .utf8name = "genesisValidatorsRoot", .getter = napi.wrapCallback(0, BeaconStateView_genesisValidatorsRoot) },
             .{ .utf8name = "latestBlockHeader", .getter = napi.wrapCallback(0, BeaconStateView_latestBlockHeader) },
+            .{ .utf8name = "eth1Data", .getter = napi.wrapCallback(0, BeaconStateView_eth1Data) },
             .{ .utf8name = "latestExecutionPayloadHeader", .getter = napi.wrapCallback(0, BeaconStateView_latestExecutionPayloadHeader) },
             .{ .utf8name = "previousJustifiedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_previousJustifiedCheckpoint) },
             .{ .utf8name = "currentJustifiedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_currentJustifiedCheckpoint) },
