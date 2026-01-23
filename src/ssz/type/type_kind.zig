@@ -1,4 +1,3 @@
-
 pub const TypeKind = enum {
     uint,
     bool,

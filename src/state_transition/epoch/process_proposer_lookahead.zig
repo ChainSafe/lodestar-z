@@ -7,6 +7,7 @@ const ForkSeq = @import("config").ForkSeq;
 const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
+const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
 const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const seed_utils = @import("../utils/seed.zig");
@@ -69,11 +70,20 @@ test "processProposerLookahead sanity" {
 
     var test_state = try TestCachedBeaconState.init(allocator, 10_000);
     defer test_state.deinit();
+
+    const fulu_state = try upgradeStateToFulu(
+        allocator,
+        test_state.cached_state.config,
+        test_state.cached_state.getEpochCache(),
+        try test_state.cached_state.state.tryCastToFork(.electra),
+    );
+    test_state.cached_state.state.* = .{ .fulu = fulu_state.inner };
+
     try processProposerLookahead(
-        .electra,
+        .fulu,
         allocator,
         test_state.cached_state.getEpochCache(),
-        test_state.cached_state.state.castToFork(.electra),
+        test_state.cached_state.state.castToFork(.fulu),
         test_state.epoch_transition_cache,
     );
 }

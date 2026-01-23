@@ -323,33 +323,33 @@ pub const AnyBeaconBlock = union(enum) {
     pub fn castToFork(self: *const AnyBeaconBlock, comptime block_type: BlockType, comptime fork: ForkSeq) *const ForkBeaconBlock(fork, block_type) {
         return switch (fork) {
             .phase0 => if (block_type == .full)
-                @ptrCast(&self.phase0)
+                @ptrCast(self.phase0)
             else
                 @compileError("phase0 doesn't have blinded blocks"),
             .altair => if (block_type == .full)
-                @ptrCast(&self.altair)
+                @ptrCast(self.altair)
             else
                 @compileError("altair doesn't have blinded blocks"),
             .bellatrix => if (block_type == .full)
-                @ptrCast(&self.full_bellatrix)
+                @ptrCast(self.full_bellatrix)
             else
-                @ptrCast(&self.blinded_bellatrix),
+                @ptrCast(self.blinded_bellatrix),
             .capella => if (block_type == .full)
-                @ptrCast(&self.full_capella)
+                @ptrCast(self.full_capella)
             else
-                @ptrCast(&self.blinded_capella),
+                @ptrCast(self.blinded_capella),
             .deneb => if (block_type == .full)
-                @ptrCast(&self.full_deneb)
+                @ptrCast(self.full_deneb)
             else
-                @ptrCast(&self.blinded_deneb),
+                @ptrCast(self.blinded_deneb),
             .electra => if (block_type == .full)
-                @ptrCast(&self.full_electra)
+                @ptrCast(self.full_electra)
             else
-                @ptrCast(&self.blinded_electra),
+                @ptrCast(self.blinded_electra),
             .fulu => if (block_type == .full)
-                @ptrCast(&self.full_fulu)
+                @ptrCast(self.full_fulu)
             else
-                @ptrCast(&self.blinded_fulu),
+                @ptrCast(self.blinded_fulu),
         };
     }
 
@@ -439,28 +439,28 @@ pub const AnyBeaconBlockBody = union(enum) {
 
     pub fn castToFork(self: *const AnyBeaconBlockBody, comptime block_type: BlockType, comptime fork: ForkSeq) *const ForkBeaconBlockBody(fork, block_type) {
         return switch (fork) {
-            .phase0 => @ptrCast(&self.phase0),
-            .altair => @ptrCast(&self.altair),
+            .phase0 => @ptrCast(self.phase0),
+            .altair => @ptrCast(self.altair),
             .bellatrix => if (block_type == .full)
-                @ptrCast(&self.full_bellatrix)
+                @ptrCast(self.full_bellatrix)
             else
-                @ptrCast(&self.blinded_bellatrix),
+                @ptrCast(self.blinded_bellatrix),
             .capella => if (block_type == .full)
-                @ptrCast(&self.full_capella)
+                @ptrCast(self.full_capella)
             else
-                @ptrCast(&self.blinded_capella),
+                @ptrCast(self.blinded_capella),
             .deneb => if (block_type == .full)
-                @ptrCast(&self.full_deneb)
+                @ptrCast(self.full_deneb)
             else
-                @ptrCast(&self.blinded_deneb),
+                @ptrCast(self.blinded_deneb),
             .electra => if (block_type == .full)
-                @alignCast(@ptrCast(&self.full_electra))
+                @ptrCast(self.full_electra)
             else
-                @ptrCast(&self.blinded_electra),
+                @ptrCast(self.blinded_electra),
             .fulu => if (block_type == .full)
-                @ptrCast(&self.full_fulu)
+                @ptrCast(self.full_fulu)
             else
-                @ptrCast(&self.blinded_fulu),
+                @ptrCast(self.blinded_fulu),
         };
     }
 

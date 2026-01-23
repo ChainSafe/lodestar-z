@@ -546,13 +546,13 @@ test "EpochTransitionCache - finalProcessEpoch" {
     var test_state = try TestCachedBeaconState.init(allocator, 256);
     defer test_state.deinit();
 
-    var fulu_state = try upgradeStateToFulu(
+    const fulu_state = try upgradeStateToFulu(
         allocator,
         test_state.cached_state.config,
         test_state.cached_state.getEpochCache(),
         try test_state.cached_state.state.tryCastToFork(.electra),
     );
-    defer fulu_state.deinit();
+    test_state.cached_state.state.* = .{ .fulu = fulu_state.inner };
 
     const epoch_cache = test_state.cached_state.getEpochCache();
     try epoch_cache.finalProcessEpoch(test_state.cached_state.state);

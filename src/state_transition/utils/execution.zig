@@ -14,10 +14,10 @@ pub fn isExecutionEnabled(comptime fork: ForkSeq, state: *ForkBeaconState(fork),
 
     switch (block_type) {
         inline .blinded => {
-            return ForkTypes(fork).ExecutionPayloadHeader.equals(&block.body().execution_payload_header, &ForkTypes(fork).ExecutionPayloadHeader.default_value);
+            return ForkTypes(fork).ExecutionPayloadHeader.equals(&block.body().inner.execution_payload_header, &ForkTypes(fork).ExecutionPayloadHeader.default_value);
         },
         inline .full => {
-            return ForkTypes(fork).ExecutionPayload.equals(&block.body().execution_payload, &ForkTypes(fork).ExecutionPayload.default_value);
+            return ForkTypes(fork).ExecutionPayload.equals(&block.body().inner.execution_payload, &ForkTypes(fork).ExecutionPayload.default_value);
         },
     }
 }

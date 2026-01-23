@@ -1,4 +1,3 @@
-
 const hashing = @import("hashing");
 const Depth = hashing.Depth;
 

@@ -151,6 +151,16 @@ pub const TransitionOpt = struct {
     do_not_transfer_cache: bool = false,
 };
 
+pub const StateTransitionResult = struct {
+    state: AnyBeaconState,
+    epoch_cache: *EpochCache,
+
+    pub fn deinit(self: *StateTransitionResult) void {
+        self.state.deinit();
+        self.epoch_cache.deinit();
+    }
+};
+
 pub fn stateTransition(
     allocator: std.mem.Allocator,
     config: *const BeaconConfig,
@@ -158,7 +168,7 @@ pub fn stateTransition(
     state: *AnyBeaconState,
     signed_block: AnySignedBeaconBlock,
     opts: TransitionOpt,
-) !*struct { state: AnyBeaconState, epoch_cache: *EpochCache } {
+) !*StateTransitionResult {
     const block = signed_block.beaconBlock();
     const block_slot = block.slot();
 
@@ -168,6 +178,7 @@ pub fn stateTransition(
     const post_epoch_cache = try epoch_cache.clone(allocator);
 
     errdefer post_state.deinit();
+    errdefer post_epoch_cache.deinit();
 
     //TODO(bing): metrics
     //if (metrics) {
@@ -187,7 +198,7 @@ pub fn stateTransition(
     if (opts.verify_proposer and !try verifyProposerSignature(
         allocator,
         config,
-        epoch_cache,
+        post_epoch_cache,
         signed_block,
     )) {
         return error.InvalidBlockSignature;
@@ -203,11 +214,14 @@ pub fn stateTransition(
         inline else => |f| {
             switch (block.blockType()) {
                 inline else => |bt| {
+                    if (comptime bt == .blinded and f.lt(.bellatrix)) {
+                        return error.InvalidBlockTypeForFork;
+                    }
                     try processBlock(
                         f,
                         allocator,
                         config,
-                        epoch_cache,
+                        post_epoch_cache,
                         post_state.castToFork(f),
                         bt,
                         block.castToFork(bt, f),
@@ -252,7 +266,12 @@ pub fn stateTransition(
         try post_state.commit();
     }
 
-    return post_state;
+    const result = try allocator.create(StateTransitionResult);
+    result.* = .{
+        .state = post_state,
+        .epoch_cache = post_epoch_cache,
+    };
+    return result;
 }
 
 pub fn deinitStateTransition() void {

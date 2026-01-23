@@ -49,51 +49,53 @@ pub fn processBlock(
 
     // The call to the process_execution_payload must happen before the call to the process_randao as the former depends
     // on the randao_mix computed with the reveal of the previous block.
-    if (comptime fork.gte(.bellatrix) and isExecutionEnabled(fork, state, block_type, block)) {
-        // TODO Deneb: Allow to disable withdrawals for interop testing
-        // https://github.com/ethereum/consensus-specs/blob/b62c9e877990242d63aa17a2a59a49bc649a2f2e/specs/eip4844/beacon-chain.md#disabling-withdrawals
-        if (comptime fork.gte(.capella)) {
-            // TODO: given max withdrawals of MAX_WITHDRAWALS_PER_PAYLOAD, can use fixed size array instead of heap alloc
-            var withdrawals_result = WithdrawalsResult{ .withdrawals = try Withdrawals.initCapacity(
-                allocator,
-                preset.MAX_WITHDRAWALS_PER_PAYLOAD,
-            ) };
-            var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
-            defer withdrawal_balances.deinit();
+    if (comptime fork.gte(.bellatrix)) {
+        if (isExecutionEnabled(fork, state, block_type, block)) {
+            // TODO Deneb: Allow to disable withdrawals for interop testing
+            // https://github.com/ethereum/consensus-specs/blob/b62c9e877990242d63aa17a2a59a49bc649a2f2e/specs/eip4844/beacon-chain.md#disabling-withdrawals
+            if (comptime fork.gte(.capella)) {
+                // TODO: given max withdrawals of MAX_WITHDRAWALS_PER_PAYLOAD, can use fixed size array instead of heap alloc
+                var withdrawals_result = WithdrawalsResult{ .withdrawals = try Withdrawals.initCapacity(
+                    allocator,
+                    preset.MAX_WITHDRAWALS_PER_PAYLOAD,
+                ) };
+                var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
+                defer withdrawal_balances.deinit();
 
-            try getExpectedWithdrawals(
+                try getExpectedWithdrawals(
+                    fork,
+                    allocator,
+                    epoch_cache,
+                    state,
+                    &withdrawals_result,
+                    &withdrawal_balances,
+                );
+                defer withdrawals_result.withdrawals.deinit(allocator);
+
+                const payload_withdrawals_root = switch (block_type) {
+                    .full => blk: {
+                        const actual_withdrawals = block.body().executionPayload().inner.withdrawals;
+                        std.debug.assert(withdrawals_result.withdrawals.items.len == actual_withdrawals.items.len);
+                        var root: Root = undefined;
+                        try types.capella.Withdrawals.hashTreeRoot(allocator, &actual_withdrawals, &root);
+                        break :blk root;
+                    },
+                    .blinded => block.body().executionPayloadHeader().inner.withdrawals_root,
+                };
+                try processWithdrawals(fork, allocator, state, withdrawals_result, payload_withdrawals_root);
+            }
+
+            try processExecutionPayload(
                 fork,
                 allocator,
-                epoch_cache,
+                config,
                 state,
-                &withdrawals_result,
-                &withdrawal_balances,
+                current_epoch,
+                block_type,
+                body,
+                external_data,
             );
-            defer withdrawals_result.withdrawals.deinit(allocator);
-
-            const payload_withdrawals_root = switch (block_type) {
-                .full => blk: {
-                    const actual_withdrawals = block.body().executionPayload().withdrawals;
-                    std.debug.assert(withdrawals_result.withdrawals.items.len == actual_withdrawals.items.len);
-                    var root: Root = undefined;
-                    try types.capella.Withdrawals.hashTreeRoot(allocator, &actual_withdrawals, &root);
-                    break :blk root;
-                },
-                .blinded => block.body().executionPayloadHeader().withdrawals_root,
-            };
-            try processWithdrawals(fork, allocator, state, withdrawals_result, payload_withdrawals_root);
         }
-
-        try processExecutionPayload(
-            fork,
-            allocator,
-            config,
-            state,
-            current_epoch,
-            block_type,
-            body,
-            external_data,
-        );
     }
 
     try processRandao(fork, config, epoch_cache, state, block_type, body, block.proposerIndex(), opts.verify_signature);

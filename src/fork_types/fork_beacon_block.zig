@@ -1,3 +1,4 @@
+const std = @import("std");
 const ForkSeq = @import("config").ForkSeq;
 
 const BlockType = @import("./block_type.zig").BlockType;
@@ -68,6 +69,13 @@ pub fn ForkBeaconBlockBody(comptime f: ForkSeq, comptime bt: BlockType) type {
         pub const fork_seq = f;
         pub const block_type = bt;
 
+        pub inline fn hashTreeRoot(self: *const Self, allocator: std.mem.Allocator, out: *[32]u8) !void {
+            if (bt == .full) {
+                return ForkTypes(f).BeaconBlockBody.hashTreeRoot(allocator, &self.inner, out);
+            }
+            return ForkTypes(f).BlindedBeaconBlockBody.hashTreeRoot(allocator, &self.inner, out);
+        }
+
         pub inline fn eth1Data(self: *const Self) *const ForkTypes(f).Eth1Data.Type {
             return &self.inner.eth1_data;
         }
@@ -90,6 +98,13 @@ pub fn ForkBeaconBlockBody(comptime f: ForkSeq, comptime bt: BlockType) type {
 
         pub inline fn randaoReveal(self: *const Self) *const [96]u8 {
             return &self.inner.randao_reveal;
+        }
+
+        pub inline fn syncAggregate(self: *const Self) *const ForkTypes(f).SyncAggregate.Type {
+            if (f.lt(.altair)) {
+                @compileError("syncAggregate is only available for altair and later forks");
+            }
+            return &self.inner.sync_aggregate;
         }
 
         pub inline fn blobKzgCommitments(self: *const Self) []const [48]u8 {

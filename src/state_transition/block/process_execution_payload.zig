@@ -31,7 +31,7 @@ pub fn processExecutionPayload(
         .blinded => .{
             body.executionPayloadHeader().parentHash(),
             body.executionPayloadHeader().prevRandao(),
-            body.executionPayloadHeader().timestamp,
+            body.executionPayloadHeader().timestamp(),
         },
     };
 
@@ -83,7 +83,7 @@ pub fn processExecutionPayload(
     var payload_header = ForkTypes(fork).ExecutionPayloadHeader.default_value;
     switch (block_type) {
         .full => try body.executionPayload().createExecutionPayloadHeader(allocator, &payload_header),
-        .blinded => payload_header = body.executionPayloadHeader().*,
+        .blinded => payload_header = body.executionPayloadHeader().inner,
     }
     defer ForkTypes(fork).ExecutionPayloadHeader.deinit(allocator, &payload_header);
 

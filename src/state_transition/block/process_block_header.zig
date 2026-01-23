@@ -48,7 +48,7 @@ pub fn processBlockHeader(
     }
 
     var body_root: [32]u8 = undefined;
-    try ForkTypes(fork).BeaconBlockBody.hashTreeRoot(allocator, &block.body().inner, &body_root);
+    try block.body().hashTreeRoot(allocator, &body_root);
     // cache current block as the new latest block
     const latest_block_header: BeaconBlockHeader = .{
         .slot = slot,
