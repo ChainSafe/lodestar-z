@@ -21,7 +21,6 @@ test "state_transition utils" {
     _ = @import("utils/execution.zig");
     _ = @import("utils/finality.zig");
     _ = @import("utils/math.zig");
-    _ = @import("utils/process_proposer_lookahead.zig");
     _ = @import("utils/pubkey_index_map.zig");
     _ = @import("utils/reference_count.zig");
     _ = @import("utils/root_cache.zig");
