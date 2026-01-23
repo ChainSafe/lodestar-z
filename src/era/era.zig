@@ -1,6 +1,6 @@
 const std = @import("std");
 const preset = @import("preset").preset;
-const state_transition = @import("state_transition");
+const fork_types = @import("fork_types");
 const e2s = @import("e2s.zig");
 
 /// Parsed components of an .era file name.
@@ -131,7 +131,7 @@ pub fn computeStartBlockSlotFromEraNumber(era_number: u64) !u64 {
     return (try std.math.sub(u64, era_number, 1)) * preset.SLOTS_PER_HISTORICAL_ROOT;
 }
 
-pub fn getShortHistoricalRoot(state: state_transition.BeaconState) ![8]u8 {
+pub fn getShortHistoricalRoot(state: fork_types.AnyBeaconState) ![8]u8 {
     const allocator = std.heap.page_allocator;
     var short_historical_root: [8]u8 = undefined;
     var s = state;
