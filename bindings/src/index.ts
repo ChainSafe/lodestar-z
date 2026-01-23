@@ -38,6 +38,12 @@ interface ExecutionPayloadHeader {
   excessBlobGas?: number; // deneb+
 }
 
+interface Fork {
+  previousVersion: Uint8Array;
+  currentVersion: Uint8Array;
+  epoch: number;
+}
+
 interface SyncCommittee {
   pubkeys: Uint8Array;
   aggregatePubkey: Uint8Array;
@@ -52,6 +58,7 @@ interface SyncCommitteeCache {
 declare class BeaconStateView {
   static createFromBytes(fork: string, bytes: Uint8Array): BeaconStateView;
   slot: number;
+  fork: Fork;
   root: Uint8Array;
   epoch: number;
   genesisTime: number;

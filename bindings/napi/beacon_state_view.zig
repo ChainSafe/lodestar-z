@@ -84,6 +84,14 @@ pub fn BeaconStateView_root(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value
     return sszValueToNapiValue(env, ct.primitive.Root, try cached_state.state.hashTreeRoot());
 }
 
+pub fn BeaconStateView_fork(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var fork_view = try cached_state.state.fork();
+    var fork: ct.phase0.Fork.Type = undefined;
+    try fork_view.toValue(allocator, &fork);
+    return try sszValueToNapiValue(env, ct.phase0.Fork, &fork);
+}
+
 pub fn BeaconStateView_epoch(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const slot = try cached_state.state.slot();
@@ -386,6 +394,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         null,
         &[_]napi.c.napi_property_descriptor{
             .{ .utf8name = "slot", .getter = napi.wrapCallback(0, BeaconStateView_slot) },
+            .{ .utf8name = "fork", .getter = napi.wrapCallback(0, BeaconStateView_fork) },
             .{ .utf8name = "root", .getter = napi.wrapCallback(0, BeaconStateView_root) },
             .{ .utf8name = "epoch", .getter = napi.wrapCallback(0, BeaconStateView_epoch) },
             .{ .utf8name = "genesisTime", .getter = napi.wrapCallback(0, BeaconStateView_genesisTime) },

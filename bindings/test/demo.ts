@@ -49,6 +49,7 @@ const state = printDuration("create state view", () => bindings.BeaconStateView.
 printDuration("write pkix to disk", () => bindings.pubkeys.save(PKIX_FILE));
 
 printDuration("get slot", () => state.slot);
+printDuration("get fork", () => state.fork);
 printDuration("get root", () => state.root);
 printDuration("get epoch", () => state.epoch);
 printDuration("get genesisTime", () => state.genesisTime);
