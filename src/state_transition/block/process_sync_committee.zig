@@ -18,6 +18,7 @@ const verifyAggregatedSignatureSet = @import("../utils/signature_sets.zig").veri
 const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconProposer;
 const balance_utils = @import("../utils/balance.zig");
 const getBlockRootAtSlot = @import("../utils/block_root.zig").getBlockRootAtSlot;
+const Node = @import("persistent_merkle_tree").Node;
 const increaseBalance = balance_utils.increaseBalance;
 const decreaseBalance = balance_utils.decreaseBalance;
 
@@ -176,8 +177,11 @@ const test_utils = @import("../test_utils/root.zig");
 
 test "process sync aggregate - sanity" {
     const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
     const state = test_state.cached_state.state;

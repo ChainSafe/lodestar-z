@@ -8,6 +8,7 @@ const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").Epoc
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const getAttestationDeltas = @import("./get_attestation_deltas.zig").getAttestationDeltas;
 const getRewardsAndPenaltiesAltair = @import("./get_rewards_and_penalties.zig").getRewardsAndPenaltiesAltair;
+const Node = @import("persistent_merkle_tree").Node;
 
 pub fn processRewardsAndPenalties(
     comptime fork: ForkSeq,
@@ -58,8 +59,11 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 
 test "processRewardsAndPenalties - sanity" {
     const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, 10_000);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
     defer test_state.deinit();
 
     try processRewardsAndPenalties(

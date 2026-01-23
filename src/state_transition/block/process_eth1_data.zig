@@ -4,6 +4,7 @@ const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const types = @import("consensus_types");
 const Eth1Data = types.phase0.Eth1Data.Type;
 const preset = @import("preset").preset;
+const Node = @import("persistent_merkle_tree").Node;
 
 pub fn processEth1Data(
     comptime fork: ForkSeq,
@@ -64,8 +65,11 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 
 test "process eth1 data - sanity" {
     const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
     const block = types.electra.BeaconBlock.default_value;

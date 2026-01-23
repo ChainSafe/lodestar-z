@@ -8,6 +8,7 @@ const ForkBeaconBlockBody = @import("fork_types").ForkBeaconBlockBody;
 const getRandaoMix = @import("../utils/seed.zig").getRandaoMix;
 const verifyRandaoSignature = @import("../signature_sets/randao.zig").verifyRandaoSignature;
 const digest = @import("../utils/sha256.zig").digest;
+const Node = @import("persistent_merkle_tree").Node;
 
 pub fn processRandao(
     comptime fork: ForkSeq,
@@ -59,8 +60,11 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 
 test "process randao - sanity" {
     const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
     const slot = config.mainnet.chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;

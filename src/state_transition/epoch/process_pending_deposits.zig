@@ -17,6 +17,7 @@ const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAt
 const PendingDeposit = types.electra.PendingDeposit.Type;
 const GENESIS_SLOT = @import("preset").GENESIS_SLOT;
 const c = @import("constants");
+const Node = @import("persistent_merkle_tree").Node;
 
 /// we append EpochTransitionCache.is_compounding_validator_arr in this flow
 pub fn processPendingDeposits(
@@ -167,8 +168,11 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 
 test "processPendingDeposits - sanity" {
     const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, 10_000);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
     defer test_state.deinit();
 
     try processPendingDeposits(

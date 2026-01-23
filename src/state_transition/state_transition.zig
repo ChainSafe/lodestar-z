@@ -299,8 +299,11 @@ test "state transition - electra block" {
 
     inline for (test_cases) |tc| {
         const allocator = std.testing.allocator;
+        const pool_size = 256 * 5;
+        var pool = try Node.Pool.init(allocator, pool_size);
+        defer pool.deinit();
 
-        var test_state = try TestCachedBeaconState.init(allocator, 256);
+        var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
         defer test_state.deinit();
 
         var electra_block = types.electra.SignedBeaconBlock.default_value;

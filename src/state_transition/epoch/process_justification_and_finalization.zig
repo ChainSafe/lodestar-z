@@ -7,6 +7,7 @@ const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").Epoc
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const getBlockRoot = @import("../utils/block_root.zig").getBlockRoot;
+const Node = @import("persistent_merkle_tree").Node;
 
 /// Update justified and finalized checkpoints depending on network participation.
 ///
@@ -105,8 +106,11 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 
 test "processJustificationAndFinalization - sanity" {
     const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, 10_000);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
     defer test_state.deinit();
 
     try processJustificationAndFinalization(

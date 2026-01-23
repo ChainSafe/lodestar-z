@@ -64,7 +64,7 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
             );
             errdefer pre_state_all_forks.deinit();
 
-            return try TestCachedBeaconState.initFromState(allocator, pre_state_all_forks, fork, fork_epoch);
+            return try TestCachedBeaconState.initFromState(allocator, pool, pre_state_all_forks, fork, fork_epoch);
         }
 
         pub fn loadPreState(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !TestCachedBeaconState {
@@ -84,7 +84,7 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
 
             var f = try pre_state_all_forks.fork();
             const fork_epoch = try f.get("epoch");
-            return try TestCachedBeaconState.initFromState(allocator, pre_state_all_forks, fork, fork_epoch);
+            return try TestCachedBeaconState.initFromState(allocator, pool, pre_state_all_forks, fork, fork_epoch);
         }
 
         /// consumer should deinit the returned state and destroy the pointer
@@ -206,24 +206,44 @@ pub fn deinitSignedBeaconBlock(signed_block: AnySignedBeaconBlock, allocator: st
             altair.SignedBeaconBlock.deinit(allocator, @constCast(b));
             allocator.destroy(b);
         },
-        .bellatrix => |b| {
+        .full_bellatrix => |b| {
             bellatrix.SignedBeaconBlock.deinit(allocator, @constCast(b));
             allocator.destroy(b);
         },
-        .capella => |b| {
+        .blinded_bellatrix => |b| {
+            bellatrix.SignedBlindedBeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .full_capella => |b| {
             capella.SignedBeaconBlock.deinit(allocator, @constCast(b));
             allocator.destroy(b);
         },
-        .deneb => |b| {
+        .blinded_capella => |b| {
+            capella.SignedBlindedBeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .full_deneb => |b| {
             deneb.SignedBeaconBlock.deinit(allocator, @constCast(b));
             allocator.destroy(b);
         },
-        .electra => |b| {
+        .blinded_deneb => |b| {
+            deneb.SignedBlindedBeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .full_electra => |b| {
             electra.SignedBeaconBlock.deinit(allocator, @constCast(b));
             allocator.destroy(b);
         },
-        .fulu => |b| {
+        .blinded_electra => |b| {
+            electra.SignedBlindedBeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .full_fulu => |b| {
             fulu.SignedBeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .blinded_fulu => |b| {
+            fulu.SignedBlindedBeaconBlock.deinit(allocator, @constCast(b));
             allocator.destroy(b);
         },
     }

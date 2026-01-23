@@ -9,6 +9,7 @@ const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const processAttestationPhase0 = @import("./process_attestation_phase0.zig").processAttestationPhase0;
 const processAttestationsAltair = @import("./process_attestation_altair.zig").processAttestationsAltair;
+const Node = @import("persistent_merkle_tree").Node;
 
 pub fn processAttestations(
     comptime fork: ForkSeq,
@@ -45,8 +46,11 @@ pub fn processAttestations(
 
 test "process attestations - sanity" {
     const allocator = std.testing.allocator;
+    const pool_size = 16 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, 16);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
     defer test_state.deinit();
 
     var electra: std.ArrayListUnmanaged(types.electra.Attestation.Type) = .empty;

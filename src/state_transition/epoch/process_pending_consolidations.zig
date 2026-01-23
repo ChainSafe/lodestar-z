@@ -57,11 +57,15 @@ pub fn processPendingConsolidations(
 
 const std = @import("std");
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Node = @import("persistent_merkle_tree").Node;
 
 test "processPendingConsolidations - sanity" {
     const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, 10_000);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
     defer test_state.deinit();
 
     try processPendingConsolidations(

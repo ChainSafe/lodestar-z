@@ -96,33 +96,41 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
         }
 
         fn process(self: *Self) !void {
-            const pre = self.pre.cached_state;
             const allocator = self.pre.allocator;
-            var epoch_transition_cache = try EpochTransitionCache.init(allocator, self.pre.cached_state);
-            defer {
-                epoch_transition_cache.deinit();
-                allocator.destroy(epoch_transition_cache);
-            }
+            const cached_state = self.pre.cached_state;
+            const config = cached_state.config;
+            const epoch_cache = cached_state.getEpochCache();
+            const state = cached_state.state;
+
+            var epoch_transition_cache = try EpochTransitionCache.init(
+                allocator,
+                config,
+                epoch_cache,
+                state,
+            );
+            defer epoch_transition_cache.deinit();
+
+            const fork_state = state.castToFork(fork);
 
             switch (epoch_process_fn) {
-                .effective_balance_updates => _ = try state_transition.processEffectiveBalanceUpdates(allocator, pre, epoch_transition_cache),
-                .eth1_data_reset => try state_transition.processEth1DataReset(pre, epoch_transition_cache),
-                .historical_roots_update => try state_transition.processHistoricalRootsUpdate(pre, epoch_transition_cache),
-                .inactivity_updates => try state_transition.processInactivityUpdates(pre, epoch_transition_cache),
-                .justification_and_finalization => try state_transition.processJustificationAndFinalization(pre, epoch_transition_cache),
-                .participation_flag_updates => try state_transition.processParticipationFlagUpdates(pre),
-                .participation_record_updates => try state_transition.processParticipationRecordUpdates(pre),
-                .randao_mixes_reset => try state_transition.processRandaoMixesReset(pre, epoch_transition_cache),
-                .registry_updates => try state_transition.processRegistryUpdates(pre, epoch_transition_cache),
-                .rewards_and_penalties => try state_transition.processRewardsAndPenalties(allocator, pre, epoch_transition_cache),
-                .slashings => try state_transition.processSlashings(allocator, pre, epoch_transition_cache),
-                .slashings_reset => try state_transition.processSlashingsReset(pre, epoch_transition_cache),
-                .sync_committee_updates => try state_transition.processSyncCommitteeUpdates(allocator, pre),
-                .historical_summaries_update => try state_transition.processHistoricalSummariesUpdate(pre, epoch_transition_cache),
-                .pending_deposits => try state_transition.processPendingDeposits(allocator, pre, epoch_transition_cache),
-                .pending_consolidations => try state_transition.processPendingConsolidations(pre, epoch_transition_cache),
+                .effective_balance_updates => _ = try state_transition.processEffectiveBalanceUpdates(fork, allocator, epoch_cache, fork_state, &epoch_transition_cache),
+                .eth1_data_reset => try state_transition.processEth1DataReset(fork, fork_state, &epoch_transition_cache),
+                .historical_roots_update => try state_transition.processHistoricalRootsUpdate(fork, fork_state, &epoch_transition_cache),
+                .inactivity_updates => try state_transition.processInactivityUpdates(fork, config, epoch_cache, fork_state, &epoch_transition_cache),
+                .justification_and_finalization => try state_transition.processJustificationAndFinalization(fork, fork_state, &epoch_transition_cache),
+                .participation_flag_updates => try state_transition.processParticipationFlagUpdates(fork, fork_state),
+                .participation_record_updates => try state_transition.processParticipationRecordUpdates(fork, fork_state),
+                .randao_mixes_reset => try state_transition.processRandaoMixesReset(fork, fork_state, &epoch_transition_cache),
+                .registry_updates => try state_transition.processRegistryUpdates(fork, config, epoch_cache, fork_state, &epoch_transition_cache),
+                .rewards_and_penalties => try state_transition.processRewardsAndPenalties(fork, allocator, config, epoch_cache, fork_state, &epoch_transition_cache),
+                .slashings => try state_transition.processSlashings(fork, allocator, epoch_cache, fork_state, &epoch_transition_cache),
+                .slashings_reset => try state_transition.processSlashingsReset(fork, epoch_cache, fork_state, &epoch_transition_cache),
+                .sync_committee_updates => try state_transition.processSyncCommitteeUpdates(fork, allocator, epoch_cache, fork_state),
+                .historical_summaries_update => try state_transition.processHistoricalSummariesUpdate(fork, fork_state, &epoch_transition_cache),
+                .pending_deposits => try state_transition.processPendingDeposits(fork, allocator, config, epoch_cache, fork_state, &epoch_transition_cache),
+                .pending_consolidations => try state_transition.processPendingConsolidations(fork, epoch_cache, fork_state, &epoch_transition_cache),
                 .proposer_lookahead => {
-                    try state_transition.processProposerLookahead(allocator, pre, epoch_transition_cache);
+                    try state_transition.processProposerLookahead(fork, allocator, epoch_cache, fork_state, &epoch_transition_cache);
                 },
             }
         }

@@ -2,7 +2,6 @@ const std = @import("std");
 const Node = @import("persistent_merkle_tree").Node;
 const ForkSeq = @import("config").ForkSeq;
 const state_transition = @import("state_transition");
-const CachedBeaconState = state_transition.CachedBeaconState;
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
@@ -115,22 +114,24 @@ pub fn Transition(comptime fork: ForkSeq) type {
             }
         }
 
-        pub fn process(self: *Self) !*CachedBeaconState {
-            var post_state: *CachedBeaconState = self.pre.cached_state;
-            for (self.blocks, 0..) |beacon_block, i| {
+        pub fn process(self: *Self) !*state_transition.state_transition.StateTransitionResult {
+            var result: ?*state_transition.state_transition.StateTransitionResult = null;
+            for (self.blocks) |beacon_block| {
+                const input_state = if (result) |res| &res.state else self.pre.cached_state.state;
+                const input_epoch_cache = if (result) |res| res.epoch_cache else self.pre.cached_state.getEpochCache();
                 // if error, clean pre_state of stateTransition() function
                 errdefer {
-                    if (i > 0) {
-                        post_state.deinit();
-                        self.pre.allocator.destroy(post_state);
+                    if (result) |res| {
+                        res.deinit();
+                        self.pre.allocator.destroy(res);
                     }
                 }
-                const new_post_state = try state_transition.state_transition.stateTransition(
+                const new_result = try state_transition.state_transition.stateTransition(
                     self.pre.allocator,
-                    post_state,
-                    .{
-                        .regular = beacon_block,
-                    },
+                    self.pre.cached_state.config,
+                    input_epoch_cache,
+                    input_state,
+                    beacon_block,
                     .{
                         .verify_state_root = true,
                         .verify_proposer = true,
@@ -138,18 +139,14 @@ pub fn Transition(comptime fork: ForkSeq) type {
                     },
                 );
 
-                // don't deinit the initial pre state, we do it in deinit()
-                const to_destroy = post_state;
-                post_state = new_post_state;
-
-                // clean post_state of stateTransition() function
-                if (i > 0) {
-                    to_destroy.deinit();
-                    self.pre.allocator.destroy(to_destroy);
+                if (result) |res| {
+                    res.deinit();
+                    self.pre.allocator.destroy(res);
                 }
+                result = new_result;
             }
 
-            return post_state;
+            return result orelse error.NoBlocks;
         }
 
         pub fn runTest(self: *Self) !void {
@@ -159,7 +156,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
                     actual.deinit();
                     self.pre.allocator.destroy(actual);
                 }
-                try expectEqualBeaconStates(post, actual.state);
+                try expectEqualBeaconStates(post, &actual.state);
             } else {
                 _ = self.process() catch |err| {
                     if (err == error.SkipZigTest) {

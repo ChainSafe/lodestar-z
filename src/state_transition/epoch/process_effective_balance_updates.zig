@@ -7,6 +7,7 @@ const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").Epoc
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
+const Node = @import("persistent_merkle_tree").Node;
 
 /// Same to https://github.com/ethereum/eth2.0-specs/blob/v1.1.0-alpha.5/specs/altair/beacon-chain.md#has_flag
 const TIMELY_TARGET = 1 << c.TIMELY_TARGET_FLAG_INDEX;
@@ -119,8 +120,11 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 
 test "processEffectiveBalanceUpdates - sanity" {
     const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, 10_000);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
     defer test_state.deinit();
 
     _ = try processEffectiveBalanceUpdates(

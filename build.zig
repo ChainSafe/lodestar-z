@@ -968,6 +968,7 @@ pub fn build(b: *std.Build) void {
     module_spec_tests.addImport("config", module_config);
     module_spec_tests.addImport("preset", module_preset);
     module_spec_tests.addImport("snappy", dep_snappy.module("snappy"));
+    module_spec_tests.addImport("fork_types", module_fork_types);
     module_spec_tests.addImport("state_transition", module_state_transition);
     module_spec_tests.addImport("ssz", module_ssz);
     module_spec_tests.addImport("blst", dep_blst.module("blst"));

@@ -172,15 +172,7 @@ pub const TestCachedBeaconState = struct {
     cached_state: *CachedBeaconState,
     epoch_transition_cache: *state_transition.EpochTransitionCache,
 
-    pub fn init(allocator: Allocator, validator_count: usize) !TestCachedBeaconState {
-        const pool = try allocator.create(Node.Pool);
-        errdefer allocator.destroy(pool);
-        pool.* = try Node.Pool.init(
-            allocator,
-            // rough estimate of size
-            @intCast(validator_count * 5),
-        );
-        errdefer pool.deinit();
+    pub fn init(allocator: Allocator, pool: *Node.Pool, validator_count: usize) !TestCachedBeaconState {
         var state = try generateElectraState(allocator, pool, active_chain_config, validator_count);
         errdefer {
             state.deinit();
@@ -249,9 +241,7 @@ pub const TestCachedBeaconState = struct {
         self.index_pubkey_cache.deinit();
         self.epoch_transition_cache.deinit();
         @import("../state_transition.zig").deinitStateTransition();
-        self.pool.deinit();
         self.allocator.destroy(self.epoch_transition_cache);
-        self.allocator.destroy(self.pool);
         self.allocator.destroy(self.index_pubkey_cache);
         self.allocator.destroy(self.config);
     }
@@ -302,6 +292,6 @@ test TestCachedBeaconState {
     var pool = try Node.Pool.init(allocator, 500_000);
     defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 }

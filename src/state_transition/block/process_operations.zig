@@ -18,6 +18,7 @@ const processDepositRequest = @import("./process_deposit_request.zig").processDe
 const processProposerSlashing = @import("./process_proposer_slashing.zig").processProposerSlashing;
 const processVoluntaryExit = @import("./process_voluntary_exit.zig").processVoluntaryExit;
 const processWithdrawalRequest = @import("./process_withdrawal_request.zig").processWithdrawalRequest;
+const Node = @import("persistent_merkle_tree").Node;
 const ProcessBlockOpts = @import("./process_block.zig").ProcessBlockOpts;
 
 pub fn processOperations(
@@ -92,8 +93,11 @@ const AnyBeaconBlock = @import("fork_types").AnyBeaconBlock;
 
 test "process operations" {
     const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
     var electra_block = ct.electra.BeaconBlock.default_value;
