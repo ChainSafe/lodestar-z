@@ -22,6 +22,12 @@ interface ProcessSlotsOpts {
   dontTransferCache?: boolean;
 }
 
+interface ProposerRewards {
+  attestations: bigint;
+  syncAggregate: bigint;
+  slashing: bigint;
+}
+
 declare class BeaconStateView {
   static createFromBytes(fork: string, bytes: Uint8Array): BeaconStateView;
   slot: number;
@@ -35,6 +41,7 @@ declare class BeaconStateView {
   finalizedCheckpoint: Checkpoint;
   proposers: number[];
   proposersNextEpoch: number[] | null;
+  proposerRewards: ProposerRewards;
   getBalance(index: number): bigint;
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   isExecutionStateType(): boolean;

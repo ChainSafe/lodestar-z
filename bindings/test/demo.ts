@@ -64,4 +64,5 @@ printDuration("getFinalizedRootProof()", () => state.getFinalizedRootProof());
 printDuration("isExecutionStateType()", () => state.isExecutionStateType());
 printDuration("getEffectiveBalanceIncrementsZeroInactive()", () => state.getEffectiveBalanceIncrementsZeroInactive());
 printDuration("computeUnrealizedCheckpoints()", () => state.computeUnrealizedCheckpoints());
+printDuration("proposerRewards", () => state.proposerRewards);
 printDuration("processSlots", () => state.processSlots(state.slot+1));

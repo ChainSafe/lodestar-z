@@ -228,6 +228,27 @@ pub fn BeaconStateView_computeUnrealizedCheckpoints(env: napi.Env, cb: napi.Call
     return obj;
 }
 
+/// Get the proposer rewards for the state.
+pub fn BeaconStateView_proposerRewards(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const rewards = cached_state.getProposerRewards();
+
+    const obj = try env.createObject();
+    try obj.setNamedProperty(
+        "attestations",
+        try env.createBigintUint64(rewards.attestations),
+    );
+    try obj.setNamedProperty(
+        "syncAggregate",
+        try env.createBigintUint64(rewards.sync_aggregate),
+    );
+    try obj.setNamedProperty(
+        "slashing",
+        try env.createBigintUint64(rewards.slashing),
+    );
+    return obj;
+}
+
 /// Process slots from current state slot to target slot, returning a new BeaconStateView.
 ///
 /// Arguments:
@@ -287,6 +308,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "getFinalizedRootProof", .method = napi.wrapCallback(0, BeaconStateView_getFinalizedRootProof) },
             .{ .utf8name = "computeUnrealizedCheckpoints", .method = napi.wrapCallback(0, BeaconStateView_computeUnrealizedCheckpoints) },
             .{ .utf8name = "processSlots", .method = napi.wrapCallback(1, BeaconStateView_processSlots) },
+            .{ .utf8name = "proposerRewards", .getter = napi.wrapCallback(0, BeaconStateView_proposerRewards) },
         },
     );
     // Static method on constructor
