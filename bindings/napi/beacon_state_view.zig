@@ -15,6 +15,7 @@ const getValidatorStatus = state_transition.getValidatorStatus;
 const getBlockRootAtSlot = state_transition.getBlockRootAtSlot;
 const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
 const isMergeTransitionComplete = state_transition.isMergeTransitionComplete;
+const getRandaoMix = state_transition.getRandaoMix;
 const preset = @import("preset").preset;
 const ct = @import("consensus_types");
 const pool = @import("./pool.zig");
@@ -407,6 +408,22 @@ pub fn BeaconStateView_isMergeTransitionComplete(env: napi.Env, cb: napi.Callbac
     return env.getBoolean(isMergeTransitionComplete(cached_state.state));
 }
 
+/// Get the randao mix at a given epoch.
+/// Arguments:
+/// - arg 0: epoch (number)
+/// Returns: Bytes32 (Uint8Array)
+pub fn BeaconStateView_getRandaoMix(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const epoch: u64 = @intCast(try cb.arg(0).getValueInt64());
+
+    const mix = getRandaoMix(cached_state.state, epoch) catch {
+        try env.throwError("INVALID_EPOCH", "Failed to get randao mix for epoch");
+        return env.getNull();
+    };
+
+    return sszValueToNapiValue(env, ct.primitive.Bytes32, mix);
+}
+
 /// Get the proposer rewards for the state.
 pub fn BeaconStateView_proposerRewards(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
@@ -493,6 +510,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "getBlockRootAtSlot", .method = napi.wrapCallback(1, BeaconStateView_getBlockRootAtSlot) },
             .{ .utf8name = "getBlockRoot", .method = napi.wrapCallback(1, BeaconStateView_getBlockRoot) },
             .{ .utf8name = "isMergeTransitionComplete", .method = napi.wrapCallback(0, BeaconStateView_isMergeTransitionComplete) },
+            .{ .utf8name = "getRandaoMix", .method = napi.wrapCallback(1, BeaconStateView_getRandaoMix) },
             .{ .utf8name = "isExecutionEnabled", .method = napi.wrapCallback(2, BeaconStateView_isExecutionEnabled) },
             .{ .utf8name = "isExecutionStateType", .method = napi.wrapCallback(0, BeaconStateView_isExecutionStateType) },
             .{ .utf8name = "getEffectiveBalanceIncrementsZeroInactive", .method = napi.wrapCallback(0, BeaconStateView_getEffectiveBalanceIncrementsZeroInactive) },

@@ -73,6 +73,7 @@ printDuration("getIndexedSyncCommitteeAtEpoch(state.epoch)", () => state.getInde
 printDuration("getBlockRootAtSlot(state.slot - 1)", () => state.getBlockRootAtSlot(state.slot - 1));
 printDuration("getBlockRoot(state.epoch - 1)", () => state.getBlockRoot(state.epoch - 1));
 printDuration("isMergeTransitionComplete()", () => state.isMergeTransitionComplete());
+printDuration("getRandaoMix(state.epoch)", () => state.getRandaoMix(state.epoch));
 printDuration("getFinalizedRootProof()", () => state.getFinalizedRootProof());
 printDuration("isExecutionStateType()", () => state.isExecutionStateType());
 printDuration("getEffectiveBalanceIncrementsZeroInactive()", () => state.getEffectiveBalanceIncrementsZeroInactive());

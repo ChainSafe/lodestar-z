@@ -81,6 +81,7 @@ declare class BeaconStateView {
   getBlockRootAtSlot(slot: number): Uint8Array;
   getBlockRoot(epoch: number): Uint8Array;
   isMergeTransitionComplete(): boolean;
+  getRandaoMix(epoch: number): Uint8Array;
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   isExecutionStateType(): boolean;
   getEffectiveBalanceIncrementsZeroInactive(): Uint16Array;

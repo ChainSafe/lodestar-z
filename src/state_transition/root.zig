@@ -78,6 +78,7 @@ pub const computeStartSlotAtEpoch = @import("./utils/epoch.zig").computeStartSlo
 pub const deinitStateTransition = @import("./state_transition.zig").deinitStateTransition;
 pub const isExecutionEnabled = @import("./utils/execution.zig").isExecutionEnabled;
 pub const isMergeTransitionComplete = @import("./utils/execution.zig").isMergeTransitionComplete;
+pub const getRandaoMix = @import("./utils/seed.zig").getRandaoMix;
 pub const getEffectiveBalanceIncrementsZeroInactive = @import("./utils/balance.zig").getEffectiveBalanceIncrementsZeroInactive;
 
 pub const WithdrawalsResult = @import("./block/process_withdrawals.zig").WithdrawalsResult;
