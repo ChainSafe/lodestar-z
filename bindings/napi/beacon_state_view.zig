@@ -434,19 +434,18 @@ pub fn BeaconStateView_getHistoricalSummaries(env: napi.Env, cb: napi.CallbackIn
         return env.getNull();
     };
 
-    const len = historical_summaries.length() catch {
-        try env.throwError("STATE_ERROR", "Failed to get historicalSummaries length");
+    // Bulk read all values at once
+    const summaries = historical_summaries.getAllReadonlyValues(allocator) catch {
+        try env.throwError("STATE_ERROR", "Failed to get historicalSummaries values");
         return env.getNull();
     };
+    defer allocator.free(summaries);
 
     const result = try env.createArray();
-    for (0..len) |i| {
-        var summary = historical_summaries.get(@intCast(i)) catch continue;
+    for (summaries, 0..) |summary, i| {
         const obj = try env.createObject();
-        const block_root = summary.getRoot("block_summary_root") catch continue;
-        const state_root = summary.getRoot("state_summary_root") catch continue;
-        try obj.setNamedProperty("blockSummaryRoot", try sszValueToNapiValue(env, ct.primitive.Root, block_root));
-        try obj.setNamedProperty("stateSummaryRoot", try sszValueToNapiValue(env, ct.primitive.Root, state_root));
+        try obj.setNamedProperty("blockSummaryRoot", try sszValueToNapiValue(env, ct.primitive.Root, &summary.block_summary_root));
+        try obj.setNamedProperty("stateSummaryRoot", try sszValueToNapiValue(env, ct.primitive.Root, &summary.state_summary_root));
         try result.setElement(@intCast(i), obj);
     }
 
