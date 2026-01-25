@@ -63,6 +63,7 @@ printDuration("getBalance(100)", () => state.getBalance(100));
 printDuration("getValidator(0)", () => state.getValidator(0));
 printDuration("getValidatorStatus(0)", () => state.getValidatorStatus(0));
 printDuration("getValidatorStatus(100)", () => state.getValidatorStatus(100));
+printDuration("validatorCount", () => state.validatorCount);
 printDuration("getFinalizedRootProof()", () => state.getFinalizedRootProof());
 printDuration("isExecutionStateType()", () => state.isExecutionStateType());
 printDuration("getEffectiveBalanceIncrementsZeroInactive()", () => state.getEffectiveBalanceIncrementsZeroInactive());
