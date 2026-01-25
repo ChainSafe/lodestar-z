@@ -301,6 +301,18 @@ pub fn BeaconStateView_getBeaconProposer(env: napi.Env, cb: napi.CallbackInfo(1)
     return try env.createInt64(@intCast(proposer));
 }
 
+/// Get all beacon proposers for the current epoch.
+/// Returns: array of validator indices (length = SLOTS_PER_EPOCH)
+pub fn BeaconStateView_getBeaconProposers(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    return numberSliceToNapiValue(
+        env,
+        u64,
+        &cached_state.getEpochCache().proposers,
+        .{},
+    );
+}
+
 /// Get the proposer rewards for the state.
 pub fn BeaconStateView_proposerRewards(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
@@ -380,6 +392,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "validatorCount", .getter = napi.wrapCallback(0, BeaconStateView_getValidatorCount) },
             .{ .utf8name = "activeValidatorCount", .getter = napi.wrapCallback(0, BeaconStateView_getActiveValidatorCount) },
             .{ .utf8name = "getBeaconProposer", .method = napi.wrapCallback(1, BeaconStateView_getBeaconProposer) },
+            .{ .utf8name = "getBeaconProposers", .method = napi.wrapCallback(0, BeaconStateView_getBeaconProposers) },
             .{ .utf8name = "isExecutionEnabled", .method = napi.wrapCallback(2, BeaconStateView_isExecutionEnabled) },
             .{ .utf8name = "isExecutionStateType", .method = napi.wrapCallback(0, BeaconStateView_isExecutionStateType) },
             .{ .utf8name = "getEffectiveBalanceIncrementsZeroInactive", .method = napi.wrapCallback(0, BeaconStateView_getEffectiveBalanceIncrementsZeroInactive) },

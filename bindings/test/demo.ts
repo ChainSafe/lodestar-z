@@ -66,6 +66,7 @@ printDuration("getValidatorStatus(100)", () => state.getValidatorStatus(100));
 printDuration("validatorCount", () => state.validatorCount);
 printDuration("activeValidatorCount", () => state.activeValidatorCount);
 printDuration("getBeaconProposer(state.slot)", () => state.getBeaconProposer(state.slot));
+printDuration("getBeaconProposers()", () => state.getBeaconProposers());
 printDuration("getFinalizedRootProof()", () => state.getFinalizedRootProof());
 printDuration("isExecutionStateType()", () => state.isExecutionStateType());
 printDuration("getEffectiveBalanceIncrementsZeroInactive()", () => state.getEffectiveBalanceIncrementsZeroInactive());
