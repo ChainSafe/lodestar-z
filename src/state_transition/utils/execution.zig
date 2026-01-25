@@ -3,8 +3,8 @@ const ForkSeq = @import("config").ForkSeq;
 const ForkTypes = @import("fork_types").ForkTypes;
 const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const ForkBeaconBlock = @import("fork_types").ForkBeaconBlock;
+const ForkBeaconBlockBody = @import("fork_types").ForkBeaconBlockBody;
 const BlockType = @import("fork_types").BlockType;
-const types = @import("consensus_types");
 // const ExecutionPayloadHeader
 const ZERO_HASH = @import("constants").ZERO_HASH;
 
@@ -25,14 +25,27 @@ pub fn isExecutionEnabled(comptime fork: ForkSeq, state: *ForkBeaconState(fork),
 pub fn isMergeTransitionBlock(
     comptime fork: ForkSeq,
     state: *ForkBeaconState(fork),
-    body: *const ForkTypes(fork).BeaconBlockBody.Type,
+    comptime block_type: BlockType,
+    body: *const ForkBeaconBlockBody(fork, block_type),
 ) bool {
     if (comptime fork != .bellatrix) {
         return false;
     }
 
-    return (!isMergeTransitionComplete(fork, state) and
-        !ForkTypes(fork).ExecutionPayload.equals(&body.execution_payload, &types.bellatrix.ExecutionPayload.default_value));
+    if (isMergeTransitionComplete(fork, state)) {
+        return false;
+    }
+
+    return switch (block_type) {
+        .full => !ForkTypes(fork).ExecutionPayload.equals(
+            &body.executionPayload().inner,
+            &ForkTypes(fork).ExecutionPayload.default_value,
+        ),
+        .blinded => !ForkTypes(fork).ExecutionPayloadHeader.equals(
+            &body.executionPayloadHeader().inner,
+            &ForkTypes(fork).ExecutionPayloadHeader.default_value,
+        ),
+    };
 }
 
 pub fn isMergeTransitionComplete(comptime fork: ForkSeq, state: *ForkBeaconState(fork)) bool {

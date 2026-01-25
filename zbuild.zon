@@ -223,6 +223,7 @@
                     .spec_test_options,
                     .consensus_types,
                     .config,
+                    .fork_types,
                     .preset,
                     .snappy,
                     .state_transition,
