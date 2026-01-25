@@ -110,6 +110,7 @@ declare class BeaconStateView {
   getPendingDeposits(): PendingDeposit[];
   getPendingPartialWithdrawals(): PendingPartialWithdrawal[];
   getPendingConsolidations(): PendingConsolidation[];
+  getProposerLookahead(): Uint32Array;
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   isExecutionStateType(): boolean;
   getEffectiveBalanceIncrementsZeroInactive(): Uint16Array;

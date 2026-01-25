@@ -535,6 +535,24 @@ pub fn BeaconStateView_getPendingConsolidations(env: napi.Env, cb: napi.Callback
     return result;
 }
 
+/// Get the proposer lookahead from the state (Fulu+).
+pub fn BeaconStateView_getProposerLookahead(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+
+    var proposer_lookahead = cached_state.state.proposerLookahead() catch {
+        try env.throwError("STATE_ERROR", "Failed to get proposerLookahead");
+        return env.getNull();
+    };
+
+    const lookahead = proposer_lookahead.getAll(allocator) catch {
+        try env.throwError("STATE_ERROR", "Failed to get proposerLookahead values");
+        return env.getNull();
+    };
+    defer allocator.free(lookahead);
+
+    return try numberSliceToNapiValue(env, u64, lookahead, .{ .typed_array = .uint32 });
+}
+
 /// Get the proposer rewards for the state.
 pub fn BeaconStateView_proposerRewards(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
@@ -626,6 +644,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "getPendingDeposits", .method = napi.wrapCallback(0, BeaconStateView_getPendingDeposits) },
             .{ .utf8name = "getPendingPartialWithdrawals", .method = napi.wrapCallback(0, BeaconStateView_getPendingPartialWithdrawals) },
             .{ .utf8name = "getPendingConsolidations", .method = napi.wrapCallback(0, BeaconStateView_getPendingConsolidations) },
+            .{ .utf8name = "getProposerLookahead", .method = napi.wrapCallback(0, BeaconStateView_getProposerLookahead) },
             .{ .utf8name = "isExecutionEnabled", .method = napi.wrapCallback(2, BeaconStateView_isExecutionEnabled) },
             .{ .utf8name = "isExecutionStateType", .method = napi.wrapCallback(0, BeaconStateView_isExecutionStateType) },
             .{ .utf8name = "getEffectiveBalanceIncrementsZeroInactive", .method = napi.wrapCallback(0, BeaconStateView_getEffectiveBalanceIncrementsZeroInactive) },
