@@ -333,6 +333,27 @@ pub fn BeaconStateView_getBeaconProposersNextEpoch(env: napi.Env, cb: napi.Callb
     return env.getNull();
 }
 
+/// Get the indexed sync committee at a given epoch.
+/// Arguments:
+/// - arg 0: epoch (number)
+/// Returns: object with validatorIndices (number[])
+pub fn BeaconStateView_getIndexedSyncCommitteeAtEpoch(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const epoch: u64 = @intCast(try cb.arg(0).getValueInt64());
+
+    const sync_committee = cached_state.getEpochCache().getIndexedSyncCommitteeAtEpoch(epoch) catch {
+        try env.throwError("NO_SYNC_COMMITTEE", "Sync committee not available for requested epoch");
+        return env.getNull();
+    };
+
+    const obj = try env.createObject();
+    try obj.setNamedProperty(
+        "validatorIndices",
+        try numberSliceToNapiValue(env, u64, sync_committee.getValidatorIndices(), .{}),
+    );
+    return obj;
+}
+
 /// Get the proposer rewards for the state.
 pub fn BeaconStateView_proposerRewards(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
@@ -415,6 +436,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "getBeaconProposers", .method = napi.wrapCallback(0, BeaconStateView_getBeaconProposers) },
             .{ .utf8name = "getBeaconProposersPrevEpoch", .method = napi.wrapCallback(0, BeaconStateView_getBeaconProposersPrevEpoch) },
             .{ .utf8name = "getBeaconProposersNextEpoch", .method = napi.wrapCallback(0, BeaconStateView_getBeaconProposersNextEpoch) },
+            .{ .utf8name = "getIndexedSyncCommitteeAtEpoch", .method = napi.wrapCallback(1, BeaconStateView_getIndexedSyncCommitteeAtEpoch) },
             .{ .utf8name = "isExecutionEnabled", .method = napi.wrapCallback(2, BeaconStateView_isExecutionEnabled) },
             .{ .utf8name = "isExecutionStateType", .method = napi.wrapCallback(0, BeaconStateView_isExecutionStateType) },
             .{ .utf8name = "getEffectiveBalanceIncrementsZeroInactive", .method = napi.wrapCallback(0, BeaconStateView_getEffectiveBalanceIncrementsZeroInactive) },

@@ -703,10 +703,12 @@ pub const EpochCache = struct {
 
     pub fn getIndexedSyncCommitteeAtEpoch(self: *const EpochCache, epoch: Epoch) !SyncCommitteeCacheAllForks {
         const sync_period = computeSyncPeriodAtEpoch(epoch);
-        switch (sync_period) {
-            self.sync_period => return self.current_sync_committee_indexed.get(),
-            self.sync_period + 1 => return self.next_sync_committee_indexed.get(),
-            else => return error.SyncCommitteeNotFound,
+        if (sync_period == self.sync_period) {
+            return self.current_sync_committee_indexed.get();
+        } else if (sync_period == self.sync_period + 1) {
+            return self.next_sync_committee_indexed.get();
+        } else {
+            return error.SyncCommitteeNotFound;
         }
     }
 

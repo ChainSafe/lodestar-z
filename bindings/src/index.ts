@@ -28,6 +28,10 @@ interface ProposerRewards {
   slashing: bigint;
 }
 
+interface SyncCommitteeCache {
+  validatorIndices: number[];
+}
+
 interface Validator {
   pubkey: Uint8Array;
   withdrawalCredentials: Uint8Array;
@@ -73,6 +77,7 @@ declare class BeaconStateView {
   getBeaconProposers(): number[];
   getBeaconProposersPrevEpoch(): number[] | null;
   getBeaconProposersNextEpoch(): number[] | null;
+  getIndexedSyncCommitteeAtEpoch(epoch: number): SyncCommitteeCache;
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   isExecutionStateType(): boolean;
   getEffectiveBalanceIncrementsZeroInactive(): Uint16Array;
