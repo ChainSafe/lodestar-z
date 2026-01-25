@@ -72,6 +72,7 @@ declare class BeaconStateView {
   getBeaconProposer(slot: number): number;
   getBeaconProposers(): number[];
   getBeaconProposersPrevEpoch(): number[] | null;
+  getBeaconProposersNextEpoch(): number[] | null;
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   isExecutionStateType(): boolean;
   getEffectiveBalanceIncrementsZeroInactive(): Uint16Array;

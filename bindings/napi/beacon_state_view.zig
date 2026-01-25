@@ -323,6 +323,16 @@ pub fn BeaconStateView_getBeaconProposersPrevEpoch(env: napi.Env, cb: napi.Callb
     return env.getNull();
 }
 
+/// Get all beacon proposers for the next epoch.
+/// Returns: array of validator indices or null if not available (pre-Fulu)
+pub fn BeaconStateView_getBeaconProposersNextEpoch(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    if (cached_state.getEpochCache().proposers_next_epoch) |*proposers| {
+        return numberSliceToNapiValue(env, u64, proposers, .{});
+    }
+    return env.getNull();
+}
+
 /// Get the proposer rewards for the state.
 pub fn BeaconStateView_proposerRewards(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
@@ -404,6 +414,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "getBeaconProposer", .method = napi.wrapCallback(1, BeaconStateView_getBeaconProposer) },
             .{ .utf8name = "getBeaconProposers", .method = napi.wrapCallback(0, BeaconStateView_getBeaconProposers) },
             .{ .utf8name = "getBeaconProposersPrevEpoch", .method = napi.wrapCallback(0, BeaconStateView_getBeaconProposersPrevEpoch) },
+            .{ .utf8name = "getBeaconProposersNextEpoch", .method = napi.wrapCallback(0, BeaconStateView_getBeaconProposersNextEpoch) },
             .{ .utf8name = "isExecutionEnabled", .method = napi.wrapCallback(2, BeaconStateView_isExecutionEnabled) },
             .{ .utf8name = "isExecutionStateType", .method = napi.wrapCallback(0, BeaconStateView_isExecutionStateType) },
             .{ .utf8name = "getEffectiveBalanceIncrementsZeroInactive", .method = napi.wrapCallback(0, BeaconStateView_getEffectiveBalanceIncrementsZeroInactive) },
