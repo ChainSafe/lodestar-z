@@ -68,7 +68,8 @@ pub fn numberSliceToNapiValue(
         if (T == typed_array_type.elementType()) {
             @memcpy(bytes[0..bytes_len], @as([]const u8, @ptrCast(numbers)));
         } else {
-            var bytes_numbers: []T = @ptrCast(bytes[0..bytes_len]);
+            const bytes_numbers_ptr: [*]T = @ptrCast(@alignCast(bytes));
+            const bytes_numbers = bytes_numbers_ptr[0..numbers.len];
             for (numbers, 0..) |num, i| {
                 bytes_numbers[i] = @intCast(num);
             }
