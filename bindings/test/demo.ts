@@ -79,6 +79,7 @@ printDuration("getPendingDeposits()", () => state.getPendingDeposits());
 printDuration("getPendingPartialWithdrawals()", () => state.getPendingPartialWithdrawals());
 printDuration("getPendingConsolidations()", () => state.getPendingConsolidations());
 printDuration("getProposerLookahead()", () => state.getProposerLookahead());
+printDuration("getSingleProof(169)", () => state.getSingleProof(169));
 printDuration("getFinalizedRootProof()", () => state.getFinalizedRootProof());
 printDuration("isExecutionStateType()", () => state.isExecutionStateType());
 printDuration("getEffectiveBalanceIncrementsZeroInactive()", () => state.getEffectiveBalanceIncrementsZeroInactive());

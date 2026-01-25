@@ -553,6 +553,28 @@ pub fn BeaconStateView_getProposerLookahead(env: napi.Env, cb: napi.CallbackInfo
     return try numberSliceToNapiValue(env, u64, lookahead, .{ .typed_array = .uint32 });
 }
 
+/// Get a single Merkle proof  for a node at the given generalized index.
+pub fn BeaconStateView_getSingleProof(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const gindex: u64 = @intCast(try cb.arg(0).getValueInt64());
+
+    var proof = cached_state.state.getSingleProof(allocator, gindex) catch {
+        try env.throwError("STATE_ERROR", "Failed to get single proof");
+        return env.getNull();
+    };
+    defer proof.deinit(allocator);
+
+    const result = try env.createArray();
+    for (proof.witnesses, 0..) |witness, i| {
+        var witness_bytes: [*]u8 = undefined;
+        const witness_buf = try env.createArrayBuffer(32, &witness_bytes);
+        @memcpy(witness_bytes[0..32], &witness);
+        try result.setElement(@intCast(i), try env.createTypedarray(.uint8, 32, witness_buf, 0));
+    }
+
+    return result;
+}
+
 /// Get the proposer rewards for the state.
 pub fn BeaconStateView_proposerRewards(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
@@ -645,6 +667,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "getPendingPartialWithdrawals", .method = napi.wrapCallback(0, BeaconStateView_getPendingPartialWithdrawals) },
             .{ .utf8name = "getPendingConsolidations", .method = napi.wrapCallback(0, BeaconStateView_getPendingConsolidations) },
             .{ .utf8name = "getProposerLookahead", .method = napi.wrapCallback(0, BeaconStateView_getProposerLookahead) },
+            .{ .utf8name = "getSingleProof", .method = napi.wrapCallback(1, BeaconStateView_getSingleProof) },
             .{ .utf8name = "isExecutionEnabled", .method = napi.wrapCallback(2, BeaconStateView_isExecutionEnabled) },
             .{ .utf8name = "isExecutionStateType", .method = napi.wrapCallback(0, BeaconStateView_isExecutionStateType) },
             .{ .utf8name = "getEffectiveBalanceIncrementsZeroInactive", .method = napi.wrapCallback(0, BeaconStateView_getEffectiveBalanceIncrementsZeroInactive) },

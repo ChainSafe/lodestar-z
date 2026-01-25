@@ -111,6 +111,7 @@ declare class BeaconStateView {
   getPendingPartialWithdrawals(): PendingPartialWithdrawal[];
   getPendingConsolidations(): PendingConsolidation[];
   getProposerLookahead(): Uint32Array;
+  getSingleProof(gindex: number): Uint8Array[];
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   isExecutionStateType(): boolean;
   getEffectiveBalanceIncrementsZeroInactive(): Uint16Array;
