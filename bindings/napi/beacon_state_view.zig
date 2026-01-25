@@ -509,6 +509,32 @@ pub fn BeaconStateView_getPendingPartialWithdrawals(env: napi.Env, cb: napi.Call
     return result;
 }
 
+/// Get the pending consolidations from the state
+pub fn BeaconStateView_getPendingConsolidations(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+
+    var pending_consolidations = cached_state.state.pendingConsolidations() catch {
+        try env.throwError("STATE_ERROR", "Failed to get pendingConsolidations");
+        return env.getNull();
+    };
+
+    const consolidations = pending_consolidations.getAllReadonlyValues(allocator) catch {
+        try env.throwError("STATE_ERROR", "Failed to get pendingConsolidations values");
+        return env.getNull();
+    };
+    defer allocator.free(consolidations);
+
+    const result = try env.createArray();
+    for (consolidations, 0..) |consolidation, i| {
+        const obj = try env.createObject();
+        try obj.setNamedProperty("sourceIndex", try env.createInt64(@intCast(consolidation.source_index)));
+        try obj.setNamedProperty("targetIndex", try env.createInt64(@intCast(consolidation.target_index)));
+        try result.setElement(@intCast(i), obj);
+    }
+
+    return result;
+}
+
 /// Get the proposer rewards for the state.
 pub fn BeaconStateView_proposerRewards(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
@@ -599,6 +625,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "getHistoricalSummaries", .method = napi.wrapCallback(0, BeaconStateView_getHistoricalSummaries) },
             .{ .utf8name = "getPendingDeposits", .method = napi.wrapCallback(0, BeaconStateView_getPendingDeposits) },
             .{ .utf8name = "getPendingPartialWithdrawals", .method = napi.wrapCallback(0, BeaconStateView_getPendingPartialWithdrawals) },
+            .{ .utf8name = "getPendingConsolidations", .method = napi.wrapCallback(0, BeaconStateView_getPendingConsolidations) },
             .{ .utf8name = "isExecutionEnabled", .method = napi.wrapCallback(2, BeaconStateView_isExecutionEnabled) },
             .{ .utf8name = "isExecutionStateType", .method = napi.wrapCallback(0, BeaconStateView_isExecutionStateType) },
             .{ .utf8name = "getEffectiveBalanceIncrementsZeroInactive", .method = napi.wrapCallback(0, BeaconStateView_getEffectiveBalanceIncrementsZeroInactive) },

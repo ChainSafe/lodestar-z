@@ -51,6 +51,11 @@ interface PendingPartialWithdrawal {
   withdrawableEpoch: bigint;
 }
 
+interface PendingConsolidation {
+  sourceIndex: number;
+  targetIndex: number;
+}
+
 interface Validator {
   pubkey: Uint8Array;
   withdrawalCredentials: Uint8Array;
@@ -104,6 +109,7 @@ declare class BeaconStateView {
   getHistoricalSummaries(): HistoricalSummary[];
   getPendingDeposits(): PendingDeposit[];
   getPendingPartialWithdrawals(): PendingPartialWithdrawal[];
+  getPendingConsolidations(): PendingConsolidation[];
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   isExecutionStateType(): boolean;
   getEffectiveBalanceIncrementsZeroInactive(): Uint16Array;
