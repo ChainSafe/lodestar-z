@@ -30,6 +30,5 @@ test "state_transition utils" {
     _ = @import("utils/signing_root.zig");
     _ = @import("utils/sync_committee.zig");
     _ = @import("utils/target_unslashed_balance.zig");
-    _ = @import("utils/validator.zig");
     _ = @import("utils/verify_merkle_branch.zig");
 }
