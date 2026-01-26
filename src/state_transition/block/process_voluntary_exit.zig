@@ -39,7 +39,7 @@ pub fn getVoluntaryExitValidity(cached_state: *CachedBeaconState, signed_volunta
     var validators = try state.validators();
     const validators_len = try validators.length();
     if (voluntary_exit.validator_index >= validators_len) {
-        return false;
+        return .inactive;
     }
 
     var validator = try validators.get(@intCast(voluntary_exit.validator_index));
