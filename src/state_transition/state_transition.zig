@@ -11,7 +11,7 @@ const types = @import("consensus_types");
 const preset = @import("preset").preset;
 
 const Slot = types.primitive.Slot.Type;
-
+const CachedBeaconState = @import("cache/state_cache.zig").CachedBeaconState;
 const BeaconConfig = @import("config").BeaconConfig;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
@@ -48,16 +48,18 @@ pub const BlockExternalData = struct {
 
 pub fn processSlots(
     allocator: std.mem.Allocator,
-    config: *const BeaconConfig,
-    epoch_cache: *EpochCache,
-    state: *AnyBeaconState,
+    cached_state: *CachedBeaconState,
     slot: Slot,
     _: EpochTransitionCacheOpts,
 ) !void {
+    const config = cached_state.config;
+    const epoch_cache = cached_state.getEpochCache();
+    const state = cached_state.state;
+
     if (try state.slot() > slot) return error.outdatedSlot;
 
     while (try state.slot() < slot) {
-        try processSlot(state);
+        try processSlot(cached_state.state);
 
         const next_slot = try state.slot() + 1;
         if (next_slot % preset.SLOTS_PER_EPOCH == 0) {
@@ -171,34 +173,34 @@ pub const StateTransitionResult = struct {
 
 pub fn stateTransition(
     allocator: std.mem.Allocator,
-    config: *const BeaconConfig,
-    epoch_cache: *EpochCache,
-    state: *AnyBeaconState,
+    cached_state: *CachedBeaconState,
     signed_block: AnySignedBeaconBlock,
     opts: TransitionOpt,
-) !*StateTransitionResult {
+) !*CachedBeaconState {
     const block = signed_block.beaconBlock();
     const block_slot = block.slot();
 
-    var post_state = try state.clone(
+    var post_cached_state = try cached_state.clone(
+        allocator,
         .{ .transfer_cache = !opts.do_not_transfer_cache },
     );
-    const post_epoch_cache = try epoch_cache.clone(allocator);
+    errdefer {
+        post_cached_state.deinit();
+        allocator.destroy(post_cached_state);
+    }
 
-    errdefer post_state.deinit();
-    errdefer post_epoch_cache.deinit();
-
-    // TODO - fix when using CachedBeaconState here
-    // try metrics.state_transition.onStateClone(post_state, .state_transition);
+    try metrics.state_transition.onStateClone(post_cached_state, .state_transition);
 
     try processSlots(
         allocator,
-        config,
-        post_epoch_cache,
-        &post_state,
+        post_cached_state,
         block_slot,
         .{},
     );
+
+    const config = post_cached_state.config;
+    const post_epoch_cache = post_cached_state.getEpochCache();
+    const post_state = post_cached_state.state;
 
     // Verify proposer signature only
     if (opts.verify_proposer and !try verifyProposerSignature(
@@ -248,8 +250,7 @@ pub fn stateTransition(
     //  postState.commit();
     //  processBlockCommitTimer?.();
 
-    // TODO - fix when using CachedBeaconState here
-    // try metrics.state_transition.onPostState(post_state);
+    try metrics.state_transition.onPostState(post_cached_state);
 
     // Verify state root
     if (opts.verify_state_root) {
@@ -266,12 +267,7 @@ pub fn stateTransition(
         try post_state.commit();
     }
 
-    const result = try allocator.create(StateTransitionResult);
-    result.* = .{
-        .state = post_state,
-        .epoch_cache = post_epoch_cache,
-    };
-    return result;
+    return post_cached_state;
 }
 
 pub fn deinitStateTransition() void {
@@ -317,9 +313,7 @@ test "state transition - electra block" {
         // testing.expectError(blst.c.BLST_BAD_ENCODING, stateTransition(allocator, test_state.cached_state, signed_block, .{ .verify_signatures = true }));
         const res = stateTransition(
             allocator,
-            test_state.cached_state.config,
-            test_state.cached_state.getEpochCache(),
-            test_state.cached_state.state,
+            test_state.cached_state,
             signed_beacon_block,
             tc.transition_opt,
         );
