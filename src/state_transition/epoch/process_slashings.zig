@@ -11,17 +11,23 @@ const PROPORTIONAL_SLASHING_MULTIPLIER_ALTAIR = preset.PROPORTIONAL_SLASHING_MUL
 const PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX = preset.PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX;
 const Node = @import("persistent_merkle_tree").Node;
 
-/// TODO: consider returning number[] when we switch to TreeView
 pub fn processSlashings(
     comptime fork: ForkSeq,
     allocator: std.mem.Allocator,
     epoch_cache: *const EpochCache,
     state: *ForkBeaconState(fork),
     cache: *const EpochTransitionCache,
-) !void {
+    update_balance: bool,
+) ![]const u64 {
+    const slashing_penalties = cache.slashing_penalties;
+    const empty_penalties = &[_]u64{};
+    if (!update_balance) {
+        @memset(slashing_penalties, 0);
+    }
+
     // Return early if there no index to slash
     if (cache.indices_to_slash.items.len == 0) {
-        return;
+        return if (update_balance) empty_penalties else slashing_penalties;
     }
     const total_balance_by_increment = cache.total_active_stake_by_increment;
     const proportional_slashing_multiplier: u64 =
@@ -51,8 +57,14 @@ pub fn processSlashings(
             try penalties_by_effective_balance_increment.put(effective_balance_increment, p);
             break :blk p;
         };
-        try decreaseBalance(fork, state, index, penalty);
+        if (update_balance) {
+            try decreaseBalance(fork, state, index, penalty);
+        } else {
+            slashing_penalties[index] = penalty;
+        }
     }
+
+    return if (update_balance) empty_penalties else slashing_penalties;
 }
 
 pub fn getTotalSlashingsByIncrement(
@@ -81,11 +93,12 @@ test "processSlashings - sanity" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
     defer test_state.deinit();
 
-    try processSlashings(
+    _ = try processSlashings(
         .electra,
         allocator,
         test_state.cached_state.getEpochCache(),
         test_state.cached_state.state.castToFork(.electra),
         test_state.epoch_transition_cache,
+        true,
     );
 }

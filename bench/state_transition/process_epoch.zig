@@ -82,6 +82,7 @@ fn ProcessRewardsAndPenaltiesBench(comptime fork: ForkSeq) type {
                 cloned.getEpochCache(),
                 cloned.state.castToFork(fork),
                 &cache,
+                null,
             ) catch unreachable;
         }
     };
@@ -122,12 +123,13 @@ fn ProcessSlashingsBench(comptime fork: ForkSeq) type {
             }
             var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
             defer cache.deinit();
-            state_transition.processSlashings(
+            _ = state_transition.processSlashings(
                 fork,
                 allocator,
                 cloned.getEpochCache(),
                 cloned.state.castToFork(fork),
                 &cache,
+                false,
             ) catch unreachable;
         }
     };
@@ -482,12 +484,13 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             recordSegment(.registry_updates, elapsedSince(registry_start));
 
             const slashings_start = std.time.nanoTimestamp();
-            state_transition.processSlashings(
+            const slashing_penalties = state_transition.processSlashings(
                 fork,
                 allocator,
                 epoch_cache,
                 fork_state,
                 &cache,
+                false,
             ) catch unreachable;
             recordSegment(.slashings, elapsedSince(slashings_start));
 
@@ -499,6 +502,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 epoch_cache,
                 fork_state,
                 &cache,
+                slashing_penalties,
             ) catch unreachable;
             recordSegment(.rewards_and_penalties, elapsedSince(rewards_start));
 

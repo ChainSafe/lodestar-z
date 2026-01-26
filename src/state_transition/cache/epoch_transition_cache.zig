@@ -68,23 +68,39 @@ const ReusedEpochTransitionCache = struct {
     current_epoch_participation: U8Array,
     rewards: U64Array,
     penalties: U64Array,
+    slashing_penalties: U64Array,
 
     pub fn init(allocator: Allocator, validator_count: usize) !ReusedEpochTransitionCache {
-        return .{
-            .allocator = allocator,
-            .is_active_prev_epoch = try BoolArray.initCapacity(allocator, validator_count),
-            .is_active_current_epoch = try BoolArray.initCapacity(allocator, validator_count),
-            .is_active_next_epoch = try BoolArray.initCapacity(allocator, validator_count),
-            .proposer_indices = try UsizeArray.initCapacity(allocator, validator_count),
-            .inclusion_delays = try UsizeArray.initCapacity(allocator, validator_count),
-            .flags = try U8Array.initCapacity(allocator, validator_count),
-            .next_epoch_shuffling_active_validator_indices = try std.ArrayList(ValidatorIndex).initCapacity(allocator, validator_count),
-            .is_compounding_validator_arr = try BoolArray.initCapacity(allocator, validator_count),
-            .previous_epoch_participation = try U8Array.initCapacity(allocator, validator_count),
-            .current_epoch_participation = try U8Array.initCapacity(allocator, validator_count),
-            .rewards = try U64Array.initCapacity(allocator, validator_count),
-            .penalties = try U64Array.initCapacity(allocator, validator_count),
-        };
+        var cache: ReusedEpochTransitionCache = undefined;
+        cache.allocator = allocator;
+        cache.is_active_prev_epoch = try BoolArray.initCapacity(allocator, validator_count);
+        errdefer cache.is_active_prev_epoch.deinit();
+        cache.is_active_current_epoch = try BoolArray.initCapacity(allocator, validator_count);
+        errdefer cache.is_active_current_epoch.deinit();
+        cache.is_active_next_epoch = try BoolArray.initCapacity(allocator, validator_count);
+        errdefer cache.is_active_next_epoch.deinit();
+        cache.proposer_indices = try UsizeArray.initCapacity(allocator, validator_count);
+        errdefer cache.proposer_indices.deinit();
+        cache.inclusion_delays = try UsizeArray.initCapacity(allocator, validator_count);
+        errdefer cache.inclusion_delays.deinit();
+        cache.flags = try U8Array.initCapacity(allocator, validator_count);
+        errdefer cache.flags.deinit();
+        cache.next_epoch_shuffling_active_validator_indices = try std.ArrayList(ValidatorIndex).initCapacity(allocator, validator_count);
+        errdefer cache.next_epoch_shuffling_active_validator_indices.deinit();
+        cache.is_compounding_validator_arr = try BoolArray.initCapacity(allocator, validator_count);
+        errdefer cache.is_compounding_validator_arr.deinit();
+        cache.previous_epoch_participation = try U8Array.initCapacity(allocator, validator_count);
+        errdefer cache.previous_epoch_participation.deinit();
+        cache.current_epoch_participation = try U8Array.initCapacity(allocator, validator_count);
+        errdefer cache.current_epoch_participation.deinit();
+        cache.rewards = try U64Array.initCapacity(allocator, validator_count);
+        errdefer cache.rewards.deinit();
+        cache.penalties = try U64Array.initCapacity(allocator, validator_count);
+        errdefer cache.penalties.deinit();
+        cache.slashing_penalties = try U64Array.initCapacity(allocator, validator_count);
+        errdefer cache.slashing_penalties.deinit();
+
+        return cache;
     }
 
     pub fn resize(self: *ReusedEpochTransitionCache, validator_count: usize) !void {
@@ -100,6 +116,7 @@ const ReusedEpochTransitionCache = struct {
         try self.current_epoch_participation.resize(validator_count);
         try self.rewards.resize(validator_count);
         try self.penalties.resize(validator_count);
+        try self.slashing_penalties.resize(validator_count);
 
         @memset(self.is_active_prev_epoch.items, true);
         @memset(self.is_active_current_epoch.items, true);
@@ -119,6 +136,7 @@ const ReusedEpochTransitionCache = struct {
         self.current_epoch_participation.deinit();
         self.rewards.deinit();
         self.penalties.deinit();
+        self.slashing_penalties.deinit();
     }
 };
 
@@ -185,6 +203,7 @@ pub const EpochTransitionCache = struct {
     is_compounding_validator_arr: *BoolArray,
     rewards: []u64,
     penalties: []u64,
+    slashing_penalties: []u64,
     balances: ?U64Array,
     next_shuffling_active_indices: []const ValidatorIndex,
     // TODO: nextShufflingDecisionRoot may not needed as we don't use ShufflingCache
@@ -517,6 +536,7 @@ pub const EpochTransitionCache = struct {
             .is_compounding_validator_arr = &reused_cache.is_compounding_validator_arr,
             .rewards = reused_cache.rewards.items,
             .penalties = reused_cache.penalties.items,
+            .slashing_penalties = reused_cache.slashing_penalties.items,
             // Will be assigned in processRewardsAndPenalties()
             .balances = null,
         };

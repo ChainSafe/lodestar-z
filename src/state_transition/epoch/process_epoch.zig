@@ -40,10 +40,9 @@ pub fn processEpoch(
 
     try processRegistryUpdates(fork, config, epoch_cache, state, cache);
 
-    // TODO(bing): In lodestar-ts we accumulate slashing penalties and only update in processRewardsAndPenalties. Do the same?
-    try processSlashings(fork, allocator, epoch_cache, state, cache);
+    const slashing_penalties = try processSlashings(fork, allocator, epoch_cache, state, cache, false);
 
-    try processRewardsAndPenalties(fork, allocator, config, epoch_cache, state, cache);
+    try processRewardsAndPenalties(fork, allocator, config, epoch_cache, state, cache, slashing_penalties);
 
     try processEth1DataReset(fork, state, cache);
 

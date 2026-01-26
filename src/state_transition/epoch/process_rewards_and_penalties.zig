@@ -17,6 +17,7 @@ pub fn processRewardsAndPenalties(
     epoch_cache: *const EpochCache,
     state: *ForkBeaconState(fork),
     cache: *const EpochTransitionCache,
+    slashing_penalties: ?[]const u64,
 ) !void {
     // No rewards are applied at the end of `GENESIS_EPOCH` because rewards are for work done in the previous epoch
     if (cache.current_epoch == GENESIS_EPOCH) {
@@ -30,9 +31,21 @@ pub fn processRewardsAndPenalties(
     const balances = try state.balancesSlice(allocator);
     defer allocator.free(balances);
 
-    for (rewards, penalties, balances) |reward, penalty, *balance| {
-        const result = balance.* + reward -| penalty;
-        balance.* = result;
+    if (slashing_penalties) |slashings| {
+        if (slashings.len != rewards.len) {
+            return error.InvalidSlashingPenaltiesLength;
+        }
+
+        for (rewards, penalties, balances, 0..) |reward, penalty, *balance, i| {
+            const total_penalty = penalty +| slashings[i];
+            const result = balance.* + reward -| total_penalty;
+            balance.* = result;
+        }
+    } else {
+        for (rewards, penalties, balances) |reward, penalty, *balance| {
+            const result = balance.* + reward -| penalty;
+            balance.* = result;
+        }
     }
 
     var balances_arraylist: std.ArrayListUnmanaged(u64) = .fromOwnedSlice(balances);
@@ -73,5 +86,6 @@ test "processRewardsAndPenalties - sanity" {
         test_state.cached_state.getEpochCache(),
         test_state.cached_state.state.castToFork(.electra),
         test_state.epoch_transition_cache,
+        null,
     );
 }
