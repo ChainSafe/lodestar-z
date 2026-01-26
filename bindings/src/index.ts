@@ -98,6 +98,10 @@ declare class BeaconStateView {
   previousJustifiedCheckpoint: Checkpoint;
   currentJustifiedCheckpoint: Checkpoint;
   finalizedCheckpoint: Checkpoint;
+  previousDecisionRoot: Uint8Array;
+  currentDecisionRoot: Uint8Array;
+  nextDecisionRoot: Uint8Array;
+  getShufflingDecisionRoot(epoch: number): Uint8Array;
   proposers: number[];
   proposersNextEpoch: number[] | null;
   proposerRewards: ProposerRewards;

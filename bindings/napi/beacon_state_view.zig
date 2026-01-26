@@ -19,6 +19,7 @@ const getRandaoMix = state_transition.getRandaoMix;
 const isValidVoluntaryExitFn = state_transition.isValidVoluntaryExit;
 const getVoluntaryExitValidityFn = state_transition.getVoluntaryExitValidity;
 const VoluntaryExitValidity = state_transition.VoluntaryExitValidity;
+const calculateShufflingDecisionRoot = state_transition.calculateShufflingDecisionRoot;
 const preset = @import("preset").preset;
 const ct = @import("consensus_types");
 const pool = @import("./pool.zig");
@@ -678,6 +679,38 @@ pub fn BeaconStateView_processSlots(env: napi.Env, cb: napi.CallbackInfo(1)) !na
     return new_state_value;
 }
 
+/// Get the previous decision root for the state.
+pub fn BeaconStateView_previousDecisionRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const root = cached_state.previousDecisionRoot();
+    return sszValueToNapiValue(env, ct.primitive.Root, &root);
+}
+
+/// Get the current decision root for the state.
+pub fn BeaconStateView_currentDecisionRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const root = cached_state.currentDecisionRoot();
+    return sszValueToNapiValue(env, ct.primitive.Root, &root);
+}
+
+/// Get the next decision root for the state.
+pub fn BeaconStateView_nextDecisionRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const root = cached_state.nextDecisionRoot();
+    return sszValueToNapiValue(env, ct.primitive.Root, &root);
+}
+
+/// Get the shuffling decision root for a given epoch.
+pub fn BeaconStateView_getShufflingDecisionRoot(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const epoch: u64 = @intCast(try cb.arg(0).getValueInt64());
+    const root = calculateShufflingDecisionRoot(allocator, cached_state.state, epoch) catch {
+        try env.throwError("STATE_ERROR", "Failed to calculate shuffling decision root");
+        return env.getNull();
+    };
+    return sszValueToNapiValue(env, ct.primitive.Root, &root);
+}
+
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const beacon_state_view_ctor = try env.defineClass(
         "BeaconStateView",
@@ -694,6 +727,10 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "previousJustifiedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_previousJustifiedCheckpoint) },
             .{ .utf8name = "currentJustifiedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_currentJustifiedCheckpoint) },
             .{ .utf8name = "finalizedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_finalizedCheckpoint) },
+            .{ .utf8name = "previousDecisionRoot", .getter = napi.wrapCallback(0, BeaconStateView_previousDecisionRoot) },
+            .{ .utf8name = "currentDecisionRoot", .getter = napi.wrapCallback(0, BeaconStateView_currentDecisionRoot) },
+            .{ .utf8name = "nextDecisionRoot", .getter = napi.wrapCallback(0, BeaconStateView_nextDecisionRoot) },
+            .{ .utf8name = "getShufflingDecisionRoot", .method = napi.wrapCallback(1, BeaconStateView_getShufflingDecisionRoot) },
             .{ .utf8name = "proposers", .getter = napi.wrapCallback(0, BeaconStateView_proposers) },
             .{ .utf8name = "proposersNextEpoch", .getter = napi.wrapCallback(0, BeaconStateView_proposersNextEpoch) },
             .{ .utf8name = "getBalance", .method = napi.wrapCallback(1, BeaconStateView_getBalance) },

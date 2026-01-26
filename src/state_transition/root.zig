@@ -94,6 +94,7 @@ pub const state_transition = @import("./state_transition.zig");
 pub const BlockExternalData = state_transition.BlockExternalData;
 pub const preset = @import("preset").preset;
 const EpochShuffling = @import("./utils/epoch_shuffling.zig");
+pub const calculateShufflingDecisionRoot = EpochShuffling.calculateShufflingDecisionRoot;
 pub const SignedBlock = @import("./types/block.zig").SignedBlock;
 pub const Block = @import("./types/block.zig").Block;
 pub const Body = @import("./types/block.zig").Body;

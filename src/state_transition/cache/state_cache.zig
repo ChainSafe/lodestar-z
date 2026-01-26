@@ -139,6 +139,21 @@ pub const CachedBeaconState = struct {
         }
         return self.getEpochCache().getBeaconProposer(slot);
     }
+
+    /// Get the previous decision root for the state from the epoch cache.
+    pub fn previousDecisionRoot(self: *CachedBeaconState) [32]u8 {
+        return self.getEpochCache().previous_decision_root;
+    }
+
+    /// Get the current decision root for the state from the epoch cache.
+    pub fn currentDecisionRoot(self: *CachedBeaconState) [32]u8 {
+        return self.getEpochCache().current_decision_root;
+    }
+
+    /// Get the next decision root for the state from the epoch cache.
+    pub fn nextDecisionRoot(self: *CachedBeaconState) [32]u8 {
+        return self.getEpochCache().next_decision_root;
+    }
 };
 
 test "CachedBeaconState.clone()" {
