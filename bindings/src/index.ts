@@ -37,6 +37,7 @@ declare class BeaconStateView {
   pendingDepositsLength: number;
   pendingPartialWithdrawalsLength: number;
   pendingConsolidationsLength: number;
+  serializeValidators(): Uint8Array;
   getBalance(index: number): bigint;
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   isExecutionStateType(): boolean;

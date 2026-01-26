@@ -184,6 +184,18 @@ pub fn BeaconStateView_createdWithTransferCache(env: napi.Env, cb: napi.Callback
     return try env.getBoolean(cached_state.created_with_transfer_cache);
 }
 
+pub fn BeaconStateView_serializeValidators(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var validators_view = try cached_state.state.validators();
+
+    const size = try validators_view.serializedSize();
+    var arraybuffer_bytes: [*]u8 = undefined;
+    const arraybuffer = try env.createArrayBuffer(size, &arraybuffer_bytes);
+    _ = try validators_view.serializeIntoBytes(arraybuffer_bytes[0..size]);
+
+    return try env.createTypedarray(.uint8, size, arraybuffer, 0);
+}
+
 pub fn BeaconStateView_getBalance(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const index: u64 = @intCast(try cb.arg(0).getValueInt64());
@@ -290,6 +302,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "getEffectiveBalanceIncrementsZeroInactive", .method = napi.wrapCallback(0, BeaconStateView_getEffectiveBalanceIncrementsZeroInactive) },
             .{ .utf8name = "getFinalizedRootProof", .method = napi.wrapCallback(0, BeaconStateView_getFinalizedRootProof) },
             .{ .utf8name = "computeUnrealizedCheckpoints", .method = napi.wrapCallback(0, BeaconStateView_computeUnrealizedCheckpoints) },
+            .{ .utf8name = "serializeValidators", .method = napi.wrapCallback(0, BeaconStateView_serializeValidators) },
         },
     );
     // Static method on constructor
