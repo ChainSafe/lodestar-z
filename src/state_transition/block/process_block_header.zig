@@ -58,11 +58,12 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *CachedBeaconState
     }
 }
 
+/// Converts a SignedBlock to a BeaconBlockHeader.
 pub fn blockToHeader(allocator: Allocator, signed_block: SignedBlock, out: *BeaconBlockHeader) !void {
     const block = signed_block.message();
     out.slot = block.slot();
     out.proposer_index = block.proposerIndex();
     out.parent_root = block.parentRoot();
     out.state_root = block.stateRoot();
-    try block.hashTreeRoot(allocator, &out.body_root);
+    try block.beaconBlockBody().hashTreeRoot(allocator, &out.body_root);
 }
