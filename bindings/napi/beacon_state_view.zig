@@ -296,13 +296,13 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "pendingDepositsLength", .getter = napi.wrapCallback(0, BeaconStateView_pendingDepositsLength) },
             .{ .utf8name = "pendingPartialWithdrawalsLength", .getter = napi.wrapCallback(0, BeaconStateView_pendingPartialWithdrawalsLength) },
             .{ .utf8name = "pendingConsolidationsLength", .getter = napi.wrapCallback(0, BeaconStateView_pendingConsolidationsLength) },
+            .{ .utf8name = "serializeValidators", .method = napi.wrapCallback(0, BeaconStateView_serializeValidators) },
             .{ .utf8name = "getBalance", .method = napi.wrapCallback(1, BeaconStateView_getBalance) },
             .{ .utf8name = "isExecutionEnabled", .method = napi.wrapCallback(2, BeaconStateView_isExecutionEnabled) },
             .{ .utf8name = "isExecutionStateType", .method = napi.wrapCallback(0, BeaconStateView_isExecutionStateType) },
             .{ .utf8name = "getEffectiveBalanceIncrementsZeroInactive", .method = napi.wrapCallback(0, BeaconStateView_getEffectiveBalanceIncrementsZeroInactive) },
             .{ .utf8name = "getFinalizedRootProof", .method = napi.wrapCallback(0, BeaconStateView_getFinalizedRootProof) },
             .{ .utf8name = "computeUnrealizedCheckpoints", .method = napi.wrapCallback(0, BeaconStateView_computeUnrealizedCheckpoints) },
-            .{ .utf8name = "serializeValidators", .method = napi.wrapCallback(0, BeaconStateView_serializeValidators) },
         },
     );
     // Static method on constructor
