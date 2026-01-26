@@ -31,6 +31,9 @@ declare class BeaconStateView {
   finalizedCheckpoint: Checkpoint;
   proposers: number[];
   proposersNextEpoch: number[] | null;
+  pendingDepositsLength: number;
+  pendingPartialWithdrawalsLength: number;
+  pendingConsolidationsLength: number;
   getBalance(index: number): bigint;
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   isExecutionStateType(): boolean;

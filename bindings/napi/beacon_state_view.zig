@@ -151,6 +151,24 @@ pub fn BeaconStateView_proposersNextEpoch(env: napi.Env, cb: napi.CallbackInfo(0
     return env.getNull();
 }
 
+pub fn BeaconStateView_pendingDepositsLength(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var pending_deposits = try cached_state.state.pendingDeposits();
+    return try env.createInt64(@intCast(try pending_deposits.length()));
+}
+
+pub fn BeaconStateView_pendingPartialWithdrawalsLength(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var pending_partial_withdrawals = try cached_state.state.pendingPartialWithdrawals();
+    return try env.createInt64(@intCast(try pending_partial_withdrawals.length()));
+}
+
+pub fn BeaconStateView_pendingConsolidationsLength(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var pending_consolidations = try cached_state.state.pendingConsolidations();
+    return try env.createInt64(@intCast(try pending_consolidations.length()));
+}
+
 pub fn BeaconStateView_getBalance(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const index: u64 = @intCast(try cb.arg(0).getValueInt64());
@@ -245,6 +263,9 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "finalizedCheckpoint", .getter = napi.wrapCallback(0, BeaconStateView_finalizedCheckpoint) },
             .{ .utf8name = "proposers", .getter = napi.wrapCallback(0, BeaconStateView_proposers) },
             .{ .utf8name = "proposersNextEpoch", .getter = napi.wrapCallback(0, BeaconStateView_proposersNextEpoch) },
+            .{ .utf8name = "pendingDepositsLength", .getter = napi.wrapCallback(0, BeaconStateView_pendingDepositsLength) },
+            .{ .utf8name = "pendingPartialWithdrawalsLength", .getter = napi.wrapCallback(0, BeaconStateView_pendingPartialWithdrawalsLength) },
+            .{ .utf8name = "pendingConsolidationsLength", .getter = napi.wrapCallback(0, BeaconStateView_pendingConsolidationsLength) },
             .{ .utf8name = "getBalance", .method = napi.wrapCallback(1, BeaconStateView_getBalance) },
             .{ .utf8name = "isExecutionEnabled", .method = napi.wrapCallback(2, BeaconStateView_isExecutionEnabled) },
             .{ .utf8name = "isExecutionStateType", .method = napi.wrapCallback(0, BeaconStateView_isExecutionStateType) },
