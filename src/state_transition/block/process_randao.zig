@@ -7,8 +7,8 @@ const BlockType = @import("fork_types").BlockType;
 const ForkBeaconBlockBody = @import("fork_types").ForkBeaconBlockBody;
 const getRandaoMix = @import("../utils/seed.zig").getRandaoMix;
 const verifyRandaoSignature = @import("../signature_sets/randao.zig").verifyRandaoSignature;
-const digest = @import("../utils/sha256.zig").digest;
 const Node = @import("persistent_merkle_tree").Node;
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub fn processRandao(
     comptime fork: ForkSeq,
@@ -38,7 +38,7 @@ pub fn processRandao(
 
     // mix in RANDAO reveal
     var randao_reveal_digest: [32]u8 = undefined;
-    digest(randao_reveal, &randao_reveal_digest);
+    Sha256.hash(randao_reveal, &randao_reveal_digest, .{});
 
     var randao_mix: [32]u8 = undefined;
     const current_mix = try getRandaoMix(fork, state, epoch);

@@ -1,4 +1,11 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const ForkSeq = @import("config").ForkSeq;
+const metrics = @import("metrics.zig");
+const observeEpochTransitionStep = metrics.observeEpochTransitionStep;
+const observeEpochTransition = metrics.observeEpochTransition;
+const readSeconds = metrics.readSeconds;
+const Timer = std.time.Timer;
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -54,10 +61,9 @@ pub fn processSlots(
 
         const next_slot = try state.slot() + 1;
         if (next_slot % preset.SLOTS_PER_EPOCH == 0) {
-            // TODO(bing): metrics
-            // const epochTransitionTimer = metrics?.epochTransitionTime.startTimer();
+            var epoch_transition_timer = try Timer.start();
 
-            // TODO(bing): metrics: time beforeProcessEpoch
+            var timer = try Timer.start();
             var epoch_transition_cache = try EpochTransitionCache.init(
                 allocator,
                 config,
@@ -65,6 +71,7 @@ pub fn processSlots(
                 state,
             );
             defer epoch_transition_cache.deinit();
+            try observeEpochTransitionStep(.{ .step = .before_process_epoch }, timer.read());
 
             switch (state.forkSeq()) {
                 inline else => |f| {
@@ -82,7 +89,9 @@ pub fn processSlots(
 
             try state.setSlot(next_slot);
 
+            timer = try Timer.start();
             try epoch_cache.afterProcessEpoch(state, &epoch_transition_cache);
+            try observeEpochTransitionStep(.{ .step = .after_process_epoch }, timer.read());
             // state.commit
 
             const state_epoch = computeEpochAtSlot(next_slot);
@@ -136,11 +145,10 @@ pub fn processSlots(
             }
 
             try epoch_cache.finalProcessEpoch(state);
+            metrics.state_transition.epoch_transition.observe(readSeconds(&epoch_transition_timer));
         } else {
             try state.setSlot(next_slot);
         }
-
-        //epochTransitionTimer
     }
 }
 
@@ -180,10 +188,8 @@ pub fn stateTransition(
     errdefer post_state.deinit();
     errdefer post_epoch_cache.deinit();
 
-    //TODO(bing): metrics
-    //if (metrics) {
-    //  onStateCloneMetrics(postState, metrics, StateCloneSource.stateTransition);
-    //}
+    // TODO - fix when using CachedBeaconState here
+    // try metrics.state_transition.onStateClone(post_state, .state_transition);
 
     try processSlots(
         allocator,
@@ -204,12 +210,11 @@ pub fn stateTransition(
         return error.InvalidBlockSignature;
     }
 
-    //  // Note: time only on success
-    //  const processBlockTimer = metrics?.processBlockTime.startTimer();
-    //
     if (block.forkSeq() != post_state.forkSeq()) {
         return error.InvalidBlockForkForState;
     }
+    // Note: time only on success
+    var timer = try Timer.start();
     switch (post_state.forkSeq()) {
         inline else => |f| {
             switch (block.blockType()) {
@@ -235,6 +240,7 @@ pub fn stateTransition(
             }
         },
     }
+    metrics.state_transition.process_block.observe(readSeconds(&timer));
 
     //
     // TODO(bing): commit
@@ -242,20 +248,14 @@ pub fn stateTransition(
     //  postState.commit();
     //  processBlockCommitTimer?.();
 
-    //  // Note: time only on success. Include processBlock and commit
-    //  processBlockTimer?.();
-    // TODO(bing): metrics
-    //  if (metrics) {
-    //    onPostStateMetrics(postState, metrics);
-    //  }
+    // TODO - fix when using CachedBeaconState here
+    // try metrics.state_transition.onPostState(post_state);
 
     // Verify state root
     if (opts.verify_state_root) {
-        //    const hashTreeRootTimer = metrics?.stateHashTreeRootTime.startTimer({
-        //      source: StateHashTreeRootSource.stateTransition,
-        //    });
+        timer = try Timer.start();
         const post_state_root = try post_state.hashTreeRoot();
-        //    hashTreeRootTimer?.();
+        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .block_transition }, readSeconds(&timer));
 
         const block_state_root = block.stateRoot();
         if (!std.mem.eql(u8, post_state_root, block_state_root)) {

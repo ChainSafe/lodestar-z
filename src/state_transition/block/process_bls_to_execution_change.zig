@@ -6,8 +6,8 @@ const types = @import("consensus_types");
 const Root = types.primitive.Root.Type;
 const SignedBLSToExecutionChange = types.capella.SignedBLSToExecutionChange.Type;
 const c = @import("constants");
-const digest = @import("../utils/sha256.zig").digest;
 const verifyBlsToExecutionChangeSignature = @import("../signature_sets/bls_to_execution_change.zig").verifyBlsToExecutionChangeSignature;
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub fn processBlsToExecutionChange(
     comptime fork: ForkSeq,
@@ -52,7 +52,7 @@ pub fn isValidBlsToExecutionChange(
     }
 
     var digest_credentials: Root = undefined;
-    digest(&address_change.from_bls_pubkey, &digest_credentials);
+    Sha256.hash(&address_change.from_bls_pubkey, &digest_credentials, .{});
     // Set the BLS_WITHDRAWAL_PREFIX on the digest_credentials for direct match
     digest_credentials[0] = c.BLS_WITHDRAWAL_PREFIX;
     if (!std.mem.eql(u8, withdrawal_credentials, &digest_credentials)) {
