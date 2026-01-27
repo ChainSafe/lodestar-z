@@ -23,7 +23,10 @@ pub const CachedBeaconState = struct {
     /// this takes ownership of the state, it is expected to be deinitialized by this struct
     state: *BeaconState,
 
-    // TODO: cloned_count properties, implement this once we switch to TreeView
+    cloned_count: u32 = 0,
+    cloned_count_with_transfer_cache: u32 = 0,
+    created_with_transfer_cache: bool = false,
+
     // TODO: proposer_rewards, looks like this is not a great place to put in, it's a result of a block state transition instead
 
     /// This class takes ownership of state after this function and has responsibility to deinit it
@@ -69,7 +72,14 @@ pub const CachedBeaconState = struct {
             .config = self.config,
             .epoch_cache_ref = epoch_cache_ref,
             .state = state,
+            .created_with_transfer_cache = opts.transfer_cache,
         };
+
+        self.cloned_count += 1;
+        if (opts.transfer_cache) {
+            self.cloned_count_with_transfer_cache += 1;
+        }
+
         return cached_state;
     }
 

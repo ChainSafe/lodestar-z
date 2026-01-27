@@ -31,6 +31,15 @@ declare class BeaconStateView {
   finalizedCheckpoint: Checkpoint;
   proposers: number[];
   proposersNextEpoch: number[] | null;
+  clonedCount: number;
+  clonedCountWithTransferCache: number;
+  createdWithTransferCache: boolean;
+  pendingDepositsLength: number;
+  pendingPartialWithdrawalsLength: number;
+  pendingConsolidationsLength: number;
+  serializeValidators(): Uint8Array;
+  serializedValidatorsSize(): number;
+  serializeValidatorsToBytes(output: Uint8Array, offset: number): number;
   getBalance(index: number): bigint;
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   isExecutionStateType(): boolean;
