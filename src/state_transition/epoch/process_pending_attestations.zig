@@ -1,8 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAtEpoch;
 const getBlockRootAtSlot = @import("../utils/block_root.zig").getBlockRootAtSlot;
 
@@ -12,7 +12,7 @@ const PendingAttestation = types.phase0.PendingAttestation.Type;
 
 pub fn processPendingAttestations(
     allocator: Allocator,
-    cached_state: *CachedBeaconStateAllForks,
+    cached_state: *CachedBeaconState,
     proposer_indices: []usize,
     validator_count: usize,
     inclusion_delays: []usize,
@@ -25,7 +25,7 @@ pub fn processPendingAttestations(
 ) !void {
     const epoch_cache = cached_state.getEpochCache();
     const state = cached_state.state;
-    const state_slot = state.slot();
+    const state_slot = try state.slot();
     const prev_epoch = epoch_cache.getPreviousShuffling().epoch;
     if (attestations.len == 0) {
         return;
@@ -45,7 +45,10 @@ pub fn processPendingAttestations(
         const proposer_index = att.proposer_index;
         const att_slot = att_data.slot;
         const att_voted_target_root = std.mem.eql(u8, att_data.target.root[0..], actual_target_block_root[0..]);
-        const att_voted_head_root = att_slot < state_slot and std.mem.eql(u8, att_data.beacon_block_root[0..], &(try getBlockRootAtSlot(state, att_slot)));
+        const att_voted_head_root = if (att_slot < state_slot) blk: {
+            const head_root = try getBlockRootAtSlot(state, att_slot);
+            break :blk std.mem.eql(u8, att_data.beacon_block_root[0..], head_root[0..]);
+        } else false;
         const committee = @as([]const u64, try epoch_cache.getBeaconCommittee(att_slot, att_data.index));
         var participants = try att.aggregation_bits.intersectValues(ValidatorIndex, allocator, committee);
         defer participants.deinit();

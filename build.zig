@@ -56,6 +56,16 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const dep_metrics = b.dependency("metrics", .{
+        .optimize = optimize,
+        .target = target,
+    });
+
+    const dep_httpz = b.dependency("httpz", .{
+        .optimize = optimize,
+        .target = target,
+    });
+
     const module_clock = b.createModule(.{
         .root_source_file = b.path("src/clock/root.zig"),
         .target = target,
@@ -155,6 +165,29 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_exe_download_era_files.addArgs(args);
     const tls_run_exe_download_era_files = b.step("run:download_era_files", "Run the download_era_files executable");
     tls_run_exe_download_era_files.dependOn(&run_exe_download_era_files.step);
+
+    const module_metrics_era = b.createModule(.{
+        .root_source_file = b.path("examples/metrics_era.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("metrics_era"), module_metrics_era) catch @panic("OOM");
+
+    const exe_metrics_era = b.addExecutable(.{
+        .name = "metrics_era",
+        .root_module = module_metrics_era,
+    });
+
+    const install_exe_metrics_era = b.addInstallArtifact(exe_metrics_era, .{});
+
+    const tls_install_exe_metrics_era = b.step("build-exe:metrics_era", "Install the metrics_era executable");
+    tls_install_exe_metrics_era.dependOn(&install_exe_metrics_era.step);
+    b.getInstallStep().dependOn(&install_exe_metrics_era.step);
+
+    const run_exe_metrics_era = b.addRunArtifact(exe_metrics_era);
+    if (b.args) |args| run_exe_metrics_era.addArgs(args);
+    const tls_run_exe_metrics_era = b.step("run:metrics_era", "Run the metrics_era executable");
+    tls_run_exe_metrics_era.dependOn(&run_exe_metrics_era.step);
 
     const module_download_spec_tests = b.createModule(.{
         .root_source_file = b.path("test/spec/download_spec_tests.zig"),
@@ -390,6 +423,8 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("bench/state_transition/process_block.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = false,
+        .omit_frame_pointer = false,
     });
     b.modules.put(b.dupe("bench_process_block"), module_bench_process_block) catch @panic("OOM");
 
@@ -602,6 +637,20 @@ pub fn build(b: *std.Build) void {
     tls_run_test_download_era_files.dependOn(&run_test_download_era_files.step);
     tls_run_test.dependOn(&run_test_download_era_files.step);
 
+    const test_metrics_era = b.addTest(.{
+        .name = "metrics_era",
+        .root_module = module_metrics_era,
+        .filters = b.option([][]const u8, "metrics_era.filters", "metrics_era test filters") orelse &[_][]const u8{},
+    });
+    const install_test_metrics_era = b.addInstallArtifact(test_metrics_era, .{});
+    const tls_install_test_metrics_era = b.step("build-test:metrics_era", "Install the metrics_era test");
+    tls_install_test_metrics_era.dependOn(&install_test_metrics_era.step);
+
+    const run_test_metrics_era = b.addRunArtifact(test_metrics_era);
+    const tls_run_test_metrics_era = b.step("test:metrics_era", "Run the metrics_era test");
+    tls_run_test_metrics_era.dependOn(&run_test_metrics_era.step);
+    tls_run_test.dependOn(&run_test_metrics_era.step);
+
     const test_download_spec_tests = b.addTest(.{
         .name = "download_spec_tests",
         .root_module = module_download_spec_tests,
@@ -771,7 +820,7 @@ pub fn build(b: *std.Build) void {
     tls_run_test.dependOn(&run_test_bench_process_epoch.step);
 
     const module_int = b.createModule(.{
-        .root_source_file = b.path("test/int/root.zig"),
+        .root_source_file = b.path("test/int/era/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -790,27 +839,6 @@ pub fn build(b: *std.Build) void {
     const tls_run_test_int = b.step("test:int", "Run the int test");
     tls_run_test_int.dependOn(&run_test_int.step);
     tls_run_test.dependOn(&run_test_int.step);
-
-    const module_int_slow = b.createModule(.{
-        .root_source_file = b.path("test/int_slow/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    b.modules.put(b.dupe("int_slow"), module_int_slow) catch @panic("OOM");
-
-    const test_int_slow = b.addTest(.{
-        .name = "int_slow",
-        .root_module = module_int_slow,
-        .filters = b.option([][]const u8, "int_slow.filters", "int_slow test filters") orelse &[_][]const u8{},
-    });
-    const install_test_int_slow = b.addInstallArtifact(test_int_slow, .{});
-    const tls_install_test_int_slow = b.step("build-test:int_slow", "Install the int_slow test");
-    tls_install_test_int_slow.dependOn(&install_test_int_slow.step);
-
-    const run_test_int_slow = b.addRunArtifact(test_int_slow);
-    const tls_run_test_int_slow = b.step("test:int_slow", "Run the int_slow test");
-    tls_run_test_int_slow.dependOn(&run_test_int_slow.step);
-    tls_run_test.dependOn(&run_test_int_slow.step);
 
     const module_spec_tests = b.createModule(.{
         .root_source_file = b.path("test/spec/root.zig"),
@@ -895,6 +923,7 @@ pub fn build(b: *std.Build) void {
     module_era.addImport("preset", module_preset);
     module_era.addImport("state_transition", module_state_transition);
     module_era.addImport("snappy", dep_snappy.module("snappy"));
+    module_era.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
 
     module_hashing.addImport("build_options", options_module_build_options);
     module_hashing.addImport("hex", module_hex);
@@ -920,8 +949,18 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("preset", module_preset);
     module_state_transition.addImport("constants", module_constants);
     module_state_transition.addImport("hex", module_hex);
+    module_state_transition.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
 
     module_download_era_files.addImport("download_era_options", options_module_download_era_options);
+
+    module_metrics_era.addImport("consensus_types", module_consensus_types);
+    module_metrics_era.addImport("state_transition", module_state_transition);
+    module_metrics_era.addImport("download_era_options", options_module_download_era_options);
+    module_metrics_era.addImport("era", module_era);
+    module_metrics_era.addImport("config", module_config);
+    module_metrics_era.addImport("preset", module_preset);
+    module_metrics_era.addImport("httpz", dep_httpz.module("httpz"));
 
     module_download_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
 
@@ -961,23 +1000,21 @@ pub fn build(b: *std.Build) void {
     module_bench_process_block.addImport("consensus_types", module_consensus_types);
     module_bench_process_block.addImport("config", module_config);
     module_bench_process_block.addImport("zbench", dep_zbench.module("zbench"));
+    module_bench_process_block.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_bench_process_block.addImport("download_era_options", options_module_download_era_options);
+    module_bench_process_block.addImport("era", module_era);
 
     module_bench_process_epoch.addImport("state_transition", module_state_transition);
     module_bench_process_epoch.addImport("consensus_types", module_consensus_types);
     module_bench_process_epoch.addImport("config", module_config);
     module_bench_process_epoch.addImport("zbench", dep_zbench.module("zbench"));
+    module_bench_process_epoch.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_bench_process_epoch.addImport("download_era_options", options_module_download_era_options);
+    module_bench_process_epoch.addImport("era", module_era);
 
-    module_int.addImport("build_options", options_module_build_options);
-    module_int.addImport("state_transition", module_state_transition);
     module_int.addImport("config", module_config);
-    module_int.addImport("consensus_types", module_consensus_types);
-    module_int.addImport("preset", module_preset);
-    module_int.addImport("constants", module_constants);
-    module_int.addImport("blst", dep_blst.module("blst"));
-
-    module_int_slow.addImport("config", module_config);
-    module_int_slow.addImport("download_era_options", options_module_download_era_options);
-    module_int_slow.addImport("era", module_era);
+    module_int.addImport("download_era_options", options_module_download_era_options);
+    module_int.addImport("era", module_era);
 
     module_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
     module_spec_tests.addImport("consensus_types", module_consensus_types);

@@ -6,11 +6,12 @@ const Block = @import("../types/block.zig").Block;
 const BeaconBlockBody = @import("../types/beacon_block.zig").BeaconBlockBody;
 const ExecutionPayload = @import("../types/beacon_block.zig").ExecutionPayload;
 // const ExecutionPayloadHeader
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const BeaconStateAllForks = @import("../types/beacon_state.zig").BeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const BeaconState = @import("../types/beacon_state.zig").BeaconState;
+const ZERO_HASH = @import("constants").ZERO_HASH;
 
-pub fn isExecutionEnabled(state: *const BeaconStateAllForks, block: Block) bool {
-    if (!state.isPostBellatrix()) return false;
+pub fn isExecutionEnabled(state: *BeaconState, block: Block) bool {
+    if (state.forkSeq().lt(.bellatrix)) return false;
     if (isMergeTransitionComplete(state)) return true;
 
     // TODO(bing): in lodestar prod, state root comparison should be enough but spec tests were failing. This switch block is a failsafe for that.
@@ -40,28 +41,21 @@ pub fn isExecutionEnabled(state: *const BeaconStateAllForks, block: Block) bool 
     }
 }
 
-pub fn isMergeTransitionBlock(state: *const BeaconStateAllForks, body: *const BeaconBlockBody) bool {
-    if (!state.isBellatrix()) {
+pub fn isMergeTransitionBlock(state: *BeaconState, body: *const BeaconBlockBody) bool {
+    if (state.forkSeq() != .bellatrix) {
         return false;
     }
 
-    return (!isMergeTransitionComplete(state) and
-        !types.bellatrix.ExecutionPayload.equals(body.getExecutionPayload().bellatrix, types.bellatrix.ExecutionPayload.default_value));
+    return (!isMergeTransitionComplete(state) and switch (body.*) {
+        .bellatrix => |bd| !types.bellatrix.ExecutionPayload.equals(&bd.execution_payload, &types.bellatrix.ExecutionPayload.default_value),
+        else => false,
+    });
 }
 
-pub fn isMergeTransitionComplete(state: *const BeaconStateAllForks) bool {
-    if (!state.isPostCapella()) {
-        return switch (state.*) {
-            .bellatrix => |s| !types.bellatrix.ExecutionPayloadHeader.equals(&s.latest_execution_payload_header, &types.bellatrix.ExecutionPayloadHeader.default_value),
-            else => false,
-        };
+pub fn isMergeTransitionComplete(state: *BeaconState) bool {
+    if (state.forkSeq().lt(.bellatrix)) {
+        return false;
     }
-
-    return switch (state.*) {
-        .capella => |s| !types.capella.ExecutionPayloadHeader.equals(&s.latest_execution_payload_header, &types.capella.ExecutionPayloadHeader.default_value),
-        .deneb => |s| !types.deneb.ExecutionPayloadHeader.equals(&s.latest_execution_payload_header, &types.deneb.ExecutionPayloadHeader.default_value),
-        .electra => |s| !types.electra.ExecutionPayloadHeader.equals(&s.latest_execution_payload_header, &types.electra.ExecutionPayloadHeader.default_value),
-        .fulu => |s| !types.electra.ExecutionPayloadHeader.equals(&s.latest_execution_payload_header, &types.electra.ExecutionPayloadHeader.default_value),
-        else => false,
-    };
+    const block_hash = state.latestExecutionPayloadHeaderBlockHash() catch return false;
+    return !std.mem.eql(u8, block_hash[0..], ZERO_HASH[0..]);
 }

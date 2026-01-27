@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
 const Block = @import("../types/block.zig").Block;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
@@ -22,7 +22,7 @@ const decreaseBalance = balance_utils.decreaseBalance;
 
 pub fn processSyncAggregate(
     allocator: Allocator,
-    cached_state: *CachedBeaconStateAllForks,
+    cached_state: *CachedBeaconState,
     sync_aggregate: *const SyncAggregate,
     verify_signatures: bool,
 ) !void {
@@ -43,9 +43,9 @@ pub fn processSyncAggregate(
 
         // When there's no participation we cons ider the signature valid and just ignore it
         if (participant_indices.items.len > 0) {
-            const previous_slot = @max(state.slot(), 1) - 1;
+            const previous_slot = @max(try state.slot(), 1) - 1;
             const root_signed = try getBlockRootAtSlot(state, previous_slot);
-            const domain = try cached_state.config.getDomain(state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
+            const domain = try cached_state.config.getDomain(try state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
 
             const pubkeys = try allocator.alloc(blst.PublicKey, participant_indices.items.len);
             defer allocator.free(pubkeys);
@@ -54,7 +54,7 @@ pub fn processSyncAggregate(
             }
 
             var signing_root: Root = undefined;
-            try computeSigningRoot(types.primitive.Root, &root_signed, domain, &signing_root);
+            try computeSigningRoot(types.primitive.Root, root_signed, domain, &signing_root);
 
             const signature_set = AggregatedSignatureSet{
                 .pubkeys = pubkeys,
@@ -74,9 +74,9 @@ pub fn processSyncAggregate(
 
     const sync_participant_reward = epoch_cache.sync_participant_reward;
     const sync_proposer_reward = epoch_cache.sync_proposer_reward;
-    const proposer_index = try cached_state.getBeaconProposer(state.slot());
-    const balances = state.balances();
-    var proposer_balance = balances.items[proposer_index];
+    const proposer_index = try cached_state.getBeaconProposer(try state.slot());
+    var balances = try state.balances();
+    var proposer_balance = try balances.get(proposer_index);
 
     for (0..preset.SYNC_COMMITTEE_SIZE) |i| {
         const index = committee_indices[i];
@@ -86,7 +86,7 @@ pub fn processSyncAggregate(
             if (index == proposer_index) {
                 proposer_balance += sync_participant_reward;
             } else {
-                increaseBalance(state, index, sync_participant_reward);
+                try increaseBalance(cached_state.state, index, sync_participant_reward);
             }
 
             // Proposer reward
@@ -97,19 +97,19 @@ pub fn processSyncAggregate(
             if (index == proposer_index) {
                 proposer_balance = @max(0, proposer_balance - sync_participant_reward);
             } else {
-                decreaseBalance(state, index, sync_participant_reward);
+                try decreaseBalance(cached_state.state, index, sync_participant_reward);
             }
         }
     }
 
     // Apply proposer balance
-    balances.items[proposer_index] = proposer_balance;
+    try balances.set(proposer_index, proposer_balance);
 }
 
 /// Consumers should deinit the returned pubkeys
 /// this is to be used when we implement getBlockSignatureSets
 /// see https://github.com/ChainSafe/state-transition-z/issues/72
-pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, block: Block, participant_indices: ?[]usize) !?AggregatedSignatureSet {
+pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *CachedBeaconState, block: Block, participant_indices: ?[]usize) !?AggregatedSignatureSet {
     const state = cached_state.state;
     const epoch_cache = cached_state.getEpochCache();
     const sync_aggregate = block.beaconBlockBody().syncAggregate();
@@ -148,7 +148,7 @@ pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *const C
     // So getSyncCommitteeSignatureSet() can be called with a state in any slot (with the correct shuffling)
     const root_signed = block.parentRoot();
 
-    const domain = try cached_state.config.getDomain(state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
+    const domain = try cached_state.config.getDomain(try state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
 
     const pubkeys = try allocator.alloc(blst.PublicKey, participant_indices_.len);
     for (0..participant_indices_.len) |i| {
@@ -162,4 +162,45 @@ pub fn getSyncCommitteeSignatureSet(allocator: Allocator, cached_state: *const C
         .signing_root = signing_root,
         .signature = signature,
     };
+}
+
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const test_utils = @import("../test_utils/root.zig");
+const Node = @import("persistent_merkle_tree").Node;
+
+test "process sync aggregate - sanity" {
+    const allocator = std.testing.allocator;
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    const state = test_state.cached_state.state;
+    const config = test_state.cached_state.config;
+    const previous_slot = try state.slot() - 1;
+    const root_signed = try getBlockRootAtSlot(state, previous_slot);
+    const domain = try config.getDomain(try state.slot(), c.DOMAIN_SYNC_COMMITTEE, previous_slot);
+    var signing_root: Root = undefined;
+    try computeSigningRoot(types.primitive.Root, root_signed, domain, &signing_root);
+
+    const committee_indices = @as(*const [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex, @ptrCast(test_state.cached_state.getEpochCache().current_sync_committee_indexed.get().getValidatorIndices()));
+    // validator 0 signs
+    const sig0 = try test_utils.interopSign(committee_indices[0], &signing_root);
+    // validator 1 signs
+    const sig1 = try test_utils.interopSign(committee_indices[1], &signing_root);
+    const agg_sig = try blst.AggregateSignature.aggregate(&.{ sig0, sig1 }, true);
+
+    var sync_aggregate: types.electra.SyncAggregate.Type = types.electra.SyncAggregate.default_value;
+    sync_aggregate.sync_committee_signature = agg_sig.toSignature().compress();
+    try sync_aggregate.sync_committee_bits.set(0, true);
+    // don't set bit 1 yet
+
+    const res = processSyncAggregate(allocator, test_state.cached_state, &sync_aggregate, true);
+    try std.testing.expect(res == error.SyncCommitteeSignatureInvalid);
+
+    // now set bit 1
+    try sync_aggregate.sync_committee_bits.set(1, true);
+    try processSyncAggregate(allocator, test_state.cached_state, &sync_aggregate, true);
 }

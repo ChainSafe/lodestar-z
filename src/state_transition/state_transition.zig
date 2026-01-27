@@ -1,6 +1,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
+const metrics = @import("metrics.zig");
+const observeEpochTransitionStep = metrics.observeEpochTransitionStep;
+const observeEpochTransition = metrics.observeEpochTransition;
+const readSeconds = metrics.readSeconds;
+const Timer = std.time.Timer;
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -11,7 +16,7 @@ const ExecutionPayload = @import("types/execution_payload.zig").ExecutionPayload
 
 const Slot = types.primitive.Slot.Type;
 
-const CachedBeaconStateAllForks = @import("cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("cache/state_cache.zig").CachedBeaconState;
 pub const SignedBeaconBlock = @import("types/beacon_block.zig").SignedBeaconBlock;
 const verifyProposerSignature = @import("./signature_sets/proposer.zig").verifyProposerSignature;
 pub const processBlock = @import("./block/process_block.zig").processBlock;
@@ -56,24 +61,26 @@ pub const BlockExternalData = struct {
     },
 };
 
-pub fn processSlotsWithTransientCache(
+pub fn processSlots(
     allocator: std.mem.Allocator,
-    post_state: *CachedBeaconStateAllForks,
+    post_state: *CachedBeaconState,
     slot: Slot,
     _: EpochTransitionCacheOpts,
 ) !void {
     var state = post_state.state;
-    if (state.slot() > slot) return error.outdatedSlot;
+    if (try state.slot() > slot) return error.outdatedSlot;
 
-    while (state.slot() < slot) {
-        try processSlot(allocator, post_state);
+    while (try state.slot() < slot) {
+        try processSlot(post_state);
 
-        if ((state.slot() + 1) % preset.SLOTS_PER_EPOCH == 0) {
-            // TODO(bing): metrics
-            // const epochTransitionTimer = metrics?.epochTransitionTime.startTimer();
+        const next_slot = try state.slot() + 1;
+        if (next_slot % preset.SLOTS_PER_EPOCH == 0) {
+            var epoch_transition_timer = try Timer.start();
 
-            // TODO(bing): metrics: time beforeProcessEpoch
+            var timer = try Timer.start();
             var epoch_transition_cache = try EpochTransitionCache.init(allocator, post_state);
+            try observeEpochTransitionStep(.{ .step = .before_process_epoch }, timer.read());
+
             defer {
                 epoch_transition_cache.deinit();
                 allocator.destroy(epoch_transition_cache);
@@ -81,12 +88,13 @@ pub fn processSlotsWithTransientCache(
             try processEpoch(allocator, post_state, epoch_transition_cache);
             // TODO(bing): registerValidatorStatuses
 
-            state.slotPtr().* += 1;
+            try state.setSlot(next_slot);
 
+            timer = try Timer.start();
             try post_state.epoch_cache_ref.get().afterProcessEpoch(post_state, epoch_transition_cache);
-            // post_state.commit
+            try observeEpochTransitionStep(.{ .step = .after_process_epoch }, timer.read());
 
-            const state_epoch = computeEpochAtSlot(state.slot());
+            const state_epoch = computeEpochAtSlot(next_slot);
 
             const config = post_state.config;
             if (state_epoch == config.chain.ALTAIR_FORK_EPOCH) {
@@ -109,11 +117,10 @@ pub fn processSlotsWithTransientCache(
             }
 
             try post_state.epoch_cache_ref.get().finalProcessEpoch(post_state);
+            metrics.state_transition.epoch_transition.observe(readSeconds(&epoch_transition_timer));
         } else {
-            state.slotPtr().* += 1;
+            try state.setSlot(next_slot);
         }
-
-        //epochTransitionTimer
     }
 }
 
@@ -126,29 +133,25 @@ pub const TransitionOpt = struct {
 
 pub fn stateTransition(
     allocator: std.mem.Allocator,
-    state: *CachedBeaconStateAllForks,
+    state: *CachedBeaconState,
     signed_block: SignedBlock,
     opts: TransitionOpt,
-) !*CachedBeaconStateAllForks {
+) !*CachedBeaconState {
     const block = signed_block.message();
     const block_slot = switch (block) {
         .regular => |b| b.slot(),
         .blinded => |b| b.slot(),
     };
 
-    const post_state = try state.clone(allocator);
+    const post_state = try state.clone(allocator, .{ .transfer_cache = !opts.do_not_transfer_cache });
 
     errdefer {
         post_state.deinit();
         allocator.destroy(post_state);
     }
 
-    //TODO(bing): metrics
-    //if (metrics) {
-    //  onStateCloneMetrics(postState, metrics, StateCloneSource.stateTransition);
-    //}
-
-    try processSlotsWithTransientCache(allocator, post_state, block_slot, .{});
+    try metrics.state_transition.onStateClone(post_state, .state_transition);
+    try processSlots(allocator, post_state, block_slot, .{});
 
     // Verify proposer signature only
     if (opts.verify_proposer and !try verifyProposerSignature(post_state, signed_block)) {
@@ -156,8 +159,7 @@ pub fn stateTransition(
     }
 
     //  // Note: time only on success
-    //  const processBlockTimer = metrics?.processBlockTime.startTimer();
-    //
+    var timer = try Timer.start();
     try processBlock(
         allocator,
         post_state,
@@ -168,35 +170,26 @@ pub fn stateTransition(
         },
         .{ .verify_signature = opts.verify_signatures },
     );
-    //
-    // TODO(bing): commit
-    //  const processBlockCommitTimer = metrics?.processBlockCommitTime.startTimer();
-    //  postState.commit();
-    //  processBlockCommitTimer?.();
+    metrics.state_transition.process_block.observe(readSeconds(&timer));
 
-    //  // Note: time only on success. Include processBlock and commit
-    //  processBlockTimer?.();
-    // TODO(bing): metrics
-    //  if (metrics) {
-    //    onPostStateMetrics(postState, metrics);
-    //  }
+    try metrics.state_transition.onPostState(post_state);
 
     // Verify state root
     if (opts.verify_state_root) {
-        var post_state_root: [32]u8 = undefined;
-        //    const hashTreeRootTimer = metrics?.stateHashTreeRootTime.startTimer({
-        //      source: StateHashTreeRootSource.stateTransition,
-        //    });
-        try post_state.state.hashTreeRoot(allocator, &post_state_root);
-        //    hashTreeRootTimer?.();
+        timer = try Timer.start();
+        const post_state_root = try post_state.state.hashTreeRoot();
+        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .block_transition }, readSeconds(&timer));
 
         const block_state_root = switch (block) {
             .regular => |b| b.stateRoot(),
             .blinded => |b| b.stateRoot(),
         };
-        if (!std.mem.eql(u8, &post_state_root, &block_state_root)) {
+        if (!std.mem.eql(u8, post_state_root, &block_state_root)) {
             return error.InvalidStateRoot;
         }
+    } else {
+        // Even if we don't verify the state_root, commit the tree changes
+        try post_state.state.commit();
     }
 
     return post_state;
@@ -204,4 +197,63 @@ pub fn stateTransition(
 
 pub fn deinitStateTransition() void {
     deinitReusedEpochTransitionCache();
+}
+
+const TestCase = struct {
+    transition_opt: TransitionOpt,
+    expect_error: bool,
+};
+
+const TestCachedBeaconState = @import("test_utils/root.zig").TestCachedBeaconState;
+const generateElectraBlock = @import("test_utils/generate_block.zig").generateElectraBlock;
+const testing = std.testing;
+const Node = @import("persistent_merkle_tree").Node;
+
+test "state transition - electra block" {
+    const test_cases = [_]TestCase{
+        .{ .transition_opt = .{ .verify_signatures = true }, .expect_error = true },
+        .{ .transition_opt = .{ .verify_signatures = false, .verify_proposer = true }, .expect_error = true },
+        .{ .transition_opt = .{ .verify_signatures = false, .verify_proposer = false, .verify_state_root = true }, .expect_error = true },
+        // this runs through epoch transition + process block without verifications
+        .{ .transition_opt = .{ .verify_signatures = false, .verify_proposer = false, .verify_state_root = false }, .expect_error = false },
+    };
+
+    inline for (test_cases) |tc| {
+        const allocator = std.testing.allocator;
+
+        var pool = try Node.Pool.init(allocator, 1024);
+        defer pool.deinit();
+        var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+        defer test_state.deinit();
+        const electra_block_ptr = try allocator.create(types.electra.SignedBeaconBlock.Type);
+        try generateElectraBlock(allocator, test_state.cached_state, electra_block_ptr);
+        defer {
+            types.electra.SignedBeaconBlock.deinit(allocator, electra_block_ptr);
+            allocator.destroy(electra_block_ptr);
+        }
+
+        const signed_beacon_block = SignedBeaconBlock{ .electra = electra_block_ptr };
+        const signed_block = SignedBlock{ .regular = signed_beacon_block };
+
+        // this returns the error so no need to handle returned post_state
+        // TODO: if blst can publish BlstError.BadEncoding, can just use testing.expectError
+        // testing.expectError(blst.c.BLST_BAD_ENCODING, stateTransition(allocator, test_state.cached_state, signed_block, .{ .verify_signatures = true }));
+        const res = stateTransition(allocator, test_state.cached_state, signed_block, tc.transition_opt);
+        if (tc.expect_error) {
+            if (res) |_| {
+                try testing.expect(false);
+            } else |_| {}
+        } else {
+            if (res) |post_state| {
+                defer {
+                    post_state.deinit();
+                    allocator.destroy(post_state);
+                }
+            } else |_| {
+                try testing.expect(false);
+            }
+        }
+    }
+
+    defer deinitStateTransition();
 }

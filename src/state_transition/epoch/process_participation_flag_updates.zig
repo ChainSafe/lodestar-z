@@ -1,27 +1,27 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const ForkSeq = @import("config").ForkSeq;
-const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
-const types = @import("consensus_types");
-const preset = @import("preset").preset;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 
-pub fn processParticipationFlagUpdates(allocator: std.mem.Allocator, cached_state: *CachedBeaconStateAllForks) !void {
+pub fn processParticipationFlagUpdates(cached_state: *CachedBeaconState) !void {
     const state = cached_state.state;
-    // rotate EpochParticipation
-    try state.rotateEpochParticipations(allocator);
 
-    // We need to replace the node of currentEpochParticipation with a node that represents an empty list of some length.
-    // SSZ represents a list as = new BranchNode(chunksNode, lengthNode).
-    // Since the chunks represent all zero'ed data we can re-use the pre-computed zeroNode at chunkDepth to skip any
-    // data transformation and create the required tree almost for free.
+    if (state.forkSeq().lt(.altair)) return;
+    try state.rotateEpochParticipation();
+}
 
-    // TODO(ct) implement this using TreeView
-    //   const currentEpochParticipationNode = types.altair.EpochParticipation.tree_setChunksNode(
-    //   state.currentEpochParticipation.node,
-    //   zeroNode(types.altair.EpochParticipation.chunkDepth),
-    //   state.currentEpochParticipation.length
-    // );
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Node = @import("persistent_merkle_tree").Node;
 
-    // state.currentEpochParticipation = types.altair.EpochParticipation.getViewDU(currentEpochParticipationNode);
+test "processParticipationFlagUpdates - sanity" {
+    const allocator = std.testing.allocator;
+    const validator_count_arr = &.{ 256, 10_000 };
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    inline for (validator_count_arr) |validator_count| {
+        var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);
+        defer test_state.deinit();
+        try processParticipationFlagUpdates(test_state.cached_state);
+    }
+    defer @import("../root.zig").deinitStateTransition();
 }

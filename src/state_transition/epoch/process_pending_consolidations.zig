@@ -1,65 +1,62 @@
-const std = @import("std");
+const Allocator = @import("std").mem.Allocator;
 const types = @import("consensus_types");
-const Allocator = std.mem.Allocator;
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
-const ForkSeq = @import("config").ForkSeq;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 
 /// also modify balances inside EpochTransitionCache
-pub fn processPendingConsolidations(allocator: Allocator, cached_state: *CachedBeaconStateAllForks, cache: *EpochTransitionCache) !void {
+pub fn processPendingConsolidations(cached_state: *CachedBeaconState, cache: *EpochTransitionCache) !void {
     const epoch_cache = cached_state.getEpochCache();
-    const state = cached_state.state;
+    var state = cached_state.state;
     const next_epoch = epoch_cache.epoch + 1;
     var next_pending_consolidation: usize = 0;
-    const validators = state.validators();
+    var validators = try state.validators();
+    var balances = try state.balances();
 
-    var chunk_start_index: usize = 0;
-    const chunk_size = 100;
-    const pending_consolidations = state.pendingConsolidations();
-    const pending_consolidations_length = pending_consolidations.items.len;
-    outer: while (chunk_start_index < pending_consolidations_length) : (chunk_start_index += chunk_size) {
-        // TODO(ssz): implement getReadonlyByRange api for TreeView
-        const consolidation_chunk = state.pendingConsolidations().items[chunk_start_index..@min(chunk_start_index + chunk_size, pending_consolidations_length)];
-        for (consolidation_chunk) |pending_consolidation| {
-            const source_index = pending_consolidation.source_index;
-            const target_index = pending_consolidation.target_index;
-            const source_validator = validators.items[source_index];
+    var pending_consolidations = try state.pendingConsolidations();
+    var pending_consolidations_it = pending_consolidations.iteratorReadonly(0);
+    const pending_consolidations_length = try pending_consolidations.length();
+    for (0..pending_consolidations_length) |_| {
+        const pending_consolidation = try pending_consolidations_it.nextValue(undefined);
+        const source_index = pending_consolidation.source_index;
+        const target_index = pending_consolidation.target_index;
+        var source_validator = try validators.get(source_index);
 
-            if (source_validator.slashed) {
-                next_pending_consolidation += 1;
-                continue;
-            }
-
-            if (source_validator.withdrawable_epoch > next_epoch) {
-                break :outer;
-            }
-
-            // Calculate the consolidated balance
-            const source_effective_balance = @min(state.balances().items[source_index], source_validator.effective_balance);
-
-            // Move active balance to target. Excess balance is withdrawable.
-            decreaseBalance(state, source_index, source_effective_balance);
-            increaseBalance(state, target_index, source_effective_balance);
-            if (cache.balances) |cached_balances| {
-                cached_balances.items[source_index] -= source_effective_balance;
-                cached_balances.items[target_index] += source_effective_balance;
-            }
-
+        if (try source_validator.get("slashed")) {
             next_pending_consolidation += 1;
+            continue;
         }
+
+        if ((try source_validator.get("withdrawable_epoch")) > next_epoch) {
+            break;
+        }
+
+        // Calculate the consolidated balance
+        const source_effective_balance = @min(try balances.get(source_index), try source_validator.get("effective_balance"));
+
+        // Move active balance to target. Excess balance is withdrawable.
+        try decreaseBalance(state, source_index, source_effective_balance);
+        try increaseBalance(state, target_index, source_effective_balance);
+        if (cache.balances) |cached_balances| {
+            cached_balances.items[source_index] -= source_effective_balance;
+            cached_balances.items[target_index] += source_effective_balance;
+        }
+
+        next_pending_consolidation += 1;
     }
 
     if (next_pending_consolidation > 0) {
-        const new_len = pending_consolidations.items.len - next_pending_consolidation;
-
-        std.mem.copyForwards(
-            types.electra.PendingConsolidation.Type,
-            pending_consolidations.items[0..new_len],
-            pending_consolidations.items[next_pending_consolidation .. next_pending_consolidation + new_len],
-        );
-
-        try pending_consolidations.resize(allocator, new_len);
+        const new_pending_consolidations = try pending_consolidations.sliceFrom(next_pending_consolidation);
+        try state.setPendingConsolidations(new_pending_consolidations);
     }
+}
+
+test "processPendingConsolidations - sanity" {
+    try @import("../test_utils/test_runner.zig").TestRunner(processPendingConsolidations, .{
+        .alloc = false,
+        .err_return = true,
+        .void_return = true,
+    }).testProcessEpochFn();
+    defer @import("../state_transition.zig").deinitStateTransition();
 }

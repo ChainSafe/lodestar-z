@@ -1,30 +1,36 @@
 const std = @import("std");
+const Node = @import("persistent_merkle_tree").Node;
 const ssz = @import("consensus_types");
 const ForkSeq = @import("config").ForkSeq;
 const Preset = @import("preset").Preset;
 const state_transition = @import("state_transition");
-const TestCachedBeaconStateAllForks = state_transition.test_utils.TestCachedBeaconStateAllForks;
+const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const SignedBeaconBlock = state_transition.SignedBeaconBlock;
-const BeaconStateAllForks = state_transition.BeaconStateAllForks;
-const CachedBeaconStateAllForks = state_transition.CachedBeaconStateAllForks;
+const BeaconState = state_transition.BeaconState;
+const CachedBeaconState = state_transition.CachedBeaconState;
 const test_case = @import("../test_case.zig");
 const loadSszValue = test_case.loadSszSnappyValue;
 const expectEqualBeaconStates = test_case.expectEqualBeaconStates;
 const TestCaseUtils = test_case.TestCaseUtils;
 const loadSignedBeaconBlock = test_case.loadSignedBeaconBlock;
+const active_preset = @import("preset").active_preset;
 
 pub fn Transition(comptime fork: ForkSeq) type {
     const tc_utils = TestCaseUtils(fork);
 
     return struct {
-        pre: TestCachedBeaconStateAllForks,
-        post: ?BeaconStateAllForks,
+        pre: TestCachedBeaconState,
+        post: ?*BeaconState,
         blocks: []SignedBeaconBlock,
 
         const Self = @This();
 
         pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
-            var tc = try Self.init(allocator, dir);
+            const pool_size = if (active_preset == .mainnet) 10_000_000 else 1_000_000;
+            var pool = try Node.Pool.init(allocator, pool_size);
+            defer pool.deinit();
+
+            var tc = try Self.init(allocator, &pool, dir);
             defer {
                 tc.deinit();
                 state_transition.deinitStateTransition();
@@ -32,7 +38,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
             try tc.runTest();
         }
 
-        pub fn init(allocator: std.mem.Allocator, dir: std.fs.Dir) !Self {
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
             var tc = Self{
                 .pre = undefined,
                 .post = undefined,
@@ -91,11 +97,11 @@ pub fn Transition(comptime fork: ForkSeq) type {
             }
 
             // load pre state
-            tc.pre = try tc_utils.loadPreStatePreFork(allocator, dir, fork_epoch);
+            tc.pre = try tc_utils.loadPreStatePreFork(allocator, pool, dir, fork_epoch);
             errdefer tc.pre.deinit();
 
             // load post state
-            tc.post = try tc_utils.loadPostState(allocator, dir);
+            tc.post = try tc_utils.loadPostState(allocator, pool, dir);
 
             return tc;
         }
@@ -106,13 +112,14 @@ pub fn Transition(comptime fork: ForkSeq) type {
             }
             self.pre.allocator.free(self.blocks);
             self.pre.deinit();
-            if (self.post) |*post| {
-                post.deinit(self.pre.allocator);
+            if (self.post) |post| {
+                post.deinit();
+                self.pre.allocator.destroy(post);
             }
         }
 
-        pub fn process(self: *Self) !*CachedBeaconStateAllForks {
-            var post_state: *CachedBeaconStateAllForks = self.pre.cached_state;
+        pub fn process(self: *Self) !*CachedBeaconState {
+            var post_state: *CachedBeaconState = self.pre.cached_state;
             for (self.blocks, 0..) |beacon_block, i| {
                 // if error, clean pre_state of stateTransition() function
                 errdefer {
@@ -155,7 +162,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
                     actual.deinit();
                     self.pre.allocator.destroy(actual);
                 }
-                try expectEqualBeaconStates(post, actual.state.*);
+                try expectEqualBeaconStates(post, actual.state);
             } else {
                 _ = self.process() catch |err| {
                     if (err == error.SkipZigTest) {

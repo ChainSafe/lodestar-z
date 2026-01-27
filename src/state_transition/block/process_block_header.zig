@@ -1,18 +1,19 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
-const CachedBeaconStateAllForks = @import("../cache/state_cache.zig").CachedBeaconStateAllForks;
+const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
-const BeaconConfig = @import("config").BeaconConfig;
+const config = @import("config");
+const BeaconConfig = config.BeaconConfig;
 const BeaconBlockHeader = types.phase0.BeaconBlockHeader.Type;
 const Root = types.primitive.Root;
 const SignedBlock = @import("../types/block.zig").SignedBlock;
 const ZERO_HASH = @import("constants").ZERO_HASH;
 const Block = @import("../types/block.zig").Block;
 
-pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaconStateAllForks, block: Block) !void {
+pub fn processBlockHeader(allocator: Allocator, cached_state: *CachedBeaconState, block: Block) !void {
     const state = cached_state.state;
-    const slot = state.slot();
+    const slot = try state.slot();
 
     // verify that the slots match
     if (block.slot() != slot) {
@@ -20,7 +21,9 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaco
     }
 
     // Verify that the block is newer than latest block header
-    if (!(block.slot() > state.latestBlockHeader().slot)) {
+    var latest_header_view = try state.latestBlockHeader();
+    const latest_header_slot = try latest_header_view.get("slot");
+    if (!(block.slot() > latest_header_slot)) {
         return error.BlockNotNewerThanLatestHeader;
     }
 
@@ -31,15 +34,13 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaco
     }
 
     // verify that the parent matches
-    var header_parent_root: [32]u8 = undefined;
-    try types.phase0.BeaconBlockHeader.hashTreeRoot(state.latestBlockHeader(), &header_parent_root);
-    if (!std.mem.eql(u8, &block.parentRoot(), &header_parent_root)) {
+    const header_parent_root = try latest_header_view.hashTreeRoot();
+    if (!std.mem.eql(u8, &block.parentRoot(), header_parent_root)) {
         return error.BlockParentRootMismatch;
     }
     var body_root: [32]u8 = undefined;
     try block.beaconBlockBody().hashTreeRoot(allocator, &body_root);
     // cache current block as the new latest block
-    const state_latest_block_header = state.latestBlockHeader();
     const latest_block_header: BeaconBlockHeader = .{
         .slot = slot,
         .proposer_index = proposer_index,
@@ -47,10 +48,13 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *const CachedBeaco
         .state_root = ZERO_HASH,
         .body_root = body_root,
     };
-    state_latest_block_header.* = latest_block_header;
+    try state.setLatestBlockHeader(&latest_block_header);
 
     // verify proposer is not slashed. Only once per block, may use the slower read from tree
-    if (state.validators().items[proposer_index].slashed) {
+    var validators_view = try state.validators();
+    var proposer_validator_view = try validators_view.get(proposer_index);
+    const proposer_slashed = try proposer_validator_view.get("slashed");
+    if (proposer_slashed) {
         return error.BlockProposerSlashed;
     }
 }
@@ -62,4 +66,36 @@ pub fn blockToHeader(allocator: Allocator, signed_block: SignedBlock, out: *Beac
     out.parent_root = block.parentRoot();
     out.state_root = block.stateRoot();
     try block.hashTreeRoot(allocator, &out.body_root);
+}
+
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const preset = @import("preset").preset;
+const Node = @import("persistent_merkle_tree").Node;
+
+test "process block header - sanity" {
+    const allocator = std.testing.allocator;
+
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    const slot = config.mainnet.chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
+    defer test_state.deinit();
+
+    const proposers = test_state.cached_state.getEpochCache().proposers;
+
+    var message: types.electra.BeaconBlock.Type = types.electra.BeaconBlock.default_value;
+    const proposer_index = proposers[slot % preset.SLOTS_PER_EPOCH];
+
+    var header = try test_state.cached_state.state.latestBlockHeader();
+    const header_parent_root = try header.hashTreeRoot();
+
+    message.slot = slot;
+    message.proposer_index = proposer_index;
+    message.parent_root = header_parent_root.*;
+
+    const beacon_block = BeaconBlock{ .electra = &message };
+
+    const block = Block{ .regular = beacon_block };
+    try processBlockHeader(allocator, test_state.cached_state, block);
 }

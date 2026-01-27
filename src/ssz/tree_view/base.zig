@@ -16,19 +16,22 @@ pub const TreeViewData = struct {
     children_nodes: std.AutoHashMapUnmanaged(Gindex, Node.Id),
 
     /// cached data for faster access of already-visited children
-    children_data: std.AutoHashMapUnmanaged(Gindex, TreeViewData),
+    children_data: std.AutoHashMapUnmanaged(Gindex, *TreeViewData),
 
     /// whether the corresponding child node/data has changed since the last update of the root
     changed: std.AutoArrayHashMapUnmanaged(Gindex, void),
 
-    pub fn init(pool: *Node.Pool, root: Node.Id) !TreeViewData {
+    pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*TreeViewData {
+        const data = try allocator.create(TreeViewData);
+        errdefer allocator.destroy(data);
         try pool.ref(root);
-        return TreeViewData{
+        data.* = TreeViewData{
             .root = root,
             .children_nodes = .empty,
             .children_data = .empty,
             .changed = .empty,
         };
+        return data;
     }
 
     /// Deinitialize the Data and free all associated resources.
@@ -40,6 +43,7 @@ pub const TreeViewData = struct {
         self.clearChildrenDataCache(allocator, pool);
         self.children_data.deinit(allocator);
         self.changed.deinit(allocator);
+        allocator.destroy(self);
     }
 
     pub fn clearChildrenNodesCache(self: *TreeViewData, pool: *Node.Pool) void {
@@ -56,7 +60,7 @@ pub const TreeViewData = struct {
     pub fn clearChildrenDataCache(self: *TreeViewData, allocator: Allocator, pool: *Node.Pool) void {
         var value_iter = self.children_data.valueIterator();
         while (value_iter.next()) |child_data| {
-            child_data.deinit(allocator, pool);
+            child_data.*.deinit(allocator, pool);
         }
         self.children_data.clearRetainingCapacity();
     }
@@ -69,11 +73,17 @@ pub const TreeViewData = struct {
         const nodes = try allocator.alloc(Node.Id, self.changed.count());
         defer allocator.free(nodes);
 
-        const gindices = self.changed.keys();
-        Gindex.sortAsc(gindices);
+        const SortCtx = struct {
+            keys: []Gindex,
+            pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
+                return @intFromEnum(ctx.keys[a_index]) < @intFromEnum(ctx.keys[b_index]);
+            }
+        };
+        self.changed.sortUnstable(SortCtx{ .keys = self.changed.keys() });
+        const gindices_sorted = self.changed.keys();
 
-        for (gindices, 0..) |gindex, i| {
-            if (self.children_data.getPtr(gindex)) |child_data| {
+        for (gindices_sorted, 0..) |gindex, i| {
+            if (self.children_data.get(gindex)) |child_data| {
                 try child_data.commit(allocator, pool);
                 nodes[i] = child_data.root;
             } else if (self.children_nodes.get(gindex)) |child_node| {
@@ -83,12 +93,17 @@ pub const TreeViewData = struct {
             }
         }
 
-        const new_root = try self.root.setNodesGrouped(pool, gindices, nodes);
+        const new_root = try self.root.setNodesGrouped(pool, gindices_sorted, nodes);
         try pool.ref(new_root);
         pool.unref(self.root);
         self.root = new_root;
 
         self.changed.clearRetainingCapacity();
+
+        // The tree root has changed and any cached child nodes may now be stale (e.g. for
+        // ancestor gindices of the modified nodes). Clear cached nodes to avoid returning
+        // nodes from the previous root in subsequent reads/writes.
+        self.clearChildrenNodesCache(pool);
     }
 };
 
@@ -103,7 +118,7 @@ pub const TreeViewData = struct {
 pub const BaseTreeView = struct {
     allocator: Allocator,
     pool: *Node.Pool,
-    data: TreeViewData,
+    data: *TreeViewData,
 
     pub const CloneOpts = struct {
         /// When true, transfer *safe* cache entries from `self` into the clone.
@@ -115,7 +130,7 @@ pub const BaseTreeView = struct {
         return BaseTreeView{
             .allocator = allocator,
             .pool = pool,
-            .data = try TreeViewData.init(pool, root),
+            .data = try TreeViewData.init(allocator, pool, root),
         };
     }
 
@@ -191,9 +206,9 @@ pub const BaseTreeView = struct {
         self.data.changed.clearRetainingCapacity();
     }
 
-    pub fn hashTreeRoot(self: *BaseTreeView, out: *[32]u8) !void {
+    pub fn hashTreeRoot(self: *BaseTreeView) !*const [32]u8 {
         try self.commit();
-        out.* = self.data.root.getRoot(self.pool).*;
+        return self.data.root.getRoot(self.pool);
     }
 
     pub fn getChildNode(self: *BaseTreeView, gindex: Gindex) !Node.Id {
@@ -208,6 +223,7 @@ pub const BaseTreeView = struct {
 
     pub fn setChildNode(self: *BaseTreeView, gindex: Gindex, node: Node.Id) !void {
         try self.data.changed.put(self.allocator, gindex, {});
+
         const opt_old_node = try self.data.children_nodes.fetchPut(
             self.allocator,
             gindex,
@@ -222,30 +238,38 @@ pub const BaseTreeView = struct {
         }
     }
 
-    pub fn getChildData(self: *BaseTreeView, gindex: Gindex) !TreeViewData {
-        const gop = try self.data.children_data.getOrPut(self.allocator, gindex);
-        if (gop.found_existing) {
-            return gop.value_ptr.*;
-        }
-        const child_node = try self.getChildNode(gindex);
-        const child_data = try TreeViewData.init(self.pool, child_node);
-        gop.value_ptr.* = child_data;
-
-        // TODO only update changed if the subview is mutable
+    pub fn getChildData(self: *BaseTreeView, gindex: Gindex) !*TreeViewData {
+        const child_data = try self.getChildDataReadonly(gindex);
         try self.data.changed.put(self.allocator, gindex, {});
         return child_data;
     }
 
-    pub fn setChildData(self: *BaseTreeView, gindex: Gindex, child_data: TreeViewData) !void {
+    pub fn getChildDataReadonly(self: *BaseTreeView, gindex: Gindex) !*TreeViewData {
+        const gop = try self.data.children_data.getOrPut(self.allocator, gindex);
+        if (gop.found_existing) {
+            return gop.value_ptr.*;
+        }
+        errdefer _ = self.data.children_data.remove(gindex);
+        const child_node = try self.data.root.getNode(self.pool, gindex);
+        const child_data = try TreeViewData.init(self.allocator, self.pool, child_node);
+        gop.value_ptr.* = child_data;
+
+        return child_data;
+    }
+
+    pub fn setChildData(self: *BaseTreeView, gindex: Gindex, child_data: *TreeViewData) !void {
         try self.data.changed.put(self.allocator, gindex, {});
+
         const opt_old_data = try self.data.children_data.fetchPut(
             self.allocator,
             gindex,
             child_data,
         );
-        if (opt_old_data) |old_data_value| {
-            var old_data = @constCast(&old_data_value.value);
-            old_data.deinit(self.allocator, self.pool);
+        if (opt_old_data) |old_data| {
+            if (old_data.value == child_data) {
+                return;
+            }
+            old_data.value.deinit(self.allocator, self.pool);
         }
     }
 };

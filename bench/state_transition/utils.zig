@@ -1,12 +1,13 @@
 //! Shared utilities for state transition benchmarks
 
 const std = @import("std");
+const Node = @import("persistent_merkle_tree").Node;
 const types = @import("consensus_types");
 const config = @import("config");
 const state_transition = @import("state_transition");
 
 const ForkSeq = config.ForkSeq;
-const BeaconStateAllForks = state_transition.BeaconStateAllForks;
+const BeaconState = state_transition.BeaconState;
 const Slot = types.primitive.Slot.Type;
 
 /// Read slot from raw BeaconState SSZ bytes (offset 40)
@@ -22,15 +23,17 @@ pub fn slotFromBlockBytes(block_bytes: []const u8) Slot {
 }
 
 /// Load and deserialize BeaconState from SSZ bytes for a specific fork
-pub fn loadState(comptime fork: ForkSeq, allocator: std.mem.Allocator, state_bytes: []const u8) !*BeaconStateAllForks {
-    const BeaconState = @field(types, @tagName(fork)).BeaconState;
-    const state_data = try allocator.create(BeaconState.Type);
-    errdefer allocator.destroy(state_data);
-    state_data.* = BeaconState.default_value;
-    try BeaconState.deserializeFromBytes(allocator, state_bytes, state_data);
+pub fn loadState(comptime fork: ForkSeq, allocator: std.mem.Allocator, pool: *Node.Pool, state_bytes: []const u8) !*BeaconState {
+    const BeaconStateST = @field(types, @tagName(fork)).BeaconState;
+    var state_data = try BeaconStateST.TreeView.init(
+        allocator,
+        pool,
+        try BeaconStateST.tree.deserializeFromBytes(pool, state_bytes),
+    );
+    errdefer state_data.deinit();
 
-    const beacon_state = try allocator.create(BeaconStateAllForks);
-    beacon_state.* = @unionInit(BeaconStateAllForks, @tagName(fork), state_data);
+    const beacon_state = try allocator.create(BeaconState);
+    beacon_state.* = @unionInit(BeaconState, @tagName(fork), state_data);
     return beacon_state;
 }
 

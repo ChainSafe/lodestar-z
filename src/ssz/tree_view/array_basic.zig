@@ -61,8 +61,10 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
             self.base_view.clearCache();
         }
 
-        pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
-            try self.base_view.hashTreeRoot(out);
+        /// Return the root hash of the tree.
+        /// The returned array is owned by the internal pool and must not be modified.
+        pub fn hashTreeRoot(self: *Self) !*const [32]u8 {
+            return try self.base_view.hashTreeRoot();
         }
 
         pub fn get(self: *Self, index: usize) !Element {
@@ -93,6 +95,11 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
         /// Get the serialized size of this tree view.
         pub fn serializedSize(_: *Self) usize {
             return ST.fixed_size;
+        }
+
+        pub fn toValue(self: *Self, _: Allocator, out: *ST.Type) !void {
+            try self.commit();
+            try ST.tree.toValue(self.base_view.data.root, self.base_view.pool, out);
         }
     };
 }
@@ -129,10 +136,9 @@ test "TreeView vector element roundtrip" {
     var expected_root: [32]u8 = undefined;
     try VectorType.hashTreeRoot(&expected, &expected_root);
 
-    var actual_root: [32]u8 = undefined;
-    try view.hashTreeRoot(&actual_root);
+    const actual_root = try view.hashTreeRoot();
 
-    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, actual_root);
 
     var roundtrip: VectorType.Type = undefined;
     try VectorType.tree.toValue(view.base_view.data.root, &pool, &roundtrip);
@@ -203,6 +209,7 @@ test "TreeView vector getAllAlloc repeat reflects updates" {
 
     try view.set(3, 99);
 
+    try view.commit();
     const second = try view.getAll(allocator);
     defer allocator.free(second);
     values[3] = 99;
@@ -376,9 +383,8 @@ test "ArrayBasicTreeView - serialize (uint64 vector)" {
         const view_size = view.serializedSize();
         try std.testing.expectEqual(tc.expected_serialized.len, view_size);
 
-        var hash_root: [32]u8 = undefined;
-        try view.hashTreeRoot(&hash_root);
-        try std.testing.expectEqualSlices(u8, &tc.expected_root, &hash_root);
+        const hash_root = try view.hashTreeRoot();
+        try std.testing.expectEqualSlices(u8, &tc.expected_root, hash_root);
     }
 }
 

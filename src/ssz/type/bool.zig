@@ -12,6 +12,8 @@ pub fn BoolType() type {
 
         pub const default_value: Type = false;
 
+        pub const default_root: [32]u8 = [_]u8{0} ** 32;
+
         pub fn equals(a: *const Type, b: *const Type) bool {
             return a.* == b.*;
         }
@@ -232,4 +234,12 @@ test "BoolType - tree.deserializeFromBytes" {
 
     try std.testing.expectError(error.invalidBoolean, Bool.tree.deserializeFromBytes(&pool, &[_]u8{0x02}));
     try std.testing.expectError(error.InvalidSize, Bool.tree.deserializeFromBytes(&pool, &[_]u8{}));
+}
+
+test "BoolType - default_root" {
+    const Bool = BoolType();
+    var expected_root: [32]u8 = undefined;
+
+    try Bool.hashTreeRoot(&Bool.default_value, &expected_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &Bool.default_root);
 }

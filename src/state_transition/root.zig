@@ -1,11 +1,15 @@
 const std = @import("std");
 const testing = std.testing;
 
+pub const stateTransition = @import("state_transition.zig").stateTransition;
+
+pub const metrics = @import("metrics.zig");
+
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
 pub const BeaconBlock = @import("./types/beacon_block.zig").BeaconBlock;
 pub const BeaconBlockBody = @import("./types/beacon_block.zig").BeaconBlockBody;
-pub const BeaconStateAllForks = @import("./types/beacon_state.zig").BeaconStateAllForks;
-pub const CachedBeaconStateAllForks = @import("./cache/state_cache.zig").CachedBeaconStateAllForks;
+pub const BeaconState = @import("./types/beacon_state.zig").BeaconState;
+pub const CachedBeaconState = @import("./cache/state_cache.zig").CachedBeaconState;
 pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
 
 pub const EpochCacheImmutableData = @import("./cache/epoch_cache.zig").EpochCacheImmutableData;

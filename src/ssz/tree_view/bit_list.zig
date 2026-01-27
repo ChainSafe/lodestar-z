@@ -54,9 +54,10 @@ pub fn BitListTreeView(comptime ST: type) type {
             self.base_view.clearCache();
         }
 
-        pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
-            try self.commit();
-            out.* = self.base_view.data.root.getRoot(self.base_view.pool).*;
+        /// Return the root hash of the tree.
+        /// The returned array is owned by the internal pool and must not be modified.
+        pub fn hashTreeRoot(self: *Self) !*const [32]u8 {
+            return try self.base_view.hashTreeRoot();
         }
 
         fn readLength(self: *Self) !usize {
