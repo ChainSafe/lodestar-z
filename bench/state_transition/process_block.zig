@@ -501,9 +501,7 @@ fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, pool: *Nod
 
     try state_transition.state_transition.processSlots(
         allocator,
-        cached_state.config,
-        cached_state.getEpochCache(),
-        cached_state.state,
+        cached_state,
         block_slot,
         .{},
     );

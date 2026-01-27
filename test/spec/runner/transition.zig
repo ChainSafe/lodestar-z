@@ -114,11 +114,10 @@ pub fn Transition(comptime fork: ForkSeq) type {
             }
         }
 
-        pub fn process(self: *Self) !*state_transition.state_transition.StateTransitionResult {
-            var result: ?*state_transition.state_transition.StateTransitionResult = null;
+        pub fn process(self: *Self) !*state_transition.CachedBeaconState {
+            var result: ?*state_transition.CachedBeaconState = null;
             for (self.blocks) |beacon_block| {
-                const input_state = if (result) |res| &res.state else self.pre.cached_state.state;
-                const input_epoch_cache = if (result) |res| res.epoch_cache else self.pre.cached_state.getEpochCache();
+                const input_cached_state = if (result) |res| res else self.pre.cached_state;
                 // if error, clean pre_state of stateTransition() function
                 errdefer {
                     if (result) |res| {
@@ -128,9 +127,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
                 }
                 const new_result = try state_transition.state_transition.stateTransition(
                     self.pre.allocator,
-                    self.pre.cached_state.config,
-                    input_epoch_cache,
-                    input_state,
+                    input_cached_state,
                     beacon_block,
                     .{
                         .verify_state_root = true,
@@ -156,7 +153,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
                     actual.deinit();
                     self.pre.allocator.destroy(actual);
                 }
-                try expectEqualBeaconStates(post, &actual.state);
+                try expectEqualBeaconStates(post, actual.state);
             } else {
                 _ = self.process() catch |err| {
                     if (err == error.SkipZigTest) {
