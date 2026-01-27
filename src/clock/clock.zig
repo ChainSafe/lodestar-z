@@ -78,8 +78,10 @@ pub const Clock = struct {
     // TODO: implement onNextSlot
 
     fn msUntilNextSlot(self: *Clock) u64 {
-        const ms_per_slot = self.config.SECONDS_PER_SLOT;
-        const diff_in_ms = std.time.milliTimestamp() - self.genesis_time * 1000;
+        const ms_per_slot = self.config.SECONDS_PER_SLOT * 1000;
+        const now_in_ms: u64 = @intCast(std.time.milliTimestamp());
+        const genesis_time_in_ms: u64 = @intCast(self.genesis_time * 1000);
+        const diff_in_ms: u64 = now_in_ms - genesis_time_in_ms;
         return ms_per_slot - (diff_in_ms % ms_per_slot);
     }
 };
