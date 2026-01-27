@@ -68,6 +68,10 @@
         },
     },
     .modules = .{
+        .clock = .{
+            .root_source_file = "src/clock/root.zig",
+            .imports = .{ .config, .consensus_types, .constants },
+        },
         .constants = .{
             .root_source_file = "src/constants/root.zig",
         },
