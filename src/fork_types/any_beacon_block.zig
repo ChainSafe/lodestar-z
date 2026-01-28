@@ -320,6 +320,18 @@ pub const AnyBeaconBlock = union(enum) {
         };
     }
 
+    pub fn forkSeq(self: *const AnyBeaconBlock) ForkSeq {
+        return switch (self.*) {
+            .phase0 => .phase0,
+            .altair => .altair,
+            .full_bellatrix, .blinded_bellatrix => .bellatrix,
+            .full_capella, .blinded_capella => .capella,
+            .full_deneb, .blinded_deneb => .deneb,
+            .full_electra, .blinded_electra => .electra,
+            .full_fulu, .blinded_fulu => .fulu,
+        };
+    }
+
     pub fn castToFork(
         self: *const AnyBeaconBlock,
         comptime block_type: BlockType,
@@ -354,18 +366,6 @@ pub const AnyBeaconBlock = union(enum) {
                 @ptrCast(self.full_fulu)
             else
                 @ptrCast(self.blinded_fulu),
-        };
-    }
-
-    pub fn forkSeq(self: *const AnyBeaconBlock) ForkSeq {
-        return switch (self.*) {
-            .phase0 => .phase0,
-            .altair => .altair,
-            .full_bellatrix, .blinded_bellatrix => .bellatrix,
-            .full_capella, .blinded_capella => .capella,
-            .full_deneb, .blinded_deneb => .deneb,
-            .full_electra, .blinded_electra => .electra,
-            .full_fulu, .blinded_fulu => .fulu,
         };
     }
 
@@ -436,6 +436,13 @@ pub const AnyBeaconBlockBody = union(enum) {
     blinded_electra: *ct.electra.BlindedBeaconBlockBody.Type,
     full_fulu: *ct.fulu.BeaconBlockBody.Type,
     blinded_fulu: *ct.fulu.BlindedBeaconBlockBody.Type,
+
+    pub fn blockType(self: *const AnyBeaconBlockBody) BlockType {
+        return switch (self.*) {
+            .phase0, .altair, .full_bellatrix, .full_capella, .full_deneb, .full_electra, .full_fulu => .full,
+            .blinded_bellatrix, .blinded_capella, .blinded_deneb, .blinded_electra, .blinded_fulu => .blinded,
+        };
+    }
 
     pub fn forkSeq(self: *const AnyBeaconBlockBody) ForkSeq {
         return switch (self.*) {
