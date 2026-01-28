@@ -71,6 +71,7 @@ printDuration("previousEpochParticipation", () => state.previousEpochParticipati
 printDuration("currentEpochParticipation", () => state.currentEpochParticipation);
 printDuration("getBalance(0)", () => state.getBalance(0));
 printDuration("getBalance(100)", () => state.getBalance(100));
+printDuration("createMultiProof(descriptor for gindex 42)", () => state.createMultiProof(Uint8Array.from([0x25, 0xe0])));
 printDuration("getFinalizedRootProof()", () => state.getFinalizedRootProof());
 printDuration("isExecutionStateType()", () => state.isExecutionStateType());
 printDuration("getEffectiveBalanceIncrementsZeroInactive()", () => state.getEffectiveBalanceIncrementsZeroInactive());

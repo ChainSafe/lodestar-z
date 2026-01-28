@@ -61,6 +61,12 @@ interface SyncCommitteeCache {
   validatorIndexMap: Map<number, number[]>;
 }
 
+interface CompactMultiProof {
+  type: "compactMulti";
+  leaves: Uint8Array[];
+  descriptor: Uint8Array;
+}
+
 declare class BeaconStateView {
   static createFromBytes(fork: string, bytes: Uint8Array): BeaconStateView;
   slot: number;
@@ -98,6 +104,7 @@ declare class BeaconStateView {
   serializedSize(): number;
   serializeToBytes(output: Uint8Array, offset: number): number;
   hashTreeRoot(): Uint8Array;
+  createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 }
 
 type Bindings = {
