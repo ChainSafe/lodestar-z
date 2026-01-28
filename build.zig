@@ -66,6 +66,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const dep_xev = b.dependency("xev", .{
+        .optimize = optimize,
+        .target = target,
+    });
+
     const module_clock = b.createModule(.{
         .root_source_file = b.path("src/clock/root.zig"),
         .target = target,
@@ -906,6 +911,8 @@ pub fn build(b: *std.Build) void {
     module_clock.addImport("config", module_config);
     module_clock.addImport("consensus_types", module_consensus_types);
     module_clock.addImport("constants", module_constants);
+    module_clock.addImport("preset", module_preset);
+    module_clock.addImport("xev", dep_xev.module("xev"));
 
     module_config.addImport("build_options", options_module_build_options);
     module_config.addImport("preset", module_preset);
