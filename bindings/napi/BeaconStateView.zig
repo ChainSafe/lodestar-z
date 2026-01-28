@@ -713,13 +713,15 @@ pub fn BeaconStateView_getShufflingDecisionRoot(env: napi.Env, cb: napi.Callback
     return sszValueToNapiValue(env, ct.primitive.Root, &root);
 }
 
+/// Make a `napi.c.napi_property_descriptor` with comptime guarantees that the provided `name` matches a function
+/// within `@This()`.
 fn makeNapiPropertyDescriptor(
     comptime argc_cap: usize,
     comptime name: []const u8,
 ) napi.c.napi_property_descriptor {
-    const func = "BeaconStateView_" ++ name;
+    const func_name = @typeName(BeaconStateView) ++ "_" ++ name;
 
-    return .{ .utf8name = name.ptr, .getter = napi.wrapCallback(argc_cap, @field(@This(), func)) };
+    return .{ .utf8name = name.ptr, .getter = napi.wrapCallback(argc_cap, @field(@This(), func_name)) };
 }
 
 pub fn register(env: napi.Env, exports: napi.Value) !void {
