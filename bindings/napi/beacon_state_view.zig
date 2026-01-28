@@ -31,6 +31,8 @@ const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiV
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = gpa.allocator();
 
+const BeaconStateView = @This();
+
 pub fn BeaconStateView_finalize(_: napi.Env, cached_state: *CachedBeaconState, _: ?*anyopaque) void {
     cached_state.deinit();
     allocator.destroy(cached_state);
@@ -711,6 +713,15 @@ pub fn BeaconStateView_getShufflingDecisionRoot(env: napi.Env, cb: napi.Callback
     return sszValueToNapiValue(env, ct.primitive.Root, &root);
 }
 
+fn makeNapiPropertyDescriptor(
+    comptime argc_cap: usize,
+    comptime name: []const u8,
+) napi.c.napi_property_descriptor {
+    const func = "BeaconStateView_" ++ name;
+
+    return .{ .utf8name = name.ptr, .getter = napi.wrapCallback(argc_cap, @field(@This(), func)) };
+}
+
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const beacon_state_view_ctor = try env.defineClass(
         "BeaconStateView",
@@ -718,7 +729,8 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         BeaconStateView_ctor,
         null,
         &[_]napi.c.napi_property_descriptor{
-            .{ .utf8name = "slot", .getter = napi.wrapCallback(0, BeaconStateView_slot) },
+            makeNapiPropertyDescriptor(0, "slot"),
+            .{ .utf8name = "slott", .getter = napi.wrapCallback(0, BeaconStateView_slot) },
             .{ .utf8name = "root", .getter = napi.wrapCallback(0, BeaconStateView_root) },
             .{ .utf8name = "epoch", .getter = napi.wrapCallback(0, BeaconStateView_epoch) },
             .{ .utf8name = "genesisTime", .getter = napi.wrapCallback(0, BeaconStateView_genesisTime) },
