@@ -6,6 +6,7 @@ const ForkTypes = @import("fork_types").ForkTypes;
 const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const types = @import("consensus_types");
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 const isSlashableAttestationData = @import("../utils/attestation.zig").isSlashableAttestationData;
 const getAttesterSlashableIndices = @import("../utils/attestation.zig").getAttesterSlashableIndices;
 const isValidIndexedAttestation = @import("./is_valid_indexed_attestation.zig").isValidIndexedAttestation;
@@ -21,6 +22,7 @@ pub fn processAttesterSlashing(
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
+    slashings_cache: *SlashingsCache,
     current_epoch: u64,
     attester_slashing: *const ForkTypes(fork).AttesterSlashing.Type,
     verify_signature: bool,
@@ -46,7 +48,7 @@ pub fn processAttesterSlashing(
         try validators.getValue(undefined, validator_index, &validator);
 
         if (isSlashableValidator(&validator, current_epoch)) {
-            try slashValidator(fork, config, epoch_cache, state, validator_index, null);
+            try slashValidator(fork, config, epoch_cache, state, slashings_cache, validator_index, null);
             slashed_any = true;
         }
     }

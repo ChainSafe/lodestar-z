@@ -4,6 +4,7 @@ const ForkSeq = @import("config").ForkSeq;
 const ForkTypes = @import("fork_types").ForkTypes;
 const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 const types = @import("consensus_types");
 const isSlashableValidator = @import("../utils/validator.zig").isSlashableValidator;
 const getProposerSlashingSignatureSets = @import("../signature_sets/proposer_slashings.zig").getProposerSlashingSignatureSets;
@@ -15,12 +16,13 @@ pub fn processProposerSlashing(
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
+    slashings_cache: *SlashingsCache,
     proposer_slashing: *const ForkTypes(fork).ProposerSlashing.Type,
     verify_signatures: bool,
 ) !void {
     try assertValidProposerSlashing(fork, config, epoch_cache, state, proposer_slashing, verify_signatures);
     const proposer_index = proposer_slashing.signed_header_1.message.proposer_index;
-    try slashValidator(fork, config, epoch_cache, state, proposer_index, null);
+    try slashValidator(fork, config, epoch_cache, state, slashings_cache, proposer_index, null);
 }
 
 pub fn assertValidProposerSlashing(

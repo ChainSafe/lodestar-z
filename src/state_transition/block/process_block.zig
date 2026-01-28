@@ -2,6 +2,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
+const buildSlashingsCacheIfNeeded = @import("../cache/slashings_cache.zig").buildFromStateIfNeeded;
 const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const BlockType = @import("fork_types").BlockType;
 const ForkBeaconBlock = @import("fork_types").ForkBeaconBlock;
@@ -37,6 +39,7 @@ pub fn processBlock(
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
+    slashings_cache: *SlashingsCache,
     comptime block_type: BlockType,
     block: *const ForkBeaconBlock(fork, block_type),
     external_data: BlockExternalData,
@@ -44,6 +47,7 @@ pub fn processBlock(
     // TODO: metrics
 ) !void {
     try processBlockHeader(fork, allocator, epoch_cache, state, block_type, block);
+    try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
     const body = block.body();
     const current_epoch = epoch_cache.epoch;
 
@@ -100,7 +104,7 @@ pub fn processBlock(
 
     try processRandao(fork, config, epoch_cache, state, block_type, body, block.proposerIndex(), opts.verify_signature);
     try processEth1Data(fork, state, body.eth1Data());
-    try processOperations(fork, allocator, config, epoch_cache, state, block_type, body, opts);
+    try processOperations(fork, allocator, config, epoch_cache, state, slashings_cache, block_type, body, opts);
     if (comptime fork.gte(.altair)) {
         try processSyncAggregate(fork, allocator, config, epoch_cache, state, body.syncAggregate(), opts.verify_signature);
     }

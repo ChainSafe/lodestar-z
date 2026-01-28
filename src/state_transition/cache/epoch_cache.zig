@@ -185,7 +185,6 @@ pub const EpochCache = struct {
 
         for (0..validator_count) |i| {
             const validator = validators[i];
-
             // Note: Not usable for fork-choice balances since in-active validators are not zero'ed
             effective_balance_increment.items[i] = @intCast(@divFloor(validator.effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT));
 

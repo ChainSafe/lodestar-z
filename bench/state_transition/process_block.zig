@@ -181,12 +181,14 @@ fn ProcessOperationsBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
+            cloned.buildSlashingsCacheIfNeeded() catch unreachable;
             state_transition.processOperations(
                 fork,
                 allocator,
                 cloned.config,
                 cloned.getEpochCache(),
                 cloned.state.castToFork(fork),
+                &cloned.slashings_cache,
                 .full,
                 self.body,
                 .{ .verify_signature = opts.verify_signature },
@@ -237,6 +239,7 @@ fn ProcessBlockBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
                 cloned.config,
                 cloned.getEpochCache(),
                 cloned.state.castToFork(fork),
+                &cloned.slashings_cache,
                 .full,
                 self.block,
                 external_data,
@@ -395,12 +398,14 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
             recordSegment(.eth1_data, elapsedSince(eth1_start));
 
             const ops_start = std.time.nanoTimestamp();
+            cloned.buildSlashingsCacheIfNeeded() catch unreachable;
             state_transition.processOperations(
                 fork,
                 allocator,
                 cloned.config,
                 epoch_cache,
                 state,
+                &cloned.slashings_cache,
                 .full,
                 self.body,
                 .{ .verify_signature = true },
