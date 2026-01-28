@@ -1,5 +1,4 @@
 const std = @import("std");
-const spec_test_options = @import("spec_test_options");
 const ForkSeq = @import("config").ForkSeq;
 const MerkleProof = @import("../runner/merkle_proof.zig");
 

@@ -3,7 +3,6 @@ const Allocator = std.mem.Allocator;
 const hashing = @import("hashing");
 const Depth = hashing.Depth;
 const Node = @import("persistent_merkle_tree").Node;
-const Gindex = @import("persistent_merkle_tree").Gindex;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
 
 const type_root = @import("../type/root.zig");

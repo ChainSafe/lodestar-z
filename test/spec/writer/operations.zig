@@ -1,7 +1,5 @@
 const std = @import("std");
-const spec_test_options = @import("spec_test_options");
 const ForkSeq = @import("config").ForkSeq;
-const Preset = @import("preset").Preset;
 const Handler = @import("../runner/operations.zig").Handler;
 
 pub const handlers = std.enums.values(Handler);

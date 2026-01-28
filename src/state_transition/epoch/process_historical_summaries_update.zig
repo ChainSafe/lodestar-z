@@ -1,12 +1,14 @@
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const types = @import("consensus_types");
-const Root = types.primitive.Root.Type;
 const preset = @import("preset").preset;
 
-pub fn processHistoricalSummariesUpdate(cached_state: *CachedBeaconState, cache: *const EpochTransitionCache) !void {
-    const state = cached_state.state;
+pub fn processHistoricalSummariesUpdate(
+    comptime fork: ForkSeq,
+    state: *BeaconState(fork),
+    cache: *const EpochTransitionCache,
+) !void {
     const next_epoch = cache.current_epoch + 1;
 
     // set historical root accumulator
@@ -22,11 +24,22 @@ pub fn processHistoricalSummariesUpdate(cached_state: *CachedBeaconState, cache:
     }
 }
 
+const std = @import("std");
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Node = @import("persistent_merkle_tree").Node;
+
 test "processHistoricalSummariesUpdate - sanity" {
-    try @import("../test_utils/test_runner.zig").TestRunner(processHistoricalSummariesUpdate, .{
-        .alloc = false,
-        .err_return = true,
-        .void_return = true,
-    }).testProcessEpochFn();
-    defer @import("../state_transition.zig").deinitStateTransition();
+    const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
+    defer test_state.deinit();
+
+    try processHistoricalSummariesUpdate(
+        .electra,
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+    );
 }

@@ -1,7 +1,11 @@
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const BeaconState = @import("fork_types").BeaconState;
 
-pub fn processParticipationRecordUpdates(cached_state: *CachedBeaconState) !void {
-    var state = cached_state.state;
+pub fn processParticipationRecordUpdates(
+    comptime fork: ForkSeq,
+    state: *BeaconState(fork),
+) !void {
+    if (comptime fork != .phase0) return;
     // rotate current/previous epoch attestations
     try state.rotateEpochPendingAttestations();
 }

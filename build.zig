@@ -108,6 +108,13 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("hex"), module_hex) catch @panic("OOM");
 
+    const module_fork_types = b.createModule(.{
+        .root_source_file = b.path("src/fork_types/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("fork_types"), module_fork_types) catch @panic("OOM");
+
     const module_persistent_merkle_tree = b.createModule(.{
         .root_source_file = b.path("src/persistent_merkle_tree/root.zig"),
         .target = target,
@@ -546,6 +553,20 @@ pub fn build(b: *std.Build) void {
     tls_run_test_hex.dependOn(&run_test_hex.step);
     tls_run_test.dependOn(&run_test_hex.step);
 
+    const test_fork_types = b.addTest(.{
+        .name = "fork_types",
+        .root_module = module_fork_types,
+        .filters = b.option([][]const u8, "fork_types.filters", "fork_types test filters") orelse &[_][]const u8{},
+    });
+    const install_test_fork_types = b.addInstallArtifact(test_fork_types, .{});
+    const tls_install_test_fork_types = b.step("build-test:fork_types", "Install the fork_types test");
+    tls_install_test_fork_types.dependOn(&install_test_fork_types.step);
+
+    const run_test_fork_types = b.addRunArtifact(test_fork_types);
+    const tls_run_test_fork_types = b.step("test:fork_types", "Run the fork_types test");
+    tls_run_test_fork_types.dependOn(&run_test_fork_types.step);
+    tls_run_test.dependOn(&run_test_fork_types.step);
+
     const test_persistent_merkle_tree = b.addTest(.{
         .name = "persistent_merkle_tree",
         .root_module = module_persistent_merkle_tree,
@@ -895,6 +916,7 @@ pub fn build(b: *std.Build) void {
 
     module_era.addImport("consensus_types", module_consensus_types);
     module_era.addImport("config", module_config);
+    module_era.addImport("fork_types", module_fork_types);
     module_era.addImport("preset", module_preset);
     module_era.addImport("state_transition", module_state_transition);
     module_era.addImport("snappy", dep_snappy.module("snappy"));
@@ -903,6 +925,12 @@ pub fn build(b: *std.Build) void {
     module_hashing.addImport("build_options", options_module_build_options);
     module_hashing.addImport("hex", module_hex);
     module_hashing.addImport("hashtree", dep_hashtree.module("hashtree"));
+
+    module_fork_types.addImport("consensus_types", module_consensus_types);
+    module_fork_types.addImport("config", module_config);
+    module_fork_types.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_fork_types.addImport("preset", module_preset);
+    module_fork_types.addImport("ssz", module_ssz);
 
     module_persistent_merkle_tree.addImport("build_options", options_module_build_options);
     module_persistent_merkle_tree.addImport("hex", module_hex);
@@ -921,6 +949,7 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("config", module_config);
     module_state_transition.addImport("consensus_types", module_consensus_types);
     module_state_transition.addImport("blst", dep_blst.module("blst"));
+    module_state_transition.addImport("fork_types", module_fork_types);
     module_state_transition.addImport("preset", module_preset);
     module_state_transition.addImport("constants", module_constants);
     module_state_transition.addImport("hex", module_hex);
@@ -972,6 +1001,7 @@ pub fn build(b: *std.Build) void {
     module_bench_hashing.addImport("zbench", dep_zbench.module("zbench"));
 
     module_bench_process_block.addImport("state_transition", module_state_transition);
+    module_bench_process_block.addImport("fork_types", module_fork_types);
     module_bench_process_block.addImport("consensus_types", module_consensus_types);
     module_bench_process_block.addImport("config", module_config);
     module_bench_process_block.addImport("zbench", dep_zbench.module("zbench"));
@@ -980,6 +1010,7 @@ pub fn build(b: *std.Build) void {
     module_bench_process_block.addImport("era", module_era);
 
     module_bench_process_epoch.addImport("state_transition", module_state_transition);
+    module_bench_process_epoch.addImport("fork_types", module_fork_types);
     module_bench_process_epoch.addImport("consensus_types", module_consensus_types);
     module_bench_process_epoch.addImport("config", module_config);
     module_bench_process_epoch.addImport("zbench", dep_zbench.module("zbench"));
@@ -994,6 +1025,7 @@ pub fn build(b: *std.Build) void {
     module_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
     module_spec_tests.addImport("consensus_types", module_consensus_types);
     module_spec_tests.addImport("config", module_config);
+    module_spec_tests.addImport("fork_types", module_fork_types);
     module_spec_tests.addImport("preset", module_preset);
     module_spec_tests.addImport("snappy", dep_snappy.module("snappy"));
     module_spec_tests.addImport("state_transition", module_state_transition);

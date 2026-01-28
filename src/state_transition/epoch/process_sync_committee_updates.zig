@@ -1,16 +1,19 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
-const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
-const types = @import("consensus_types");
+const BeaconState = @import("fork_types").BeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const preset = @import("preset").preset;
 const getNextSyncCommittee = @import("../utils/sync_committee.zig").getNextSyncCommittee;
 const SyncCommitteeInfo = @import("../utils/sync_committee.zig").SyncCommitteeInfo;
+const Node = @import("persistent_merkle_tree").Node;
 
-pub fn processSyncCommitteeUpdates(allocator: Allocator, cached_state: *CachedBeaconState) !void {
-    const state = cached_state.state;
-    const epoch_cache = cached_state.getEpochCache();
+pub fn processSyncCommitteeUpdates(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    epoch_cache: *EpochCache,
+    state: *BeaconState(fork),
+) !void {
     const next_epoch = epoch_cache.epoch + 1;
     if (next_epoch % preset.EPOCHS_PER_SYNC_COMMITTEE_PERIOD == 0) {
         const active_validator_indices = epoch_cache.getNextEpochShuffling().active_indices;
@@ -18,7 +21,7 @@ pub fn processSyncCommitteeUpdates(allocator: Allocator, cached_state: *CachedBe
 
         // Compute next
         var next_sync_committee_info: SyncCommitteeInfo = undefined;
-        try getNextSyncCommittee(allocator, state, active_validator_indices, effective_balance_increments, &next_sync_committee_info);
+        try getNextSyncCommittee(fork, allocator, state, active_validator_indices, effective_balance_increments, &next_sync_committee_info);
 
         // Rotate syncCommittee in state
         try state.rotateSyncCommittees(&next_sync_committee_info.sync_committee);
@@ -29,19 +32,21 @@ pub fn processSyncCommitteeUpdates(allocator: Allocator, cached_state: *CachedBe
     }
 }
 
-const Node = @import("persistent_merkle_tree").Node;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
 test "processSyncCommitteeUpdates - sanity" {
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
     const allocator = std.testing.allocator;
-    const validator_count_arr = &.{ 256, 10_000 };
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
 
-    inline for (validator_count_arr) |validator_count| {
-        var pool = try Node.Pool.init(allocator, 1024);
-        defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
+    defer test_state.deinit();
 
-        var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);
-        defer test_state.deinit();
-        try processSyncCommitteeUpdates(allocator, test_state.cached_state);
-    }
-    defer @import("../state_transition.zig").deinitStateTransition();
+    try processSyncCommitteeUpdates(
+        .electra,
+        allocator,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+    );
 }

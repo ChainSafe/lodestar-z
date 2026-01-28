@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const attester_status = @import("../utils/attester_status.zig");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const preset = @import("preset").preset;
 const c = @import("constants");
@@ -34,10 +34,7 @@ const RewardPenaltyItem = struct {
     finality_delay_penalty: u64,
 };
 
-pub fn getAttestationDeltas(allocator: Allocator, cached_state: *const CachedBeaconState, cache: *const EpochTransitionCache, rewards: []u64, penalties: []u64) !void {
-    const state = cached_state.state;
-    const epoch_cache = cached_state.getEpochCache();
-
+pub fn getAttestationDeltas(allocator: Allocator, epoch_cache: *const EpochCache, cache: *const EpochTransitionCache, finalized_epoch: u64, rewards: []u64, penalties: []u64) !void {
     const flags = cache.flags;
     const proposer_indices = cache.proposer_indices;
     const inclusion_delays = cache.inclusion_delays;
@@ -63,7 +60,7 @@ pub fn getAttestationDeltas(allocator: Allocator, cached_state: *const CachedBea
     const total_balance_in_gwei_f64: f64 = @floatFromInt(total_balance_in_gwei);
     const total_balance_in_gwei_sqrt: f64 = @sqrt(total_balance_in_gwei_f64);
     const balance_sq_root: u64 = @intFromFloat(total_balance_in_gwei_sqrt);
-    const finality_delay = cache.prev_epoch - try state.finalizedEpoch();
+    const finality_delay = cache.prev_epoch - finalized_epoch;
 
     const BASE_REWARDS_PER_EPOCH = BASE_REWARDS_PER_EPOCH_CONST;
     const proposer_reward_quotient = PROPOSER_REWARD_QUOTIENT;

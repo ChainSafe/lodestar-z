@@ -1,7 +1,4 @@
 const std = @import("std");
-const types = @import("consensus_types");
-const Epoch = types.primitive.Epoch.Type;
-const Version = types.primitive.Version.Type;
 
 /// Ordered consensus fork identifiers used throughout the client.
 ///

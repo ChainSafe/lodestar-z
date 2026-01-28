@@ -11,7 +11,6 @@ const isFixedType = @import("../type/type_kind.zig").isFixedType;
 
 const tree_view_root = @import("root.zig");
 const BaseTreeView = tree_view_root.BaseTreeView;
-const TreeViewData = tree_view_root.TreeViewData;
 
 /// Shared helpers for basic element types packed into chunks.
 pub fn BasicPackedChunks(

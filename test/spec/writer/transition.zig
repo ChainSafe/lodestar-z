@@ -1,7 +1,5 @@
 const std = @import("std");
-const spec_test_options = @import("spec_test_options");
 const ForkSeq = @import("config").ForkSeq;
-const Preset = @import("preset").Preset;
 
 /// Transition has no sub-handlers so we define a single value enum.
 pub const Handler = enum {

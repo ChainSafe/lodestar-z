@@ -1,10 +1,12 @@
 const std = @import("std");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const BeaconState = @import("fork_types").BeaconState;
 
-pub fn processParticipationFlagUpdates(cached_state: *CachedBeaconState) !void {
-    const state = cached_state.state;
-
-    if (state.forkSeq().lt(.altair)) return;
+pub fn processParticipationFlagUpdates(
+    comptime fork: ForkSeq,
+    state: *BeaconState(fork),
+) !void {
+    if (comptime fork.lt(.altair)) return;
     try state.rotateEpochParticipation();
 }
 
@@ -13,15 +15,15 @@ const Node = @import("persistent_merkle_tree").Node;
 
 test "processParticipationFlagUpdates - sanity" {
     const allocator = std.testing.allocator;
-    const validator_count_arr = &.{ 256, 10_000 };
-
-    var pool = try Node.Pool.init(allocator, 1024);
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
     defer pool.deinit();
 
-    inline for (validator_count_arr) |validator_count| {
-        var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);
-        defer test_state.deinit();
-        try processParticipationFlagUpdates(test_state.cached_state);
-    }
-    defer @import("../root.zig").deinitStateTransition();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
+    defer test_state.deinit();
+
+    try processParticipationFlagUpdates(
+        .electra,
+        test_state.cached_state.state.castToFork(.electra),
+    );
 }

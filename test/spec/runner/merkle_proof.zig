@@ -7,7 +7,6 @@ const hex = @import("hex");
 const ssz = @import("ssz");
 
 const pmt = @import("persistent_merkle_tree");
-const proof = pmt.proof;
 const Node = pmt.Node;
 const Gindex = pmt.Gindex;
 

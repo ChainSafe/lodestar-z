@@ -1,5 +1,4 @@
 const types = @import("consensus_types");
-const Validators = types.phase0.Validators.Type;
 const Validator = types.phase0.Validator.Type;
 const Epoch = types.primitive.Epoch.Type;
 const preset = @import("preset").preset;

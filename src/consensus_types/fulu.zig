@@ -1,4 +1,3 @@
-const std = @import("std");
 const ssz = @import("ssz");
 const p = @import("primitive.zig");
 const c = @import("constants");
@@ -15,9 +14,11 @@ pub const Fork = phase0.Fork;
 pub const ForkData = phase0.ForkData;
 pub const Checkpoint = phase0.Checkpoint;
 pub const Validator = phase0.Validator;
+pub const Validators = phase0.Validators;
 pub const AttestationData = phase0.AttestationData;
 pub const PendingAttestation = phase0.PendingAttestation;
 pub const Eth1Data = phase0.Eth1Data;
+pub const Eth1DataVotes = phase0.Eth1DataVotes;
 pub const HistoricalBatch = phase0.HistoricalBatch;
 pub const DepositMessage = phase0.DepositMessage;
 pub const DepositData = phase0.DepositData;
@@ -33,6 +34,9 @@ pub const HistoricalStateRoots = phase0.HistoricalStateRoots;
 pub const ProposerSlashings = phase0.ProposerSlashings;
 pub const Deposits = phase0.Deposits;
 pub const VoluntaryExits = phase0.VoluntaryExits;
+pub const Slashings = phase0.Slashings;
+pub const Balances = phase0.Balances;
+pub const RandaoMixes = phase0.RandaoMixes;
 
 pub const SyncAggregate = altair.SyncAggregate;
 pub const SyncCommittee = altair.SyncCommittee;

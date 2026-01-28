@@ -1,8 +1,4 @@
 const std = @import("std");
-const expectEqualRoots = @import("test_utils.zig").expectEqualRoots;
-const expectEqualRootsAlloc = @import("test_utils.zig").expectEqualRootsAlloc;
-const expectEqualSerializedAlloc = @import("test_utils.zig").expectEqualSerializedAlloc;
-const expectEqualSerialized = @import("test_utils.zig").expectEqualSerialized;
 const TypeKind = @import("type_kind.zig").TypeKind;
 const isBasicType = @import("type_kind.zig").isBasicType;
 const isFixedType = @import("type_kind.zig").isFixedType;
@@ -514,8 +510,6 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
 }
 
 const UintType = @import("uint.zig").UintType;
-const BoolType = @import("bool.zig").BoolType;
-const BitListType = @import("bit_list.zig").BitListType;
 const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 const FixedContainerType = @import("container.zig").FixedContainerType;
 const FixedListType = @import("list.zig").FixedListType;

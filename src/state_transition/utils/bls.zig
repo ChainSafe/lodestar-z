@@ -1,5 +1,4 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const blst = @import("blst");
 const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;

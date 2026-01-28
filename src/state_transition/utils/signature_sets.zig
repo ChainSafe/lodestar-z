@@ -1,5 +1,3 @@
-const std = @import("std");
-const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 pub const blst = @import("blst");
 const PublicKey = blst.PublicKey;

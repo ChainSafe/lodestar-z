@@ -1,18 +1,27 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
 const config = @import("config");
-const BeaconConfig = config.BeaconConfig;
+const ForkSeq = @import("config").ForkSeq;
+const ForkTypes = @import("fork_types").ForkTypes;
+const BeaconState = @import("fork_types").BeaconState;
+const BlockType = @import("fork_types").BlockType;
+const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
+const BeaconBlock = @import("fork_types").BeaconBlock;
 const BeaconBlockHeader = types.phase0.BeaconBlockHeader.Type;
-const Root = types.primitive.Root;
-const SignedBlock = @import("../types/block.zig").SignedBlock;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const ZERO_HASH = @import("constants").ZERO_HASH;
-const Block = @import("../types/block.zig").Block;
+const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconProposer;
+const Node = @import("persistent_merkle_tree").Node;
 
-pub fn processBlockHeader(allocator: Allocator, cached_state: *CachedBeaconState, block: Block) !void {
-    const state = cached_state.state;
+pub fn processBlockHeader(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    epoch_cache: *const EpochCache,
+    state: *BeaconState(fork),
+    comptime block_type: BlockType,
+    block: *const BeaconBlock(block_type, fork),
+) !void {
     const slot = try state.slot();
 
     // verify that the slots match
@@ -28,23 +37,24 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *CachedBeaconState
     }
 
     // verify that proposer index is the correct index
-    const proposer_index = try cached_state.getBeaconProposer(slot);
+    const proposer_index = try getBeaconProposer(fork, epoch_cache, state, slot);
     if (block.proposerIndex() != proposer_index) {
         return error.BlockProposerIndexMismatch;
     }
 
     // verify that the parent matches
     const header_parent_root = try latest_header_view.hashTreeRoot();
-    if (!std.mem.eql(u8, &block.parentRoot(), header_parent_root)) {
+    if (!std.mem.eql(u8, block.parentRoot(), header_parent_root)) {
         return error.BlockParentRootMismatch;
     }
+
     var body_root: [32]u8 = undefined;
-    try block.beaconBlockBody().hashTreeRoot(allocator, &body_root);
+    try block.body().hashTreeRoot(allocator, &body_root);
     // cache current block as the new latest block
     const latest_block_header: BeaconBlockHeader = .{
         .slot = slot,
         .proposer_index = proposer_index,
-        .parent_root = block.parentRoot(),
+        .parent_root = block.parentRoot().*,
         .state_root = ZERO_HASH,
         .body_root = body_root,
     };
@@ -59,28 +69,27 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *CachedBeaconState
     }
 }
 
-pub fn blockToHeader(allocator: Allocator, signed_block: SignedBlock, out: *BeaconBlockHeader) !void {
-    const block = signed_block.message();
+pub fn blockToHeader(allocator: Allocator, signed_block: AnySignedBeaconBlock, out: *BeaconBlockHeader) !void {
+    const block = signed_block.beaconBlock();
     out.slot = block.slot();
     out.proposer_index = block.proposerIndex();
-    out.parent_root = block.parentRoot();
-    out.state_root = block.stateRoot();
+    out.parent_root = block.parentRoot().*;
+    out.state_root = block.stateRoot().*;
     try block.hashTreeRoot(allocator, &out.body_root);
 }
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const preset = @import("preset").preset;
-const Node = @import("persistent_merkle_tree").Node;
 
 test "process block header - sanity" {
     const allocator = std.testing.allocator;
-
-    var pool = try Node.Pool.init(allocator, 1024);
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
-    const slot = config.mainnet.chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
     defer test_state.deinit();
+    const slot = config.mainnet.chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
 
     const proposers = test_state.cached_state.getEpochCache().proposers;
 
@@ -94,8 +103,14 @@ test "process block header - sanity" {
     message.proposer_index = proposer_index;
     message.parent_root = header_parent_root.*;
 
-    const beacon_block = BeaconBlock{ .electra = &message };
+    const fork_block = BeaconBlock(.full, .electra){ .inner = message };
 
-    const block = Block{ .regular = beacon_block };
-    try processBlockHeader(allocator, test_state.cached_state, block);
+    try processBlockHeader(
+        .electra,
+        allocator,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+        .full,
+        &fork_block,
+    );
 }

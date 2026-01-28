@@ -9,7 +9,7 @@ const upgradeStateToDeneb = state_transition.upgradeStateToDeneb;
 const upgradeStateToElectra = state_transition.upgradeStateToElectra;
 const upgradeStateToFulu = state_transition.upgradeStateToFulu;
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
-const BeaconState = state_transition.BeaconState;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const test_case = @import("../test_case.zig");
 const TestCaseUtils = test_case.TestCaseUtils;
 const expectEqualBeaconStates = test_case.expectEqualBeaconStates;
@@ -39,7 +39,7 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
 
     return struct {
         pre: TestCachedBeaconState,
-        post: ?*BeaconState,
+        post: ?*AnyBeaconState,
 
         const Self = @This();
 
@@ -97,13 +97,62 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
 
         fn upgrade(self: *Self) !void {
             const cached_state = self.pre.cached_state;
+            const config = cached_state.config;
+            const epoch_cache = cached_state.getEpochCache();
             switch (target_fork) {
-                .altair => try upgradeStateToAltair(self.pre.allocator, cached_state),
-                .bellatrix => try upgradeStateToBellatrix(self.pre.allocator, cached_state),
-                .capella => try upgradeStateToCapella(self.pre.allocator, cached_state),
-                .deneb => try upgradeStateToDeneb(self.pre.allocator, cached_state),
-                .electra => try upgradeStateToElectra(self.pre.allocator, cached_state),
-                .fulu => try upgradeStateToFulu(self.pre.allocator, cached_state),
+                .altair => {
+                    const upgraded = try upgradeStateToAltair(
+                        self.pre.allocator,
+                        config,
+                        epoch_cache,
+                        try cached_state.state.tryCastToFork(.phase0),
+                    );
+                    cached_state.state.* = .{ .altair = upgraded.inner };
+                },
+                .bellatrix => {
+                    const upgraded = try upgradeStateToBellatrix(
+                        config,
+                        epoch_cache,
+                        try cached_state.state.tryCastToFork(.altair),
+                    );
+                    cached_state.state.* = .{ .bellatrix = upgraded.inner };
+                },
+                .capella => {
+                    const upgraded = try upgradeStateToCapella(
+                        self.pre.allocator,
+                        config,
+                        epoch_cache,
+                        try cached_state.state.tryCastToFork(.bellatrix),
+                    );
+                    cached_state.state.* = .{ .capella = upgraded.inner };
+                },
+                .deneb => {
+                    const upgraded = try upgradeStateToDeneb(
+                        self.pre.allocator,
+                        config,
+                        epoch_cache,
+                        try cached_state.state.tryCastToFork(.capella),
+                    );
+                    cached_state.state.* = .{ .deneb = upgraded.inner };
+                },
+                .electra => {
+                    const upgraded = try upgradeStateToElectra(
+                        self.pre.allocator,
+                        config,
+                        epoch_cache,
+                        try cached_state.state.tryCastToFork(.deneb),
+                    );
+                    cached_state.state.* = .{ .electra = upgraded.inner };
+                },
+                .fulu => {
+                    const upgraded = try upgradeStateToFulu(
+                        self.pre.allocator,
+                        config,
+                        epoch_cache,
+                        try cached_state.state.tryCastToFork(.electra),
+                    );
+                    cached_state.state.* = .{ .fulu = upgraded.inner };
+                },
                 else => unreachable,
             }
         }

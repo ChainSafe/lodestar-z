@@ -6,7 +6,7 @@ const Validator = types.phase0.Validator;
 
 const Epoch = types.primitive.Epoch.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
@@ -27,10 +27,9 @@ pub fn isSlashableValidator(validator: *const Validator.Type, epoch: Epoch) bool
     return !validator.slashed and validator.activation_epoch <= epoch and epoch < validator.withdrawable_epoch;
 }
 
-pub fn getActiveValidatorIndices(allocator: Allocator, state: *BeaconState, epoch: Epoch) !std.ArrayList(ValidatorIndex) {
+pub fn getActiveValidatorIndices(allocator: Allocator, validators: *types.phase0.Validators.TreeView, epoch: Epoch) !std.ArrayList(ValidatorIndex) {
     var indices = std.ArrayList(ValidatorIndex).init(allocator);
 
-    var validators = try state.validators();
     var validators_it = validators.iteratorReadonly();
     const validators_len = try validators.length();
     for (0..validators_len) |i| {
@@ -85,7 +84,7 @@ pub fn getMaxEffectiveBalance(withdrawal_credentials: *const WithdrawalCredentia
     return preset.MIN_ACTIVATION_BALANCE;
 }
 
-pub fn getPendingBalanceToWithdraw(state: *BeaconState, validator_index: ValidatorIndex) !u64 {
+pub fn getPendingBalanceToWithdraw(comptime fork: ForkSeq, state: *BeaconState(fork), validator_index: ValidatorIndex) !u64 {
     var total: u64 = 0;
 
     var pending_partial_withdrawals = try state.pendingPartialWithdrawals();
