@@ -365,16 +365,16 @@ pub fn BeaconStateView_serializedSize(env: napi.Env, cb: napi.CallbackInfo(0)) !
     return try env.createInt64(@intCast(size));
 }
 
+/// arg 0: output: preallocated Uint8Array buffer
+/// arg 1: offset: offset of buffer where serialization should start
 pub fn BeaconStateView_serializeToBytes(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
 
-    // arg 0: output
     const output_info = try cb.arg(0).getTypedarrayInfo();
     if (output_info.array_type != .uint8) {
         return error.InvalidOutputBufferType;
     }
 
-    // arg 1: offset
     const offset = try cb.arg(1).getValueUint32();
     if (offset > output_info.length) {
         return error.InvalidOffset;
