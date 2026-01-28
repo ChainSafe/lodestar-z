@@ -9,6 +9,9 @@ const c = @import("constants");
 const innerShuffleList = @import("./shuffle.zig").innerShuffleList;
 const Epoch = types.primitive.Epoch.Type;
 const ReferenceCount = @import("./reference_count.zig").ReferenceCount;
+const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
+const getBlockRootAtSlot = @import("./block_root.zig").getBlockRootAtSlot;
+const computeAnchorCheckpoint = @import("./anchor_checkpoint.zig").computeAnchorCheckpoint;
 
 pub const EpochShufflingRc = ReferenceCount(*EpochShuffling);
 
@@ -131,4 +134,26 @@ fn computeCommitteeCount(active_validator_count: usize) usize {
 test computeCommitteeCount {
     const committee_count = computeCommitteeCount(2_000_000);
     try std.testing.expectEqual(64, committee_count);
+}
+
+/// Calculate the decision root for a given epoch.
+pub fn calculateDecisionRoot(state: *BeaconState, epoch: Epoch) ![32]u8 {
+    const pivot_slot = computeStartSlotAtEpoch(epoch - 1) - 1;
+    const block_root = try getBlockRootAtSlot(state, pivot_slot);
+
+    return block_root.*;
+}
+
+/// Get the shuffling decision block root for the given epoch of given state.
+pub fn calculateShufflingDecisionRoot(allocator: Allocator, state: *BeaconState, epoch: Epoch) ![32]u8 {
+    const slot = try state.slot();
+
+    if (slot > c.GENESIS_SLOT) {
+        return try calculateDecisionRoot(state, epoch);
+    }
+
+    const anchor = try computeAnchorCheckpoint(allocator, state);
+    var result: [32]u8 = undefined;
+    try types.phase0.BeaconBlockHeader.hashTreeRoot(&anchor.block_header, &result);
+    return result;
 }

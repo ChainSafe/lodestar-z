@@ -54,6 +54,13 @@ pub const Block = union(enum) {
             .blinded => |b| b.proposerIndex(),
         };
     }
+
+    pub fn stateRoot(self: *const Block) [32]u8 {
+        return switch (self.*) {
+            .regular => |b| b.stateRoot(),
+            .blinded => |b| b.stateRoot(),
+        };
+    }
 };
 
 pub const Body = union(enum) {

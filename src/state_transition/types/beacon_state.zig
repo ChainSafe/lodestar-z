@@ -164,13 +164,9 @@ pub const BeaconState = union(ForkSeq) {
         }
     }
 
-    /// Get a Merkle proof for the finalized root in the beacon state.
-    pub fn getFinalizedRootProof(self: *BeaconState, allocator: Allocator) !SingleProof {
+    /// Get a Merkle proof for a node at the given generalized index.
+    pub fn getSingleProof(self: *BeaconState, allocator: Allocator, gindex_value: u64) !SingleProof {
         try self.commit();
-        const gindex_value: u64 = switch (self.*) {
-            .electra, .fulu => constants.FINALIZED_ROOT_GINDEX_ELECTRA,
-            else => constants.FINALIZED_ROOT_GINDEX,
-        };
         const gindex: Gindex = @enumFromInt(gindex_value);
         return switch (self.*) {
             inline else => |*state| try createSingleProof(
@@ -180,6 +176,15 @@ pub const BeaconState = union(ForkSeq) {
                 gindex,
             ),
         };
+    }
+
+    /// Get a Merkle proof for the finalized root in the beacon state.
+    pub fn getFinalizedRootProof(self: *BeaconState, allocator: Allocator) !SingleProof {
+        const gindex_value: u64 = switch (self.*) {
+            .electra, .fulu => constants.FINALIZED_ROOT_GINDEX_ELECTRA,
+            else => constants.FINALIZED_ROOT_GINDEX,
+        };
+        return self.getSingleProof(allocator, gindex_value);
     }
 
     pub fn hashTreeRoot(self: *BeaconState) !*const [32]u8 {
