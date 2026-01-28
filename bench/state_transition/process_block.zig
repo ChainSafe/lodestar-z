@@ -33,7 +33,7 @@ const BenchOpts = struct {
 fn ProcessBlockHeaderBench(comptime fork: ForkSeq) type {
     return struct {
         cached_state: *CachedBeaconState,
-        block: *const ForkBeaconBlock(fork, .full),
+        block: *const ForkBeaconBlock(.full, fork),
 
         pub fn run(self: @This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
@@ -56,7 +56,7 @@ fn ProcessBlockHeaderBench(comptime fork: ForkSeq) type {
 fn ProcessWithdrawalsBench(comptime fork: ForkSeq) type {
     return struct {
         cached_state: *CachedBeaconState,
-        body: *const ForkBeaconBlockBody(fork, .full),
+        body: *const ForkBeaconBlockBody(.full, fork),
 
         pub fn run(self: @This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
@@ -101,7 +101,7 @@ fn ProcessWithdrawalsBench(comptime fork: ForkSeq) type {
 fn ProcessExecutionPayloadBench(comptime fork: ForkSeq) type {
     return struct {
         cached_state: *CachedBeaconState,
-        body: *const ForkBeaconBlockBody(fork, .full),
+        body: *const ForkBeaconBlockBody(.full, fork),
 
         pub fn run(self: @This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
@@ -127,8 +127,8 @@ fn ProcessExecutionPayloadBench(comptime fork: ForkSeq) type {
 fn ProcessRandaoBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
     return struct {
         cached_state: *CachedBeaconState,
-        block: *const ForkBeaconBlock(fork, .full),
-        body: *const ForkBeaconBlockBody(fork, .full),
+        block: *const ForkBeaconBlock(.full, fork),
+        body: *const ForkBeaconBlockBody(.full, fork),
 
         pub fn run(self: @This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
@@ -153,7 +153,7 @@ fn ProcessRandaoBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
 fn ProcessEth1DataBench(comptime fork: ForkSeq) type {
     return struct {
         cached_state: *CachedBeaconState,
-        body: *const ForkBeaconBlockBody(fork, .full),
+        body: *const ForkBeaconBlockBody(.full, fork),
 
         pub fn run(self: @This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
@@ -173,7 +173,7 @@ fn ProcessEth1DataBench(comptime fork: ForkSeq) type {
 fn ProcessOperationsBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
     return struct {
         cached_state: *CachedBeaconState,
-        body: *const ForkBeaconBlockBody(fork, .full),
+        body: *const ForkBeaconBlockBody(.full, fork),
 
         pub fn run(self: @This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
@@ -198,7 +198,7 @@ fn ProcessOperationsBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type
 fn ProcessSyncAggregateBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
     return struct {
         cached_state: *CachedBeaconState,
-        body: *const ForkBeaconBlockBody(fork, .full),
+        body: *const ForkBeaconBlockBody(.full, fork),
 
         pub fn run(self: @This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
@@ -222,7 +222,7 @@ fn ProcessSyncAggregateBench(comptime fork: ForkSeq, comptime opts: BenchOpts) t
 fn ProcessBlockBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
     return struct {
         cached_state: *CachedBeaconState,
-        block: *const ForkBeaconBlock(fork, .full),
+        block: *const ForkBeaconBlock(.full, fork),
 
         pub fn run(self: @This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
@@ -302,8 +302,8 @@ fn printSegmentStats(stdout: anytype) !void {
 fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
     return struct {
         cached_state: *CachedBeaconState,
-        block: *const ForkBeaconBlock(fork, .full),
-        body: *const ForkBeaconBlockBody(fork, .full),
+        block: *const ForkBeaconBlock(.full, fork),
+        body: *const ForkBeaconBlockBody(.full, fork),
 
         pub fn run(self: @This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;

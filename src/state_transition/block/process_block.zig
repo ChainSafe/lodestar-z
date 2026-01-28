@@ -38,7 +38,7 @@ pub fn processBlock(
     epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
     comptime block_type: BlockType,
-    block: *const ForkBeaconBlock(fork, block_type),
+    block: *const ForkBeaconBlock(block_type, fork),
     external_data: BlockExternalData,
     opts: ProcessBlockOpts,
     // TODO: metrics

@@ -28,7 +28,7 @@ pub fn processOperations(
     epoch_cache: *EpochCache,
     state: *ForkBeaconState(fork),
     comptime block_type: BlockType,
-    body: *const ForkBeaconBlockBody(fork, block_type),
+    body: *const ForkBeaconBlockBody(block_type, fork),
     opts: ProcessBlockOpts,
 ) !void {
     // verify that outstanding deposits are processed up to the maximum number of deposits

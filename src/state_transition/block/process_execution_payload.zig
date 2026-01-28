@@ -20,7 +20,7 @@ pub fn processExecutionPayload(
     state: *ForkBeaconState(fork),
     current_epoch: u64,
     comptime block_type: BlockType,
-    body: *const ForkBeaconBlockBody(fork, block_type),
+    body: *const ForkBeaconBlockBody(block_type, fork),
     external_data: BlockExternalData,
 ) !void {
     const parent_hash, const prev_randao, const timestamp = switch (block_type) {
@@ -115,7 +115,7 @@ test "process execution payload - sanity" {
     var message: types.electra.BeaconBlock.Type = types.electra.BeaconBlock.default_value;
     message.body = body;
 
-    const fork_body = ForkBeaconBlockBody(.electra, .full){ .inner = body };
+    const fork_body = ForkBeaconBlockBody(.full, .electra){ .inner = body };
 
     try processExecutionPayload(
         .electra,
@@ -146,7 +146,7 @@ test "process execution payload - blinded" {
     try body.execution_payload_header.extra_data.appendSlice(allocator, &[_]u8{ 0x01, 0x02, 0x03 });
     defer types.electra.BlindedBeaconBlockBody.deinit(allocator, &body);
 
-    const fork_body = ForkBeaconBlockBody(.electra, .blinded){ .inner = body };
+    const fork_body = ForkBeaconBlockBody(.blinded, .electra){ .inner = body };
 
     try processExecutionPayload(
         .electra,

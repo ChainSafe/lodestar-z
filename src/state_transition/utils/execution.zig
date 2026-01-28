@@ -8,7 +8,7 @@ const BlockType = @import("fork_types").BlockType;
 // const ExecutionPayloadHeader
 const ZERO_HASH = @import("constants").ZERO_HASH;
 
-pub fn isExecutionEnabled(comptime fork: ForkSeq, state: *ForkBeaconState(fork), comptime block_type: BlockType, block: *const ForkBeaconBlock(fork, block_type)) bool {
+pub fn isExecutionEnabled(comptime fork: ForkSeq, state: *ForkBeaconState(fork), comptime block_type: BlockType, block: *const ForkBeaconBlock(block_type, fork)) bool {
     if (comptime fork.lt(.bellatrix)) return false;
     if (isMergeTransitionComplete(fork, state)) return true;
 

@@ -320,7 +320,11 @@ pub const AnyBeaconBlock = union(enum) {
         };
     }
 
-    pub fn castToFork(self: *const AnyBeaconBlock, comptime block_type: BlockType, comptime fork: ForkSeq) *const ForkBeaconBlock(fork, block_type) {
+    pub fn castToFork(
+        self: *const AnyBeaconBlock,
+        comptime block_type: BlockType,
+        comptime fork: ForkSeq,
+    ) *const ForkBeaconBlock(block_type, fork) {
         return switch (fork) {
             .phase0 => if (block_type == .full)
                 @ptrCast(self.phase0)
@@ -445,7 +449,11 @@ pub const AnyBeaconBlockBody = union(enum) {
         };
     }
 
-    pub fn castToFork(self: *const AnyBeaconBlockBody, comptime block_type: BlockType, comptime fork: ForkSeq) *const ForkBeaconBlockBody(fork, block_type) {
+    pub fn castToFork(
+        self: *const AnyBeaconBlockBody,
+        comptime block_type: BlockType,
+        comptime fork: ForkSeq,
+    ) *const ForkBeaconBlockBody(block_type, fork) {
         return switch (fork) {
             .phase0 => @ptrCast(self.phase0),
             .altair => @ptrCast(self.altair),

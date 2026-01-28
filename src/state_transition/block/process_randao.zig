@@ -16,7 +16,7 @@ pub fn processRandao(
     epoch_cache: *const EpochCache,
     state: *ForkBeaconState(fork),
     comptime block_type: BlockType,
-    body: *const ForkBeaconBlockBody(fork, block_type),
+    body: *const ForkBeaconBlockBody(block_type, fork),
     proposer_idx: u64,
     verify_signature: bool,
 ) !void {
@@ -82,7 +82,7 @@ test "process randao - sanity" {
 
     const beacon_block = AnyBeaconBlock{ .full_electra = &message };
 
-    const fork_body = ForkBeaconBlockBody(.electra, .full){ .inner = message.body };
+    const fork_body = ForkBeaconBlockBody(.full, .electra){ .inner = message.body };
 
     try processRandao(
         .electra,

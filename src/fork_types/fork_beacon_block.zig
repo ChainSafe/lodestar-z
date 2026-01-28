@@ -6,7 +6,7 @@ const ForkTypes = @import("./fork_types.zig").ForkTypes;
 const ForkExecutionPayload = @import("./fork_execution_payload.zig").ForkExecutionPayload;
 const ForkExecutionPayloadHeader = @import("./fork_execution_payload.zig").ForkExecutionPayloadHeader;
 
-pub fn ForkSignedBeaconBlock(comptime f: ForkSeq, comptime bt: BlockType) type {
+pub fn ForkSignedBeaconBlock(comptime bt: BlockType, comptime f: ForkSeq) type {
     return struct {
         const Self = @This();
 
@@ -15,16 +15,16 @@ pub fn ForkSignedBeaconBlock(comptime f: ForkSeq, comptime bt: BlockType) type {
             .blinded => ForkTypes(f).SignedBlindedBeaconBlock.Type,
         },
 
-        pub const fork_seq = f;
         pub const block_type = bt;
+        pub const fork_seq = f;
 
-        pub inline fn message(self: *const Self) *const ForkBeaconBlock(f, bt) {
+        pub inline fn message(self: *const Self) *const ForkBeaconBlock(bt, f) {
             return @ptrCast(&self.inner.body);
         }
     };
 }
 
-pub fn ForkBeaconBlock(comptime f: ForkSeq, comptime bt: BlockType) type {
+pub fn ForkBeaconBlock(comptime bt: BlockType, comptime f: ForkSeq) type {
     return struct {
         const Self = @This();
 
@@ -36,8 +36,8 @@ pub fn ForkBeaconBlock(comptime f: ForkSeq, comptime bt: BlockType) type {
             },
         },
 
-        pub const fork_seq = f;
         pub const block_type = bt;
+        pub const fork_seq = f;
 
         pub inline fn slot(self: *const Self) u64 {
             return self.inner.slot;
@@ -51,13 +51,13 @@ pub fn ForkBeaconBlock(comptime f: ForkSeq, comptime bt: BlockType) type {
             return &self.inner.parent_root;
         }
 
-        pub inline fn body(self: *const Self) *const ForkBeaconBlockBody(f, bt) {
+        pub inline fn body(self: *const Self) *const ForkBeaconBlockBody(bt, f) {
             return @ptrCast(&self.inner.body);
         }
     };
 }
 
-pub fn ForkBeaconBlockBody(comptime f: ForkSeq, comptime bt: BlockType) type {
+pub fn ForkBeaconBlockBody(comptime bt: BlockType, comptime f: ForkSeq) type {
     return struct {
         const Self = @This();
 
@@ -66,8 +66,8 @@ pub fn ForkBeaconBlockBody(comptime f: ForkSeq, comptime bt: BlockType) type {
             .blinded => ForkTypes(f).BlindedBeaconBlockBody.Type,
         },
 
-        pub const fork_seq = f;
         pub const block_type = bt;
+        pub const fork_seq = f;
 
         pub inline fn hashTreeRoot(self: *const Self, allocator: std.mem.Allocator, out: *[32]u8) !void {
             if (bt == .full) {
@@ -114,4 +114,10 @@ pub fn ForkBeaconBlockBody(comptime f: ForkSeq, comptime bt: BlockType) type {
             return self.inner.blob_kzg_commitments.items;
         }
     };
+}
+
+test "sanity" {
+    std.testing.refAllDecls(ForkSignedBeaconBlock(.full, .capella));
+    std.testing.refAllDecls(ForkBeaconBlock(.full, .capella));
+    std.testing.refAllDecls(ForkBeaconBlockBody(.full, .capella));
 }

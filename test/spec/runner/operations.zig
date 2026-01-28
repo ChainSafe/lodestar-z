@@ -173,7 +173,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 },
                 .block_header => {
                     const epoch_cache = cached_state.getEpochCache();
-                    const fork_block = ForkBeaconBlock(fork, .full){ .inner = self.op };
+                    const fork_block = ForkBeaconBlock(.full, fork){ .inner = self.op };
                     try state_transition.processBlockHeader(
                         fork,
                         allocator,
@@ -204,7 +204,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     const config = cached_state.config;
                     const epoch_cache = cached_state.getEpochCache();
                     const current_epoch = epoch_cache.epoch;
-                    const fork_body = ForkBeaconBlockBody(fork, .full){ .inner = self.op };
+                    const fork_body = ForkBeaconBlockBody(.full, fork){ .inner = self.op };
                     try state_transition.processExecutionPayload(
                         fork,
                         allocator,

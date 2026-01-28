@@ -20,7 +20,7 @@ pub fn processBlockHeader(
     epoch_cache: *const EpochCache,
     state: *ForkBeaconState(fork),
     comptime block_type: BlockType,
-    block: *const ForkBeaconBlock(fork, block_type),
+    block: *const ForkBeaconBlock(block_type, fork),
 ) !void {
     const slot = try state.slot();
 
@@ -103,7 +103,7 @@ test "process block header - sanity" {
     message.proposer_index = proposer_index;
     message.parent_root = header_parent_root.*;
 
-    const fork_block = ForkBeaconBlock(.electra, .full){ .inner = message };
+    const fork_block = ForkBeaconBlock(.full, .electra){ .inner = message };
 
     try processBlockHeader(
         .electra,
