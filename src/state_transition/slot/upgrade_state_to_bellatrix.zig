@@ -1,14 +1,14 @@
 const std = @import("std");
 const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const ct = @import("consensus_types");
 
 pub fn upgradeStateToBellatrix(
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    altair_state: *ForkBeaconState(.altair),
-) !ForkBeaconState(.bellatrix) {
+    altair_state: *BeaconState(.altair),
+) !BeaconState(.bellatrix) {
 
     // Get underlying node and cast altair tree to bellatrix tree
     //

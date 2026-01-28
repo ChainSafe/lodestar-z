@@ -9,7 +9,7 @@ const state_transition = @import("../root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
 const getBlockRootAtSlot = state_transition.getBlockRootAtSlot;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 
 /// Generate a valid electra block for the given pre-state.
 pub fn generateElectraBlock(allocator: Allocator, cached_state: *CachedBeaconState, out: *types.electra.SignedBeaconBlock.Type) !void {

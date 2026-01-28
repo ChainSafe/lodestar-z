@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const types = @import("consensus_types");
 const Root = types.primitive.Root.Type;
 const preset = @import("preset").preset;
@@ -29,7 +29,7 @@ pub const WithdrawalsResult = struct {
 pub fn processWithdrawals(
     comptime fork: ForkSeq,
     allocator: Allocator,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     expected_withdrawals_result: WithdrawalsResult,
     payload_withdrawals_root: Root,
 ) !void {
@@ -87,7 +87,7 @@ pub fn getExpectedWithdrawals(
     comptime fork: ForkSeq,
     allocator: Allocator,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     withdrawals_result: *WithdrawalsResult,
     withdrawal_balances: *std.AutoHashMap(ValidatorIndex, usize),
 ) !void {

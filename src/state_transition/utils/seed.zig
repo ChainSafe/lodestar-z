@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Epoch = types.primitive.Epoch.Type;
 const DomainType = types.primitive.DomainType.Type;
@@ -61,7 +61,7 @@ test "computeProposers - sanity" {
     try computeProposers(ForkSeq.electra, allocator, epoch_seed, 0, active_indices[0..], effective_balance_increments, &out);
 }
 
-pub fn getNextSyncCommitteeIndices(comptime fork: ForkSeq, allocator: Allocator, state: *ForkBeaconState(fork), active_indices: []const ValidatorIndex, effective_balance_increments: EffectiveBalanceIncrements, out: []ValidatorIndex) !void {
+pub fn getNextSyncCommitteeIndices(comptime fork: ForkSeq, allocator: Allocator, state: *BeaconState(fork), active_indices: []const ValidatorIndex, effective_balance_increments: EffectiveBalanceIncrements, out: []ValidatorIndex) !void {
     const rand_byte_count: ByteCount = if (comptime fork.gte(.electra)) ByteCount.Two else ByteCount.One;
     const max_effective_balance: u64 = if (comptime fork.gte(.electra)) preset.MAX_EFFECTIVE_BALANCE_ELECTRA else preset.MAX_EFFECTIVE_BALANCE;
     const epoch = computeEpochAtSlot(try state.slot()) + 1;
@@ -70,12 +70,12 @@ pub fn getNextSyncCommitteeIndices(comptime fork: ForkSeq, allocator: Allocator,
     try computeSyncCommitteeIndices(allocator, &seed, active_indices, effective_balance_increments.items, rand_byte_count, max_effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT, preset.SHUFFLE_ROUND_COUNT, out);
 }
 
-pub fn getRandaoMix(comptime fork: ForkSeq, state: *ForkBeaconState(fork), epoch: Epoch) !*const [32]u8 {
+pub fn getRandaoMix(comptime fork: ForkSeq, state: *BeaconState(fork), epoch: Epoch) !*const [32]u8 {
     var randao_mixes = try state.randaoMixes();
     return try randao_mixes.getRoot(epoch % EPOCHS_PER_HISTORICAL_VECTOR);
 }
 
-pub fn getSeed(comptime fork: ForkSeq, state: *ForkBeaconState(fork), epoch: Epoch, domain_type: DomainType, out: *[32]u8) !void {
+pub fn getSeed(comptime fork: ForkSeq, state: *BeaconState(fork), epoch: Epoch, domain_type: DomainType, out: *[32]u8) !void {
     const mix = try getRandaoMix(fork, state, epoch + EPOCHS_PER_HISTORICAL_VECTOR - MIN_SEED_LOOKAHEAD - 1);
     var epoch_buf: [8]u8 = undefined;
     std.mem.writeInt(u64, &epoch_buf, epoch, .little);

@@ -1,5 +1,5 @@
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const types = @import("consensus_types");
 const Checkpoint = types.phase0.Checkpoint.Type;
 const JustificationBits = types.phase0.JustificationBits.Type;
@@ -14,7 +14,7 @@ const Node = @import("persistent_merkle_tree").Node;
 /// PERF: Very low (constant) cost. Persist small objects to the tree.
 pub fn processJustificationAndFinalization(
     comptime fork: ForkSeq,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     cache: *const EpochTransitionCache,
 ) !void {
     // Initial FFG checkpoint values have a `0x00` stub for `root`.
@@ -33,7 +33,7 @@ pub fn processJustificationAndFinalization(
 
 pub fn weighJustificationAndFinalization(
     comptime fork: ForkSeq,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     total_active_balance: u64,
     previous_epoch_target_balance: u64,
     current_epoch_target_balance: u64,

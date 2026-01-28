@@ -8,7 +8,7 @@ const ct = @import("consensus_types");
 
 const ForkTypes = @import("./fork_types.zig").ForkTypes;
 
-pub fn ForkBeaconState(comptime f: ForkSeq) type {
+pub fn BeaconState(comptime f: ForkSeq) type {
     return struct {
         const Self = @This();
 
@@ -481,7 +481,7 @@ pub fn ForkBeaconState(comptime f: ForkSeq) type {
             return upgraded;
         }
 
-        pub fn upgradeUnsafe(self: *Self) !ForkBeaconState(switch (f) {
+        pub fn upgradeUnsafe(self: *Self) !BeaconState(switch (f) {
             .phase0 => .altair,
             .altair => .bellatrix,
             .bellatrix => .capella,

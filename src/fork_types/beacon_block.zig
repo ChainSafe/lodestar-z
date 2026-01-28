@@ -3,10 +3,10 @@ const ForkSeq = @import("config").ForkSeq;
 
 const BlockType = @import("./block_type.zig").BlockType;
 const ForkTypes = @import("./fork_types.zig").ForkTypes;
-const ForkExecutionPayload = @import("./fork_execution_payload.zig").ForkExecutionPayload;
-const ForkExecutionPayloadHeader = @import("./fork_execution_payload.zig").ForkExecutionPayloadHeader;
+const ExecutionPayload = @import("./execution_payload.zig").ExecutionPayload;
+const ExecutionPayloadHeader = @import("./execution_payload.zig").ExecutionPayloadHeader;
 
-pub fn ForkSignedBeaconBlock(comptime bt: BlockType, comptime f: ForkSeq) type {
+pub fn SignedBeaconBlock(comptime bt: BlockType, comptime f: ForkSeq) type {
     return struct {
         const Self = @This();
 
@@ -18,13 +18,13 @@ pub fn ForkSignedBeaconBlock(comptime bt: BlockType, comptime f: ForkSeq) type {
         pub const block_type = bt;
         pub const fork_seq = f;
 
-        pub inline fn message(self: *const Self) *const ForkBeaconBlock(bt, f) {
+        pub inline fn message(self: *const Self) *const BeaconBlock(bt, f) {
             return @ptrCast(&self.inner.body);
         }
     };
 }
 
-pub fn ForkBeaconBlock(comptime bt: BlockType, comptime f: ForkSeq) type {
+pub fn BeaconBlock(comptime bt: BlockType, comptime f: ForkSeq) type {
     return struct {
         const Self = @This();
 
@@ -51,13 +51,13 @@ pub fn ForkBeaconBlock(comptime bt: BlockType, comptime f: ForkSeq) type {
             return &self.inner.parent_root;
         }
 
-        pub inline fn body(self: *const Self) *const ForkBeaconBlockBody(bt, f) {
+        pub inline fn body(self: *const Self) *const BeaconBlockBody(bt, f) {
             return @ptrCast(&self.inner.body);
         }
     };
 }
 
-pub fn ForkBeaconBlockBody(comptime bt: BlockType, comptime f: ForkSeq) type {
+pub fn BeaconBlockBody(comptime bt: BlockType, comptime f: ForkSeq) type {
     return struct {
         const Self = @This();
 
@@ -80,7 +80,7 @@ pub fn ForkBeaconBlockBody(comptime bt: BlockType, comptime f: ForkSeq) type {
             return &self.inner.eth1_data;
         }
 
-        pub inline fn executionPayload(self: *const Self) *const ForkExecutionPayload(f) {
+        pub inline fn executionPayload(self: *const Self) *const ExecutionPayload(f) {
             if (bt != .full) {
                 @compileError("executionPayload is only available for full blocks");
             }
@@ -88,7 +88,7 @@ pub fn ForkBeaconBlockBody(comptime bt: BlockType, comptime f: ForkSeq) type {
             return @ptrCast(&self.inner.execution_payload);
         }
 
-        pub inline fn executionPayloadHeader(self: *const Self) *const ForkExecutionPayloadHeader(f) {
+        pub inline fn executionPayloadHeader(self: *const Self) *const ExecutionPayloadHeader(f) {
             if (bt != .blinded) {
                 @compileError("executionPayloadHeader is only available for blinded blocks");
             }
@@ -117,7 +117,7 @@ pub fn ForkBeaconBlockBody(comptime bt: BlockType, comptime f: ForkSeq) type {
 }
 
 test "sanity" {
-    std.testing.refAllDecls(ForkSignedBeaconBlock(.full, .capella));
-    std.testing.refAllDecls(ForkBeaconBlock(.full, .capella));
-    std.testing.refAllDecls(ForkBeaconBlockBody(.full, .capella));
+    std.testing.refAllDecls(SignedBeaconBlock(.full, .capella));
+    std.testing.refAllDecls(BeaconBlock(.full, .capella));
+    std.testing.refAllDecls(BeaconBlockBody(.full, .capella));
 }

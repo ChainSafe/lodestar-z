@@ -5,7 +5,7 @@ const ct = @import("consensus_types");
 
 const ForkTypes = @import("./fork_types.zig").ForkTypes;
 
-pub fn ForkExecutionPayload(comptime f: ForkSeq) type {
+pub fn ExecutionPayload(comptime f: ForkSeq) type {
     return struct {
         const Self = @This();
 
@@ -58,7 +58,7 @@ pub fn ForkExecutionPayload(comptime f: ForkSeq) type {
     };
 }
 
-pub fn ForkExecutionPayloadHeader(comptime f: ForkSeq) type {
+pub fn ExecutionPayloadHeader(comptime f: ForkSeq) type {
     return struct {
         const Self = @This();
 

@@ -4,10 +4,10 @@ const types = @import("consensus_types");
 const config = @import("config");
 const ForkSeq = @import("config").ForkSeq;
 const ForkTypes = @import("fork_types").ForkTypes;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const BlockType = @import("fork_types").BlockType;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
-const ForkBeaconBlock = @import("fork_types").ForkBeaconBlock;
+const BeaconBlock = @import("fork_types").BeaconBlock;
 const BeaconBlockHeader = types.phase0.BeaconBlockHeader.Type;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const ZERO_HASH = @import("constants").ZERO_HASH;
@@ -18,9 +18,9 @@ pub fn processBlockHeader(
     comptime fork: ForkSeq,
     allocator: Allocator,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     comptime block_type: BlockType,
-    block: *const ForkBeaconBlock(block_type, fork),
+    block: *const BeaconBlock(block_type, fork),
 ) !void {
     const slot = try state.slot();
 
@@ -103,7 +103,7 @@ test "process block header - sanity" {
     message.proposer_index = proposer_index;
     message.parent_root = header_parent_root.*;
 
-    const fork_block = ForkBeaconBlock(.full, .electra){ .inner = message };
+    const fork_block = BeaconBlock(.full, .electra){ .inner = message };
 
     try processBlockHeader(
         .electra,

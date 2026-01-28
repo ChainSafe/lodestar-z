@@ -8,7 +8,7 @@ const isBasicType = @import("ssz").isBasicType;
 const BaseTreeView = @import("ssz").BaseTreeView;
 const CloneOpts = @import("ssz").BaseTreeView.CloneOpts;
 const ct = @import("consensus_types");
-const ForkBeaconState = @import("./fork_beacon_state.zig").ForkBeaconState;
+const BeaconState = @import("./beacon_state.zig").BeaconState;
 const AnyExecutionPayloadHeader = @import("./any_execution_payload.zig").AnyExecutionPayloadHeader;
 
 /// wrapper for all AnyBeaconState types across forks so that we don't have to do switch/case for all methods
@@ -178,11 +178,11 @@ pub const AnyBeaconState = union(ForkSeq) {
 
     // pub fn castFromFork(comptime f: ForkSeq, )
 
-    pub fn castToFork(self: *AnyBeaconState, comptime f: ForkSeq) *ForkBeaconState(f) {
+    pub fn castToFork(self: *AnyBeaconState, comptime f: ForkSeq) *BeaconState(f) {
         return @ptrCast(&@field(self, @tagName(f)));
     }
 
-    pub fn tryCastToFork(self: *AnyBeaconState, comptime f: ForkSeq) !*ForkBeaconState(f) {
+    pub fn tryCastToFork(self: *AnyBeaconState, comptime f: ForkSeq) !*BeaconState(f) {
         if (self.forkSeq() != f) {
             return error.InvalidForkCast;
         }

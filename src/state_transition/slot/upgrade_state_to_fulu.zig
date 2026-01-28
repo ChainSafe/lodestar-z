@@ -2,7 +2,7 @@ const Allocator = @import("std").mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const ct = @import("consensus_types");
 const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
 const preset = @import("preset").preset;
@@ -16,8 +16,8 @@ pub fn upgradeStateToFulu(
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    electra_state: *ForkBeaconState(.electra),
-) !ForkBeaconState(.fulu) {
+    electra_state: *BeaconState(.electra),
+) !BeaconState(.fulu) {
     var state = try electra_state.upgradeUnsafe();
     errdefer state.deinit();
 
@@ -50,7 +50,7 @@ fn initializeProposerLookahead(
     comptime fork: ForkSeq,
     allocator: Allocator,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     out: []ValidatorIndex,
 ) !void {
     const lookahead_epochs = preset.MIN_SEED_LOOKAHEAD + 1;

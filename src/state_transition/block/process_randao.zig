@@ -2,9 +2,9 @@ const std = @import("std");
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const BlockType = @import("fork_types").BlockType;
-const ForkBeaconBlockBody = @import("fork_types").ForkBeaconBlockBody;
+const BeaconBlockBody = @import("fork_types").BeaconBlockBody;
 const getRandaoMix = @import("../utils/seed.zig").getRandaoMix;
 const verifyRandaoSignature = @import("../signature_sets/randao.zig").verifyRandaoSignature;
 const Node = @import("persistent_merkle_tree").Node;
@@ -14,9 +14,9 @@ pub fn processRandao(
     comptime fork: ForkSeq,
     beacon_config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     comptime block_type: BlockType,
-    body: *const ForkBeaconBlockBody(block_type, fork),
+    body: *const BeaconBlockBody(block_type, fork),
     proposer_idx: u64,
     verify_signature: bool,
 ) !void {
@@ -82,7 +82,7 @@ test "process randao - sanity" {
 
     const beacon_block = AnyBeaconBlock{ .full_electra = &message };
 
-    const fork_body = ForkBeaconBlockBody(.full, .electra){ .inner = message.body };
+    const fork_body = BeaconBlockBody(.full, .electra){ .inner = message.body };
 
     try processRandao(
         .electra,

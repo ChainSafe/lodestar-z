@@ -6,7 +6,7 @@ const Validator = types.phase0.Validator;
 
 const Epoch = types.primitive.Epoch.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
@@ -84,7 +84,7 @@ pub fn getMaxEffectiveBalance(withdrawal_credentials: *const WithdrawalCredentia
     return preset.MIN_ACTIVATION_BALANCE;
 }
 
-pub fn getPendingBalanceToWithdraw(comptime fork: ForkSeq, state: *ForkBeaconState(fork), validator_index: ValidatorIndex) !u64 {
+pub fn getPendingBalanceToWithdraw(comptime fork: ForkSeq, state: *BeaconState(fork), validator_index: ValidatorIndex) !u64 {
     var total: u64 = 0;
 
     var pending_partial_withdrawals = try state.pendingPartialWithdrawals();

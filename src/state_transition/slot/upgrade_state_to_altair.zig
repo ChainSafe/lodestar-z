@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const getNextSyncCommittee = @import("../utils/sync_committee.zig").getNextSyncCommittee;
 const SyncCommitteeInfo = @import("../utils/sync_committee.zig").SyncCommitteeInfo;
 const sumTargetUnslashedBalanceIncrements = @import("../utils/target_unslashed_balance.zig").sumTargetUnslashedBalanceIncrements;
@@ -16,8 +16,8 @@ pub fn upgradeStateToAltair(
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
-    phase0_state: *ForkBeaconState(.phase0),
-) !ForkBeaconState(.altair) {
+    phase0_state: *BeaconState(.phase0),
+) !BeaconState(.altair) {
     var altair_state = try phase0_state.upgradeUnsafe();
     errdefer altair_state.deinit();
 

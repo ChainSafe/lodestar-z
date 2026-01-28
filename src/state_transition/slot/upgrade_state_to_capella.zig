@@ -2,15 +2,15 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const ct = @import("consensus_types");
 
 pub fn upgradeStateToCapella(
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    bellatrix_state: *ForkBeaconState(.bellatrix),
-) !ForkBeaconState(.capella) {
+    bellatrix_state: *BeaconState(.bellatrix),
+) !BeaconState(.capella) {
     // Get underlying node and cast bellatrix tree to capella tree
     //
     // An bellatrix BeaconState tree can be safely casted to a capella BeaconState tree because:

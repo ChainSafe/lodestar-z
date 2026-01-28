@@ -18,8 +18,8 @@ const AnyExecutionPayload = @import("./any_execution_payload.zig").AnyExecutionP
 const AnyExecutionPayloadHeader = @import("./any_execution_payload.zig").AnyExecutionPayloadHeader;
 const AnyAttestations = @import("./any_attestation.zig").AnyAttestations;
 const AnyAttesterSlashings = @import("./any_attester_slashing.zig").AnyAttesterSlashings;
-const ForkBeaconBlock = @import("./fork_beacon_block.zig").ForkBeaconBlock;
-const ForkBeaconBlockBody = @import("./fork_beacon_block.zig").ForkBeaconBlockBody;
+const BeaconBlock = @import("./beacon_block.zig").BeaconBlock;
+const BeaconBlockBody = @import("./beacon_block.zig").BeaconBlockBody;
 
 pub const AnySignedBeaconBlock = union(enum) {
     phase0: *ct.phase0.SignedBeaconBlock.Type,
@@ -324,7 +324,7 @@ pub const AnyBeaconBlock = union(enum) {
         self: *const AnyBeaconBlock,
         comptime block_type: BlockType,
         comptime fork: ForkSeq,
-    ) *const ForkBeaconBlock(block_type, fork) {
+    ) *const BeaconBlock(block_type, fork) {
         return switch (fork) {
             .phase0 => if (block_type == .full)
                 @ptrCast(self.phase0)
@@ -453,7 +453,7 @@ pub const AnyBeaconBlockBody = union(enum) {
         self: *const AnyBeaconBlockBody,
         comptime block_type: BlockType,
         comptime fork: ForkSeq,
-    ) *const ForkBeaconBlockBody(block_type, fork) {
+    ) *const BeaconBlockBody(block_type, fork) {
         return switch (fork) {
             .phase0 => @ptrCast(self.phase0),
             .altair => @ptrCast(self.altair),

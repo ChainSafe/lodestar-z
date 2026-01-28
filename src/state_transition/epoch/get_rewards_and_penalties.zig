@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const attester_status = @import("../utils/attester_status.zig");
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
@@ -41,7 +41,7 @@ pub fn getRewardsAndPenaltiesAltair(
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     cache: *const EpochTransitionCache,
     rewards: []u64,
     penalties: []u64,

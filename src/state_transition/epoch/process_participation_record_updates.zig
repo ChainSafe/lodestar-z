@@ -1,9 +1,9 @@
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 
 pub fn processParticipationRecordUpdates(
     comptime fork: ForkSeq,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
 ) !void {
     if (comptime fork != .phase0) return;
     // rotate current/previous epoch attestations

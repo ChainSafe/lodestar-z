@@ -4,9 +4,9 @@ const types = @import("consensus_types");
 const config = @import("config");
 const ForkSeq = config.ForkSeq;
 const ForkTypes = @import("fork_types").ForkTypes;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const BlockType = @import("fork_types").BlockType;
-const ForkBeaconBlockBody = @import("fork_types").ForkBeaconBlockBody;
+const BeaconBlockBody = @import("fork_types").BeaconBlockBody;
 const BlockExternalData = @import("../state_transition.zig").BlockExternalData;
 const BeaconConfig = config.BeaconConfig;
 const isMergeTransitionComplete = @import("../utils/execution.zig").isMergeTransitionComplete;
@@ -17,10 +17,10 @@ pub fn processExecutionPayload(
     comptime fork: ForkSeq,
     allocator: Allocator,
     beacon_config: *const BeaconConfig,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     current_epoch: u64,
     comptime block_type: BlockType,
-    body: *const ForkBeaconBlockBody(block_type, fork),
+    body: *const BeaconBlockBody(block_type, fork),
     external_data: BlockExternalData,
 ) !void {
     const parent_hash, const prev_randao, const timestamp = switch (block_type) {
@@ -115,7 +115,7 @@ test "process execution payload - sanity" {
     var message: types.electra.BeaconBlock.Type = types.electra.BeaconBlock.default_value;
     message.body = body;
 
-    const fork_body = ForkBeaconBlockBody(.full, .electra){ .inner = body };
+    const fork_body = BeaconBlockBody(.full, .electra){ .inner = body };
 
     try processExecutionPayload(
         .electra,
@@ -146,7 +146,7 @@ test "process execution payload - blinded" {
     try body.execution_payload_header.extra_data.appendSlice(allocator, &[_]u8{ 0x01, 0x02, 0x03 });
     defer types.electra.BlindedBeaconBlockBody.deinit(allocator, &body);
 
-    const fork_body = ForkBeaconBlockBody(.blinded, .electra){ .inner = body };
+    const fork_body = BeaconBlockBody(.blinded, .electra){ .inner = body };
 
     try processExecutionPayload(
         .electra,

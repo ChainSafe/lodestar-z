@@ -8,7 +8,7 @@ const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const isValidIndexedAttestation = @import("./is_valid_indexed_attestation.zig").isValidIndexedAttestation;
 const ForkTypes = @import("fork_types").ForkTypes;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const Slot = types.primitive.Slot.Type;
 const PendingAttestation = types.phase0.PendingAttestation.Type;
 
@@ -16,7 +16,7 @@ pub fn processAttestationPhase0(
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(.phase0),
+    state: *BeaconState(.phase0),
     attestation: *const ForkTypes(.phase0).Attestation.Type,
     verify_signature: bool,
 ) !void {
@@ -70,7 +70,7 @@ pub fn processAttestationPhase0(
 pub fn validateAttestation(
     comptime fork: ForkSeq,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     attestation: *const ForkTypes(fork).Attestation.Type,
 ) !void {
     const state_slot = try state.slot();

@@ -1,14 +1,14 @@
 const std = @import("std");
 const ForkSeq = @import("config").ForkSeq;
 const ForkTypes = @import("fork_types").ForkTypes;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
-const ForkBeaconBlock = @import("fork_types").ForkBeaconBlock;
-const ForkBeaconBlockBody = @import("fork_types").ForkBeaconBlockBody;
+const BeaconState = @import("fork_types").BeaconState;
+const BeaconBlock = @import("fork_types").BeaconBlock;
+const BeaconBlockBody = @import("fork_types").BeaconBlockBody;
 const BlockType = @import("fork_types").BlockType;
 // const ExecutionPayloadHeader
 const ZERO_HASH = @import("constants").ZERO_HASH;
 
-pub fn isExecutionEnabled(comptime fork: ForkSeq, state: *ForkBeaconState(fork), comptime block_type: BlockType, block: *const ForkBeaconBlock(block_type, fork)) bool {
+pub fn isExecutionEnabled(comptime fork: ForkSeq, state: *BeaconState(fork), comptime block_type: BlockType, block: *const BeaconBlock(block_type, fork)) bool {
     if (comptime fork.lt(.bellatrix)) return false;
     if (isMergeTransitionComplete(fork, state)) return true;
 
@@ -24,9 +24,9 @@ pub fn isExecutionEnabled(comptime fork: ForkSeq, state: *ForkBeaconState(fork),
 
 pub fn isMergeTransitionBlock(
     comptime fork: ForkSeq,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     comptime block_type: BlockType,
-    body: *const ForkBeaconBlockBody(fork, block_type),
+    body: *const BeaconBlockBody(fork, block_type),
 ) bool {
     if (comptime fork != .bellatrix) {
         return false;
@@ -48,7 +48,7 @@ pub fn isMergeTransitionBlock(
     };
 }
 
-pub fn isMergeTransitionComplete(comptime fork: ForkSeq, state: *ForkBeaconState(fork)) bool {
+pub fn isMergeTransitionComplete(comptime fork: ForkSeq, state: *BeaconState(fork)) bool {
     if (comptime fork.lt(.bellatrix)) {
         return false;
     }
