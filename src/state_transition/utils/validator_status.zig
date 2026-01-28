@@ -18,17 +18,7 @@ pub const ValidatorStatus = enum {
     withdrawal_done,
 
     pub fn toString(self: ValidatorStatus) []const u8 {
-        return switch (self) {
-            .pending_initialized => "pending_initialized",
-            .pending_queued => "pending_queued",
-            .active_ongoing => "active_ongoing",
-            .active_exiting => "active_exiting",
-            .active_slashed => "active_slashed",
-            .exited_unslashed => "exited_unslashed",
-            .exited_slashed => "exited_slashed",
-            .withdrawal_possible => "withdrawal_possible",
-            .withdrawal_done => "withdrawal_done",
-        };
+        return @tagName(self);
     }
 
     pub fn fromString(s: []const u8) ?ValidatorStatus {
