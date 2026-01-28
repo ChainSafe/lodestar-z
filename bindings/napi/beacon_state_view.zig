@@ -940,6 +940,8 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             .{ .utf8name = "getEffectiveBalanceIncrementsZeroInactive", .method = napi.wrapCallback(0, BeaconStateView_getEffectiveBalanceIncrementsZeroInactive) },
             .{ .utf8name = "getFinalizedRootProof", .method = napi.wrapCallback(0, BeaconStateView_getFinalizedRootProof) },
             .{ .utf8name = "computeUnrealizedCheckpoints", .method = napi.wrapCallback(0, BeaconStateView_computeUnrealizedCheckpoints) },
+            .{ .utf8name = "processSlots", .method = napi.wrapCallback(1, BeaconStateView_processSlots) },
+            .{ .utf8name = "proposerRewards", .getter = napi.wrapCallback(0, BeaconStateView_proposerRewards) },
             .{ .utf8name = "serialize", .method = napi.wrapCallback(0, BeaconStateView_serialize) },
             .{ .utf8name = "serializedSize", .method = napi.wrapCallback(0, BeaconStateView_serializedSize) },
             .{ .utf8name = "serializeToBytes", .method = napi.wrapCallback(2, BeaconStateView_serializeToBytes) },
