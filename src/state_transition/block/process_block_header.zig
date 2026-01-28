@@ -73,11 +73,8 @@ pub fn blockToHeader(allocator: Allocator, signed_block: AnySignedBeaconBlock, o
     const block = signed_block.beaconBlock();
     out.slot = block.slot();
     out.proposer_index = block.proposerIndex();
-    out.parent_root = block.parentRoot();
-    out.state_root = switch (block) {
-        .regular => |b| b.stateRoot(),
-        .blinded => |b| b.stateRoot(),
-    };
+    out.parent_root = block.parentRoot().*;
+    out.state_root = block.stateRoot().*;
     try block.hashTreeRoot(allocator, &out.body_root);
 }
 
