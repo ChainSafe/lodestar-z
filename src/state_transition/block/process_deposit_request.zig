@@ -1,12 +1,11 @@
-const std = @import("std");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const types = @import("consensus_types");
 const DepositRequest = types.electra.DepositRequest.Type;
 const PendingDeposit = types.electra.PendingDeposit.Type;
 const c = @import("constants");
 
-pub fn processDepositRequest(cached_state: *CachedBeaconState, deposit_request: *const DepositRequest) !void {
-    var state = cached_state.state;
+pub fn processDepositRequest(comptime fork: ForkSeq, state: *ForkBeaconState(fork), deposit_request: *const DepositRequest) !void {
     const deposit_requests_start_index = try state.depositRequestsStartIndex();
     if (deposit_requests_start_index == c.UNSET_DEPOSIT_REQUESTS_START_INDEX) {
         try state.setDepositRequestsStartIndex(deposit_request.index);

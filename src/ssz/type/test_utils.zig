@@ -1,7 +1,5 @@
 const std = @import("std");
-const assert = std.debug.assert;
 const isFixedType = @import("type_kind.zig").isFixedType;
-const isBitVectorType = @import("bit_vector.zig").isBitVectorType;
 
 const hexToBytes = @import("hex").hexToBytes;
 const bytesToHex = @import("hex").bytesToHex;
@@ -59,10 +57,6 @@ pub const TypeTestCase = struct {
     serializedHex: []const u8,
     json: []const u8,
     rootHex: []const u8,
-};
-
-const TypeTestError = error{
-    InvalidRootHex,
 };
 
 /// ST: ssz type

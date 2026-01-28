@@ -1,10 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const ReferenceCount = @import("../utils/reference_count.zig").ReferenceCount;
-const EFFECTIVE_BALANCE_INCREMENT = preset.EFFECTIVE_BALANCE_INCREMENT;
 
 pub const EffectiveBalanceIncrements = std.ArrayList(u16);
 pub const EffectiveBalanceIncrementsRc = ReferenceCount(EffectiveBalanceIncrements);
@@ -23,7 +21,7 @@ pub fn getEffectiveBalanceIncrementsWithLen(allocator: Allocator, validator_coun
     return getEffectiveBalanceIncrementsZeroed(allocator, len);
 }
 
-pub fn getEffectiveBalanceIncrements(allocator: Allocator, state: BeaconState) !EffectiveBalanceIncrements {
+pub fn getEffectiveBalanceIncrements(allocator: Allocator, state: AnyBeaconState) !EffectiveBalanceIncrements {
     const validators = try state.validatorsSlice(allocator);
     defer allocator.free(validators);
 

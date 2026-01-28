@@ -1,15 +1,19 @@
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const types = @import("consensus_types");
-const Epoch = types.primitive.Epoch.Type;
-const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const ForkSeq = @import("config").ForkSeq;
+const BeaconConfig = @import("config").BeaconConfig;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const computeActivationExitEpoch = @import("../utils/epoch.zig").computeActivationExitEpoch;
 const initiateValidatorExit = @import("../block/initiate_validator_exit.zig").initiateValidatorExit;
+const Node = @import("persistent_merkle_tree").Node;
 
-pub fn processRegistryUpdates(cached_state: *CachedBeaconState, cache: *const EpochTransitionCache) !void {
-    const epoch_cache = cached_state.getEpochCache();
-    const state = cached_state.state;
-
+pub fn processRegistryUpdates(
+    comptime fork: ForkSeq,
+    config: *const BeaconConfig,
+    epoch_cache: *EpochCache,
+    state: *ForkBeaconState(fork),
+    cache: *const EpochTransitionCache,
+) !void {
     // Get the validators sub tree once for all the loop
     var validators = try state.validators();
 
@@ -20,7 +24,7 @@ pub fn processRegistryUpdates(cached_state: *CachedBeaconState, cache: *const Ep
         // set validator exit epoch and withdrawable epoch
         // TODO: Figure out a way to quickly set properties on the validators tree
         var validator = try validators.get(i);
-        try initiateValidatorExit(cached_state, &validator);
+        try initiateValidatorExit(fork, config, epoch_cache, state, &validator);
     }
 
     // set new activation eligibilities
@@ -30,7 +34,7 @@ pub fn processRegistryUpdates(cached_state: *CachedBeaconState, cache: *const Ep
     }
 
     const finalized_epoch = try state.finalizedEpoch();
-    const len = if (state.forkSeq().lt(.electra)) @min(cache.indices_eligible_for_activation.items.len, epoch_cache.activation_churn_limit) else cache.indices_eligible_for_activation.items.len;
+    const len = if (comptime fork.lt(.electra)) @min(cache.indices_eligible_for_activation.items.len, epoch_cache.activation_churn_limit) else cache.indices_eligible_for_activation.items.len;
     const activation_epoch = computeActivationExitEpoch(cache.current_epoch);
 
     // dequeue validators for activation up to churn limit
@@ -47,4 +51,25 @@ pub fn processRegistryUpdates(cached_state: *CachedBeaconState, cache: *const Ep
         }
         try validator.set("activation_epoch", activation_epoch);
     }
+}
+
+const std = @import("std");
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
+test "processRegistryUpdates - sanity" {
+    const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
+    defer test_state.deinit();
+
+    try processRegistryUpdates(
+        .electra,
+        test_state.cached_state.config,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+    );
 }

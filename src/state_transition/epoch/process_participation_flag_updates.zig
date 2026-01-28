@@ -1,9 +1,29 @@
 const std = @import("std");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 
-pub fn processParticipationFlagUpdates(cached_state: *CachedBeaconState) !void {
-    const state = cached_state.state;
-
-    if (state.forkSeq().lt(.altair)) return;
+pub fn processParticipationFlagUpdates(
+    comptime fork: ForkSeq,
+    state: *ForkBeaconState(fork),
+) !void {
+    if (comptime fork.lt(.altair)) return;
     try state.rotateEpochParticipation();
+}
+
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Node = @import("persistent_merkle_tree").Node;
+
+test "processParticipationFlagUpdates - sanity" {
+    const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
+    defer test_state.deinit();
+
+    try processParticipationFlagUpdates(
+        .electra,
+        test_state.cached_state.state.castToFork(.electra),
+    );
 }

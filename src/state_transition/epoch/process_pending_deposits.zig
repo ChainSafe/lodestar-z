@@ -1,12 +1,14 @@
 const std = @import("std");
 const types = @import("consensus_types");
 const Allocator = std.mem.Allocator;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const BeaconConfig = @import("config").BeaconConfig;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const getActivationExitChurnLimit = @import("../utils/validator.zig").getActivationExitChurnLimit;
 const preset = @import("preset").preset;
 const isValidatorKnown = @import("../utils/electra.zig").isValidatorKnown;
-const ForkSeq = @import("config").ForkSeq;
 const validateDepositSignature = @import("../block/process_deposit.zig").validateDepositSignature;
 const addValidatorToRegistry = @import("../block/process_deposit.zig").addValidatorToRegistry;
 const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCompoundingWithdrawalCredential;
@@ -15,12 +17,17 @@ const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAt
 const PendingDeposit = types.electra.PendingDeposit.Type;
 const GENESIS_SLOT = @import("preset").GENESIS_SLOT;
 const c = @import("constants");
+const Node = @import("persistent_merkle_tree").Node;
 
 /// we append EpochTransitionCache.is_compounding_validator_arr in this flow
-pub fn processPendingDeposits(allocator: Allocator, cached_state: *CachedBeaconState, cache: *EpochTransitionCache) !void {
-    const epoch_cache = cached_state.getEpochCache();
-    var state = cached_state.state;
-
+pub fn processPendingDeposits(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    config: *const BeaconConfig,
+    epoch_cache: *EpochCache,
+    state: *ForkBeaconState(fork),
+    cache: *EpochTransitionCache,
+) !void {
     const next_epoch = epoch_cache.epoch + 1;
     const deposit_balance_to_consume = try state.depositBalanceToConsume();
     const available_for_processing = deposit_balance_to_consume + getActivationExitChurnLimit(epoch_cache);
@@ -65,7 +72,7 @@ pub fn processPendingDeposits(allocator: Allocator, cached_state: *CachedBeaconS
         var is_validator_withdrawn = false;
         const validator_index = epoch_cache.getValidatorIndex(&deposit.pubkey);
 
-        if (try isValidatorKnown(state, validator_index)) {
+        if (try isValidatorKnown(fork, state, validator_index)) {
             var validators = try state.validators();
             var validator = try validators.get(validator_index.?);
             is_validator_exited = try validator.get("exit_epoch") < c.FAR_FUTURE_EPOCH;
@@ -74,7 +81,7 @@ pub fn processPendingDeposits(allocator: Allocator, cached_state: *CachedBeaconS
 
         if (is_validator_withdrawn) {
             // Deposited balance will never become active. Increase balance but do not consume churn
-            try applyPendingDeposit(allocator, cached_state, deposit, cache);
+            try applyPendingDeposit(fork, allocator, config, epoch_cache, state, deposit, cache);
         } else if (is_validator_exited) {
             // Validator is exiting, postpone the deposit until after withdrawable epoch
             try deposits_to_postpone.append(deposit);
@@ -86,7 +93,7 @@ pub fn processPendingDeposits(allocator: Allocator, cached_state: *CachedBeaconS
             }
             // Consume churn and apply deposit.
             processed_amount += deposit.amount;
-            try applyPendingDeposit(allocator, cached_state, deposit, cache);
+            try applyPendingDeposit(fork, allocator, config, epoch_cache, state, deposit, cache);
         }
 
         // Regardless of how the deposit was handled, we move on in the queue.
@@ -111,21 +118,27 @@ pub fn processPendingDeposits(allocator: Allocator, cached_state: *CachedBeaconS
 }
 
 /// we append EpochTransitionCache.is_compounding_validator_arr in this flow
-fn applyPendingDeposit(allocator: Allocator, cached_state: *CachedBeaconState, deposit: PendingDeposit, cache: *EpochTransitionCache) !void {
-    const epoch_cache = cached_state.getEpochCache();
-    const state = cached_state.state;
+fn applyPendingDeposit(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    config: *const BeaconConfig,
+    epoch_cache: *EpochCache,
+    state: *ForkBeaconState(fork),
+    deposit: PendingDeposit,
+    cache: *EpochTransitionCache,
+) !void {
     const validator_index = epoch_cache.getValidatorIndex(&deposit.pubkey) orelse null;
     const pubkey = deposit.pubkey;
     // TODO: is this withdrawal_credential(s) the same to spec?
     const withdrawal_credentials = &deposit.withdrawal_credentials;
     const amount = deposit.amount;
     const signature = deposit.signature;
-    const is_validator_known = try isValidatorKnown(state, validator_index);
+    const is_validator_known = try isValidatorKnown(fork, state, validator_index);
 
     if (!is_validator_known) {
         // Verify the deposit signature (proof of possession) which is not checked by the deposit contract
-        if (validateDepositSignature(cached_state.config, pubkey, withdrawal_credentials, amount, signature)) {
-            try addValidatorToRegistry(allocator, cached_state, pubkey, withdrawal_credentials, amount);
+        if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
+            try addValidatorToRegistry(fork, allocator, epoch_cache, state, pubkey, withdrawal_credentials, amount);
             try cache.is_compounding_validator_arr.append(hasCompoundingWithdrawalCredential(withdrawal_credentials));
             // set balance, so that the next deposit of same pubkey will increase the balance correctly
             // this is to fix the double deposit issue found in mekong
@@ -140,7 +153,7 @@ fn applyPendingDeposit(allocator: Allocator, cached_state: *CachedBeaconState, d
     } else {
         if (validator_index) |val_idx| {
             // Increase balance
-            try increaseBalance(state, val_idx, amount);
+            try increaseBalance(fork, state, val_idx, amount);
             if (cache.balances) |*balances| {
                 balances.items[val_idx] += amount;
             }
@@ -149,4 +162,25 @@ fn applyPendingDeposit(allocator: Allocator, cached_state: *CachedBeaconState, d
             return error.UnexpectedNullValidatorIndex;
         }
     }
+}
+
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
+test "processPendingDeposits - sanity" {
+    const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
+    defer test_state.deinit();
+
+    try processPendingDeposits(
+        .electra,
+        allocator,
+        test_state.cached_state.config,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+    );
 }

@@ -1,11 +1,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
+const Node = @import("persistent_merkle_tree").Node;
 
 /// Same to https://github.com/ethereum/eth2.0-specs/blob/v1.1.0-alpha.5/specs/altair/beacon-chain.md#has_flag
 const TIMELY_TARGET = 1 << c.TIMELY_TARGET_FLAG_INDEX;
@@ -15,10 +17,13 @@ const DOWNWARD_THRESHOLD = HYSTERESIS_INCREMENT * preset.HYSTERESIS_DOWNWARD_MUL
 const UPWARD_THRESHOLD = HYSTERESIS_INCREMENT * preset.HYSTERESIS_UPWARD_MULTIPLIER;
 
 /// this function also update EpochTransitionCache
-pub fn processEffectiveBalanceUpdates(allocator: Allocator, cached_state: *CachedBeaconState, cache: *EpochTransitionCache) !usize {
-    const state = cached_state.state;
-    const fork = state.forkSeq();
-    const epoch_cache = cached_state.getEpochCache();
+pub fn processEffectiveBalanceUpdates(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    epoch_cache: *EpochCache,
+    state: *ForkBeaconState(fork),
+    cache: *EpochTransitionCache,
+) !usize {
     var validators = try state.validators();
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements().items;
     var next_epoch_total_active_balance_by_increment: u64 = 0;
@@ -39,7 +44,7 @@ pub fn processEffectiveBalanceUpdates(allocator: Allocator, cached_state: *Cache
 
     var previous_epoch_participation: types.altair.EpochParticipation.TreeView = undefined;
     var current_epoch_participation: types.altair.EpochParticipation.TreeView = undefined;
-    if (fork.gte(.altair)) {
+    if (comptime fork.gte(.altair)) {
         previous_epoch_participation = try state.previousEpochParticipation();
         current_epoch_participation = try state.currentEpochParticipation();
     }
@@ -48,7 +53,7 @@ pub fn processEffectiveBalanceUpdates(allocator: Allocator, cached_state: *Cache
     for (balances, 0..) |balance, i| {
         var effective_balance_increment = effective_balance_increments[i];
         var effective_balance = @as(u64, effective_balance_increment) * preset.EFFECTIVE_BALANCE_INCREMENT;
-        const effective_balance_limit: u64 = if (fork.lt(.electra)) preset.MAX_EFFECTIVE_BALANCE else blk: {
+        const effective_balance_limit: u64 = if (comptime fork.lt(.electra)) preset.MAX_EFFECTIVE_BALANCE else blk: {
             // from electra, effectiveBalanceLimit is per validator
             if (is_compounding_validator_arr[i]) {
                 break :blk preset.MAX_EFFECTIVE_BALANCE_ELECTRA;
@@ -76,7 +81,7 @@ pub fn processEffectiveBalanceUpdates(allocator: Allocator, cached_state: *Cache
 
             // TODO: describe issue. Compute progressive target balances
             // Must update target balances for consistency, see comments below
-            if (fork.gte(.altair)) {
+            if (comptime fork.gte(.altair)) {
                 const slashed = try validator.get("slashed");
                 if (!slashed) {
                     if ((try previous_epoch_participation.get(i)) & TIMELY_TARGET == TIMELY_TARGET) {
@@ -109,4 +114,24 @@ pub fn processEffectiveBalanceUpdates(allocator: Allocator, cached_state: *Cache
 
     cache.next_epoch_total_active_balance_by_increment = next_epoch_total_active_balance_by_increment;
     return num_update;
+}
+
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
+test "processEffectiveBalanceUpdates - sanity" {
+    const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
+    defer test_state.deinit();
+
+    _ = try processEffectiveBalanceUpdates(
+        .electra,
+        allocator,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+    );
 }

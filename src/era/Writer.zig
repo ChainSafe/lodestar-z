@@ -10,7 +10,7 @@
 const std = @import("std");
 const c = @import("config");
 const preset = @import("preset").preset;
-const state_transition = @import("state_transition");
+const fork_types = @import("fork_types");
 const snappy = @import("snappy").frame;
 const e2s = @import("e2s.zig");
 const era = @import("era.zig");
@@ -184,7 +184,7 @@ pub fn writeSerializedState(self: *Writer, allocator: std.mem.Allocator, slot: u
     try self.writeCompressedState(allocator, slot, short_historical_root, compressed);
 }
 
-pub fn writeState(self: *Writer, allocator: std.mem.Allocator, state: state_transition.BeaconState) !void {
+pub fn writeState(self: *Writer, allocator: std.mem.Allocator, state: fork_types.AnyBeaconState) !void {
     var s = state;
     const slot = try s.slot();
     const short_historical_root = try era.getShortHistoricalRoot(state);
@@ -229,7 +229,7 @@ pub fn writeSerializedBlock(self: *Writer, allocator: std.mem.Allocator, slot: u
     try self.writeCompressedBlock(allocator, slot, compressed);
 }
 
-pub fn writeBlock(self: *Writer, allocator: std.mem.Allocator, block: state_transition.SignedBeaconBlock) !void {
+pub fn writeBlock(self: *Writer, allocator: std.mem.Allocator, block: fork_types.AnySignedBeaconBlock) !void {
     const slot = block.beaconBlock().slot();
     const serialized = try block.serialize(allocator);
     defer allocator.free(serialized);

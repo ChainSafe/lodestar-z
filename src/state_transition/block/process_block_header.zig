@@ -1,17 +1,27 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const BeaconBlock = @import("../types/beacon_block.zig").BeaconBlock;
-const BeaconConfig = @import("config").BeaconConfig;
+const config = @import("config");
+const ForkSeq = @import("config").ForkSeq;
+const ForkTypes = @import("fork_types").ForkTypes;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BlockType = @import("fork_types").BlockType;
+const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
+const ForkBeaconBlock = @import("fork_types").ForkBeaconBlock;
 const BeaconBlockHeader = types.phase0.BeaconBlockHeader.Type;
-const Root = types.primitive.Root;
-const SignedBlock = @import("../types/block.zig").SignedBlock;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const ZERO_HASH = @import("constants").ZERO_HASH;
-const Block = @import("../types/block.zig").Block;
+const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconProposer;
+const Node = @import("persistent_merkle_tree").Node;
 
-pub fn processBlockHeader(allocator: Allocator, cached_state: *CachedBeaconState, block: Block) !void {
-    const state = cached_state.state;
+pub fn processBlockHeader(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
+    comptime block_type: BlockType,
+    block: *const ForkBeaconBlock(fork, block_type),
+) !void {
     const slot = try state.slot();
 
     // verify that the slots match
@@ -27,23 +37,24 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *CachedBeaconState
     }
 
     // verify that proposer index is the correct index
-    const proposer_index = try cached_state.getBeaconProposer(slot);
+    const proposer_index = try getBeaconProposer(fork, epoch_cache, state, slot);
     if (block.proposerIndex() != proposer_index) {
         return error.BlockProposerIndexMismatch;
     }
 
     // verify that the parent matches
     const header_parent_root = try latest_header_view.hashTreeRoot();
-    if (!std.mem.eql(u8, &block.parentRoot(), header_parent_root)) {
+    if (!std.mem.eql(u8, block.parentRoot(), header_parent_root)) {
         return error.BlockParentRootMismatch;
     }
+
     var body_root: [32]u8 = undefined;
-    try block.beaconBlockBody().hashTreeRoot(allocator, &body_root);
+    try block.body().hashTreeRoot(allocator, &body_root);
     // cache current block as the new latest block
     const latest_block_header: BeaconBlockHeader = .{
         .slot = slot,
         .proposer_index = proposer_index,
-        .parent_root = block.parentRoot(),
+        .parent_root = block.parentRoot().*,
         .state_root = ZERO_HASH,
         .body_root = body_root,
     };
@@ -58,11 +69,51 @@ pub fn processBlockHeader(allocator: Allocator, cached_state: *CachedBeaconState
     }
 }
 
-pub fn blockToHeader(allocator: Allocator, signed_block: SignedBlock, out: *BeaconBlockHeader) !void {
-    const block = signed_block.message();
+pub fn blockToHeader(allocator: Allocator, signed_block: AnySignedBeaconBlock, out: *BeaconBlockHeader) !void {
+    const block = signed_block.beaconBlock();
     out.slot = block.slot();
     out.proposer_index = block.proposerIndex();
     out.parent_root = block.parentRoot();
-    out.state_root = block.stateRoot();
+    out.state_root = switch (block) {
+        .regular => |b| b.stateRoot(),
+        .blinded => |b| b.stateRoot(),
+    };
     try block.hashTreeRoot(allocator, &out.body_root);
+}
+
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const preset = @import("preset").preset;
+
+test "process block header - sanity" {
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+    const slot = config.mainnet.chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
+
+    const proposers = test_state.cached_state.getEpochCache().proposers;
+
+    var message: types.electra.BeaconBlock.Type = types.electra.BeaconBlock.default_value;
+    const proposer_index = proposers[slot % preset.SLOTS_PER_EPOCH];
+
+    var header = try test_state.cached_state.state.latestBlockHeader();
+    const header_parent_root = try header.hashTreeRoot();
+
+    message.slot = slot;
+    message.proposer_index = proposer_index;
+    message.parent_root = header_parent_root.*;
+
+    const fork_block = ForkBeaconBlock(.electra, .full){ .inner = message };
+
+    try processBlockHeader(
+        .electra,
+        allocator,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+        .full,
+        &fork_block,
+    );
 }

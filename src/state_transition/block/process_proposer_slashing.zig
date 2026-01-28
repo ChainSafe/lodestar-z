@@ -1,29 +1,38 @@
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const std = @import("std");
+const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
+const ForkTypes = @import("fork_types").ForkTypes;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 const types = @import("consensus_types");
-const ProposerSlashing = types.phase0.ProposerSlashing.Type;
 const isSlashableValidator = @import("../utils/validator.zig").isSlashableValidator;
 const getProposerSlashingSignatureSets = @import("../signature_sets/proposer_slashings.zig").getProposerSlashingSignatureSets;
 const verifySignature = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
 const slashValidator = @import("./slash_validator.zig").slashValidator;
 
 pub fn processProposerSlashing(
-    cached_state: *CachedBeaconState,
-    proposer_slashing: *const ProposerSlashing,
+    comptime fork: ForkSeq,
+    config: *const BeaconConfig,
+    epoch_cache: *EpochCache,
+    state: *ForkBeaconState(fork),
+    slashings_cache: *SlashingsCache,
+    proposer_slashing: *const ForkTypes(fork).ProposerSlashing.Type,
     verify_signatures: bool,
 ) !void {
-    try assertValidProposerSlashing(cached_state, proposer_slashing, verify_signatures);
+    try assertValidProposerSlashing(fork, config, epoch_cache, state, proposer_slashing, verify_signatures);
     const proposer_index = proposer_slashing.signed_header_1.message.proposer_index;
-    try slashValidator(cached_state, proposer_index, null);
+    try slashValidator(fork, config, epoch_cache, state, slashings_cache, proposer_index, null);
 }
 
 pub fn assertValidProposerSlashing(
-    cached_state: *CachedBeaconState,
-    proposer_slashing: *const ProposerSlashing,
+    comptime fork: ForkSeq,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
+    proposer_slashing: *const ForkTypes(fork).ProposerSlashing.Type,
     verify_signature: bool,
 ) !void {
-    const state = cached_state.state;
-    const epoch_cache = cached_state.getEpochCache();
     const header_1 = proposer_slashing.signed_header_1.message;
     const header_2 = proposer_slashing.signed_header_2.message;
 
@@ -51,14 +60,18 @@ pub fn assertValidProposerSlashing(
     // verify the proposer is slashable
     var proposer_view = try validators_view.get(header_1.proposer_index);
     var proposer: types.phase0.Validator.Type = undefined;
-    try proposer_view.toValue(cached_state.allocator, &proposer);
+    try proposer_view.toValue(undefined, &proposer);
     if (!isSlashableValidator(&proposer, epoch_cache.epoch)) {
         return error.InvalidProposerSlashingProposerNotSlashable;
     }
 
     // verify signatures
     if (verify_signature) {
-        const signature_sets = try getProposerSlashingSignatureSets(cached_state, proposer_slashing);
+        const signature_sets = try getProposerSlashingSignatureSets(
+            config,
+            epoch_cache,
+            proposer_slashing,
+        );
         if (!try verifySignature(&signature_sets[0]) or !try verifySignature(&signature_sets[1])) {
             return error.InvalidProposerSlashingSignature;
         }

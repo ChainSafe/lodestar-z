@@ -1,17 +1,23 @@
 const std = @import("std");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const BeaconConfig = @import("config").BeaconConfig;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const types = @import("consensus_types");
 const Root = types.primitive.Root.Type;
 const SignedBLSToExecutionChange = types.capella.SignedBLSToExecutionChange.Type;
 const c = @import("constants");
-const digest = @import("../utils/sha256.zig").digest;
 const verifyBlsToExecutionChangeSignature = @import("../signature_sets/bls_to_execution_change.zig").verifyBlsToExecutionChangeSignature;
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
-pub fn processBlsToExecutionChange(cached_state: *CachedBeaconState, signed_bls_to_execution_change: *const SignedBLSToExecutionChange) !void {
+pub fn processBlsToExecutionChange(
+    comptime fork: ForkSeq,
+    config: *const BeaconConfig,
+    state: *ForkBeaconState(fork),
+    signed_bls_to_execution_change: *const SignedBLSToExecutionChange,
+) !void {
     const address_change = signed_bls_to_execution_change.message;
-    var state = cached_state.state;
 
-    try isValidBlsToExecutionChange(cached_state, signed_bls_to_execution_change, true);
+    try isValidBlsToExecutionChange(fork, config, state, signed_bls_to_execution_change, true);
 
     var new_withdrawal_credentials: Root = [_]u8{0} ** 32;
     const validator_index = address_change.validator_index;
@@ -24,8 +30,13 @@ pub fn processBlsToExecutionChange(cached_state: *CachedBeaconState, signed_bls_
     try validator.setValue("withdrawal_credentials", &new_withdrawal_credentials);
 }
 
-pub fn isValidBlsToExecutionChange(cached_state: *CachedBeaconState, signed_bls_to_execution_change: *const SignedBLSToExecutionChange, verify_signature: bool) !void {
-    const state = cached_state.state;
+pub fn isValidBlsToExecutionChange(
+    comptime fork: ForkSeq,
+    config: *const BeaconConfig,
+    state: *ForkBeaconState(fork),
+    signed_bls_to_execution_change: *const SignedBLSToExecutionChange,
+    verify_signature: bool,
+) !void {
     const address_change = signed_bls_to_execution_change.message;
     const validator_index = address_change.validator_index;
     var validators = try state.validators();
@@ -41,7 +52,7 @@ pub fn isValidBlsToExecutionChange(cached_state: *CachedBeaconState, signed_bls_
     }
 
     var digest_credentials: Root = undefined;
-    digest(&address_change.from_bls_pubkey, &digest_credentials);
+    Sha256.hash(&address_change.from_bls_pubkey, &digest_credentials, .{});
     // Set the BLS_WITHDRAWAL_PREFIX on the digest_credentials for direct match
     digest_credentials[0] = c.BLS_WITHDRAWAL_PREFIX;
     if (!std.mem.eql(u8, withdrawal_credentials, &digest_credentials)) {
@@ -49,7 +60,7 @@ pub fn isValidBlsToExecutionChange(cached_state: *CachedBeaconState, signed_bls_
     }
 
     if (verify_signature) {
-        if (!try verifyBlsToExecutionChangeSignature(cached_state, signed_bls_to_execution_change)) {
+        if (!try verifyBlsToExecutionChangeSignature(config, signed_bls_to_execution_change)) {
             return error.InvalidBlsToExecutionChangeSignature;
         }
     }

@@ -1,13 +1,15 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ForkSeq = @import("config").ForkSeq;
+const BeaconConfig = @import("config").BeaconConfig;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const attester_status = @import("../utils/attester_status.zig");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const preset = @import("preset").preset;
 const c = @import("constants");
 
 const EFFECTIVE_BALANCE_INCREMENT = preset.EFFECTIVE_BALANCE_INCREMENT;
-const ForkSeq = @import("config").ForkSeq;
 const INACTIVITY_PENALTY_QUOTIENT_ALTAIR = preset.INACTIVITY_PENALTY_QUOTIENT_ALTAIR;
 const INACTIVITY_PENALTY_QUOTIENT_BELLATRIX = preset.INACTIVITY_PENALTY_QUOTIENT_BELLATRIX;
 const PARTICIPATION_FLAG_WEIGHTS = c.PARTICIPATION_FLAG_WEIGHTS;
@@ -22,7 +24,7 @@ const FLAG_PREV_SOURCE_ATTESTER_UNSLASHED = attester_status.FLAG_PREV_SOURCE_ATT
 const FLAG_PREV_TARGET_ATTESTER_UNSLASHED = attester_status.FLAG_PREV_TARGET_ATTESTER_UNSLASHED;
 const hasMarkers = attester_status.hasMarkers;
 
-const isInInactivityLeak = @import("../utils/finality.zig").isInInactivityLeak;
+const isInInactivityLeak = @import("inactivity_leak.zig").isInInactivityLeak;
 
 const RewardPenaltyItem = struct {
     base_reward: u64,
@@ -34,8 +36,16 @@ const RewardPenaltyItem = struct {
 };
 
 /// consumer should deinit `rewards` and `penalties` arrays
-pub fn getRewardsAndPenaltiesAltair(allocator: Allocator, cached_state: *const CachedBeaconState, cache: *const EpochTransitionCache, rewards: []u64, penalties: []u64) !void {
-    const state = cached_state.state;
+pub fn getRewardsAndPenaltiesAltair(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
+    cache: *const EpochTransitionCache,
+    rewards: []u64,
+    penalties: []u64,
+) !void {
     const validator_count = try state.validatorsCount();
     const active_increments = cache.total_active_stake_by_increment;
     if (rewards.len != validator_count or penalties.len != validator_count) {
@@ -44,15 +54,11 @@ pub fn getRewardsAndPenaltiesAltair(allocator: Allocator, cached_state: *const C
     @memset(rewards, 0);
     @memset(penalties, 0);
 
-    const is_in_inactivity_leak = try isInInactivityLeak(cached_state);
+    const is_in_inactivity_leak = isInInactivityLeak(epoch_cache.epoch, try state.finalizedEpoch());
     // effectiveBalance is multiple of EFFECTIVE_BALANCE_INCREMENT and less than MAX_EFFECTIVE_BALANCE
     // so there are limited values of them like 32, 31, 30
     var reward_penalty_item_cache = std.AutoHashMap(u64, RewardPenaltyItem).init(allocator);
     defer reward_penalty_item_cache.deinit();
-
-    const config = cached_state.config;
-    const epoch_cache = cached_state.getEpochCache();
-    const fork = config.forkSeq(try state.slot());
 
     const inactivity_penality_multiplier: u64 =
         if (fork == ForkSeq.altair) INACTIVITY_PENALTY_QUOTIENT_ALTAIR else INACTIVITY_PENALTY_QUOTIENT_BELLATRIX;

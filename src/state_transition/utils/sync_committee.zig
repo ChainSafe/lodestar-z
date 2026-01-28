@@ -2,14 +2,13 @@ const std = @import("std");
 const blst = @import("blst");
 const AggregatePublicKey = blst.AggregatePublicKey;
 const Allocator = std.mem.Allocator;
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
-const EffiectiveBalanceIncrements = @import("../cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EffectiveBalanceIncrements = @import("../cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
 const SyncCommittee = types.altair.SyncCommittee.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const PublicKey = types.primitive.BLSPubkey.Type;
 const ForkSeq = @import("config").ForkSeq;
 const intSqrt = @import("../utils/math.zig").intSqrt;
 
@@ -22,14 +21,15 @@ pub const SyncCommitteeInfo = struct {
 
 /// Consumer must deallocate the returned `SyncCommitteeInfo` struct
 pub fn getNextSyncCommittee(
+    comptime fork: ForkSeq,
     allocator: Allocator,
-    state: *BeaconState,
+    state: *ForkBeaconState(fork),
     active_validator_indices: []const ValidatorIndex,
-    effective_balance_increments: EffiectiveBalanceIncrements,
+    effective_balance_increments: EffectiveBalanceIncrements,
     out: *SyncCommitteeInfo,
 ) !void {
     const indices = &out.indices;
-    try getNextSyncCommitteeIndices(allocator, state, active_validator_indices, effective_balance_increments, indices);
+    try getNextSyncCommitteeIndices(fork, allocator, state, active_validator_indices, effective_balance_increments, indices);
     var validators_view = try state.validators();
 
     // Using the index2pubkey cache is slower because it needs the serialized pubkey.

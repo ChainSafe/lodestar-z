@@ -1,6 +1,4 @@
 const std = @import("std");
-const Preset = @import("preset").Preset;
-const ChainConfig = @import("../ChainConfig.zig");
 const BeaconConfig = @import("../BeaconConfig.zig");
 const b = @import("hex").hexToBytesComptime;
 const gnosis = @import("./gnosis.zig");

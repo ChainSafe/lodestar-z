@@ -1,15 +1,17 @@
-const std = @import("std");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
-const types = @import("consensus_types");
 const preset = @import("preset").preset;
 
 /// Resets slashings for the next epoch.
 /// PERF: Almost no (constant) cost
-pub fn processSlashingsReset(cached_state: *CachedBeaconState, cache: *const EpochTransitionCache) !void {
-    const state = cached_state.state;
-    const epoch_cache = cached_state.getEpochCache();
+pub fn processSlashingsReset(
+    comptime fork: ForkSeq,
+    epoch_cache: *EpochCache,
+    state: *ForkBeaconState(fork),
+    cache: *const EpochTransitionCache,
+) !void {
     const next_epoch = cache.current_epoch + 1;
 
     // reset slashings
@@ -19,4 +21,25 @@ pub fn processSlashingsReset(cached_state: *CachedBeaconState, cache: *const Epo
     const old_slashing_value_by_increment = slashing / preset.EFFECTIVE_BALANCE_INCREMENT;
     try slashings.set(slash_index, 0);
     epoch_cache.total_slashings_by_increment = @max(0, epoch_cache.total_slashings_by_increment - old_slashing_value_by_increment);
+}
+
+const std = @import("std");
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Node = @import("persistent_merkle_tree").Node;
+
+test "processSlashingsReset - sanity" {
+    const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
+    defer test_state.deinit();
+
+    try processSlashingsReset(
+        .electra,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+    );
 }

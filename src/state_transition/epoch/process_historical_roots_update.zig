@@ -1,12 +1,15 @@
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const Root = types.primitive.Root.Type;
 
-pub fn processHistoricalRootsUpdate(cached_state: *CachedBeaconState, cache: *const EpochTransitionCache) !void {
-    const state = cached_state.state;
+pub fn processHistoricalRootsUpdate(
+    comptime fork: ForkSeq,
+    state: *ForkBeaconState(fork),
+    cache: *const EpochTransitionCache,
+) !void {
     const next_epoch = cache.current_epoch + 1;
 
     // set historical root accumulator

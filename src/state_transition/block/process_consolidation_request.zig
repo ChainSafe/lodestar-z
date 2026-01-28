@@ -1,5 +1,8 @@
 const std = @import("std");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const BeaconConfig = @import("config").BeaconConfig;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const FAR_FUTURE_EPOCH = @import("constants").FAR_FUTURE_EPOCH;
@@ -19,25 +22,24 @@ const isActiveValidatorView = validator_utils.isActiveValidatorView;
 
 // TODO Electra: Clean up necessary as there is a lot of overlap with isValidSwitchToCompoundRequest
 pub fn processConsolidationRequest(
-    cached_state: *CachedBeaconState,
+    comptime fork: ForkSeq,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
     consolidation: *const ConsolidationRequest,
 ) !void {
-    var state = cached_state.state;
-    const epoch_cache = cached_state.getEpochCache();
-    const config = epoch_cache.config;
-
     const source_pubkey = consolidation.source_pubkey;
     const target_pubkey = consolidation.target_pubkey;
     const source_address = consolidation.source_address;
 
-    if (!(try isPubkeyKnown(cached_state, source_pubkey))) return;
-    if (!(try isPubkeyKnown(cached_state, target_pubkey))) return;
+    if (!(try isPubkeyKnown(fork, epoch_cache, state, source_pubkey))) return;
+    if (!(try isPubkeyKnown(fork, epoch_cache, state, target_pubkey))) return;
 
     const source_index = epoch_cache.pubkey_to_index.get(&source_pubkey) orelse return;
     const target_index = epoch_cache.pubkey_to_index.get(&target_pubkey) orelse return;
 
-    if (try isValidSwitchToCompoundRequest(cached_state, consolidation)) {
-        try switchToCompoundingValidator(cached_state, source_index);
+    if (try isValidSwitchToCompoundRequest(fork, epoch_cache, state, consolidation)) {
+        try switchToCompoundingValidator(fork, state, source_index);
         // Early return since we have already switched validator to compounding
         return;
     }
@@ -97,14 +99,14 @@ pub fn processConsolidationRequest(
     }
 
     // Verify the source has no pending withdrawals in the queue
-    if (try getPendingBalanceToWithdraw(state, source_index) > 0) {
+    if (try getPendingBalanceToWithdraw(fork, state, source_index) > 0) {
         return;
     }
 
     // Initiate source validator exit and append pending consolidation
     // TODO Electra: See if we can get rid of big int
     const effective_balance = try source_validator.get("effective_balance");
-    const exit_epoch = try computeConsolidationEpochAndUpdateChurn(cached_state, effective_balance);
+    const exit_epoch = try computeConsolidationEpochAndUpdateChurn(fork, epoch_cache, state, effective_balance);
     try source_validator.set("exit_epoch", exit_epoch);
     try source_validator.set("withdrawable_epoch", exit_epoch + config.chain.MIN_VALIDATOR_WITHDRAWABILITY_DELAY);
 
@@ -115,10 +117,12 @@ pub fn processConsolidationRequest(
     try pending_consolidations.pushValue(&pending_consolidation);
 }
 
-fn isValidSwitchToCompoundRequest(cached_state: *const CachedBeaconState, consolidation: *const ConsolidationRequest) !bool {
-    const state = cached_state.state;
-    const epoch_cache = cached_state.getEpochCache();
-
+fn isValidSwitchToCompoundRequest(
+    comptime fork: ForkSeq,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
+    consolidation: *const ConsolidationRequest,
+) !bool {
     // this check is mainly to make the compiler happy, pubkey is checked by the consumer already
     const source_index = epoch_cache.pubkey_to_index.get(&consolidation.source_pubkey) orelse return false;
     const target_index = epoch_cache.pubkey_to_index.get(&consolidation.target_pubkey) orelse return false;

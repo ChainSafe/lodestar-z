@@ -1,7 +1,5 @@
 const std = @import("std");
 const yaml = @import("yaml");
-const spec_test_options = @import("spec_test_options");
-const types = @import("generic_types.zig");
 const snappy = @import("snappy").raw;
 const hex = @import("hex");
 const ssz = @import("ssz");

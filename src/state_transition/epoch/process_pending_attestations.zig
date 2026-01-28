@@ -1,8 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAtEpoch;
 const getBlockRootAtSlot = @import("../utils/block_root.zig").getBlockRootAtSlot;
 
@@ -11,8 +12,10 @@ const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const PendingAttestation = types.phase0.PendingAttestation.Type;
 
 pub fn processPendingAttestations(
+    comptime fork: ForkSeq,
     allocator: Allocator,
-    cached_state: *CachedBeaconState,
+    epoch_cache: *const EpochCache,
+    state: *ForkBeaconState(fork),
     proposer_indices: []usize,
     validator_count: usize,
     inclusion_delays: []usize,
@@ -23,15 +26,13 @@ pub fn processPendingAttestations(
     target_flag: u8,
     head_flag: u8,
 ) !void {
-    const epoch_cache = cached_state.getEpochCache();
-    const state = cached_state.state;
     const state_slot = try state.slot();
     const prev_epoch = epoch_cache.getPreviousShuffling().epoch;
     if (attestations.len == 0) {
         return;
     }
 
-    const actual_target_block_root = try getBlockRootAtSlot(state, computeStartSlotAtEpoch(epoch));
+    const actual_target_block_root = try getBlockRootAtSlot(fork, state, computeStartSlotAtEpoch(epoch));
     for (0..attestations.len) |i| {
         const att = attestations[i];
         // Ignore empty BitArray, from spec test minimal/phase0/epoch_processing/participation_record_updates updated_participation_record
@@ -46,7 +47,7 @@ pub fn processPendingAttestations(
         const att_slot = att_data.slot;
         const att_voted_target_root = std.mem.eql(u8, att_data.target.root[0..], actual_target_block_root[0..]);
         const att_voted_head_root = if (att_slot < state_slot) blk: {
-            const head_root = try getBlockRootAtSlot(state, att_slot);
+            const head_root = try getBlockRootAtSlot(fork, state, att_slot);
             break :blk std.mem.eql(u8, att_data.beacon_block_root[0..], head_root[0..]);
         } else false;
         const committee = @as([]const u64, try epoch_cache.getBeaconCommittee(att_slot, att_data.index));

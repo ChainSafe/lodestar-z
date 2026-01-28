@@ -1,5 +1,4 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const blst = @import("blst");
 const types = @import("consensus_types");
 const bls_utils = @import("../utils/bls.zig");
