@@ -684,7 +684,7 @@ fn testBlockSanity(Block: type) !void {
     const sync_aggregate = try block_body.syncAggregate();
     try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 96, &sync_aggregate.sync_committee_signature);
 
-    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 32, (try block_body.executionPayload()).getParentHash());
+    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 32, (try block_body.executionPayload()).parentHash());
 
     // capella
     try expect((try block_body.blsToExecutionChanges()).len == 0);

@@ -115,9 +115,3 @@ pub fn BeaconBlockBody(comptime bt: BlockType, comptime f: ForkSeq) type {
         }
     };
 }
-
-test "sanity" {
-    std.testing.refAllDecls(SignedBeaconBlock(.full, .capella));
-    std.testing.refAllDecls(BeaconBlock(.full, .capella));
-    std.testing.refAllDecls(BeaconBlockBody(.full, .capella));
-}

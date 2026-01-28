@@ -16,8 +16,12 @@ pub fn BeaconState(comptime f: ForkSeq) type {
 
         pub const fork_seq = f;
 
-        pub fn fromBaseView(base_view: BaseTreeView) !Self {
-            return .{ .inner = try ForkTypes(f).BeaconState.tree.viewFromBaseView(base_view) };
+        pub fn fromBaseView(base_view: BaseTreeView) Self {
+            return .{
+                .inner = ForkTypes(f).BeaconState.TreeView{
+                    .base_view = base_view,
+                },
+            };
         }
 
         pub fn baseView(self: *Self) BaseTreeView {
@@ -488,7 +492,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             .capella => .deneb,
             .deneb => .electra,
             .electra => .fulu,
-            .fulu => error.InvalidAtFork,
+            .fulu => .fulu,
         }) {
             const cur = self.inner;
             const allocator = cur.base_view.allocator;

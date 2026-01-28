@@ -619,8 +619,8 @@ pub const AnyBeaconState = union(ForkSeq) {
             .bellatrix => |*state| try state.setValue("latest_execution_payload_header", &header.bellatrix),
             .capella => |*state| try state.setValue("latest_execution_payload_header", &header.capella),
             .deneb => |*state| try state.setValue("latest_execution_payload_header", &header.deneb),
-            .electra => |*state| try state.setValue("latest_execution_payload_header", &header.electra),
-            .fulu => |*state| try state.setValue("latest_execution_payload_header", &header.fulu),
+            .electra => |*state| try state.setValue("latest_execution_payload_header", &header.deneb),
+            .fulu => |*state| try state.setValue("latest_execution_payload_header", &header.deneb),
             else => return error.InvalidAtFork,
         }
     }
