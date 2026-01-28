@@ -19,7 +19,6 @@ const SignedBlock = state_transition.SignedBlock;
 const SignedBeaconBlock = state_transition.SignedBeaconBlock;
 const Body = state_transition.Body;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const PubkeyIndexMap = state_transition.PubkeyIndexMap(ValidatorIndex);
 const Withdrawals = types.capella.Withdrawals.Type;
 const WithdrawalsResult = state_transition.WithdrawalsResult;
 const BlockExternalData = state_transition.BlockExternalData;
@@ -367,9 +366,11 @@ fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, pool: *Nod
     try stdout.print("Block: slot: {}\n", .{block_slot});
 
     const beacon_config = config.BeaconConfig.init(chain_config, (try beacon_state.genesisValidatorsRoot()).*);
-    const pubkey_index_map = try PubkeyIndexMap.init(allocator);
-    const index_pubkey_cache = try allocator.create(state_transition.Index2PubkeyCache);
-    index_pubkey_cache.* = state_transition.Index2PubkeyCache.init(allocator);
+    var pubkey_index_map = state_transition.PubkeyIndexMap.init(allocator);
+    defer pubkey_index_map.deinit();
+    var index_pubkey_cache = state_transition.Index2PubkeyCache.init(allocator);
+    defer index_pubkey_cache.deinit();
+
     const validators = try beacon_state.validatorsSlice(allocator);
     defer allocator.free(validators);
 
@@ -377,8 +378,8 @@ fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, pool: *Nod
 
     const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, beacon_state, .{
         .config = &beacon_config,
-        .index_to_pubkey = index_pubkey_cache,
-        .pubkey_to_index = pubkey_index_map,
+        .index_to_pubkey = &index_pubkey_cache,
+        .pubkey_to_index = &pubkey_index_map,
     }, .{ .skip_sync_committee_cache = !comptime fork.gte(.altair), .skip_sync_pubkeys = false });
 
     try state_transition.state_transition.processSlots(allocator, cached_state, block_slot, .{});

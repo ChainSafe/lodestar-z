@@ -5,6 +5,7 @@ pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSignin
 pub const BeaconBlock = @import("./types/beacon_block.zig").BeaconBlock;
 pub const BeaconBlockBody = @import("./types/beacon_block.zig").BeaconBlockBody;
 pub const BeaconState = @import("./types/beacon_state.zig").BeaconState;
+pub const ExecutionPayloadHeader = @import("./types/execution_payload.zig").ExecutionPayloadHeader;
 pub const CachedBeaconState = @import("./cache/state_cache.zig").CachedBeaconState;
 pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
 
@@ -12,15 +13,17 @@ pub const EpochCacheImmutableData = @import("./cache/epoch_cache.zig").EpochCach
 pub const EpochCacheRc = @import("./cache/epoch_cache.zig").EpochCacheRc;
 pub const EpochCache = @import("./cache/epoch_cache.zig").EpochCache;
 
-pub const PubkeyIndexMap = @import("./utils/pubkey_index_map.zig").PubkeyIndexMap;
 pub const shuffle = @import("./utils/shuffle.zig");
 pub const committee_indices = @import("./utils/committee_indices.zig");
+pub const PubkeyIndexMap = @import("./cache/pubkey_cache.zig").PubkeyIndexMap;
 pub const Index2PubkeyCache = @import("./cache/pubkey_cache.zig").Index2PubkeyCache;
 pub const syncPubkeys = @import("./cache/pubkey_cache.zig").syncPubkeys;
 
 pub const EpochTransitionCache = @import("./cache/epoch_transition_cache.zig").EpochTransitionCache;
 pub const processEpoch = @import("./epoch/process_epoch.zig").processEpoch;
 pub const processJustificationAndFinalization = @import("./epoch/process_justification_and_finalization.zig").processJustificationAndFinalization;
+pub const computeUnrealizedCheckpoints = @import("./epoch/process_justification_and_finalization.zig").computeUnrealizedCheckpoints;
+pub const UnrealizedCheckpoints = @import("./epoch/process_justification_and_finalization.zig").UnrealizedCheckpoints;
 pub const processInactivityUpdates = @import("./epoch/process_inactivity_updates.zig").processInactivityUpdates;
 pub const processRegistryUpdates = @import("./epoch/process_registry_updates.zig").processRegistryUpdates;
 pub const processSlashings = @import("./epoch/process_slashings.zig").processSlashings;
@@ -71,6 +74,8 @@ pub const processConsolidationRequest = @import("./block/process_consolidation_r
 pub const getBlockRootAtSlot = @import("./utils/block_root.zig").getBlockRootAtSlot;
 pub const computeStartSlotAtEpoch = @import("./utils/epoch.zig").computeStartSlotAtEpoch;
 pub const deinitStateTransition = @import("./state_transition.zig").deinitStateTransition;
+pub const isExecutionEnabled = @import("./utils/execution.zig").isExecutionEnabled;
+pub const getEffectiveBalanceIncrementsZeroInactive = @import("./utils/balance.zig").getEffectiveBalanceIncrementsZeroInactive;
 
 pub const WithdrawalsResult = @import("./block/process_withdrawals.zig").WithdrawalsResult;
 

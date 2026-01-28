@@ -203,11 +203,23 @@ pub fn forkVersion(self: *const BeaconConfig, slot: Slot) *const [4]u8 {
 // TODO: getPostDenebForkTypes
 
 /// Return the maximum number of blobs allowed per block at `epoch`.
+///
+/// Fulu introduced Blob Parameter Only (BPO) hard forks [EIP-7892] to adjust the max blobs per block,
+/// so the max blobs per block from that fork onwards differ depending on which epoch the hard forks happen.
+///
+/// Reference: https://eips.ethereum.org/EIPS/eip-7892
 pub fn getMaxBlobsPerBlock(self: *const BeaconConfig, epoch: Epoch) u64 {
     const fork = self.forkInfoAtEpoch(epoch).fork_seq;
     return switch (fork) {
         .deneb => self.chain.MAX_BLOBS_PER_BLOCK,
-        .electra, .fulu => self.chain.MAX_BLOBS_PER_BLOCK_ELECTRA,
+        .electra => self.chain.MAX_BLOBS_PER_BLOCK_ELECTRA,
+        .fulu => {
+            for (0..self.chain.BLOB_SCHEDULE.len) |i| {
+                const schedule = self.chain.BLOB_SCHEDULE[self.chain.BLOB_SCHEDULE.len - i - 1];
+                if (epoch >= schedule.EPOCH) return schedule.MAX_BLOBS_PER_BLOCK;
+            }
+            return self.chain.MAX_BLOBS_PER_BLOCK_ELECTRA;
+        },
         else =>
         // For forks before Deneb, we assume no blobs
         0,

@@ -1,0 +1,87 @@
+import * as fs from "node:fs";
+import {config} from "@lodestar/config/default";
+import * as era from "@lodestar/era";
+import bindings from "../src/index.ts";
+
+console.log("loaded bindings");
+
+function printDuration<R>(label: string, fn: () => R): R {
+  console.time(label);
+  const result = fn();
+  console.timeEnd(label);
+  return result;
+}
+
+async function printDurationAsync<R>(label: string, fn: () => Promise<R>): Promise<R> {
+  console.time(label);
+  const result = await fn();
+  console.timeEnd(label);
+  return result;
+}
+
+const PKIX_FILE = "./mainnet.pkix";
+const hasPkix = printDuration("check for pkix file", () => {
+  try {
+    fs.accessSync(PKIX_FILE);
+    return true;
+  } catch {
+    return false;
+  }
+});
+
+if (hasPkix) {
+  printDuration("load pkix from disk", () => bindings.pubkeys.load(PKIX_FILE));
+} else {
+  printDuration("update bindings capacity", () => {
+    bindings.pool.ensureCapacity(10_000_000);
+    bindings.pubkeys.ensureCapacity(2_000_000);
+  });
+}
+
+const reader = await printDurationAsync("load era reader", () =>
+  era.era.EraReader.open(config, "./fixtures/era/mainnet-01628-47ac89fb.era")
+);
+
+const stateBytes = await printDurationAsync("read serialized state", () => reader.readSerializedState());
+
+const state = printDuration("create state view", () => bindings.BeaconStateView.createFromBytes("fulu", stateBytes));
+
+printDuration("write pkix to disk", () => bindings.pubkeys.save(PKIX_FILE));
+
+printDuration("get slot", () => state.slot);
+printDuration("get fork", () => state.fork);
+printDuration("get root", () => state.root);
+printDuration("get epoch", () => state.epoch);
+printDuration("get genesisTime", () => state.genesisTime);
+printDuration("get genesisValidatorsRoot", () => state.genesisValidatorsRoot);
+printDuration("get eth1Data", () => state.eth1Data);
+printDuration("get latestBlockHeader", () => state.latestBlockHeader);
+printDuration("get previousJustifiedCheckpoint", () => state.previousJustifiedCheckpoint);
+printDuration("get currentJustifiedCheckpoint", () => state.currentJustifiedCheckpoint);
+printDuration("proposers", () => state.proposers);
+printDuration("proposersNextEpoch", () => state.proposersNextEpoch);
+printDuration("proposersPrevEpoch", () => state.proposersPrevEpoch);
+printDuration("currentSyncCommittee", () => state.currentSyncCommittee);
+printDuration("nextSyncCommittee", () => state.nextSyncCommittee);
+printDuration("currentSyncCommitteeIndexed", () => state.currentSyncCommitteeIndexed);
+printDuration("effectiveBalanceIncrements", () => state.effectiveBalanceIncrements);
+printDuration("latestExecutionPayloadHeader", () => state.latestExecutionPayloadHeader);
+printDuration("syncProposerReward", () => state.syncProposerReward);
+printDuration("previousEpochParticipation", () => state.previousEpochParticipation);
+printDuration("currentEpochParticipation", () => state.currentEpochParticipation);
+printDuration("getBalance(0)", () => state.getBalance(0));
+printDuration("getBalance(100)", () => state.getBalance(100));
+printDuration("getFinalizedRootProof()", () => state.getFinalizedRootProof());
+printDuration("isExecutionStateType()", () => state.isExecutionStateType());
+printDuration("getEffectiveBalanceIncrementsZeroInactive()", () => state.getEffectiveBalanceIncrementsZeroInactive());
+printDuration("computeUnrealizedCheckpoints()", () => state.computeUnrealizedCheckpoints());
+printDuration("serialize", () => state.serialize());
+printDuration("serializedSize", () => state.serializedSize());
+printDuration("serializeToBytes", () => {
+  const size = state.serializedSize();
+  const output = new Uint8Array(size);
+  const bytesWritten = state.serializeToBytes(output, 0);
+  console.log(`  wrote ${bytesWritten} bytes`);
+  return output;
+});
+printDuration("hashTreeRoot", () => state.hashTreeRoot());

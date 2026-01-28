@@ -19,7 +19,7 @@ const Node = @import("persistent_merkle_tree").Node;
 const state_transition = @import("../root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const BeaconState = state_transition.BeaconState;
-const PubkeyIndexMap = state_transition.PubkeyIndexMap(ValidatorIndex);
+const PubkeyIndexMap = state_transition.PubkeyIndexMap;
 const Index2PubkeyCache = state_transition.Index2PubkeyCache;
 const EffectiveBalanceIncrements = state_transition.EffectiveBalanceIncrements;
 const getNextSyncCommitteeIndices = state_transition.getNextSyncCommitteeIndices;
@@ -177,14 +177,14 @@ pub const TestCachedBeaconState = struct {
     }
 
     pub fn initFromState(allocator: Allocator, state: *BeaconState, fork: ForkSeq, fork_epoch: Epoch) !TestCachedBeaconState {
-        const pubkey_index_map = try PubkeyIndexMap.init(allocator);
+        const pubkey_index_map = try allocator.create(PubkeyIndexMap);
+        errdefer allocator.destroy(pubkey_index_map);
+        pubkey_index_map.* = PubkeyIndexMap.init(allocator);
         errdefer pubkey_index_map.deinit();
         const index_pubkey_cache = try allocator.create(Index2PubkeyCache);
-        errdefer {
-            index_pubkey_cache.deinit();
-            allocator.destroy(index_pubkey_cache);
-        }
+        errdefer allocator.destroy(index_pubkey_cache);
         index_pubkey_cache.* = Index2PubkeyCache.init(allocator);
+        errdefer index_pubkey_cache.deinit();
         const chain_config = getConfig(active_chain_config, fork, fork_epoch);
         const config = try allocator.create(BeaconConfig);
         errdefer allocator.destroy(config);
@@ -219,6 +219,7 @@ pub const TestCachedBeaconState = struct {
         self.cached_state.deinit();
         self.allocator.destroy(self.cached_state);
         self.pubkey_index_map.deinit();
+        self.allocator.destroy(self.pubkey_index_map);
         self.index_pubkey_cache.deinit();
         self.allocator.destroy(self.index_pubkey_cache);
         self.allocator.destroy(self.config);
