@@ -30,7 +30,9 @@ pub const CachedBeaconState = struct {
     /// Proposer rewards accumulated during block processing
     proposer_rewards: ProposerRewards,
 
-    // TODO: cloned_count properties, implement this once we switch to TreeView
+    cloned_count: u32 = 0,
+    cloned_count_with_transfer_cache: u32 = 0,
+    created_with_transfer_cache: bool = false,
 
     /// This class takes ownership of state after this function and has responsibility to deinit it
     pub fn createCachedBeaconState(allocator: Allocator, state: *AnyBeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*CachedBeaconState {
@@ -82,7 +84,14 @@ pub const CachedBeaconState = struct {
             .epoch_cache_ref = epoch_cache_ref,
             .state = state,
             .proposer_rewards = self.proposer_rewards,
+            .created_with_transfer_cache = opts.transfer_cache,
         };
+
+        self.cloned_count += 1;
+        if (opts.transfer_cache) {
+            self.cloned_count_with_transfer_cache += 1;
+        }
+
         return cached_state;
     }
 

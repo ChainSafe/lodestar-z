@@ -243,6 +243,79 @@ pub fn BeaconStateView_currentSyncCommitteeIndexed(env: napi.Env, cb: napi.Callb
     return obj;
 }
 
+pub fn BeaconStateView_pendingDepositsLength(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var pending_deposits = try cached_state.state.pendingDeposits();
+    return try env.createInt64(@intCast(try pending_deposits.length()));
+}
+
+pub fn BeaconStateView_pendingPartialWithdrawalsLength(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var pending_partial_withdrawals = try cached_state.state.pendingPartialWithdrawals();
+    return try env.createInt64(@intCast(try pending_partial_withdrawals.length()));
+}
+
+pub fn BeaconStateView_pendingConsolidationsLength(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var pending_consolidations = try cached_state.state.pendingConsolidations();
+    return try env.createInt64(@intCast(try pending_consolidations.length()));
+}
+
+pub fn BeaconStateView_clonedCount(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    return try env.createInt64(@intCast(cached_state.cloned_count));
+}
+
+pub fn BeaconStateView_clonedCountWithTransferCache(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    return try env.createInt64(@intCast(cached_state.cloned_count_with_transfer_cache));
+}
+
+pub fn BeaconStateView_createdWithTransferCache(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    return try env.getBoolean(cached_state.created_with_transfer_cache);
+}
+
+pub fn BeaconStateView_serializeValidators(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var validators_view = try cached_state.state.validators();
+
+    const size = try validators_view.serializedSize();
+    var arraybuffer_bytes: [*]u8 = undefined;
+    const arraybuffer = try env.createArrayBuffer(size, &arraybuffer_bytes);
+    _ = try validators_view.serializeIntoBytes(arraybuffer_bytes[0..size]);
+
+    return try env.createTypedarray(.uint8, size, arraybuffer, 0);
+}
+
+pub fn BeaconStateView_serializedValidatorsSize(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var validators_view = try cached_state.state.validators();
+    const size = try validators_view.serializedSize();
+    return try env.createInt64(@intCast(size));
+}
+
+pub fn BeaconStateView_serializeValidatorsToBytes(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+
+    // arg 0: output
+    const output_info = try cb.arg(0).getTypedarrayInfo();
+    if (output_info.array_type != .uint8) {
+        return error.InvalidOutputBufferType;
+    }
+
+    // arg 1: offset
+    const offset = try cb.arg(1).getValueUint32();
+    if (offset > output_info.length) {
+        return error.InvalidOffset;
+    }
+
+    var validators_view = try cached_state.state.validators();
+    const output_slice = output_info.data[offset..];
+    const bytes_written = try validators_view.serializeIntoBytes(output_slice);
+    return try env.createInt64(@intCast(bytes_written));
+}
+
 pub fn BeaconStateView_effectiveBalanceIncrements(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const increments = cached_state.getEpochCache().getEffectiveBalanceIncrements();

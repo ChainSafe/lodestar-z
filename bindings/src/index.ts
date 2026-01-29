@@ -55,12 +55,6 @@ interface SyncCommittee {
   aggregatePubkey: Uint8Array;
 }
 
-// reference: https://github.com/ChainSafe/lodestar/blob/b6d377a93c39aa17d19408e119208a0733dcba3c/packages/state-transition/src/cache/syncCommitteeCache.ts#L8-L20
-interface SyncCommitteeCache {
-  validatorIndices: Uint32Array;
-  validatorIndexMap: Map<number, number[]>;
-}
-
 interface ProcessSlotsOpts {
   dontTransferCache?: boolean;
 }
@@ -145,6 +139,15 @@ declare class BeaconStateView {
   previousEpochParticipation: number[];
   currentEpochParticipation: number[];
   proposerRewards: ProposerRewards;
+  clonedCount: number;
+  clonedCountWithTransferCache: number;
+  createdWithTransferCache: boolean;
+  pendingDepositsLength: number;
+  pendingPartialWithdrawalsLength: number;
+  pendingConsolidationsLength: number;
+  serializeValidators(): Uint8Array;
+  serializedValidatorsSize(): number;
+  serializeValidatorsToBytes(output: Uint8Array, offset: number): number;
   getBalance(index: number): bigint;
   getValidator(index: number): Validator;
   getValidatorStatus(index: number): ValidatorStatus;

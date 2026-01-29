@@ -73,6 +73,21 @@ printDuration("latestExecutionPayloadHeader", () => state.latestExecutionPayload
 printDuration("syncProposerReward", () => state.syncProposerReward);
 printDuration("previousEpochParticipation", () => state.previousEpochParticipation);
 printDuration("currentEpochParticipation", () => state.currentEpochParticipation);
+printDuration("pendingDepositsLength", () => state.pendingDepositsLength);
+printDuration("pendingPartialWithdrawalsLength", () => state.pendingPartialWithdrawalsLength);
+printDuration("pendingConsolidationsLength", () => state.pendingConsolidationsLength);
+printDuration("clonedCount", () => state.clonedCount);
+printDuration("clonedCountWithTransferCache", () => state.clonedCountWithTransferCache);
+printDuration("createdWithTransferCache", () => state.createdWithTransferCache);
+printDuration("serializeValidators", () => state.serializeValidators());
+printDuration("serializedValidatorsSize", () => state.serializedValidatorsSize());
+printDuration("serializeValidatorsToBytes", () => {
+  const size = state.serializedValidatorsSize();
+  const output = new Uint8Array(size);
+  const bytesWritten = state.serializeValidatorsToBytes(output, 0);
+  console.log(`  wrote ${bytesWritten} bytes`);
+  return output;
+});
 printDuration("getBalance(0)", () => state.getBalance(0));
 printDuration("getBalance(100)", () => state.getBalance(100));
 printDuration("getValidator(0)", () => state.getValidator(0));
