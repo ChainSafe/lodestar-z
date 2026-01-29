@@ -177,19 +177,19 @@
         .bench_ssz_attestation = .{
             .root_module = .{
                 .root_source_file = "bench/ssz/attestation.zig",
-                .imports = .{ .consensus_types, .ssz, .zbench },
+                .imports = .{ .config, .consensus_types, .download_era_options, .era, .ssz, .zbench },
             },
         },
         .bench_ssz_block = .{
             .root_module = .{
                 .root_source_file = "bench/ssz/block.zig",
-                .imports = .{ .consensus_types, .ssz, .zbench },
+                .imports = .{ .config, .consensus_types, .download_era_options, .era, .ssz, .zbench },
             },
         },
         .bench_ssz_state = .{
             .root_module = .{
                 .root_source_file = "bench/ssz/state.zig",
-                .imports = .{ .consensus_types, .ssz, .zbench },
+                .imports = .{ .config, .consensus_types, .download_era_options, .era, .ssz, .zbench },
             },
         },
         .bench_merkle_gindex = .{
