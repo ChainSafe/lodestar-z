@@ -5,6 +5,7 @@ pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSignin
 pub const BeaconBlock = @import("./types/beacon_block.zig").BeaconBlock;
 pub const BeaconBlockBody = @import("./types/beacon_block.zig").BeaconBlockBody;
 pub const BeaconState = @import("./types/beacon_state.zig").BeaconState;
+pub const ExecutionPayloadHeader = @import("./types/execution_payload.zig").ExecutionPayloadHeader;
 pub const CachedBeaconState = @import("./cache/state_cache.zig").CachedBeaconState;
 pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
 
@@ -64,16 +65,24 @@ pub const processAttesterSlashing = @import("./block/process_attester_slashing.z
 pub const processDeposit = @import("./block/process_deposit.zig").processDeposit;
 pub const processProposerSlashing = @import("./block/process_proposer_slashing.zig").processProposerSlashing;
 pub const processVoluntaryExit = @import("./block/process_voluntary_exit.zig").processVoluntaryExit;
+pub const isValidVoluntaryExit = @import("./block/process_voluntary_exit.zig").isValidVoluntaryExit;
+pub const getVoluntaryExitValidity = @import("./block/process_voluntary_exit.zig").getVoluntaryExitValidity;
+pub const VoluntaryExitValidity = @import("./block/process_voluntary_exit.zig").VoluntaryExitValidity;
 pub const processBlsToExecutionChange = @import("./block/process_bls_to_execution_change.zig").processBlsToExecutionChange;
 pub const processDepositRequest = @import("./block/process_deposit_request.zig").processDepositRequest;
 pub const processWithdrawalRequest = @import("./block/process_withdrawal_request.zig").processWithdrawalRequest;
 pub const processConsolidationRequest = @import("./block/process_consolidation_request.zig").processConsolidationRequest;
 
 // utils
+pub const validator_status = @import("./utils/validator_status.zig");
+pub const ValidatorStatus = validator_status.ValidatorStatus;
+pub const getValidatorStatus = validator_status.getValidatorStatus;
 pub const getBlockRootAtSlot = @import("./utils/block_root.zig").getBlockRootAtSlot;
 pub const computeStartSlotAtEpoch = @import("./utils/epoch.zig").computeStartSlotAtEpoch;
 pub const deinitStateTransition = @import("./state_transition.zig").deinitStateTransition;
 pub const isExecutionEnabled = @import("./utils/execution.zig").isExecutionEnabled;
+pub const isMergeTransitionComplete = @import("./utils/execution.zig").isMergeTransitionComplete;
+pub const getRandaoMix = @import("./utils/seed.zig").getRandaoMix;
 pub const getEffectiveBalanceIncrementsZeroInactive = @import("./utils/balance.zig").getEffectiveBalanceIncrementsZeroInactive;
 
 pub const WithdrawalsResult = @import("./block/process_withdrawals.zig").WithdrawalsResult;
@@ -86,6 +95,7 @@ pub const state_transition = @import("./state_transition.zig");
 pub const BlockExternalData = state_transition.BlockExternalData;
 pub const preset = @import("preset").preset;
 const EpochShuffling = @import("./utils/epoch_shuffling.zig");
+pub const calculateShufflingDecisionRoot = EpochShuffling.calculateShufflingDecisionRoot;
 pub const SignedBlock = @import("./types/block.zig").SignedBlock;
 pub const Block = @import("./types/block.zig").Block;
 pub const Body = @import("./types/block.zig").Body;

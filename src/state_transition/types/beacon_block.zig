@@ -274,6 +274,15 @@ pub const BeaconBlock = union(enum) {
             .fulu => |block| .{ .fulu = &block.body },
         };
     }
+
+    pub fn defaultValue(fork_seq: ForkSeq) BeaconBlock {
+        switch (fork_seq) {
+            inline else => |tag| {
+                const B = @field(types, @tagName(tag)).BeaconBlock;
+                return @unionInit(BeaconBlock, @tagName(tag), &B.default_value);
+            },
+        }
+    }
 };
 
 pub const BlindedBeaconBlock = union(enum) {
