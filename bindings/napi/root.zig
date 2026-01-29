@@ -5,6 +5,7 @@ const config = @import("./config.zig");
 const shuffle = @import("./shuffle.zig");
 const proposer_index = @import("./proposer_index.zig");
 const BeaconStateView = @import("./BeaconStateView.zig");
+const blst = @import("./blst.zig");
 
 comptime {
     napi.module.register(register);
@@ -29,6 +30,7 @@ fn register(env: napi.Env, exports: napi.Value) !void {
     try shuffle.register(env, exports);
     try proposer_index.register(env, exports);
     try BeaconStateView.register(env, exports);
+    try blst.register(env, exports);
 
     try exports.setNamedProperty("deinit", try env.createFunction(
         "deinit",
