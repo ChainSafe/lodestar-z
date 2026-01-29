@@ -61,6 +61,61 @@ interface SyncCommitteeCache {
   validatorIndexMap: Map<number, number[]>;
 }
 
+interface ProcessSlotsOpts {
+  dontTransferCache?: boolean;
+}
+
+interface ProposerRewards {
+  attestations: bigint;
+  syncAggregate: bigint;
+  slashing: bigint;
+}
+
+interface SyncCommitteeCache {
+  validatorIndices: number[];
+}
+
+interface HistoricalSummary {
+  blockSummaryRoot: Uint8Array;
+  stateSummaryRoot: Uint8Array;
+}
+
+interface PendingConsolidation {
+  sourceIndex: number;
+  targetIndex: number;
+}
+
+interface Validator {
+  pubkey: Uint8Array;
+  withdrawalCredentials: Uint8Array;
+  effectiveBalance: bigint;
+  slashed: boolean;
+  activationEligibilityEpoch: bigint;
+  activationEpoch: bigint;
+  exitEpoch: bigint;
+  withdrawableEpoch: bigint;
+}
+
+type ValidatorStatus =
+  | "pending_initialized"
+  | "pending_queued"
+  | "active_ongoing"
+  | "active_exiting"
+  | "active_slashed"
+  | "exited_unslashed"
+  | "exited_slashed"
+  | "withdrawal_possible"
+  | "withdrawal_done";
+
+type VoluntaryExitValidity =
+  | "valid"
+  | "inactive"
+  | "already_exited"
+  | "early_epoch"
+  | "short_time_active"
+  | "pending_withdrawals"
+  | "invalid_signature";
+
 declare class BeaconStateView {
   static createFromBytes(fork: string, bytes: Uint8Array): BeaconStateView;
   slot: number;
@@ -75,6 +130,10 @@ declare class BeaconStateView {
   previousJustifiedCheckpoint: Checkpoint;
   currentJustifiedCheckpoint: Checkpoint;
   finalizedCheckpoint: Checkpoint;
+  previousDecisionRoot: Uint8Array;
+  currentDecisionRoot: Uint8Array;
+  nextDecisionRoot: Uint8Array;
+  getShufflingDecisionRoot(epoch: number): Uint8Array;
   proposers: number[];
   proposersNextEpoch: number[] | null;
   proposersPrevEpoch: number[] | null;
@@ -85,7 +144,29 @@ declare class BeaconStateView {
   syncProposerReward: number;
   previousEpochParticipation: number[];
   currentEpochParticipation: number[];
+  proposerRewards: ProposerRewards;
   getBalance(index: number): bigint;
+  getValidator(index: number): Validator;
+  getValidatorStatus(index: number): ValidatorStatus;
+  validatorCount: number;
+  activeValidatorCount: number;
+  getBeaconProposer(slot: number): number;
+  getBeaconProposers(): number[];
+  getBeaconProposersPrevEpoch(): number[] | null;
+  getBeaconProposersNextEpoch(): number[] | null;
+  getIndexedSyncCommitteeAtEpoch(epoch: number): SyncCommitteeCache;
+  getBlockRootAtSlot(slot: number): Uint8Array;
+  getBlockRoot(epoch: number): Uint8Array;
+  isMergeTransitionComplete(): boolean;
+  getRandaoMix(epoch: number): Uint8Array;
+  getHistoricalSummaries(): HistoricalSummary[];
+  getPendingDeposits(): Uint8Array;
+  getPendingPartialWithdrawals(): Uint8Array;
+  getPendingConsolidations(): PendingConsolidation[];
+  getProposerLookahead(): Uint32Array;
+  getSingleProof(gindex: number): Uint8Array[];
+  isValidVoluntaryExit(signedVoluntaryExitBytes: Uint8Array, verifySignature: boolean): boolean;
+  getVoluntaryExitValidity(signedVoluntaryExitBytes: Uint8Array, verifySignature: boolean): VoluntaryExitValidity;
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
   isExecutionStateType(): boolean;
   getEffectiveBalanceIncrementsZeroInactive(): Uint16Array;
@@ -98,6 +179,7 @@ declare class BeaconStateView {
   serializedSize(): number;
   serializeToBytes(output: Uint8Array, offset: number): number;
   hashTreeRoot(): Uint8Array;
+  processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
 }
 
 type Bindings = {
