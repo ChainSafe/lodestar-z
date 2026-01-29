@@ -23,7 +23,7 @@ test "state_transition utils" {
     _ = @import("utils/math.zig");
     _ = @import("utils/pubkey_index_map.zig");
     _ = @import("utils/reference_count.zig");
-    _ = @import("cache/RootCache.zig");
+    _ = @import("cache/root_cache.zig");
     _ = @import("utils/seed.zig");
     _ = @import("utils/shuffle.zig");
     _ = @import("utils/signature_sets.zig");

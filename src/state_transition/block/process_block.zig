@@ -46,8 +46,11 @@ pub fn processBlock(
     opts: ProcessBlockOpts,
     // TODO: metrics
 ) !void {
-    try processBlockHeader(fork, allocator, epoch_cache, state, block_type, block);
+    // Build slashings cache against the *current* latest_block_header slot (pre-header update).
     try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
+    try processBlockHeader(fork, allocator, epoch_cache, state, block_type, block);
+    // Keep cache slot in sync with latest_block_header without forcing a rebuild.
+    slashings_cache.updateLatestBlockSlot(block.slot());
     const body = block.body();
     const current_epoch = epoch_cache.epoch;
 
