@@ -112,76 +112,98 @@ type VoluntaryExitValidity =
 
 declare class BeaconStateView {
   static createFromBytes(fork: string, bytes: Uint8Array): BeaconStateView;
+
   slot: number;
   fork: Fork;
-  root: Uint8Array;
   epoch: number;
   genesisTime: number;
   genesisValidatorsRoot: Uint8Array;
   eth1Data: Eth1Data;
   latestBlockHeader: BeaconBlockHeader;
-  latestExecutionPayloadHeader: ExecutionPayloadHeader;
   previousJustifiedCheckpoint: Checkpoint;
   currentJustifiedCheckpoint: Checkpoint;
   finalizedCheckpoint: Checkpoint;
+  getBlockRoot(slot: number): Uint8Array;
+  getRandaoMix(epoch: number): Uint8Array;
+  previousEpochParticipation: number[];
+  currentEpochParticipation: number[];
+  latestExecutionPayloadHeader: ExecutionPayloadHeader;
+  historicalSummaries: HistoricalSummary[];
+  pendingDeposits: Uint8Array;
+  pendingDepositsCount: number;
+  pendingPartialWithdrawals: Uint8Array;
+  pendingPartialWithdrawalsCount: number;
+  pendingConsolidations: PendingConsolidation[];
+  pendingConsolidationsCount: number;
+  proposerLookahead: Uint32Array;
+  // executionPayloadAvailability: boolean[];
+
+  // getShufflingAtEpoch(epoch: number): EpochShuffling;
   previousDecisionRoot: Uint8Array;
   currentDecisionRoot: Uint8Array;
   nextDecisionRoot: Uint8Array;
+  // TODO wrong return type
   getShufflingDecisionRoot(epoch: number): Uint8Array;
-  proposers: number[];
-  proposersNextEpoch: number[] | null;
-  proposersPrevEpoch: number[] | null;
+  previousProposers: number[] | null;
+  currentProposers: number[];
+  nextProposers: number[];
+  getBeaconProposer(slot: number): number;
   currentSyncCommittee: SyncCommittee;
   nextSyncCommittee: SyncCommittee;
   currentSyncCommitteeIndexed: SyncCommitteeCache;
-  effectiveBalanceIncrements: Uint16Array;
   syncProposerReward: number;
-  previousEpochParticipation: number[];
-  currentEpochParticipation: number[];
-  proposerRewards: ProposerRewards;
-  clonedCount: number;
-  clonedCountWithTransferCache: number;
-  createdWithTransferCache: boolean;
-  pendingDepositsLength: number;
-  pendingPartialWithdrawalsLength: number;
-  pendingConsolidationsLength: number;
-  serializeValidators(): Uint8Array;
-  serializedValidatorsSize(): number;
-  serializeValidatorsToBytes(output: Uint8Array, offset: number): number;
+  getIndexedSyncCommitteeAtEpoch(epoch: number): SyncCommitteeCache;
+
+  effectiveBalanceIncrements: Uint16Array;
+  getEffectiveBalanceIncrementsZeroInactive(): Uint16Array;
   getBalance(index: number): bigint;
   getValidator(index: number): Validator;
+  // TODO wrong function
   getValidatorStatus(index: number): ValidatorStatus;
   validatorCount: number;
   activeValidatorCount: number;
-  getBeaconProposer(slot: number): number;
-  getBeaconProposers(): number[];
-  getBeaconProposersPrevEpoch(): number[] | null;
-  getBeaconProposersNextEpoch(): number[] | null;
-  getIndexedSyncCommitteeAtEpoch(epoch: number): SyncCommitteeCache;
-  getBlockRootAtSlot(slot: number): Uint8Array;
-  getBlockRoot(epoch: number): Uint8Array;
-  isMergeTransitionComplete(): boolean;
-  getRandaoMix(epoch: number): Uint8Array;
-  getHistoricalSummaries(): HistoricalSummary[];
-  getPendingDeposits(): Uint8Array;
-  getPendingPartialWithdrawals(): Uint8Array;
-  getPendingConsolidations(): PendingConsolidation[];
-  getProposerLookahead(): Uint32Array;
-  getSingleProof(gindex: number): Uint8Array[];
-  isValidVoluntaryExit(signedVoluntaryExitBytes: Uint8Array, verifySignature: boolean): boolean;
-  getVoluntaryExitValidity(signedVoluntaryExitBytes: Uint8Array, verifySignature: boolean): VoluntaryExitValidity;
+
+  isExecutionStateType: boolean;
+  isMergeTransitionComplete: boolean;
+  // TODO remove
   isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
-  isExecutionStateType(): boolean;
-  getEffectiveBalanceIncrementsZeroInactive(): Uint16Array;
+
+  // getExpectedWithdrawals(): ExpectedWithdrawals;
+
+  proposerRewards: ProposerRewards;
+  // computeBlockRewards(block: BeaconBlock, proposerRewards: RewardsCache): BlockRewards;
+  // computeAttestationRewards(validatorIds?: (number | string)[]): AttestationRewards;
+  // computeSyncCommitteeRewards(block: BeaconBlock, validatorIds?: (number | string)[]): SyncCommitteeRewards;
+  // getLatestWeakSubjectivityCheckpointEpoch(): number;
+
+  getVoluntaryExitValidity(signedVoluntaryExitBytes: Uint8Array, verifySignature: boolean): VoluntaryExitValidity;
+  isValidVoluntaryExit(signedVoluntaryExitBytes: Uint8Array, verifySignature: boolean): boolean;
+
   getFinalizedRootProof(): Uint8Array[];
+  // getSyncCommitteesWitness(): SyncCommitteeWitness;
+  getSingleProof(gindex: number): Uint8Array[];
+  // createMultiProof(descriptor: Uint8Array): CompactMultiProof;
+
   computeUnrealizedCheckpoints(): {
     justifiedCheckpoint: Checkpoint;
     finalizedCheckpoint: Checkpoint;
   };
+
+  clonedCount: number;
+  clonedCountWithTransferCache: number;
+  createdWithTransferCache: boolean;
+  // isStateValidatorsNodesPopulated(): boolean;
+
+  // loadOtherState(stateBytes: Uint8Array, seedValidatorsBytes?: Uint8Array): void;
   serialize(): Uint8Array;
   serializedSize(): number;
   serializeToBytes(output: Uint8Array, offset: number): number;
+  serializeValidators(): Uint8Array;
+  serializedValidatorsSize(): number;
+  serializeValidatorsToBytes(output: Uint8Array, offset: number): number;
   hashTreeRoot(): Uint8Array;
+
+  // stateTransition(signedBlockBytes: Uint8Array): BeaconStateView;
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
 }
 
