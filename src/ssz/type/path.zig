@@ -1,5 +1,4 @@
 const std = @import("std");
-const isFixedType = @import("type_kind.zig").isFixedType;
 const isBasicType = @import("type_kind.zig").isBasicType;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const BYTES_PER_CHUNK = @import("root.zig").BYTES_PER_CHUNK;

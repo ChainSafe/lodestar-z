@@ -1,5 +1,3 @@
-const std = @import("std");
-const preset = @import("preset").preset;
 const ChainConfig = @import("../ChainConfig.zig");
 const BeaconConfig = @import("../BeaconConfig.zig");
 const b = @import("hex").hexToBytesComptime;

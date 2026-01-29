@@ -1,4 +1,3 @@
-const std = @import("std");
 const ssz = @import("ssz");
 const p = @import("primitive.zig");
 const c = @import("constants");

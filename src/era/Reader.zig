@@ -4,7 +4,7 @@ const std = @import("std");
 const c = @import("config");
 const preset = @import("preset").preset;
 const Node = @import("persistent_merkle_tree").Node;
-const state_transition = @import("state_transition");
+const fork_types = @import("fork_types");
 const snappy = @import("snappy").frame;
 const e2s = @import("e2s.zig");
 const era = @import("era.zig");
@@ -91,14 +91,14 @@ pub fn readSerializedState(self: Reader, allocator: std.mem.Allocator, era_numbe
     return try snappy.uncompress(allocator, compressed) orelse error.InvalidE2SHeader;
 }
 
-pub fn readState(self: Reader, allocator: std.mem.Allocator, era_number: ?u64) !state_transition.BeaconState {
+pub fn readState(self: Reader, allocator: std.mem.Allocator, era_number: ?u64) !fork_types.AnyBeaconState {
     const serialized = try self.readSerializedState(allocator, era_number);
     defer allocator.free(serialized);
 
     const state_slot = era.readSlotFromBeaconStateBytes(serialized);
     const state_fork = self.config.forkSeq(state_slot);
 
-    return try state_transition.BeaconState.deserialize(allocator, self.pool, state_fork, serialized);
+    return try fork_types.AnyBeaconState.deserialize(allocator, self.pool, state_fork, serialized);
 }
 
 pub fn readCompressedBlock(self: Reader, allocator: std.mem.Allocator, slot: u64) !?[]const u8 {
@@ -131,13 +131,13 @@ pub fn readSerializedBlock(self: Reader, allocator: std.mem.Allocator, slot: u64
     return try snappy.uncompress(allocator, compressed) orelse error.InvalidE2SHeader;
 }
 
-pub fn readBlock(self: Reader, allocator: std.mem.Allocator, slot: u64) !?state_transition.SignedBeaconBlock {
+pub fn readBlock(self: Reader, allocator: std.mem.Allocator, slot: u64) !?fork_types.AnySignedBeaconBlock {
     const serialized = try self.readSerializedBlock(allocator, slot) orelse return null;
     defer allocator.free(serialized);
 
     const fork_seq = self.config.forkSeq(slot);
 
-    return try state_transition.SignedBeaconBlock.deserialize(allocator, fork_seq, serialized);
+    return try fork_types.AnySignedBeaconBlock.deserialize(allocator, .full, fork_seq, serialized);
 }
 
 /// Validate the era file.

@@ -171,16 +171,27 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 allocator.destroy(cloned_state);
             }
 
-            var epoch_cache = try EpochTransitionCache.init(allocator, cloned_state);
-            defer {
-                epoch_cache.deinit();
-                allocator.destroy(epoch_cache);
-            }
+            var epoch_transition_cache = try EpochTransitionCache.init(
+                allocator,
+                cloned_state.config,
+                cloned_state.getEpochCache(),
+                cloned_state.state,
+            );
+            defer epoch_transition_cache.deinit();
 
-            try getRewardsAndPenaltiesFn(allocator, cloned_state, epoch_cache, epoch_cache.rewards, epoch_cache.penalties);
+            try getRewardsAndPenaltiesFn(
+                fork,
+                allocator,
+                cloned_state.config,
+                cloned_state.getEpochCache(),
+                cloned_state.state.castToFork(fork),
+                &epoch_transition_cache,
+                epoch_transition_cache.rewards,
+                epoch_transition_cache.penalties,
+            );
 
-            self.actual_rewards = epoch_cache.rewards;
-            self.actual_penalties = epoch_cache.penalties;
+            self.actual_rewards = epoch_transition_cache.rewards;
+            self.actual_penalties = epoch_transition_cache.penalties;
         }
 
         fn accumulateDeltas(

@@ -1,6 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const BeaconConfig = @import("config").BeaconConfig;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const BeaconState = @import("fork_types").BeaconState;
 const ct = @import("consensus_types");
 const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
 const constants = @import("constants");
@@ -10,23 +12,19 @@ const getConsolidationChurnLimit = @import("../utils/validator.zig").getConsolid
 const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCompoundingWithdrawalCredential;
 const queueExcessActiveBalance = @import("../utils/electra.zig").queueExcessActiveBalance;
 
-pub fn upgradeStateToElectra(allocator: Allocator, cached_state: *CachedBeaconState) !void {
-    var deneb_state = cached_state.state.*;
-    if (deneb_state.forkSeq() != .deneb) {
-        return error.StateIsNotDeneb;
-    }
-
+pub fn upgradeStateToElectra(
+    allocator: Allocator,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    deneb_state: *BeaconState(.deneb),
+) !BeaconState(.electra) {
     var state = try deneb_state.upgradeUnsafe();
-    cached_state.state.* = state;
-    errdefer {
-        state.deinit();
-        cached_state.state.* = deneb_state;
-    }
+    errdefer state.deinit();
 
     const new_fork: ct.phase0.Fork.Type = .{
         .previous_version = try deneb_state.forkCurrentVersion(),
-        .current_version = cached_state.config.chain.ELECTRA_FORK_VERSION,
-        .epoch = cached_state.getEpochCache().epoch,
+        .current_version = config.chain.ELECTRA_FORK_VERSION,
+        .epoch = epoch_cache.epoch,
     };
     try state.setFork(&new_fork);
 
@@ -35,7 +33,7 @@ pub fn upgradeStateToElectra(allocator: Allocator, cached_state: *CachedBeaconSt
     // try state.setDepositBalanceToConsume(0);
     // try state.setExitBalanceToConsume(0);
 
-    const current_epoch_pre = cached_state.getEpochCache().epoch;
+    const current_epoch_pre = epoch_cache.epoch;
     var earliest_exit_epoch = computeActivationExitEpoch(current_epoch_pre);
     // [EIP-7251]: add validators that are not yet active to pending balance deposits
     var pre_activation = std.ArrayList(ct.primitive.ValidatorIndex.Type).init(allocator);
@@ -55,8 +53,8 @@ pub fn upgradeStateToElectra(allocator: Allocator, cached_state: *CachedBeaconSt
 
     try state.setEarliestExitEpoch(earliest_exit_epoch + 1);
     try state.setEarliestConsolidationEpoch(computeActivationExitEpoch(current_epoch_pre));
-    try state.setExitBalanceToConsume(getActivationExitChurnLimit(cached_state.getEpochCache()));
-    try state.setConsolidationBalanceToConsume(getConsolidationChurnLimit(cached_state.getEpochCache()));
+    try state.setExitBalanceToConsume(getActivationExitChurnLimit(epoch_cache));
+    try state.setConsolidationBalanceToConsume(getConsolidationChurnLimit(epoch_cache));
 
     const sort_fn = struct {
         pub fn sort(validator_arr: []const ct.phase0.Validator.Type, a: ValidatorIndex, b: ValidatorIndex) bool {
@@ -70,7 +68,7 @@ pub fn upgradeStateToElectra(allocator: Allocator, cached_state: *CachedBeaconSt
     // const electra_state = state.electra;
     var balances = try state.balances();
     var validators = try state.validators();
-    const effective_balance_increments = cached_state.getEpochCache().getEffectiveBalanceIncrements();
+    const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
     var pending_deposits = try state.pendingDeposits();
     for (pre_activation.items) |validator_index| {
         const balance = try balances.get(validator_index);
@@ -95,9 +93,10 @@ pub fn upgradeStateToElectra(allocator: Allocator, cached_state: *CachedBeaconSt
         // [EIP-7251]: Ensure early adopters of compounding credentials go through the activation churn
         const withdrawal_credentials = validator.withdrawal_credentials;
         if (hasCompoundingWithdrawalCredential(&withdrawal_credentials)) {
-            try queueExcessActiveBalance(cached_state, validator_index, &withdrawal_credentials, validator.pubkey);
+            try queueExcessActiveBalance(.electra, &state, validator_index, &withdrawal_credentials, validator.pubkey);
         }
     }
 
     deneb_state.deinit();
+    return state;
 }

@@ -5,7 +5,6 @@ const TypeKind = @import("type_kind.zig").TypeKind;
 const UintType = @import("uint.zig").UintType;
 const hexToBytes = @import("hex").hexToBytes;
 const hexByteLen = @import("hex").hexByteLen;
-const hexLenFromBytes = @import("hex").hexLenFromBytes;
 const bytesToHex = @import("hex").bytesToHex;
 const merkleize = @import("hashing").merkleize;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;

@@ -1,12 +1,13 @@
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
+const types = @import("consensus_types");
 const Slot = types.primitive.Slot.Type;
 const Epoch = types.primitive.Epoch.Type;
 const SyncPeriod = types.primitive.SyncPeriod.Type;
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
 const Gwei = types.primitive.Gwei.Type;
+const ForkSeq = @import("config").ForkSeq;
+const BeaconState = @import("fork_types").BeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const getActivationExitChurnLimit = @import("../utils/validator.zig").getActivationExitChurnLimit;
 const getConsolidationChurnLimit = @import("../utils/validator.zig").getConsolidationChurnLimit;
 
@@ -34,9 +35,12 @@ pub fn computeActivationExitEpoch(epoch: Epoch) Epoch {
     return epoch + 1 + preset.MAX_SEED_LOOKAHEAD;
 }
 
-pub fn computeExitEpochAndUpdateChurn(cached_state: *const CachedBeaconState, exit_balance: Gwei) !u64 {
-    var state = cached_state.state;
-    const epoch_cache = cached_state.getEpochCache();
+pub fn computeExitEpochAndUpdateChurn(
+    comptime fork: ForkSeq,
+    epoch_cache: *const EpochCache,
+    state: *BeaconState(fork),
+    exit_balance: Gwei,
+) !u64 {
     const state_earliest_exit_epoch = try state.earliestExitEpoch();
     var earliest_exit_epoch = @max(state_earliest_exit_epoch, computeActivationExitEpoch(epoch_cache.epoch));
     const per_epoch_churn = getActivationExitChurnLimit(epoch_cache);
@@ -63,10 +67,12 @@ pub fn computeExitEpochAndUpdateChurn(cached_state: *const CachedBeaconState, ex
     return earliest_exit_epoch;
 }
 
-pub fn computeConsolidationEpochAndUpdateChurn(cached_state: *const CachedBeaconState, consolidation_balance: Gwei) !u64 {
-    var state = cached_state.state;
-    const epoch_cache = cached_state.getEpochCache();
-
+pub fn computeConsolidationEpochAndUpdateChurn(
+    comptime fork: ForkSeq,
+    epoch_cache: *const EpochCache,
+    state: *BeaconState(fork),
+    consolidation_balance: Gwei,
+) !u64 {
     const state_earliest_consolidation_epoch = try state.earliestConsolidationEpoch();
     var earliest_consolidation_epoch = @max(state_earliest_consolidation_epoch, computeActivationExitEpoch(epoch_cache.epoch));
     const per_epoch_consolidation_churn = getConsolidationChurnLimit(epoch_cache);
@@ -94,16 +100,8 @@ pub fn computeConsolidationEpochAndUpdateChurn(cached_state: *const CachedBeacon
     return earliest_consolidation_epoch;
 }
 
-pub fn getCurrentEpoch(state: BeaconState) Epoch {
-    return computeEpochAtSlot(state.slot());
-}
-
 pub fn computePreviousEpoch(epoch: Epoch) Epoch {
     return if (epoch == GENESIS_EPOCH) GENESIS_EPOCH else epoch - 1;
-}
-
-pub fn getPreviousEpoch(state: BeaconState) Epoch {
-    return computePreviousEpoch(getCurrentEpoch(state));
 }
 
 pub fn computeSyncPeriodAtSlot(slot: Slot) SyncPeriod {

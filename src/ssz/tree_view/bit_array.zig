@@ -1,10 +1,6 @@
-const std = @import("std");
-const Allocator = std.mem.Allocator;
-
 const hashing = @import("hashing");
 const Depth = hashing.Depth;
 
-const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 
 const BaseTreeView = @import("root.zig").BaseTreeView;

@@ -2,7 +2,6 @@ const std = @import("std");
 const zbench = @import("zbench");
 
 const Depth = @import("hashing").Depth;
-const Gindex = @import("gindex.zig").Gindex;
 const Node = @import("Node.zig");
 const Pool = Node.Pool;
 

@@ -1,21 +1,20 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const BeaconState = @import("fork_types").BeaconState;
 const types = @import("consensus_types");
 const Root = types.primitive.Root.Type;
 const preset = @import("preset").preset;
 const c = @import("constants");
 const ForkSeq = @import("config").ForkSeq;
-const Withdrawal = types.capella.Withdrawal.Type;
 const Withdrawals = types.capella.Withdrawals.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const ExecutionAddress = types.primitive.ExecutionAddress.Type;
-const PendingPartialWithdrawal = types.electra.PendingPartialWithdrawal.Type;
-const ExecutionPayload = @import("../types/execution_payload.zig").ExecutionPayload;
 const hasExecutionWithdrawalCredential = @import("../utils/electra.zig").hasExecutionWithdrawalCredential;
 const hasEth1WithdrawalCredential = @import("../utils/capella.zig").hasEth1WithdrawalCredential;
 const getMaxEffectiveBalance = @import("../utils/validator.zig").getMaxEffectiveBalance;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
+const Node = @import("persistent_merkle_tree").Node;
 
 pub const WithdrawalsResult = struct {
     withdrawals: Withdrawals,
@@ -28,12 +27,12 @@ pub const WithdrawalsResult = struct {
 /// TODO: spec and implementation should be the same
 /// refer to https://github.com/ethereum/consensus-specs/blob/dev/specs/electra/beacon-chain.md#modified-process_withdrawals
 pub fn processWithdrawals(
+    comptime fork: ForkSeq,
     allocator: Allocator,
-    cached_state: *CachedBeaconState,
+    state: *BeaconState(fork),
     expected_withdrawals_result: WithdrawalsResult,
     payload_withdrawals_root: Root,
 ) !void {
-    var state = cached_state.state;
     // processedPartialWithdrawalsCount is withdrawals coming from EL since electra (EIP-7002)
     const processed_partial_withdrawals_count = expected_withdrawals_result.processed_partial_withdrawals_count;
     const expected_withdrawals = expected_withdrawals_result.withdrawals.items;
@@ -48,10 +47,10 @@ pub fn processWithdrawals(
 
     for (0..num_withdrawals) |i| {
         const withdrawal = expected_withdrawals[i];
-        try decreaseBalance(state, withdrawal.validator_index, withdrawal.amount);
+        try decreaseBalance(fork, state, withdrawal.validator_index, withdrawal.amount);
     }
 
-    if (state.forkSeq().gte(.electra)) {
+    if (comptime fork.gte(.electra)) {
         if (processed_partial_withdrawals_count > 0) {
             var pending_partial_withdrawals = try state.pendingPartialWithdrawals();
             const truncated = try pending_partial_withdrawals.sliceFrom(processed_partial_withdrawals_count);
@@ -85,17 +84,16 @@ pub fn processWithdrawals(
 
 // Consumer should deinit WithdrawalsResult with .deinit() after use
 pub fn getExpectedWithdrawals(
+    comptime fork: ForkSeq,
     allocator: Allocator,
+    epoch_cache: *const EpochCache,
+    state: *BeaconState(fork),
     withdrawals_result: *WithdrawalsResult,
     withdrawal_balances: *std.AutoHashMap(ValidatorIndex, usize),
-    cached_state: *const CachedBeaconState,
 ) !void {
-    var state = cached_state.state;
-    if (state.forkSeq().lt(.capella)) {
+    if (comptime fork.lt(.capella)) {
         return error.InvalidForkSequence;
     }
-
-    const epoch_cache = cached_state.getEpochCache();
 
     const epoch = epoch_cache.epoch;
     var withdrawal_index = try state.nextWithdrawalIndex();
@@ -106,7 +104,7 @@ pub fn getExpectedWithdrawals(
     // partial_withdrawals_count is withdrawals coming from EL since electra (EIP-7002)
     var processed_partial_withdrawals_count: u64 = 0;
 
-    if (state.forkSeq().gte(.electra)) {
+    if (comptime fork.gte(.electra)) {
         // MAX_PENDING_PARTIALS_PER_WITHDRAWALS_SWEEP = 8, PENDING_PARTIAL_WITHDRAWALS_LIMIT: 134217728 so we should just lazily iterate thru state.pending_partial_withdrawals.
         // pending_partial_withdrawals comes from EIP-7002 smart contract where it takes fee so it's more likely than not validator is in correct condition to withdraw
         // also we may break early if withdrawableEpoch > epoch
@@ -161,7 +159,7 @@ pub fn getExpectedWithdrawals(
         const withdraw_balance_gop = try withdrawal_balances.getOrPut(validator_index);
         const withdraw_balance: u64 = if (withdraw_balance_gop.found_existing) withdraw_balance_gop.value_ptr.* else 0;
         const val_balance = try balances.get(validator_index);
-        const balance = if (state.forkSeq().gte(.electra))
+        const balance = if (comptime fork.gte(.electra))
             // Deduct partially withdrawn balance already queued above
             if (val_balance > withdraw_balance) val_balance - withdraw_balance else 0
         else
@@ -170,7 +168,7 @@ pub fn getExpectedWithdrawals(
         const withdrawable_epoch = try validator.get("withdrawable_epoch");
         const withdrawal_credentials = try validator.getRoot("withdrawal_credentials");
         const effective_balance = try validator.get("effective_balance");
-        const has_withdrawable_credentials = if (state.forkSeq().gte(.electra)) hasExecutionWithdrawalCredential(withdrawal_credentials) else hasEth1WithdrawalCredential(withdrawal_credentials);
+        const has_withdrawable_credentials = if (comptime fork.gte(.electra)) hasExecutionWithdrawalCredential(withdrawal_credentials) else hasEth1WithdrawalCredential(withdrawal_credentials);
         // early skip for balance = 0 as its now more likely that validator has exited/slashed with
         // balance zero than not have withdrawal credentials set
         if (balance == 0 or !has_withdrawable_credentials) {
@@ -188,7 +186,7 @@ pub fn getExpectedWithdrawals(
                 .amount = balance,
             });
             withdrawal_index += 1;
-        } else if ((effective_balance == if (state.forkSeq().gte(.electra))
+        } else if ((effective_balance == if (comptime fork.gte(.electra))
             getMaxEffectiveBalance(withdrawal_credentials)
         else
             preset.MAX_EFFECTIVE_BALANCE) and balance > effective_balance)
@@ -217,4 +215,44 @@ pub fn getExpectedWithdrawals(
 
     withdrawals_result.sampled_validators = n;
     withdrawals_result.processed_partial_withdrawals_count = processed_partial_withdrawals_count;
+}
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
+test "process withdrawals - sanity" {
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var withdrawals_result = WithdrawalsResult{
+        .withdrawals = try Withdrawals.initCapacity(
+            allocator,
+            preset.MAX_WITHDRAWALS_PER_PAYLOAD,
+        ),
+    };
+    defer withdrawals_result.withdrawals.deinit(allocator);
+    var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
+    defer withdrawal_balances.deinit();
+
+    var root: Root = undefined;
+    try types.capella.Withdrawals.hashTreeRoot(allocator, &withdrawals_result.withdrawals, &root);
+
+    try getExpectedWithdrawals(
+        .electra,
+        allocator,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+        &withdrawals_result,
+        &withdrawal_balances,
+    );
+    try processWithdrawals(
+        .electra,
+        allocator,
+        test_state.cached_state.state.castToFork(.electra),
+        withdrawals_result,
+        root,
+    );
 }

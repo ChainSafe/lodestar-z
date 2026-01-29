@@ -1,10 +1,11 @@
 const std = @import("std");
 const testing = std.testing;
 
+pub const stateTransition = @import("state_transition.zig").stateTransition;
+
+pub const metrics = @import("metrics.zig");
+
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
-pub const BeaconBlock = @import("./types/beacon_block.zig").BeaconBlock;
-pub const BeaconBlockBody = @import("./types/beacon_block.zig").BeaconBlockBody;
-pub const BeaconState = @import("./types/beacon_state.zig").BeaconState;
 pub const CachedBeaconState = @import("./cache/state_cache.zig").CachedBeaconState;
 pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
 
@@ -82,11 +83,6 @@ pub const state_transition = @import("./state_transition.zig");
 pub const BlockExternalData = state_transition.BlockExternalData;
 pub const preset = @import("preset").preset;
 const EpochShuffling = @import("./utils/epoch_shuffling.zig");
-pub const SignedBlock = @import("./types/block.zig").SignedBlock;
-pub const Block = @import("./types/block.zig").Block;
-pub const Body = @import("./types/block.zig").Body;
-pub const SignedBeaconBlock = @import("./types/beacon_block.zig").SignedBeaconBlock;
-pub const Attestations = @import("./types/attestation.zig").Attestations;
 pub const processProposerLookahead = @import("./epoch/process_proposer_lookahead.zig").processProposerLookahead;
 
 test {
