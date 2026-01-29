@@ -30,12 +30,16 @@ pub fn processInactivityUpdates(
     const FLAG_PREV_TARGET_ATTESTER_UNSLASHED = attester_status_utils.FLAG_PREV_TARGET_ATTESTER_UNSLASHED;
     const FLAG_ELIGIBLE_ATTESTER = attester_status_utils.FLAG_ELIGIBLE_ATTESTER;
 
-    // TODO for TreeView, we may want to convert to value and back
     var inactivity_scores = try state.inactivityScores();
+    try inactivity_scores.commit();
+    const allocator = state.baseView().allocator;
+    const inactivity_scores_values = try inactivity_scores.getAll(allocator);
+    defer allocator.free(inactivity_scores_values);
+    std.debug.assert(flags.len <= inactivity_scores_values.len);
     for (0..flags.len) |i| {
         const flag = flags[i];
         if (hasMarkers(flag, FLAG_ELIGIBLE_ATTESTER)) {
-            var inactivity_score = try inactivity_scores.get(i);
+            var inactivity_score = inactivity_scores_values[i];
 
             const prev_inactivity_score = inactivity_score;
             if (hasMarkers(flag, FLAG_PREV_TARGET_ATTESTER_UNSLASHED)) {
