@@ -1,26 +1,11 @@
 const std = @import("std");
 const napi = @import("zapi:napi");
 const c = @import("config");
-const state_transition = @import("state_transition");
-const BeaconState = state_transition.BeaconState;
-const CachedBeaconState = state_transition.CachedBeaconState;
-const ExecutionPayloadHeader = state_transition.ExecutionPayloadHeader;
-const SignedBeaconBlock = state_transition.SignedBeaconBlock;
-const SignedBlock = state_transition.SignedBlock;
-const isExecutionEnabledFunc = state_transition.isExecutionEnabled;
-const computeUnrealizedCheckpoints = state_transition.computeUnrealizedCheckpoints;
-const getEffectiveBalanceIncrementsZeroInactiveFn = state_transition.getEffectiveBalanceIncrementsZeroInactive;
-const processSlotsFn = state_transition.state_transition.processSlots;
-const ValidatorStatus = state_transition.ValidatorStatus;
-const getValidatorStatus = state_transition.getValidatorStatus;
-const getBlockRootAtSlot = state_transition.getBlockRootAtSlot;
-const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
-const isMergeTransitionComplete = state_transition.isMergeTransitionComplete;
-const getRandaoMix = state_transition.getRandaoMix;
-const isValidVoluntaryExitFn = state_transition.isValidVoluntaryExit;
-const getVoluntaryExitValidityFn = state_transition.getVoluntaryExitValidity;
-const VoluntaryExitValidity = state_transition.VoluntaryExitValidity;
-const calculateShufflingDecisionRoot = state_transition.calculateShufflingDecisionRoot;
+const st = @import("state_transition");
+const CachedBeaconState = st.CachedBeaconState;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
+const AnyExecutionPayloadHeader = @import("fork_types").AnyExecutionPayloadHeader;
+const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 const preset = @import("preset").preset;
 const ct = @import("consensus_types");
 const pool = @import("./pool.zig");
@@ -29,8 +14,7 @@ const pubkey = @import("./pubkeys.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
 const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiValue;
 
-const BeaconStateView = @This();
-
+/// Allocator used for all BeaconStateView instances.
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = gpa.allocator();
 
@@ -62,10 +46,10 @@ pub fn BeaconStateView_createFromBytes(env: napi.Env, cb: napi.CallbackInfo(2)) 
     const fork = c.ForkSeq.fromName(fork_name);
 
     const bytes_info = try cb.arg(1).getTypedarrayInfo();
-    const state = try allocator.create(BeaconState);
+    const state = try allocator.create(AnyBeaconState);
     errdefer allocator.destroy(state);
 
-    state.* = try BeaconState.deserialize(allocator, &pool.pool, fork, bytes_info.data);
+    state.* = try AnyBeaconState.deserialize(allocator, &pool.pool, fork, bytes_info.data);
     errdefer state.deinit();
 
     const cached_state_value = try env.newInstance(ctor, .{});
@@ -161,7 +145,10 @@ pub fn BeaconStateView_getBlockRoot(env: napi.Env, cb: napi.CallbackInfo(1)) !na
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const slot: u64 = @intCast(try cb.arg(0).getValueInt64());
 
-    const root = getBlockRootAtSlot(cached_state.state, slot) catch |err| {
+    const result = switch (cached_state.state.forkSeq()) {
+        inline else => |f| st.getBlockRootAtSlot(f, cached_state.state.castToFork(f), slot),
+    };
+    const root = result catch |err| {
         const msg = switch (err) {
             error.SlotTooBig => "Can only get block root in the past",
             error.SlotTooSmall => "Cannot get block root more than SLOTS_PER_HISTORICAL_ROOT in the past",
@@ -182,7 +169,10 @@ pub fn BeaconStateView_getRandaoMix(env: napi.Env, cb: napi.CallbackInfo(1)) !na
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const epoch: u64 = @intCast(try cb.arg(0).getValueInt64());
 
-    const mix = getRandaoMix(cached_state.state, epoch) catch {
+    const result = switch (cached_state.state.forkSeq()) {
+        inline else => |f| st.getRandaoMix(f, cached_state.state.castToFork(f), epoch),
+    };
+    const mix = result catch {
         try env.throwError("INVALID_EPOCH", "Failed to get randao mix for epoch");
         return env.getNull();
     };
@@ -210,7 +200,7 @@ pub fn BeaconStateView_currentEpochParticipation(env: napi.Env, cb: napi.Callbac
 
 pub fn BeaconStateView_latestExecutionPayloadHeader(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    var header: ExecutionPayloadHeader = undefined;
+    var header: AnyExecutionPayloadHeader = undefined;
     try cached_state.state.latestExecutionPayloadHeader(allocator, &header);
     defer header.deinit(allocator);
 
@@ -218,8 +208,6 @@ pub fn BeaconStateView_latestExecutionPayloadHeader(env: napi.Env, cb: napi.Call
         .bellatrix => |*h| try sszValueToNapiValue(env, ct.bellatrix.ExecutionPayloadHeader, h),
         .capella => |*h| try sszValueToNapiValue(env, ct.capella.ExecutionPayloadHeader, h),
         .deneb => |*h| try sszValueToNapiValue(env, ct.deneb.ExecutionPayloadHeader, h),
-        .electra => |*h| try sszValueToNapiValue(env, ct.electra.ExecutionPayloadHeader, h),
-        .fulu => |*h| try sszValueToNapiValue(env, ct.fulu.ExecutionPayloadHeader, h),
     };
 }
 
@@ -392,7 +380,7 @@ pub fn BeaconStateView_nextDecisionRoot(env: napi.Env, cb: napi.CallbackInfo(0))
 pub fn BeaconStateView_getShufflingDecisionRoot(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const epoch: u64 = @intCast(try cb.arg(0).getValueInt64());
-    const root = calculateShufflingDecisionRoot(allocator, cached_state.state, epoch) catch {
+    const root = st.calculateShufflingDecisionRoot(allocator, cached_state.state, epoch) catch {
         try env.throwError("STATE_ERROR", "Failed to calculate shuffling decision root");
         return env.getNull();
     };
@@ -530,7 +518,7 @@ pub fn BeaconStateView_effectiveBalanceIncrements(env: napi.Env, cb: napi.Callba
 pub fn BeaconStateView_getEffectiveBalanceIncrementsZeroInactive(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
 
-    var result = try getEffectiveBalanceIncrementsZeroInactiveFn(allocator, cached_state);
+    var result = try st.getEffectiveBalanceIncrementsZeroInactive(allocator, cached_state);
     defer result.deinit();
 
     const validator_count = result.items.len;
@@ -592,7 +580,7 @@ pub fn BeaconStateView_getValidatorStatus(env: napi.Env, cb: napi.CallbackInfo(1
     var validator: ct.phase0.Validator.Type = undefined;
     try validator_view.toValue(allocator, &validator);
 
-    const status = getValidatorStatus(&validator, current_epoch);
+    const status = st.getValidatorStatus(&validator, current_epoch);
     return try env.createStringUtf8(status.toString());
 }
 
@@ -630,11 +618,30 @@ pub fn BeaconStateView_isExecutionEnabled(env: napi.Env, cb: napi.CallbackInfo(2
     const bytes_info = try cb.arg(1).getTypedarrayInfo();
 
     // Deserialize the signed block
-    const signed_block = try SignedBeaconBlock.deserialize(allocator, fork, bytes_info.data);
+    const signed_block = try AnySignedBeaconBlock.deserialize(
+        allocator,
+        .full,
+        fork,
+        bytes_info.data,
+    );
     defer signed_block.deinit(allocator);
 
-    const signed = SignedBlock{ .regular = signed_block };
-    const result = isExecutionEnabledFunc(cached_state.state, signed.message());
+    if (signed_block.forkSeq() != cached_state.state.forkSeq()) {
+        try env.throwError("FORK_MISMATCH", "Fork of signed block does not match state fork");
+        return env.getNull();
+    }
+    const result = switch (cached_state.state.forkSeq()) {
+        inline else => |f| switch (signed_block.blockType()) {
+            inline else => |bt| if (comptime bt == .blinded and f.lt(.bellatrix)) {
+                return error.InvalidBlockTypeForFork;
+            } else st.isExecutionEnabled(
+                f,
+                cached_state.state.castToFork(f),
+                bt,
+                signed_block.beaconBlock().castToFork(bt, f),
+            ),
+        },
+    };
     return try env.getBoolean(result);
 }
 
@@ -642,7 +649,10 @@ pub fn BeaconStateView_isExecutionEnabled(env: napi.Env, cb: napi.CallbackInfo(2
 /// Returns: boolean
 pub fn BeaconStateView_isMergeTransitionComplete(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    return env.getBoolean(isMergeTransitionComplete(cached_state.state));
+    const result = switch (cached_state.state.forkSeq()) {
+        inline else => |f| st.isMergeTransitionComplete(f, cached_state.state.castToFork(f)),
+    };
+    return env.getBoolean(result);
 }
 
 // pub fn BeaconStateView_getExpectedWithdrawals
@@ -689,22 +699,22 @@ pub fn BeaconStateView_getVoluntaryExitValidity(env: napi.Env, cb: napi.Callback
         return env.getNull();
     };
 
-    const validity = getVoluntaryExitValidityFn(cached_state, &signed_voluntary_exit, verify_signature) catch {
+    const result = switch (cached_state.state.forkSeq()) {
+        inline else => |f| st.getVoluntaryExitValidity(
+            f,
+            cached_state.config,
+            cached_state.getEpochCache(),
+            cached_state.state.castToFork(f),
+            &signed_voluntary_exit,
+            verify_signature,
+        ),
+    };
+    const validity = result catch {
         try env.throwError("VALIDATION_ERROR", "Failed to get voluntary exit validity");
         return env.getNull();
     };
 
-    const validity_str = switch (validity) {
-        .valid => "valid",
-        .inactive => "inactive",
-        .already_exited => "already_exited",
-        .early_epoch => "early_epoch",
-        .short_time_active => "short_time_active",
-        .pending_withdrawals => "pending_withdrawals",
-        .invalid_signature => "invalid_signature",
-    };
-
-    return env.createStringUtf8(validity_str);
+    return env.createStringUtf8(@tagName(validity));
 }
 
 /// Check if a signed voluntary exit is valid.
@@ -720,7 +730,17 @@ pub fn BeaconStateView_isValidVoluntaryExit(env: napi.Env, cb: napi.CallbackInfo
         return env.getNull();
     };
 
-    const is_valid = isValidVoluntaryExitFn(cached_state, &signed_voluntary_exit, verify_signature) catch {
+    const result = switch (cached_state.state.forkSeq()) {
+        inline else => |f| st.isValidVoluntaryExit(
+            f,
+            cached_state.config,
+            cached_state.getEpochCache(),
+            cached_state.state.castToFork(f),
+            &signed_voluntary_exit,
+            verify_signature,
+        ),
+    };
+    const is_valid = result catch {
         try env.throwError("VALIDATION_ERROR", "Failed to validate voluntary exit");
         return env.getNull();
     };
@@ -765,7 +785,7 @@ pub fn BeaconStateView_getSingleProof(env: napi.Env, cb: napi.CallbackInfo(1)) !
 
 pub fn BeaconStateView_computeUnrealizedCheckpoints(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const result = try computeUnrealizedCheckpoints(cached_state, allocator);
+    const result = try st.computeUnrealizedCheckpoints(cached_state, allocator);
 
     const obj = try env.createObject();
     try obj.setNamedProperty(
@@ -906,7 +926,7 @@ pub fn BeaconStateView_processSlots(env: napi.Env, cb: napi.CallbackInfo(1)) !na
         allocator.destroy(post_state);
     }
 
-    try processSlotsFn(allocator, post_state, slot, .{});
+    try st.processSlots(allocator, post_state, slot, .{});
 
     const ctor = try cb.this().getNamedProperty("constructor");
     const new_state_value = try env.newInstance(ctor, .{});
@@ -917,13 +937,21 @@ pub fn BeaconStateView_processSlots(env: napi.Env, cb: napi.CallbackInfo(1)) !na
     return new_state_value;
 }
 
+/// `BeaconStateView_getXYZ` => "getXYZ"
+fn fnName(comptime func: anytype) [:0]const u8 {
+    const fq_name = @typeName(@TypeOf(func));
+    const start_index = comptime std.mem.indexOf(u8, fq_name, "@typeInfo") orelse @compileError("Expected a @typeInfo");
+    const underscore_index = comptime std.mem.indexOfScalar(u8, fq_name[start_index..], '_') orelse @compileError("Expected an underscore");
+    const next_paren_index = comptime std.mem.indexOfScalar(u8, fq_name[start_index..], ')') orelse @compileError("Expected a paren");
+    return @ptrCast(fq_name[(start_index + underscore_index + 1) .. start_index + next_paren_index] ++ [_]u8{0});
+}
+
+///
 /// Creates a `napi.c.napi_property_descriptor` getter from a BeaconStateView_XXX function.
 fn getter(
     comptime func: anytype,
 ) napi.c.napi_property_descriptor {
-    const fq_name = @typeName(@TypeOf(func));
-    const last_underscore_index = std.mem.lastIndexOf(u8, fq_name, '_') orelse @compileError("Expected a function with an underscore");
-    const name = fq_name[(last_underscore_index + 1)..];
+    const name = comptime fnName(func);
     return .{ .utf8name = name.ptr, .getter = napi.wrapCallback(0, func) };
 }
 
@@ -932,9 +960,7 @@ fn method(
     comptime argc_cap: usize,
     comptime func: anytype,
 ) napi.c.napi_property_descriptor {
-    const fq_name = @typeName(@TypeOf(func));
-    const last_underscore_index = std.mem.lastIndexOf(u8, fq_name, '_') orelse @compileError("Expected a function with an underscore");
-    const name = fq_name[(last_underscore_index + 1)..];
+    const name = comptime fnName(func);
     return .{ .utf8name = name.ptr, .method = napi.wrapCallback(argc_cap, func) };
 }
 

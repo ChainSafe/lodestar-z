@@ -101,7 +101,7 @@
         },
         .fork_types = .{
             .root_source_file = "src/fork_types/root.zig",
-            .imports = .{ .consensus_types, .config, .persistent_merkle_tree, .preset, .ssz },
+            .imports = .{ .consensus_types, .constants, .config, .persistent_merkle_tree, .preset, .ssz },
         },
         .persistent_merkle_tree = .{
             .root_source_file = "src/persistent_merkle_tree/root.zig",
@@ -239,6 +239,7 @@
                     .consensus_types,
                     .preset,
                     .config,
+                    .fork_types,
                     .state_transition,
                     "zapi:napi",
                 },
