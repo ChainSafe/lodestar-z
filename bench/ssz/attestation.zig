@@ -135,6 +135,7 @@ pub fn main() !void {
     defer allocator.free(block_bytes);
 
     var block = SignedBeaconBlock.default_value;
+    defer block.deinit();
     try SignedBeaconBlock.deserializeFromBytes(allocator, block_bytes, &block);
 
     const attestation = &block.message.body.attestations.items[0];
