@@ -152,6 +152,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                         config,
                         epoch_cache,
                         state,
+                        &cached_state.slashings_cache,
                         attestations[0..],
                         verify,
                     );
@@ -166,6 +167,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                         config,
                         epoch_cache,
                         state,
+                        &cached_state.slashings_cache,
                         current_epoch,
                         &self.op,
                         verify,
@@ -224,9 +226,11 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     const epoch_cache = cached_state.getEpochCache();
                     try state_transition.processProposerSlashing(
                         fork,
+                        allocator,
                         config,
                         epoch_cache,
                         state,
+                        &cached_state.slashings_cache,
                         &self.op,
                         verify,
                     );

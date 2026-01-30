@@ -6,6 +6,7 @@ const c = @import("constants");
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateValidatorExit;
@@ -21,6 +22,7 @@ pub fn slashValidator(
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
+    slashings_cache: *SlashingsCache,
     slashed_index: ValidatorIndex,
     whistle_blower_index: ?ValidatorIndex,
 ) !void {
@@ -35,6 +37,9 @@ pub fn slashValidator(
     try initiateValidatorExit(fork, config, epoch_cache, state, &validator);
 
     try validator.set("slashed", true);
+    var latest_block_header = try state.latestBlockHeader();
+    const latest_block_slot = try latest_block_header.get("slot");
+    try slashings_cache.recordValidatorSlashing(latest_block_slot, slashed_index);
     const cur_withdrawable_epoch = try validator.get("withdrawable_epoch");
     try validator.set(
         "withdrawable_epoch",

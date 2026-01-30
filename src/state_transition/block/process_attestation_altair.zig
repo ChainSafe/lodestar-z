@@ -8,6 +8,7 @@ const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const ForkTypes = @import("fork_types").ForkTypes;
 const BeaconState = @import("fork_types").BeaconState;
+const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 const c = @import("constants");
 const RootCache = @import("../cache/root_cache.zig").RootCache;
 const validateAttestation = @import("./process_attestation_phase0.zig").validateAttestation;
@@ -35,6 +36,7 @@ pub fn processAttestationsAltair(
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
+    slashings_cache: *const SlashingsCache,
     attestations: []const ForkTypes(fork).Attestation.Type,
     verify_signature: bool,
 ) !void {
@@ -84,7 +86,6 @@ pub fn processAttestationsAltair(
         // For each participant, update their participation
         // In epoch processing, this participation info is used to calculate balance updates
         var total_balance_increments_with_weight: u64 = 0;
-        var validators = try state.validators();
         for (attesting_indices.items) |validator_index| {
             const flags = try epoch_participation.get(validator_index);
 
@@ -113,9 +114,7 @@ pub fn processAttestationsAltair(
             // TODO: describe issue. Compute progressive target balances
             // When processing each attestation, increase the cummulative target balance. Only applies post-altair
             if ((flags_new_set & TIMELY_TARGET) == TIMELY_TARGET) {
-                var validator = try validators.get(validator_index);
-                const slashed = try validator.get("slashed");
-                if (!slashed) {
+                if (!slashings_cache.isSlashed(validator_index)) {
                     if (in_current_epoch) {
                         epoch_cache.current_target_unslashed_balance_increments += effective_balance_increments[validator_index];
                     } else {

@@ -187,6 +187,7 @@ fn ProcessOperationsBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type
                 cloned.config,
                 cloned.getEpochCache(),
                 cloned.state.castToFork(fork),
+                &cloned.slashings_cache,
                 .full,
                 self.body,
                 .{ .verify_signature = opts.verify_signature },
@@ -237,6 +238,7 @@ fn ProcessBlockBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
                 cloned.config,
                 cloned.getEpochCache(),
                 cloned.state.castToFork(fork),
+                &cloned.slashings_cache,
                 .full,
                 self.block,
                 external_data,
@@ -401,6 +403,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 cloned.config,
                 epoch_cache,
                 state,
+                &cloned.slashings_cache,
                 .full,
                 self.body,
                 .{ .verify_signature = true },
@@ -506,6 +509,7 @@ fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, pool: *Nod
         .{},
     );
     try cached_state.state.commit();
+    try state_transition.buildSlashingsCacheFromStateIfNeeded(allocator, cached_state.state, &cached_state.slashings_cache);
     try stdout.print("State: slot={}, validators={}\n", .{ try cached_state.state.slot(), try beacon_state.validatorsCount() });
 
     var bench = zbench.Benchmark.init(allocator, .{
