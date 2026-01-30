@@ -54,6 +54,7 @@ fn ProcessInactivityUpdatesBench(comptime fork: ForkSeq) type {
             defer cache.deinit();
             state_transition.processInactivityUpdates(
                 fork,
+                allocator,
                 cloned.config,
                 cloned.getEpochCache(),
                 cloned.state.castToFork(fork),
@@ -463,6 +464,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 const inactivity_start = std.time.nanoTimestamp();
                 state_transition.processInactivityUpdates(
                     fork,
+                    allocator,
                     cloned.config,
                     epoch_cache,
                     fork_state,
