@@ -1,7 +1,7 @@
 const std = @import("std");
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const decreaseBalance = @import("../utils//balance.zig").decreaseBalance;
@@ -16,7 +16,7 @@ pub fn processSlashings(
     comptime fork: ForkSeq,
     allocator: std.mem.Allocator,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     cache: *const EpochTransitionCache,
 ) !void {
     // Return early if there no index to slash
@@ -57,7 +57,7 @@ pub fn processSlashings(
 
 pub fn getTotalSlashingsByIncrement(
     comptime fork: ForkSeq,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
 ) !u64 {
     var total_slashings_by_increment: u64 = 0;
     var slashings = try state.slashings();

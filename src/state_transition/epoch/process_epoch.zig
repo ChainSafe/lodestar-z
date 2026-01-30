@@ -1,7 +1,11 @@
 const std = @import("std");
+const Timer = std.time.Timer;
+const metrics = @import("../metrics.zig");
+const observeEpochTransitionStep = metrics.observeEpochTransitionStep;
+
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const processJustificationAndFinalization = @import("./process_justification_and_finalization.zig").processJustificationAndFinalization;
@@ -23,37 +27,53 @@ const processSyncCommitteeUpdates = @import("./process_sync_committee_updates.zi
 const processProposerLookahead = @import("./process_proposer_lookahead.zig").processProposerLookahead;
 const Node = @import("persistent_merkle_tree").Node;
 
-// TODO: add metrics
 pub fn processEpoch(
     comptime fork: ForkSeq,
     allocator: std.mem.Allocator,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     cache: *EpochTransitionCache,
 ) !void {
+    var timer = try Timer.start();
     try processJustificationAndFinalization(fork, state, cache);
+    try observeEpochTransitionStep(.{ .step = .process_justification_and_finalization }, timer.read());
 
     if (comptime fork.gte(.altair)) {
+        timer = try Timer.start();
         try processInactivityUpdates(fork, allocator, config, epoch_cache, state, cache);
+        try observeEpochTransitionStep(.{ .step = .process_inactivity_updates }, timer.read());
     }
 
+    timer = try Timer.start();
     try processRegistryUpdates(fork, config, epoch_cache, state, cache);
+    try observeEpochTransitionStep(.{ .step = .process_registry_updates }, timer.read());
 
     // TODO(bing): In lodestar-ts we accumulate slashing penalties and only update in processRewardsAndPenalties. Do the same?
+    timer = try Timer.start();
     try processSlashings(fork, allocator, epoch_cache, state, cache);
+    try observeEpochTransitionStep(.{ .step = .process_slashings }, timer.read());
 
+    timer = try Timer.start();
     try processRewardsAndPenalties(fork, allocator, config, epoch_cache, state, cache);
+    try observeEpochTransitionStep(.{ .step = .process_rewards_and_penalties }, timer.read());
 
     try processEth1DataReset(fork, state, cache);
 
     if (comptime fork.gte(.electra)) {
+        timer = try Timer.start();
         try processPendingDeposits(fork, allocator, config, epoch_cache, state, cache);
+        try observeEpochTransitionStep(.{ .step = .process_pending_deposits }, timer.read());
+
+        timer = try Timer.start();
         try processPendingConsolidations(fork, epoch_cache, state, cache);
+        try observeEpochTransitionStep(.{ .step = .process_pending_consolidations }, timer.read());
     }
 
     // const numUpdate = processEffectiveBalanceUpdates(fork, state, cache);
+    timer = try Timer.start();
     _ = try processEffectiveBalanceUpdates(fork, allocator, epoch_cache, state, cache);
+    try observeEpochTransitionStep(.{ .step = .process_effective_balance_updates }, timer.read());
 
     try processSlashingsReset(fork, epoch_cache, state, cache);
     try processRandaoMixesReset(fork, state, cache);
@@ -67,15 +87,21 @@ pub fn processEpoch(
     if (comptime fork == .phase0) {
         try processParticipationRecordUpdates(fork, state);
     } else {
+        timer = try Timer.start();
         try processParticipationFlagUpdates(fork, state);
+        try observeEpochTransitionStep(.{ .step = .process_participation_flag_updates }, timer.read());
     }
 
     if (comptime fork.gte(.altair)) {
+        timer = try Timer.start();
         try processSyncCommitteeUpdates(fork, allocator, epoch_cache, state);
+        try observeEpochTransitionStep(.{ .step = .process_sync_committee_updates }, timer.read());
     }
 
     if (comptime fork.gte(.fulu)) {
+        timer = try Timer.start();
         try processProposerLookahead(fork, allocator, epoch_cache, state, cache);
+        try observeEpochTransitionStep(.{ .step = .process_proposer_lookahead }, timer.read());
     }
 }
 

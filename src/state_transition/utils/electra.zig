@@ -3,7 +3,7 @@ const COMPOUNDING_WITHDRAWAL_PREFIX = c.COMPOUNDING_WITHDRAWAL_PREFIX;
 const MIN_ACTIVATION_BALANCE = @import("preset").preset.MIN_ACTIVATION_BALANCE;
 const GENESIS_SLOT = @import("preset").GENESIS_SLOT;
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const ct = @import("consensus_types");
 
 pub const WithdrawalCredentials = ct.primitive.Root.Type;
@@ -22,7 +22,7 @@ pub fn hasExecutionWithdrawalCredential(withdrawal_credentials: *const Withdrawa
     return hasCompoundingWithdrawalCredential(withdrawal_credentials) or hasEth1WithdrawalCredential(withdrawal_credentials);
 }
 
-pub fn switchToCompoundingValidator(comptime fork: ForkSeq, state: *ForkBeaconState(fork), index: ValidatorIndex) !void {
+pub fn switchToCompoundingValidator(comptime fork: ForkSeq, state: *BeaconState(fork), index: ValidatorIndex) !void {
     var validators = try state.validators();
     var validator = try validators.get(index);
     const old_withdrawal_credentials = try validator.getRoot("withdrawal_credentials");
@@ -47,7 +47,7 @@ pub fn switchToCompoundingValidator(comptime fork: ForkSeq, state: *ForkBeaconSt
 
 pub fn queueExcessActiveBalance(
     comptime fork: ForkSeq,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     index: ValidatorIndex,
     withdrawal_credentials: *const WithdrawalCredentials,
     pubkey: ct.primitive.BLSPubkey.Type,
@@ -72,11 +72,11 @@ pub fn queueExcessActiveBalance(
     }
 }
 
-pub fn isPubkeyKnown(comptime fork: ForkSeq, epoch_cache: *const EpochCache, state: *ForkBeaconState(fork), pubkey: BLSPubkey) !bool {
+pub fn isPubkeyKnown(comptime fork: ForkSeq, epoch_cache: *const EpochCache, state: *BeaconState(fork), pubkey: BLSPubkey) !bool {
     return try isValidatorKnown(fork, state, epoch_cache.getValidatorIndex(&pubkey));
 }
 
-pub fn isValidatorKnown(comptime fork: ForkSeq, state: *ForkBeaconState(fork), index: ?ValidatorIndex) !bool {
+pub fn isValidatorKnown(comptime fork: ForkSeq, state: *BeaconState(fork), index: ?ValidatorIndex) !bool {
     const validator_index = index orelse return false;
     const validators_count = try state.validatorsCount();
     return validator_index < validators_count;

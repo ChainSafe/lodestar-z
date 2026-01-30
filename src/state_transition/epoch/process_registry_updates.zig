@@ -1,6 +1,6 @@
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const computeActivationExitEpoch = @import("../utils/epoch.zig").computeActivationExitEpoch;
@@ -11,7 +11,7 @@ pub fn processRegistryUpdates(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     cache: *const EpochTransitionCache,
 ) !void {
     // Get the validators sub tree once for all the loop

@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const ct = @import("consensus_types");
 const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
 const constants = @import("constants");
@@ -16,8 +16,8 @@ pub fn upgradeStateToElectra(
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    deneb_state: *ForkBeaconState(.deneb),
-) !ForkBeaconState(.electra) {
+    deneb_state: *BeaconState(.deneb),
+) !BeaconState(.electra) {
     var state = try deneb_state.upgradeUnsafe();
     errdefer state.deinit();
 

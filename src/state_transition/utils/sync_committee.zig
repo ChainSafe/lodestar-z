@@ -2,7 +2,7 @@ const std = @import("std");
 const blst = @import("blst");
 const AggregatePublicKey = blst.AggregatePublicKey;
 const Allocator = std.mem.Allocator;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EffectiveBalanceIncrements = @import("../cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -23,7 +23,7 @@ pub const SyncCommitteeInfo = struct {
 pub fn getNextSyncCommittee(
     comptime fork: ForkSeq,
     allocator: Allocator,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     active_validator_indices: []const ValidatorIndex,
     effective_balance_increments: EffectiveBalanceIncrements,
     out: *SyncCommitteeInfo,

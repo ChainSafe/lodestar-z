@@ -73,13 +73,13 @@ pub const AnyExecutionPayload = union(enum) {
         }
     }
 
-    pub fn getParentHash(self: *const AnyExecutionPayload) *const Root {
+    pub fn parentHash(self: *const AnyExecutionPayload) *const Root {
         return switch (self.*) {
             inline else => |*payload| &payload.parent_hash,
         };
     }
 
-    pub fn getFeeRecipient(self: *const AnyExecutionPayload) *const ExecutionAddress {
+    pub fn feeRecipient(self: *const AnyExecutionPayload) *const [20]u8 {
         return switch (self.*) {
             inline else => |*payload| &payload.fee_recipient,
         };
@@ -91,87 +91,87 @@ pub const AnyExecutionPayload = union(enum) {
         };
     }
 
-    pub fn getReceiptsRoot(self: *const AnyExecutionPayload) *const Root {
+    pub fn receiptsRoot(self: *const AnyExecutionPayload) *const Root {
         return switch (self.*) {
             inline else => |*payload| &payload.receipts_root,
         };
     }
 
-    pub fn getLogsBloom(self: *const AnyExecutionPayload) *const ct.bellatrix.LogsBloom.Type {
+    pub fn logsBloom(self: *const AnyExecutionPayload) *const ct.bellatrix.LogsBloom.Type {
         return switch (self.*) {
             inline else => |*payload| &payload.logs_bloom,
         };
     }
 
-    pub fn getPrevRandao(self: *const AnyExecutionPayload) *const Root {
+    pub fn prevRandao(self: *const AnyExecutionPayload) *const Root {
         return switch (self.*) {
             inline else => |*payload| &payload.prev_randao,
         };
     }
 
-    pub fn getBlockNumber(self: *const AnyExecutionPayload) u64 {
+    pub fn blockNumber(self: *const AnyExecutionPayload) u64 {
         return switch (self.*) {
             inline else => |payload| payload.block_number,
         };
     }
 
-    pub fn getGasLimit(self: *const AnyExecutionPayload) u64 {
+    pub fn gasLimit(self: *const AnyExecutionPayload) u64 {
         return switch (self.*) {
             inline else => |payload| payload.gas_limit,
         };
     }
 
-    pub fn getGasUsed(self: *const AnyExecutionPayload) u64 {
+    pub fn gasUsed(self: *const AnyExecutionPayload) u64 {
         return switch (self.*) {
             inline else => |payload| payload.gas_used,
         };
     }
 
-    pub fn getTimestamp(self: *const AnyExecutionPayload) u64 {
+    pub fn timestamp(self: *const AnyExecutionPayload) u64 {
         return switch (self.*) {
             inline else => |payload| payload.timestamp,
         };
     }
 
-    pub fn getExtraData(self: *const AnyExecutionPayload) *const ct.bellatrix.ExtraData.Type {
+    pub fn extraData(self: *const AnyExecutionPayload) ct.bellatrix.ExtraData.Type {
         return switch (self.*) {
             inline else => |payload| payload.extra_data,
         };
     }
 
-    pub fn getBaseFeePerGas(self: *const AnyExecutionPayload) u256 {
+    pub fn baseFeePerGas(self: *const AnyExecutionPayload) u256 {
         return switch (self.*) {
             inline else => |payload| payload.base_fee_per_gas,
         };
     }
 
-    pub fn getBlockHash(self: *const AnyExecutionPayload) *const Root {
+    pub fn blockHash(self: *const AnyExecutionPayload) *const Root {
         return switch (self.*) {
             inline else => |*payload| &payload.block_hash,
         };
     }
 
-    pub fn getTransactions(self: *const AnyExecutionPayload) *const ct.bellatrix.Transactions.Type {
+    pub fn transactions(self: *const AnyExecutionPayload) *const ct.bellatrix.Transactions.Type {
         return switch (self.*) {
             inline else => |*payload| &payload.transactions,
         };
     }
 
-    pub fn getWithdrawals(self: *const AnyExecutionPayload) !*const ct.capella.Withdrawals.Type {
+    pub fn withdrawals(self: *const AnyExecutionPayload) !*const ct.capella.Withdrawals.Type {
         return switch (self.*) {
             .bellatrix => return error.InvalidFork,
             inline else => |*payload| &payload.withdrawals,
         };
     }
 
-    pub fn getBlobGasUsed(self: *const AnyExecutionPayload) !u64 {
+    pub fn blobGasUsed(self: *const AnyExecutionPayload) !u64 {
         return switch (self.*) {
             inline .bellatrix, .capella => error.InvalidFork,
             inline else => |payload| payload.blob_gas_used,
         };
     }
 
-    pub fn getExcessBlobGas(self: *const AnyExecutionPayload) !u64 {
+    pub fn excessBlobGas(self: *const AnyExecutionPayload) !u64 {
         return switch (self.*) {
             inline .bellatrix, .capella => error.InvalidFork,
             inline else => |payload| payload.excess_blob_gas,
@@ -215,13 +215,13 @@ pub const AnyExecutionPayloadHeader = union(enum) {
         }
     }
 
-    pub fn getParentHash(self: *const AnyExecutionPayloadHeader) Root {
+    pub fn parentHash(self: *const AnyExecutionPayloadHeader) Root {
         return switch (self.*) {
             inline else => |payload_header| payload_header.parent_hash,
         };
     }
 
-    pub fn getFeeRecipient(self: *const AnyExecutionPayloadHeader) ExecutionAddress {
+    pub fn feeRecipient(self: *const AnyExecutionPayloadHeader) [20]u8 {
         return switch (self.*) {
             inline else => |payload_header| payload_header.fee_recipient,
         };
@@ -233,87 +233,87 @@ pub const AnyExecutionPayloadHeader = union(enum) {
         };
     }
 
-    pub fn getReceiptsRoot(self: *const AnyExecutionPayloadHeader) Root {
+    pub fn receiptsRoot(self: *const AnyExecutionPayloadHeader) Root {
         return switch (self.*) {
             inline else => |payload_header| payload_header.receipts_root,
         };
     }
 
-    pub fn getLogsBloom(self: *const AnyExecutionPayloadHeader) ct.bellatrix.LogsBoom.Type {
+    pub fn logsBloom(self: *const AnyExecutionPayloadHeader) ct.bellatrix.LogsBloom.Type {
         return switch (self.*) {
             inline else => |payload_header| payload_header.logs_bloom,
         };
     }
 
-    pub fn getPrevRandao(self: *const AnyExecutionPayloadHeader) Root {
+    pub fn prevRandao(self: *const AnyExecutionPayloadHeader) Root {
         return switch (self.*) {
             inline else => |payload_header| payload_header.prev_randao,
         };
     }
 
-    pub fn getBlockNumber(self: *const AnyExecutionPayloadHeader) u64 {
+    pub fn blockNumber(self: *const AnyExecutionPayloadHeader) u64 {
         return switch (self.*) {
             inline else => |payload_header| payload_header.block_number,
         };
     }
 
-    pub fn getGasLimit(self: *const AnyExecutionPayloadHeader) u64 {
+    pub fn gasLimit(self: *const AnyExecutionPayloadHeader) u64 {
         return switch (self.*) {
             inline else => |payload_header| payload_header.gas_limit,
         };
     }
 
-    pub fn getGasUsed(self: *const AnyExecutionPayloadHeader) u64 {
+    pub fn gasUsed(self: *const AnyExecutionPayloadHeader) u64 {
         return switch (self.*) {
             inline else => |payload_header| payload_header.gas_used,
         };
     }
 
-    pub fn getTimestamp(self: *const AnyExecutionPayloadHeader) u64 {
+    pub fn timestamp(self: *const AnyExecutionPayloadHeader) u64 {
         return switch (self.*) {
             inline else => |payload_header| payload_header.timestamp,
         };
     }
 
-    pub fn getExtraData(self: *const AnyExecutionPayloadHeader) ct.bellatrix.ExtraData.Type {
+    pub fn extraData(self: *const AnyExecutionPayloadHeader) ct.bellatrix.ExtraData.Type {
         return switch (self.*) {
             inline else => |payload_header| payload_header.extra_data,
         };
     }
 
-    pub fn getBaseFeePerGas(self: *const AnyExecutionPayloadHeader) u256 {
+    pub fn baseFeePerGas(self: *const AnyExecutionPayloadHeader) u256 {
         return switch (self.*) {
             inline else => |payload_header| payload_header.base_fee_per_gas,
         };
     }
 
-    pub fn getBlockHash(self: *const AnyExecutionPayloadHeader) Root {
+    pub fn blockHash(self: *const AnyExecutionPayloadHeader) Root {
         return switch (self.*) {
             inline else => |payload_header| payload_header.block_hash,
         };
     }
 
-    pub fn getTransactionsRoot(self: *const AnyExecutionPayloadHeader) Root {
+    pub fn transactionsRoot(self: *const AnyExecutionPayloadHeader) Root {
         return switch (self.*) {
             inline else => |payload_header| payload_header.transactions_root,
         };
     }
 
-    pub fn getWithdrawalsRoot(self: *const AnyExecutionPayloadHeader) Root {
+    pub fn withdrawalsRoot(self: *const AnyExecutionPayloadHeader) Root {
         return switch (self.*) {
             .bellatrix => @panic("Withdrawals are not available in bellatrix"),
             inline else => |payload_header| payload_header.withdrawals_root,
         };
     }
 
-    pub fn getBlobGasUsed(self: *const AnyExecutionPayloadHeader) u64 {
+    pub fn blobGasUsed(self: *const AnyExecutionPayloadHeader) u64 {
         return switch (self.*) {
             inline .bellatrix, .capella => @panic("Blob gas used is not available in bellatrix or capella"),
             inline else => |payload_header| payload_header.blob_gas_used,
         };
     }
 
-    pub fn getExcessBlobGas(self: *const AnyExecutionPayloadHeader) u64 {
+    pub fn excessBlobGas(self: *const AnyExecutionPayloadHeader) u64 {
         return switch (self.*) {
             inline .bellatrix, .capella => @panic("Excess blob gas is not available in bellatrix or capella"),
             inline else => |payload_header| payload_header.excess_blob_gas,
@@ -377,6 +377,6 @@ test "electra - sanity" {
     var header: AnyExecutionPayloadHeader = .{ .deneb = header_out };
     try electra_payload.createPayloadHeader(std.testing.allocator, &header);
     defer header.deinit(std.testing.allocator);
-    _ = header.getGasUsed();
+    _ = header.gasUsed();
     try std.testing.expect(header.deneb.block_number == payload.block_number);
 }

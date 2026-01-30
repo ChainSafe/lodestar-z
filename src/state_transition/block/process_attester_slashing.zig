@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const ForkTypes = @import("fork_types").ForkTypes;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const types = @import("consensus_types");
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const isSlashableAttestationData = @import("../utils/attestation.zig").isSlashableAttestationData;
@@ -20,7 +20,7 @@ pub fn processAttesterSlashing(
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     current_epoch: u64,
     attester_slashing: *const ForkTypes(fork).AttesterSlashing.Type,
     verify_signature: bool,

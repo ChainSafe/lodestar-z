@@ -8,8 +8,8 @@ const active_preset = @import("preset").active_preset;
 const state_transition = @import("state_transition");
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
-const ForkBeaconBlock = @import("fork_types").ForkBeaconBlock;
-const ForkBeaconBlockBody = @import("fork_types").ForkBeaconBlockBody;
+const BeaconBlock = @import("fork_types").BeaconBlock;
+const BeaconBlockBody = @import("fork_types").BeaconBlockBody;
 const Withdrawals = ssz.capella.Withdrawals.Type;
 const WithdrawalsResult = state_transition.WithdrawalsResult;
 const test_case = @import("../test_case.zig");
@@ -173,7 +173,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 },
                 .block_header => {
                     const epoch_cache = cached_state.getEpochCache();
-                    const fork_block = ForkBeaconBlock(fork, .full){ .inner = self.op };
+                    const fork_block = BeaconBlock(.full, fork){ .inner = self.op };
                     try state_transition.processBlockHeader(
                         fork,
                         allocator,
@@ -204,7 +204,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     const config = cached_state.config;
                     const epoch_cache = cached_state.getEpochCache();
                     const current_epoch = epoch_cache.epoch;
-                    const fork_body = ForkBeaconBlockBody(fork, .full){ .inner = self.op };
+                    const fork_body = BeaconBlockBody(.full, fork){ .inner = self.op };
                     try state_transition.processExecutionPayload(
                         fork,
                         allocator,

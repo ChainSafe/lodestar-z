@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const BLSPubkey = types.primitive.BLSPubkey.Type;
 const WithdrawalCredentials = types.primitive.Root.Type;
@@ -61,7 +61,7 @@ pub fn processDeposit(
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     deposit: *const types.phase0.Deposit.Type,
 ) !void {
     // verify the merkle branch
@@ -94,7 +94,7 @@ pub fn applyDeposit(
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     deposit: *const DepositData,
 ) !void {
     const pubkey = deposit.pubkey();
@@ -146,7 +146,7 @@ pub fn addValidatorToRegistry(
     comptime fork: ForkSeq,
     allocator: Allocator,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     pubkey: BLSPubkey,
     withdrawal_credentials: *const WithdrawalCredentials,
     amount: u64,

@@ -1,7 +1,7 @@
 const std = @import("std");
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -25,7 +25,7 @@ pub fn processConsolidationRequest(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     consolidation: *const ConsolidationRequest,
 ) !void {
     const source_pubkey = consolidation.source_pubkey;
@@ -120,7 +120,7 @@ pub fn processConsolidationRequest(
 fn isValidSwitchToCompoundRequest(
     comptime fork: ForkSeq,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     consolidation: *const ConsolidationRequest,
 ) !bool {
     // this check is mainly to make the compiler happy, pubkey is checked by the consumer already

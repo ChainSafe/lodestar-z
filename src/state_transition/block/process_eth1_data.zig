@@ -1,6 +1,6 @@
 const std = @import("std");
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const types = @import("consensus_types");
 const Eth1Data = types.phase0.Eth1Data.Type;
 const preset = @import("preset").preset;
@@ -8,7 +8,7 @@ const Node = @import("persistent_merkle_tree").Node;
 
 pub fn processEth1Data(
     comptime fork: ForkSeq,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     eth1_data: *const Eth1Data,
 ) !void {
     if (try becomesNewEth1Data(fork, state, eth1_data)) {
@@ -20,7 +20,7 @@ pub fn processEth1Data(
 
 pub fn becomesNewEth1Data(
     comptime fork: ForkSeq,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     new_eth1_data: *const Eth1Data,
 ) !bool {
     const SLOTS_PER_ETH1_VOTING_PERIOD = preset.EPOCHS_PER_ETH1_VOTING_PERIOD * preset.SLOTS_PER_EPOCH;

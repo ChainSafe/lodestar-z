@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const attester_status = @import("../utils/attester_status.zig");
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
@@ -24,7 +24,7 @@ const FLAG_PREV_SOURCE_ATTESTER_UNSLASHED = attester_status.FLAG_PREV_SOURCE_ATT
 const FLAG_PREV_TARGET_ATTESTER_UNSLASHED = attester_status.FLAG_PREV_TARGET_ATTESTER_UNSLASHED;
 const hasMarkers = attester_status.hasMarkers;
 
-const isInInactivityLeak = @import("../utils/finality.zig").isInInactivityLeak;
+const isInInactivityLeak = @import("inactivity_leak.zig").isInInactivityLeak;
 
 const RewardPenaltyItem = struct {
     base_reward: u64,
@@ -41,7 +41,7 @@ pub fn getRewardsAndPenaltiesAltair(
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     cache: *const EpochTransitionCache,
     rewards: []u64,
     penalties: []u64,

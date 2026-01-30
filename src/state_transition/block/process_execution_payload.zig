@@ -4,9 +4,9 @@ const types = @import("consensus_types");
 const config = @import("config");
 const ForkSeq = config.ForkSeq;
 const ForkTypes = @import("fork_types").ForkTypes;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const BlockType = @import("fork_types").BlockType;
-const ForkBeaconBlockBody = @import("fork_types").ForkBeaconBlockBody;
+const BeaconBlockBody = @import("fork_types").BeaconBlockBody;
 const BlockExternalData = @import("../state_transition.zig").BlockExternalData;
 const BeaconConfig = config.BeaconConfig;
 const isMergeTransitionComplete = @import("../utils/execution.zig").isMergeTransitionComplete;
@@ -17,10 +17,10 @@ pub fn processExecutionPayload(
     comptime fork: ForkSeq,
     allocator: Allocator,
     beacon_config: *const BeaconConfig,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     current_epoch: u64,
     comptime block_type: BlockType,
-    body: *const ForkBeaconBlockBody(fork, block_type),
+    body: *const BeaconBlockBody(block_type, fork),
     external_data: BlockExternalData,
 ) !void {
     const parent_hash, const prev_randao, const timestamp = switch (block_type) {
@@ -84,7 +84,11 @@ pub fn processExecutionPayload(
     var payload_header = ForkTypes(fork).ExecutionPayloadHeader.default_value;
     switch (block_type) {
         .full => try body.executionPayload().createExecutionPayloadHeader(allocator, &payload_header),
-        .blinded => payload_header = body.executionPayloadHeader().inner,
+        .blinded => try ForkTypes(fork).ExecutionPayloadHeader.clone(
+            allocator,
+            &body.executionPayloadHeader().inner,
+            &payload_header,
+        ),
     }
     defer ForkTypes(fork).ExecutionPayloadHeader.deinit(allocator, &payload_header);
 
@@ -111,7 +115,7 @@ test "process execution payload - sanity" {
     var message: types.electra.BeaconBlock.Type = types.electra.BeaconBlock.default_value;
     message.body = body;
 
-    const fork_body = ForkBeaconBlockBody(.electra, .full){ .inner = body };
+    const fork_body = BeaconBlockBody(.full, .electra){ .inner = body };
 
     try processExecutionPayload(
         .electra,
@@ -120,6 +124,37 @@ test "process execution payload - sanity" {
         test_state.cached_state.state.castToFork(.electra),
         test_state.cached_state.getEpochCache().epoch,
         .full,
+        &fork_body,
+        .{ .execution_payload_status = .valid, .data_availability_status = .available },
+    );
+}
+
+test "process execution payload - blinded" {
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    const beacon_config = test_state.cached_state.config;
+
+    var body: types.electra.BlindedBeaconBlockBody.Type = types.electra.BlindedBeaconBlockBody.default_value;
+    body.execution_payload_header.timestamp = try test_state.cached_state.state.genesisTime() +
+        try test_state.cached_state.state.slot() * beacon_config.chain.SECONDS_PER_SLOT;
+    try body.execution_payload_header.extra_data.appendSlice(allocator, &[_]u8{ 0x01, 0x02, 0x03 });
+    defer types.electra.BlindedBeaconBlockBody.deinit(allocator, &body);
+
+    const fork_body = BeaconBlockBody(.blinded, .electra){ .inner = body };
+
+    try processExecutionPayload(
+        .electra,
+        allocator,
+        beacon_config,
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.cached_state.getEpochCache().epoch,
+        .blinded,
         &fork_body,
         .{ .execution_payload_status = .valid, .data_availability_status = .available },
     );

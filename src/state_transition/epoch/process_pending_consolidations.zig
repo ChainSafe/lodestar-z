@@ -1,5 +1,5 @@
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
@@ -9,7 +9,7 @@ const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 pub fn processPendingConsolidations(
     comptime fork: ForkSeq,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     cache: *EpochTransitionCache,
 ) !void {
     const next_epoch = epoch_cache.epoch + 1;

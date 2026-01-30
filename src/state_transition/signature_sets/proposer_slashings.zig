@@ -2,7 +2,7 @@ const std = @import("std");
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const ForkTypes = @import("fork_types").ForkTypes;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
 const c = @import("constants");
@@ -45,7 +45,7 @@ pub fn proposerSlashingsSignatureSets(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    state: *const ForkBeaconState(fork),
+    state: *const BeaconState(fork),
     signed_block: *const ForkTypes(fork).SignedBeaconBlock.Type,
     out: std.ArrayList(SingleSignatureSet),
 ) !void {

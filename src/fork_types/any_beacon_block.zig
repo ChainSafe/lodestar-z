@@ -18,8 +18,8 @@ const AnyExecutionPayload = @import("./any_execution_payload.zig").AnyExecutionP
 const AnyExecutionPayloadHeader = @import("./any_execution_payload.zig").AnyExecutionPayloadHeader;
 const AnyAttestations = @import("./any_attestation.zig").AnyAttestations;
 const AnyAttesterSlashings = @import("./any_attester_slashing.zig").AnyAttesterSlashings;
-const ForkBeaconBlock = @import("./fork_beacon_block.zig").ForkBeaconBlock;
-const ForkBeaconBlockBody = @import("./fork_beacon_block.zig").ForkBeaconBlockBody;
+const BeaconBlock = @import("./beacon_block.zig").BeaconBlock;
+const BeaconBlockBody = @import("./beacon_block.zig").BeaconBlockBody;
 
 pub const AnySignedBeaconBlock = union(enum) {
     phase0: *ct.phase0.SignedBeaconBlock.Type,
@@ -320,7 +320,23 @@ pub const AnyBeaconBlock = union(enum) {
         };
     }
 
-    pub fn castToFork(self: *const AnyBeaconBlock, comptime block_type: BlockType, comptime fork: ForkSeq) *const ForkBeaconBlock(fork, block_type) {
+    pub fn forkSeq(self: *const AnyBeaconBlock) ForkSeq {
+        return switch (self.*) {
+            .phase0 => .phase0,
+            .altair => .altair,
+            .full_bellatrix, .blinded_bellatrix => .bellatrix,
+            .full_capella, .blinded_capella => .capella,
+            .full_deneb, .blinded_deneb => .deneb,
+            .full_electra, .blinded_electra => .electra,
+            .full_fulu, .blinded_fulu => .fulu,
+        };
+    }
+
+    pub fn castToFork(
+        self: *const AnyBeaconBlock,
+        comptime block_type: BlockType,
+        comptime fork: ForkSeq,
+    ) *const BeaconBlock(block_type, fork) {
         return switch (fork) {
             .phase0 => if (block_type == .full)
                 @ptrCast(self.phase0)
@@ -350,18 +366,6 @@ pub const AnyBeaconBlock = union(enum) {
                 @ptrCast(self.full_fulu)
             else
                 @ptrCast(self.blinded_fulu),
-        };
-    }
-
-    pub fn forkSeq(self: *const AnyBeaconBlock) ForkSeq {
-        return switch (self.*) {
-            .phase0 => .phase0,
-            .altair => .altair,
-            .full_bellatrix, .blinded_bellatrix => .bellatrix,
-            .full_capella, .blinded_capella => .capella,
-            .full_deneb, .blinded_deneb => .deneb,
-            .full_electra, .blinded_electra => .electra,
-            .full_fulu, .blinded_fulu => .fulu,
         };
     }
 
@@ -433,11 +437,30 @@ pub const AnyBeaconBlockBody = union(enum) {
     full_fulu: *ct.fulu.BeaconBlockBody.Type,
     blinded_fulu: *ct.fulu.BlindedBeaconBlockBody.Type,
 
-    pub fn forkSeq(self: *const AnyBeaconBlockBody) ForkSeq {
-        return self.*;
+    pub fn blockType(self: *const AnyBeaconBlockBody) BlockType {
+        return switch (self.*) {
+            .phase0, .altair, .full_bellatrix, .full_capella, .full_deneb, .full_electra, .full_fulu => .full,
+            .blinded_bellatrix, .blinded_capella, .blinded_deneb, .blinded_electra, .blinded_fulu => .blinded,
+        };
     }
 
-    pub fn castToFork(self: *const AnyBeaconBlockBody, comptime block_type: BlockType, comptime fork: ForkSeq) *const ForkBeaconBlockBody(fork, block_type) {
+    pub fn forkSeq(self: *const AnyBeaconBlockBody) ForkSeq {
+        return switch (self.*) {
+            .phase0 => .phase0,
+            .altair => .altair,
+            .full_bellatrix, .blinded_bellatrix => .bellatrix,
+            .full_capella, .blinded_capella => .capella,
+            .full_deneb, .blinded_deneb => .deneb,
+            .full_electra, .blinded_electra => .electra,
+            .full_fulu, .blinded_fulu => .fulu,
+        };
+    }
+
+    pub fn castToFork(
+        self: *const AnyBeaconBlockBody,
+        comptime block_type: BlockType,
+        comptime fork: ForkSeq,
+    ) *const BeaconBlockBody(block_type, fork) {
         return switch (fork) {
             .phase0 => @ptrCast(self.phase0),
             .altair => @ptrCast(self.altair),
@@ -648,6 +671,7 @@ fn testBlockSanity(Block: type) !void {
     try beacon_block.hashTreeRoot(allocator, &out);
     try expect(!std.mem.eql(u8, &[_]u8{0} ** 32, &out));
     const block_body = beacon_block.beaconBlockBody();
+    try expect(block_body.forkSeq() == .electra);
     out = [_]u8{0} ** 32;
     try block_body.hashTreeRoot(allocator, &out);
     try expect(!std.mem.eql(u8, &[_]u8{0} ** 32, &out));
@@ -667,7 +691,7 @@ fn testBlockSanity(Block: type) !void {
     const sync_aggregate = try block_body.syncAggregate();
     try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 96, &sync_aggregate.sync_committee_signature);
 
-    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 32, (try block_body.executionPayload()).getParentHash());
+    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 32, (try block_body.executionPayload()).parentHash());
 
     // capella
     try expect((try block_body.blsToExecutionChanges()).len == 0);
