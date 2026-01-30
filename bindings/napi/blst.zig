@@ -563,8 +563,6 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     try blst_obj.setNamedProperty("aggregatePublicKeys", try env.createFunction("aggregatePublicKeys", 1, blst_aggregatePublicKeys, null));
     try blst_obj.setNamedProperty("aggregateSerializedPublicKeys", try env.createFunction("aggregateSerializedPublicKeys", 1, blst_aggregateSerializedPublicKeys, null));
 
-    try blst_obj.setNamedProperty("SIGNATURE_LENGTH_UNCOMPRESSED", try env.createUint32(Signature.SERIALIZE_SIZE));
-
     try exports.setNamedProperty("blst", blst_obj);
 
     const global = try env.getGlobal();
