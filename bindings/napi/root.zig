@@ -4,7 +4,7 @@ const pubkeys = @import("./pubkeys.zig");
 const config = @import("./config.zig");
 const shuffle = @import("./shuffle.zig");
 const proposer_index = @import("./proposer_index.zig");
-const beaconStateView = @import("./beacon_state_view.zig");
+const beaconStateView = @import("BeaconStateView.zig");
 const blst = @import("./blst.zig");
 
 comptime {

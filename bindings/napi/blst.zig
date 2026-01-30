@@ -39,9 +39,17 @@ pub fn PublicKey_fromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value 
     const pk_value = try env.newInstance(ctor, .{});
     const pk = try env.unwrap(PublicKey, pk_value);
 
-    pk.* = try PublicKey.deserialize(bytes_info.data[0..PublicKey.SERIALIZE_SIZE]);
+    pk.* = try PublicKey.deserialize(bytes_info.data[0..]);
 
     return pk_value;
+}
+
+/// Converts given array of bytes to a `PublicKey`.
+pub fn PublicKey_validate(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const pk = try env.unwrap(PublicKey, cb.this());
+    try pk.validate();
+
+    return try env.getUndefined();
 }
 
 /// Serializes and compresses this public key to bytes.
@@ -85,7 +93,7 @@ pub fn Signature_fromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value 
     const sig_value = try env.newInstance(ctor, .{});
     const sig = try env.unwrap(Signature, sig_value);
 
-    sig.* = Signature.deserialize(bytes_info.data[0..Signature.SERIALIZE_SIZE]) catch return error.DeserializationFailed;
+    sig.* = Signature.deserialize(bytes_info.data[0..]) catch return error.DeserializationFailed;
 
     return sig_value;
 }
@@ -166,15 +174,23 @@ pub fn SecretKey_fromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value 
 /// Generates a `SecretKey` from a seed (IKM) using key derivation.
 ///
 /// Seed must be at least 32 bytes.
-pub fn SecretKey_fromKeygen(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+pub fn SecretKey_fromKeygen(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const ctor = cb.this();
     const bytes_info = try cb.arg(0).getTypedarrayInfo();
+
+    const key_info_data: ?[]const u8 = if (cb.getArg(1)) |ki| blk: {
+        const typeof = try ki.typeof();
+        if (typeof == .undefined or typeof == .null) break :blk null;
+        const info = try ki.getTypedarrayInfo();
+        if (info.array_type != .uint8) return error.InvalidArgument;
+        break :blk info.data;
+    } else null;
 
     if (bytes_info.data.len < 32) return error.InvalidSeedLength;
 
     const sk_value = try env.newInstance(ctor, .{});
     const sk = try env.unwrap(SecretKey, sk_value);
-    sk.* = SecretKey.keyGen(bytes_info.data, null) catch return error.KeyGenFailed;
+    sk.* = SecretKey.keyGen(bytes_info.data, key_info_data) catch return error.KeyGenFailed;
 
     return sk_value;
 }
@@ -272,7 +288,7 @@ pub fn Signature_sigValidate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Valu
 /// 3) sig: Signature
 /// 4) sig_groupcheck: bool
 /// 5) pks_validate: bool
-pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(3)) !napi.Value {
+pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(5)) !napi.Value {
     const msg_info = try cb.arg(0).getTypedarrayInfo();
     if (msg_info.data.len != 32) return error.InvalidMessageLength;
 
@@ -519,7 +535,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     );
     try sk_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{
         method(1, SecretKey_fromBytes),
-        method(1, SecretKey_fromKeygen),
+        method(2, SecretKey_fromKeygen),
     });
 
     const pk_ctor = try env.defineClass(
@@ -530,6 +546,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         &[_]napi.c.napi_property_descriptor{
             method(0, PublicKey_toBytes),
             method(0, PublicKey_toBytesCompress),
+            method(0, PublicKey_validate),
         },
     );
     try pk_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{
@@ -557,7 +574,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     try blst_obj.setNamedProperty("Signature", sig_ctor);
 
     try blst_obj.setNamedProperty("verify", try env.createFunction("verify", 5, blst_verify, null));
-    try blst_obj.setNamedProperty("fastAggregateVerify", try env.createFunction("fastAggregateVerify", 3, blst_fastAggregateVerify, null));
+    try blst_obj.setNamedProperty("fastAggregateVerify", try env.createFunction("fastAggregateVerify", 5, blst_fastAggregateVerify, null));
     try blst_obj.setNamedProperty("verifyMultipleAggregateSignatures", try env.createFunction("verifyMultipleAggregateSignatures", 1, blst_verifyMultipleAggregateSignatures, null));
     try blst_obj.setNamedProperty("aggregateSignatures", try env.createFunction("aggregateSignatures", 2, blst_aggregateSignatures, null));
     try blst_obj.setNamedProperty("aggregatePublicKeys", try env.createFunction("aggregatePublicKeys", 1, blst_aggregatePublicKeys, null));

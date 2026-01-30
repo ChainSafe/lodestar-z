@@ -209,13 +209,14 @@ declare class BeaconStateView {
 
 declare class PublicKey {
   static fromBytes(bytes: Uint8Array): PublicKey;
+  validate(): void;
   toBytes(): Uint8Array;
   toBytesCompress(): Uint8Array;
 }
 
 declare class SecretKey {
   static fromBytes(bytes: Uint8Array): SecretKey;
-  static fromKeygen(ikm: Uint8Array): SecretKey;
+  static fromKeygen(ikm: Uint8Array, key_info?: Uint8Array): SecretKey;
   sign(msg: Uint8Array): Signature;
   toPublicKey(): PublicKey;
   toBytes(): Uint8Array;
