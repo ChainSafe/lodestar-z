@@ -1,7 +1,7 @@
 const std = @import("std");
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const types = @import("consensus_types");
 const Root = types.primitive.Root.Type;
 const SignedBLSToExecutionChange = types.capella.SignedBLSToExecutionChange.Type;
@@ -12,7 +12,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 pub fn processBlsToExecutionChange(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     signed_bls_to_execution_change: *const SignedBLSToExecutionChange,
 ) !void {
     const address_change = signed_bls_to_execution_change.message;
@@ -33,7 +33,7 @@ pub fn processBlsToExecutionChange(
 pub fn isValidBlsToExecutionChange(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     signed_bls_to_execution_change: *const SignedBLSToExecutionChange,
     verify_signature: bool,
 ) !void {

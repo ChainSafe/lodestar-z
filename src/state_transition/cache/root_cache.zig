@@ -4,7 +4,7 @@ const getBlockRootFn = @import("../utils/block_root.zig").getBlockRoot;
 const getBlockRootAtSlotFn = @import("../utils/block_root.zig").getBlockRootAtSlot;
 const types = @import("consensus_types");
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const Checkpoint = types.phase0.Checkpoint.Type;
 const Epoch = types.primitive.Epoch.Type;
 const Slot = types.primitive.Slot.Type;
@@ -15,13 +15,13 @@ pub fn RootCache(comptime fork: ForkSeq) type {
         allocator: Allocator,
         current_justified_checkpoint: Checkpoint,
         previous_justified_checkpoint: Checkpoint,
-        state: *ForkBeaconState(fork),
+        state: *BeaconState(fork),
         block_root_epoch_cache: std.AutoHashMap(Epoch, *const Root),
         block_root_slot_cache: std.AutoHashMap(Slot, *const Root),
 
         const Self = @This();
 
-        pub fn init(allocator: Allocator, state: *ForkBeaconState(fork)) !*Self {
+        pub fn init(allocator: Allocator, state: *BeaconState(fork)) !*Self {
             const instance = try allocator.create(Self);
             errdefer allocator.destroy(instance);
 

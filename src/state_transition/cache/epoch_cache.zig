@@ -20,7 +20,7 @@ const EffectiveBalanceIncrementsRc = @import("./effective_balance_increments.zig
 const EffectiveBalanceIncrements = @import("./effective_balance_increments.zig").EffectiveBalanceIncrements;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
@@ -185,6 +185,7 @@ pub const EpochCache = struct {
 
         for (0..validator_count) |i| {
             const validator = validators[i];
+
             // Note: Not usable for fork-choice balances since in-active validators are not zero'ed
             effective_balance_increment.items[i] = @intCast(@divFloor(validator.effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT));
 

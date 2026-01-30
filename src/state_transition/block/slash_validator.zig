@@ -4,7 +4,7 @@ const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
@@ -21,7 +21,7 @@ pub fn slashValidator(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     slashings_cache: *SlashingsCache,
     slashed_index: ValidatorIndex,
     whistle_blower_index: ?ValidatorIndex,

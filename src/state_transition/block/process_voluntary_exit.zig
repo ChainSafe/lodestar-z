@@ -1,7 +1,7 @@
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const types = @import("consensus_types");
 const c = @import("constants");
 const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit.Type;
@@ -16,7 +16,7 @@ pub fn processVoluntaryExit(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     signed_voluntary_exit: *const SignedVoluntaryExit,
     verify_signature: bool,
 ) !void {
@@ -33,7 +33,7 @@ pub fn isValidVoluntaryExit(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     signed_voluntary_exit: *const SignedVoluntaryExit,
     verify_signature: bool,
 ) !bool {

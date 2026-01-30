@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const preset = @import("preset").preset;
 const getNextSyncCommittee = @import("../utils/sync_committee.zig").getNextSyncCommittee;
@@ -12,7 +12,7 @@ pub fn processSyncCommitteeUpdates(
     comptime fork: ForkSeq,
     allocator: Allocator,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
 ) !void {
     const next_epoch = epoch_cache.epoch + 1;
     if (next_epoch % preset.EPOCHS_PER_SYNC_COMMITTEE_PERIOD == 0) {
