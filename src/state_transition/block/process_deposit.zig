@@ -27,10 +27,10 @@ pub const DepositData = union(enum) {
     phase0: types.phase0.DepositData.Type,
     electra: types.electra.DepositRequest.Type,
 
-    pub fn pubkey(self: *const DepositData) BLSPubkey {
+    pub fn pubkey(self: *const DepositData) *const BLSPubkey {
         return switch (self.*) {
-            .phase0 => |data| data.pubkey,
-            .electra => |data| data.pubkey,
+            .phase0 => |*data| &data.pubkey,
+            .electra => |*data| &data.pubkey,
         };
     }
 
@@ -102,7 +102,7 @@ pub fn applyDeposit(
     const amount = deposit.amount();
     const signature = deposit.signature();
 
-    const cached_index = epoch_cache.getValidatorIndex(&pubkey);
+    const cached_index = epoch_cache.getValidatorIndex(pubkey);
     const is_new_validator = cached_index == null or cached_index.? >= try state.validatorsCount();
 
     if (comptime fork.lt(.electra)) {
@@ -120,7 +120,7 @@ pub fn applyDeposit(
         }
     } else {
         const pending_deposit = types.electra.PendingDeposit.Type{
-            .pubkey = pubkey,
+            .pubkey = pubkey.*,
             .withdrawal_credentials = withdrawal_credentials.*,
             .amount = amount,
             .signature = signature,
@@ -147,7 +147,7 @@ pub fn addValidatorToRegistry(
     allocator: Allocator,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
-    pubkey: BLSPubkey,
+    pubkey: *const BLSPubkey,
     withdrawal_credentials: *const WithdrawalCredentials,
     amount: u64,
 ) !void {
@@ -159,7 +159,7 @@ pub fn addValidatorToRegistry(
     );
 
     const validator: types.phase0.Validator.Type = .{
-        .pubkey = pubkey,
+        .pubkey = pubkey.*,
         .withdrawal_credentials = withdrawal_credentials.*,
         .activation_eligibility_epoch = c.FAR_FUTURE_EPOCH,
         .activation_epoch = c.FAR_FUTURE_EPOCH,
@@ -199,14 +199,14 @@ pub fn addValidatorToRegistry(
 /// refer to https://github.com/ethereum/consensus-specs/blob/v1.5.0/specs/electra/beacon-chain.md#new-is_valid_deposit_signature
 pub fn validateDepositSignature(
     config: *const BeaconConfig,
-    pubkey: BLSPubkey,
+    pubkey: *const BLSPubkey,
     withdrawal_credentials: *const WithdrawalCredentials,
     amount: u64,
     deposit_signature: BLSSignature,
 ) !void {
     // verify the deposit signature (proof of posession) which is not checked by the deposit contract
     const deposit_message = DepositMessage{
-        .pubkey = pubkey,
+        .pubkey = pubkey.*,
         .withdrawal_credentials = withdrawal_credentials.*,
         .amount = amount,
     };
@@ -220,7 +220,7 @@ pub fn validateDepositSignature(
     try computeSigningRoot(types.phase0.DepositMessage, &deposit_message, &domain, &signing_root);
 
     // Pubkeys must be checked for group + inf. This must be done only once when the validator deposit is processed
-    const public_key = try blst.PublicKey.uncompress(&pubkey);
+    const public_key = try blst.PublicKey.uncompress(pubkey);
     try public_key.validate();
     const signature = try blst.Signature.uncompress(&deposit_signature);
     try signature.validate(true);

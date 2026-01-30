@@ -128,7 +128,7 @@ fn applyPendingDeposit(
     cache: *EpochTransitionCache,
 ) !void {
     const validator_index = epoch_cache.getValidatorIndex(&deposit.pubkey) orelse null;
-    const pubkey = deposit.pubkey;
+    const pubkey = &deposit.pubkey;
     // TODO: is this withdrawal_credential(s) the same to spec?
     const withdrawal_credentials = &deposit.withdrawal_credentials;
     const amount = deposit.amount;

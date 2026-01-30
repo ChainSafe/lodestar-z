@@ -12,7 +12,7 @@ const SyncPeriod = types.primitive.SyncPeriod.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const CommitteeIndex = types.primitive.CommitteeIndex.Type;
 const BeaconConfig = @import("config").BeaconConfig;
-const PubkeyIndexMap = @import("../utils/pubkey_index_map.zig").PubkeyIndexMap(ValidatorIndex);
+const PubkeyIndexMap = @import("./pubkey_cache.zig").PubkeyIndexMap;
 const Index2PubkeyCache = @import("./pubkey_cache.zig").Index2PubkeyCache;
 const EpochShuffling = @import("../utils//epoch_shuffling.zig").EpochShuffling;
 const EpochShufflingRc = @import("../utils/epoch_shuffling.zig").EpochShufflingRc;
@@ -36,6 +36,7 @@ const computeSyncParticipantReward = @import("../utils/sync_committee.zig").comp
 const computeBaseRewardPerIncrement = @import("../utils/sync_committee.zig").computeBaseRewardPerIncrement;
 const computeSyncPeriodAtEpoch = @import("../utils/epoch.zig").computeSyncPeriodAtEpoch;
 const isAggregatorFromCommitteeLength = @import("../utils/aggregator.zig").isAggregatorFromCommitteeLength;
+const calculateShufflingDecisionRoot = @import("../utils/epoch_shuffling.zig").calculateShufflingDecisionRoot;
 
 const sumTargetUnslashedBalanceIncrements = @import("../utils/target_unslashed_balance.zig").sumTargetUnslashedBalanceIncrements;
 
@@ -93,10 +94,10 @@ pub const EpochCache = struct {
     /// is null pre-Fulu.
     proposers_next_epoch: ?[preset.SLOTS_PER_EPOCH]ValidatorIndex,
 
-    // TODO: the below is not needed if we compute the next epoch shuffling eagerly
-    // previous_decision_root
-    // current_decision_root
-    // next_decision_root
+    /// Epoch decision roots to look up correct shuffling from the Shuffling Cache
+    previous_decision_root: [32]u8,
+    current_decision_root: [32]u8,
+    next_decision_root: [32]u8,
 
     // EpochCache does not take ownership of EpochShuffling, it is shared across EpochCache instances
     previous_shuffling: *EpochShufflingRc,
@@ -324,6 +325,11 @@ pub const EpochCache = struct {
             current_target_unslashed_balance_increments = sumTargetUnslashedBalanceIncrements(current_epoch_participation, current_epoch, validators);
         }
 
+        // Calculate decision roots for shuffling cache lookups
+        const previous_decision_root = try calculateShufflingDecisionRoot(allocator, state, previous_epoch);
+        const current_decision_root = try calculateShufflingDecisionRoot(allocator, state, current_epoch);
+        const next_decision_root = try calculateShufflingDecisionRoot(allocator, state, next_epoch);
+
         const epoch_cache_ptr = try allocator.create(EpochCache);
         errdefer allocator.destroy(epoch_cache_ptr);
 
@@ -336,6 +342,9 @@ pub const EpochCache = struct {
             // On first epoch, set to null to prevent unnecessary work since this is only used for metrics
             .proposers_prev_epoch = null,
             .proposers_next_epoch = null,
+            .previous_decision_root = previous_decision_root,
+            .current_decision_root = current_decision_root,
+            .next_decision_root = next_decision_root,
             .previous_shuffling = try EpochShufflingRc.init(allocator, previous_shuffling),
             .current_shuffling = try EpochShufflingRc.init(allocator, current_shuffling),
             .next_shuffling = try EpochShufflingRc.init(allocator, next_shuffling),
@@ -679,20 +688,16 @@ pub const EpochCache = struct {
         return isAggregatorFromCommitteeLength(committee.length, slot_signature);
     }
 
-    pub fn getPubkey(self: *const EpochCache, index: ValidatorIndex) ?types.primitive.BLSPubkey {
-        return if (index < self.index_to_pubkey.items.len) self.index_to_pubkey[index] else null;
-    }
-
     pub fn getValidatorIndex(self: *const EpochCache, pubkey: *const types.primitive.BLSPubkey.Type) ?ValidatorIndex {
-        return self.pubkey_to_index.get(pubkey[0..]);
+        return self.pubkey_to_index.get(pubkey.*);
     }
 
     /// Sets `index` at `PublicKey` within the index to pubkey map and allocates and puts a new `PublicKey` at `index` within the set of validators.
-    pub fn addPubkey(self: *EpochCache, index: ValidatorIndex, pubkey: types.primitive.BLSPubkey.Type) !void {
+    pub fn addPubkey(self: *EpochCache, index: ValidatorIndex, pubkey: *const types.primitive.BLSPubkey.Type) !void {
         std.debug.assert(index <= self.index_to_pubkey.items.len);
-        try self.pubkey_to_index.set(pubkey[0..], index);
+        try self.pubkey_to_index.put(pubkey.*, index);
         // this is deinit() by application
-        const pk = try blst.PublicKey.uncompress(&pubkey);
+        const pk = try blst.PublicKey.uncompress(pubkey);
         if (index == self.index_to_pubkey.items.len) {
             try self.index_to_pubkey.append(pk);
             return;
@@ -735,10 +740,12 @@ pub const EpochCache = struct {
 
     pub fn getIndexedSyncCommitteeAtEpoch(self: *const EpochCache, epoch: Epoch) !SyncCommitteeCacheAllForks {
         const sync_period = computeSyncPeriodAtEpoch(epoch);
-        switch (sync_period) {
-            self.sync_period => return self.current_sync_committee_indexed.get(),
-            self.sync_period + 1 => return self.next_sync_committee_indexed.get(),
-            else => return error.SyncCommitteeNotFound,
+        if (sync_period == self.sync_period) {
+            return self.current_sync_committee_indexed.get();
+        } else if (sync_period == self.sync_period + 1) {
+            return self.next_sync_committee_indexed.get();
+        } else {
+            return error.SyncCommitteeNotFound;
         }
     }
 
