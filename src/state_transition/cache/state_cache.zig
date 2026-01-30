@@ -29,14 +29,6 @@ pub const CachedBeaconState = struct {
 
     /// This class takes ownership of state after this function and has responsibility to deinit it
     pub fn createCachedBeaconState(allocator: Allocator, state: *AnyBeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*CachedBeaconState {
-        var latest_block_header = try state.latestBlockHeader();
-        const latest_block_slot = try latest_block_header.get("slot");
-        var validators_view = try state.validators();
-        try validators_view.commit();
-        const validators = try validators_view.getAllReadonlyValues(allocator);
-        defer allocator.free(validators);
-        var slashings_cache = try SlashingsCache.initFromValidators(allocator, latest_block_slot, validators);
-        errdefer slashings_cache.deinit();
         const epoch_cache = try EpochCache.createFromState(allocator, state, immutable_data, option);
         errdefer epoch_cache.deinit();
         const epoch_cache_ref = try EpochCacheRc.init(allocator, epoch_cache);
@@ -48,7 +40,7 @@ pub const CachedBeaconState = struct {
             .allocator = allocator,
             .config = immutable_data.config,
             .epoch_cache_ref = epoch_cache_ref,
-            .slashings_cache = slashings_cache,
+            .slashings_cache = try SlashingsCache.initEmpty(allocator),
             .state = state,
         };
 
@@ -97,19 +89,6 @@ pub const CachedBeaconState = struct {
 
     pub fn recordValidatorSlashing(self: *CachedBeaconState, block_slot: types.primitive.Slot.Type, index: ValidatorIndex) !void {
         try self.slashings_cache.recordValidatorSlashing(block_slot, index);
-    }
-
-    pub fn buildSlashingsCacheIfNeeded(self: *CachedBeaconState) !void {
-        var latest_block_header = try self.state.latestBlockHeader();
-        const latest_block_slot = try latest_block_header.get("slot");
-        if (self.slashings_cache.isInitialized(latest_block_slot)) return;
-
-        self.slashings_cache.deinit();
-        var validators_view = try self.state.validators();
-        try validators_view.commit();
-        const validators = try validators_view.getAllReadonlyValues(self.allocator);
-        defer self.allocator.free(validators);
-        self.slashings_cache = try SlashingsCache.initFromValidators(self.allocator, latest_block_slot, validators);
     }
 
     pub fn updateSlashingsCacheLatestBlockSlot(self: *CachedBeaconState) !void {

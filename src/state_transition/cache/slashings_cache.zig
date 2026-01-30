@@ -11,10 +11,10 @@ pub const SlashingsCache = struct {
     latest_block_slot: ?Slot,
     slashed_validators: DynamicBitSet,
 
-    pub fn initEmpty(allocator: Allocator) SlashingsCache {
+    pub fn initEmpty(allocator: Allocator) !SlashingsCache {
         return .{
             .latest_block_slot = null,
-            .slashed_validators = DynamicBitSet.initEmpty(allocator, 0) catch unreachable,
+            .slashed_validators = try DynamicBitSet.initEmpty(allocator, 0),
         };
     }
 
@@ -49,6 +49,7 @@ pub const SlashingsCache = struct {
 
     pub fn deinit(self: *SlashingsCache) void {
         self.slashed_validators.deinit();
+        self.* = undefined;
     }
 
     pub fn isInitialized(self: *const SlashingsCache, latest_block_slot: Slot) bool {
@@ -90,10 +91,12 @@ pub fn buildFromStateIfNeeded(
     const latest_block_slot = try latest_block_header.get("slot");
     if (slashings_cache.isInitialized(latest_block_slot)) return;
 
-    slashings_cache.deinit();
     var validators_view = try state.validators();
     try validators_view.commit();
     const validators = try validators_view.getAllReadonlyValues(allocator);
     defer allocator.free(validators);
-    slashings_cache.* = try SlashingsCache.initFromValidators(allocator, latest_block_slot, validators);
+    var new_cache = try SlashingsCache.initFromValidators(allocator, latest_block_slot, validators);
+    errdefer new_cache.deinit();
+    slashings_cache.deinit();
+    slashings_cache.* = new_cache;
 }

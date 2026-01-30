@@ -42,7 +42,7 @@ pub fn processOperations(
     const current_epoch = epoch_cache.epoch;
 
     for (body.inner.proposer_slashings.items) |*proposer_slashing| {
-        try processProposerSlashing(fork, config, epoch_cache, state, slashings_cache, proposer_slashing, opts.verify_signature);
+        try processProposerSlashing(fork, allocator, config, epoch_cache, state, slashings_cache, proposer_slashing, opts.verify_signature);
     }
 
     for (body.inner.attester_slashings.items) |*attester_slashing| {

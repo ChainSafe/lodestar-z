@@ -7,6 +7,7 @@ const BeaconState = @import("fork_types").BeaconState;
 const types = @import("consensus_types");
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
+const buildSlashingsCacheIfNeeded = @import("../cache/slashings_cache.zig").buildFromStateIfNeeded;
 const isSlashableAttestationData = @import("../utils/attestation.zig").isSlashableAttestationData;
 const getAttesterSlashableIndices = @import("../utils/attestation.zig").getAttesterSlashableIndices;
 const isValidIndexedAttestation = @import("./is_valid_indexed_attestation.zig").isValidIndexedAttestation;
@@ -27,6 +28,7 @@ pub fn processAttesterSlashing(
     attester_slashing: *const ForkTypes(fork).AttesterSlashing.Type,
     verify_signature: bool,
 ) !void {
+    try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
     try assertValidAttesterSlashing(
         fork,
         allocator,

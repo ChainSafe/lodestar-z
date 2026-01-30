@@ -8,6 +8,7 @@ const ForkTypes = @import("fork_types").ForkTypes;
 const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
+const buildSlashingsCacheIfNeeded = @import("../cache/slashings_cache.zig").buildFromStateIfNeeded;
 const processAttestationPhase0 = @import("./process_attestation_phase0.zig").processAttestationPhase0;
 const processAttestationsAltair = @import("./process_attestation_altair.zig").processAttestationsAltair;
 const Node = @import("persistent_merkle_tree").Node;
@@ -18,10 +19,11 @@ pub fn processAttestations(
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
-    slashings_cache: *const SlashingsCache,
+    slashings_cache: *SlashingsCache,
     attestations: []const ForkTypes(fork).Attestation.Type,
     verify_signatures: bool,
 ) !void {
+    try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
     if (comptime fork == .phase0) {
         for (attestations) |attestation| {
             try processAttestationPhase0(

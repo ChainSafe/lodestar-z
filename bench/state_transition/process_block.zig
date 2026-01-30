@@ -181,7 +181,6 @@ fn ProcessOperationsBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
-            cloned.buildSlashingsCacheIfNeeded() catch unreachable;
             state_transition.processOperations(
                 fork,
                 allocator,
@@ -398,7 +397,6 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
             recordSegment(.eth1_data, elapsedSince(eth1_start));
 
             const ops_start = std.time.nanoTimestamp();
-            cloned.buildSlashingsCacheIfNeeded() catch unreachable;
             state_transition.processOperations(
                 fork,
                 allocator,
@@ -511,6 +509,7 @@ fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, pool: *Nod
         .{},
     );
     try cached_state.state.commit();
+    try state_transition.buildSlashingsCacheFromStateIfNeeded(allocator, cached_state.state, &cached_state.slashings_cache);
     try stdout.print("State: slot={}, validators={}\n", .{ try cached_state.state.slot(), try beacon_state.validatorsCount() });
 
     var bench = zbench.Benchmark.init(allocator, .{

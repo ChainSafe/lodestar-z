@@ -226,6 +226,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     const epoch_cache = cached_state.getEpochCache();
                     try state_transition.processProposerSlashing(
                         fork,
+                        allocator,
                         config,
                         epoch_cache,
                         state,
