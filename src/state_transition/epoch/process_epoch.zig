@@ -35,7 +35,7 @@ pub fn processEpoch(
     try processJustificationAndFinalization(fork, state, cache);
 
     if (comptime fork.gte(.altair)) {
-        try processInactivityUpdates(fork, config, epoch_cache, state, cache);
+        try processInactivityUpdates(fork, allocator, config, epoch_cache, state, cache);
     }
 
     try processRegistryUpdates(fork, config, epoch_cache, state, cache);

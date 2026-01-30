@@ -12,6 +12,7 @@ const Node = @import("persistent_merkle_tree").Node;
 
 pub fn processInactivityUpdates(
     comptime fork: ForkSeq,
+    allocator: std.mem.Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *ForkBeaconState(fork),
@@ -32,9 +33,9 @@ pub fn processInactivityUpdates(
 
     var inactivity_scores = try state.inactivityScores();
     try inactivity_scores.commit();
-    const allocator = state.baseView().allocator;
     const inactivity_scores_values = try inactivity_scores.getAll(allocator);
     defer allocator.free(inactivity_scores_values);
+
     std.debug.assert(flags.len <= inactivity_scores_values.len);
     for (0..flags.len) |i| {
         const flag = flags[i];
@@ -70,6 +71,7 @@ test "processInactivityUpdates - sanity" {
 
     try processInactivityUpdates(
         .electra,
+        allocator,
         test_state.cached_state.config,
         test_state.cached_state.getEpochCache(),
         test_state.cached_state.state.castToFork(.electra),
