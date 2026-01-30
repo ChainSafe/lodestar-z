@@ -14,6 +14,9 @@ const pubkey = @import("./pubkeys.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
 const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiValue;
 
+const getter = @import("napi_property_descriptor.zig").getter;
+const method = @import("napi_property_descriptor.zig").method;
+
 /// Allocator used for all BeaconStateView instances.
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = gpa.allocator();
@@ -898,33 +901,6 @@ pub fn BeaconStateView_processSlots(env: napi.Env, cb: napi.CallbackInfo(1)) !na
     allocator.destroy(post_state);
 
     return new_state_value;
-}
-
-/// `BeaconStateView_getXYZ` => "getXYZ"
-fn fnName(comptime func: anytype) [:0]const u8 {
-    const fq_name = @typeName(@TypeOf(func));
-    const start_index = comptime std.mem.indexOf(u8, fq_name, "@typeInfo") orelse @compileError("Expected a @typeInfo");
-    const underscore_index = comptime std.mem.indexOfScalar(u8, fq_name[start_index..], '_') orelse @compileError("Expected an underscore");
-    const next_paren_index = comptime std.mem.indexOfScalar(u8, fq_name[start_index..], ')') orelse @compileError("Expected a paren");
-    return @ptrCast(fq_name[(start_index + underscore_index + 1) .. start_index + next_paren_index] ++ [_]u8{0});
-}
-
-///
-/// Creates a `napi.c.napi_property_descriptor` getter from a BeaconStateView_XXX function.
-fn getter(
-    comptime func: anytype,
-) napi.c.napi_property_descriptor {
-    const name = comptime fnName(func);
-    return .{ .utf8name = name.ptr, .getter = napi.wrapCallback(0, func) };
-}
-
-/// Creates a `napi.c.napi_property_descriptor` method from a BeaconStateView_XXX function.
-fn method(
-    comptime argc_cap: usize,
-    comptime func: anytype,
-) napi.c.napi_property_descriptor {
-    const name = comptime fnName(func);
-    return .{ .utf8name = name.ptr, .method = napi.wrapCallback(argc_cap, func) };
 }
 
 pub fn register(env: napi.Env, exports: napi.Value) !void {
