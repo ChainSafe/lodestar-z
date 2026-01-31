@@ -186,19 +186,25 @@ pub fn BeaconStateView_getRandaoMix(env: napi.Env, cb: napi.CallbackInfo(1)) !na
 pub fn BeaconStateView_previousEpochParticipation(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     var view = try cached_state.state.previousEpochParticipation();
-    var previous_epoch_participation: ct.altair.EpochParticipation.Type = .{};
-    try view.toValue(allocator, &previous_epoch_participation);
-    defer previous_epoch_participation.deinit(allocator);
-    return try sszValueToNapiValue(env, ct.altair.EpochParticipation, &previous_epoch_participation);
+
+    const size = try view.serializedSize();
+    var bytes: [*]u8 = undefined;
+    const buf = try env.createArrayBuffer(size, &bytes);
+    _ = try view.serializeIntoBytes(bytes[0..size]);
+
+    return try env.createTypedarray(.uint8, size, buf, 0);
 }
 
 pub fn BeaconStateView_currentEpochParticipation(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     var view = try cached_state.state.currentEpochParticipation();
-    var current_epoch_participation: ct.altair.EpochParticipation.Type = .{};
-    try view.toValue(allocator, &current_epoch_participation);
-    defer current_epoch_participation.deinit(allocator);
-    return try sszValueToNapiValue(env, ct.altair.EpochParticipation, &current_epoch_participation);
+
+    const size = try view.serializedSize();
+    var bytes: [*]u8 = undefined;
+    const buf = try env.createArrayBuffer(size, &bytes);
+    _ = try view.serializeIntoBytes(bytes[0..size]);
+
+    return try env.createTypedarray(.uint8, size, buf, 0);
 }
 
 pub fn BeaconStateView_latestExecutionPayloadHeader(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
