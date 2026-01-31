@@ -5,7 +5,11 @@ const napi = @import("zapi:napi");
 pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Type) !napi.Value {
     switch (ST.kind) {
         .uint => {
-            return try env.createInt64(@intCast(value.*));
+            if (ST.Type == u64) {
+                return try env.createBigintUint64(value.*);
+            } else {
+                return try env.createInt64(@intCast(value.*));
+            }
         },
         .bool => {
             return try env.getBoolean(value.*);
