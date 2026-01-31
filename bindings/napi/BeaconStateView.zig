@@ -312,14 +312,19 @@ pub fn BeaconStateView_pendingConsolidations(env: napi.Env, cb: napi.CallbackInf
         return env.getNull();
     };
 
-    const consolidations = pending_consolidations.getAllReadonlyValues(allocator) catch {
-        try env.throwError("STATE_ERROR", "Failed to get pendingConsolidations values");
+    const size = pending_consolidations.serializedSize() catch {
+        try env.throwError("STATE_ERROR", "Failed to get pendingConsolidations size");
         return env.getNull();
     };
-    defer allocator.free(consolidations);
 
-    const consolidations_arraylist = ct.electra.PendingConsolidations.Type.fromOwnedSlice(consolidations);
-    return try sszValueToNapiValue(env, ct.electra.PendingConsolidations, &consolidations_arraylist);
+    var bytes: [*]u8 = undefined;
+    const buf = try env.createArrayBuffer(size, &bytes);
+    _ = pending_consolidations.serializeIntoBytes(bytes[0..size]) catch {
+        try env.throwError("STATE_ERROR", "Failed to serialize pendingConsolidations");
+        return env.getNull();
+    };
+
+    return try env.createTypedarray(.uint8, size, buf, 0);
 }
 
 pub fn BeaconStateView_pendingConsolidationsCount(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
