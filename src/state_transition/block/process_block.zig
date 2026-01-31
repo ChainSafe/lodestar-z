@@ -2,9 +2,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const BlockType = @import("fork_types").BlockType;
-const ForkBeaconBlock = @import("fork_types").ForkBeaconBlock;
+const BeaconBlock = @import("fork_types").BeaconBlock;
 const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
 const Root = types.primitive.Root.Type;
@@ -36,9 +36,9 @@ pub fn processBlock(
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     comptime block_type: BlockType,
-    block: *const ForkBeaconBlock(fork, block_type),
+    block: *const BeaconBlock(block_type, fork),
     external_data: BlockExternalData,
     opts: ProcessBlockOpts,
     // TODO: metrics

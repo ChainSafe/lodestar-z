@@ -4,7 +4,7 @@ const ssz = @import("consensus_types");
 const preset = @import("preset").preset;
 const c = @import("constants");
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
@@ -22,7 +22,7 @@ pub fn processProposerLookahead(
     comptime fork: ForkSeq,
     allocator: Allocator,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     epoch_transition_cache: *const EpochTransitionCache,
 ) !void {
     const proposer_lookahead: *[ssz.fulu.ProposerLookahead.length]u64 = try state.proposerLookaheadSlice(allocator);

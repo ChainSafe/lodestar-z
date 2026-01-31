@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAtEpoch;
 const getBlockRootAtSlot = @import("../utils/block_root.zig").getBlockRootAtSlot;
@@ -15,7 +15,7 @@ pub fn processPendingAttestations(
     comptime fork: ForkSeq,
     allocator: Allocator,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     proposer_indices: []usize,
     validator_count: usize,
     inclusion_delays: []usize,

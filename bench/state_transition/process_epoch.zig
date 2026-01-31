@@ -129,7 +129,7 @@ fn ProcessSlashingsBench(comptime fork: ForkSeq) type {
                 cloned.getEpochCache(),
                 cloned.state.castToFork(fork),
                 &cache,
-                false,
+                true,
             ) catch unreachable;
         }
     };

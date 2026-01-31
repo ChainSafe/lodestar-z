@@ -80,9 +80,7 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
         pub fn process(self: *Self) !void {
             try state_transition.state_transition.processSlots(
                 self.pre.allocator,
-                self.pre.cached_state.config,
-                self.pre.cached_state.getEpochCache(),
-                self.pre.cached_state.state,
+                self.pre.cached_state,
                 try self.pre.cached_state.state.slot() + self.slots,
                 .{},
             );
@@ -180,9 +178,9 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
             }
         }
 
-        pub fn process(self: *Self) !*state_transition.state_transition.StateTransitionResult {
+        pub fn process(self: *Self) !*state_transition.CachedBeaconState {
             const verify = self.bls_setting.verify();
-            var result: ?*state_transition.state_transition.StateTransitionResult = null;
+            var result: ?*state_transition.CachedBeaconState = null;
             for (self.blocks) |*block| {
                 const signed_block = switch (fork) {
                     .phase0 => AnySignedBeaconBlock{ .phase0 = block },
@@ -193,8 +191,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
                     .electra => AnySignedBeaconBlock{ .full_electra = block },
                     .fulu => AnySignedBeaconBlock{ .full_fulu = block },
                 };
-                const input_state = if (result) |res| &res.state else self.pre.cached_state.state;
-                const input_epoch_cache = if (result) |res| res.epoch_cache else self.pre.cached_state.getEpochCache();
+                const input_cached_state = if (result) |res| res else self.pre.cached_state;
                 {
                     // if error, clean pre_state of stateTransition() function
                     errdefer {
@@ -205,9 +202,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
                     }
                     const new_result = try state_transition.state_transition.stateTransition(
                         self.pre.allocator,
-                        self.pre.cached_state.config,
-                        input_epoch_cache,
-                        input_state,
+                        input_cached_state,
                         signed_block,
                         .{
                             .verify_signatures = verify,
@@ -233,7 +228,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
                     actual.deinit();
                     self.pre.allocator.destroy(actual);
                 }
-                try expectEqualBeaconStates(post, &actual.state);
+                try expectEqualBeaconStates(post, actual.state);
             } else {
                 _ = self.process() catch |err| {
                     if (err == error.SkipZigTest) {

@@ -2,7 +2,7 @@ const std = @import("std");
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const ForkTypes = @import("fork_types").ForkTypes;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const types = @import("consensus_types");
 const isSlashableValidator = @import("../utils/validator.zig").isSlashableValidator;
@@ -14,7 +14,7 @@ pub fn processProposerSlashing(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     proposer_slashing: *const ForkTypes(fork).ProposerSlashing.Type,
     verify_signatures: bool,
 ) !void {
@@ -27,7 +27,7 @@ pub fn assertValidProposerSlashing(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     proposer_slashing: *const ForkTypes(fork).ProposerSlashing.Type,
     verify_signature: bool,
 ) !void {

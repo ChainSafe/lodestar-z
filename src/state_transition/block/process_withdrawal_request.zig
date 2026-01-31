@@ -1,7 +1,7 @@
 const std = @import("std");
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const c = @import("constants");
 const types = @import("consensus_types");
@@ -19,7 +19,7 @@ pub fn processWithdrawalRequest(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     withdrawal_request: *const WithdrawalRequest,
 ) !void {
     const amount = withdrawal_request.amount;

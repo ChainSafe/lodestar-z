@@ -9,7 +9,7 @@ const preset = @import("preset").preset;
 const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;

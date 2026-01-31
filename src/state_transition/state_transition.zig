@@ -1,10 +1,17 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const ForkSeq = @import("config").ForkSeq;
+const metrics = @import("metrics.zig");
+const observeEpochTransitionStep = metrics.observeEpochTransitionStep;
+const observeEpochTransition = metrics.observeEpochTransition;
+const readSeconds = metrics.readSeconds;
+const Timer = std.time.Timer;
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 
 const Slot = types.primitive.Slot.Type;
-
+const CachedBeaconState = @import("cache/state_cache.zig").CachedBeaconState;
 const BeaconConfig = @import("config").BeaconConfig;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
@@ -41,23 +48,24 @@ pub const BlockExternalData = struct {
 
 pub fn processSlots(
     allocator: std.mem.Allocator,
-    config: *const BeaconConfig,
-    epoch_cache: *EpochCache,
-    state: *AnyBeaconState,
+    cached_state: *CachedBeaconState,
     slot: Slot,
     _: EpochTransitionCacheOpts,
 ) !void {
+    const config = cached_state.config;
+    const epoch_cache = cached_state.getEpochCache();
+    const state = cached_state.state;
+
     if (try state.slot() > slot) return error.outdatedSlot;
 
     while (try state.slot() < slot) {
-        try processSlot(state);
+        try processSlot(cached_state.state);
 
         const next_slot = try state.slot() + 1;
         if (next_slot % preset.SLOTS_PER_EPOCH == 0) {
-            // TODO(bing): metrics
-            // const epochTransitionTimer = metrics?.epochTransitionTime.startTimer();
+            var epoch_transition_timer = try Timer.start();
 
-            // TODO(bing): metrics: time beforeProcessEpoch
+            var timer = try Timer.start();
             var epoch_transition_cache = try EpochTransitionCache.init(
                 allocator,
                 config,
@@ -65,6 +73,7 @@ pub fn processSlots(
                 state,
             );
             defer epoch_transition_cache.deinit();
+            try observeEpochTransitionStep(.{ .step = .before_process_epoch }, timer.read());
 
             switch (state.forkSeq()) {
                 inline else => |f| {
@@ -82,7 +91,9 @@ pub fn processSlots(
 
             try state.setSlot(next_slot);
 
+            timer = try Timer.start();
             try epoch_cache.afterProcessEpoch(state, &epoch_transition_cache);
+            try observeEpochTransitionStep(.{ .step = .after_process_epoch }, timer.read());
             // state.commit
 
             const state_epoch = computeEpochAtSlot(next_slot);
@@ -136,11 +147,10 @@ pub fn processSlots(
             }
 
             try epoch_cache.finalProcessEpoch(state);
+            metrics.state_transition.epoch_transition.observe(readSeconds(&epoch_transition_timer));
         } else {
             try state.setSlot(next_slot);
         }
-
-        //epochTransitionTimer
     }
 }
 
@@ -163,36 +173,34 @@ pub const StateTransitionResult = struct {
 
 pub fn stateTransition(
     allocator: std.mem.Allocator,
-    config: *const BeaconConfig,
-    epoch_cache: *EpochCache,
-    state: *AnyBeaconState,
+    cached_state: *CachedBeaconState,
     signed_block: AnySignedBeaconBlock,
     opts: TransitionOpt,
-) !*StateTransitionResult {
+) !*CachedBeaconState {
     const block = signed_block.beaconBlock();
     const block_slot = block.slot();
 
-    var post_state = try state.clone(
+    var post_cached_state = try cached_state.clone(
+        allocator,
         .{ .transfer_cache = !opts.do_not_transfer_cache },
     );
-    const post_epoch_cache = try epoch_cache.clone(allocator);
+    errdefer {
+        post_cached_state.deinit();
+        allocator.destroy(post_cached_state);
+    }
 
-    errdefer post_state.deinit();
-    errdefer post_epoch_cache.deinit();
-
-    //TODO(bing): metrics
-    //if (metrics) {
-    //  onStateCloneMetrics(postState, metrics, StateCloneSource.stateTransition);
-    //}
+    try metrics.state_transition.onStateClone(post_cached_state, .state_transition);
 
     try processSlots(
         allocator,
-        config,
-        post_epoch_cache,
-        &post_state,
+        post_cached_state,
         block_slot,
         .{},
     );
+
+    const config = post_cached_state.config;
+    const post_epoch_cache = post_cached_state.getEpochCache();
+    const post_state = post_cached_state.state;
 
     // Verify proposer signature only
     if (opts.verify_proposer and !try verifyProposerSignature(
@@ -204,12 +212,11 @@ pub fn stateTransition(
         return error.InvalidBlockSignature;
     }
 
-    //  // Note: time only on success
-    //  const processBlockTimer = metrics?.processBlockTime.startTimer();
-    //
     if (block.forkSeq() != post_state.forkSeq()) {
         return error.InvalidBlockForkForState;
     }
+    // Note: time only on success
+    var timer = try Timer.start();
     switch (post_state.forkSeq()) {
         inline else => |f| {
             switch (block.blockType()) {
@@ -235,6 +242,7 @@ pub fn stateTransition(
             }
         },
     }
+    metrics.state_transition.process_block.observe(readSeconds(&timer));
 
     //
     // TODO(bing): commit
@@ -242,20 +250,13 @@ pub fn stateTransition(
     //  postState.commit();
     //  processBlockCommitTimer?.();
 
-    //  // Note: time only on success. Include processBlock and commit
-    //  processBlockTimer?.();
-    // TODO(bing): metrics
-    //  if (metrics) {
-    //    onPostStateMetrics(postState, metrics);
-    //  }
+    try metrics.state_transition.onPostState(post_cached_state);
 
     // Verify state root
     if (opts.verify_state_root) {
-        //    const hashTreeRootTimer = metrics?.stateHashTreeRootTime.startTimer({
-        //      source: StateHashTreeRootSource.stateTransition,
-        //    });
+        timer = try Timer.start();
         const post_state_root = try post_state.hashTreeRoot();
-        //    hashTreeRootTimer?.();
+        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .block_transition }, readSeconds(&timer));
 
         const block_state_root = block.stateRoot();
         if (!std.mem.eql(u8, post_state_root, block_state_root)) {
@@ -266,12 +267,7 @@ pub fn stateTransition(
         try post_state.commit();
     }
 
-    const result = try allocator.create(StateTransitionResult);
-    result.* = .{
-        .state = post_state,
-        .epoch_cache = post_epoch_cache,
-    };
-    return result;
+    return post_cached_state;
 }
 
 pub fn deinitStateTransition() void {
@@ -317,9 +313,7 @@ test "state transition - electra block" {
         // testing.expectError(blst.c.BLST_BAD_ENCODING, stateTransition(allocator, test_state.cached_state, signed_block, .{ .verify_signatures = true }));
         const res = stateTransition(
             allocator,
-            test_state.cached_state.config,
-            test_state.cached_state.getEpochCache(),
-            test_state.cached_state.state,
+            test_state.cached_state,
             signed_beacon_block,
             tc.transition_opt,
         );

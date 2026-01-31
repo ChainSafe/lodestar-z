@@ -5,7 +5,7 @@ const types = @import("consensus_types");
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkTypes = @import("fork_types").ForkTypes;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const processAttestationPhase0 = @import("./process_attestation_phase0.zig").processAttestationPhase0;
 const processAttestationsAltair = @import("./process_attestation_altair.zig").processAttestationsAltair;
@@ -16,7 +16,7 @@ pub fn processAttestations(
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     attestations: []const ForkTypes(fork).Attestation.Type,
     verify_signatures: bool,
 ) !void {

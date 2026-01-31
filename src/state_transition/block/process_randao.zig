@@ -2,21 +2,21 @@ const std = @import("std");
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const BlockType = @import("fork_types").BlockType;
-const ForkBeaconBlockBody = @import("fork_types").ForkBeaconBlockBody;
+const BeaconBlockBody = @import("fork_types").BeaconBlockBody;
 const getRandaoMix = @import("../utils/seed.zig").getRandaoMix;
 const verifyRandaoSignature = @import("../signature_sets/randao.zig").verifyRandaoSignature;
-const digest = @import("../utils/sha256.zig").digest;
 const Node = @import("persistent_merkle_tree").Node;
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub fn processRandao(
     comptime fork: ForkSeq,
     beacon_config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     comptime block_type: BlockType,
-    body: *const ForkBeaconBlockBody(fork, block_type),
+    body: *const BeaconBlockBody(block_type, fork),
     proposer_idx: u64,
     verify_signature: bool,
 ) !void {
@@ -38,7 +38,7 @@ pub fn processRandao(
 
     // mix in RANDAO reveal
     var randao_reveal_digest: [32]u8 = undefined;
-    digest(randao_reveal, &randao_reveal_digest);
+    Sha256.hash(randao_reveal, &randao_reveal_digest, .{});
 
     var randao_mix: [32]u8 = undefined;
     const current_mix = try getRandaoMix(fork, state, epoch);
@@ -82,7 +82,7 @@ test "process randao - sanity" {
 
     const beacon_block = AnyBeaconBlock{ .full_electra = &message };
 
-    const fork_body = ForkBeaconBlockBody(.electra, .full){ .inner = message.body };
+    const fork_body = BeaconBlockBody(.full, .electra){ .inner = message.body };
 
     try processRandao(
         .electra,

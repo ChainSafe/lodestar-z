@@ -6,7 +6,7 @@ const Epoch = types.primitive.Epoch.Type;
 const SyncPeriod = types.primitive.SyncPeriod.Type;
 const Gwei = types.primitive.Gwei.Type;
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const getActivationExitChurnLimit = @import("../utils/validator.zig").getActivationExitChurnLimit;
 const getConsolidationChurnLimit = @import("../utils/validator.zig").getConsolidationChurnLimit;
@@ -38,7 +38,7 @@ pub fn computeActivationExitEpoch(epoch: Epoch) Epoch {
 pub fn computeExitEpochAndUpdateChurn(
     comptime fork: ForkSeq,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     exit_balance: Gwei,
 ) !u64 {
     const state_earliest_exit_epoch = try state.earliestExitEpoch();
@@ -70,7 +70,7 @@ pub fn computeExitEpochAndUpdateChurn(
 pub fn computeConsolidationEpochAndUpdateChurn(
     comptime fork: ForkSeq,
     epoch_cache: *const EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     consolidation_balance: Gwei,
 ) !u64 {
     const state_earliest_consolidation_epoch = try state.earliestConsolidationEpoch();

@@ -2,9 +2,9 @@ const std = @import("std");
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const BlockType = @import("fork_types").BlockType;
-const ForkBeaconBlockBody = @import("fork_types").ForkBeaconBlockBody;
+const BeaconBlockBody = @import("fork_types").BeaconBlockBody;
 const ForkTypes = @import("fork_types").ForkTypes;
 const ct = @import("consensus_types");
 
@@ -26,9 +26,9 @@ pub fn processOperations(
     allocator: std.mem.Allocator,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     comptime block_type: BlockType,
-    body: *const ForkBeaconBlockBody(fork, block_type),
+    body: *const BeaconBlockBody(block_type, fork),
     opts: ProcessBlockOpts,
 ) !void {
     // verify that outstanding deposits are processed up to the maximum number of deposits

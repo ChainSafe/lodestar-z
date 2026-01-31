@@ -3,7 +3,7 @@ const types = @import("consensus_types");
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const getActivationExitChurnLimit = @import("../utils/validator.zig").getActivationExitChurnLimit;
@@ -25,7 +25,7 @@ pub fn processPendingDeposits(
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     cache: *EpochTransitionCache,
 ) !void {
     const next_epoch = epoch_cache.epoch + 1;
@@ -123,7 +123,7 @@ fn applyPendingDeposit(
     allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     deposit: PendingDeposit,
     cache: *EpochTransitionCache,
 ) !void {

@@ -1,12 +1,12 @@
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 
 pub fn processHistoricalSummariesUpdate(
     comptime fork: ForkSeq,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     cache: *const EpochTransitionCache,
 ) !void {
     const next_epoch = cache.current_epoch + 1;

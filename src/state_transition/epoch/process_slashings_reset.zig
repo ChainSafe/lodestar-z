@@ -1,5 +1,5 @@
 const ForkSeq = @import("config").ForkSeq;
-const ForkBeaconState = @import("fork_types").ForkBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const preset = @import("preset").preset;
@@ -9,7 +9,7 @@ const preset = @import("preset").preset;
 pub fn processSlashingsReset(
     comptime fork: ForkSeq,
     epoch_cache: *EpochCache,
-    state: *ForkBeaconState(fork),
+    state: *BeaconState(fork),
     cache: *const EpochTransitionCache,
 ) !void {
     const next_epoch = cache.current_epoch + 1;
