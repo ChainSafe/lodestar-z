@@ -186,19 +186,25 @@ pub fn BeaconStateView_getRandaoMix(env: napi.Env, cb: napi.CallbackInfo(1)) !na
 pub fn BeaconStateView_previousEpochParticipation(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     var view = try cached_state.state.previousEpochParticipation();
-    var previous_epoch_participation: ct.altair.EpochParticipation.Type = .{};
-    try view.toValue(allocator, &previous_epoch_participation);
-    defer previous_epoch_participation.deinit(allocator);
-    return try sszValueToNapiValue(env, ct.altair.EpochParticipation, &previous_epoch_participation);
+
+    const size = try view.serializedSize();
+    var bytes: [*]u8 = undefined;
+    const buf = try env.createArrayBuffer(size, &bytes);
+    _ = try view.serializeIntoBytes(bytes[0..size]);
+
+    return try env.createTypedarray(.uint8, size, buf, 0);
 }
 
 pub fn BeaconStateView_currentEpochParticipation(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     var view = try cached_state.state.currentEpochParticipation();
-    var current_epoch_participation: ct.altair.EpochParticipation.Type = .{};
-    try view.toValue(allocator, &current_epoch_participation);
-    defer current_epoch_participation.deinit(allocator);
-    return try sszValueToNapiValue(env, ct.altair.EpochParticipation, &current_epoch_participation);
+
+    const size = try view.serializedSize();
+    var bytes: [*]u8 = undefined;
+    const buf = try env.createArrayBuffer(size, &bytes);
+    _ = try view.serializeIntoBytes(bytes[0..size]);
+
+    return try env.createTypedarray(.uint8, size, buf, 0);
 }
 
 pub fn BeaconStateView_latestExecutionPayloadHeader(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
@@ -224,15 +230,19 @@ pub fn BeaconStateView_historicalSummaries(env: napi.Env, cb: napi.CallbackInfo(
         return env.getNull();
     };
 
-    // Bulk read all values at once
-    const summaries = historical_summaries.getAllReadonlyValues(allocator) catch {
-        try env.throwError("STATE_ERROR", "Failed to get historicalSummaries values");
+    const size = historical_summaries.serializedSize() catch {
+        try env.throwError("STATE_ERROR", "Failed to get historicalSummaries size");
         return env.getNull();
     };
-    defer allocator.free(summaries);
 
-    const summaries_arraylist = ct.capella.HistoricalSummaries.Type.fromOwnedSlice(summaries);
-    return try sszValueToNapiValue(env, ct.capella.HistoricalSummaries, &summaries_arraylist);
+    var bytes: [*]u8 = undefined;
+    const buf = try env.createArrayBuffer(size, &bytes);
+    _ = historical_summaries.serializeIntoBytes(bytes[0..size]) catch {
+        try env.throwError("STATE_ERROR", "Failed to serialize historicalSummaries");
+        return env.getNull();
+    };
+
+    return try env.createTypedarray(.uint8, size, buf, 0);
 }
 
 /// Get the pending deposits from the state (Electra+).
@@ -306,14 +316,19 @@ pub fn BeaconStateView_pendingConsolidations(env: napi.Env, cb: napi.CallbackInf
         return env.getNull();
     };
 
-    const consolidations = pending_consolidations.getAllReadonlyValues(allocator) catch {
-        try env.throwError("STATE_ERROR", "Failed to get pendingConsolidations values");
+    const size = pending_consolidations.serializedSize() catch {
+        try env.throwError("STATE_ERROR", "Failed to get pendingConsolidations size");
         return env.getNull();
     };
-    defer allocator.free(consolidations);
 
-    const consolidations_arraylist = ct.electra.PendingConsolidations.Type.fromOwnedSlice(consolidations);
-    return try sszValueToNapiValue(env, ct.electra.PendingConsolidations, &consolidations_arraylist);
+    var bytes: [*]u8 = undefined;
+    const buf = try env.createArrayBuffer(size, &bytes);
+    _ = pending_consolidations.serializeIntoBytes(bytes[0..size]) catch {
+        try env.throwError("STATE_ERROR", "Failed to serialize pendingConsolidations");
+        return env.getNull();
+    };
+
+    return try env.createTypedarray(.uint8, size, buf, 0);
 }
 
 pub fn BeaconStateView_pendingConsolidationsCount(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
