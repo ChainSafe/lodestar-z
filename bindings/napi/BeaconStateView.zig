@@ -748,7 +748,75 @@ pub fn BeaconStateView_getSingleProof(env: napi.Env, cb: napi.CallbackInfo(1)) !
     return result;
 }
 
-// pub fn BeaconStateView_createMultiProof
+/// Create a compact multi-proof from a descriptor.
+/// Arguments:
+/// - arg 0: descriptor (Uint8Array)
+/// Returns: {type: string, leaves: Uint8Array[], descriptor: Uint8Array}
+pub fn BeaconStateView_createMultiProof(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const persistent_merkle_tree = @import("persistent_merkle_tree");
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+
+    const descriptor_info = try cb.arg(0).getTypedarrayInfo();
+    const descriptor = descriptor_info.data;
+
+    // Get the root node from the state
+    try cached_state.state.commit();
+    const root_node = switch (cached_state.state.*) {
+        inline else => |*state| state.base_view.data.root,
+    };
+
+    // Create proof input for compact multi-proof
+    const proof_input = persistent_merkle_tree.proof.ProofInput{
+        .compactMulti = .{ .descriptor = descriptor },
+    };
+
+    var proof = persistent_merkle_tree.proof.createProof(
+        allocator,
+        &pool.pool,
+        root_node,
+        proof_input,
+    ) catch {
+        try env.throwError("STATE_ERROR", "Failed to create proof");
+        return env.getNull();
+    };
+    defer proof.deinit(allocator);
+
+    // Create result object matching Proof interface
+    const result = try env.createObject();
+
+    // Add type field
+    const proof_type_str = switch (proof) {
+        inline else => |_, tag| @tagName(tag),
+    };
+    try result.setNamedProperty("type", try env.createStringUtf8(proof_type_str));
+
+    // Extract data based on proof type
+    switch (proof) {
+        .compactMulti => |compact| {
+            // Create leaves array
+            const leaves_array = try env.createArray();
+            for (compact.leaves, 0..) |leaf, i| {
+                var leaf_bytes: [*]u8 = undefined;
+                const leaf_buf = try env.createArrayBuffer(32, &leaf_bytes);
+                @memcpy(leaf_bytes[0..32], &leaf);
+                try leaves_array.setElement(@intCast(i), try env.createTypedarray(.uint8, 32, leaf_buf, 0));
+            }
+            try result.setNamedProperty("leaves", leaves_array);
+
+            // Create descriptor Uint8Array
+            var descriptor_bytes: [*]u8 = undefined;
+            const descriptor_buf = try env.createArrayBuffer(compact.descriptor.len, &descriptor_bytes);
+            @memcpy(descriptor_bytes[0..compact.descriptor.len], compact.descriptor);
+            try result.setNamedProperty("descriptor", try env.createTypedarray(.uint8, compact.descriptor.len, descriptor_buf, 0));
+        },
+        else => {
+            try env.throwError("STATE_ERROR", "Unexpected proof type");
+            return env.getNull();
+        },
+    }
+
+    return result;
+}
 
 pub fn BeaconStateView_computeUnrealizedCheckpoints(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
@@ -976,7 +1044,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             method(0, BeaconStateView_getFinalizedRootProof),
             // method(1, BeaconStateView_getSyncCommitteesWitness),
             method(1, BeaconStateView_getSingleProof),
-            // method(1, BeaconStateView_createMultiProof),
+            method(1, BeaconStateView_createMultiProof),
 
             method(0, BeaconStateView_computeUnrealizedCheckpoints),
 
