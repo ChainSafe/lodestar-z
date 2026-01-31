@@ -32,19 +32,13 @@ pub fn processRewardsAndPenalties(
     defer allocator.free(balances);
 
     if (slashing_penalties) |slashings| {
-        if (slashings.len != rewards.len) {
-            return error.InvalidSlashingPenaltiesLength;
-        }
-
         for (rewards, penalties, balances, 0..) |reward, penalty, *balance, i| {
-            const total_penalty = penalty +| slashings[i];
-            const result = balance.* + reward -| total_penalty;
-            balance.* = result;
+            const slashing: u64 = if (i < slashings.len) slashings[i] else 0;
+            balance.* = (try std.math.add(u64, balance.*, reward)) -| penalty -| slashing;
         }
     } else {
         for (rewards, penalties, balances) |reward, penalty, *balance| {
-            const result = balance.* + reward -| penalty;
-            balance.* = result;
+            balance.* = (try std.math.add(u64, balance.*, reward)) -| penalty;
         }
     }
 
