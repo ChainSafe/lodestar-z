@@ -477,7 +477,15 @@ pub fn main() !void {
     return error.NoBenchmarkRan;
 }
 
-fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, pool: *Node.Pool, stdout: anytype, state_bytes: []const u8, block_bytes: []const u8, chain_config: config.ChainConfig) !void {
+fn runBenchmark(
+    comptime fork: ForkSeq,
+    allocator: std.mem.Allocator,
+    pool: *Node.Pool,
+    stdout: anytype,
+    state_bytes: []const u8,
+    block_bytes: []const u8,
+    chain_config: config.ChainConfig,
+) !void {
     const beacon_state = try loadState(fork, allocator, pool, state_bytes);
     var signed_beacon_block = try loadBlock(fork, allocator, block_bytes);
     defer signed_beacon_block.deinit(allocator);
@@ -489,8 +497,13 @@ fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, pool: *Nod
 
     const beacon_config = config.BeaconConfig.init(chain_config, (try beacon_state.genesisValidatorsRoot()).*);
     const pubkey_index_map = try PubkeyIndexMap.init(allocator);
+    defer pubkey_index_map.deinit();
     const index_pubkey_cache = try allocator.create(state_transition.Index2PubkeyCache);
     index_pubkey_cache.* = state_transition.Index2PubkeyCache.init(allocator);
+    defer {
+        index_pubkey_cache.deinit();
+        allocator.destroy(index_pubkey_cache);
+    }
     const validators = try beacon_state.validatorsSlice(allocator);
     defer allocator.free(validators);
 
@@ -501,6 +514,10 @@ fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, pool: *Nod
         .index_to_pubkey = index_pubkey_cache,
         .pubkey_to_index = pubkey_index_map,
     }, .{ .skip_sync_committee_cache = !comptime fork.gte(.altair), .skip_sync_pubkeys = false });
+    defer {
+        cached_state.deinit();
+        allocator.destroy(cached_state);
+    }
 
     try state_transition.state_transition.processSlots(
         allocator,
