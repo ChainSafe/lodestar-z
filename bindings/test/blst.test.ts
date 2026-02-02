@@ -58,20 +58,20 @@ describe("blst", () => {
     describe("fromBytes()", () => {
       it("should take uncompressed byte arrays", () => {
         expectEqualHex(
-          bindings.blst.Signature.fromBytes(TEST_VECTORS.signature.uncompressed).toBytes(),
+          Signature.fromBytes(TEST_VECTORS.signature.uncompressed).toBytes(),
           TEST_VECTORS.signature.uncompressed
         );
       });
       it("should take compressed byte arrays", () => {
         expectEqualHex(
-          bindings.blst.Signature.fromBytes(TEST_VECTORS.signature.compressed).toBytes(),
+          Signature.fromBytes(TEST_VECTORS.signature.compressed).toBytes(),
           TEST_VECTORS.signature.uncompressed
         );
       });
     });
 
     it("should serialize to bytes", () => {
-      const sig = bindings.blst.Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
       const bytes = sig.toBytesCompress();
       expect(bytes).toBeInstanceOf(Uint8Array);
       expect(bytes.length).toBe(96);
@@ -81,13 +81,13 @@ describe("blst", () => {
     describe("argument validation", () => {
       for (const [type, invalid] of invalidInputs) {
         it(`should throw on invalid pkBytes type: ${type}`, () => {
-          expect(() => bindings.blst.Signature.fromBytes(invalid)).to.throw();
+          expect(() => Signature.fromBytes(invalid)).to.throw();
         });
       }
     });
 
     it("should throw on invalid length", () => {
-      expect(() => bindings.blst.Signature.fromBytes(new Uint8Array(95))).toThrow();
+      expect(() => Signature.fromBytes(new Uint8Array(95))).toThrow();
     });
   });
 
@@ -168,7 +168,7 @@ describe("blst", () => {
       describe("sign", () => {
         it("should create a valid Signature", () => {
           const sig = SecretKey.fromKeygen(KEY_MATERIAL, undefined).sign(Buffer.from("some fancy message"));
-          expect(sig).to.be.instanceOf(bindings.blst.Signature);
+          expect(sig).to.be.instanceOf(Signature);
           expect(sig.sigValidate(false)).to.be.undefined;
         });
       });
@@ -178,14 +178,14 @@ describe("blst", () => {
   describe("verify", () => {
     it("should verify valid signature", () => {
       const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = bindings.blst.Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
       const result = bindings.blst.verify(TEST_VECTORS.message, pk, sig, false, false);
       expect(result).toBe(true);
     });
 
     it("should reject wrong message", () => {
       const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = bindings.blst.Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
       const wrongMessage = new Uint8Array(32).fill(0);
       const result = bindings.blst.verify(wrongMessage, pk, sig, false, false);
       expect(result).toBe(false);
@@ -195,20 +195,20 @@ describe("blst", () => {
   describe("fastAggregateVerify", () => {
     it("should verify with single pubkey", () => {
       const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = bindings.blst.Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
       const result = bindings.blst.fastAggregateVerify(TEST_VECTORS.message, [pk], sig, false, false);
       expect(result).toBe(true);
     });
 
     it("should return false for empty pubkeys", () => {
-      const sig = bindings.blst.Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
       const result = bindings.blst.fastAggregateVerify(TEST_VECTORS.message, [], sig, false, false);
       expect(result).toBe(false);
     });
 
     it("should reject wrong message", () => {
       const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = bindings.blst.Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
       const wrongMessage = new Uint8Array(32).fill(0);
       const result = bindings.blst.fastAggregateVerify(wrongMessage, [pk], sig, true, false);
       expect(result).toBe(false);
@@ -216,14 +216,12 @@ describe("blst", () => {
 
     it("should throw on wrong message length", () => {
       const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = bindings.blst.Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
       expect(() => bindings.blst.fastAggregateVerify(new Uint8Array(31), [pk], sig, false, false)).toThrow();
     });
-
   });
 
   describe("verifyMultipleAggregateSignatures", () => {
-
     it("should return true for valid sets", () => {
       expect(bindings.blst.verifyMultipleAggregateSignatures(getTestSets(6), false, false)).to.be.true;
     });
@@ -238,7 +236,7 @@ describe("blst", () => {
 
 const DEFAULT_TEST_MESSAGE = Uint8Array.from(Buffer.from("lodestarlodestarlodestarlodestar"));
 
-export function buildTestSetFromMessage(msg: Uint8Array = DEFAULT_TEST_MESSAGE): TestSet {
+function buildTestSetFromMessage(msg: Uint8Array = DEFAULT_TEST_MESSAGE): TestSet {
   const sk = SecretKey.fromKeygen(crypto.randomBytes(32));
   const pk = sk.toPublicKey();
   const sig = sk.sign(msg);
@@ -262,11 +260,11 @@ export function buildTestSetFromMessage(msg: Uint8Array = DEFAULT_TEST_MESSAGE):
   };
 }
 
-export interface TestSet {
+interface TestSet {
   msg: Uint8Array;
   sk: SecretKey;
   pk: PublicKey;
-  sig: bindings.blst.Signature;
+  sig: Signature;
 }
 
 const testSets = new Map<number, TestSet>();
@@ -277,25 +275,23 @@ function buildTestSet(i: number): TestSet {
   return set;
 }
 
-export function arrayOfIndexes(start: number, end: number): number[] {
+function getTestSets(count: number): TestSet[] {
+  return arrayOfIndexes(0, count - 1).map(getTestSet);
+}
+
+function arrayOfIndexes(start: number, end: number): number[] {
   const arr: number[] = [];
   for (let i = start; i <= end; i++) arr.push(i);
   return arr;
 }
 
-export function getTestSets(count: number): TestSet[] {
-  return arrayOfIndexes(0, count - 1).map(getTestSet);
-}
-export function getTestSet(i: number = 0): TestSet {
+function getTestSet(i: number = 0): TestSet {
   const set = testSets.get(i);
   if (set) {
     return set;
   }
   return buildTestSet(i);
 }
-
-
-
 
 function fromHex(hexString: string): Uint8Array {
   if (hexString.startsWith("0x")) hexString = hexString.slice(2);
