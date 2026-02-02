@@ -245,7 +245,6 @@ interface Blst {
     msg: Uint8Array,
     pks: PublicKey[],
     sig: Signature,
-    pksValidate: boolean,
     sigGroupcheck: boolean
   ): boolean;
   verifyMultipleAggregateSignatures(sets: SignatureSet[], sigsGroupcheck: boolean, pksValidate: boolean): boolean;

@@ -287,15 +287,13 @@ pub fn Signature_validate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 /// 2) pks: PublicKey[]
 /// 3) sig: Signature
 /// 4) sig_groupcheck: bool
-/// 5) pks_validate: bool
-pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(5)) !napi.Value {
+pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.Value {
     const msg_info = try cb.arg(0).getTypedarrayInfo();
     if (msg_info.data.len != 32) return error.InvalidMessageLength;
 
     const pks_array = cb.arg(1);
     const sig = try env.unwrap(Signature, cb.arg(2));
-    const pks_validate = try cb.arg(3).getValueBool();
-    const sig_groupcheck = try cb.arg(4).getValueBool();
+    const sig_groupcheck = try cb.arg(3).getValueBool();
 
     const pks_len = try pks_array.getArrayLength();
     if (pks_len == 0) {
@@ -312,7 +310,8 @@ pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(5)) !napi.V
     }
 
     var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
-    const result = sig.fastAggregateVerify(sig_groupcheck, &pairing_buf, msg_info.data[0..32], DST, pks, pks_validate) catch {
+    // `pks_validate` is always false here since we assume proof of possession for public keys.
+    const result = sig.fastAggregateVerify(sig_groupcheck, &pairing_buf, msg_info.data[0..32], DST, pks, false) catch {
         return try env.getBoolean(false);
     };
 
@@ -565,7 +564,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     try blst_obj.setNamedProperty("Signature", sig_ctor);
 
     try blst_obj.setNamedProperty("verify", try env.createFunction("verify", 5, blst_verify, null));
-    try blst_obj.setNamedProperty("fastAggregateVerify", try env.createFunction("fastAggregateVerify", 5, blst_fastAggregateVerify, null));
+    try blst_obj.setNamedProperty("fastAggregateVerify", try env.createFunction("fastAggregateVerify", 4, blst_fastAggregateVerify, null));
     try blst_obj.setNamedProperty("verifyMultipleAggregateSignatures", try env.createFunction("verifyMultipleAggregateSignatures", 3, blst_verifyMultipleAggregateSignatures, null));
     try blst_obj.setNamedProperty("aggregateSignatures", try env.createFunction("aggregateSignatures", 2, blst_aggregateSignatures, null));
     try blst_obj.setNamedProperty("aggregatePublicKeys", try env.createFunction("aggregatePublicKeys", 1, blst_aggregatePublicKeys, null));

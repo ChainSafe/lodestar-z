@@ -196,13 +196,13 @@ describe("blst", () => {
     it("should verify with single pubkey", () => {
       const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
       const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
-      const result = bindings.blst.fastAggregateVerify(TEST_VECTORS.message, [pk], sig, false, false);
+      const result = bindings.blst.fastAggregateVerify(TEST_VECTORS.message, [pk], sig, false);
       expect(result).toBe(true);
     });
 
     it("should return false for empty pubkeys", () => {
       const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
-      const result = bindings.blst.fastAggregateVerify(TEST_VECTORS.message, [], sig, false, false);
+      const result = bindings.blst.fastAggregateVerify(TEST_VECTORS.message, [], sig, false);
       expect(result).toBe(false);
     });
 
@@ -210,14 +210,14 @@ describe("blst", () => {
       const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
       const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
       const wrongMessage = new Uint8Array(32).fill(0);
-      const result = bindings.blst.fastAggregateVerify(wrongMessage, [pk], sig, true, false);
+      const result = bindings.blst.fastAggregateVerify(wrongMessage, [pk], sig, false);
       expect(result).toBe(false);
     });
 
     it("should throw on wrong message length", () => {
       const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
       const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
-      expect(() => bindings.blst.fastAggregateVerify(new Uint8Array(31), [pk], sig, false, false)).toThrow();
+      expect(() => bindings.blst.fastAggregateVerify(new Uint8Array(31), [pk], sig, false)).toThrow();
     });
   });
 
