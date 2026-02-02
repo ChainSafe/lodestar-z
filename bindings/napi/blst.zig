@@ -349,13 +349,7 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
     const rands = try allocator.alloc([32]u8, n_elems);
     defer allocator.free(rands);
 
-    var prng = std.Random.DefaultPrng.init(blk: {
-        var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch {
-            seed = @intCast(std.time.milliTimestamp());
-        };
-        break :blk seed;
-    });
+    var prng = std.Random.DefaultPrng.init(std.crypto.random.int(u64));
     const rand = prng.random();
 
     for (0..n_elems) |i| {
