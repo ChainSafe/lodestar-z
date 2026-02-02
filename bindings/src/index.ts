@@ -1,7 +1,7 @@
 // TODO make robust for production use ala bun-ffi-z
 
-import {createRequire} from "node:module";
-import {join} from "node:path";
+import { createRequire } from "node:module";
+import { join } from "node:path";
 
 const require = createRequire(import.meta.url);
 
@@ -227,7 +227,7 @@ declare class Signature {
   static aggregate(sigs: Signature[], sigsGroupcheck: boolean): Signature;
   toBytes(): Uint8Array;
   toBytesCompress(): Uint8Array;
-  sigValidate(sigInfcheck: boolean): void;
+  validate(sigInfcheck: boolean): void;
 }
 
 interface SignatureSet {

@@ -269,7 +269,7 @@ pub fn Signature_aggregate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value 
 
 /// Validates the signature.
 /// Throws an error if the signature is invalid.
-pub fn Signature_sigValidate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+pub fn Signature_validate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const sig = try env.unwrap(Signature, cb.this());
     const sig_infcheck = try cb.arg(0).getValueBool();
 
@@ -552,7 +552,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         &[_]napi.c.napi_property_descriptor{
             method(0, Signature_toBytes),
             method(0, Signature_toBytesCompress),
-            .{ .utf8name = "sigValidate", .method = napi.wrapCallback(1, Signature_sigValidate) },
+            .{ .utf8name = "validate", .method = napi.wrapCallback(1, Signature_validate) },
         },
     );
     try sig_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{

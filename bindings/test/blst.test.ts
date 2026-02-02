@@ -169,7 +169,7 @@ describe("blst", () => {
         it("should create a valid Signature", () => {
           const sig = SecretKey.fromKeygen(KEY_MATERIAL, undefined).sign(Buffer.from("some fancy message"));
           expect(sig).to.be.instanceOf(Signature);
-          expect(sig.sigValidate(false)).to.be.undefined;
+          expect(sig.validate(false)).to.be.undefined;
         });
       });
     });
@@ -247,7 +247,7 @@ function buildTestSetFromMessage(msg: Uint8Array = DEFAULT_TEST_MESSAGE): TestSe
     return buildTestSetFromMessage(msg);
   }
   try {
-    sig.sigValidate(false);
+    sig.validate(false);
   } catch {
     console.log(">>>\n>>>\n>>> Invalid Signature Found in a TestSet\n>>>\n>>>");
     return buildTestSetFromMessage(msg);
