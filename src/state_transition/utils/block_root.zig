@@ -1,13 +1,13 @@
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
-const Root = types.primitive.Root.Type;
 const Slot = types.primitive.Slot.Type;
 const Epoch = types.primitive.Epoch.Type;
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const BeaconState = @import("fork_types").BeaconState;
 const SLOTS_PER_HISTORICAL_ROOT = preset.SLOTS_PER_HISTORICAL_ROOT;
 const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
 
-pub fn getBlockRootAtSlot(state: *BeaconState, slot: Slot) !*const [32]u8 {
+pub fn getBlockRootAtSlot(comptime fork: ForkSeq, state: *BeaconState(fork), slot: Slot) !*const [32]u8 {
     const state_slot = try state.slot();
     if (slot >= state_slot) {
         return error.SlotTooBig;
@@ -23,8 +23,8 @@ pub fn getBlockRootAtSlot(state: *BeaconState, slot: Slot) !*const [32]u8 {
     return try block_roots.getRoot(slot % SLOTS_PER_HISTORICAL_ROOT);
 }
 
-pub fn getBlockRoot(state: *BeaconState, epoch: Epoch) !*const [32]u8 {
-    return getBlockRootAtSlot(state, computeStartSlotAtEpoch(epoch));
+pub fn getBlockRoot(comptime fork: ForkSeq, state: *BeaconState(fork), epoch: Epoch) !*const [32]u8 {
+    return getBlockRootAtSlot(fork, state, computeStartSlotAtEpoch(epoch));
 }
 
 // TODO: getTemporaryBlockHeader

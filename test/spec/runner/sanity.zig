@@ -2,11 +2,10 @@ const std = @import("std");
 const Node = @import("persistent_merkle_tree").Node;
 const ssz = @import("consensus_types");
 const ForkSeq = @import("config").ForkSeq;
-const Preset = @import("preset").Preset;
 const state_transition = @import("state_transition");
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
-const BeaconState = state_transition.BeaconState;
-const CachedBeaconState = state_transition.CachedBeaconState;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
+const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 const test_case = @import("../test_case.zig");
 const loadSszValue = test_case.loadSszSnappyValue;
 const expectEqualBeaconStates = test_case.expectEqualBeaconStates;
@@ -31,7 +30,7 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
 
     return struct {
         pre: TestCachedBeaconState,
-        post: *BeaconState,
+        post: *AnyBeaconState,
         slots: u64,
 
         const Self = @This();
@@ -83,7 +82,7 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
                 self.pre.allocator,
                 self.pre.cached_state,
                 try self.pre.cached_state.state.slot() + self.slots,
-                undefined,
+                .{},
             );
         }
 
@@ -102,7 +101,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
     return struct {
         pre: TestCachedBeaconState,
         // a null post state means the test is expected to fail
-        post: ?*BeaconState,
+        post: ?*AnyBeaconState,
         blocks: []SignedBeaconBlock.Type,
         bls_setting: BlsSetting,
 
@@ -179,39 +178,47 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
             }
         }
 
-        pub fn process(self: *Self) !*CachedBeaconState {
+        pub fn process(self: *Self) !*state_transition.CachedBeaconState {
             const verify = self.bls_setting.verify();
-            var post_state: *CachedBeaconState = self.pre.cached_state;
-            for (self.blocks, 0..) |*block, i| {
-                const signed_block = @unionInit(state_transition.SignedBeaconBlock, @tagName(fork), block);
+            var result: ?*state_transition.CachedBeaconState = null;
+            for (self.blocks) |*block| {
+                const signed_block = switch (fork) {
+                    .phase0 => AnySignedBeaconBlock{ .phase0 = block },
+                    .altair => AnySignedBeaconBlock{ .altair = block },
+                    .bellatrix => AnySignedBeaconBlock{ .full_bellatrix = block },
+                    .capella => AnySignedBeaconBlock{ .full_capella = block },
+                    .deneb => AnySignedBeaconBlock{ .full_deneb = block },
+                    .electra => AnySignedBeaconBlock{ .full_electra = block },
+                    .fulu => AnySignedBeaconBlock{ .full_fulu = block },
+                };
+                const input_cached_state = if (result) |res| res else self.pre.cached_state;
                 {
                     // if error, clean pre_state of stateTransition() function
                     errdefer {
-                        if (i > 0) {
-                            post_state.deinit();
-                            self.pre.allocator.destroy(post_state);
+                        if (result) |res| {
+                            res.deinit();
+                            self.pre.allocator.destroy(res);
                         }
                     }
-                    const new_post_state = try state_transition.state_transition.stateTransition(self.pre.allocator, post_state, .{
-                        .regular = signed_block,
-                    }, .{
-                        .verify_signatures = verify,
-                        .verify_proposer = verify,
-                    });
+                    const new_result = try state_transition.state_transition.stateTransition(
+                        self.pre.allocator,
+                        input_cached_state,
+                        signed_block,
+                        .{
+                            .verify_signatures = verify,
+                            .verify_proposer = verify,
+                        },
+                    );
 
-                    // don't deinit the initial pre state, we do it in deinit()
-                    const to_destroy = post_state;
-                    post_state = new_post_state;
-
-                    // clean post_state of stateTransition() function
-                    if (i > 0) {
-                        to_destroy.deinit();
-                        self.pre.allocator.destroy(to_destroy);
+                    if (result) |res| {
+                        res.deinit();
+                        self.pre.allocator.destroy(res);
                     }
+                    result = new_result;
                 }
             }
 
-            return post_state;
+            return result orelse error.NoBlocks;
         }
 
         pub fn runTest(self: *Self) !void {

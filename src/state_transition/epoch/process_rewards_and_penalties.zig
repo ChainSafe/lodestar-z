@@ -1,24 +1,31 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const BeaconConfig = @import("config").BeaconConfig;
+const BeaconState = @import("fork_types").BeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
-const preset = @import("preset").preset;
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const getAttestationDeltas = @import("./get_attestation_deltas.zig").getAttestationDeltas;
 const getRewardsAndPenaltiesAltair = @import("./get_rewards_and_penalties.zig").getRewardsAndPenaltiesAltair;
+const Node = @import("persistent_merkle_tree").Node;
 
-pub fn processRewardsAndPenalties(allocator: Allocator, cached_state: *CachedBeaconState, cache: *const EpochTransitionCache) !void {
+pub fn processRewardsAndPenalties(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *BeaconState(fork),
+    cache: *const EpochTransitionCache,
+) !void {
     // No rewards are applied at the end of `GENESIS_EPOCH` because rewards are for work done in the previous epoch
     if (cache.current_epoch == GENESIS_EPOCH) {
         return;
     }
 
-    const state = cached_state.state;
-
     const rewards = cache.rewards;
     const penalties = cache.penalties;
-    try getRewardsAndPenalties(allocator, cached_state, cache, rewards, penalties);
+    try getRewardsAndPenalties(fork, allocator, config, epoch_cache, state, cache, rewards, penalties);
 
     const balances = try state.balancesSlice(allocator);
     defer allocator.free(balances);
@@ -33,16 +40,38 @@ pub fn processRewardsAndPenalties(allocator: Allocator, cached_state: *CachedBea
 }
 
 pub fn getRewardsAndPenalties(
+    comptime fork: ForkSeq,
     allocator: Allocator,
-    cached_state: *const CachedBeaconState,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *BeaconState(fork),
     cache: *const EpochTransitionCache,
     rewards: []u64,
     penalties: []u64,
 ) !void {
-    const state = cached_state.state;
-    const fork = cached_state.config.forkSeq(try state.slot());
-    return if (fork == ForkSeq.phase0)
-        try getAttestationDeltas(allocator, cached_state, cache, rewards, penalties)
-    else
-        try getRewardsAndPenaltiesAltair(allocator, cached_state, cache, rewards, penalties);
+    if (comptime fork == .phase0) {
+        return try getAttestationDeltas(allocator, epoch_cache, cache, try state.finalizedEpoch(), rewards, penalties);
+    }
+    return try getRewardsAndPenaltiesAltair(fork, allocator, config, epoch_cache, state, cache, rewards, penalties);
+}
+
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
+test "processRewardsAndPenalties - sanity" {
+    const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
+    defer test_state.deinit();
+
+    try processRewardsAndPenalties(
+        .electra,
+        allocator,
+        test_state.cached_state.config,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+    );
 }

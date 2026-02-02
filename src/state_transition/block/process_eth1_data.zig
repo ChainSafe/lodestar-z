@@ -1,20 +1,28 @@
 const std = @import("std");
+const ForkSeq = @import("config").ForkSeq;
+const BeaconState = @import("fork_types").BeaconState;
 const types = @import("consensus_types");
 const Eth1Data = types.phase0.Eth1Data.Type;
-const BeaconState = @import("../types/beacon_state.zig").BeaconState;
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const preset = @import("preset").preset;
+const Node = @import("persistent_merkle_tree").Node;
 
-pub fn processEth1Data(allocator: std.mem.Allocator, cached_state: *CachedBeaconState, eth1_data: *const Eth1Data) !void {
-    const state = cached_state.state;
-    if (try becomesNewEth1Data(allocator, state, eth1_data)) {
+pub fn processEth1Data(
+    comptime fork: ForkSeq,
+    state: *BeaconState(fork),
+    eth1_data: *const Eth1Data,
+) !void {
+    if (try becomesNewEth1Data(fork, state, eth1_data)) {
         try state.setEth1Data(eth1_data);
     }
 
     try state.appendEth1DataVote(eth1_data);
 }
 
-pub fn becomesNewEth1Data(allocator: std.mem.Allocator, state: *BeaconState, new_eth1_data: *const Eth1Data) !bool {
+pub fn becomesNewEth1Data(
+    comptime fork: ForkSeq,
+    state: *BeaconState(fork),
+    new_eth1_data: *const Eth1Data,
+) !bool {
     const SLOTS_PER_ETH1_VOTING_PERIOD = preset.EPOCHS_PER_ETH1_VOTING_PERIOD * preset.SLOTS_PER_EPOCH;
 
     // If there are not more than 50% votes, then we do not have to count to find a winner.
@@ -25,7 +33,7 @@ pub fn becomesNewEth1Data(allocator: std.mem.Allocator, state: *BeaconState, new
     // Nothing to do if the state already has this as eth1data (happens a lot after majority vote is in)
     var state_eth1_data_view = try state.eth1Data();
     var state_eth1_data: Eth1Data = undefined;
-    try state_eth1_data_view.toValue(allocator, &state_eth1_data);
+    try state_eth1_data_view.toValue(undefined, &state_eth1_data);
     if (types.phase0.Eth1Data.equals(&state_eth1_data, new_eth1_data)) return false;
 
     var new_eth1_data_root: [32]u8 = undefined;
@@ -51,4 +59,23 @@ pub fn becomesNewEth1Data(allocator: std.mem.Allocator, state: *BeaconState, new
     }
 
     return false;
+}
+
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
+test "process eth1 data - sanity" {
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    const block = types.electra.BeaconBlock.default_value;
+    try processEth1Data(
+        .electra,
+        test_state.cached_state.state.castToFork(.electra),
+        &block.body.eth1_data,
+    );
 }

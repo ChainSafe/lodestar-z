@@ -1,7 +1,5 @@
 const std = @import("std");
-const spec_test_options = @import("spec_test_options");
 const ForkSeq = @import("config").ForkSeq;
-const Preset = @import("preset").Preset;
 
 /// Random tests use the same format as sanity/blocks tests
 pub const Handler = enum {

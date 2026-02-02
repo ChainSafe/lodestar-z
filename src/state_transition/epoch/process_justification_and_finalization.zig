@@ -1,27 +1,43 @@
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const BeaconState = @import("fork_types").BeaconState;
 const types = @import("consensus_types");
-const Epoch = types.primitive.Epoch.Type;
 const Checkpoint = types.phase0.Checkpoint.Type;
 const JustificationBits = types.phase0.JustificationBits.Type;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const getBlockRoot = @import("../utils/block_root.zig").getBlockRoot;
+const Node = @import("persistent_merkle_tree").Node;
 
 /// Update justified and finalized checkpoints depending on network participation.
 ///
 /// PERF: Very low (constant) cost. Persist small objects to the tree.
-pub fn processJustificationAndFinalization(cached_state: *CachedBeaconState, cache: *const EpochTransitionCache) !void {
+pub fn processJustificationAndFinalization(
+    comptime fork: ForkSeq,
+    state: *BeaconState(fork),
+    cache: *const EpochTransitionCache,
+) !void {
     // Initial FFG checkpoint values have a `0x00` stub for `root`.
     // Skip FFG updates in the first two epochs to avoid corner cases that might result in modifying this stub.
     if (cache.current_epoch <= GENESIS_EPOCH + 1) {
         return;
     }
-    try weighJustificationAndFinalization(cached_state, cache.total_active_stake_by_increment, cache.prev_epoch_unslashed_stake_target_by_increment, cache.curr_epoch_unslashed_target_stake_by_increment);
+    try weighJustificationAndFinalization(
+        fork,
+        state,
+        cache.total_active_stake_by_increment,
+        cache.prev_epoch_unslashed_stake_target_by_increment,
+        cache.curr_epoch_unslashed_target_stake_by_increment,
+    );
 }
 
-pub fn weighJustificationAndFinalization(cached_state: *CachedBeaconState, total_active_balance: u64, previous_epoch_target_balance: u64, current_epoch_target_balance: u64) !void {
-    var state = cached_state.state;
+pub fn weighJustificationAndFinalization(
+    comptime fork: ForkSeq,
+    state: *BeaconState(fork),
+    total_active_balance: u64,
+    previous_epoch_target_balance: u64,
+    current_epoch_target_balance: u64,
+) !void {
     const current_epoch = computeEpochAtSlot(try state.slot());
     const previous_epoch = if (current_epoch == GENESIS_EPOCH) GENESIS_EPOCH else current_epoch - 1;
 
@@ -48,7 +64,7 @@ pub fn weighJustificationAndFinalization(cached_state: *CachedBeaconState, total
     if (previous_epoch_target_balance * 3 > total_active_balance * 2) {
         const new_current_justified_checkpoint = Checkpoint{
             .epoch = previous_epoch,
-            .root = (try getBlockRoot(state, previous_epoch)).*,
+            .root = (try getBlockRoot(fork, state, previous_epoch)).*,
         };
         try state.setCurrentJustifiedCheckpoint(&new_current_justified_checkpoint);
         bits[1] = true;
@@ -57,7 +73,7 @@ pub fn weighJustificationAndFinalization(cached_state: *CachedBeaconState, total
     if (current_epoch_target_balance * 3 > total_active_balance * 2) {
         const new_current_justified_checkpoint = Checkpoint{
             .epoch = current_epoch,
-            .root = (try getBlockRoot(state, current_epoch)).*,
+            .root = (try getBlockRoot(fork, state, current_epoch)).*,
         };
         try state.setCurrentJustifiedCheckpoint(&new_current_justified_checkpoint);
         bits[0] = true;
@@ -83,4 +99,23 @@ pub fn weighJustificationAndFinalization(cached_state: *CachedBeaconState, total
     if (bits[0] and bits[1] and old_current_justified_checkpoint_epoch + 1 == current_epoch) {
         try state.setFinalizedCheckpoint(&old_current_justified_checkpoint);
     }
+}
+
+const std = @import("std");
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
+test "processJustificationAndFinalization - sanity" {
+    const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
+    defer test_state.deinit();
+
+    try processJustificationAndFinalization(
+        .electra,
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+    );
 }

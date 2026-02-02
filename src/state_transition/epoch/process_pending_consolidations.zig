@@ -1,14 +1,17 @@
-const Allocator = @import("std").mem.Allocator;
-const types = @import("consensus_types");
-const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
+const ForkSeq = @import("config").ForkSeq;
+const BeaconState = @import("fork_types").BeaconState;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 
 /// also modify balances inside EpochTransitionCache
-pub fn processPendingConsolidations(cached_state: *CachedBeaconState, cache: *EpochTransitionCache) !void {
-    const epoch_cache = cached_state.getEpochCache();
-    var state = cached_state.state;
+pub fn processPendingConsolidations(
+    comptime fork: ForkSeq,
+    epoch_cache: *const EpochCache,
+    state: *BeaconState(fork),
+    cache: *EpochTransitionCache,
+) !void {
     const next_epoch = epoch_cache.epoch + 1;
     var next_pending_consolidation: usize = 0;
     var validators = try state.validators();
@@ -36,8 +39,8 @@ pub fn processPendingConsolidations(cached_state: *CachedBeaconState, cache: *Ep
         const source_effective_balance = @min(try balances.get(source_index), try source_validator.get("effective_balance"));
 
         // Move active balance to target. Excess balance is withdrawable.
-        try decreaseBalance(state, source_index, source_effective_balance);
-        try increaseBalance(state, target_index, source_effective_balance);
+        try decreaseBalance(fork, state, source_index, source_effective_balance);
+        try increaseBalance(fork, state, target_index, source_effective_balance);
         if (cache.balances) |cached_balances| {
             cached_balances.items[source_index] -= source_effective_balance;
             cached_balances.items[target_index] += source_effective_balance;
@@ -50,4 +53,25 @@ pub fn processPendingConsolidations(cached_state: *CachedBeaconState, cache: *Ep
         const new_pending_consolidations = try pending_consolidations.sliceFrom(next_pending_consolidation);
         try state.setPendingConsolidations(new_pending_consolidations);
     }
+}
+
+const std = @import("std");
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Node = @import("persistent_merkle_tree").Node;
+
+test "processPendingConsolidations - sanity" {
+    const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
+    defer test_state.deinit();
+
+    try processPendingConsolidations(
+        .electra,
+        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+    );
 }
