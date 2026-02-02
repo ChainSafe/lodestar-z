@@ -216,7 +216,7 @@ declare class PublicKey {
 
 declare class SecretKey {
   static fromBytes(bytes: Uint8Array): SecretKey;
-  static fromKeygen(ikm: Uint8Array, key_info?: Uint8Array): SecretKey;
+  static fromKeygen(ikm: Uint8Array, keyInfo?: Uint8Array): SecretKey;
   sign(msg: Uint8Array): Signature;
   toPublicKey(): PublicKey;
   toBytes(): Uint8Array;
