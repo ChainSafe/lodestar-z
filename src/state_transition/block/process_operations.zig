@@ -7,6 +7,7 @@ const BlockType = @import("fork_types").BlockType;
 const BeaconBlockBody = @import("fork_types").BeaconBlockBody;
 const ForkTypes = @import("fork_types").ForkTypes;
 const ct = @import("consensus_types");
+const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 
 const getEth1DepositCount = @import("../utils/deposit.zig").getEth1DepositCount;
 const processAttestations = @import("./process_attestations.zig").processAttestations;
@@ -27,6 +28,7 @@ pub fn processOperations(
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
+    slashings_cache: *SlashingsCache,
     comptime block_type: BlockType,
     body: *const BeaconBlockBody(block_type, fork),
     opts: ProcessBlockOpts,
@@ -40,7 +42,7 @@ pub fn processOperations(
     const current_epoch = epoch_cache.epoch;
 
     for (body.inner.proposer_slashings.items) |*proposer_slashing| {
-        try processProposerSlashing(fork, config, epoch_cache, state, proposer_slashing, opts.verify_signature);
+        try processProposerSlashing(fork, allocator, config, epoch_cache, state, slashings_cache, proposer_slashing, opts.verify_signature);
     }
 
     for (body.inner.attester_slashings.items) |*attester_slashing| {
@@ -50,13 +52,14 @@ pub fn processOperations(
             config,
             epoch_cache,
             state,
+            slashings_cache,
             current_epoch,
             attester_slashing,
             opts.verify_signature,
         );
     }
 
-    try processAttestations(fork, allocator, config, epoch_cache, state, body.inner.attestations.items, opts.verify_signature);
+    try processAttestations(fork, allocator, config, epoch_cache, state, slashings_cache, body.inner.attestations.items, opts.verify_signature);
 
     for (body.inner.deposits.items) |*deposit| {
         try processDeposit(fork, allocator, config, epoch_cache, state, deposit);
@@ -109,6 +112,7 @@ test "process operations" {
         test_state.cached_state.config,
         test_state.cached_state.getEpochCache(),
         try test_state.cached_state.state.tryCastToFork(.electra),
+        &test_state.cached_state.slashings_cache,
         .full,
         beacon_block.beaconBlockBody().castToFork(.full, .electra),
         .{},
