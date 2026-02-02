@@ -15,7 +15,7 @@ pub const AnchorCheckpoint = struct {
 
 /// Compute the anchor checkpoint for a given state.
 /// Returns both the checkpoint and block header.
-pub fn computeAnchorCheckpoint(allocator: Allocator, state: *AnyBeaconState) !AnchorCheckpoint {
+pub fn computeAnchorCheckpoint(state: *AnyBeaconState) !AnchorCheckpoint {
     const slot = try state.slot();
     var header = types.phase0.BeaconBlockHeader.default_value;
     var root: [32]u8 = undefined;
@@ -30,7 +30,7 @@ pub fn computeAnchorCheckpoint(allocator: Allocator, state: *AnyBeaconState) !An
     } else {
         // After genesis, clone latestBlockHeader
         var latest_block_header = try state.latestBlockHeader();
-        try latest_block_header.toValue(allocator, &header);
+        try latest_block_header.toValue(undefined, &header);
 
         if (std.mem.eql(u8, &header.state_root, &ZERO_HASH)) {
             header.state_root = (try state.hashTreeRoot()).*;

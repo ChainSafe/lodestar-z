@@ -369,7 +369,7 @@ pub fn BeaconStateView_nextDecisionRoot(env: napi.Env, cb: napi.CallbackInfo(0))
 pub fn BeaconStateView_getShufflingDecisionRoot(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const epoch: u64 = @intCast(try cb.arg(0).getValueInt64());
-    const root = st.calculateShufflingDecisionRoot(allocator, cached_state.state, epoch) catch {
+    const root = st.calculateShufflingDecisionRoot(cached_state.state, epoch) catch {
         try env.throwError("STATE_ERROR", "Failed to calculate shuffling decision root");
         return env.getNull();
     };

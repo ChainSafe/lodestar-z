@@ -149,15 +149,13 @@ pub fn calculateDecisionRoot(state: *AnyBeaconState, epoch: Epoch) ![32]u8 {
 }
 
 /// Get the shuffling decision block root for the given epoch of given state.
-pub fn calculateShufflingDecisionRoot(allocator: Allocator, state: *AnyBeaconState, epoch: Epoch) ![32]u8 {
+pub fn calculateShufflingDecisionRoot(state: *AnyBeaconState, epoch: Epoch) ![32]u8 {
     const slot = try state.slot();
 
     if (slot > c.GENESIS_SLOT) {
         return try calculateDecisionRoot(state, epoch);
     }
 
-    const anchor = try computeAnchorCheckpoint(allocator, state);
-    var result: [32]u8 = undefined;
-    try types.phase0.BeaconBlockHeader.hashTreeRoot(&anchor.block_header, &result);
-    return result;
+    const anchor = try computeAnchorCheckpoint(state);
+    return anchor.checkpoint.root;
 }
