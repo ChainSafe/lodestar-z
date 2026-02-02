@@ -336,7 +336,6 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
         return try env.getBoolean(false);
     }
 
-    //TODO: don't allocate msgs, pks, sigs
     const msgs = try allocator.alloc([32]u8, n_elems);
     defer allocator.free(msgs);
 
