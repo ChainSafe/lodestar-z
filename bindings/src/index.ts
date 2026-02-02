@@ -1,7 +1,7 @@
 // TODO make robust for production use ala bun-ffi-z
 
-import { createRequire } from "node:module";
-import { join } from "node:path";
+import {createRequire} from "node:module";
+import {join} from "node:path";
 
 const require = createRequire(import.meta.url);
 
@@ -241,7 +241,13 @@ interface Blst {
   SecretKey: typeof SecretKey;
   Signature: typeof Signature;
   verify(msg: Uint8Array, pk: PublicKey, sig: Signature, pkValidate: boolean, sigGroupcheck: boolean): boolean;
-  fastAggregateVerify(msg: Uint8Array, pks: PublicKey[], sig: Signature, pksValidate: boolean, sigGroupcheck: boolean): boolean;
+  fastAggregateVerify(
+    msg: Uint8Array,
+    pks: PublicKey[],
+    sig: Signature,
+    pksValidate: boolean,
+    sigGroupcheck: boolean
+  ): boolean;
   verifyMultipleAggregateSignatures(sets: SignatureSet[], sigsGroupcheck: boolean, pksValidate: boolean): boolean;
   aggregateSignatures(signatures: Signature[], sigsGroupcheck: boolean): Signature;
   aggregatePublicKeys(pks: PublicKey[], pksValidate: boolean): PublicKey;

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import {beforeEach, describe, expect, it} from "vitest";
 import bindings from "../src/index.ts";
 
 const SECRET_KEY = bindings.blst.SecretKey;
@@ -12,8 +12,14 @@ describe("blst", () => {
     });
 
     it("should take uncompressed byte arrays", () => {
-      expectEqualHex(PUBLIC_KEY.fromBytes(TEST_VECTORS.publicKey.uncompressed).toBytes(), TEST_VECTORS.publicKey.uncompressed);
-      expectEqualHex(PUBLIC_KEY.fromBytes(TEST_VECTORS.publicKey.uncompressed).toBytesCompress(), TEST_VECTORS.publicKey.compressed);
+      expectEqualHex(
+        PUBLIC_KEY.fromBytes(TEST_VECTORS.publicKey.uncompressed).toBytes(),
+        TEST_VECTORS.publicKey.uncompressed
+      );
+      expectEqualHex(
+        PUBLIC_KEY.fromBytes(TEST_VECTORS.publicKey.uncompressed).toBytesCompress(),
+        TEST_VECTORS.publicKey.compressed
+      );
     });
     describe("argument validation", () => {
       for (const [type, invalid] of invalidInputs) {
@@ -49,10 +55,16 @@ describe("blst", () => {
   describe("Signature", () => {
     describe("fromBytes()", () => {
       it("should take uncompressed byte arrays", () => {
-        expectEqualHex(bindings.blst.Signature.fromBytes(TEST_VECTORS.signature.uncompressed).toBytes(), TEST_VECTORS.signature.uncompressed);
+        expectEqualHex(
+          bindings.blst.Signature.fromBytes(TEST_VECTORS.signature.uncompressed).toBytes(),
+          TEST_VECTORS.signature.uncompressed
+        );
       });
       it("should take compressed byte arrays", () => {
-        expectEqualHex(bindings.blst.Signature.fromBytes(TEST_VECTORS.signature.compressed).toBytes(), TEST_VECTORS.signature.uncompressed);
+        expectEqualHex(
+          bindings.blst.Signature.fromBytes(TEST_VECTORS.signature.compressed).toBytes(),
+          TEST_VECTORS.signature.uncompressed
+        );
       });
     });
 
@@ -241,8 +253,8 @@ const invalidInputs: [string, any][] = [
   ["symbol", Symbol("foo")],
   ["null", null],
   ["undefined", undefined],
-  ["object", { foo: "bar" }],
-  ["proxy", new Proxy({ foo: "bar" }, {})],
+  ["object", {foo: "bar"}],
+  ["proxy", new Proxy({foo: "bar"}, {})],
   ["date", new Date("1982-03-24T16:00:00-06:00")],
   [
     "function",
@@ -274,9 +286,6 @@ function expectEqualHex(value: Uint8Array, expected: Uint8Array): void {
   expect(Buffer.from(value).toString("hex")).to.equal(Buffer.from(expected).toString("hex"));
 }
 
-
 function expectNotEqualHex(value: Uint8Array, expected: Uint8Array): void {
   expect(Buffer.from(value).toString("hex")).to.not.equal(Buffer.from(expected).toString("hex"));
 }
-
-

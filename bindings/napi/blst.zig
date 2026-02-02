@@ -350,12 +350,6 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
     const rands = try allocator.alloc([32]u8, n_elems);
     defer allocator.free(rands);
 
-    const pk_storage = try allocator.alloc(PublicKey, n_elems);
-    defer allocator.free(pk_storage);
-
-    const sig_storage = try allocator.alloc(Signature, n_elems);
-    defer allocator.free(sig_storage);
-
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
         std.posix.getrandom(std.mem.asBytes(&seed)) catch {
@@ -373,15 +367,12 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
         if (msg.data.len != 32) return error.InvalidMessageLength;
         @memcpy(&msgs[i], msg.data[0..32]);
 
+        // Use unwrapped pointers directly - no copy needed
         const pk_value = try set_value.getNamedProperty("pk");
-        const pk = try env.unwrap(PublicKey, pk_value);
-        pk_storage[i] = pk.*;
-        pks[i] = &pk_storage[i];
+        pks[i] = try env.unwrap(PublicKey, pk_value);
 
         const sig_value = try set_value.getNamedProperty("sig");
-        const sig = try env.unwrap(Signature, sig_value);
-        sig_storage[i] = sig.*;
-        sigs[i] = &sig_storage[i];
+        sigs[i] = try env.unwrap(Signature, sig_value);
 
         rand.bytes(&rands[i]);
     }
