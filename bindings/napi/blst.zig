@@ -326,7 +326,7 @@ pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(5)) !napi.V
 /// 1) sets: Array of { msg: Uint8Array, pk: PublicKey, sig: Signature }
 /// 2) sigs_groupcheck: bool
 /// 3) pks_validate: bool
-pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackInfo(3)) !napi.Value {
     const sets = cb.arg(0);
     const n_elems = try sets.getArrayLength();
 
@@ -566,7 +566,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
 
     try blst_obj.setNamedProperty("verify", try env.createFunction("verify", 5, blst_verify, null));
     try blst_obj.setNamedProperty("fastAggregateVerify", try env.createFunction("fastAggregateVerify", 5, blst_fastAggregateVerify, null));
-    try blst_obj.setNamedProperty("verifyMultipleAggregateSignatures", try env.createFunction("verifyMultipleAggregateSignatures", 1, blst_verifyMultipleAggregateSignatures, null));
+    try blst_obj.setNamedProperty("verifyMultipleAggregateSignatures", try env.createFunction("verifyMultipleAggregateSignatures", 3, blst_verifyMultipleAggregateSignatures, null));
     try blst_obj.setNamedProperty("aggregateSignatures", try env.createFunction("aggregateSignatures", 2, blst_aggregateSignatures, null));
     try blst_obj.setNamedProperty("aggregatePublicKeys", try env.createFunction("aggregatePublicKeys", 1, blst_aggregatePublicKeys, null));
     try blst_obj.setNamedProperty("aggregateSerializedPublicKeys", try env.createFunction("aggregateSerializedPublicKeys", 1, blst_aggregateSerializedPublicKeys, null));
