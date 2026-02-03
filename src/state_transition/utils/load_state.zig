@@ -164,65 +164,24 @@ fn loadInactivityScores(
     var migrated_scores = try seed_scores.clone(.{});
     errdefer migrated_scores.deinit();
 
-    const old_validator_count = try migrated_scores.length();
-    const new_validator_count = inactivity_scores_bytes.len / INACTIVITY_SCORE_SIZE;
-    const is_more_validator = new_validator_count >= old_validator_count;
-    const min_validator_count = @min(old_validator_count, new_validator_count);
-
-    const old_size = try migrated_scores.serializedSize();
-    const old_bytes = try allocator.alloc(u8, old_size);
-    defer allocator.free(old_bytes);
-    _ = try migrated_scores.serializeIntoBytes(old_bytes);
+    const diff_ctx = try buildScoresDiffContext(allocator, &migrated_scores, inactivity_scores_bytes);
+    defer allocator.free(diff_ctx.old_bytes);
 
     var modified_validators = std.ArrayList(ValidatorIndex).init(allocator);
     defer modified_validators.deinit();
 
-    const old_scores_slice = if (is_more_validator)
-        old_bytes
+    const old_scores_slice = if (diff_ctx.is_more_validator)
+        diff_ctx.old_bytes
     else
-        old_bytes[0 .. min_validator_count * INACTIVITY_SCORE_SIZE];
-    const new_scores_slice = if (is_more_validator)
-        inactivity_scores_bytes[0 .. min_validator_count * INACTIVITY_SCORE_SIZE]
+        diff_ctx.old_bytes[0 .. diff_ctx.min_validator_count * INACTIVITY_SCORE_SIZE];
+    const new_scores_slice = if (diff_ctx.is_more_validator)
+        inactivity_scores_bytes[0 .. diff_ctx.min_validator_count * INACTIVITY_SCORE_SIZE]
     else
         inactivity_scores_bytes;
 
     try findModifiedInactivityScores(old_scores_slice, new_scores_slice, &modified_validators, 0);
-
-    for (modified_validators.items) |validator_index| {
-        const i: usize = @intCast(validator_index);
-        const start = i * INACTIVITY_SCORE_SIZE;
-        const chunk: *const [INACTIVITY_SCORE_SIZE]u8 = @ptrCast(inactivity_scores_bytes[start .. start + INACTIVITY_SCORE_SIZE].ptr);
-        const value = std.mem.readInt(u64, chunk, .little);
-        try migrated_scores.set(i, @intCast(value));
-    }
-
-    if (new_validator_count >= old_validator_count) {
-        var idx: usize = old_validator_count;
-        while (idx < new_validator_count) : (idx += 1) {
-            const start = idx * INACTIVITY_SCORE_SIZE;
-            const chunk: *const [INACTIVITY_SCORE_SIZE]u8 = @ptrCast(inactivity_scores_bytes[start .. start + INACTIVITY_SCORE_SIZE].ptr);
-            const value = std.mem.readInt(u64, chunk, .little);
-            try migrated_scores.push(@intCast(value));
-        }
-    } else {
-        if (new_validator_count == 0) {
-            const scores_pool = migrated_scores.base_view.pool;
-            const empty_scores = blk: {
-                const empty_root = try types.altair.InactivityScores.tree.fromValue(
-                    scores_pool,
-                    &types.altair.InactivityScores.default_value,
-                );
-                errdefer scores_pool.unref(empty_root);
-                break :blk try types.altair.InactivityScores.TreeView.init(allocator, scores_pool, empty_root);
-            };
-            migrated_scores.deinit();
-            migrated_scores = empty_scores;
-        } else {
-            const trimmed = try migrated_scores.sliceTo(new_validator_count - 1);
-            migrated_scores.deinit();
-            migrated_scores = trimmed;
-        }
-    }
+    try applyScoreDiffs(&migrated_scores, inactivity_scores_bytes, modified_validators.items);
+    try syncScoresLength(allocator, &migrated_scores, inactivity_scores_bytes, diff_ctx.old_validator_count, diff_ctx.new_validator_count);
 
     try migrated_view.set("inactivity_scores", migrated_scores);
 }
@@ -246,26 +205,156 @@ fn loadValidators(
     var migrated_validators = try seed_validators.clone(.{});
     errdefer migrated_validators.deinit();
 
-    const seed_bytes = blk: {
-        if (seed_state_validators_bytes) |b| break :blk b;
-        const size = try seed_validators.serializedSize();
-        const out = try allocator.alloc(u8, size);
-        errdefer allocator.free(out);
-        _ = try seed_validators.serializeIntoBytes(out);
-        break :blk out;
-    };
-    defer if (seed_state_validators_bytes == null) allocator.free(seed_bytes);
+    const seed_bytes = try getSeedValidatorsBytes(allocator, &seed_validators, seed_state_validators_bytes);
+    defer if (seed_bytes.owned) allocator.free(seed_bytes.bytes);
 
     var modified_validators = std.ArrayList(ValidatorIndex).init(allocator);
     errdefer modified_validators.deinit();
 
-    const old_validators_slice = seed_bytes[0 .. min_count * ssz_bytes.VALIDATOR_BYTES_SIZE];
+    const old_validators_slice = seed_bytes.bytes[0 .. min_count * ssz_bytes.VALIDATOR_BYTES_SIZE];
     const new_validators_slice = new_validators_bytes[0 .. min_count * ssz_bytes.VALIDATOR_BYTES_SIZE];
     try findModifiedValidators(old_validators_slice, new_validators_slice, &modified_validators, 0);
 
-    for (modified_validators.items) |validator_index| {
-        const i: usize = @intCast(validator_index);
+    try applyModifiedValidators(
+        allocator,
+        &seed_validators,
+        &migrated_validators,
+        seed_bytes.bytes,
+        new_validators_bytes,
+        modified_validators.items,
+    );
 
+    if (new_count >= seed_count) {
+        const extra_count = new_count - seed_count;
+        try modified_validators.ensureUnusedCapacity(extra_count);
+
+        try appendNewValidators(allocator, &migrated_validators, new_validators_bytes, seed_count, new_count, &modified_validators);
+    } else {
+        try trimValidators(allocator, &migrated_validators, new_count);
+    }
+
+    const out_slice = try modified_validators.toOwnedSlice();
+    errdefer allocator.free(out_slice);
+
+    try migrated_view.set("validators", migrated_validators);
+    return out_slice;
+}
+
+const ScoresDiffContext = struct {
+    old_bytes: []u8,
+    is_more_validator: bool,
+    min_validator_count: usize,
+    old_validator_count: usize,
+    new_validator_count: usize,
+};
+
+fn buildScoresDiffContext(
+    allocator: Allocator,
+    migrated_scores: *types.altair.InactivityScores.TreeView,
+    inactivity_scores_bytes: []const u8,
+) !ScoresDiffContext {
+    const old_validator_count = try migrated_scores.length();
+    const new_validator_count = inactivity_scores_bytes.len / INACTIVITY_SCORE_SIZE;
+    const is_more_validator = new_validator_count >= old_validator_count;
+    const min_validator_count = @min(old_validator_count, new_validator_count);
+
+    const old_size = try migrated_scores.serializedSize();
+    const old_bytes = try allocator.alloc(u8, old_size);
+    errdefer allocator.free(old_bytes);
+    _ = try migrated_scores.serializeIntoBytes(old_bytes);
+
+    return .{
+        .old_bytes = old_bytes,
+        .is_more_validator = is_more_validator,
+        .min_validator_count = min_validator_count,
+        .old_validator_count = old_validator_count,
+        .new_validator_count = new_validator_count,
+    };
+}
+
+fn applyScoreDiffs(
+    migrated_scores: *types.altair.InactivityScores.TreeView,
+    inactivity_scores_bytes: []const u8,
+    modified_validators: []const ValidatorIndex,
+) !void {
+    for (modified_validators) |validator_index| {
+        const i: usize = @intCast(validator_index);
+        const start = i * INACTIVITY_SCORE_SIZE;
+        const chunk: *const [INACTIVITY_SCORE_SIZE]u8 = @ptrCast(inactivity_scores_bytes[start .. start + INACTIVITY_SCORE_SIZE].ptr);
+        const value = std.mem.readInt(u64, chunk, .little);
+        try migrated_scores.set(i, @intCast(value));
+    }
+}
+
+fn syncScoresLength(
+    allocator: Allocator,
+    migrated_scores: *types.altair.InactivityScores.TreeView,
+    inactivity_scores_bytes: []const u8,
+    old_validator_count: usize,
+    new_validator_count: usize,
+) !void {
+    if (new_validator_count >= old_validator_count) {
+        var idx: usize = old_validator_count;
+        while (idx < new_validator_count) : (idx += 1) {
+            const start = idx * INACTIVITY_SCORE_SIZE;
+            const chunk: *const [INACTIVITY_SCORE_SIZE]u8 = @ptrCast(inactivity_scores_bytes[start .. start + INACTIVITY_SCORE_SIZE].ptr);
+            const value = std.mem.readInt(u64, chunk, .little);
+            try migrated_scores.push(@intCast(value));
+        }
+        return;
+    }
+
+    if (new_validator_count == 0) {
+        const scores_pool = migrated_scores.base_view.pool;
+        const empty_scores = blk: {
+            const empty_root = try types.altair.InactivityScores.tree.fromValue(
+                scores_pool,
+                &types.altair.InactivityScores.default_value,
+            );
+            errdefer scores_pool.unref(empty_root);
+            break :blk try types.altair.InactivityScores.TreeView.init(allocator, scores_pool, empty_root);
+        };
+        migrated_scores.deinit();
+        migrated_scores.* = empty_scores;
+        return;
+    }
+
+    const trimmed = try migrated_scores.sliceTo(new_validator_count - 1);
+    migrated_scores.deinit();
+    migrated_scores.* = trimmed;
+}
+
+const SeedBytes = struct {
+    bytes: []const u8,
+    owned: bool,
+};
+
+fn getSeedValidatorsBytes(
+    allocator: Allocator,
+    seed_validators: *types.phase0.Validators.TreeView,
+    seed_state_validators_bytes: ?[]const u8,
+) !SeedBytes {
+    if (seed_state_validators_bytes) |bytes| {
+        return .{ .bytes = bytes, .owned = false };
+    }
+
+    const size = try seed_validators.serializedSize();
+    const out = try allocator.alloc(u8, size);
+    errdefer allocator.free(out);
+    _ = try seed_validators.serializeIntoBytes(out);
+    return .{ .bytes = out, .owned = true };
+}
+
+fn applyModifiedValidators(
+    allocator: Allocator,
+    seed_validators: *types.phase0.Validators.TreeView,
+    migrated_validators: *types.phase0.Validators.TreeView,
+    seed_bytes: []const u8,
+    new_validators_bytes: []const u8,
+    modified_validators: []const ValidatorIndex,
+) !void {
+    for (modified_validators) |validator_index| {
+        const i: usize = @intCast(validator_index);
         const start = i * ssz_bytes.VALIDATOR_BYTES_SIZE;
         const new_bytes = new_validators_bytes[start .. start + ssz_bytes.VALIDATOR_BYTES_SIZE];
         const seed_val_bytes = seed_bytes[start .. start + ssz_bytes.VALIDATOR_BYTES_SIZE];
@@ -283,52 +372,58 @@ fn loadValidators(
         errdefer new_validator.deinit();
         try migrated_validators.set(i, new_validator);
     }
+}
 
-    if (new_count >= seed_count) {
-        const extra_count = new_count - seed_count;
-        try modified_validators.ensureUnusedCapacity(extra_count);
+fn appendNewValidators(
+    allocator: Allocator,
+    migrated_validators: *types.phase0.Validators.TreeView,
+    new_validators_bytes: []const u8,
+    start_index: usize,
+    end_index: usize,
+    modified_validators: *std.ArrayList(ValidatorIndex),
+) !void {
+    var idx: usize = start_index;
+    while (idx < end_index) : (idx += 1) {
+        const start = idx * ssz_bytes.VALIDATOR_BYTES_SIZE;
+        const new_bytes = new_validators_bytes[start .. start + ssz_bytes.VALIDATOR_BYTES_SIZE];
 
-        var idx: usize = seed_count;
-        while (idx < new_count) : (idx += 1) {
-            const start = idx * ssz_bytes.VALIDATOR_BYTES_SIZE;
-            const new_bytes = new_validators_bytes[start .. start + ssz_bytes.VALIDATOR_BYTES_SIZE];
+        const pool = migrated_validators.base_view.pool;
+        var v: ?types.phase0.Validator.TreeView = blk: {
+            const root = try types.phase0.Validator.tree.deserializeFromBytes(pool, new_bytes);
+            errdefer pool.unref(root);
+            break :blk try types.phase0.Validator.TreeView.init(allocator, pool, root);
+        };
+        errdefer if (v) |*vv| vv.deinit();
 
-            var v: ?types.phase0.Validator.TreeView = blk: {
-                const root = try types.phase0.Validator.tree.deserializeFromBytes(pool, new_bytes);
-                errdefer pool.unref(root);
-                break :blk try types.phase0.Validator.TreeView.init(allocator, pool, root);
-            };
-            errdefer if (v) |*vv| vv.deinit();
+        try migrated_validators.push(v.?);
+        v = null;
+        modified_validators.appendAssumeCapacity(@intCast(idx));
+    }
+}
 
-            try migrated_validators.push(v.?);
-            v = null;
-            modified_validators.appendAssumeCapacity(@intCast(idx));
-        }
-    } else {
-        if (new_count == 0) {
-            const v_pool = migrated_validators.base_view.pool;
-            const empty_validators = blk: {
-                const empty_root = try types.phase0.Validators.tree.fromValue(
-                    v_pool,
-                    &types.phase0.Validators.default_value,
-                );
-                errdefer v_pool.unref(empty_root);
-                break :blk try types.phase0.Validators.TreeView.init(allocator, v_pool, empty_root);
-            };
-            migrated_validators.deinit();
-            migrated_validators = empty_validators;
-        } else {
-            const trimmed = try migrated_validators.sliceTo(new_count - 1);
-            migrated_validators.deinit();
-            migrated_validators = trimmed;
-        }
+fn trimValidators(
+    allocator: Allocator,
+    migrated_validators: *types.phase0.Validators.TreeView,
+    new_count: usize,
+) !void {
+    if (new_count == 0) {
+        const v_pool = migrated_validators.base_view.pool;
+        const empty_validators = blk: {
+            const empty_root = try types.phase0.Validators.tree.fromValue(
+                v_pool,
+                &types.phase0.Validators.default_value,
+            );
+            errdefer v_pool.unref(empty_root);
+            break :blk try types.phase0.Validators.TreeView.init(allocator, v_pool, empty_root);
+        };
+        migrated_validators.deinit();
+        migrated_validators.* = empty_validators;
+        return;
     }
 
-    const out_slice = try modified_validators.toOwnedSlice();
-    errdefer allocator.free(out_slice);
-
-    try migrated_view.set("validators", migrated_validators);
-    return out_slice;
+    const trimmed = try migrated_validators.sliceTo(new_count - 1);
+    migrated_validators.deinit();
+    migrated_validators.* = trimmed;
 }
 
 fn validatorsNodeId(state: *AnyBeaconState) !Node.Id {
