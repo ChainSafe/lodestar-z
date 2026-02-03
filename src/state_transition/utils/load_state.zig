@@ -473,10 +473,12 @@ fn loadValidatorWithSeedReuse(
     const pubkey_same = std.mem.eql(u8, new_validator_bytes[0..48], seed_validator_bytes[0..48]);
     const withdrawal_same = std.mem.eql(u8, new_validator_bytes[48..80], seed_validator_bytes[48..80]);
 
-    if (!pubkey_same and !withdrawal_same) {
-        const root = try types.phase0.Validator.tree.deserializeFromBytes(pool, new_validator_bytes);
-        errdefer pool.unref(root);
-        return try types.phase0.Validator.TreeView.init(allocator, pool, root);
+    if (!pubkey_same) {
+        if (!withdrawal_same) {
+            const root = try types.phase0.Validator.tree.deserializeFromBytes(pool, new_validator_bytes);
+            errdefer pool.unref(root);
+            return try types.phase0.Validator.TreeView.init(allocator, pool, root);
+        }
     }
 
     var nodes: [types.phase0.Validator.chunk_count]Node.Id = undefined;
