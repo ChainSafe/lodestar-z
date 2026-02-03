@@ -25,6 +25,14 @@ pub const MigrateStateOutput = struct {
     modified_validators: []ValidatorIndex,
 };
 
+/// Load BeaconState from SSZ bytes using a seed state to reuse unchanged subtrees.
+///
+/// This avoids full deserialization for large fields (validators/inactivity_scores)
+/// by diffing bytes and reusing the seed state's TreeView nodes.
+///
+/// Returns the migrated state and indices of modified validators.
+///
+/// Errors are propagated from SSZ parsing and tree operations when bytes are invalid.
 pub fn loadState(
     allocator: Allocator,
     config: *const BeaconConfig,
@@ -64,6 +72,8 @@ fn deserializeBeaconStateTreeViewWithSeedOverrides(
         const inactivity_scores_bytes = state_bytes[scores_range[0]..scores_range[1]];
         const ScoresType = comptime StateST.getFieldType("inactivity_scores");
 
+        // If the seed fork is pre-altair, there are no scores to reuse, so we fully
+        // deserialize inactivity_scores here (diff optimization only applies when seed_fork >= altair).
         const scores_node = if (seed_fork.gte(.altair)) blk: {
             break :blk try inactivityScoresNodeId(seed_state);
         } else blk: {
@@ -170,11 +180,11 @@ fn loadInactivityScores(
     var modified_validators = std.ArrayList(ValidatorIndex).init(allocator);
     defer modified_validators.deinit();
 
-    const old_scores_slice = if (diff_ctx.is_more_validator)
+    const old_scores_slice = if (diff_ctx.has_more_validators)
         diff_ctx.old_bytes
     else
         diff_ctx.old_bytes[0 .. diff_ctx.min_validator_count * INACTIVITY_SCORE_SIZE];
-    const new_scores_slice = if (diff_ctx.is_more_validator)
+    const new_scores_slice = if (diff_ctx.has_more_validators)
         inactivity_scores_bytes[0 .. diff_ctx.min_validator_count * INACTIVITY_SCORE_SIZE]
     else
         inactivity_scores_bytes;
@@ -242,7 +252,7 @@ fn loadValidators(
 
 const ScoresDiffContext = struct {
     old_bytes: []u8,
-    is_more_validator: bool,
+    has_more_validators: bool,
     min_validator_count: usize,
     old_validator_count: usize,
     new_validator_count: usize,
@@ -255,7 +265,7 @@ fn buildScoresDiffContext(
 ) !ScoresDiffContext {
     const old_validator_count = try migrated_scores.length();
     const new_validator_count = inactivity_scores_bytes.len / INACTIVITY_SCORE_SIZE;
-    const is_more_validator = new_validator_count >= old_validator_count;
+    const has_more_validators = new_validator_count >= old_validator_count;
     const min_validator_count = @min(old_validator_count, new_validator_count);
 
     const old_size = try migrated_scores.serializedSize();
@@ -265,7 +275,7 @@ fn buildScoresDiffContext(
 
     return .{
         .old_bytes = old_bytes,
-        .is_more_validator = is_more_validator,
+        .has_more_validators = has_more_validators,
         .min_validator_count = min_validator_count,
         .old_validator_count = old_validator_count,
         .new_validator_count = new_validator_count,
@@ -524,7 +534,8 @@ fn findModifiedValidators(
     modified_validators: *std.ArrayList(ValidatorIndex),
     validator_offset: usize,
 ) !void {
-    if (validators_bytes.len != validators_bytes2.len) return error.InvalidSize;
+    std.debug.assert(validators_bytes.len == validators_bytes2.len);
+    std.debug.assert(validators_bytes.len % ssz_bytes.VALIDATOR_BYTES_SIZE == 0);
 
     if (std.mem.eql(u8, validators_bytes, validators_bytes2)) return;
 
@@ -557,7 +568,8 @@ fn findModifiedInactivityScores(
     modified_validators: *std.ArrayList(ValidatorIndex),
     validator_offset: usize,
 ) !void {
-    if (inactivity_scores_bytes.len != inactivity_scores_bytes2.len) return error.InvalidSize;
+    std.debug.assert(inactivity_scores_bytes.len == inactivity_scores_bytes2.len);
+    std.debug.assert(inactivity_scores_bytes.len % INACTIVITY_SCORE_SIZE == 0);
 
     if (std.mem.eql(u8, inactivity_scores_bytes, inactivity_scores_bytes2)) return;
 
