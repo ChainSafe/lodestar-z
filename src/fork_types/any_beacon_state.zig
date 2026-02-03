@@ -15,6 +15,12 @@ const constants = @import("constants");
 const BeaconState = @import("./beacon_state.zig").BeaconState;
 const AnyExecutionPayloadHeader = @import("./any_execution_payload.zig").AnyExecutionPayloadHeader;
 
+pub fn readSlotFromAnyBeaconStateBytes(bytes: []const u8) u64 {
+    // slot is at offset 40: 8 (genesisTime) + 32 (genesisValidatorsRoot)
+    std.debug.assert(bytes.len >= 48);
+    return std.mem.readInt(u64, bytes[40..][0..8], .little);
+}
+
 /// wrapper for all AnyBeaconState types across forks so that we don't have to do switch/case for all methods
 pub const AnyBeaconState = union(ForkSeq) {
     phase0: ct.phase0.BeaconState.TreeView,
