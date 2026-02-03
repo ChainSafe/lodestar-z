@@ -544,12 +544,12 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         &[_]napi.c.napi_property_descriptor{
             method(0, Signature_toBytes),
             method(0, Signature_toBytesCompress),
-            .{ .utf8name = "validate", .method = napi.wrapCallback(1, Signature_validate) },
+            method(1, Signature_validate),
         },
     );
     try sig_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{
-        .{ .utf8name = "fromBytes", .method = napi.wrapCallback(1, Signature_fromBytes) },
-        .{ .utf8name = "aggregate", .method = napi.wrapCallback(1, Signature_aggregate) },
+        method(1, Signature_fromBytes),
+        method(1, Signature_aggregate),
     });
 
     try blst_obj.setNamedProperty("SecretKey", sk_ctor);
