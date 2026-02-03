@@ -123,7 +123,7 @@ fn loadStateForFork(
 
     const validators_range = ranges[validators_field_index];
     const new_validators_bytes = state_bytes[validators_range[0]..validators_range[1]];
-    const modified_validators = try loadValidators(allocator, &migrated_view, pool, seed_validators_node, new_validators_bytes, seed_validators_bytes);
+    const modified_validators = try loadValidators(allocator, StateST, &migrated_view, pool, seed_validators_node, new_validators_bytes, seed_validators_bytes);
     errdefer allocator.free(modified_validators);
 
     if (comptime out_fork.gte(.altair)) {
@@ -132,7 +132,7 @@ fn loadStateForFork(
             const scores_range = ranges[scores_field_index];
             const inactivity_scores_bytes = state_bytes[scores_range[0]..scores_range[1]];
             const seed_scores_node = try inactivityScoresNodeId(seed_state);
-            try loadInactivityScores(allocator, &migrated_view, pool, seed_scores_node, inactivity_scores_bytes);
+            try loadInactivityScores(allocator, StateST, &migrated_view, pool, seed_scores_node, inactivity_scores_bytes);
         }
     }
 
@@ -152,7 +152,8 @@ fn loadStateForFork(
 
 fn loadInactivityScores(
     allocator: Allocator,
-    migrated_view: anytype,
+    comptime StateST: type,
+    migrated_view: *StateST.TreeView,
     pool: *Node.Pool,
     seed_scores_node: Node.Id,
     inactivity_scores_bytes: []const u8,
@@ -228,7 +229,8 @@ fn loadInactivityScores(
 
 fn loadValidators(
     allocator: Allocator,
-    migrated_view: anytype,
+    comptime StateST: type,
+    migrated_view: *StateST.TreeView,
     pool: *Node.Pool,
     seed_validators_node: Node.Id,
     new_validators_bytes: []const u8,
