@@ -1066,6 +1066,7 @@ pub fn build(b: *std.Build) void {
     module_bindings.addImport("consensus_types", module_consensus_types);
     module_bindings.addImport("preset", module_preset);
     module_bindings.addImport("config", module_config);
+    module_bindings.addImport("constants", module_constants);
     module_bindings.addImport("fork_types", module_fork_types);
     module_bindings.addImport("state_transition", module_state_transition);
     module_bindings.addImport("zapi:napi", dep_zapi.module("napi"));
