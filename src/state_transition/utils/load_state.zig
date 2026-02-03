@@ -489,31 +489,20 @@ fn loadValidatorWithSeedReuse(
     }
 
     inline for (types.phase0.Validator.fields, 0..) |field, i| {
-        const start = types.phase0.Validator.field_offsets[i];
-        const end = start + field.type.fixed_size;
-        const bytes = new_validator_bytes[start..end];
+        const reuse = if (comptime std.mem.eql(u8, field.name, "pubkey"))
+            pubkey_same
+        else if (comptime std.mem.eql(u8, field.name, "withdrawal_credentials"))
+            withdrawal_same
+        else
+            false;
 
-        if (comptime std.mem.eql(u8, field.name, "pubkey")) {
-            if (pubkey_same) {
-                const gindex = Gindex.fromDepth(types.phase0.Validator.chunk_depth, i);
-                nodes[i] = try seed_validator.base_view.getChildNode(gindex);
-            } else {
-                const node_id = try field.type.tree.deserializeFromBytes(pool, bytes);
-                owned_nodes[owned_len] = node_id;
-                owned_len += 1;
-                nodes[i] = node_id;
-            }
-        } else if (comptime std.mem.eql(u8, field.name, "withdrawal_credentials")) {
-            if (withdrawal_same) {
-                const gindex = Gindex.fromDepth(types.phase0.Validator.chunk_depth, i);
-                nodes[i] = try seed_validator.base_view.getChildNode(gindex);
-            } else {
-                const node_id = try field.type.tree.deserializeFromBytes(pool, bytes);
-                owned_nodes[owned_len] = node_id;
-                owned_len += 1;
-                nodes[i] = node_id;
-            }
+        if (reuse) {
+            const gindex = Gindex.fromDepth(types.phase0.Validator.chunk_depth, i);
+            nodes[i] = try seed_validator.base_view.getChildNode(gindex);
         } else {
+            const start = types.phase0.Validator.field_offsets[i];
+            const end = start + field.type.fixed_size;
+            const bytes = new_validator_bytes[start..end];
             const node_id = try field.type.tree.deserializeFromBytes(pool, bytes);
             owned_nodes[owned_len] = node_id;
             owned_len += 1;
