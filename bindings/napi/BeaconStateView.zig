@@ -45,7 +45,7 @@ pub fn BeaconStateView_ctor(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value
 pub fn BeaconStateView_createFromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const ctor = cb.this();
 
-    const bytes_info = try cb.arg(1).getTypedarrayInfo();
+    const bytes_info = try cb.arg(0).getTypedarrayInfo();
     const state = try allocator.create(AnyBeaconState);
     errdefer allocator.destroy(state);
 
