@@ -2,41 +2,39 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const types = @import("consensus_types");
-const ssz = @import("ssz");
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
 
 const ssz_bytes = @import("ssz_bytes.zig");
 const ssz_container = @import("ssz_container.zig");
 
-const BeaconStateTreeViewAllForks = @import("../types/beacon_state_tree_view.zig").BeaconStateTreeViewAllForks;
-
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const Slot = types.primitive.Slot.Type;
 
 /// Inactivity score is `uint64` (8 bytes).
 const INACTIVITY_SCORE_SIZE: usize = 8;
 
 // BeaconState field indices are stable across forks.
-// Keep a single source of truth in `state_transition/types/beacon_state_tree_view.zig`.
+const BEACON_STATE_VALIDATORS_FIELD_INDEX: usize = types.phase0.BeaconState.getFieldIndex("validators");
+const BEACON_STATE_INACTIVITY_SCORES_FIELD_INDEX: usize = types.altair.BeaconState.getFieldIndex("inactivity_scores");
 
 pub const MigrateStateOutput = struct {
-    state: BeaconStateTreeViewAllForks,
+    state: AnyBeaconState,
     modified_validators: []ValidatorIndex,
 };
 
 pub fn loadState(
     allocator: Allocator,
     config: *const BeaconConfig,
-    seed_state: *BeaconStateTreeViewAllForks,
+    seed_state: *AnyBeaconState,
     state_bytes: []const u8,
     seed_validators_bytes: ?[]const u8,
 ) !MigrateStateOutput {
     const fork = try ssz_bytes.getForkFromStateBytes(config, state_bytes);
     const seed_fork = config.forkSeq(try seed_state.slot());
-    const pool = seed_state.pool();
+    const pool = seed_state.baseView().pool;
 
     return switch (fork) {
         .phase0 => try loadStateForFork(allocator, pool, .phase0, seed_fork, seed_state, types.phase0.BeaconState, state_bytes, seed_validators_bytes),
@@ -54,7 +52,7 @@ fn deserializeBeaconStateTreeViewWithSeedOverrides(
     pool: *Node.Pool,
     comptime out_fork: ForkSeq,
     seed_fork: ForkSeq,
-    seed_state: *BeaconStateTreeViewAllForks,
+    seed_state: *AnyBeaconState,
     comptime StateST: type,
     state_bytes: []const u8,
     ranges: *const [StateST.fields.len][2]usize,
@@ -66,17 +64,13 @@ fn deserializeBeaconStateTreeViewWithSeedOverrides(
         const inactivity_scores_bytes = state_bytes[scores_range[0]..scores_range[1]];
         const ScoresType = comptime StateST.getFieldType("inactivity_scores");
 
-        var scores_node: Node.Id = undefined;
-        var owns_scores_node = false;
-        if (seed_fork.gte(.altair)) {
-            var seed_scores = try seed_state.inactivityScores();
-            defer seed_scores.deinit();
-            scores_node = seed_scores.base_view.data.root;
-        } else {
-            owns_scores_node = true;
-            scores_node = try ScoresType.tree.deserializeFromBytes(pool, inactivity_scores_bytes);
-        }
-        errdefer if (owns_scores_node) pool.unref(scores_node);
+        const scores_node = if (seed_fork.gte(.altair)) blk: {
+            break :blk try inactivityScoresNodeId(seed_state);
+        } else blk: {
+            const node_id = try ScoresType.tree.deserializeFromBytes(pool, inactivity_scores_bytes);
+            errdefer pool.unref(node_id);
+            break :blk node_id;
+        };
 
         return try ssz_container.deserializeContainerOverrideFieldsWithRanges(
             allocator,
@@ -103,7 +97,7 @@ fn loadStateForFork(
     pool: *Node.Pool,
     comptime out_fork: ForkSeq,
     seed_fork: ForkSeq,
-    seed_state: *BeaconStateTreeViewAllForks,
+    seed_state: *AnyBeaconState,
     comptime StateST: type,
     state_bytes: []const u8,
     seed_validators_bytes: ?[]const u8,
@@ -112,11 +106,9 @@ fn loadStateForFork(
 
     const validators_field_index = comptime StateST.getFieldIndex("validators");
 
-    var seed_validators_view = try seed_state.validators();
-    defer seed_validators_view.deinit();
-    const seed_validators_node = seed_validators_view.base_view.data.root;
+    const seed_validators_node = try validatorsNodeId(seed_state);
 
-    const migrated_view = try deserializeBeaconStateTreeViewWithSeedOverrides(
+    var migrated_view = try deserializeBeaconStateTreeViewWithSeedOverrides(
         allocator,
         pool,
         out_fork,
@@ -127,13 +119,11 @@ fn loadStateForFork(
         &ranges,
         seed_validators_node,
     );
-
-    var migrated_state: BeaconStateTreeViewAllForks = BeaconStateTreeViewAllForks.fromTreeView(out_fork, migrated_view);
-    errdefer migrated_state.deinit();
+    errdefer migrated_view.deinit();
 
     const validators_range = ranges[validators_field_index];
     const new_validators_bytes = state_bytes[validators_range[0]..validators_range[1]];
-    const modified_validators = try loadValidators(allocator, &migrated_state, seed_state, new_validators_bytes, seed_validators_bytes);
+    const modified_validators = try loadValidators(allocator, &migrated_view, pool, seed_validators_node, new_validators_bytes, seed_validators_bytes);
     errdefer allocator.free(modified_validators);
 
     if (comptime out_fork.gte(.altair)) {
@@ -141,22 +131,33 @@ fn loadStateForFork(
             const scores_field_index = comptime StateST.getFieldIndex("inactivity_scores");
             const scores_range = ranges[scores_field_index];
             const inactivity_scores_bytes = state_bytes[scores_range[0]..scores_range[1]];
-            try loadInactivityScores(allocator, &migrated_state, seed_state, inactivity_scores_bytes);
+            const seed_scores_node = try inactivityScoresNodeId(seed_state);
+            try loadInactivityScores(allocator, &migrated_view, pool, seed_scores_node, inactivity_scores_bytes);
         }
     }
 
-    try migrated_state.commit();
+    try migrated_view.commit();
 
+    const migrated_state: AnyBeaconState = switch (out_fork) {
+        .phase0 => .{ .phase0 = migrated_view },
+        .altair => .{ .altair = migrated_view },
+        .bellatrix => .{ .bellatrix = migrated_view },
+        .capella => .{ .capella = migrated_view },
+        .deneb => .{ .deneb = migrated_view },
+        .electra => .{ .electra = migrated_view },
+        .fulu => .{ .fulu = migrated_view },
+    };
     return .{ .state = migrated_state, .modified_validators = modified_validators };
 }
 
 fn loadInactivityScores(
     allocator: Allocator,
-    migrated_state: *BeaconStateTreeViewAllForks,
-    seed_state: *BeaconStateTreeViewAllForks,
+    migrated_view: anytype,
+    pool: *Node.Pool,
+    seed_scores_node: Node.Id,
     inactivity_scores_bytes: []const u8,
 ) !void {
-    var seed_scores = try seed_state.inactivityScores();
+    var seed_scores = try types.altair.InactivityScores.TreeView.init(allocator, pool, seed_scores_node);
     defer seed_scores.deinit();
 
     var migrated_scores = try seed_scores.clone(.{});
@@ -222,17 +223,18 @@ fn loadInactivityScores(
         }
     }
 
-    try migrated_state.setInactivityScores(migrated_scores);
+    try migrated_view.set("inactivity_scores", migrated_scores);
 }
 
 fn loadValidators(
     allocator: Allocator,
-    migrated_state: *BeaconStateTreeViewAllForks,
-    seed_state: *BeaconStateTreeViewAllForks,
+    migrated_view: anytype,
+    pool: *Node.Pool,
+    seed_validators_node: Node.Id,
     new_validators_bytes: []const u8,
     seed_state_validators_bytes: ?[]const u8,
 ) ![]ValidatorIndex {
-    var seed_validators = try seed_state.validators();
+    var seed_validators = try types.phase0.Validators.TreeView.init(allocator, pool, seed_validators_node);
     defer seed_validators.deinit();
 
     const seed_count = try seed_validators.length();
@@ -289,7 +291,6 @@ fn loadValidators(
             const start = idx * ssz_bytes.VALIDATOR_BYTES_SIZE;
             const new_bytes = new_validators_bytes[start .. start + ssz_bytes.VALIDATOR_BYTES_SIZE];
 
-            const pool = migrated_validators.base_view.pool;
             var v: ?types.phase0.Validator.TreeView = blk: {
                 const root = try types.phase0.Validator.tree.deserializeFromBytes(pool, new_bytes);
                 errdefer pool.unref(root);
@@ -324,8 +325,44 @@ fn loadValidators(
     const out_slice = try modified_validators.toOwnedSlice();
     errdefer allocator.free(out_slice);
 
-    try migrated_state.setValidators(migrated_validators);
+    try migrated_view.set("validators", migrated_validators);
     return out_slice;
+}
+
+fn validatorsNodeId(state: *AnyBeaconState) !Node.Id {
+    return switch (state.*) {
+        .phase0 => |*s| try s.base_view.getChildNode(Gindex.fromDepth(types.phase0.BeaconState.chunk_depth, BEACON_STATE_VALIDATORS_FIELD_INDEX)),
+        .altair => |*s| try s.base_view.getChildNode(Gindex.fromDepth(types.altair.BeaconState.chunk_depth, BEACON_STATE_VALIDATORS_FIELD_INDEX)),
+        .bellatrix => |*s| try s.base_view.getChildNode(Gindex.fromDepth(types.bellatrix.BeaconState.chunk_depth, BEACON_STATE_VALIDATORS_FIELD_INDEX)),
+        .capella => |*s| try s.base_view.getChildNode(Gindex.fromDepth(types.capella.BeaconState.chunk_depth, BEACON_STATE_VALIDATORS_FIELD_INDEX)),
+        .deneb => |*s| try s.base_view.getChildNode(Gindex.fromDepth(types.deneb.BeaconState.chunk_depth, BEACON_STATE_VALIDATORS_FIELD_INDEX)),
+        .electra => |*s| try s.base_view.getChildNode(Gindex.fromDepth(types.electra.BeaconState.chunk_depth, BEACON_STATE_VALIDATORS_FIELD_INDEX)),
+        .fulu => |*s| try s.base_view.getChildNode(Gindex.fromDepth(types.fulu.BeaconState.chunk_depth, BEACON_STATE_VALIDATORS_FIELD_INDEX)),
+    };
+}
+
+fn inactivityScoresNodeId(state: *AnyBeaconState) !Node.Id {
+    return switch (state.*) {
+        .phase0 => error.InvalidAtFork,
+        .altair => |*s| try s.base_view.getChildNode(Gindex.fromDepth(types.altair.BeaconState.chunk_depth, BEACON_STATE_INACTIVITY_SCORES_FIELD_INDEX)),
+        .bellatrix => |*s| try s.base_view.getChildNode(Gindex.fromDepth(types.bellatrix.BeaconState.chunk_depth, BEACON_STATE_INACTIVITY_SCORES_FIELD_INDEX)),
+        .capella => |*s| try s.base_view.getChildNode(Gindex.fromDepth(types.capella.BeaconState.chunk_depth, BEACON_STATE_INACTIVITY_SCORES_FIELD_INDEX)),
+        .deneb => |*s| try s.base_view.getChildNode(Gindex.fromDepth(types.deneb.BeaconState.chunk_depth, BEACON_STATE_INACTIVITY_SCORES_FIELD_INDEX)),
+        .electra => |*s| try s.base_view.getChildNode(Gindex.fromDepth(types.electra.BeaconState.chunk_depth, BEACON_STATE_INACTIVITY_SCORES_FIELD_INDEX)),
+        .fulu => |*s| try s.base_view.getChildNode(Gindex.fromDepth(types.fulu.BeaconState.chunk_depth, BEACON_STATE_INACTIVITY_SCORES_FIELD_INDEX)),
+    };
+}
+
+fn validatorsViewOwned(allocator: Allocator, state: *AnyBeaconState) !types.phase0.Validators.TreeView {
+    const root = try validatorsNodeId(state);
+    const pool = state.baseView().pool;
+    return try types.phase0.Validators.TreeView.init(allocator, pool, root);
+}
+
+fn inactivityScoresViewOwned(allocator: Allocator, state: *AnyBeaconState) !types.altair.InactivityScores.TreeView {
+    const root = try inactivityScoresNodeId(state);
+    const pool = state.baseView().pool;
+    return try types.altair.InactivityScores.TreeView.init(allocator, pool, root);
 }
 
 fn loadValidatorWithSeedReuse(
@@ -478,12 +515,10 @@ test "loadValidatorWithSeedReuse: reuse vs rebuild" {
     const seed_state_bytes = try state_ptr.serialize(allocator);
     defer allocator.free(seed_state_bytes);
 
-    const seed_root = try types.electra.BeaconState.tree.deserializeFromBytes(&pool, seed_state_bytes);
-    errdefer pool.unref(seed_root);
-    var seed_state: BeaconStateTreeViewAllForks = .{ .electra = try types.electra.BeaconState.TreeView.init(allocator, &pool, seed_root) };
+    var seed_state = try AnyBeaconState.deserialize(allocator, &pool, .electra, seed_state_bytes);
     defer seed_state.deinit();
 
-    var seed_validators = try seed_state.validators();
+    var seed_validators = try validatorsViewOwned(allocator, &seed_state);
     defer seed_validators.deinit();
 
     const target_index: usize = 3;
@@ -575,9 +610,7 @@ test "loadState scenarios" {
         const seed_bytes = try state_ptr.serialize(allocator);
         defer allocator.free(seed_bytes);
 
-        const seed_root = try types.electra.BeaconState.tree.deserializeFromBytes(&pool, seed_bytes);
-        errdefer pool.unref(seed_root);
-        var seed_all: BeaconStateTreeViewAllForks = .{ .electra = try types.electra.BeaconState.TreeView.init(allocator, &pool, seed_root) };
+        var seed_all = try AnyBeaconState.deserialize(allocator, &pool, .electra, seed_bytes);
         defer seed_all.deinit();
 
         const mutated_bytes = blk: {
@@ -671,11 +704,11 @@ test "loadState scenarios" {
             try std.testing.expectEqual(e, got);
         }
 
-        var migrated_validators = try out.state.validators();
+        var migrated_validators = try validatorsViewOwned(allocator, &out.state);
         defer migrated_validators.deinit();
         try std.testing.expectEqual(case.expect_validators_len, try migrated_validators.length());
 
-        var scores = try out.state.inactivityScores();
+        var scores = try inactivityScoresViewOwned(allocator, &out.state);
         defer scores.deinit();
         try std.testing.expectEqual(case.expect_scores_len, try scores.length());
 
