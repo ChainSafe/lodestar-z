@@ -53,6 +53,12 @@ interface ProcessSlotsOpts {
   transferCache?: boolean;
 }
 
+interface CompactMultiProof {
+  type: "compactMulti";
+  leaves: Uint8Array[];
+  descriptor: Uint8Array;
+}
+
 interface ProposerRewards {
   attestations: bigint;
   syncAggregate: bigint;
@@ -103,6 +109,7 @@ type VoluntaryExitValidity =
   | "short_time_active"
   | "pending_withdrawals"
   | "invalid_signature";
+
 
 declare class BeaconStateView {
   static createFromBytes(fork: string, bytes: Uint8Array): BeaconStateView;
@@ -196,6 +203,7 @@ declare class BeaconStateView {
   serializedValidatorsSize(): number;
   serializeValidatorsToBytes(output: Uint8Array, offset: number): number;
   hashTreeRoot(): Uint8Array;
+  createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
   // stateTransition(signedBlockBytes: Uint8Array): BeaconStateView;
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
