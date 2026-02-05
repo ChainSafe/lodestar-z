@@ -5,7 +5,8 @@ const c = @import("config");
 const BeaconConfig = @import("config").BeaconConfig;
 const ChainConfig = @import("config").ChainConfig;
 
-// Allocator for internal allocations.
+/// Allocator for internal allocations.
+/// Creating ChainConfigs allocate memory for certain fields.
 const allocator = std.heap.page_allocator;
 
 /// A global config for N-API bindings to use.
