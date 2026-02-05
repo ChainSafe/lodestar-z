@@ -90,12 +90,16 @@ Code](https://spinroot.com/gerard/pdf/P10.pdf) will change the way you code fore
     - and use VOPR as the final line of defense, to find bugs in your and reviewer's understanding
       of code.
 
-- All memory must be statically allocated at startup. **No memory may be dynamically allocated (or
-  freed and reallocated) after initialization.** This avoids unpredictable behavior that can
-  significantly affect performance, and avoids use-after-free. As a second-order effect, it is our
-  experience that this also makes for more efficient, simpler designs that are more performant and
+- Most memory should be statically allocated at startup, where **possible** and **optimal**.
+  TigerBeetle does all allocation at startup but that is nearly impossible for Lodestar's use case,
+  since some data changes from epoch to epoch. 
+
+  This makes for more efficient, simpler designs that are more performant and
   easier to maintain and reason about, compared to designs that do not consider all possible memory
   usage patterns upfront as part of the design.
+
+  As such, we should aspire to define boundaries to make
+  this possible, but we should not blindly avoid dynamic memory allocation.
 
 - Declare variables at the **smallest possible scope**, and **minimize the number of variables in
   scope**, to reduce the probability that variables are misused.
