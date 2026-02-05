@@ -887,20 +887,20 @@ pub fn BeaconStateView_hashTreeRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !na
 ///
 /// Arguments:
 /// - arg 0: target slot (number)
-/// - arg 1: options object (optional) with `dontTransferCache` boolean
+/// - arg 1: options object (optional) with `transferCache` boolean
 pub fn BeaconStateView_processSlots(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const slot: u64 = @intCast(try cb.arg(0).getValueInt64());
 
-    var dont_transfer_cache = false;
+    var transfer_cache = false;
     if (cb.getArg(1)) |options_arg| {
         if (try options_arg.typeof() == .object) {
-            if (try options_arg.hasNamedProperty("dontTransferCache")) {
-                dont_transfer_cache = try (try options_arg.getNamedProperty("dontTransferCache")).getValueBool();
+            if (try options_arg.hasNamedProperty("transferCache")) {
+                transfer_cache = try (try options_arg.getNamedProperty("transferCache")).getValueBool();
             }
         }
     }
-    const post_state = try cached_state.clone(allocator, .{ .transfer_cache = !dont_transfer_cache });
+    const post_state = try cached_state.clone(allocator, .{ .transfer_cache = transfer_cache });
     errdefer {
         post_state.deinit();
         allocator.destroy(post_state);
