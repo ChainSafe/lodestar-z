@@ -493,15 +493,19 @@ fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, pool: *Nod
         state.deinit();
         allocator.destroy(state);
     };
+
     const beacon_config = config.BeaconConfig.init(chain_config, (try beacon_state.?.genesisValidatorsRoot()).*);
+
     const pubkey_index_map = try PubkeyIndexMap.init(allocator);
     defer pubkey_index_map.deinit();
+
     const index_pubkey_cache = try allocator.create(state_transition.Index2PubkeyCache);
     index_pubkey_cache.* = state_transition.Index2PubkeyCache.init(allocator);
     defer {
         index_pubkey_cache.deinit();
         allocator.destroy(index_pubkey_cache);
     }
+
     const validators = try beacon_state.?.validatorsSlice(allocator);
     defer allocator.free(validators);
 
