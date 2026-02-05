@@ -82,12 +82,12 @@ interface PendingConsolidation {
 interface Validator {
   pubkey: Uint8Array;
   withdrawalCredentials: Uint8Array;
-  effectiveBalance: bigint;
+  effectiveBalance: number;
   slashed: boolean;
-  activationEligibilityEpoch: bigint;
-  activationEpoch: bigint;
-  exitEpoch: bigint;
-  withdrawableEpoch: bigint;
+  activationEligibilityEpoch: number;
+  activationEpoch: number;
+  exitEpoch: number;
+  withdrawableEpoch: number;
 }
 
 type ValidatorStatus =
@@ -112,7 +112,7 @@ type VoluntaryExitValidity =
 
 
 declare class BeaconStateView {
-  static createFromBytes(fork: string, bytes: Uint8Array): BeaconStateView;
+  static createFromBytes(bytes: Uint8Array): BeaconStateView;
 
   slot: number;
   fork: Fork;

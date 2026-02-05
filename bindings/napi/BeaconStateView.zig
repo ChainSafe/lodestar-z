@@ -777,7 +777,7 @@ pub fn BeaconStateView_createMultiProof(env: napi.Env, cb: napi.CallbackInfo(1))
 
     const descriptor_info = try cb.arg(0).getTypedarrayInfo();
     if (descriptor_info.array_type != .uint8) {
-        try env.throwTypeError("Expected descriptor to be a Uint8Array");
+        try env.throwTypeError("STATE_ERROR", "Expected descriptor to be a Uint8Array");
         return env.getNull();
     }
     const descriptor = descriptor_info.data;

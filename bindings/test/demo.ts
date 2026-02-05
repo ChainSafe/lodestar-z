@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
 import bindings from "../src/index.ts";
+import {getFirstEraFilePath} from "./eraFiles.ts";
 
 console.log("loaded bindings");
 
@@ -39,7 +40,7 @@ if (hasPkix) {
 }
 
 const reader = await printDurationAsync("load era reader", () =>
-  era.era.EraReader.open(config, "./fixtures/era/mainnet-01628-47ac89fb.era")
+  era.era.EraReader.open(config, getFirstEraFilePath())
 );
 
 const stateBytes = await printDurationAsync("read serialized state", () => reader.readSerializedState());

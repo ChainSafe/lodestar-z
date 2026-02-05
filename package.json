@@ -35,8 +35,10 @@
   "devDependencies": {
     "@biomejs/biome": "^2.3.11",
     "@chainsafe/biomejs-config": "^1.0.0",
-    "@lodestar/config": "^1.38.0",
-    "@lodestar/era": "^1.38.0",
+    "@lodestar/config": "^1.39.1",
+    "@lodestar/era": "^1.39.1",
+    "@lodestar/state-transition": "^1.39.1",
+    "@lodestar/types": "^1.39.1",
     "@types/node": "^25.0.9",
     "vitest": "^4.0.17"
   }
