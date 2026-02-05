@@ -42,6 +42,7 @@ fn ProcessBlockHeaderBench(comptime fork: ForkSeq) type {
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
+
             state_transition.processBlockHeader(
                 fork,
                 allocator,
@@ -110,6 +111,7 @@ fn ProcessExecutionPayloadBench(comptime fork: ForkSeq) type {
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
+
             const external_data = BlockExternalData{ .execution_payload_status = .valid, .data_availability_status = .available };
             state_transition.processExecutionPayload(
                 fork,
@@ -137,6 +139,7 @@ fn ProcessRandaoBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
+
             state_transition.processRandao(
                 fork,
                 cloned.config,
@@ -162,6 +165,7 @@ fn ProcessEth1DataBench(comptime fork: ForkSeq) type {
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
+
             state_transition.processEth1Data(
                 fork,
                 cloned.state.castToFork(fork),
@@ -182,6 +186,7 @@ fn ProcessOperationsBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
+
             state_transition.processOperations(
                 fork,
                 allocator,
@@ -208,6 +213,7 @@ fn ProcessSyncAggregateBench(comptime fork: ForkSeq, comptime opts: BenchOpts) t
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
+
             state_transition.processSyncAggregate(
                 fork,
                 allocator,
@@ -232,6 +238,7 @@ fn ProcessBlockBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
+
             const external_data = BlockExternalData{ .execution_payload_status = .valid, .data_availability_status = .available };
             state_transition.processBlock(
                 fork,
@@ -433,6 +440,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
+
     const allocator = gpa.allocator();
     const stdout = std.io.getStdOut().writer();
     var pool = try Node.Pool.init(allocator, 10_000_000);
@@ -479,9 +487,18 @@ pub fn main() !void {
     return error.NoBenchmarkRan;
 }
 
-fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, pool: *Node.Pool, stdout: anytype, state_bytes: []const u8, block_bytes: []const u8, chain_config: config.ChainConfig) !void {
+fn runBenchmark(
+    comptime fork: ForkSeq,
+    allocator: std.mem.Allocator,
+    pool: *Node.Pool,
+    stdout: anytype,
+    state_bytes: []const u8,
+    block_bytes: []const u8,
+    chain_config: config.ChainConfig,
+) !void {
     var signed_beacon_block = try loadBlock(fork, allocator, block_bytes);
     defer signed_beacon_block.deinit(allocator);
+
     const any_block = signed_beacon_block.beaconBlock();
     const block = any_block.castToFork(.full, fork);
     const body = block.body();
