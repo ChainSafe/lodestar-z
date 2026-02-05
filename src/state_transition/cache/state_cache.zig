@@ -10,6 +10,7 @@ const EpochCacheOpts = @import("./epoch_cache.zig").EpochCacheOpts;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const CloneOpts = @import("ssz").BaseTreeView.CloneOpts;
+const SlashingsCache = @import("./slashings_cache.zig").SlashingsCache;
 const Node = @import("persistent_merkle_tree").Node;
 
 pub const ProposerRewards = struct {
@@ -25,6 +26,7 @@ pub const CachedBeaconState = struct {
     /// only a reference to the shared EpochCache instance
     /// TODO: before an epoch transition, need to release() epoch_cache before using a new one
     epoch_cache_ref: *EpochCacheRc,
+    slashings_cache: SlashingsCache,
     /// this takes ownership of the state, it is expected to be deinitialized by this struct
     state: *AnyBeaconState,
     /// Proposer rewards accumulated during block processing
@@ -53,6 +55,7 @@ pub const CachedBeaconState = struct {
             .allocator = allocator,
             .config = immutable_data.config,
             .epoch_cache_ref = epoch_cache_ref,
+            .slashings_cache = try SlashingsCache.initEmpty(allocator),
             .state = state,
             .proposer_rewards = .{},
         };
@@ -74,6 +77,9 @@ pub const CachedBeaconState = struct {
         const epoch_cache_ref = self.epoch_cache_ref.acquire();
         errdefer epoch_cache_ref.release();
 
+        var slashings_cache = try self.slashings_cache.clone(allocator);
+        errdefer slashings_cache.deinit();
+
         const state = try allocator.create(AnyBeaconState);
         errdefer allocator.destroy(state);
         state.* = try self.state.clone(opts);
@@ -82,6 +88,7 @@ pub const CachedBeaconState = struct {
             .allocator = allocator,
             .config = self.config,
             .epoch_cache_ref = epoch_cache_ref,
+            .slashings_cache = slashings_cache,
             .state = state,
             .proposer_rewards = self.proposer_rewards,
             .created_with_transfer_cache = opts.transfer_cache,
@@ -98,8 +105,23 @@ pub const CachedBeaconState = struct {
     pub fn deinit(self: *CachedBeaconState) void {
         // should not deinit config since we don't take ownership of it, it's singleton across applications
         self.epoch_cache_ref.release();
+        self.slashings_cache.deinit();
         self.state.deinit();
         self.allocator.destroy(self.state);
+    }
+
+    pub fn isSlashed(self: *const CachedBeaconState, index: ValidatorIndex) bool {
+        return self.slashings_cache.isSlashed(index);
+    }
+
+    pub fn recordValidatorSlashing(self: *CachedBeaconState, block_slot: types.primitive.Slot.Type, index: ValidatorIndex) !void {
+        try self.slashings_cache.recordValidatorSlashing(block_slot, index);
+    }
+
+    pub fn updateSlashingsCacheLatestBlockSlot(self: *CachedBeaconState) !void {
+        var latest_block_header = try self.state.latestBlockHeader();
+        const latest_block_slot = try latest_block_header.get("slot");
+        self.slashings_cache.updateLatestBlockSlot(latest_block_slot);
     }
 
     // TODO: implement loadCachedBeaconState

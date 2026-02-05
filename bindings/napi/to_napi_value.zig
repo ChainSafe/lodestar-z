@@ -1,10 +1,14 @@
 const std = @import("std");
 const ssz = @import("ssz");
 const napi = @import("zapi:napi");
+const constants = @import("constants");
 
 pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Type) !napi.Value {
     switch (ST.kind) {
         .uint => {
+            if (ST.Type == u64 and value.* == constants.FAR_FUTURE_EPOCH) {
+                return try (try env.getGlobal()).getNamedProperty("Infinity");
+            }
             return try env.createInt64(@intCast(value.*));
         },
         .bool => {

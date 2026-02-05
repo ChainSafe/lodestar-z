@@ -3,8 +3,7 @@ const pool = @import("./pool.zig");
 const pubkeys = @import("./pubkeys.zig");
 const config = @import("./config.zig");
 const shuffle = @import("./shuffle.zig");
-const proposer_index = @import("./proposer_index.zig");
-const BeaconStateView = @import("BeaconStateView.zig");
+const BeaconStateView = @import("./BeaconStateView.zig");
 const blst = @import("./blst.zig");
 
 comptime {
@@ -28,7 +27,6 @@ fn register(env: napi.Env, exports: napi.Value) !void {
     try pubkeys.register(env, exports);
     try config.register(env, exports);
     try shuffle.register(env, exports);
-    try proposer_index.register(env, exports);
     try BeaconStateView.register(env, exports);
     try blst.register(env, exports);
 
