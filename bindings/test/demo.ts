@@ -123,4 +123,4 @@ printDuration("serializeToBytes", () => {
 });
 printDuration("hashTreeRoot", () => state.hashTreeRoot());
 printDuration("proposerRewards", () => state.proposerRewards);
-printDuration("processSlots", () => state.processSlots(state.slot+1));
+printDuration("processSlots", () => state.processSlots(state.slot + 1));

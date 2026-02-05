@@ -41,7 +41,7 @@ pub fn processEpoch(
 
     if (comptime fork.gte(.altair)) {
         timer = try Timer.start();
-        try processInactivityUpdates(fork, config, epoch_cache, state, cache);
+        try processInactivityUpdates(fork, allocator, config, epoch_cache, state, cache);
         try observeEpochTransitionStep(.{ .step = .process_inactivity_updates }, timer.read());
     }
 
@@ -49,13 +49,12 @@ pub fn processEpoch(
     try processRegistryUpdates(fork, config, epoch_cache, state, cache);
     try observeEpochTransitionStep(.{ .step = .process_registry_updates }, timer.read());
 
-    // TODO(bing): In lodestar-ts we accumulate slashing penalties and only update in processRewardsAndPenalties. Do the same?
     timer = try Timer.start();
-    try processSlashings(fork, allocator, epoch_cache, state, cache);
+    const slashing_penalties = try processSlashings(fork, allocator, epoch_cache, state, cache, false);
     try observeEpochTransitionStep(.{ .step = .process_slashings }, timer.read());
 
     timer = try Timer.start();
-    try processRewardsAndPenalties(fork, allocator, config, epoch_cache, state, cache);
+    try processRewardsAndPenalties(fork, allocator, config, epoch_cache, state, cache, slashing_penalties);
     try observeEpochTransitionStep(.{ .step = .process_rewards_and_penalties }, timer.read());
 
     try processEth1DataReset(fork, state, cache);

@@ -9,6 +9,7 @@ pub const metrics = @import("metrics.zig");
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
 pub const CachedBeaconState = @import("./cache/state_cache.zig").CachedBeaconState;
 pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
+pub const buildSlashingsCacheFromStateIfNeeded = @import("./cache/slashings_cache.zig").buildFromStateIfNeeded;
 
 pub const EpochCacheImmutableData = @import("./cache/epoch_cache.zig").EpochCacheImmutableData;
 pub const EpochCacheRc = @import("./cache/epoch_cache.zig").EpochCacheRc;

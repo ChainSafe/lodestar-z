@@ -158,7 +158,7 @@ pub const TransitionOpt = struct {
     verify_state_root: bool = true,
     verify_proposer: bool = true,
     verify_signatures: bool = false,
-    do_not_transfer_cache: bool = false,
+    transfer_cache: bool = true,
 };
 
 pub const StateTransitionResult = struct {
@@ -182,7 +182,7 @@ pub fn stateTransition(
 
     var post_cached_state = try cached_state.clone(
         allocator,
-        .{ .transfer_cache = !opts.do_not_transfer_cache },
+        .{ .transfer_cache = opts.transfer_cache },
     );
     errdefer {
         post_cached_state.deinit();
@@ -230,6 +230,7 @@ pub fn stateTransition(
                         config,
                         post_epoch_cache,
                         post_state.castToFork(f),
+                        &post_cached_state.slashings_cache,
                         bt,
                         block.castToFork(bt, f),
                         BlockExternalData{

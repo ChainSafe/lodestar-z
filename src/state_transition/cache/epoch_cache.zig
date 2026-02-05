@@ -326,9 +326,9 @@ pub const EpochCache = struct {
         }
 
         // Calculate decision roots for shuffling cache lookups
-        const previous_decision_root = try calculateShufflingDecisionRoot(allocator, state, previous_epoch);
-        const current_decision_root = try calculateShufflingDecisionRoot(allocator, state, current_epoch);
-        const next_decision_root = try calculateShufflingDecisionRoot(allocator, state, next_epoch);
+        const previous_decision_root = try calculateShufflingDecisionRoot(state, previous_epoch);
+        const current_decision_root = try calculateShufflingDecisionRoot(state, current_epoch);
+        const next_decision_root = try calculateShufflingDecisionRoot(state, next_epoch);
 
         const epoch_cache_ptr = try allocator.create(EpochCache);
         errdefer allocator.destroy(epoch_cache_ptr);

@@ -2,6 +2,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
+const buildSlashingsCacheIfNeeded = @import("../cache/slashings_cache.zig").buildFromStateIfNeeded;
 const BeaconState = @import("fork_types").BeaconState;
 const BlockType = @import("fork_types").BlockType;
 const BeaconBlock = @import("fork_types").BeaconBlock;
@@ -37,13 +39,18 @@ pub fn processBlock(
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
+    slashings_cache: *SlashingsCache,
     comptime block_type: BlockType,
     block: *const BeaconBlock(block_type, fork),
     external_data: BlockExternalData,
     opts: ProcessBlockOpts,
     // TODO: metrics
 ) !void {
+    // Build slashings cache against the *current* latest_block_header slot (pre-header update).
+    try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
     try processBlockHeader(fork, allocator, epoch_cache, state, block_type, block);
+    // Keep cache slot in sync with latest_block_header without forcing a rebuild.
+    slashings_cache.updateLatestBlockSlot(block.slot());
     const body = block.body();
     const current_epoch = epoch_cache.epoch;
 
@@ -100,7 +107,7 @@ pub fn processBlock(
 
     try processRandao(fork, config, epoch_cache, state, block_type, body, block.proposerIndex(), opts.verify_signature);
     try processEth1Data(fork, state, body.eth1Data());
-    try processOperations(fork, allocator, config, epoch_cache, state, block_type, body, opts);
+    try processOperations(fork, allocator, config, epoch_cache, state, slashings_cache, block_type, body, opts);
     if (comptime fork.gte(.altair)) {
         try processSyncAggregate(fork, allocator, config, epoch_cache, state, body.syncAggregate(), opts.verify_signature);
     }

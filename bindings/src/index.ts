@@ -1,9 +1,3 @@
-// TODO make robust for production use ala bun-ffi-z
-
-import { createRequire } from "node:module";
-import { join } from "node:path";
-
-const require = createRequire(import.meta.url);
 
 interface BeaconBlockHeader {
   slot: number;
@@ -56,7 +50,7 @@ interface SyncCommittee {
 }
 
 interface ProcessSlotsOpts {
-  dontTransferCache?: boolean;
+  transferCache?: boolean;
 }
 
 interface CompactMultiProof {
@@ -217,21 +211,48 @@ declare class BeaconStateView {
 
 declare class PublicKey {
   static fromBytes(bytes: Uint8Array): PublicKey;
+  validate(): void;
+  toBytes(): Uint8Array;
   toBytesCompress(): Uint8Array;
+}
+
+declare class SecretKey {
+  static fromBytes(bytes: Uint8Array): SecretKey;
+  static fromKeygen(ikm: Uint8Array, keyInfo?: Uint8Array): SecretKey;
+  sign(msg: Uint8Array): Signature;
+  toPublicKey(): PublicKey;
   toBytes(): Uint8Array;
 }
 
 declare class Signature {
   static fromBytes(bytes: Uint8Array): Signature;
-  toBytesCompress(): Uint8Array;
+  static aggregate(sigs: Signature[], sigsGroupcheck: boolean): Signature;
   toBytes(): Uint8Array;
+  toBytesCompress(): Uint8Array;
+  validate(sigInfcheck: boolean): void;
+}
+
+interface SignatureSet {
+  msg: Uint8Array;
+  pk: PublicKey;
+  sig: Signature;
 }
 
 interface Blst {
   PublicKey: typeof PublicKey;
+  SecretKey: typeof SecretKey;
   Signature: typeof Signature;
-  verify(msg: Uint8Array, pk: PublicKey, sig: Signature): boolean;
-  fastAggregateVerify(msg: Uint8Array, pks: PublicKey[], sig: Signature): boolean;
+  verify(msg: Uint8Array, pk: PublicKey, sig: Signature, pkValidate: boolean, sigGroupcheck: boolean): boolean;
+  fastAggregateVerify(
+    msg: Uint8Array,
+    pks: PublicKey[],
+    sig: Signature,
+    sigGroupcheck: boolean
+  ): boolean;
+  verifyMultipleAggregateSignatures(sets: SignatureSet[], sigsGroupcheck: boolean, pksValidate: boolean): boolean;
+  aggregateSignatures(signatures: Signature[], sigsGroupcheck: boolean): Signature;
+  aggregatePublicKeys(pks: PublicKey[], pksValidate: boolean): PublicKey;
+  aggregateSerializedPublicKeys(serializedPublicKeys: Uint8Array[], pksValidate: boolean): PublicKey;
 }
 
 type Bindings = {
@@ -255,15 +276,12 @@ type Bindings = {
   shuffle: {
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
   };
-  computeProposerIndex: (
-    fork: "phase0" | "altair" | "bellatrix" | "capella" | "deneb" | "electra" | "fulu",
-    effectiveBalanceIncrements: Uint16Array,
-    indices: Uint32Array,
-    seed: Uint8Array
-  ) => number;
   BeaconStateView: typeof BeaconStateView;
   blst: Blst;
   deinit: () => void;
 };
 
-export default require(join(import.meta.dirname, "../../zig-out/lib/bindings.node")) as Bindings;
+import { join } from "node:path";
+import { requireNapiLibrary } from "@chainsafe/zapi";
+
+export default requireNapiLibrary(join(import.meta.dirname, "../..")) as Bindings;

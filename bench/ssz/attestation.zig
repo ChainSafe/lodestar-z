@@ -1,7 +1,12 @@
 const std = @import("std");
-const Attestation = @import("consensus_types").deneb.Attestation;
+// TODO make this fork-agnostic
+const Attestation = @import("consensus_types").fulu.Attestation;
+const SignedBeaconBlock = @import("consensus_types").fulu.SignedBeaconBlock;
 const ssz = @import("ssz");
 const zbench = @import("zbench");
+const download_era_options = @import("download_era_options");
+const era = @import("era");
+const config = @import("config");
 
 // printf "Date: %s\nKernel: %s\nCPU: %s\nCPUs: %s\nMemory: %s\n" "$(date)" "$(uname -r)" "$(lscpu | grep 'Model name' | awk -F: '{print $2}' | xargs)" "$(lscpu | grep '^CPU(s):' | awk '{print $2}')" "$(free -h | grep Mem | awk '{print $2}')"
 // Date: Fri Apr 25 10:07:24 AM EDT 2025
@@ -115,13 +120,28 @@ pub fn main() !void {
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
-    const attestation_file = try std.fs.cwd().openFile("bench/attestation.ssz", .{});
-    defer attestation_file.close();
-    const attestation_bytes = try attestation_file.readToEndAlloc(allocator, 1_000_000_000);
+    const era_path = try std.fs.path.join(
+        allocator,
+        &[_][]const u8{ download_era_options.era_out_dir, download_era_options.era_files[1] },
+    );
+    defer allocator.free(era_path);
 
-    const attestation = allocator.create(Attestation.Type) catch unreachable;
-    attestation.* = Attestation.default_value;
-    Attestation.deserializeFromBytes(allocator, attestation_bytes, attestation) catch unreachable;
+    var era_reader = try era.Reader.open(allocator, config.mainnet.config, era_path);
+    defer era_reader.close(allocator);
+
+    const block_slot = try era.era.computeStartBlockSlotFromEraNumber(era_reader.era_number) + 1;
+
+    const block_bytes: []u8 = @constCast(try era_reader.readSerializedBlock(allocator, block_slot) orelse return error.InvalidEraFile);
+    defer allocator.free(block_bytes);
+
+    var block = SignedBeaconBlock.default_value;
+    defer block.deinit();
+    try SignedBeaconBlock.deserializeFromBytes(allocator, block_bytes, &block);
+
+    const attestation = &block.message.body.attestations.items[0];
+    const attestation_bytes = try allocator.alloc(u8, Attestation.serializedSize(attestation));
+    defer allocator.free(attestation_bytes);
+    _ = Attestation.serializeIntoBytes(attestation, attestation_bytes);
 
     const serialize_attestation = SerializeAttestation{ .attestation = attestation };
     try bench.addParam("serialize attestation", &serialize_attestation, .{});

@@ -17,6 +17,7 @@ const ForkSeq = config.ForkSeq;
 const CachedBeaconState = state_transition.CachedBeaconState;
 const BeaconBlock = fork_types.BeaconBlock;
 const BeaconBlockBody = fork_types.BeaconBlockBody;
+const AnyBeaconState = fork_types.AnyBeaconState;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const Withdrawals = types.capella.Withdrawals.Type;
 const WithdrawalsResult = state_transition.WithdrawalsResult;
@@ -40,6 +41,7 @@ fn ProcessBlockHeaderBench(comptime fork: ForkSeq) type {
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
+
             state_transition.processBlockHeader(
                 fork,
                 allocator,
@@ -108,6 +110,7 @@ fn ProcessExecutionPayloadBench(comptime fork: ForkSeq) type {
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
+
             const external_data = BlockExternalData{ .execution_payload_status = .valid, .data_availability_status = .available };
             state_transition.processExecutionPayload(
                 fork,
@@ -135,6 +138,7 @@ fn ProcessRandaoBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
+
             state_transition.processRandao(
                 fork,
                 cloned.config,
@@ -160,6 +164,7 @@ fn ProcessEth1DataBench(comptime fork: ForkSeq) type {
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
+
             state_transition.processEth1Data(
                 fork,
                 cloned.state.castToFork(fork),
@@ -180,12 +185,14 @@ fn ProcessOperationsBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
+
             state_transition.processOperations(
                 fork,
                 allocator,
                 cloned.config,
                 cloned.getEpochCache(),
                 cloned.state.castToFork(fork),
+                &cloned.slashings_cache,
                 .full,
                 self.body,
                 .{ .verify_signature = opts.verify_signature },
@@ -205,6 +212,7 @@ fn ProcessSyncAggregateBench(comptime fork: ForkSeq, comptime opts: BenchOpts) t
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
+
             state_transition.processSyncAggregate(
                 fork,
                 allocator,
@@ -229,6 +237,7 @@ fn ProcessBlockBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
+
             const external_data = BlockExternalData{ .execution_payload_status = .valid, .data_availability_status = .available };
             state_transition.processBlock(
                 fork,
@@ -236,6 +245,7 @@ fn ProcessBlockBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
                 cloned.config,
                 cloned.getEpochCache(),
                 cloned.state.castToFork(fork),
+                &cloned.slashings_cache,
                 .full,
                 self.block,
                 external_data,
@@ -400,6 +410,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 cloned.config,
                 epoch_cache,
                 state,
+                &cloned.slashings_cache,
                 .full,
                 self.body,
                 .{ .verify_signature = true },
@@ -427,6 +438,8 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+
     const allocator = gpa.allocator();
     const stdout = std.io.getStdOut().writer();
     var pool = try Node.Pool.init(allocator, 10_000_000);
@@ -473,32 +486,57 @@ pub fn main() !void {
     return error.NoBenchmarkRan;
 }
 
-fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, pool: *Node.Pool, stdout: anytype, state_bytes: []const u8, block_bytes: []const u8, chain_config: config.ChainConfig) !void {
-    const beacon_state = try loadState(fork, allocator, pool, state_bytes);
+fn runBenchmark(
+    comptime fork: ForkSeq,
+    allocator: std.mem.Allocator,
+    pool: *Node.Pool,
+    stdout: anytype,
+    state_bytes: []const u8,
+    block_bytes: []const u8,
+    chain_config: config.ChainConfig,
+) !void {
     var signed_beacon_block = try loadBlock(fork, allocator, block_bytes);
     defer signed_beacon_block.deinit(allocator);
+
     const any_block = signed_beacon_block.beaconBlock();
     const block = any_block.castToFork(.full, fork);
     const body = block.body();
     const block_slot = block.slot();
     try stdout.print("Block: slot: {}\n", .{block_slot});
 
-    const beacon_config = config.BeaconConfig.init(chain_config, (try beacon_state.genesisValidatorsRoot()).*);
+    var beacon_state: ?*AnyBeaconState = try loadState(fork, allocator, pool, state_bytes);
+    defer if (beacon_state) |state| {
+        state.deinit();
+        allocator.destroy(state);
+    };
+
+    const beacon_config = config.BeaconConfig.init(chain_config, (try beacon_state.?.genesisValidatorsRoot()).*);
+
     var pubkey_index_map = state_transition.PubkeyIndexMap.init(allocator);
     defer pubkey_index_map.deinit();
-    var index_pubkey_cache = state_transition.Index2PubkeyCache.init(allocator);
-    defer index_pubkey_cache.deinit();
 
-    const validators = try beacon_state.validatorsSlice(allocator);
+    const index_pubkey_cache = try allocator.create(state_transition.Index2PubkeyCache);
+    index_pubkey_cache.* = state_transition.Index2PubkeyCache.init(allocator);
+    defer {
+        index_pubkey_cache.deinit();
+        allocator.destroy(index_pubkey_cache);
+    }
+
+    const validators = try beacon_state.?.validatorsSlice(allocator);
     defer allocator.free(validators);
 
-    try state_transition.syncPubkeys(validators, pubkey_index_map, index_pubkey_cache);
+    try state_transition.syncPubkeys(validators, &pubkey_index_map, &index_pubkey_cache);
 
-    const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, beacon_state, .{
+    const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, beacon_state.?, .{
         .config = &beacon_config,
         .index_to_pubkey = &index_pubkey_cache,
         .pubkey_to_index = &pubkey_index_map,
     }, .{ .skip_sync_committee_cache = !comptime fork.gte(.altair), .skip_sync_pubkeys = false });
+    beacon_state = null;
+    defer {
+        cached_state.deinit();
+        allocator.destroy(cached_state);
+    }
 
     try state_transition.state_transition.processSlots(
         allocator,
@@ -507,7 +545,8 @@ fn runBenchmark(comptime fork: ForkSeq, allocator: std.mem.Allocator, pool: *Nod
         .{},
     );
     try cached_state.state.commit();
-    try stdout.print("State: slot={}, validators={}\n", .{ try cached_state.state.slot(), try beacon_state.validatorsCount() });
+    try state_transition.buildSlashingsCacheFromStateIfNeeded(allocator, cached_state.state, &cached_state.slashings_cache);
+    try stdout.print("State: slot={}, validators={}\n", .{ try cached_state.state.slot(), try cached_state.state.validatorsCount() });
 
     var bench = zbench.Benchmark.init(allocator, .{
         .iterations = 50,

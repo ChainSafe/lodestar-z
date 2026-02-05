@@ -10,8 +10,6 @@ pub const deneb = @import("deneb.zig");
 pub const electra = @import("electra.zig");
 pub const fulu = @import("fulu.zig");
 
-pub const misc = @import("misc.zig");
-
 test {
     testing.refAllDecls(primitive);
     testing.refAllDecls(phase0);

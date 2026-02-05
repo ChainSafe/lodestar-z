@@ -1020,15 +1020,24 @@ pub fn build(b: *std.Build) void {
 
     module_write_ssz_static_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
 
+    module_bench_ssz_attestation.addImport("config", module_config);
     module_bench_ssz_attestation.addImport("consensus_types", module_consensus_types);
+    module_bench_ssz_attestation.addImport("download_era_options", options_module_download_era_options);
+    module_bench_ssz_attestation.addImport("era", module_era);
     module_bench_ssz_attestation.addImport("ssz", module_ssz);
     module_bench_ssz_attestation.addImport("zbench", dep_zbench.module("zbench"));
 
+    module_bench_ssz_block.addImport("config", module_config);
     module_bench_ssz_block.addImport("consensus_types", module_consensus_types);
+    module_bench_ssz_block.addImport("download_era_options", options_module_download_era_options);
+    module_bench_ssz_block.addImport("era", module_era);
     module_bench_ssz_block.addImport("ssz", module_ssz);
     module_bench_ssz_block.addImport("zbench", dep_zbench.module("zbench"));
 
+    module_bench_ssz_state.addImport("config", module_config);
     module_bench_ssz_state.addImport("consensus_types", module_consensus_types);
+    module_bench_ssz_state.addImport("download_era_options", options_module_download_era_options);
+    module_bench_ssz_state.addImport("era", module_era);
     module_bench_ssz_state.addImport("ssz", module_ssz);
     module_bench_ssz_state.addImport("zbench", dep_zbench.module("zbench"));
 
@@ -1064,6 +1073,7 @@ pub fn build(b: *std.Build) void {
     module_bindings.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_bindings.addImport("ssz", module_ssz);
     module_bindings.addImport("consensus_types", module_consensus_types);
+    module_bindings.addImport("constants", module_constants);
     module_bindings.addImport("preset", module_preset);
     module_bindings.addImport("config", module_config);
     module_bindings.addImport("fork_types", module_fork_types);
