@@ -1,10 +1,10 @@
-import {beforeAll, describe, expect, it} from "vitest";
-import {config} from "@lodestar/config/default";
+import { config } from "@lodestar/config/default";
 import * as era from "@lodestar/era";
-import {ssz} from "@lodestar/types";
-import {computeEpochAtSlot} from "@lodestar/state-transition";
+import { computeEpochAtSlot } from "@lodestar/state-transition";
+import { ssz } from "@lodestar/types";
+import { beforeAll, describe, expect, it } from "vitest";
 import bindings from "../src/index.ts";
-import {getFirstEraFilePath} from "./eraFiles.ts";
+import { getFirstEraFilePath } from "./eraFiles.ts";
 
 describe("BeaconStateView", () => {
   let state: InstanceType<typeof bindings.BeaconStateView>;
@@ -19,14 +19,14 @@ describe("BeaconStateView", () => {
     // if pubkey index file exists, load it
     try {
       bindings.pubkeys.load("./mainnet.pkix");
-    } catch (e) {
+    } catch (_e) {
       // ignore error
     }
 
     // Load era file and create state
     const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
     stateBytes = await reader.readSerializedState();
-    
+
     // Create both the bindings state and a lodestar reference state
     state = bindings.BeaconStateView.createFromBytes(stateBytes);
     lodestarState = ssz.fulu.BeaconState.deserializeToView(stateBytes);
@@ -168,21 +168,15 @@ describe("BeaconStateView", () => {
     });
 
     it("latestExecutionPayloadHeader.timestamp should match lodestar", () => {
-      expect(state.latestExecutionPayloadHeader.timestamp).toBe(
-        lodestarState.latestExecutionPayloadHeader.timestamp
-      );
+      expect(state.latestExecutionPayloadHeader.timestamp).toBe(lodestarState.latestExecutionPayloadHeader.timestamp);
     });
 
     it("latestExecutionPayloadHeader.gasLimit should match lodestar", () => {
-      expect(state.latestExecutionPayloadHeader.gasLimit).toBe(
-        lodestarState.latestExecutionPayloadHeader.gasLimit
-      );
+      expect(state.latestExecutionPayloadHeader.gasLimit).toBe(lodestarState.latestExecutionPayloadHeader.gasLimit);
     });
 
     it("latestExecutionPayloadHeader.gasUsed should match lodestar", () => {
-      expect(state.latestExecutionPayloadHeader.gasUsed).toBe(
-        lodestarState.latestExecutionPayloadHeader.gasUsed
-      );
+      expect(state.latestExecutionPayloadHeader.gasUsed).toBe(lodestarState.latestExecutionPayloadHeader.gasUsed);
     });
 
     it("isMergeTransitionComplete should be true for fulu state", () => {
@@ -208,11 +202,9 @@ describe("BeaconStateView", () => {
     it("getValidator(0) should return first validator data", () => {
       const validator = state.getValidator(0);
       const expected = lodestarState.validators.get(0);
-      
+
       expect(validator.pubkey).toEqual(expected.pubkey);
-      expect(validator.withdrawalCredentials).toEqual(
-        expected.withdrawalCredentials
-      );
+      expect(validator.withdrawalCredentials).toEqual(expected.withdrawalCredentials);
       expect(validator.effectiveBalance).toBe(expected.effectiveBalance);
       expect(validator.slashed).toBe(expected.slashed);
       expect(validator.activationEligibilityEpoch).toBe(expected.activationEligibilityEpoch);
@@ -362,7 +354,7 @@ describe("BeaconStateView", () => {
       const size = state.serializedSize();
       const output = new Uint8Array(size);
       const bytesWritten = state.serializeToBytes(output, 0);
-      
+
       expect(bytesWritten).toBe(size);
       expect(output).toEqual(stateBytes);
     });
@@ -382,9 +374,9 @@ describe("BeaconStateView", () => {
       const size = state.serializedValidatorsSize();
       const output = new Uint8Array(size);
       const bytesWritten = state.serializeValidatorsToBytes(output, 0);
-      
+
       expect(bytesWritten).toBe(size);
-      
+
       const expected = state.serializeValidators();
       expect(output).toEqual(expected);
     });
@@ -394,7 +386,7 @@ describe("BeaconStateView", () => {
     it("hashTreeRoot should match lodestar", () => {
       const bindingsRoot = state.hashTreeRoot();
       const lodestarRoot = lodestarState.hashTreeRoot();
-      
+
       expect(bindingsRoot).toEqual(lodestarRoot);
     }, 30_000); // slow
   });
@@ -421,7 +413,7 @@ describe("BeaconStateView", () => {
       // Descriptor for gindex 42
       const descriptor = Uint8Array.from([0x25, 0xe0]);
       const proof = state.createMultiProof(descriptor);
-      
+
       expect(proof.type).toBe("compactMulti");
       expect(Array.isArray(proof.leaves)).toBe(true);
       expect(proof.descriptor).toBeInstanceOf(Uint8Array);
@@ -440,7 +432,7 @@ describe("BeaconStateView", () => {
       // Invalid voluntary exit bytes (all zeros)
       const invalidExit = new Uint8Array(112);
       const result = state.getVoluntaryExitValidity(invalidExit, false);
-      
+
       const validReasons = [
         "valid",
         "inactive",
@@ -457,11 +449,11 @@ describe("BeaconStateView", () => {
   describe("unrealized checkpoints", () => {
     it("computeUnrealizedCheckpoints should return checkpoints", () => {
       const result = state.computeUnrealizedCheckpoints();
-      
+
       expect(result.justifiedCheckpoint).toBeDefined();
       expect(typeof result.justifiedCheckpoint.epoch).toBe("number");
       expect(result.justifiedCheckpoint.root.length).toBe(32);
-      
+
       expect(result.finalizedCheckpoint).toBeDefined();
       expect(typeof result.finalizedCheckpoint.epoch).toBe("number");
       expect(result.finalizedCheckpoint.root.length).toBe(32);
@@ -471,7 +463,7 @@ describe("BeaconStateView", () => {
   describe("proposer rewards", () => {
     it("proposerRewards should have expected structure", () => {
       const rewards = state.proposerRewards;
-      
+
       expect(typeof rewards.attestations).toBe("bigint");
       expect(typeof rewards.syncAggregate).toBe("bigint");
       expect(typeof rewards.slashing).toBe("bigint");
@@ -496,14 +488,14 @@ describe("BeaconStateView", () => {
     it("processSlots should advance state by 1 slot", () => {
       const originalSlot = state.slot;
       const newState = state.processSlots(originalSlot + 1);
-      
+
       expect(newState.slot).toBe(originalSlot + 1);
     });
 
     it("processSlots with transferCache option should work", () => {
       const originalSlot = state.slot;
-      const newState = state.processSlots(originalSlot + 1, {transferCache: true});
-      
+      const newState = state.processSlots(originalSlot + 1, { transferCache: true });
+
       expect(newState.slot).toBe(originalSlot + 1);
       expect(newState.createdWithTransferCache).toBe(true);
     });

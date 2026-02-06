@@ -39,9 +39,7 @@ if (hasPkix) {
   });
 }
 
-const reader = await printDurationAsync("load era reader", () =>
-  era.era.EraReader.open(config, getFirstEraFilePath())
-);
+const reader = await printDurationAsync("load era reader", () => era.era.EraReader.open(config, getFirstEraFilePath()));
 
 const stateBytes = await printDurationAsync("read serialized state", () => reader.readSerializedState());
 
@@ -108,7 +106,9 @@ printDuration("proposerLookahead", () => state.proposerLookahead);
 printDuration("getSingleProof(169)", () => state.getSingleProof(169));
 printDuration("isValidVoluntaryExit", () => state.isValidVoluntaryExit(new Uint8Array(112), false));
 printDuration("getVoluntaryExitValidity", () => state.getVoluntaryExitValidity(new Uint8Array(112), false));
-printDuration("createMultiProof(descriptor for gindex 42)", () => state.createMultiProof(Uint8Array.from([0x25, 0xe0])));
+printDuration("createMultiProof(descriptor for gindex 42)", () =>
+  state.createMultiProof(Uint8Array.from([0x25, 0xe0]))
+);
 printDuration("getFinalizedRootProof()", () => state.getFinalizedRootProof());
 printDuration("isExecutionStateType", () => state.isExecutionStateType);
 printDuration("getEffectiveBalanceIncrementsZeroInactive()", () => state.getEffectiveBalanceIncrementsZeroInactive());

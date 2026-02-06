@@ -1,4 +1,3 @@
-
 interface BeaconBlockHeader {
   slot: number;
   proposerIndex: number;
@@ -109,7 +108,6 @@ type VoluntaryExitValidity =
   | "short_time_active"
   | "pending_withdrawals"
   | "invalid_signature";
-
 
 declare class BeaconStateView {
   static createFromBytes(bytes: Uint8Array): BeaconStateView;
@@ -243,12 +241,7 @@ interface Blst {
   SecretKey: typeof SecretKey;
   Signature: typeof Signature;
   verify(msg: Uint8Array, pk: PublicKey, sig: Signature, pkValidate: boolean, sigGroupcheck: boolean): boolean;
-  fastAggregateVerify(
-    msg: Uint8Array,
-    pks: PublicKey[],
-    sig: Signature,
-    sigGroupcheck: boolean
-  ): boolean;
+  fastAggregateVerify(msg: Uint8Array, pks: PublicKey[], sig: Signature, sigGroupcheck: boolean): boolean;
   verifyMultipleAggregateSignatures(sets: SignatureSet[], sigsGroupcheck: boolean, pksValidate: boolean): boolean;
   aggregateSignatures(signatures: Signature[], sigsGroupcheck: boolean): Signature;
   aggregatePublicKeys(pks: PublicKey[], pksValidate: boolean): PublicKey;
@@ -281,7 +274,7 @@ type Bindings = {
   deinit: () => void;
 };
 
-import { join } from "node:path";
-import { requireNapiLibrary } from "@chainsafe/zapi";
+import {join} from "node:path";
+import {requireNapiLibrary} from "@chainsafe/zapi";
 
 export default requireNapiLibrary(join(import.meta.dirname, "../..")) as Bindings;

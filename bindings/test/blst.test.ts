@@ -1,41 +1,41 @@
-import crypto from "crypto";
-import { beforeEach, describe, expect, it } from "vitest";
+import crypto from "node:crypto";
+import {beforeEach, describe, expect, it} from "vitest";
 import bindings from "../src/index.ts";
 
-const SecretKey = bindings.blst.SecretKey;
-const PublicKey = bindings.blst.PublicKey;
-const Signature = bindings.blst.Signature;
+const SECRET_KEY = bindings.blst.SecretKey;
+const PUBLIC_KEY = bindings.blst.PublicKey;
+const SIGNATURE = bindings.blst.Signature;
 
 describe("blst", () => {
   describe("PublicKey", () => {
     it("should deserialize from bytes", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
+      const pk = PUBLIC_KEY.fromBytes(TEST_VECTORS.publicKey.compressed);
       expect(pk).toBeDefined();
     });
 
     it("should take uncompressed byte arrays", () => {
       expectEqualHex(
-        PublicKey.fromBytes(TEST_VECTORS.publicKey.uncompressed).toBytes(),
+        PUBLIC_KEY.fromBytes(TEST_VECTORS.publicKey.uncompressed).toBytes(),
         TEST_VECTORS.publicKey.uncompressed
       );
       expectEqualHex(
-        PublicKey.fromBytes(TEST_VECTORS.publicKey.uncompressed).toBytesCompress(),
+        PUBLIC_KEY.fromBytes(TEST_VECTORS.publicKey.uncompressed).toBytesCompress(),
         TEST_VECTORS.publicKey.compressed
       );
     });
     describe("argument validation", () => {
       for (const [type, invalid] of invalidInputs) {
         it(`should throw on invalid pkBytes type: ${type}`, () => {
-          expect(() => PublicKey.fromBytes(invalid)).to.throw();
+          expect(() => PUBLIC_KEY.fromBytes(invalid)).to.throw();
         });
       }
       it("should throw incorrect length pkBytes", () => {
-        expect(() => PublicKey.fromBytes(Buffer.alloc(12, "*"))).to.throw("BadEncoding");
+        expect(() => PUBLIC_KEY.fromBytes(Buffer.alloc(12, "*"))).to.throw("BadEncoding");
       });
     });
 
     it("should serialize to bytes", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.uncompressed);
+      const pk = PUBLIC_KEY.fromBytes(TEST_VECTORS.publicKey.uncompressed);
       const bytes = pk.toBytes();
       expect(bytes).toBeInstanceOf(Uint8Array);
       expect(bytes.length).toBe(96);
@@ -43,14 +43,14 @@ describe("blst", () => {
     });
 
     it("should throw on invalid key", () => {
-      expect(() => PublicKey.fromBytes(sullyUint8Array(TEST_VECTORS.publicKey.compressed))).to.throw("BadEncoding");
+      expect(() => PUBLIC_KEY.fromBytes(sullyUint8Array(TEST_VECTORS.publicKey.compressed))).to.throw("BadEncoding");
     });
 
     it("should throw on zero key", () => {
       const G1_POINT_AT_INFINITY =
         "c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
-      expect(() => PublicKey.fromBytes(Buffer.from(G1_POINT_AT_INFINITY))).to.throw("BadEncoding");
+      expect(() => PUBLIC_KEY.fromBytes(Buffer.from(G1_POINT_AT_INFINITY))).to.throw("BadEncoding");
     });
   });
 
@@ -58,20 +58,20 @@ describe("blst", () => {
     describe("fromBytes()", () => {
       it("should take uncompressed byte arrays", () => {
         expectEqualHex(
-          Signature.fromBytes(TEST_VECTORS.signature.uncompressed).toBytes(),
+          SIGNATURE.fromBytes(TEST_VECTORS.signature.uncompressed).toBytes(),
           TEST_VECTORS.signature.uncompressed
         );
       });
       it("should take compressed byte arrays", () => {
         expectEqualHex(
-          Signature.fromBytes(TEST_VECTORS.signature.compressed).toBytes(),
+          SIGNATURE.fromBytes(TEST_VECTORS.signature.compressed).toBytes(),
           TEST_VECTORS.signature.uncompressed
         );
       });
     });
 
     it("should serialize to bytes", () => {
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const sig = SIGNATURE.fromBytes(TEST_VECTORS.signature.compressed);
       const bytes = sig.toBytesCompress();
       expect(bytes).toBeInstanceOf(Uint8Array);
       expect(bytes.length).toBe(96);
@@ -81,55 +81,55 @@ describe("blst", () => {
     describe("argument validation", () => {
       for (const [type, invalid] of invalidInputs) {
         it(`should throw on invalid pkBytes type: ${type}`, () => {
-          expect(() => Signature.fromBytes(invalid)).to.throw();
+          expect(() => SIGNATURE.fromBytes(invalid)).to.throw();
         });
       }
     });
 
     it("should throw on invalid length", () => {
-      expect(() => Signature.fromBytes(new Uint8Array(95))).toThrow();
+      expect(() => SIGNATURE.fromBytes(new Uint8Array(95))).toThrow();
     });
   });
 
   describe("SecretKey", () => {
     describe("SecretKey.fromKeygen", () => {
       it("should create an instance from Uint8Array ikm", () => {
-        expect(SecretKey.fromKeygen(KEY_MATERIAL)).to.be.instanceOf(SecretKey);
+        expect(SECRET_KEY.fromKeygen(KEY_MATERIAL)).to.be.instanceOf(SECRET_KEY);
       });
       it("should create the same key from the same ikm", () => {
-        expectEqualHex(SecretKey.fromKeygen(KEY_MATERIAL).toBytes(), SecretKey.fromKeygen(KEY_MATERIAL).toBytes());
+        expectEqualHex(SECRET_KEY.fromKeygen(KEY_MATERIAL).toBytes(), SECRET_KEY.fromKeygen(KEY_MATERIAL).toBytes());
       });
       it("should take a second 'info' argument", () => {
         expectNotEqualHex(
-          SecretKey.fromKeygen(KEY_MATERIAL, Uint8Array.from(Buffer.from("some fancy info"))).toBytes(),
-          SecretKey.fromKeygen(KEY_MATERIAL).toBytes()
+          SECRET_KEY.fromKeygen(KEY_MATERIAL, Uint8Array.from(Buffer.from("some fancy info"))).toBytes(),
+          SECRET_KEY.fromKeygen(KEY_MATERIAL).toBytes()
         );
       });
       describe("argument validation", () => {
         const validInfoTypes = ["undefined", "null", "string"];
         for (const [type, invalid] of invalidInputs) {
           it(`should throw on invalid ikm type: ${type}`, () => {
-            expect(() => SecretKey.fromKeygen(invalid, undefined)).to.throw();
+            expect(() => SECRET_KEY.fromKeygen(invalid, undefined)).to.throw();
           });
           if (!validInfoTypes.includes(type)) {
             it(`should throw on invalid info type: ${type}`, () => {
-              expect(() => SecretKey.fromKeygen(KEY_MATERIAL, invalid)).to.throw();
+              expect(() => SECRET_KEY.fromKeygen(KEY_MATERIAL, invalid)).to.throw();
             });
           }
         }
         it("should throw incorrect length ikm", () => {
-          expect(() => SecretKey.fromKeygen(Buffer.alloc(12, "*"))).to.throw("InvalidSeedLength");
+          expect(() => SECRET_KEY.fromKeygen(Buffer.alloc(12, "*"))).to.throw("InvalidSeedLength");
         });
       });
     });
     describe("SecretKey.fromBytes", () => {
       it("should create an instance", () => {
-        expect(SecretKey.fromBytes(SECRET_KEY_BYTES)).to.be.instanceOf(SecretKey);
+        expect(SECRET_KEY.fromBytes(SECRET_KEY_BYTES)).to.be.instanceOf(SECRET_KEY);
       });
       describe("argument validation", () => {
         for (const [type, invalid] of invalidInputs) {
           it(`should throw on invalid ikm type: ${type}`, () => {
-            expect(() => SecretKey.fromBytes(invalid)).to.throw();
+            expect(() => SECRET_KEY.fromBytes(invalid)).to.throw();
           });
         }
       });
@@ -138,7 +138,7 @@ describe("blst", () => {
       let key: SecretKey;
       describe("toBytes", () => {
         beforeEach(() => {
-          key = SecretKey.fromBytes(SECRET_KEY_BYTES);
+          key = SECRET_KEY.fromBytes(SECRET_KEY_BYTES);
         });
         it("should toBytes the key to Uint8Array", () => {
           expect(key.toBytes()).to.be.instanceof(Uint8Array);
@@ -148,18 +148,18 @@ describe("blst", () => {
         });
         it("should reconstruct the same key", () => {
           const serialized = key.toBytes();
-          expectEqualHex(SecretKey.fromBytes(serialized).toBytes(), serialized);
+          expectEqualHex(SECRET_KEY.fromBytes(serialized).toBytes(), serialized);
         });
       });
       describe("toPublicKey", () => {
         it("should create a valid PublicKey", () => {
-          const key = SecretKey.fromBytes(SECRET_KEY_BYTES);
+          const key = SECRET_KEY.fromBytes(SECRET_KEY_BYTES);
           const pk = key.toPublicKey();
-          expect(pk).to.be.instanceOf(PublicKey);
+          expect(pk).to.be.instanceOf(PUBLIC_KEY);
           expect(pk.validate()).to.be.undefined;
         });
         it("should return the same PublicKey from the same SecretKey", () => {
-          const sk = SecretKey.fromBytes(SECRET_KEY_BYTES);
+          const sk = SECRET_KEY.fromBytes(SECRET_KEY_BYTES);
           const pk1 = sk.toPublicKey().toBytes();
           const pk2 = sk.toPublicKey().toBytes();
           expectEqualHex(pk1, pk2);
@@ -167,8 +167,8 @@ describe("blst", () => {
       });
       describe("sign", () => {
         it("should create a valid Signature", () => {
-          const sig = SecretKey.fromKeygen(KEY_MATERIAL, undefined).sign(Buffer.from("some fancy message"));
-          expect(sig).to.be.instanceOf(Signature);
+          const sig = SECRET_KEY.fromKeygen(KEY_MATERIAL, undefined).sign(Buffer.from("some fancy message"));
+          expect(sig).to.be.instanceOf(SIGNATURE);
           expect(sig.validate(false)).to.be.undefined;
         });
       });
@@ -177,15 +177,15 @@ describe("blst", () => {
 
   describe("verify", () => {
     it("should verify valid signature", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const pk = PUBLIC_KEY.fromBytes(TEST_VECTORS.publicKey.compressed);
+      const sig = SIGNATURE.fromBytes(TEST_VECTORS.signature.compressed);
       const result = bindings.blst.verify(TEST_VECTORS.message, pk, sig, false, false);
       expect(result).toBe(true);
     });
 
     it("should reject wrong message", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const pk = PUBLIC_KEY.fromBytes(TEST_VECTORS.publicKey.compressed);
+      const sig = SIGNATURE.fromBytes(TEST_VECTORS.signature.compressed);
       const wrongMessage = new Uint8Array(32).fill(0);
       const result = bindings.blst.verify(wrongMessage, pk, sig, false, false);
       expect(result).toBe(false);
@@ -194,29 +194,29 @@ describe("blst", () => {
 
   describe("fastAggregateVerify", () => {
     it("should verify with single pubkey", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const pk = PUBLIC_KEY.fromBytes(TEST_VECTORS.publicKey.compressed);
+      const sig = SIGNATURE.fromBytes(TEST_VECTORS.signature.compressed);
       const result = bindings.blst.fastAggregateVerify(TEST_VECTORS.message, [pk], sig, false);
       expect(result).toBe(true);
     });
 
     it("should return false for empty pubkeys", () => {
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const sig = SIGNATURE.fromBytes(TEST_VECTORS.signature.compressed);
       const result = bindings.blst.fastAggregateVerify(TEST_VECTORS.message, [], sig, false);
       expect(result).toBe(false);
     });
 
     it("should reject wrong message", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const pk = PUBLIC_KEY.fromBytes(TEST_VECTORS.publicKey.compressed);
+      const sig = SIGNATURE.fromBytes(TEST_VECTORS.signature.compressed);
       const wrongMessage = new Uint8Array(32).fill(0);
       const result = bindings.blst.fastAggregateVerify(wrongMessage, [pk], sig, false);
       expect(result).toBe(false);
     });
 
     it("should throw on wrong message length", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const pk = PUBLIC_KEY.fromBytes(TEST_VECTORS.publicKey.compressed);
+      const sig = SIGNATURE.fromBytes(TEST_VECTORS.signature.compressed);
       expect(() => bindings.blst.fastAggregateVerify(new Uint8Array(31), [pk], sig, false)).toThrow();
     });
   });
@@ -237,7 +237,7 @@ describe("blst", () => {
 const DEFAULT_TEST_MESSAGE = Uint8Array.from(Buffer.from("lodestarlodestarlodestarlodestar"));
 
 function buildTestSetFromMessage(msg: Uint8Array = DEFAULT_TEST_MESSAGE): TestSet {
-  const sk = SecretKey.fromKeygen(crypto.randomBytes(32));
+  const sk = SECRET_KEY.fromKeygen(crypto.randomBytes(32));
   const pk = sk.toPublicKey();
   const sig = sk.sign(msg);
   try {
@@ -254,9 +254,9 @@ function buildTestSetFromMessage(msg: Uint8Array = DEFAULT_TEST_MESSAGE): TestSe
   }
   return {
     msg,
-    sk,
     pk,
     sig,
+    sk,
   };
 }
 
@@ -285,7 +285,7 @@ function arrayOfIndexes(start: number, end: number): number[] {
   return arr;
 }
 
-function getTestSet(i: number = 0): TestSet {
+function getTestSet(i = 0): TestSet {
   const set = testSets.get(i);
   if (set) {
     return set;
@@ -293,28 +293,29 @@ function getTestSet(i: number = 0): TestSet {
   return buildTestSet(i);
 }
 
-function fromHex(hexString: string): Uint8Array {
-  if (hexString.startsWith("0x")) hexString = hexString.slice(2);
-  return Uint8Array.from(Buffer.from(hexString, "hex"));
+function fromHex(str: string): Uint8Array {
+  var hexStr = str;
+  if (str.startsWith("0x")) hexStr = str.slice(2);
+  return Uint8Array.from(Buffer.from(hexStr, "hex"));
 }
 
 // Test vectors generated with @chainsafe/blst using seed Buffer.alloc(32, "*")
 const TEST_VECTORS = {
   message: DEFAULT_TEST_MESSAGE,
   publicKey: {
-    uncompressed: fromHex(
-      "0ae7e5822ba97ab07877ea318e747499da648b27302414f9d0b9bb7e3646d248be90c9fdaddfdb93485a6e9334f0109301f36856007e1bc875ab1b00dbf47f9ead16c5562d889d8b270002ade81e78d473204fcb51ede8659bce3d95c67903bc"
-    ),
     compressed: fromHex(
       "8ae7e5822ba97ab07877ea318e747499da648b27302414f9d0b9bb7e3646d248be90c9fdaddfdb93485a6e9334f01093"
     ),
+    uncompressed: fromHex(
+      "0ae7e5822ba97ab07877ea318e747499da648b27302414f9d0b9bb7e3646d248be90c9fdaddfdb93485a6e9334f0109301f36856007e1bc875ab1b00dbf47f9ead16c5562d889d8b270002ade81e78d473204fcb51ede8659bce3d95c67903bc"
+    ),
   },
   signature: {
-    uncompressed: fromHex(
-      "01faa68cb2d12b67c54a5a8ac52a7f351f187e4a4f446296c46d56b961159d52ad34a3015cff5753743c1ac2ec7ddbb708dc18431e8b9a53738a5fd08db1981711ae7f6669b9f0486c20546e3bd9e7a1d6cf239563a4b4ffbe0f572086c735aa0aa269bc3fccc963c752b96499f0ba79750ca53eb90a0feb116387b59e40baa427f75bea3094ae9123d35cd543db9e1d07a95a35d5f7371f7315306603c41c473b8bf3af1a812c5ee121cfcdb73536ad28631ded94f86e97684f5f8a0bbd0a3d"
-    ),
     compressed: fromHex(
       "81faa68cb2d12b67c54a5a8ac52a7f351f187e4a4f446296c46d56b961159d52ad34a3015cff5753743c1ac2ec7ddbb708dc18431e8b9a53738a5fd08db1981711ae7f6669b9f0486c20546e3bd9e7a1d6cf239563a4b4ffbe0f572086c735aa"
+    ),
+    uncompressed: fromHex(
+      "01faa68cb2d12b67c54a5a8ac52a7f351f187e4a4f446296c46d56b961159d52ad34a3015cff5753743c1ac2ec7ddbb708dc18431e8b9a53738a5fd08db1981711ae7f6669b9f0486c20546e3bd9e7a1d6cf239563a4b4ffbe0f572086c735aa0aa269bc3fccc963c752b96499f0ba79750ca53eb90a0feb116387b59e40baa427f75bea3094ae9123d35cd543db9e1d07a95a35d5f7371f7315306603c41c473b8bf3af1a812c5ee121cfcdb73536ad28631ded94f86e97684f5f8a0bbd0a3d"
     ),
   },
 };
@@ -326,8 +327,8 @@ const invalidInputs: [string, any][] = [
   ["symbol", Symbol("foo")],
   ["null", null],
   ["undefined", undefined],
-  ["object", { foo: "bar" }],
-  ["proxy", new Proxy({ foo: "bar" }, {})],
+  ["object", {foo: "bar"}],
+  ["proxy", new Proxy({foo: "bar"}, {})],
   ["date", new Date("1982-03-24T16:00:00-06:00")],
   [
     "function",
