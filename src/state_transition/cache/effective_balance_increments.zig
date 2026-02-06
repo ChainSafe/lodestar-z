@@ -7,8 +7,8 @@ const ReferenceCount = @import("../utils/reference_count.zig").ReferenceCount;
 pub const EffectiveBalanceIncrements = std.ArrayList(u16);
 pub const EffectiveBalanceIncrementsRc = ReferenceCount(EffectiveBalanceIncrements);
 
-pub fn getEffectiveBalanceIncrementsZeroed(allocator: Allocator, len: usize) !EffectiveBalanceIncrements {
-    var increments = try EffectiveBalanceIncrements.initCapacity(allocator, len);
+pub fn getEffectiveBalanceIncrementsZeroed(allocator: Allocator, len: usize, capacity: usize) !EffectiveBalanceIncrements {
+    var increments = try EffectiveBalanceIncrements.initCapacity(allocator, capacity);
     try increments.resize(len);
     for (0..len) |i| {
         increments.items[i] = 0;
@@ -17,10 +17,11 @@ pub fn getEffectiveBalanceIncrementsZeroed(allocator: Allocator, len: usize) !Ef
 }
 
 pub fn getEffectiveBalanceIncrementsWithLen(allocator: Allocator, validator_count: usize) !EffectiveBalanceIncrements {
-    const len = 1024 * @divFloor(validator_count + 1024, 1024);
-    return getEffectiveBalanceIncrementsZeroed(allocator, len);
+    const capacity = 1024 * @divFloor(validator_count + 1024, 1024);
+    return getEffectiveBalanceIncrementsZeroed(allocator, validator_count, capacity);
 }
 
+/// unused, but may be useful for testing or other purposes
 pub fn getEffectiveBalanceIncrements(allocator: Allocator, state: AnyBeaconState) !EffectiveBalanceIncrements {
     const validators = try state.validatorsSlice(allocator);
     defer allocator.free(validators);

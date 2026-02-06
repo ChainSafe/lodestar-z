@@ -341,7 +341,7 @@ describe("BeaconStateView", () => {
     it("serialize should produce bytes matching original", () => {
       const serialized = state.serialize();
       expect(serialized.length).toBe(stateBytes.length);
-      expect(serialized).toEqual(stateBytes);
+      expect(Buffer.compare(serialized, stateBytes)).toBe(0);
     });
 
     it("serializedSize should match actual serialized length", () => {
@@ -356,7 +356,7 @@ describe("BeaconStateView", () => {
       const bytesWritten = state.serializeToBytes(output, 0);
 
       expect(bytesWritten).toBe(size);
-      expect(output).toEqual(stateBytes);
+      expect(Buffer.compare(output, stateBytes)).toBe(0);
     });
 
     it("serializeValidators should produce valid validator bytes", () => {
@@ -378,9 +378,9 @@ describe("BeaconStateView", () => {
       expect(bytesWritten).toBe(size);
 
       const expected = state.serializeValidators();
-      expect(output).toEqual(expected);
+      expect(Buffer.compare(output, expected)).toBe(0);
     });
-  });
+  }, 10_000); // slow
 
   describe("hashTreeRoot", () => {
     it("hashTreeRoot should match lodestar", () => {

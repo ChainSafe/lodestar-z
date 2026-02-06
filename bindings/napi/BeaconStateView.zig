@@ -224,24 +224,12 @@ pub fn BeaconStateView_latestExecutionPayloadHeader(env: napi.Env, cb: napi.Call
 pub fn BeaconStateView_historicalSummaries(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
 
-    var historical_summaries = cached_state.state.historicalSummaries() catch {
-        try env.throwError("STATE_ERROR", "Failed to get historicalSummaries");
-        return env.getNull();
-    };
+    var historical_summaries_view = try cached_state.state.historicalSummaries();
+    var historical_summaries = ct.capella.HistoricalSummaries.default_value;
+    try historical_summaries_view.toValue(allocator, &historical_summaries);
+    defer historical_summaries.deinit(allocator);
 
-    const size = historical_summaries.serializedSize() catch {
-        try env.throwError("STATE_ERROR", "Failed to get historicalSummaries size");
-        return env.getNull();
-    };
-
-    var bytes: [*]u8 = undefined;
-    const buf = try env.createArrayBuffer(size, &bytes);
-    _ = historical_summaries.serializeIntoBytes(bytes[0..size]) catch {
-        try env.throwError("STATE_ERROR", "Failed to serialize historicalSummaries");
-        return env.getNull();
-    };
-
-    return try env.createTypedarray(.uint8, size, buf, 0);
+    return try sszValueToNapiValue(env, ct.capella.HistoricalSummaries, &historical_summaries);
 }
 
 /// Get the pending deposits from the state (Electra+).
@@ -460,7 +448,12 @@ pub fn BeaconStateView_currentSyncCommitteeIndexed(env: napi.Env, cb: napi.Callb
     const obj = try env.createObject();
     try obj.setNamedProperty(
         "validatorIndices",
-        try numberSliceToNapiValue(env, u32, @as([]const u32, @ptrCast(validator_indices)), .{ .typed_array = .uint32 }),
+        try numberSliceToNapiValue(
+            env,
+            u32,
+            @as([]const u32, @ptrCast(validator_indices)),
+            .{ .typed_array = null },
+        ),
     );
 
     const global = try env.getGlobal();
@@ -965,7 +958,7 @@ pub fn BeaconStateView_hashTreeRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !na
 /// Arguments:
 /// - arg 0: target slot (number)
 /// - arg 1: options object (optional) with `transferCache` boolean
-pub fn BeaconStateView_processSlots(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+pub fn BeaconStateView_processSlots(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const slot: u64 = @intCast(try cb.arg(0).getValueInt64());
 
@@ -974,6 +967,7 @@ pub fn BeaconStateView_processSlots(env: napi.Env, cb: napi.CallbackInfo(1)) !na
         if (try options_arg.typeof() == .object) {
             if (try options_arg.hasNamedProperty("transferCache")) {
                 transfer_cache = try (try options_arg.getNamedProperty("transferCache")).getValueBool();
+                std.debug.print("has transferCache: {}\n", .{transfer_cache});
             }
         }
     }
@@ -1087,7 +1081,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             method(0, BeaconStateView_hashTreeRoot),
 
             // method(2, BeaconStateView_stateTransition),
-            method(1, BeaconStateView_processSlots),
+            method(2, BeaconStateView_processSlots),
         },
     );
     // Static method on constructor
