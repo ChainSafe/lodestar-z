@@ -109,12 +109,6 @@ pub fn readAllGroupIndices(allocator: std.mem.Allocator, file: std.fs.File) ![]G
     return group_indices.toOwnedSlice();
 }
 
-pub fn readSlotFromBeaconStateBytes(bytes: []const u8) u64 {
-    // slot is at offset 40: 8 (genesisTime) + 32 (genesisValidatorsRoot)
-    std.debug.assert(bytes.len >= 48);
-    return std.mem.readInt(u64, bytes[40..][0..8], .little);
-}
-
 pub fn isValidEraBlockSlot(slot: u64, era_number: u64) bool {
     return computeEraNumberFromBlockSlot(slot) == era_number;
 }

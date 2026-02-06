@@ -6,6 +6,37 @@ const Gindex = @import("gindex.zig").Gindex;
 const proof = @import("proof.zig");
 const Depth = @import("hashing").Depth;
 
+const DescriptorTestCase = struct {
+    input: []const u8,
+    output: []const bool,
+};
+
+const descriptor_test_cases = [_]DescriptorTestCase{
+    .{
+        .input = &[_]u8{0b1000_0000},
+        .output = &[_]bool{true},
+    },
+    .{
+        .input = &[_]u8{ 0b0010_0101, 0b1110_0000 },
+        .output = &[_]bool{ false, false, true, false, false, true, false, true, true, true, true },
+    },
+    .{
+        .input = &[_]u8{ 0b0101_0101, 0b1000_0000 },
+        .output = &[_]bool{ false, true, false, true, false, true, false, true, true },
+    },
+    .{
+        .input = &[_]u8{0b0101_0110},
+        .output = &[_]bool{ false, true, false, true, false, true, true },
+    },
+};
+
+const descriptor_error_cases = [_][]const u8{
+    &[_]u8{ 0b1000_0000, 0 },
+    &[_]u8{ 0b0000_0001, 0 },
+    &[_]u8{0b0101_0111},
+    &[_]u8{ 0b0101_0110, 0 },
+};
+
 fn makeLeaf(value: u8) [32]u8 {
     var out: [32]u8 = [_]u8{0} ** 32;
     out[0] = value;
@@ -125,4 +156,55 @@ test "single proof invalid gindex" {
 
     const empty_witnesses: []const [32]u8 = &[_][32]u8{};
     try testing.expectError(proof.Error.InvalidGindex, proof.createNodeFromSingleProof(&pool, zero_gindex, leaf_hash, empty_witnesses));
+}
+
+test "descriptorToBitlist - should convert valid descriptor to a bitlist" {
+    for (descriptor_test_cases) |case| {
+        const result = try proof.descriptorToBitlist(testing.allocator, case.input);
+        defer testing.allocator.free(result);
+        try testing.expectEqualSlices(bool, case.output, result);
+    }
+}
+
+test "descriptorToBitlist - should throw on invalid descriptors" {
+    for (descriptor_error_cases) |case| {
+        try testing.expectError(proof.Error.InvalidWitnessLength, proof.descriptorToBitlist(testing.allocator, case));
+    }
+}
+
+test "computeDescriptor - should convert gindices to a descriptor" {
+    const gindex = Gindex.fromUint(42);
+    const expected = [_]u8{ 0x25, 0xe0 };
+
+    const descriptor = try proof.computeDescriptor(testing.allocator, &[_]Gindex{gindex});
+    defer testing.allocator.free(descriptor);
+
+    try testing.expectEqualSlices(u8, &expected, descriptor);
+}
+
+test "compact multiproof - should roundtrip node -> proof -> node" {
+    const build_depth: usize = 5;
+    const pool_capacity: u32 = @intCast((@as(usize, 1) << (build_depth + 1)) * 2);
+
+    var pool = try Node.Pool.init(testing.allocator, pool_capacity);
+    defer pool.deinit();
+
+    var next_value: u8 = 1;
+    const root = try buildFullTree(&pool, build_depth, &next_value);
+    defer pool.unref(root);
+
+    for (descriptor_test_cases) |case| {
+        const leaves = try proof.createCompactMultiProof(testing.allocator, &pool, root, case.input);
+        defer testing.allocator.free(leaves);
+
+        var pool2 = try Node.Pool.init(testing.allocator, pool_capacity);
+        defer pool2.deinit();
+
+        const reconstructed = try proof.createNodeFromCompactMultiProof(&pool2, leaves, case.input);
+        defer pool2.unref(reconstructed);
+
+        const original_root = root.getRoot(&pool).*;
+        const reconstructed_root = reconstructed.getRoot(&pool2).*;
+        try testing.expectEqualSlices(u8, &original_root, &reconstructed_root);
+    }
 }

@@ -13,6 +13,12 @@ const CloneOpts = @import("ssz").BaseTreeView.CloneOpts;
 const SlashingsCache = @import("./slashings_cache.zig").SlashingsCache;
 const Node = @import("persistent_merkle_tree").Node;
 
+pub const ProposerRewards = struct {
+    attestations: u64 = 0,
+    sync_aggregate: u64 = 0,
+    slashing: u64 = 0,
+};
+
 pub const CachedBeaconState = struct {
     allocator: Allocator,
     /// only a reference to the singleton BeaconConfig
@@ -23,33 +29,46 @@ pub const CachedBeaconState = struct {
     slashings_cache: SlashingsCache,
     /// this takes ownership of the state, it is expected to be deinitialized by this struct
     state: *AnyBeaconState,
+    /// Proposer rewards accumulated during block processing
+    proposer_rewards: ProposerRewards,
 
-    // TODO: cloned_count properties, implement this once we switch to TreeView
-    // TODO: proposer_rewards, looks like this is not a great place to put in, it's a result of a block state transition instead
+    cloned_count: u32 = 0,
+    cloned_count_with_transfer_cache: u32 = 0,
+    created_with_transfer_cache: bool = false,
 
     /// This class takes ownership of state after this function and has responsibility to deinit it
     pub fn createCachedBeaconState(allocator: Allocator, state: *AnyBeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*CachedBeaconState {
+        const cached_state = try allocator.create(CachedBeaconState);
+        errdefer allocator.destroy(cached_state);
+
+        try cached_state.init(allocator, state, immutable_data, option);
+
+        return cached_state;
+    }
+
+    pub fn init(self: *CachedBeaconState, allocator: Allocator, state: *AnyBeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !void {
         const epoch_cache = try EpochCache.createFromState(allocator, state, immutable_data, option);
         errdefer epoch_cache.deinit();
         const epoch_cache_ref = try EpochCacheRc.init(allocator, epoch_cache);
         errdefer epoch_cache_ref.release();
-        const cached_state = try allocator.create(CachedBeaconState);
-        errdefer allocator.destroy(cached_state);
-
-        cached_state.* = .{
+        self.* = .{
             .allocator = allocator,
             .config = immutable_data.config,
             .epoch_cache_ref = epoch_cache_ref,
             .slashings_cache = try SlashingsCache.initEmpty(allocator),
             .state = state,
+            .proposer_rewards = .{},
         };
-
-        return cached_state;
     }
 
     // TODO: do we need another getConst()?
     pub fn getEpochCache(self: *const CachedBeaconState) *EpochCache {
         return self.epoch_cache_ref.get();
+    }
+
+    /// Get the proposer rewards for the state.
+    pub fn getProposerRewards(self: *const CachedBeaconState) ProposerRewards {
+        return self.proposer_rewards;
     }
 
     pub fn clone(self: *CachedBeaconState, allocator: Allocator, opts: CloneOpts) !*CachedBeaconState {
@@ -71,7 +90,15 @@ pub const CachedBeaconState = struct {
             .epoch_cache_ref = epoch_cache_ref,
             .slashings_cache = slashings_cache,
             .state = state,
+            .proposer_rewards = self.proposer_rewards,
+            .created_with_transfer_cache = opts.transfer_cache,
         };
+
+        self.cloned_count += 1;
+        if (opts.transfer_cache) {
+            self.cloned_count_with_transfer_cache += 1;
+        }
+
         return cached_state;
     }
 
@@ -133,6 +160,21 @@ pub const CachedBeaconState = struct {
             return try proposer_lookahead.get(index);
         }
         return self.getEpochCache().getBeaconProposer(slot);
+    }
+
+    /// Get the previous decision root for the state from the epoch cache.
+    pub fn previousDecisionRoot(self: *CachedBeaconState) [32]u8 {
+        return self.getEpochCache().previous_decision_root;
+    }
+
+    /// Get the current decision root for the state from the epoch cache.
+    pub fn currentDecisionRoot(self: *CachedBeaconState) [32]u8 {
+        return self.getEpochCache().current_decision_root;
+    }
+
+    /// Get the next decision root for the state from the epoch cache.
+    pub fn nextDecisionRoot(self: *CachedBeaconState) [32]u8 {
+        return self.getEpochCache().next_decision_root;
     }
 };
 

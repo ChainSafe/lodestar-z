@@ -1,0 +1,39 @@
+name: Publish NAPI Bindings
+on:
+  workflow_dispatch:
+
+env:
+  ZIG_VERSION: "0.14.1"
+  NODE_VERSION: "24"
+
+jobs:
+  publish-bindings:
+    name: publish bindings
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Install dependencies
+        run: |
+          pnpm install
+      - name: Run bindings formatter
+        run: |
+          pnpm biome ci
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Build and publish to npm
+        run: |
+          pnpm zapi build-artifacts --optimize ReleaseSafe
+          pnpm zapi prepublish
+          pnpm zapi publish --access public
+

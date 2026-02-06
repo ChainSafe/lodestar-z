@@ -16,7 +16,6 @@ const ForkSeq = config.ForkSeq;
 const CachedBeaconState = state_transition.CachedBeaconState;
 const EpochTransitionCache = state_transition.EpochTransitionCache;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const PubkeyIndexMap = state_transition.PubkeyIndexMap(ValidatorIndex);
 const slotFromStateBytes = @import("utils.zig").slotFromStateBytes;
 const loadState = @import("utils.zig").loadState;
 
@@ -686,7 +685,7 @@ fn runBenchmark(
 
     const beacon_config = config.BeaconConfig.init(chain_config, (try beacon_state.?.genesisValidatorsRoot()).*);
 
-    const pubkey_index_map = try PubkeyIndexMap.init(allocator);
+    var pubkey_index_map = state_transition.PubkeyIndexMap.init(allocator);
     defer pubkey_index_map.deinit();
 
     const index_pubkey_cache = try allocator.create(state_transition.Index2PubkeyCache);
@@ -699,12 +698,12 @@ fn runBenchmark(
     const validators = try beacon_state.?.validatorsSlice(allocator);
     defer allocator.free(validators);
 
-    try state_transition.syncPubkeys(validators, pubkey_index_map, index_pubkey_cache);
+    try state_transition.syncPubkeys(validators, &pubkey_index_map, &index_pubkey_cache);
 
     const immutable_data = state_transition.EpochCacheImmutableData{
         .config = &beacon_config,
-        .index_to_pubkey = index_pubkey_cache,
-        .pubkey_to_index = pubkey_index_map,
+        .index_to_pubkey = &index_pubkey_cache,
+        .pubkey_to_index = &pubkey_index_map,
     };
 
     const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, beacon_state.?, immutable_data, .{

@@ -8,7 +8,9 @@ pub const BeaconBlockBody = @import("./beacon_block.zig").BeaconBlockBody;
 pub const ExecutionPayload = @import("./execution_payload.zig").ExecutionPayload;
 pub const ExecutionPayloadHeader = @import("./execution_payload.zig").ExecutionPayloadHeader;
 
-pub const AnyBeaconState = @import("./any_beacon_state.zig").AnyBeaconState;
+pub const any_beacon_state = @import("./any_beacon_state.zig");
+pub const AnyBeaconState = any_beacon_state.AnyBeaconState;
+pub const readSlotFromAnyBeaconStateBytes = any_beacon_state.readSlotFromAnyBeaconStateBytes;
 pub const AnySignedBeaconBlock = @import("./any_beacon_block.zig").AnySignedBeaconBlock;
 pub const AnyBeaconBlock = @import("./any_beacon_block.zig").AnyBeaconBlock;
 pub const AnyBeaconBlockBody = @import("./any_beacon_block.zig").AnyBeaconBlockBody;

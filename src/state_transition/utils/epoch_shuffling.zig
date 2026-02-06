@@ -4,12 +4,14 @@ const types = @import("consensus_types");
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const preset = @import("preset").preset;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
-const BeaconState = @import("fork_types").BeaconState;
 const getSeed = @import("./seed.zig").getSeed;
 const c = @import("constants");
 const innerShuffleList = @import("./shuffle.zig").innerShuffleList;
 const Epoch = types.primitive.Epoch.Type;
 const ReferenceCount = @import("./reference_count.zig").ReferenceCount;
+const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
+const getBlockRootAtSlot = @import("./block_root.zig").getBlockRootAtSlot;
+const computeAnchorCheckpoint = @import("./anchor_checkpoint.zig").computeAnchorCheckpoint;
 
 pub const EpochShufflingRc = ReferenceCount(*EpochShuffling);
 
@@ -134,4 +136,26 @@ fn computeCommitteeCount(active_validator_count: usize) usize {
 test computeCommitteeCount {
     const committee_count = computeCommitteeCount(2_000_000);
     try std.testing.expectEqual(64, committee_count);
+}
+
+/// Calculate the decision root for a given epoch.
+pub fn calculateDecisionRoot(state: *AnyBeaconState, epoch: Epoch) ![32]u8 {
+    const pivot_slot = computeStartSlotAtEpoch(epoch -| 1) -| 1;
+    const block_root = switch (state.forkSeq()) {
+        inline else => |f| try getBlockRootAtSlot(f, state.castToFork(f), pivot_slot),
+    };
+
+    return block_root.*;
+}
+
+/// Get the shuffling decision block root for the given epoch of given state.
+pub fn calculateShufflingDecisionRoot(state: *AnyBeaconState, epoch: Epoch) ![32]u8 {
+    const slot = try state.slot();
+
+    if (slot > c.GENESIS_SLOT) {
+        return try calculateDecisionRoot(state, epoch);
+    }
+
+    const anchor = try computeAnchorCheckpoint(state);
+    return anchor.checkpoint.root;
 }

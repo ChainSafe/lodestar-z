@@ -30,10 +30,7 @@ pub fn BeaconBlock(comptime bt: BlockType, comptime f: ForkSeq) type {
 
         inner: switch (bt) {
             .full => ForkTypes(f).BeaconBlock.Type,
-            .blinded => switch (f) {
-                .phase0, .altair => @compileError("Blinded blocks are not defined for phase0 and altair forks"),
-                else => ForkTypes(f).BlindedBeaconBlock.Type,
-            },
+            .blinded => ForkTypes(f).BlindedBeaconBlock.Type,
         },
 
         pub const block_type = bt;
