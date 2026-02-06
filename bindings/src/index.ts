@@ -59,9 +59,46 @@ interface CompactMultiProof {
 }
 
 interface ProposerRewards {
-  attestations: bigint;
-  syncAggregate: bigint;
-  slashing: bigint;
+  attestations: number;
+  syncAggregate: number;
+  slashing: number;
+}
+
+interface BlockRewards {
+  proposerIndex: number;
+  total: number;
+  attestations: number;
+  syncAggregate: number;
+  proposerSlashings: number;
+  attesterSlashings: number;
+}
+
+interface SyncCommitteeReward {
+  validatorIndex: number;
+  reward: number;
+}
+
+interface IdealAttestationsReward {
+  effectiveBalance: number;
+  head: number;
+  target: number;
+  source: number;
+  inclusionDelay: number;
+  inactivity: number;
+}
+
+interface TotalAttestationsReward {
+  validatorIndex: number;
+  head: number;
+  target: number;
+  source: number;
+  inclusionDelay: number;
+  inactivity: number;
+}
+
+interface AttestationsRewards {
+  idealRewards: IdealAttestationsReward[];
+  totalRewards: TotalAttestationsReward[];
 }
 
 interface SyncCommitteeCache {
@@ -205,6 +242,9 @@ declare class BeaconStateView {
 
   // stateTransition(signedBlockBytes: Uint8Array): BeaconStateView;
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
+  computeBlockRewards(fork: string, signedBlockBytes: Uint8Array): BlockRewards;
+  computeSyncCommitteeRewards(fork: string, signedBlockBytes: Uint8Array): SyncCommitteeReward[];
+  computeAttestationsRewards(): AttestationsRewards;
 }
 
 declare class PublicKey {
