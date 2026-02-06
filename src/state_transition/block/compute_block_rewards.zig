@@ -70,8 +70,11 @@ fn computeBlockAttestationRewardAltair(allocator: Allocator, cached_state: *Cach
     switch (fork_seq) {
         inline .altair, .bellatrix, .capella, .deneb => |fork| {
             const state = try cached_state.state.tryCastToFork(fork);
-            const atts = attestations.phase0;
-            try processAttestationsAltair(fork, allocator, config, epoch_cache, state, &cached_state.slashings_cache, atts.items, false);
+            try processAttestationsAltair(fork, allocator, config, epoch_cache, state, &cached_state.slashings_cache, attestations.phase0.items, false);
+        },
+        inline .electra, .fulu => |fork| {
+            const state = try cached_state.state.tryCastToFork(fork);
+            try processAttestationsAltair(fork, allocator, config, epoch_cache, state, &cached_state.slashings_cache, attestations.electra.items, false);
         },
         else => return error.UnsupportedFork,
     }

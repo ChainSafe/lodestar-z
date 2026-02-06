@@ -42,10 +42,10 @@ if (hasPkix) {
 const reader = await printDurationAsync("load era reader", () => era.era.EraReader.open(config, getFirstEraFilePath()));
 
 const stateBytes = await printDurationAsync("read serialized state", () => reader.readSerializedState());
-const blockSlot = era.era.computeStartBlockSlotFromEraNumber(reader.eraNumber);
+const blockSlot = reader.eraNumber * 8192 - 1;
 const blockBytes = await printDurationAsync("read serialized block", () => reader.readSerializedBlock(blockSlot));
 
-const state = printDuration("create state view", () => bindings.BeaconStateView.createFromBytes("fulu", stateBytes));
+const state = printDuration("create state view", () => bindings.BeaconStateView.createFromBytes(stateBytes));
 
 printDuration("write pkix to disk", () => bindings.pubkeys.save(PKIX_FILE));
 
@@ -127,6 +127,12 @@ printDuration("serializeToBytes", () => {
 printDuration("hashTreeRoot", () => state.hashTreeRoot());
 printDuration("proposerRewards", () => state.proposerRewards);
 
+printDuration("computeAttestationsRewards", () => {
+  const rewards = state.computeAttestationsRewards();
+  console.log(`  idealRewards: ${rewards.idealRewards.length}, totalRewards: ${rewards.totalRewards.length}`);
+  return rewards;
+});
+
 if (blockBytes) {
   printDuration("computeBlockRewards", () => {
     const rewards = state.computeBlockRewards("fulu", blockBytes);
@@ -139,11 +145,5 @@ if (blockBytes) {
     return rewards;
   });
 }
-
-printDuration("computeAttestationsRewards", () => {
-  const rewards = state.computeAttestationsRewards();
-  console.log(`  idealRewards: ${rewards.idealRewards.length}, totalRewards: ${rewards.totalRewards.length}`);
-  return rewards;
-});
 
 printDuration("processSlots", () => state.processSlots(state.slot + 1));
