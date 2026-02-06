@@ -26,7 +26,7 @@ pub fn isValidAttestationSlot(attestation_slot: Slot, current_slot: Slot) bool {
 }
 
 // consumer takes the ownership of the returned array
-pub fn getAttesterSlashableIndices(allocator: Allocator, attester_slashing: *const AttesterSlashing) !std.ArrayList(ValidatorIndex) {
+pub fn getAttesterSlashableIndices(allocator: Allocator, attester_slashing: anytype) !std.ArrayList(ValidatorIndex) {
     var att_set_1 = std.AutoArrayHashMap(ValidatorIndex, bool).init(allocator);
     defer att_set_1.deinit();
 
