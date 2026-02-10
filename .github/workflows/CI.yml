@@ -252,6 +252,9 @@ jobs:
       - name: Build bindings
         run: |
           zig build build-lib:bindings
+      - name: Download era files
+        run: |
+          zig build run:download_era_files
       - name: Test bindings
         run: |
           pnpm test
