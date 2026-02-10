@@ -43,7 +43,7 @@ const reader = await printDurationAsync("load era reader", () => era.era.EraRead
 
 const stateBytes = await printDurationAsync("read serialized state", () => reader.readSerializedState());
 
-const state = printDuration("create state view", () => bindings.BeaconStateView.createFromBytes("fulu", stateBytes));
+const state = printDuration("create state view", () => bindings.BeaconStateView.createFromBytes(stateBytes));
 
 printDuration("write pkix to disk", () => bindings.pubkeys.save(PKIX_FILE));
 
