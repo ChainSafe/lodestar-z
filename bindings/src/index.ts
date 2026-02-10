@@ -278,7 +278,7 @@ type Bindings = {
   shuffle: {
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
   };
-  state_transition: {
+  stateTransition: {
     stateTransition: (
       preState: BeaconStateView,
       signedBlockBytes: Uint8Array,
@@ -296,7 +296,7 @@ type Bindings = {
   deinit: () => void;
 };
 
-import { join } from "node:path";
-import { requireNapiLibrary } from "@chainsafe/zapi";
+import {join} from "node:path";
+import {requireNapiLibrary} from "@chainsafe/zapi";
 
 export default requireNapiLibrary(join(import.meta.dirname, "../..")) as Bindings;
