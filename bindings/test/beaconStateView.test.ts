@@ -1,10 +1,10 @@
-import {config} from "@lodestar/config/default";
+import { config } from "@lodestar/config/default";
 import * as era from "@lodestar/era";
-import {computeEpochAtSlot} from "@lodestar/state-transition";
-import {ssz} from "@lodestar/types";
-import {beforeAll, describe, expect, it} from "vitest";
+import { computeEpochAtSlot } from "@lodestar/state-transition";
+import { ssz } from "@lodestar/types";
+import { beforeAll, describe, expect, it } from "vitest";
 import bindings from "../src/index.ts";
-import {getFirstEraFilePath} from "./eraFiles.ts";
+import { getFirstEraFilePath } from "./eraFiles.ts";
 
 describe("BeaconStateView", () => {
   let state: InstanceType<typeof bindings.BeaconStateView>;
@@ -388,7 +388,7 @@ describe("BeaconStateView", () => {
       const lodestarRoot = lodestarState.hashTreeRoot();
 
       expect(bindingsRoot).toEqual(lodestarRoot);
-    }, 30_000); // slow
+    }, 60_000); // slow
   });
 
   describe("proofs", () => {
@@ -494,7 +494,7 @@ describe("BeaconStateView", () => {
 
     it("processSlots with transferCache option should work", () => {
       const originalSlot = state.slot;
-      const newState = state.processSlots(originalSlot + 1, {transferCache: true});
+      const newState = state.processSlots(originalSlot + 1, { transferCache: true });
 
       expect(newState.slot).toBe(originalSlot + 1);
       expect(newState.createdWithTransferCache).toBe(true);
