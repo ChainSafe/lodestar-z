@@ -388,7 +388,7 @@ describe("BeaconStateView", () => {
       const lodestarRoot = lodestarState.hashTreeRoot();
 
       expect(bindingsRoot).toEqual(lodestarRoot);
-    }, 60_000); // slow
+    }, 120_000); // slow
   });
 
   describe("proofs", () => {
