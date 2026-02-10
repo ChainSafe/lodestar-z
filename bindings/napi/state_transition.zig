@@ -33,7 +33,7 @@ pub fn stateTransition(
 
     const bytes_info = try cb.arg(1).getTypedarrayInfo();
     const current_epoch = state_transition.computeEpochAtSlot(try cached_state.state.slot());
-    const fork = @import("config").mainnet.config.forkSeqAtEpoch(current_epoch);
+    const fork = cached_state.config.forkSeqAtEpoch(current_epoch);
     const signed_block = try AnySignedBeaconBlock.deserialize(
         allocator,
         .full,
