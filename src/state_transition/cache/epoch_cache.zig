@@ -25,7 +25,7 @@ const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").Epoc
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
 const computeActivationExitEpoch = @import("../utils/epoch.zig").computeActivationExitEpoch;
-const getEffectiveBalanceIncrementsWithLen = @import("./effective_balance_increments.zig").getEffectiveBalanceIncrementsWithLen;
+const effectiveBalanceIncrementsInit = @import("./effective_balance_increments.zig").effectiveBalanceIncrementsInit;
 const getTotalSlashingsByIncrement = @import("../epoch/process_slashings.zig").getTotalSlashingsByIncrement;
 const computeEpochShuffling = @import("../utils/epoch_shuffling.zig").computeEpochShuffling;
 const getSeed = @import("../utils/seed.zig").getSeed;
@@ -169,7 +169,7 @@ pub const EpochCache = struct {
             try syncPubkeys(validators, pubkey_to_index, index_to_pubkey);
         }
 
-        const effective_balance_increments = try getEffectiveBalanceIncrementsWithLen(allocator, validator_count);
+        const effective_balance_increments = try effectiveBalanceIncrementsInit(allocator, validator_count);
         const state_fork_seq = state.forkSeq();
         const total_slashings_by_increment = switch (state_fork_seq) {
             inline else => |f| try getTotalSlashingsByIncrement(f, state.castToFork(f)),
@@ -549,11 +549,11 @@ pub const EpochCache = struct {
 
     pub fn beforeEpochTransition(self: *EpochCache) !void {
         // Clone (copy) before being mutated in processEffectiveBalanceUpdates
-        var effective_balance_increment = try EffectiveBalanceIncrements.initCapacity(self.allocator, self.effective_balance_increments.get().items.len);
-        try effective_balance_increment.appendSlice(self.effective_balance_increments.get().items);
+        var effective_balance_increments = try EffectiveBalanceIncrements.initCapacity(self.allocator, self.effective_balance_increments.get().items.len);
+        try effective_balance_increments.appendSlice(self.effective_balance_increments.get().items);
         // unref the previous effective balance increment
         self.effective_balance_increments.release();
-        self.effective_balance_increments = try EffectiveBalanceIncrementsRc.init(self.allocator, effective_balance_increment);
+        self.effective_balance_increments = try EffectiveBalanceIncrementsRc.init(self.allocator, effective_balance_increments);
     }
 
     /// Consumer borrows the returned slice
@@ -786,7 +786,7 @@ pub const EpochCache = struct {
         if (index >= self.effective_balance_increments.get().items.len) {
             // Clone and extend effectiveBalanceIncrements, preserving existing data
             const old = self.effective_balance_increments.get();
-            var new_increments = try getEffectiveBalanceIncrementsWithLen(self.allocator, index + 1);
+            var new_increments = try effectiveBalanceIncrementsInit(self.allocator, index + 1);
             @memcpy(new_increments.items[0..old.items.len], old.items);
             self.effective_balance_increments.release();
             self.effective_balance_increments = try EffectiveBalanceIncrementsRc.init(allocator, new_increments);
