@@ -27,7 +27,7 @@ pub fn slashValidator(
     whistle_blower_index: ?ValidatorIndex,
 ) !void {
     const epoch = epoch_cache.epoch;
-    const effective_balance_increments = epoch_cache.effective_balance_increment;
+    const effective_balance_increments = epoch_cache.effective_balance_increments;
     const slashed_effective_balance_increments = effective_balance_increments.get().items[@intCast(slashed_index)];
 
     var validators = try state.validators();
