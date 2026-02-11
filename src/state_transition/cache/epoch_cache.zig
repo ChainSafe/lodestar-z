@@ -527,9 +527,7 @@ pub const EpochCache = struct {
 
     pub fn beforeEpochTransition(self: *EpochCache) !void {
         // Clone (copy) before being mutated in processEffectiveBalanceUpdates
-        var effective_balance_increments = try EffectiveBalanceIncrements.initCapacity(self.allocator, self.effective_balance_increments.get().items.len);
-        try effective_balance_increments.appendSlice(self.effective_balance_increments.get().items);
-        // unref the previous effective balance increment
+        const effective_balance_increments = try self.effective_balance_increments.get().clone();
         self.effective_balance_increments.release();
         self.effective_balance_increments = try EffectiveBalanceIncrementsRc.init(self.allocator, effective_balance_increments);
     }
