@@ -783,12 +783,13 @@ pub const EpochCache = struct {
 
     /// This is different from typescript version: only allocate new EffectiveBalanceIncrements if needed
     pub fn effectiveBalanceIncrementsSet(self: *EpochCache, allocator: Allocator, index: usize, effective_balance: u64) !void {
-        var effective_balance_increments = self.effective_balance_increments.get();
-        if (index >= effective_balance_increments.items.len) {
-            // Clone and extend effectiveBalanceIncrements
-            effective_balance_increments = try getEffectiveBalanceIncrementsWithLen(self.allocator, index + 1);
+        if (index >= self.effective_balance_increments.get().items.len) {
+            // Clone and extend effectiveBalanceIncrements, preserving existing data
+            const old = self.effective_balance_increments.get();
+            var new_increments = try getEffectiveBalanceIncrementsWithLen(self.allocator, index + 1);
+            @memcpy(new_increments.items[0..old.items.len], old.items);
             self.effective_balance_increments.release();
-            self.effective_balance_increments = try EffectiveBalanceIncrementsRc.init(allocator, effective_balance_increments);
+            self.effective_balance_increments = try EffectiveBalanceIncrementsRc.init(allocator, new_increments);
         }
         self.effective_balance_increments.get().items[index] = @intCast(@divFloor(effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT));
     }
