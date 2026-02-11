@@ -252,6 +252,11 @@ jobs:
       - name: Build bindings
         run: |
           zig build build-lib:bindings
+      - name: Restore era files cache
+        uses: actions/cache@v4
+        with:
+          path: fixtures/era
+          key: era-files-${{ hashFiles('build.zig') }} # downloaded era files defined in build.zig
       - name: Download era files
         run: |
           zig build run:download_era_files
