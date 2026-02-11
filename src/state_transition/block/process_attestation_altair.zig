@@ -40,7 +40,7 @@ pub fn processAttestationsAltair(
     attestations: []const ForkTypes(fork).Attestation.Type,
     verify_signature: bool,
 ) !void {
-    const effective_balance_increments = epoch_cache.effective_balance_increment.get().items;
+    const effective_balance_increments = epoch_cache.effective_balance_increments.get().items;
     const state_slot = try state.slot();
     const current_epoch = epoch_cache.epoch;
 
