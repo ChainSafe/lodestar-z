@@ -9,9 +9,6 @@ import {getFirstEraFilePath} from "./eraFiles.ts";
 describe("BeaconStateView", () => {
   let state: InstanceType<typeof bindings.BeaconStateView>;
   let stateBytes: Uint8Array;
-  // Expected values extracted from lodestar's tree view.
-  // The full tree (~3-4GB for mainnet) is freed before creating the native state
-  // so the two large allocations never coexist in memory (avoids OOM on CI).
   let expected: {
     slot: number;
     genesisTime: number;
@@ -55,23 +52,12 @@ describe("BeaconStateView", () => {
   };
 
   beforeAll(async () => {
-    // Ensure capacity for the state
-    bindings.pool.ensureCapacity(10_000_000);
-    bindings.pubkeys.ensureCapacity(2_000_000);
-
-    // if pubkey index file exists, load it
-    try {
-      bindings.pubkeys.load("./mainnet.pkix");
-    } catch (_e) {
-      // ignore error
-    }
-
-    // Load era file
     const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
     stateBytes = await reader.readSerializedState();
 
     // Phase 1: Build lodestar tree view and extract reference values.
-    // Scoped so lodestarState is eligible for GC before we allocate the native state.
+    // The tree uses ~3-4GB for mainnet, so we extract what we need and free it
+    // before creating the native state to avoid OOM on CI.
     {
       const lodestarState = ssz.fulu.BeaconState.deserializeToView(stateBytes);
       const v0 = lodestarState.validators.get(0);
@@ -138,10 +124,17 @@ describe("BeaconStateView", () => {
         validatorCount: lodestarState.validators.length,
       };
     }
-    // lodestarState is now out of scope — reclaim the tree before allocating the native state
+    // lodestarState is now out of scope — force GC to reclaim the ~3-4GB tree
     global.gc?.();
 
-    // Phase 2: Create the native state (only after lodestar tree is freed)
+    // Phase 2: Create native BeaconStateView
+    bindings.pool.ensureCapacity(10_000_000);
+    bindings.pubkeys.ensureCapacity(2_000_000);
+    try {
+      bindings.pubkeys.load("./mainnet.pkix");
+    } catch (_e) {
+      // ignore error
+    }
     state = bindings.BeaconStateView.createFromBytes(stateBytes);
   }, 120_000); // 2 minute timeout for loading era file
 

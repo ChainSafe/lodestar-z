@@ -98,14 +98,14 @@ pub fn save(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 }
 
 pub fn load(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    if (initialized) {
-        deinit();
-    }
-
     var file_path_buf: [1024]u8 = undefined;
     const file_path = try cb.arg(0).getValueStringUtf8(&file_path_buf);
     var file = try std.fs.cwd().openFile(file_path, .{});
     defer file.close();
+
+    if (initialized) {
+        deinit();
+    }
 
     var header: [12]u8 = undefined;
     const header_len = try file.readAll(&header);
