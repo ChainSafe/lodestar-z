@@ -10,6 +10,6 @@
     "includes": ["bindings/**/*.ts"]
   },
   "vcs": {
-    "defaultBranch": "unstable"
+    "defaultBranch": "main"
   }
 }
