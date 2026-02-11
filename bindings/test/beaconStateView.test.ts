@@ -1,15 +1,58 @@
-import { config } from "@lodestar/config/default";
+import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
-import { computeEpochAtSlot } from "@lodestar/state-transition";
-import { ssz } from "@lodestar/types";
-import { beforeAll, describe, expect, it } from "vitest";
+import {computeEpochAtSlot} from "@lodestar/state-transition";
+import {ssz} from "@lodestar/types";
+import {beforeAll, describe, expect, it} from "vitest";
 import bindings from "../src/index.ts";
-import { getFirstEraFilePath } from "./eraFiles.ts";
+import {getFirstEraFilePath} from "./eraFiles.ts";
 
 describe("BeaconStateView", () => {
   let state: InstanceType<typeof bindings.BeaconStateView>;
   let stateBytes: Uint8Array;
-  let lodestarState: ReturnType<typeof ssz.fulu.BeaconState.deserializeToView>;
+  // Expected values extracted from lodestar's tree view.
+  // The full tree (~3-4GB for mainnet) is freed before creating the native state
+  // so the two large allocations never coexist in memory (avoids OOM on CI).
+  let expected: {
+    slot: number;
+    genesisTime: number;
+    genesisValidatorsRoot: Uint8Array;
+    validatorCount: number;
+    fork: {previousVersion: Uint8Array; currentVersion: Uint8Array; epoch: number};
+    eth1Data: {depositRoot: Uint8Array; depositCount: number; blockHash: Uint8Array};
+    latestBlockHeader: {
+      slot: number;
+      proposerIndex: number;
+      parentRoot: Uint8Array;
+      stateRoot: Uint8Array;
+      bodyRoot: Uint8Array;
+    };
+    previousJustifiedCheckpoint: {epoch: number; root: Uint8Array};
+    currentJustifiedCheckpoint: {epoch: number; root: Uint8Array};
+    finalizedCheckpoint: {epoch: number; root: Uint8Array};
+    currentSyncCommittee: {aggregatePubkey: Uint8Array};
+    nextSyncCommittee: {aggregatePubkey: Uint8Array};
+    latestExecutionPayloadHeader: {
+      blockNumber: number;
+      blockHash: Uint8Array;
+      parentHash: Uint8Array;
+      stateRoot: Uint8Array;
+      timestamp: number;
+      gasLimit: number;
+      gasUsed: number;
+    };
+    balance0: number;
+    balance100: number;
+    validator0: {
+      pubkey: Uint8Array;
+      withdrawalCredentials: Uint8Array;
+      effectiveBalance: number;
+      slashed: boolean;
+      activationEligibilityEpoch: number;
+      activationEpoch: number;
+      exitEpoch: number;
+      withdrawableEpoch: number;
+    };
+  };
 
   beforeAll(async () => {
     // Ensure capacity for the state
@@ -23,18 +66,88 @@ describe("BeaconStateView", () => {
       // ignore error
     }
 
-    // Load era file and create state
+    // Load era file
     const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
     stateBytes = await reader.readSerializedState();
 
-    // Create both the bindings state and a lodestar reference state
+    // Phase 1: Build lodestar tree view and extract reference values.
+    // Scoped so lodestarState is eligible for GC before we allocate the native state.
+    {
+      const lodestarState = ssz.fulu.BeaconState.deserializeToView(stateBytes);
+      const v0 = lodestarState.validators.get(0);
+      expected = {
+        balance0: lodestarState.balances.get(0),
+        balance100: lodestarState.balances.get(100),
+        currentJustifiedCheckpoint: {
+          epoch: lodestarState.currentJustifiedCheckpoint.epoch,
+          root: Uint8Array.from(lodestarState.currentJustifiedCheckpoint.root),
+        },
+        currentSyncCommittee: {
+          aggregatePubkey: Uint8Array.from(lodestarState.currentSyncCommittee.aggregatePubkey),
+        },
+        eth1Data: {
+          blockHash: Uint8Array.from(lodestarState.eth1Data.blockHash),
+          depositCount: lodestarState.eth1Data.depositCount,
+          depositRoot: Uint8Array.from(lodestarState.eth1Data.depositRoot),
+        },
+        finalizedCheckpoint: {
+          epoch: lodestarState.finalizedCheckpoint.epoch,
+          root: Uint8Array.from(lodestarState.finalizedCheckpoint.root),
+        },
+        fork: {
+          currentVersion: Uint8Array.from(lodestarState.fork.currentVersion),
+          epoch: lodestarState.fork.epoch,
+          previousVersion: Uint8Array.from(lodestarState.fork.previousVersion),
+        },
+        genesisTime: lodestarState.genesisTime,
+        genesisValidatorsRoot: Uint8Array.from(lodestarState.genesisValidatorsRoot),
+        latestBlockHeader: {
+          bodyRoot: Uint8Array.from(lodestarState.latestBlockHeader.bodyRoot),
+          parentRoot: Uint8Array.from(lodestarState.latestBlockHeader.parentRoot),
+          proposerIndex: lodestarState.latestBlockHeader.proposerIndex,
+          slot: lodestarState.latestBlockHeader.slot,
+          stateRoot: Uint8Array.from(lodestarState.latestBlockHeader.stateRoot),
+        },
+        latestExecutionPayloadHeader: {
+          blockHash: Uint8Array.from(lodestarState.latestExecutionPayloadHeader.blockHash),
+          blockNumber: lodestarState.latestExecutionPayloadHeader.blockNumber,
+          gasLimit: lodestarState.latestExecutionPayloadHeader.gasLimit,
+          gasUsed: lodestarState.latestExecutionPayloadHeader.gasUsed,
+          parentHash: Uint8Array.from(lodestarState.latestExecutionPayloadHeader.parentHash),
+          stateRoot: Uint8Array.from(lodestarState.latestExecutionPayloadHeader.stateRoot),
+          timestamp: lodestarState.latestExecutionPayloadHeader.timestamp,
+        },
+        nextSyncCommittee: {
+          aggregatePubkey: Uint8Array.from(lodestarState.nextSyncCommittee.aggregatePubkey),
+        },
+        previousJustifiedCheckpoint: {
+          epoch: lodestarState.previousJustifiedCheckpoint.epoch,
+          root: Uint8Array.from(lodestarState.previousJustifiedCheckpoint.root),
+        },
+        slot: lodestarState.slot,
+        validator0: {
+          activationEligibilityEpoch: v0.activationEligibilityEpoch,
+          activationEpoch: v0.activationEpoch,
+          effectiveBalance: v0.effectiveBalance,
+          exitEpoch: v0.exitEpoch,
+          pubkey: Uint8Array.from(v0.pubkey),
+          slashed: v0.slashed,
+          withdrawableEpoch: v0.withdrawableEpoch,
+          withdrawalCredentials: Uint8Array.from(v0.withdrawalCredentials),
+        },
+        validatorCount: lodestarState.validators.length,
+      };
+    }
+    // lodestarState is now out of scope — reclaim the tree before allocating the native state
+    global.gc?.();
+
+    // Phase 2: Create the native state (only after lodestar tree is freed)
     state = bindings.BeaconStateView.createFromBytes(stateBytes);
-    lodestarState = ssz.fulu.BeaconState.deserializeToView(stateBytes);
   }, 120_000); // 2 minute timeout for loading era file
 
   describe("basic properties", () => {
     it("slot should match lodestar", () => {
-      expect(state.slot).toBe(lodestarState.slot);
+      expect(state.slot).toBe(expected.slot);
     });
 
     it("epoch should be computed correctly from slot", () => {
@@ -43,140 +156,122 @@ describe("BeaconStateView", () => {
     });
 
     it("genesisTime should match lodestar", () => {
-      expect(state.genesisTime).toBe(lodestarState.genesisTime);
+      expect(state.genesisTime).toBe(expected.genesisTime);
     });
 
     it("genesisValidatorsRoot should match lodestar", () => {
-      const expected = lodestarState.genesisValidatorsRoot;
-      expect(state.genesisValidatorsRoot).toEqual(expected);
+      expect(state.genesisValidatorsRoot).toEqual(expected.genesisValidatorsRoot);
     });
 
     it("validatorCount should match lodestar", () => {
-      expect(state.validatorCount).toBe(lodestarState.validators.length);
+      expect(state.validatorCount).toBe(expected.validatorCount);
     });
   });
 
   describe("fork", () => {
     it("fork.previousVersion should match lodestar", () => {
-      const expected = lodestarState.fork.previousVersion;
-      expect(state.fork.previousVersion).toEqual(expected);
+      expect(state.fork.previousVersion).toEqual(expected.fork.previousVersion);
     });
 
     it("fork.currentVersion should match lodestar", () => {
-      const expected = lodestarState.fork.currentVersion;
-      expect(state.fork.currentVersion).toEqual(expected);
+      expect(state.fork.currentVersion).toEqual(expected.fork.currentVersion);
     });
 
     it("fork.epoch should match lodestar", () => {
-      expect(state.fork.epoch).toBe(lodestarState.fork.epoch);
+      expect(state.fork.epoch).toBe(expected.fork.epoch);
     });
   });
 
   describe("eth1Data", () => {
     it("eth1Data.depositRoot should match lodestar", () => {
-      const expected = lodestarState.eth1Data.depositRoot;
-      expect(state.eth1Data.depositRoot).toEqual(expected);
+      expect(state.eth1Data.depositRoot).toEqual(expected.eth1Data.depositRoot);
     });
 
     it("eth1Data.depositCount should match lodestar", () => {
-      expect(state.eth1Data.depositCount).toBe(lodestarState.eth1Data.depositCount);
+      expect(state.eth1Data.depositCount).toBe(expected.eth1Data.depositCount);
     });
 
     it("eth1Data.blockHash should match lodestar", () => {
-      const expected = lodestarState.eth1Data.blockHash;
-      expect(state.eth1Data.blockHash).toEqual(expected);
+      expect(state.eth1Data.blockHash).toEqual(expected.eth1Data.blockHash);
     });
   });
 
   describe("latestBlockHeader", () => {
     it("latestBlockHeader.slot should match lodestar", () => {
-      expect(state.latestBlockHeader.slot).toBe(lodestarState.latestBlockHeader.slot);
+      expect(state.latestBlockHeader.slot).toBe(expected.latestBlockHeader.slot);
     });
 
     it("latestBlockHeader.proposerIndex should match lodestar", () => {
-      expect(state.latestBlockHeader.proposerIndex).toBe(lodestarState.latestBlockHeader.proposerIndex);
+      expect(state.latestBlockHeader.proposerIndex).toBe(expected.latestBlockHeader.proposerIndex);
     });
 
     it("latestBlockHeader.parentRoot should match lodestar", () => {
-      const expected = lodestarState.latestBlockHeader.parentRoot;
-      expect(state.latestBlockHeader.parentRoot).toEqual(expected);
+      expect(state.latestBlockHeader.parentRoot).toEqual(expected.latestBlockHeader.parentRoot);
     });
 
     it("latestBlockHeader.stateRoot should match lodestar", () => {
-      const expected = lodestarState.latestBlockHeader.stateRoot;
-      expect(state.latestBlockHeader.stateRoot).toEqual(expected);
+      expect(state.latestBlockHeader.stateRoot).toEqual(expected.latestBlockHeader.stateRoot);
     });
 
     it("latestBlockHeader.bodyRoot should match lodestar", () => {
-      const expected = lodestarState.latestBlockHeader.bodyRoot;
-      expect(state.latestBlockHeader.bodyRoot).toEqual(expected);
+      expect(state.latestBlockHeader.bodyRoot).toEqual(expected.latestBlockHeader.bodyRoot);
     });
   });
 
   describe("checkpoints", () => {
     it("previousJustifiedCheckpoint should match lodestar", () => {
-      const expected = lodestarState.previousJustifiedCheckpoint;
-      expect(state.previousJustifiedCheckpoint.epoch).toBe(expected.epoch);
-      expect(state.previousJustifiedCheckpoint.root).toEqual(expected.root);
+      expect(state.previousJustifiedCheckpoint.epoch).toBe(expected.previousJustifiedCheckpoint.epoch);
+      expect(state.previousJustifiedCheckpoint.root).toEqual(expected.previousJustifiedCheckpoint.root);
     });
 
     it("currentJustifiedCheckpoint should match lodestar", () => {
-      const expected = lodestarState.currentJustifiedCheckpoint;
-      expect(state.currentJustifiedCheckpoint.epoch).toBe(expected.epoch);
-      expect(state.currentJustifiedCheckpoint.root).toEqual(expected.root);
+      expect(state.currentJustifiedCheckpoint.epoch).toBe(expected.currentJustifiedCheckpoint.epoch);
+      expect(state.currentJustifiedCheckpoint.root).toEqual(expected.currentJustifiedCheckpoint.root);
     });
 
     it("finalizedCheckpoint should match lodestar", () => {
-      const expected = lodestarState.finalizedCheckpoint;
-      expect(state.finalizedCheckpoint.epoch).toBe(expected.epoch);
-      expect(state.finalizedCheckpoint.root).toEqual(expected.root);
+      expect(state.finalizedCheckpoint.epoch).toBe(expected.finalizedCheckpoint.epoch);
+      expect(state.finalizedCheckpoint.root).toEqual(expected.finalizedCheckpoint.root);
     });
   });
 
   describe("sync committees (altair+)", () => {
     it("currentSyncCommittee.aggregatePubkey should match lodestar", () => {
-      const expected = lodestarState.currentSyncCommittee.aggregatePubkey;
-      expect(state.currentSyncCommittee.aggregatePubkey).toEqual(expected);
+      expect(state.currentSyncCommittee.aggregatePubkey).toEqual(expected.currentSyncCommittee.aggregatePubkey);
     });
 
     it("nextSyncCommittee.aggregatePubkey should match lodestar", () => {
-      const expected = lodestarState.nextSyncCommittee.aggregatePubkey;
-      expect(state.nextSyncCommittee.aggregatePubkey).toEqual(expected);
+      expect(state.nextSyncCommittee.aggregatePubkey).toEqual(expected.nextSyncCommittee.aggregatePubkey);
     });
   });
 
   describe("execution payload header (bellatrix+)", () => {
     it("latestExecutionPayloadHeader.blockNumber should match lodestar", () => {
-      expect(state.latestExecutionPayloadHeader.blockNumber).toBe(
-        lodestarState.latestExecutionPayloadHeader.blockNumber
-      );
+      expect(state.latestExecutionPayloadHeader.blockNumber).toBe(expected.latestExecutionPayloadHeader.blockNumber);
     });
 
     it("latestExecutionPayloadHeader.blockHash should match lodestar", () => {
-      const expected = lodestarState.latestExecutionPayloadHeader.blockHash;
-      expect(state.latestExecutionPayloadHeader.blockHash).toEqual(expected);
+      expect(state.latestExecutionPayloadHeader.blockHash).toEqual(expected.latestExecutionPayloadHeader.blockHash);
     });
 
     it("latestExecutionPayloadHeader.parentHash should match lodestar", () => {
-      const expected = lodestarState.latestExecutionPayloadHeader.parentHash;
-      expect(state.latestExecutionPayloadHeader.parentHash).toEqual(expected);
+      expect(state.latestExecutionPayloadHeader.parentHash).toEqual(expected.latestExecutionPayloadHeader.parentHash);
     });
 
     it("latestExecutionPayloadHeader.stateRoot should match lodestar", () => {
-      const expected = lodestarState.latestExecutionPayloadHeader.stateRoot;
-      expect(state.latestExecutionPayloadHeader.stateRoot).toEqual(expected);
+      expect(state.latestExecutionPayloadHeader.stateRoot).toEqual(expected.latestExecutionPayloadHeader.stateRoot);
     });
 
     it("latestExecutionPayloadHeader.timestamp should match lodestar", () => {
-      expect(state.latestExecutionPayloadHeader.timestamp).toBe(lodestarState.latestExecutionPayloadHeader.timestamp);
+      expect(state.latestExecutionPayloadHeader.timestamp).toBe(expected.latestExecutionPayloadHeader.timestamp);
     });
 
     it("latestExecutionPayloadHeader.gasLimit should match lodestar", () => {
-      expect(state.latestExecutionPayloadHeader.gasLimit).toBe(lodestarState.latestExecutionPayloadHeader.gasLimit);
+      expect(state.latestExecutionPayloadHeader.gasLimit).toBe(expected.latestExecutionPayloadHeader.gasLimit);
     });
 
     it("latestExecutionPayloadHeader.gasUsed should match lodestar", () => {
-      expect(state.latestExecutionPayloadHeader.gasUsed).toBe(lodestarState.latestExecutionPayloadHeader.gasUsed);
+      expect(state.latestExecutionPayloadHeader.gasUsed).toBe(expected.latestExecutionPayloadHeader.gasUsed);
     });
 
     it("isMergeTransitionComplete should be true for fulu state", () => {
@@ -190,27 +285,24 @@ describe("BeaconStateView", () => {
 
   describe("validators and balances", () => {
     it("getBalance(0) should return first validator balance", () => {
-      const expected = lodestarState.balances.get(0);
-      expect(state.getBalance(0)).toBe(BigInt(expected));
+      expect(state.getBalance(0)).toBe(BigInt(expected.balance0));
     });
 
     it("getBalance(100) should return validator 100 balance", () => {
-      const expected = lodestarState.balances.get(100);
-      expect(state.getBalance(100)).toBe(BigInt(expected));
+      expect(state.getBalance(100)).toBe(BigInt(expected.balance100));
     });
 
     it("getValidator(0) should return first validator data", () => {
       const validator = state.getValidator(0);
-      const expected = lodestarState.validators.get(0);
 
-      expect(validator.pubkey).toEqual(expected.pubkey);
-      expect(validator.withdrawalCredentials).toEqual(expected.withdrawalCredentials);
-      expect(validator.effectiveBalance).toBe(expected.effectiveBalance);
-      expect(validator.slashed).toBe(expected.slashed);
-      expect(validator.activationEligibilityEpoch).toBe(expected.activationEligibilityEpoch);
-      expect(validator.activationEpoch).toBe(expected.activationEpoch);
-      expect(validator.exitEpoch).toBe(expected.exitEpoch);
-      expect(validator.withdrawableEpoch).toBe(expected.withdrawableEpoch);
+      expect(validator.pubkey).toEqual(expected.validator0.pubkey);
+      expect(validator.withdrawalCredentials).toEqual(expected.validator0.withdrawalCredentials);
+      expect(validator.effectiveBalance).toBe(expected.validator0.effectiveBalance);
+      expect(validator.slashed).toBe(expected.validator0.slashed);
+      expect(validator.activationEligibilityEpoch).toBe(expected.validator0.activationEligibilityEpoch);
+      expect(validator.activationEpoch).toBe(expected.validator0.activationEpoch);
+      expect(validator.exitEpoch).toBe(expected.validator0.exitEpoch);
+      expect(validator.withdrawableEpoch).toBe(expected.validator0.withdrawableEpoch);
     });
 
     it("getValidatorStatus should return a valid status string", () => {
@@ -377,8 +469,8 @@ describe("BeaconStateView", () => {
 
       expect(bytesWritten).toBe(size);
 
-      const expected = state.serializeValidators();
-      expect(Buffer.compare(output, expected)).toBe(0);
+      const expectedValidators = state.serializeValidators();
+      expect(Buffer.compare(output, expectedValidators)).toBe(0);
     });
   }, 10_000); // slow
 
@@ -497,7 +589,7 @@ describe("BeaconStateView", () => {
 
     it("processSlots with transferCache option should work", () => {
       const originalSlot = state.slot;
-      const newState = state.processSlots(originalSlot + 1, { transferCache: true });
+      const newState = state.processSlots(originalSlot + 1, {transferCache: true});
 
       expect(newState.slot).toBe(originalSlot + 1);
       expect(newState.createdWithTransferCache).toBe(true);

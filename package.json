@@ -11,7 +11,7 @@
   },
   "scripts": {
     "lint": "biome check",
-    "test": "vitest run bindings/test/*.test.ts"
+    "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts"
   },
   "keywords": [],
   "author": "ChainSafe Systems",
