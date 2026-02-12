@@ -9,7 +9,7 @@ const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 const buildSlashingsCacheIfNeeded = @import("../cache/slashings_cache.zig").buildFromStateIfNeeded;
 const isSlashableAttestationData = @import("../utils/attestation.zig").isSlashableAttestationData;
-const getAttesterSlashableIndices = @import("../utils/attestation.zig").getAttesterSlashableIndices;
+const findAttesterSlashableIndices = @import("../utils/attestation.zig").findAttesterSlashableIndices;
 const isValidIndexedAttestation = @import("./is_valid_indexed_attestation.zig").isValidIndexedAttestation;
 const isSlashableValidator = @import("../utils/validator.zig").isSlashableValidator;
 const slashValidator = @import("./slash_validator.zig").slashValidator;
@@ -39,7 +39,11 @@ pub fn processAttesterSlashing(
         verify_signature,
     );
 
-    const intersecting_indices = try getAttesterSlashableIndices(allocator, attester_slashing);
+    var intersecting_indices = try std.ArrayList(types.primitive.ValidatorIndex.Type).initCapacity(
+        allocator,
+        attester_slashing.attestation_1.attesting_indices.items.len,
+    );
+    try findAttesterSlashableIndices(attester_slashing, &intersecting_indices);
     defer intersecting_indices.deinit();
 
     var slashed_any: bool = false;

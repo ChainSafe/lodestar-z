@@ -25,21 +25,26 @@ pub fn isValidAttestationSlot(attestation_slot: Slot, current_slot: Slot) bool {
         current_slot <= attestation_slot + preset.SLOTS_PER_EPOCH;
 }
 
-// consumer takes the ownership of the returned array
-pub fn getAttesterSlashableIndices(allocator: Allocator, attester_slashing: *const AttesterSlashing) !std.ArrayList(ValidatorIndex) {
-    var att_set_1 = std.AutoArrayHashMap(ValidatorIndex, bool).init(allocator);
-    defer att_set_1.deinit();
-
-    for (attester_slashing.attestation_1.attesting_indices.items) |validator_index| {
-        try att_set_1.put(validator_index, true);
-    }
-
-    var result = std.ArrayList(ValidatorIndex).init(allocator);
-    for (attester_slashing.attestation_2.attesting_indices.items) |validator_index| {
-        if (att_set_1.get(validator_index)) |_| {
-            try result.append(validator_index);
+/// Two-pointer sorted merge membership check for attesting indices to slash without auxiliary allocations.
+///
+/// Pre-requisite: isValidIndexedAttestation already checks for attesting indices to be sorted and unique.
+/// Without that check, this would be incorrect.
+pub fn findAttesterSlashableIndices(attester_slashing: *const AttesterSlashing, indices: *std.ArrayList(ValidatorIndex)) !void {
+    const a = attester_slashing.attestation_1.attesting_indices.items;
+    const b = attester_slashing.attestation_2.attesting_indices.items;
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < a.len and j < b.len) {
+        if (a[i] == b[j]) {
+            try indices.append(a[i]);
+            i += 1;
+            j += 1;
+        } else if (a[i] < b[j]) {
+            i += 1;
+        } else {
+            j += 1;
         }
     }
-
-    return result;
+    // we must reach the end of one of the indices
+    std.debug.assert(i == a.len or j == b.len);
 }
