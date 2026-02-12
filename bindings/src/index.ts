@@ -260,7 +260,7 @@ type Bindings = {
       get: (pubkey: Uint8Array) => number | undefined;
     };
     index2pubkey: {
-      get: (index: number) => Uint8Array | undefined;
+      get: (index: number) => PublicKey | undefined;
     };
   };
   config: {
