@@ -8,7 +8,6 @@ pub const bellatrix = @import("bellatrix.zig");
 pub const capella = @import("capella.zig");
 pub const deneb = @import("deneb.zig");
 pub const electra = @import("electra.zig");
-
 pub const fulu = @import("fulu.zig");
 
 test {

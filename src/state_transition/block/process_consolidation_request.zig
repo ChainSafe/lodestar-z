@@ -35,8 +35,8 @@ pub fn processConsolidationRequest(
     if (!(try isPubkeyKnown(fork, epoch_cache, state, source_pubkey))) return;
     if (!(try isPubkeyKnown(fork, epoch_cache, state, target_pubkey))) return;
 
-    const source_index = epoch_cache.pubkey_to_index.get(&source_pubkey) orelse return;
-    const target_index = epoch_cache.pubkey_to_index.get(&target_pubkey) orelse return;
+    const source_index = epoch_cache.pubkey_to_index.get(source_pubkey) orelse return;
+    const target_index = epoch_cache.pubkey_to_index.get(target_pubkey) orelse return;
 
     if (try isValidSwitchToCompoundRequest(fork, epoch_cache, state, consolidation)) {
         try switchToCompoundingValidator(fork, state, source_index);
@@ -124,8 +124,8 @@ fn isValidSwitchToCompoundRequest(
     consolidation: *const ConsolidationRequest,
 ) !bool {
     // this check is mainly to make the compiler happy, pubkey is checked by the consumer already
-    const source_index = epoch_cache.pubkey_to_index.get(&consolidation.source_pubkey) orelse return false;
-    const target_index = epoch_cache.pubkey_to_index.get(&consolidation.target_pubkey) orelse return false;
+    const source_index = epoch_cache.pubkey_to_index.get(consolidation.source_pubkey) orelse return false;
+    const target_index = epoch_cache.pubkey_to_index.get(consolidation.target_pubkey) orelse return false;
 
     // Switch to compounding requires source and target be equal
     if (source_index != target_index) {

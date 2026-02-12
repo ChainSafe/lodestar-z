@@ -22,6 +22,10 @@
             .url = "git+https://github.com/chainsafe/zig-yaml#e0e5962579e990a66c21424416c7ac092b20b772",
             .hash = "zig_yaml-0.1.0-C1161m2NAgDhth5OvjG1o1UNKcdo-XNfO82m10J1g4Cl",
         },
+        .zapi = .{
+            .url = "git+https://github.com/chainsafe/zapi#cf013457cdf0612a62a6d008d65505ff79e85596",
+            .hash = "napi_z-0.1.0-iqJb7-4oAgBkIQFWFEDazD0-G9NRBQZaEY0fwTB7Aqbu",
+        },
         .zbench = .{
             .url = "git+https://github.com/hendriknielaender/zBench#d8c7dd485306b88b757d52005614ebcb0a336942",
             .hash = "zbench-0.10.0-YTdc714iAQDO4lTHMnIljYHPZ5v_sNTsw75vAmO1pyT-",

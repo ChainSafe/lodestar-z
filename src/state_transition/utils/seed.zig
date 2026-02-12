@@ -13,21 +13,28 @@ const MIN_SEED_LOOKAHEAD = preset.MIN_SEED_LOOKAHEAD;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const EffectiveBalanceIncrements = @import("../cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
 const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
-const ComputeIndexUtils = @import("./committee_indices.zig").ComputeIndexUtils(ValidatorIndex);
+const ComputeIndexUtils = @import("./committee_indices.zig");
 const computeProposerIndex = ComputeIndexUtils.computeProposerIndex;
 const computeSyncCommitteeIndices = ComputeIndexUtils.computeSyncCommitteeIndices;
 const computeEpochAtSlot = @import("./epoch.zig").computeEpochAtSlot;
 const ByteCount = @import("./committee_indices.zig").ByteCount;
 
-pub fn computeProposers(comptime fork_seq: ForkSeq, allocator: Allocator, epoch_seed: [32]u8, epoch: Epoch, active_indices: []const ValidatorIndex, effective_balance_increments: EffectiveBalanceIncrements, out: []ValidatorIndex) !void {
+pub fn computeProposers(
+    comptime fork_seq: ForkSeq,
+    allocator: Allocator,
+    epoch_seed: [32]u8,
+    epoch: Epoch,
+    active_indices: []const ValidatorIndex,
+    effective_balance_increments: EffectiveBalanceIncrements,
+    out: []ValidatorIndex,
+) !void {
     const start_slot = computeStartSlotAtEpoch(epoch);
     for (start_slot..start_slot + preset.SLOTS_PER_EPOCH, 0..) |slot, i| {
-        var slot_buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &slot_buf, slot, .little);
-        // epoch_seed is 32 bytes, slot_buf is 8 bytes
+        // epoch_seed is 32 bytes, slot is 8 bytes
         var buffer: [40]u8 = [_]u8{0} ** (32 + 8);
-        std.mem.copyForwards(u8, buffer[0..32], epoch_seed[0..]);
-        std.mem.copyForwards(u8, buffer[32..], slot_buf[0..]);
+        @memcpy(buffer[0..32], epoch_seed[0..]);
+        std.mem.writeInt(u64, buffer[32..][0..8], slot, .little);
+
         var seed: [32]u8 = undefined;
         Sha256.hash(buffer[0..], &seed, .{});
 

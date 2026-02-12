@@ -12,7 +12,7 @@ const SyncPeriod = types.primitive.SyncPeriod.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const CommitteeIndex = types.primitive.CommitteeIndex.Type;
 const BeaconConfig = @import("config").BeaconConfig;
-const PubkeyIndexMap = @import("../utils/pubkey_index_map.zig").PubkeyIndexMap(ValidatorIndex);
+const PubkeyIndexMap = @import("./pubkey_cache.zig").PubkeyIndexMap;
 const Index2PubkeyCache = @import("./pubkey_cache.zig").Index2PubkeyCache;
 const EpochShuffling = @import("../utils//epoch_shuffling.zig").EpochShuffling;
 const EpochShufflingRc = @import("../utils/epoch_shuffling.zig").EpochShufflingRc;
@@ -25,7 +25,7 @@ const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").Epoc
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
 const computeActivationExitEpoch = @import("../utils/epoch.zig").computeActivationExitEpoch;
-const getEffectiveBalanceIncrementsWithLen = @import("./effective_balance_increments.zig").getEffectiveBalanceIncrementsWithLen;
+const effectiveBalanceIncrementsInit = @import("./effective_balance_increments.zig").effectiveBalanceIncrementsInit;
 const getTotalSlashingsByIncrement = @import("../epoch/process_slashings.zig").getTotalSlashingsByIncrement;
 const computeEpochShuffling = @import("../utils/epoch_shuffling.zig").computeEpochShuffling;
 const getSeed = @import("../utils/seed.zig").getSeed;
@@ -36,6 +36,7 @@ const computeSyncParticipantReward = @import("../utils/sync_committee.zig").comp
 const computeBaseRewardPerIncrement = @import("../utils/sync_committee.zig").computeBaseRewardPerIncrement;
 const computeSyncPeriodAtEpoch = @import("../utils/epoch.zig").computeSyncPeriodAtEpoch;
 const isAggregatorFromCommitteeLength = @import("../utils/aggregator.zig").isAggregatorFromCommitteeLength;
+const calculateShufflingDecisionRoot = @import("../utils/epoch_shuffling.zig").calculateShufflingDecisionRoot;
 
 const sumTargetUnslashedBalanceIncrements = @import("../utils/target_unslashed_balance.zig").sumTargetUnslashedBalanceIncrements;
 
@@ -93,10 +94,10 @@ pub const EpochCache = struct {
     /// is null pre-Fulu.
     proposers_next_epoch: ?[preset.SLOTS_PER_EPOCH]ValidatorIndex,
 
-    // TODO: the below is not needed if we compute the next epoch shuffling eagerly
-    // previous_decision_root
-    // current_decision_root
-    // next_decision_root
+    /// Epoch decision roots to look up correct shuffling from the Shuffling Cache
+    previous_decision_root: [32]u8,
+    current_decision_root: [32]u8,
+    next_decision_root: [32]u8,
 
     // EpochCache does not take ownership of EpochShuffling, it is shared across EpochCache instances
     previous_shuffling: *EpochShufflingRc,
@@ -109,7 +110,7 @@ pub const EpochCache = struct {
     // next_active_indices
 
     // EpochCache does not take ownership of EffectiveBalanceIncrements, it is shared across EpochCache instances
-    effective_balance_increment: *EffectiveBalanceIncrementsRc,
+    effective_balance_increments: *EffectiveBalanceIncrementsRc,
 
     total_slashings_by_increment: u64,
 
@@ -168,7 +169,7 @@ pub const EpochCache = struct {
             try syncPubkeys(validators, pubkey_to_index, index_to_pubkey);
         }
 
-        const effective_balance_increment = try getEffectiveBalanceIncrementsWithLen(allocator, validator_count);
+        const effective_balance_increments = try effectiveBalanceIncrementsInit(allocator, validator_count);
         const state_fork_seq = state.forkSeq();
         const total_slashings_by_increment = switch (state_fork_seq) {
             inline else => |f| try getTotalSlashingsByIncrement(f, state.castToFork(f)),
@@ -187,7 +188,7 @@ pub const EpochCache = struct {
             const validator = validators[i];
 
             // Note: Not usable for fork-choice balances since in-active validators are not zero'ed
-            effective_balance_increment.items[i] = @intCast(@divFloor(validator.effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT));
+            effective_balance_increments.items[i] = @intCast(@divFloor(validator.effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT));
 
             if (isActiveValidator(&validator, previous_epoch)) {
                 try previous_active_indices_array_list.append(i);
@@ -195,7 +196,7 @@ pub const EpochCache = struct {
 
             if (isActiveValidator(&validator, current_epoch)) {
                 try current_active_indices_array_list.append(i);
-                total_active_balance_increments += effective_balance_increment.items[i];
+                total_active_balance_increments += effective_balance_increments.items[i];
             }
 
             if (isActiveValidator(&validator, next_epoch)) {
@@ -241,6 +242,7 @@ pub const EpochCache = struct {
             inline else => |f| try getSeed(f, state.castToFork(f), current_epoch, c.DOMAIN_BEACON_PROPOSER, &current_proposer_seed),
         }
         var proposers = [_]ValidatorIndex{0} ** preset.SLOTS_PER_EPOCH;
+        var next_proposers: ?[preset.SLOTS_PER_EPOCH]ValidatorIndex = null;
         if (current_shuffling.active_indices.len > 0) {
             switch (fork_seq) {
                 inline else => |f| try computeProposers(
@@ -249,9 +251,21 @@ pub const EpochCache = struct {
                     current_proposer_seed,
                     current_epoch,
                     current_shuffling.active_indices,
-                    effective_balance_increment,
+                    effective_balance_increments,
                     &proposers,
                 ),
+            }
+            if (fork_seq.gte(.fulu)) {
+                // Post-Fulu, EIP-7917 introduced the `proposer_lookahead`
+                switch (fork_seq) {
+                    inline else => |f| {
+                        next_proposers = undefined;
+                        var proposer_lookahead = try state.castToFork(f).proposerLookahead();
+                        for (0..preset.SLOTS_PER_EPOCH) |i| {
+                            next_proposers.?[i] = @intCast(try proposer_lookahead.get(preset.SLOTS_PER_EPOCH + i));
+                        }
+                    },
+                }
             }
         }
 
@@ -324,6 +338,11 @@ pub const EpochCache = struct {
             current_target_unslashed_balance_increments = sumTargetUnslashedBalanceIncrements(current_epoch_participation, current_epoch, validators);
         }
 
+        // Calculate decision roots for shuffling cache lookups
+        const previous_decision_root = try calculateShufflingDecisionRoot(state, previous_epoch);
+        const current_decision_root = try calculateShufflingDecisionRoot(state, current_epoch);
+        const next_decision_root = try calculateShufflingDecisionRoot(state, next_epoch);
+
         const epoch_cache_ptr = try allocator.create(EpochCache);
         errdefer allocator.destroy(epoch_cache_ptr);
 
@@ -335,11 +354,14 @@ pub const EpochCache = struct {
             .proposers = proposers,
             // On first epoch, set to null to prevent unnecessary work since this is only used for metrics
             .proposers_prev_epoch = null,
-            .proposers_next_epoch = null,
+            .proposers_next_epoch = next_proposers,
+            .previous_decision_root = previous_decision_root,
+            .current_decision_root = current_decision_root,
+            .next_decision_root = next_decision_root,
             .previous_shuffling = try EpochShufflingRc.init(allocator, previous_shuffling),
             .current_shuffling = try EpochShufflingRc.init(allocator, current_shuffling),
             .next_shuffling = try EpochShufflingRc.init(allocator, next_shuffling),
-            .effective_balance_increment = try EffectiveBalanceIncrementsRc.init(allocator, effective_balance_increment),
+            .effective_balance_increments = try EffectiveBalanceIncrementsRc.init(allocator, effective_balance_increments),
             .total_slashings_by_increment = total_slashings_by_increment,
             .sync_participant_reward = sync_participant_reward,
             .sync_proposer_reward = sync_proposer_reward,
@@ -369,7 +391,7 @@ pub const EpochCache = struct {
         self.next_shuffling.release();
 
         // unref the effective balance increments
-        self.effective_balance_increment.release();
+        self.effective_balance_increments.release();
 
         // unref the sync committee caches
         self.current_sync_committee_indexed.release();
@@ -393,7 +415,7 @@ pub const EpochCache = struct {
             .current_shuffling = self.current_shuffling.acquire(),
             .next_shuffling = self.next_shuffling.acquire(),
             // reuse the same instances, increase reference count, cloned only when necessary before an epoch transition
-            .effective_balance_increment = self.effective_balance_increment.acquire(),
+            .effective_balance_increments = self.effective_balance_increments.acquire(),
             .total_slashings_by_increment = self.total_slashings_by_increment,
             // Basic types (numbers) cloned implicitly
             .sync_participant_reward = self.sync_participant_reward,
@@ -440,7 +462,7 @@ pub const EpochCache = struct {
 
     /// Utility method to return SyncCommitteeCache so that consumers don't have to deal with ".get()" call
     pub fn getEffectiveBalanceIncrements(self: *const EpochCache) EffectiveBalanceIncrements {
-        return self.effective_balance_increment.get();
+        return self.effective_balance_increments.get();
     }
 
     pub fn afterProcessEpoch(self: *EpochCache, state: *AnyBeaconState, epoch_transition_cache: *const EpochTransitionCache) !void {
@@ -517,7 +539,7 @@ pub const EpochCache = struct {
                         upcoming_proposer_seed,
                         self.epoch,
                         self.current_shuffling.get().active_indices,
-                        self.effective_balance_increment.get(),
+                        self.effective_balance_increments.get(),
                         &self.proposers,
                     );
                 }
@@ -527,11 +549,11 @@ pub const EpochCache = struct {
 
     pub fn beforeEpochTransition(self: *EpochCache) !void {
         // Clone (copy) before being mutated in processEffectiveBalanceUpdates
-        var effective_balance_increment = try EffectiveBalanceIncrements.initCapacity(self.allocator, self.effective_balance_increment.get().items.len);
-        try effective_balance_increment.appendSlice(self.effective_balance_increment.get().items);
+        var effective_balance_increments = try EffectiveBalanceIncrements.initCapacity(self.allocator, self.effective_balance_increments.get().items.len);
+        try effective_balance_increments.appendSlice(self.effective_balance_increments.get().items);
         // unref the previous effective balance increment
-        self.effective_balance_increment.release();
-        self.effective_balance_increment = try EffectiveBalanceIncrementsRc.init(self.allocator, effective_balance_increment);
+        self.effective_balance_increments.release();
+        self.effective_balance_increments = try EffectiveBalanceIncrementsRc.init(self.allocator, effective_balance_increments);
     }
 
     /// Consumer borrows the returned slice
@@ -679,20 +701,16 @@ pub const EpochCache = struct {
         return isAggregatorFromCommitteeLength(committee.length, slot_signature);
     }
 
-    pub fn getPubkey(self: *const EpochCache, index: ValidatorIndex) ?types.primitive.BLSPubkey {
-        return if (index < self.index_to_pubkey.items.len) self.index_to_pubkey[index] else null;
-    }
-
     pub fn getValidatorIndex(self: *const EpochCache, pubkey: *const types.primitive.BLSPubkey.Type) ?ValidatorIndex {
-        return self.pubkey_to_index.get(pubkey[0..]);
+        return self.pubkey_to_index.get(pubkey.*);
     }
 
     /// Sets `index` at `PublicKey` within the index to pubkey map and allocates and puts a new `PublicKey` at `index` within the set of validators.
-    pub fn addPubkey(self: *EpochCache, index: ValidatorIndex, pubkey: types.primitive.BLSPubkey.Type) !void {
+    pub fn addPubkey(self: *EpochCache, index: ValidatorIndex, pubkey: *const types.primitive.BLSPubkey.Type) !void {
         std.debug.assert(index <= self.index_to_pubkey.items.len);
-        try self.pubkey_to_index.set(pubkey[0..], index);
+        try self.pubkey_to_index.put(pubkey.*, index);
         // this is deinit() by application
-        const pk = try blst.PublicKey.uncompress(&pubkey);
+        const pk = try blst.PublicKey.uncompress(pubkey);
         if (index == self.index_to_pubkey.items.len) {
             try self.index_to_pubkey.append(pk);
             return;
@@ -735,10 +753,12 @@ pub const EpochCache = struct {
 
     pub fn getIndexedSyncCommitteeAtEpoch(self: *const EpochCache, epoch: Epoch) !SyncCommitteeCacheAllForks {
         const sync_period = computeSyncPeriodAtEpoch(epoch);
-        switch (sync_period) {
-            self.sync_period => return self.current_sync_committee_indexed.get(),
-            self.sync_period + 1 => return self.next_sync_committee_indexed.get(),
-            else => return error.SyncCommitteeNotFound,
+        if (sync_period == self.sync_period) {
+            return self.current_sync_committee_indexed.get();
+        } else if (sync_period == self.sync_period + 1) {
+            return self.next_sync_committee_indexed.get();
+        } else {
+            return error.SyncCommitteeNotFound;
         }
     }
 
@@ -763,14 +783,15 @@ pub const EpochCache = struct {
 
     /// This is different from typescript version: only allocate new EffectiveBalanceIncrements if needed
     pub fn effectiveBalanceIncrementsSet(self: *EpochCache, allocator: Allocator, index: usize, effective_balance: u64) !void {
-        var effective_balance_increments = self.effective_balance_increment.get();
-        if (index >= effective_balance_increments.items.len) {
-            // Clone and extend effectiveBalanceIncrements
-            effective_balance_increments = try getEffectiveBalanceIncrementsWithLen(self.allocator, index + 1);
-            self.effective_balance_increment.release();
-            self.effective_balance_increment = try EffectiveBalanceIncrementsRc.init(allocator, effective_balance_increments);
+        if (index >= self.effective_balance_increments.get().items.len) {
+            // Clone and extend effectiveBalanceIncrements, preserving existing data
+            const old = self.effective_balance_increments.get();
+            var new_increments = try effectiveBalanceIncrementsInit(self.allocator, index + 1);
+            @memcpy(new_increments.items[0..old.items.len], old.items);
+            self.effective_balance_increments.release();
+            self.effective_balance_increments = try EffectiveBalanceIncrementsRc.init(allocator, new_increments);
         }
-        self.effective_balance_increment.get().items[index] = @intCast(@divFloor(effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT));
+        self.effective_balance_increments.get().items[index] = @intCast(@divFloor(effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT));
     }
 
     pub fn isPostElectra(self: *const EpochCache) bool {

@@ -4,12 +4,22 @@ const expect = std.testing.expect;
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const Node = @import("persistent_merkle_tree").Node;
+const Gindex = @import("persistent_merkle_tree").Gindex;
+const createSingleProof = @import("persistent_merkle_tree").proof.createSingleProof;
+const SingleProof = @import("persistent_merkle_tree").proof.SingleProof;
 const isBasicType = @import("ssz").isBasicType;
 const BaseTreeView = @import("ssz").BaseTreeView;
 const CloneOpts = @import("ssz").BaseTreeView.CloneOpts;
 const ct = @import("consensus_types");
+const constants = @import("constants");
 const BeaconState = @import("./beacon_state.zig").BeaconState;
 const AnyExecutionPayloadHeader = @import("./any_execution_payload.zig").AnyExecutionPayloadHeader;
+
+pub fn readSlotFromAnyBeaconStateBytes(bytes: []const u8) u64 {
+    // slot is at offset 40: 8 (genesisTime) + 32 (genesisValidatorsRoot)
+    std.debug.assert(bytes.len >= 48);
+    return std.mem.readInt(u64, bytes[40..][0..8], .little);
+}
 
 /// wrapper for all AnyBeaconState types across forks so that we don't have to do switch/case for all methods
 pub const AnyBeaconState = union(ForkSeq) {
@@ -158,6 +168,29 @@ pub const AnyBeaconState = union(ForkSeq) {
         switch (self.*) {
             inline else => |*state| try state.commit(),
         }
+    }
+
+    /// Get a Merkle proof for a node at the given generalized index.
+    pub fn getSingleProof(self: *AnyBeaconState, allocator: Allocator, gindex_value: u64) !SingleProof {
+        try self.commit();
+        const gindex: Gindex = @enumFromInt(gindex_value);
+        return switch (self.*) {
+            inline else => |*state| try createSingleProof(
+                allocator,
+                state.base_view.pool,
+                state.base_view.data.root,
+                gindex,
+            ),
+        };
+    }
+
+    /// Get a Merkle proof for the finalized root in the beacon state.
+    pub fn getFinalizedRootProof(self: *AnyBeaconState, allocator: Allocator) !SingleProof {
+        const gindex_value: u64 = switch (self.*) {
+            .electra, .fulu => constants.FINALIZED_ROOT_GINDEX_ELECTRA,
+            else => constants.FINALIZED_ROOT_GINDEX,
+        };
+        return self.getSingleProof(allocator, gindex_value);
     }
 
     pub fn hashTreeRoot(self: *AnyBeaconState) !*const [32]u8 {

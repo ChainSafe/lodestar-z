@@ -1,3 +1,4 @@
+const std = @import("std");
 const ForkSeq = @import("config").ForkSeq;
 const BeaconState = @import("fork_types").BeaconState;
 const types = @import("consensus_types");
@@ -7,7 +8,6 @@ const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").Epoc
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const getBlockRoot = @import("../utils/block_root.zig").getBlockRoot;
-const Node = @import("persistent_merkle_tree").Node;
 
 /// Update justified and finalized checkpoints depending on network participation.
 ///
@@ -101,8 +101,8 @@ pub fn weighJustificationAndFinalization(
     }
 }
 
-const std = @import("std");
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Node = @import("persistent_merkle_tree").Node;
 
 test "processJustificationAndFinalization - sanity" {
     const allocator = std.testing.allocator;

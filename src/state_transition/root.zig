@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 
 pub const stateTransition = @import("state_transition.zig").stateTransition;
+pub const processSlots = @import("state_transition.zig").processSlots;
 
 pub const metrics = @import("metrics.zig");
 
@@ -14,15 +15,18 @@ pub const EpochCacheImmutableData = @import("./cache/epoch_cache.zig").EpochCach
 pub const EpochCacheRc = @import("./cache/epoch_cache.zig").EpochCacheRc;
 pub const EpochCache = @import("./cache/epoch_cache.zig").EpochCache;
 
-pub const PubkeyIndexMap = @import("./utils/pubkey_index_map.zig").PubkeyIndexMap;
 pub const shuffle = @import("./utils/shuffle.zig");
 pub const committee_indices = @import("./utils/committee_indices.zig");
+pub const PubkeyIndexMap = @import("./cache/pubkey_cache.zig").PubkeyIndexMap;
 pub const Index2PubkeyCache = @import("./cache/pubkey_cache.zig").Index2PubkeyCache;
 pub const syncPubkeys = @import("./cache/pubkey_cache.zig").syncPubkeys;
+pub const syncPubkeysParallel = @import("./cache/pubkey_cache.zig").syncPubkeysParallel;
 
 pub const EpochTransitionCache = @import("./cache/epoch_transition_cache.zig").EpochTransitionCache;
 pub const processEpoch = @import("./epoch/process_epoch.zig").processEpoch;
 pub const processJustificationAndFinalization = @import("./epoch/process_justification_and_finalization.zig").processJustificationAndFinalization;
+pub const computeUnrealizedCheckpoints = @import("./utils/unrealized_checkpoints.zig").computeUnrealizedCheckpoints;
+pub const UnrealizedCheckpoints = @import("./utils/unrealized_checkpoints.zig").UnrealizedCheckpoints;
 pub const processInactivityUpdates = @import("./epoch/process_inactivity_updates.zig").processInactivityUpdates;
 pub const processRegistryUpdates = @import("./epoch/process_registry_updates.zig").processRegistryUpdates;
 pub const processSlashings = @import("./epoch/process_slashings.zig").processSlashings;
@@ -64,15 +68,25 @@ pub const processAttesterSlashing = @import("./block/process_attester_slashing.z
 pub const processDeposit = @import("./block/process_deposit.zig").processDeposit;
 pub const processProposerSlashing = @import("./block/process_proposer_slashing.zig").processProposerSlashing;
 pub const processVoluntaryExit = @import("./block/process_voluntary_exit.zig").processVoluntaryExit;
+pub const isValidVoluntaryExit = @import("./block/process_voluntary_exit.zig").isValidVoluntaryExit;
+pub const getVoluntaryExitValidity = @import("./block/process_voluntary_exit.zig").getVoluntaryExitValidity;
+pub const VoluntaryExitValidity = @import("./block/process_voluntary_exit.zig").VoluntaryExitValidity;
 pub const processBlsToExecutionChange = @import("./block/process_bls_to_execution_change.zig").processBlsToExecutionChange;
 pub const processDepositRequest = @import("./block/process_deposit_request.zig").processDepositRequest;
 pub const processWithdrawalRequest = @import("./block/process_withdrawal_request.zig").processWithdrawalRequest;
 pub const processConsolidationRequest = @import("./block/process_consolidation_request.zig").processConsolidationRequest;
 
 // utils
+pub const validator_status = @import("./utils/validator_status.zig");
+pub const ValidatorStatus = validator_status.ValidatorStatus;
+pub const getValidatorStatus = validator_status.getValidatorStatus;
 pub const getBlockRootAtSlot = @import("./utils/block_root.zig").getBlockRootAtSlot;
 pub const computeStartSlotAtEpoch = @import("./utils/epoch.zig").computeStartSlotAtEpoch;
 pub const deinitStateTransition = @import("./state_transition.zig").deinitStateTransition;
+pub const isExecutionEnabled = @import("./utils/execution.zig").isExecutionEnabled;
+pub const isMergeTransitionComplete = @import("./utils/execution.zig").isMergeTransitionComplete;
+pub const getRandaoMix = @import("./utils/seed.zig").getRandaoMix;
+pub const getEffectiveBalanceIncrementsZeroInactive = @import("./utils/balance.zig").getEffectiveBalanceIncrementsZeroInactive;
 
 pub const WithdrawalsResult = @import("./block/process_withdrawals.zig").WithdrawalsResult;
 
@@ -84,6 +98,7 @@ pub const state_transition = @import("./state_transition.zig");
 pub const BlockExternalData = state_transition.BlockExternalData;
 pub const preset = @import("preset").preset;
 const EpochShuffling = @import("./utils/epoch_shuffling.zig");
+pub const calculateShufflingDecisionRoot = EpochShuffling.calculateShufflingDecisionRoot;
 pub const processProposerLookahead = @import("./epoch/process_proposer_lookahead.zig").processProposerLookahead;
 
 test {

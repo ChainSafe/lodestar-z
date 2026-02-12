@@ -18,7 +18,7 @@ const Node = @import("persistent_merkle_tree").Node;
 const state_transition = @import("../root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
-const PubkeyIndexMap = state_transition.PubkeyIndexMap(ValidatorIndex);
+const PubkeyIndexMap = state_transition.PubkeyIndexMap;
 const Index2PubkeyCache = state_transition.Index2PubkeyCache;
 const EffectiveBalanceIncrements = state_transition.EffectiveBalanceIncrements;
 const getNextSyncCommitteeIndices = state_transition.getNextSyncCommitteeIndices;
@@ -185,14 +185,16 @@ pub const TestCachedBeaconState = struct {
     }
 
     pub fn initFromState(allocator: Allocator, pool: *Node.Pool, state: *AnyBeaconState, fork: ForkSeq, fork_epoch: Epoch) !TestCachedBeaconState {
-        const pubkey_index_map = try PubkeyIndexMap.init(allocator);
-        errdefer pubkey_index_map.deinit();
-        const index_pubkey_cache = try allocator.create(Index2PubkeyCache);
+        const pubkey_index_map = try allocator.create(PubkeyIndexMap);
+        pubkey_index_map.* = PubkeyIndexMap.init(allocator);
         errdefer {
-            index_pubkey_cache.deinit();
-            allocator.destroy(index_pubkey_cache);
+            pubkey_index_map.deinit();
+            allocator.destroy(pubkey_index_map);
         }
+        const index_pubkey_cache = try allocator.create(Index2PubkeyCache);
+        errdefer allocator.destroy(index_pubkey_cache);
         index_pubkey_cache.* = Index2PubkeyCache.init(allocator);
+        errdefer index_pubkey_cache.deinit();
         const chain_config = getConfig(active_chain_config, fork, fork_epoch);
         const config = try allocator.create(BeaconConfig);
         errdefer allocator.destroy(config);
@@ -238,6 +240,7 @@ pub const TestCachedBeaconState = struct {
         self.cached_state.deinit();
         self.allocator.destroy(self.cached_state);
         self.pubkey_index_map.deinit();
+        self.allocator.destroy(self.pubkey_index_map);
         self.index_pubkey_cache.deinit();
         self.epoch_transition_cache.deinit();
         @import("../state_transition.zig").deinitStateTransition();

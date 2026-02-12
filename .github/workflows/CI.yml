@@ -14,6 +14,7 @@ concurrency:
 
 env:
   ZIG_VERSION: "0.14.1"
+  NODE_VERSION: "24"
 
 jobs:
   zbuild:
@@ -223,3 +224,42 @@ jobs:
       - name: Run spec tests - mainnet
         run: |
           zig build test:spec_tests -Dpreset=mainnet
+
+  bindings-test:
+    name: bindings - test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Install dependencies
+        run: |
+          pnpm install
+      - name: Run bindings formatter
+        run: |
+          pnpm biome ci
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Build bindings
+        run: |
+          zig build build-lib:bindings
+      - name: Restore era files cache
+        uses: actions/cache@v4
+        with:
+          path: fixtures/era
+          key: era-files-${{ hashFiles('build.zig') }} # downloaded era files defined in build.zig
+      - name: Download era files
+        run: |
+          zig build run:download_era_files
+      - name: Test bindings
+        run: |
+          pnpm test

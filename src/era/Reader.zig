@@ -95,7 +95,7 @@ pub fn readState(self: Reader, allocator: std.mem.Allocator, era_number: ?u64) !
     const serialized = try self.readSerializedState(allocator, era_number);
     defer allocator.free(serialized);
 
-    const state_slot = era.readSlotFromBeaconStateBytes(serialized);
+    const state_slot = fork_types.readSlotFromAnyBeaconStateBytes(serialized);
     const state_fork = self.config.forkSeq(state_slot);
 
     return try fork_types.AnyBeaconState.deserialize(allocator, self.pool, state_fork, serialized);
