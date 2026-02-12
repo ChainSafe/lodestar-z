@@ -41,7 +41,10 @@ pub fn processAttesterSlashing(
 
     var intersecting_indices = try std.ArrayList(types.primitive.ValidatorIndex.Type).initCapacity(
         allocator,
-        attester_slashing.attestation_1.attesting_indices.items.len,
+        @min(
+            attester_slashing.attestation_1.attesting_indices.items.len,
+            attester_slashing.attestation_2.attesting_indices.items.len,
+        ),
     );
     try findAttesterSlashableIndices(attester_slashing, &intersecting_indices);
     defer intersecting_indices.deinit();
