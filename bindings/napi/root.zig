@@ -11,6 +11,7 @@ comptime {
 }
 
 pub fn deinit(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
+    blst.deinit();
     pool.deinit();
     pubkeys.deinit();
     config.deinit();

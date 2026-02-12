@@ -1,9 +1,9 @@
 const std = @import("std");
 const napi = @import("zapi:napi");
 const blst = @import("blst");
+const blst_bindings = @import("./blst.zig");
 const PubkeyIndexMap = @import("state_transition").PubkeyIndexMap;
 const Index2PubkeyCache = @import("state_transition").Index2PubkeyCache;
-const PublicKey_ctor = @import("./blst.zig").PublicKey_ctor;
 
 /// Pool uses page allocator for internal allocations.
 /// It's recommended to never reallocate the pubkey2index after initialization.
@@ -177,7 +177,7 @@ pub fn index2pubkeyGet(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
         return env.getUndefined();
     }
 
-    const out = try env.newInstance(PublicKey_ctor, .{});
+    const out = try blst_bindings.newPublicKeyInstance(env);
     const out_pubkey = try env.unwrap(blst.PublicKey, out);
     out_pubkey.* = index2pubkey.items[@intCast(index)];
     return out;

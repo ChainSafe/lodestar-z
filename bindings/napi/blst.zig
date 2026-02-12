@@ -20,6 +20,52 @@ const allocator = if (builtin.mode == .Debug)
 else
     std.heap.c_allocator;
 
+// Holds references to the constructors for PublicKey and Signature classes.
+var public_key_ctor_ref: ?napi.c.napi_ref = null;
+var signature_ctor_ref: ?napi.c.napi_ref = null;
+
+fn setRef(env: napi.Env, ctor: napi.Value, slot: *?napi.c.napi_ref) !void {
+    if (slot.*) |ref| {
+        try napi.status.check(napi.c.napi_delete_reference(env.env, ref));
+    }
+
+    var ref: napi.c.napi_ref = undefined;
+    try napi.status.check(napi.c.napi_create_reference(env.env, ctor.value, 1, &ref));
+    slot.* = ref;
+}
+
+fn getFromRef(env: napi.Env, slot: ?napi.c.napi_ref) !napi.Value {
+    const ref_ = slot orelse return error.RefNotInitialized;
+
+    var value: napi.c.napi_value = undefined;
+    try napi.status.check(napi.c.napi_get_reference_value(env.env, ref_, &value));
+    return .{
+        .env = env.env,
+        .value = value,
+    };
+}
+
+pub fn newPublicKeyInstance(env: napi.Env) !napi.Value {
+    const ctor = try getFromRef(env, public_key_ctor_ref);
+    return try env.newInstance(ctor, .{});
+}
+
+pub fn newSignatureInstance(env: napi.Env) !napi.Value {
+    const ctor = try getFromRef(env, signature_ctor_ref);
+    return try env.newInstance(ctor, .{});
+}
+
+pub fn deinit() void {
+    if (public_key_ctor_ref) |ref| {
+        napi.status.check(napi.c.napi_delete_reference(null, ref)) catch {};
+        public_key_ctor_ref = null;
+    }
+    if (signature_ctor_ref) |ref| {
+        napi.status.check(napi.c.napi_delete_reference(null, ref)) catch {};
+        signature_ctor_ref = null;
+    }
+}
+
 pub fn PublicKey_finalize(_: napi.Env, pk: *PublicKey, _: ?*anyopaque) void {
     allocator.destroy(pk);
 }
@@ -200,11 +246,7 @@ pub fn SecretKey_sign(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const sk = try env.unwrap(SecretKey, cb.this());
     const msg = try cb.arg(0).getTypedarrayInfo();
 
-    const global = try env.getGlobal();
-    const blst_obj = try global.getNamedProperty("blst");
-    const sig_ctor = try blst_obj.getNamedProperty("Signature");
-
-    const sig_value = try env.newInstance(sig_ctor, .{});
+    const sig_value = try newSignatureInstance(env);
     const sig = try env.unwrap(Signature, sig_value);
     sig.* = sk.sign(msg.data, DST, null);
 
@@ -215,11 +257,7 @@ pub fn SecretKey_sign(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 pub fn SecretKey_toPublicKey(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const sk = try env.unwrap(SecretKey, cb.this());
 
-    const global = try env.getGlobal();
-    const blst_obj = try global.getNamedProperty("blst");
-    const pk_ctor = try blst_obj.getNamedProperty("PublicKey");
-
-    const pk_value = try env.newInstance(pk_ctor, .{});
+    const pk_value = try newPublicKeyInstance(env);
     const pk = try env.unwrap(PublicKey, pk_value);
     pk.* = sk.toPublicKey();
 
@@ -413,11 +451,7 @@ pub fn blst_aggregateSignatures(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.V
     const agg_sig = AggregateSignature.aggregate(sigs, sigs_groupcheck) catch return error.AggregationFailed;
     const result_sig = agg_sig.toSignature();
 
-    const global = try env.getGlobal();
-    const blst_obj = try global.getNamedProperty("blst");
-    const sig_ctor = try blst_obj.getNamedProperty("Signature");
-
-    const sig_value = try env.newInstance(sig_ctor, .{});
+    const sig_value = try newSignatureInstance(env);
     const sig = try env.unwrap(Signature, sig_value);
     sig.* = result_sig;
 
@@ -429,7 +463,7 @@ pub fn blst_aggregateSignatures(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.V
 /// Arguments:
 /// 1) pks: PublicKey[]
 /// 2) pks_validate: bool
-pub fn blst_aggregatePublicKeys(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+pub fn blst_aggregatePublicKeys(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const pks_array = cb.arg(0);
     const pks_len = try pks_array.getArrayLength();
     const pks_validate = try cb.arg(1).getValueBool();
@@ -450,11 +484,7 @@ pub fn blst_aggregatePublicKeys(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.V
     const agg_pk = AggregatePublicKey.aggregate(pks, pks_validate) catch return error.AggregationFailed;
     const result_pk = agg_pk.toPublicKey();
 
-    const global = try env.getGlobal();
-    const blst_obj = try global.getNamedProperty("blst");
-    const pk_ctor = try blst_obj.getNamedProperty("PublicKey");
-
-    const pk_value = try env.newInstance(pk_ctor, .{});
+    const pk_value = try newPublicKeyInstance(env);
     const pk = try env.unwrap(PublicKey, pk_value);
     pk.* = result_pk;
 
@@ -465,7 +495,7 @@ pub fn blst_aggregatePublicKeys(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.V
 ///
 /// Arguments:
 /// 1) serializedPublicKeys: Uint8Array[] - array of serialized (96-bytes each) `PublicKey`s.
-pub fn blst_aggregateSerializedPublicKeys(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+pub fn blst_aggregateSerializedPublicKeys(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const pks_array = cb.arg(0);
     const pks_len = try pks_array.getArrayLength();
     const pks_validate = try cb.arg(1).getValueBool();
@@ -486,11 +516,7 @@ pub fn blst_aggregateSerializedPublicKeys(env: napi.Env, cb: napi.CallbackInfo(1
     const agg_pk = AggregatePublicKey.aggregate(pks, pks_validate) catch return error.AggregationFailed;
     const result_pk = agg_pk.toPublicKey();
 
-    const global = try env.getGlobal();
-    const blst_obj = try global.getNamedProperty("blst");
-    const pk_ctor = try blst_obj.getNamedProperty("PublicKey");
-
-    const pk_value = try env.newInstance(pk_ctor, .{});
+    const pk_value = try newPublicKeyInstance(env);
     const pk = try env.unwrap(PublicKey, pk_value);
     pk.* = result_pk;
 
@@ -552,6 +578,9 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         method(1, Signature_aggregate),
     });
 
+    try setRef(env, pk_ctor, &public_key_ctor_ref);
+    try setRef(env, sig_ctor, &signature_ctor_ref);
+
     try blst_obj.setNamedProperty("SecretKey", sk_ctor);
     try blst_obj.setNamedProperty("PublicKey", pk_ctor);
     try blst_obj.setNamedProperty("Signature", sig_ctor);
@@ -560,11 +589,8 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     try blst_obj.setNamedProperty("fastAggregateVerify", try env.createFunction("fastAggregateVerify", 4, blst_fastAggregateVerify, null));
     try blst_obj.setNamedProperty("verifyMultipleAggregateSignatures", try env.createFunction("verifyMultipleAggregateSignatures", 3, blst_verifyMultipleAggregateSignatures, null));
     try blst_obj.setNamedProperty("aggregateSignatures", try env.createFunction("aggregateSignatures", 2, blst_aggregateSignatures, null));
-    try blst_obj.setNamedProperty("aggregatePublicKeys", try env.createFunction("aggregatePublicKeys", 1, blst_aggregatePublicKeys, null));
-    try blst_obj.setNamedProperty("aggregateSerializedPublicKeys", try env.createFunction("aggregateSerializedPublicKeys", 1, blst_aggregateSerializedPublicKeys, null));
+    try blst_obj.setNamedProperty("aggregatePublicKeys", try env.createFunction("aggregatePublicKeys", 2, blst_aggregatePublicKeys, null));
+    try blst_obj.setNamedProperty("aggregateSerializedPublicKeys", try env.createFunction("aggregateSerializedPublicKeys", 2, blst_aggregateSerializedPublicKeys, null));
 
     try exports.setNamedProperty("blst", blst_obj);
-
-    const global = try env.getGlobal();
-    try global.setNamedProperty("blst", blst_obj);
 }
