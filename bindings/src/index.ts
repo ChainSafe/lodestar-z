@@ -58,6 +58,13 @@ interface CompactMultiProof {
   descriptor: Uint8Array;
 }
 
+interface TransitionOpts {
+  verifyStateRoot?: boolean;
+  verifyProposer?: boolean;
+  verifySignatures?: boolean;
+  transferCache?: boolean;
+}
+
 interface ProposerRewards {
   attestations: bigint;
   syncAggregate: bigint;
@@ -248,6 +255,8 @@ interface Blst {
   aggregateSerializedPublicKeys(serializedPublicKeys: Uint8Array[], pksValidate: boolean): PublicKey;
 }
 
+type ForkName = "phase0" | "altair" | "bellatrix" | "capella" | "deneb" | "electra" | "fulu";
+
 type Bindings = {
   pool: {
     ensureCapacity: (capacity: number) => void;
@@ -269,6 +278,19 @@ type Bindings = {
   shuffle: {
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
   };
+  stateTransition: {
+    stateTransition: (
+      preState: BeaconStateView,
+      signedBlockBytes: Uint8Array,
+      options?: TransitionOpts
+    ) => BeaconStateView;
+  };
+  computeProposerIndex: (
+    fork: ForkName,
+    effectiveBalanceIncrements: Uint16Array,
+    indices: Uint32Array,
+    seed: Uint8Array
+  ) => number;
   BeaconStateView: typeof BeaconStateView;
   blst: Blst;
   deinit: () => void;

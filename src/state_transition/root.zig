@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 
 pub const stateTransition = @import("state_transition.zig").stateTransition;
+pub const TransitionOpt = @import("state_transition.zig").TransitionOpt;
 pub const processSlots = @import("state_transition.zig").processSlots;
 
 pub const metrics = @import("metrics.zig");
@@ -82,6 +83,7 @@ pub const ValidatorStatus = validator_status.ValidatorStatus;
 pub const getValidatorStatus = validator_status.getValidatorStatus;
 pub const getBlockRootAtSlot = @import("./utils/block_root.zig").getBlockRootAtSlot;
 pub const computeStartSlotAtEpoch = @import("./utils/epoch.zig").computeStartSlotAtEpoch;
+pub const computeEpochAtSlot = @import("./utils/epoch.zig").computeEpochAtSlot;
 pub const deinitStateTransition = @import("./state_transition.zig").deinitStateTransition;
 pub const isExecutionEnabled = @import("./utils/execution.zig").isExecutionEnabled;
 pub const isMergeTransitionComplete = @import("./utils/execution.zig").isMergeTransitionComplete;

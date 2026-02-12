@@ -3,6 +3,7 @@ const pool = @import("./pool.zig");
 const pubkeys = @import("./pubkeys.zig");
 const config = @import("./config.zig");
 const shuffle = @import("./shuffle.zig");
+const state_transition = @import("./state_transition.zig");
 const BeaconStateView = @import("./BeaconStateView.zig");
 const blst = @import("./blst.zig");
 
@@ -23,6 +24,7 @@ fn register(env: napi.Env, exports: napi.Value) !void {
     try pubkeys.init();
     config.init();
 
+    try state_transition.register(env, exports);
     try pool.register(env, exports);
     try pubkeys.register(env, exports);
     try config.register(env, exports);
