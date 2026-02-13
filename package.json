@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "description": "Lodestar-z NAPI bindings",
   "files": [
-    "bindings/src/"
+    "bindings/src/",
+    "zig-out/lib/"
   ],
   "type": "module",
   "exports": {
