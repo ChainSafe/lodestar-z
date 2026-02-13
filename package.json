@@ -10,6 +10,7 @@
     ".": "./bindings/src/index.ts"
   },
   "scripts": {
+    "prepare": "zig build build-lib:bindings -Doptimize=ReleaseSafe",
     "lint": "biome check",
     "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts"
   },
