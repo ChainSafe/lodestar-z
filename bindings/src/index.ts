@@ -274,7 +274,20 @@ type Bindings = {
   deinit: () => void;
 };
 
-import {join} from "node:path";
-import {requireNapiLibrary} from "@chainsafe/zapi";
+import { join } from "node:path";
+import { requireNapiLibrary } from "@chainsafe/zapi";
 
-export default requireNapiLibrary(join(import.meta.dirname, "../..")) as Bindings;
+const bindings = requireNapiLibrary(join(import.meta.dirname, "../..")) as Bindings;
+export default bindings;
+
+export const {
+  PublicKey,
+  SecretKey,
+  Signature,
+  verify,
+  fastAggregateVerify,
+  verifyMultipleAggregateSignatures,
+  aggregateSignatures,
+  aggregatePublicKeys,
+  aggregateSerializedPublicKeys,
+} = bindings.blst;
