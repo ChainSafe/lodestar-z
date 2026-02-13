@@ -29,7 +29,7 @@ fn ProcessJustificationAndFinalizationBench(comptime fork: ForkSeq) type {
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
-            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
+            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.epoch_cache, cloned.state) catch unreachable;
             defer cache.deinit();
             state_transition.processJustificationAndFinalization(
                 fork,
@@ -50,13 +50,13 @@ fn ProcessInactivityUpdatesBench(comptime fork: ForkSeq) type {
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
-            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
+            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.epoch_cache, cloned.state) catch unreachable;
             defer cache.deinit();
             state_transition.processInactivityUpdates(
                 fork,
                 allocator,
                 cloned.config,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
                 &cache,
             ) catch unreachable;
@@ -74,13 +74,13 @@ fn ProcessRewardsAndPenaltiesBench(comptime fork: ForkSeq) type {
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
-            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
+            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.epoch_cache, cloned.state) catch unreachable;
             defer cache.deinit();
             state_transition.processRewardsAndPenalties(
                 fork,
                 allocator,
                 cloned.config,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
                 &cache,
                 null,
@@ -99,12 +99,12 @@ fn ProcessRegistryUpdatesBench(comptime fork: ForkSeq) type {
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
-            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
+            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.epoch_cache, cloned.state) catch unreachable;
             defer cache.deinit();
             state_transition.processRegistryUpdates(
                 fork,
                 cloned.config,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
                 &cache,
             ) catch unreachable;
@@ -122,12 +122,12 @@ fn ProcessSlashingsBench(comptime fork: ForkSeq) type {
                 cloned.deinit();
                 allocator.destroy(cloned);
             }
-            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
+            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.epoch_cache, cloned.state) catch unreachable;
             defer cache.deinit();
             _ = state_transition.processSlashings(
                 fork,
                 allocator,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
                 &cache,
                 true,
@@ -147,7 +147,7 @@ fn ProcessEth1DataResetBench(comptime fork: ForkSeq) type {
                 allocator.destroy(cloned);
             }
 
-            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
+            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.epoch_cache, cloned.state) catch unreachable;
             defer cache.deinit();
 
             state_transition.processEth1DataReset(
@@ -170,14 +170,14 @@ fn ProcessPendingDepositsBench(comptime fork: ForkSeq) type {
                 allocator.destroy(cloned);
             }
 
-            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
+            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.epoch_cache, cloned.state) catch unreachable;
             defer cache.deinit();
 
             state_transition.processPendingDeposits(
                 fork,
                 allocator,
                 cloned.config,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
                 &cache,
             ) catch unreachable;
@@ -196,12 +196,12 @@ fn ProcessPendingConsolidationsBench(comptime fork: ForkSeq) type {
                 allocator.destroy(cloned);
             }
 
-            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
+            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.epoch_cache, cloned.state) catch unreachable;
             defer cache.deinit();
 
             state_transition.processPendingConsolidations(
                 fork,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
                 &cache,
             ) catch unreachable;
@@ -220,13 +220,13 @@ fn ProcessEffectiveBalanceUpdatesBench(comptime fork: ForkSeq) type {
                 allocator.destroy(cloned);
             }
 
-            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
+            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.epoch_cache, cloned.state) catch unreachable;
             defer cache.deinit();
 
             _ = state_transition.processEffectiveBalanceUpdates(
                 fork,
                 allocator,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
                 &cache,
             ) catch unreachable;
@@ -245,12 +245,12 @@ fn ProcessSlashingsResetBench(comptime fork: ForkSeq) type {
                 allocator.destroy(cloned);
             }
 
-            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
+            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.epoch_cache, cloned.state) catch unreachable;
             defer cache.deinit();
 
             state_transition.processSlashingsReset(
                 fork,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
                 &cache,
             ) catch unreachable;
@@ -269,7 +269,7 @@ fn ProcessRandaoMixesResetBench(comptime fork: ForkSeq) type {
                 allocator.destroy(cloned);
             }
 
-            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
+            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.epoch_cache, cloned.state) catch unreachable;
             defer cache.deinit();
 
             state_transition.processRandaoMixesReset(
@@ -292,7 +292,7 @@ fn ProcessHistoricalSummariesUpdateBench(comptime fork: ForkSeq) type {
                 allocator.destroy(cloned);
             }
 
-            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
+            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.epoch_cache, cloned.state) catch unreachable;
             defer cache.deinit();
 
             state_transition.processHistoricalSummariesUpdate(
@@ -337,7 +337,7 @@ fn ProcessSyncCommitteeUpdatesBench(comptime fork: ForkSeq) type {
             state_transition.processSyncCommitteeUpdates(
                 fork,
                 allocator,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
             ) catch unreachable;
         }
@@ -355,13 +355,13 @@ fn ProcessProposerLookaheadBench(comptime fork: ForkSeq) type {
                 allocator.destroy(cloned);
             }
 
-            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
+            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.epoch_cache, cloned.state) catch unreachable;
             defer cache.deinit();
 
             state_transition.processProposerLookahead(
                 fork,
                 allocator,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
                 &cache,
             ) catch unreachable;
@@ -442,14 +442,14 @@ fn ProcessEpochBench(comptime fork: ForkSeq) type {
                 allocator.destroy(cloned);
             }
 
-            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
+            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.epoch_cache, cloned.state) catch unreachable;
             defer cache.deinit();
 
             state_transition.processEpoch(
                 fork,
                 allocator,
                 cloned.config,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
                 &cache,
             ) catch unreachable;
@@ -468,11 +468,11 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 allocator.destroy(cloned);
             }
 
-            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.getEpochCache(), cloned.state) catch unreachable;
+            var cache = EpochTransitionCache.init(allocator, cloned.config, cloned.epoch_cache, cloned.state) catch unreachable;
             defer cache.deinit();
 
             const fork_state = cloned.state.castToFork(fork);
-            const epoch_cache = cloned.getEpochCache();
+            const epoch_cache = cloned.epoch_cache;
 
             const epoch_start = std.time.nanoTimestamp();
 

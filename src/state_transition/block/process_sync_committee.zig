@@ -186,7 +186,7 @@ test "process sync aggregate - sanity" {
 
     const state = test_state.cached_state.state;
     const config = test_state.cached_state.config;
-    const epoch_cache = test_state.cached_state.getEpochCache();
+    const epoch_cache = test_state.cached_state.epoch_cache;
     const fork_state = state.castToFork(.electra);
     const previous_slot = try state.slot() - 1;
     const root_signed = try getBlockRootAtSlot(.electra, fork_state, previous_slot);

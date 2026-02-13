@@ -174,7 +174,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             var epoch_transition_cache = try EpochTransitionCache.init(
                 allocator,
                 cloned_state.config,
-                cloned_state.getEpochCache(),
+                cloned_state.epoch_cache,
                 cloned_state.state,
             );
             defer epoch_transition_cache.deinit();
@@ -183,7 +183,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 fork,
                 allocator,
                 cloned_state.config,
-                cloned_state.getEpochCache(),
+                cloned_state.epoch_cache,
                 cloned_state.state.castToFork(fork),
                 &epoch_transition_cache,
                 epoch_transition_cache.rewards,

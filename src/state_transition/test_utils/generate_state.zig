@@ -221,7 +221,7 @@ pub const TestCachedBeaconState = struct {
         epoch_transition_cache.* = try state_transition.EpochTransitionCache.init(
             allocator,
             cached_state.config,
-            cached_state.getEpochCache(),
+            cached_state.epoch_cache,
             cached_state.state,
         );
 

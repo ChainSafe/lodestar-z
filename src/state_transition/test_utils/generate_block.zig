@@ -20,7 +20,7 @@ pub fn generateElectraBlock(allocator: Allocator, cached_state: *CachedBeaconSta
     const att_slot: Slot = (try state.slot()) - 2;
     const att_index = 0;
     const att_block_root = try getBlockRootAtSlot(.electra, fork_state, att_slot);
-    const target_epoch = cached_state.getEpochCache().epoch;
+    const target_epoch = cached_state.epoch_cache.epoch;
     const target_epoch_slot = computeStartSlotAtEpoch(target_epoch);
     var source_checkpoint: types.phase0.Checkpoint.Type = undefined;
     try state.currentJustifiedCheckpoint(&source_checkpoint);
@@ -36,10 +36,10 @@ pub fn generateElectraBlock(allocator: Allocator, cached_state: *CachedBeaconSta
             .root = att_target_root.*,
         },
     };
-    const committee_count = try cached_state.getEpochCache().getCommitteeCountPerSlot(target_epoch);
+    const committee_count = try cached_state.epoch_cache.getCommitteeCountPerSlot(target_epoch);
     var total_committee_size: usize = 0;
     for (0..committee_count) |committee_index| {
-        const committee = try cached_state.getEpochCache().getBeaconCommittee(att_slot, committee_index);
+        const committee = try cached_state.epoch_cache.getBeaconCommittee(att_slot, committee_index);
         total_committee_size += committee.len;
     }
 

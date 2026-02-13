@@ -69,7 +69,7 @@ pub fn getIndexedAttestationSignatureSet(
 /// Consumer need to free the pubkeys arrays in each AggregatedSignatureSet in out
 /// TODO: consume in https://github.com/ChainSafe/state-transition-z/issues/72
 pub fn attestationsSignatureSets(allocator: Allocator, cached_state: *const CachedBeaconState, signed_block: *const AnySignedBeaconBlock, out: std.ArrayList(AggregatedSignatureSet)) !void {
-    const epoch_cache = cached_state.getEpochCache();
+    const epoch_cache = cached_state.epoch_cache;
     const attestation_items = signed_block.beaconBlock().beaconBlockBody().attestations().items();
 
     switch (attestation_items) {
