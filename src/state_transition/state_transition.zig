@@ -53,7 +53,7 @@ pub fn processSlots(
     _: EpochTransitionCacheOpts,
 ) !void {
     const config = cached_state.config;
-    const epoch_cache = cached_state.getEpochCache();
+    const epoch_cache = cached_state.epoch_cache;
     const state = cached_state.state;
 
     if (try state.slot() > slot) return error.outdatedSlot;
@@ -199,7 +199,7 @@ pub fn stateTransition(
     );
 
     const config = post_cached_state.config;
-    const post_epoch_cache = post_cached_state.getEpochCache();
+    const post_epoch_cache = post_cached_state.epoch_cache;
     const post_state = post_cached_state.state;
 
     // Verify proposer signature only

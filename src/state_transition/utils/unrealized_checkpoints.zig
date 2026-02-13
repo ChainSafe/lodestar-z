@@ -26,7 +26,7 @@ pub fn computeUnrealizedCheckpoints(cached_state: *CachedBeaconState, allocator:
         var epoch_transition_cache = try EpochTransitionCache.init(
             allocator,
             cloned_state.config,
-            cloned_state.getEpochCache(),
+            cloned_state.epoch_cache,
             cloned_state.state,
         );
         defer epoch_transition_cache.deinit();
@@ -53,7 +53,7 @@ pub fn computeUnrealizedCheckpoints(cached_state: *CachedBeaconState, allocator:
     }
 
     // For other forks, use the progressive balances inside EpochCache
-    const epoch_cache = cached_state.getEpochCache();
+    const epoch_cache = cached_state.epoch_cache;
     const current_epoch = epoch_cache.epoch;
 
     // same logic to processJustificationAndFinalization

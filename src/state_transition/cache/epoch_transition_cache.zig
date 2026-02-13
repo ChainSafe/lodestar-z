@@ -571,12 +571,12 @@ test "EpochTransitionCache - finalProcessEpoch" {
     const fulu_state = try upgradeStateToFulu(
         allocator,
         test_state.cached_state.config,
-        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.epoch_cache,
         try test_state.cached_state.state.tryCastToFork(.electra),
     );
     test_state.cached_state.state.* = .{ .fulu = fulu_state.inner };
 
-    const epoch_cache = test_state.cached_state.getEpochCache();
+    const epoch_cache = test_state.cached_state.epoch_cache;
     try epoch_cache.finalProcessEpoch(test_state.cached_state.state);
 }
 
@@ -595,7 +595,7 @@ test "EpochTransitionCache.beforeProcessEpoch" {
         var epoch_transition_cache = try EpochTransitionCache.init(
             allocator,
             test_state.cached_state.config,
-            test_state.cached_state.getEpochCache(),
+            test_state.cached_state.epoch_cache,
             test_state.cached_state.state,
         );
         defer epoch_transition_cache.deinit();

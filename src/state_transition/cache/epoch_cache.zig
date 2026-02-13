@@ -49,8 +49,6 @@ const ForkTypes = @import("fork_types").ForkTypes;
 
 const syncPubkeys = @import("./pubkey_cache.zig").syncPubkeys;
 
-const ReferenceCount = @import("../utils/reference_count.zig").ReferenceCount;
-
 pub const EpochCacheImmutableData = struct {
     config: *const BeaconConfig,
     pubkey_to_index: *PubkeyIndexMap,
@@ -66,11 +64,6 @@ const proposer_weight: f64 = @floatFromInt(c.PROPOSER_WEIGHT);
 const weight_denominator: f64 = @floatFromInt(c.WEIGHT_DENOMINATOR);
 
 pub const proposer_weight_factor: f64 = proposer_weight / (weight_denominator - proposer_weight);
-
-/// an EpochCache is shared by multiple CachedBeaconState instances
-/// a CachedBeaconState should increase the reference count of EpochCache when it is created
-/// and decrease the reference count when it is deinitialized
-pub const EpochCacheRc = ReferenceCount(*EpochCache);
 
 pub const EpochCache = struct {
     allocator: Allocator,
@@ -401,7 +394,7 @@ pub const EpochCache = struct {
 
     pub fn clone(self: *const EpochCache, allocator: Allocator) !*EpochCache {
         const epoch_cache = EpochCache{
-            .allocator = self.allocator,
+            .allocator = allocator,
             .config = self.config,
             // Common append-only structures shared with all states, no need to clone
             .pubkey_to_index = self.pubkey_to_index,
@@ -410,6 +403,9 @@ pub const EpochCache = struct {
             .proposers = self.proposers,
             .proposers_prev_epoch = self.proposers_prev_epoch,
             .proposers_next_epoch = self.proposers_next_epoch,
+            .previous_decision_root = self.previous_decision_root,
+            .current_decision_root = self.current_decision_root,
+            .next_decision_root = self.next_decision_root,
             // reuse the same instances, increase reference count
             .previous_shuffling = self.previous_shuffling.acquire(),
             .current_shuffling = self.current_shuffling.acquire(),

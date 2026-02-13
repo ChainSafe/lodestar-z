@@ -78,7 +78,7 @@ test "processProposerLookahead sanity" {
     const fulu_state = try upgradeStateToFulu(
         allocator,
         test_state.cached_state.config,
-        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.epoch_cache,
         try test_state.cached_state.state.tryCastToFork(.electra),
     );
     test_state.cached_state.state.* = .{ .fulu = fulu_state.inner };
@@ -86,7 +86,7 @@ test "processProposerLookahead sanity" {
     try processProposerLookahead(
         .fulu,
         allocator,
-        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.fulu),
         test_state.epoch_transition_cache,
     );

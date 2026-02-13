@@ -12,7 +12,6 @@ pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increm
 pub const buildSlashingsCacheFromStateIfNeeded = @import("./cache/slashings_cache.zig").buildFromStateIfNeeded;
 
 pub const EpochCacheImmutableData = @import("./cache/epoch_cache.zig").EpochCacheImmutableData;
-pub const EpochCacheRc = @import("./cache/epoch_cache.zig").EpochCacheRc;
 pub const EpochCache = @import("./cache/epoch_cache.zig").EpochCache;
 
 pub const shuffle = @import("./utils/shuffle.zig");

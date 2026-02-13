@@ -38,7 +38,7 @@ test "processSlashingsReset - sanity" {
 
     try processSlashingsReset(
         .electra,
-        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.electra),
         test_state.epoch_transition_cache,
     );
