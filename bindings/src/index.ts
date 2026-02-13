@@ -207,24 +207,24 @@ declare class BeaconStateView {
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
 }
 
-declare class PublicKey {
-  static fromBytes(bytes: Uint8Array): PublicKey;
+declare class _PublicKey {
+  static fromBytes(bytes: Uint8Array): _PublicKey;
   validate(): void;
   toBytes(): Uint8Array;
   toBytesCompress(): Uint8Array;
 }
 
-declare class SecretKey {
-  static fromBytes(bytes: Uint8Array): SecretKey;
-  static fromKeygen(ikm: Uint8Array, keyInfo?: Uint8Array): SecretKey;
-  sign(msg: Uint8Array): Signature;
-  toPublicKey(): PublicKey;
+declare class _SecretKey {
+  static fromBytes(bytes: Uint8Array): _SecretKey;
+  static fromKeygen(ikm: Uint8Array, keyInfo?: Uint8Array): _SecretKey;
+  sign(msg: Uint8Array): _Signature;
+  toPublicKey(): _PublicKey;
   toBytes(): Uint8Array;
 }
 
-declare class Signature {
-  static fromBytes(bytes: Uint8Array): Signature;
-  static aggregate(sigs: Signature[], sigsGroupcheck: boolean): Signature;
+declare class _Signature {
+  static fromBytes(bytes: Uint8Array): _Signature;
+  static aggregate(sigs: _Signature[], sigsGroupcheck: boolean): _Signature;
   toBytes(): Uint8Array;
   toBytesCompress(): Uint8Array;
   validate(sigInfcheck: boolean): void;
@@ -232,20 +232,20 @@ declare class Signature {
 
 interface SignatureSet {
   msg: Uint8Array;
-  pk: PublicKey;
-  sig: Signature;
+  pk: _PublicKey;
+  sig: _Signature;
 }
 
 interface Blst {
-  PublicKey: typeof PublicKey;
-  SecretKey: typeof SecretKey;
-  Signature: typeof Signature;
-  verify(msg: Uint8Array, pk: PublicKey, sig: Signature, pkValidate: boolean, sigGroupcheck: boolean): boolean;
-  fastAggregateVerify(msg: Uint8Array, pks: PublicKey[], sig: Signature, sigGroupcheck: boolean): boolean;
+  PublicKey: typeof _PublicKey;
+  SecretKey: typeof _SecretKey;
+  Signature: typeof _Signature;
+  verify(msg: Uint8Array, pk: _PublicKey, sig: _Signature, pkValidate: boolean, sigGroupcheck: boolean): boolean;
+  fastAggregateVerify(msg: Uint8Array, pks: _PublicKey[], sig: _Signature, sigGroupcheck: boolean): boolean;
   verifyMultipleAggregateSignatures(sets: SignatureSet[], sigsGroupcheck: boolean, pksValidate: boolean): boolean;
-  aggregateSignatures(signatures: Signature[], sigsGroupcheck: boolean): Signature;
-  aggregatePublicKeys(pks: PublicKey[], pksValidate: boolean): PublicKey;
-  aggregateSerializedPublicKeys(serializedPublicKeys: Uint8Array[], pksValidate: boolean): PublicKey;
+  aggregateSignatures(signatures: _Signature[], sigsGroupcheck: boolean): _Signature;
+  aggregatePublicKeys(pks: _PublicKey[], pksValidate: boolean): _PublicKey;
+  aggregateSerializedPublicKeys(serializedPublicKeys: Uint8Array[], pksValidate: boolean): _PublicKey;
 }
 
 type Bindings = {
@@ -260,7 +260,7 @@ type Bindings = {
       get: (pubkey: Uint8Array) => number | undefined;
     };
     index2pubkey: {
-      get: (index: number) => PublicKey | undefined;
+      get: (index: number) => _PublicKey | undefined;
     };
   };
   config: {
@@ -274,8 +274,8 @@ type Bindings = {
   deinit: () => void;
 };
 
-import { join } from "node:path";
-import { requireNapiLibrary } from "@chainsafe/zapi";
+import {join} from "node:path";
+import {requireNapiLibrary} from "@chainsafe/zapi";
 
 const bindings = requireNapiLibrary(join(import.meta.dirname, "../..")) as Bindings;
 export default bindings;
@@ -291,3 +291,8 @@ export const {
   aggregatePublicKeys,
   aggregateSerializedPublicKeys,
 } = bindings.blst;
+
+export type PublicKey = _PublicKey;
+export type SecretKey = _SecretKey;
+export type Signature = _Signature;
+export type {SignatureSet};
