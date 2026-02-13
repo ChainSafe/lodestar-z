@@ -236,6 +236,16 @@ interface SignatureSet {
   sig: Signature;
 }
 
+interface PkAndSerializedSig {
+  pk: PublicKey;
+  sig: Uint8Array;
+}
+
+interface PkAndSig {
+  pk: PublicKey;
+  sig: Signature;
+}
+
 interface Blst {
   PublicKey: typeof PublicKey;
   SecretKey: typeof SecretKey;
@@ -246,6 +256,7 @@ interface Blst {
   aggregateSignatures(signatures: Signature[], sigsGroupcheck: boolean): Signature;
   aggregatePublicKeys(pks: PublicKey[], pksValidate: boolean): PublicKey;
   aggregateSerializedPublicKeys(serializedPublicKeys: Uint8Array[], pksValidate: boolean): PublicKey;
+  asyncAggregateWithRandomness(sets: PkAndSerializedSig[]): Promise<PkAndSig>;
 }
 
 type Bindings = {

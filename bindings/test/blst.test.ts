@@ -232,6 +232,104 @@ describe("blst", () => {
       expect(bindings.blst.verifyMultipleAggregateSignatures(sets, false, false)).to.be.false;
     });
   });
+
+  describe("asyncAggregateWithRandomness", () => {
+    const sameMessageSets = getTestSetsSameMessage(10);
+    const msg = sameMessageSets.msg;
+    const sets = sameMessageSets.sets.map((s) => ({
+      pk: s.pk,
+      sig: s.sig.toBytesCompress(),
+    }));
+    const randomSet = getTestSet(20);
+
+    it("should not accept an empty array argument", () => {
+      expect(() => bindings.blst.asyncAggregateWithRandomness([])).toThrow("EmptyArray");
+    });
+
+    describe("should accept an array of {pk: PublicKey, sig: Uint8Array}", () => {
+      it("should handle valid case", () => {
+        expect(() => bindings.blst.asyncAggregateWithRandomness([{pk: sets[0].pk, sig: sets[0].sig}])).not.toThrow();
+      });
+      it("should handle invalid publicKey property name", () => {
+        expect(() =>
+          bindings.blst.asyncAggregateWithRandomness([{publicKey: sets[0].pk, sig: sets[0].sig} as any])
+        ).toThrow();
+      });
+      it("should handle invalid publicKey property value", () => {
+        expect(() => bindings.blst.asyncAggregateWithRandomness([{pk: 1 as any, sig: sets[0].sig}])).toThrow();
+      });
+      it("should handle invalid signature property name", () => {
+        expect(() =>
+          bindings.blst.asyncAggregateWithRandomness([{pk: sets[0].pk, signature: sets[0].sig} as any])
+        ).toThrow();
+      });
+      it("should handle invalid signature property value", () => {
+        expect(() => bindings.blst.asyncAggregateWithRandomness([{pk: sets[0].pk, sig: "bar" as any}])).toThrow();
+      });
+    });
+
+    it("should throw for invalid serialized (G2 point at infinity)", () => {
+      expect(() =>
+        bindings.blst.asyncAggregateWithRandomness(
+          sets.concat({
+            pk: sets[0].pk,
+            sig: G2_POINT_AT_INFINITY,
+          })
+        )
+      ).toThrow();
+    });
+
+    it("should return a {pk: PublicKey, sig: Signature} object", async () => {
+      const aggPromise = bindings.blst.asyncAggregateWithRandomness(sets);
+      expect(aggPromise).toBeInstanceOf(Promise);
+      const agg = await aggPromise;
+      expect(agg).toBeDefined();
+
+      expect(agg).toHaveProperty("pk");
+      expect(agg.pk).toBeInstanceOf(PUBLIC_KEY);
+      expect(() => agg.pk.validate()).not.toThrow();
+
+      expect(agg).toHaveProperty("sig");
+      expect(agg.sig).toBeInstanceOf(SIGNATURE);
+      expect(() => agg.sig.validate(false)).not.toThrow();
+    });
+
+    it("should add randomness to aggregated publicKey", async () => {
+      const withoutRandomness = bindings.blst.aggregatePublicKeys(
+        sets.map(({pk}) => pk),
+        false
+      );
+      const withRandomness = await bindings.blst.asyncAggregateWithRandomness(sets);
+      expectNotEqualHex(withRandomness.pk.toBytesCompress(), withoutRandomness.toBytesCompress());
+    });
+
+    it("should add randomness to aggregated signature", async () => {
+      const withoutRandomness = bindings.blst.aggregateSignatures(
+        sets.map(({sig}) => SIGNATURE.fromBytes(sig)),
+        false
+      );
+      const withRandomness = await bindings.blst.asyncAggregateWithRandomness(sets);
+      expectNotEqualHex(withRandomness.sig.toBytesCompress(), withoutRandomness.toBytesCompress());
+    });
+
+    it("should produce verifiable set", async () => {
+      const {pk, sig} = await bindings.blst.asyncAggregateWithRandomness(sets);
+      expect(bindings.blst.verify(msg, pk, sig, false, false)).toBe(true);
+    });
+
+    it("should not validate for different message", async () => {
+      const {pk, sig} = await bindings.blst.asyncAggregateWithRandomness(sets);
+      expect(bindings.blst.verify(randomSet.msg, pk, sig, false, false)).toBe(false);
+    });
+
+    it("should not validate included key/sig for different message", async () => {
+      const {pk, sig} = await bindings.blst.asyncAggregateWithRandomness([
+        ...sets,
+        {pk: randomSet.pk, sig: randomSet.sig.toBytesCompress()},
+      ]);
+      expect(bindings.blst.verify(msg, pk, sig, false, false)).toBe(false);
+    });
+  });
 });
 
 const DEFAULT_TEST_MESSAGE = Uint8Array.from(Buffer.from("lodestarlodestarlodestarlodestar"));
@@ -362,4 +460,37 @@ function expectEqualHex(value: Uint8Array, expected: Uint8Array): void {
 
 function expectNotEqualHex(value: Uint8Array, expected: Uint8Array): void {
   expect(Buffer.from(value).toString("hex")).to.not.equal(Buffer.from(expected).toString("hex"));
+}
+
+const G2_POINT_AT_INFINITY = Buffer.from(
+  "c000000000000000000000000000000000000000000000000000000000000000" +
+    "0000000000000000000000000000000000000000000000000000000000000000" +
+    "0000000000000000000000000000000000000000000000000000000000000000",
+  "hex"
+);
+
+const commonMessage = crypto.randomBytes(32);
+const commonMessageSignatures = new Map<number, Signature>();
+
+function getTestSetSameMessage(i: number): TestSet {
+  const set = getTestSet(i);
+  let sig = commonMessageSignatures.get(i);
+  if (!sig) {
+    sig = set.sk.sign(commonMessage);
+    commonMessageSignatures.set(i, sig);
+  }
+  return {
+    msg: commonMessage,
+    sk: set.sk,
+    pk: set.pk,
+    sig,
+  };
+}
+
+function getTestSetsSameMessage(count: number): {msg: Uint8Array; sets: {sk: SecretKey; pk: PublicKey; sig: Signature}[]} {
+  const sets = arrayOfIndexes(0, count - 1).map(getTestSetSameMessage);
+  return {
+    msg: sets[0].msg,
+    sets: sets.map(({sk, pk, sig}) => ({sk, pk, sig})),
+  };
 }
