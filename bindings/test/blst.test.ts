@@ -481,16 +481,19 @@ function getTestSetSameMessage(i: number): TestSet {
   }
   return {
     msg: commonMessage,
-    sk: set.sk,
     pk: set.pk,
     sig,
+    sk: set.sk,
   };
 }
 
-function getTestSetsSameMessage(count: number): {msg: Uint8Array; sets: {sk: SecretKey; pk: PublicKey; sig: Signature}[]} {
+function getTestSetsSameMessage(count: number): {
+  msg: Uint8Array;
+  sets: {sk: SecretKey; pk: PublicKey; sig: Signature}[];
+} {
   const sets = arrayOfIndexes(0, count - 1).map(getTestSetSameMessage);
   return {
     msg: sets[0].msg,
-    sets: sets.map(({sk, pk, sig}) => ({sk, pk, sig})),
+    sets: sets.map(({sk, pk, sig}) => ({pk, sig, sk})),
   };
 }
