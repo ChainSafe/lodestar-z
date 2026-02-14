@@ -71,6 +71,18 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const dep_xev = b.dependency("xev", .{
+        .optimize = optimize,
+        .target = target,
+    });
+
+    const module_clock = b.createModule(.{
+        .root_source_file = b.path("src/clock/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("clock"), module_clock) catch @panic("OOM");
+
     const module_constants = b.createModule(.{
         .root_source_file = b.path("src/constants/root.zig"),
         .target = target,
@@ -495,6 +507,20 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_lib_bindings.step);
 
     const tls_run_test = b.step("test", "Run all tests");
+
+    const test_clock = b.addTest(.{
+        .name = "clock",
+        .root_module = module_clock,
+        .filters = b.option([][]const u8, "clock.filters", "clock test filters") orelse &[_][]const u8{},
+    });
+    const install_test_clock = b.addInstallArtifact(test_clock, .{});
+    const tls_install_test_clock = b.step("build-test:clock", "Install the clock test");
+    tls_install_test_clock.dependOn(&install_test_clock.step);
+
+    const run_test_clock = b.addRunArtifact(test_clock);
+    const tls_run_test_clock = b.step("test:clock", "Run the clock test");
+    tls_run_test_clock.dependOn(&run_test_clock.step);
+    tls_run_test.dependOn(&run_test_clock.step);
 
     const test_constants = b.addTest(.{
         .name = "constants",
@@ -943,6 +969,12 @@ pub fn build(b: *std.Build) void {
     const tls_run_test_ssz_static_spec_tests = b.step("test:ssz_static_spec_tests", "Run the ssz_static_spec_tests test");
     tls_run_test_ssz_static_spec_tests.dependOn(&run_test_ssz_static_spec_tests.step);
     tls_run_test.dependOn(&run_test_ssz_static_spec_tests.step);
+
+    module_clock.addImport("config", module_config);
+    module_clock.addImport("consensus_types", module_consensus_types);
+    module_clock.addImport("constants", module_constants);
+    module_clock.addImport("preset", module_preset);
+    module_clock.addImport("xev", dep_xev.module("xev"));
 
     module_config.addImport("build_options", options_module_build_options);
     module_config.addImport("preset", module_preset);

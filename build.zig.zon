@@ -38,6 +38,10 @@
             .url = "git+https://github.com/karlseguin/http.zig.git#2924ead41db9e1986db3b4909a82185c576f6361",
             .hash = "httpz-0.0.0-PNVzrC7CBgDSMZNP7chgAczR3FyAz5Eum6Kb1_K9kmYR",
         },
+        .xev = .{
+            .url = "git+https://github.com/mitchellh/libxev#109a4f2ac93898c8f302f09fc5b6b110297404b0",
+            .hash = "libxev-0.0.0-86vtczLyEgBQSDh5GIcDMbFKAErjaxpSv1XdTdnFgJtu",
+        },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
 }

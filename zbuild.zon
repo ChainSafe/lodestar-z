@@ -33,6 +33,9 @@
         .httpz = .{
             .url = "git+https://github.com/karlseguin/http.zig.git#2924ead41db9e1986db3b4909a82185c576f6361",
         },
+        .xev = .{
+            .url = "git+https://github.com/mitchellh/libxev#109a4f2ac93898c8f302f09fc5b6b110297404b0",
+        },
     },
     .options_modules = .{
         .build_options = .{
@@ -77,6 +80,10 @@
         },
     },
     .modules = .{
+        .clock = .{
+            .root_source_file = "src/clock/root.zig",
+            .imports = .{ .config, .consensus_types, .constants, .preset, .xev },
+        },
         .constants = .{
             .root_source_file = "src/constants/root.zig",
         },
