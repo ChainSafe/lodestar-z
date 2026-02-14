@@ -240,11 +240,11 @@ interface Blst {
   PublicKey: typeof _PublicKey;
   SecretKey: typeof _SecretKey;
   Signature: typeof _Signature;
-  verify(msg: Uint8Array, pk: _PublicKey, sig: _Signature, pkValidate: boolean, sigGroupcheck: boolean): boolean;
+  verify(msg: Uint8Array, pk: _PublicKey, sig: _Signature, pkValidate?: boolean, sigGroupcheck?: boolean): boolean;
   fastAggregateVerify(msg: Uint8Array, pks: _PublicKey[], sig: _Signature, sigGroupcheck: boolean): boolean;
-  verifyMultipleAggregateSignatures(sets: SignatureSet[], sigsGroupcheck: boolean, pksValidate: boolean): boolean;
-  aggregateSignatures(signatures: _Signature[], sigsGroupcheck: boolean): _Signature;
-  aggregatePublicKeys(pks: _PublicKey[], pksValidate: boolean): _PublicKey;
+  verifyMultipleAggregateSignatures(sets: SignatureSet[], sigsGroupcheck?: boolean, pksValidate?: boolean): boolean;
+  aggregateSignatures(signatures: _Signature[], sigsGroupcheck?: boolean): _Signature;
+  aggregatePublicKeys(pks: _PublicKey[], pksValidate?: boolean): _PublicKey;
   aggregateSerializedPublicKeys(serializedPublicKeys: Uint8Array[], pksValidate: boolean): _PublicKey;
 }
 

@@ -132,14 +132,20 @@ pub fn Signature_ctor(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
 }
 
 /// Converts given array of bytes to a `Signature`.
-pub fn Signature_fromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+pub fn Signature_fromBytes(env: napi.Env, cb: napi.CallbackInfo(3)) !napi.Value {
     const ctor = cb.this();
     const bytes_info = try cb.arg(0).getTypedarrayInfo();
+    const sig_validate: bool = if (cb.getArg(1)) |sgc| blk: {
+        break :blk try sgc.getValueBool();
+    } else false;
+    const sig_infcheck: bool = if (cb.getArg(2)) |v| blk: {
+        break :blk try v.getValueBool();
+    } else false;
 
     const sig_value = try env.newInstance(ctor, .{});
     const sig = try env.unwrap(Signature, sig_value);
 
-    sig.* = Signature.deserialize(bytes_info.data[0..]) catch return error.DeserializationFailed;
+    sig.* = Signature.deserialize(bytes_info.data[0..], sig_validate, sig_infcheck) catch return error.DeserializationFailed;
 
     return sig_value;
 }
@@ -174,14 +180,18 @@ pub fn Signature_toBytesCompress(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.
 /// 1) msg: Uint8Array
 /// 2) pk: PublicKey
 /// 3) sig: Signature
-/// 4) pk_validate: bool
-/// 5) sig_groupcheck: bool
+/// 4) pk_validate: ?bool
+/// 5) sig_groupcheck: ?bool
 pub fn blst_verify(env: napi.Env, cb: napi.CallbackInfo(5)) !napi.Value {
     const msg_info = try cb.arg(0).getTypedarrayInfo();
     const pk = try env.unwrap(PublicKey, cb.arg(1));
     const sig = try env.unwrap(Signature, cb.arg(2));
-    const pk_validate = try cb.arg(3).getValueBool();
-    const sig_groupcheck = try cb.arg(4).getValueBool();
+    const sig_groupcheck: bool = if (cb.getArg(3)) |sgc| blk: {
+        break :blk try sgc.getValueBool();
+    } else false;
+    const pk_validate: bool = if (cb.getArg(4)) |v| blk: {
+        break :blk try v.getValueBool();
+    } else false;
 
     sig.verify(sig_groupcheck, msg_info.data, DST, null, pk, pk_validate) catch {
         return try env.getBoolean(false);
@@ -361,14 +371,18 @@ pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.V
 ///
 /// Arguments:
 /// 1) sets: Array of { msg: Uint8Array, pk: PublicKey, sig: Signature }
-/// 2) sigs_groupcheck: bool
-/// 3) pks_validate: bool
+/// 2) sigs_groupcheck: ?bool
+/// 3) pks_validate: ?bool
 pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackInfo(3)) !napi.Value {
     const sets = cb.arg(0);
     const n_elems = try sets.getArrayLength();
 
-    const sigs_groupcheck = try cb.arg(1).getValueBool();
-    const pks_validate = try cb.arg(2).getValueBool();
+    const sigs_groupcheck: bool = if (cb.getArg(1)) |sgc| blk: {
+        break :blk try sgc.getValueBool();
+    } else false;
+    const pks_validate: bool = if (cb.getArg(2)) |v| blk: {
+        break :blk try v.getValueBool();
+    } else false;
 
     if (n_elems == 0) {
         return try env.getBoolean(false);
@@ -430,10 +444,13 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
 ///
 /// Arguments:
 /// 1) signatures: Signature[]
-/// 2) sigs_groupcheck: bool
+/// 2) sigs_groupcheck: ?bool
 pub fn blst_aggregateSignatures(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const sigs_array = cb.arg(0);
-    const sigs_groupcheck = try cb.arg(1).getValueBool();
+
+    const sigs_groupcheck: bool = if (cb.getArg(1)) |sgc| blk: {
+        break :blk try sgc.getValueBool();
+    } else false;
 
     const sigs_len = try sigs_array.getArrayLength();
 
@@ -462,11 +479,14 @@ pub fn blst_aggregateSignatures(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.V
 ///
 /// Arguments:
 /// 1) pks: PublicKey[]
-/// 2) pks_validate: bool
+/// 2) pks_validate: ?bool
 pub fn blst_aggregatePublicKeys(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const pks_array = cb.arg(0);
     const pks_len = try pks_array.getArrayLength();
-    const pks_validate = try cb.arg(1).getValueBool();
+
+    const pks_validate: bool = if (cb.getArg(1)) |v| blk: {
+        break :blk try v.getValueBool();
+    } else false;
 
     if (pks_len == 0) {
         return error.EmptyPublicKeyArray;
