@@ -11,15 +11,32 @@ const getZeroHash = @import("hashing").getZeroHash;
 const Node = @import("persistent_merkle_tree").Node;
 const BitVectorTreeView = @import("../tree_view/root.zig").BitVectorTreeView;
 
-pub fn BitVector(comptime _length: comptime_int) type {
-    const byte_len = std.math.divCeil(usize, _length, 8) catch unreachable;
-    return struct {
-        data: [byte_len]u8,
+pub fn isBitVectorType(ST: type) bool {
+    return @hasDecl(ST, "length") and ST == BitVectorType(ST.length);
+}
 
-        pub const length = _length;
+pub fn BitVectorType(comptime _length: comptime_int) type {
+    if (_length <= 0) @compileError("length must be greater than 0");
+
+    return struct {
+        pub const kind = TypeKind.vector;
+        pub const Element: type = BoolType();
+        pub const length: usize = _length;
+        pub const byte_length = std.math.divCeil(usize, length, 8) catch unreachable;
+        pub const Type: type = @This();
+        pub const TreeView: type = BitVectorTreeView(@This());
+        pub const fixed_size: usize = byte_length;
+        pub const chunk_count: usize = std.math.divCeil(usize, fixed_size, 32) catch unreachable;
+        pub const chunk_depth: u8 = maxChunksToDepth(chunk_count);
+
+        data: [byte_length]u8,
+
+        pub const default_value: Type = Type.empty;
+
+        pub const default_root: [32]u8 = getZeroHash(chunk_depth).*;
 
         pub const empty: @This() = .{
-            .data = [_]u8{0} ** byte_len,
+            .data = [_]u8{0} ** byte_length,
         };
 
         pub fn equals(self: *const @This(), other: *const @This()) bool {
@@ -46,7 +63,7 @@ pub fn BitVector(comptime _length: comptime_int) type {
             }
             var true_bit_count: usize = 0;
 
-            for (0..byte_len) |i_byte| {
+            for (0..byte_length) |i_byte| {
                 var b = self.data[i_byte];
 
                 while (b != 0) {
@@ -64,7 +81,7 @@ pub fn BitVector(comptime _length: comptime_int) type {
         pub fn getSingleTrueBit(self: *const @This()) ?usize {
             var found_index: ?usize = null;
 
-            for (0..byte_len) |i_byte| {
+            for (0..byte_length) |i_byte| {
                 var b = self.data[i_byte];
 
                 while (b != 0) {
@@ -132,9 +149,9 @@ pub fn BitVector(comptime _length: comptime_int) type {
             allocator: std.mem.Allocator,
             values: *const [length]T,
         ) !std.ArrayList(T) {
-            var indices = try std.ArrayList(T).initCapacity(allocator, byte_len * 8);
+            var indices = try std.ArrayList(T).initCapacity(allocator, byte_length * 8);
 
-            for (0..byte_len) |i_byte| {
+            for (0..byte_length) |i_byte| {
                 var b = self.data[i_byte];
                 // Kernighan's algorithm to count the set bits instead of going through 0..8 for every byte
                 while (b != 0) {
@@ -147,37 +164,6 @@ pub fn BitVector(comptime _length: comptime_int) type {
                 }
             }
             return indices;
-        }
-    };
-}
-
-pub fn isBitVectorType(ST: type) bool {
-    return ST.kind == .vector and ST.Element.kind == .bool and ST.Type == BitVector(ST.length);
-}
-
-pub fn BitVectorType(comptime _length: comptime_int) type {
-    comptime {
-        if (_length <= 0) {
-            @compileError("length must be greater than 0");
-        }
-    }
-    return struct {
-        pub const kind = TypeKind.vector;
-        pub const Element: type = BoolType();
-        pub const length: usize = _length;
-        pub const byte_length = std.math.divCeil(usize, length, 8) catch unreachable;
-        pub const Type: type = BitVector(length);
-        pub const TreeView: type = BitVectorTreeView(@This());
-        pub const fixed_size: usize = byte_length;
-        pub const chunk_count: usize = std.math.divCeil(usize, fixed_size, 32) catch unreachable;
-        pub const chunk_depth: u8 = maxChunksToDepth(chunk_count);
-
-        pub const default_value: Type = Type.empty;
-
-        pub const default_root: [32]u8 = getZeroHash(chunk_depth).*;
-
-        pub fn equals(a: *const Type, b: *const Type) bool {
-            return a.equals(b);
         }
 
         pub fn hashTreeRoot(value: *const Type, out: *[32]u8) !void {
@@ -324,7 +310,7 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
 test "BitVectorType - sanity" {
     const length = 44;
     const Bits = BitVectorType(length);
-    var b: Bits.Type = Bits.default_value;
+    var b: Bits = .default_value;
     try b.set(0, true);
     try b.set(length - 1, true);
 
@@ -344,7 +330,7 @@ test "BitVectorType - sanity with bools" {
     const Bits = BitVectorType(16);
     const expected_bools = [_]bool{ true, false, true, true, false, true, false, true, true, false, true, true, false, false, true, false };
     const expected_true_bit_indexes = [_]usize{ 0, 2, 3, 5, 7, 8, 10, 11, 14 };
-    var b: Bits.Type = try Bits.Type.fromBoolArray(expected_bools);
+    var b: Bits = try Bits.fromBoolArray(expected_bools);
 
     var actual_bools: [Bits.length]bool = undefined;
     b.toBoolArray(&actual_bools);
@@ -357,7 +343,7 @@ test "BitVectorType - sanity with bools" {
     try std.testing.expectEqualSlices(usize, &expected_true_bit_indexes, true_bit_indexes[0..true_bit_count]);
 
     const expected_single_bool = [_]bool{ false, false, false, false, false, false, false, false, false, false, false, true, false, false, false, false };
-    var b_single_bool: Bits.Type = try Bits.Type.fromBoolArray(expected_single_bool);
+    var b_single_bool: Bits = try Bits.fromBoolArray(expected_single_bool);
 
     try std.testing.expectEqual(b_single_bool.getSingleTrueBit(), 11);
 }
@@ -375,7 +361,7 @@ test "BitVectorType - intersectValues" {
     const Bits = BitVectorType(16);
 
     for (test_cases) |tc| {
-        var b: Bits.Type = Bits.default_value;
+        var b: Bits = .default_value;
 
         for (tc.expected) |i| try b.set(i, true);
 
@@ -391,11 +377,11 @@ test "BitVectorType - intersectValues" {
 test "clone" {
     const length = 44;
     const Bits = BitVectorType(length);
-    var b: Bits.Type = Bits.default_value;
+    var b: Bits = .default_value;
     try b.set(0, true);
     try b.set(length - 1, true);
 
-    var cloned: Bits.Type = undefined;
+    var cloned: Bits = undefined;
     try Bits.clone(&b, &cloned);
     try std.testing.expect(&b != &cloned);
     try std.testing.expect(std.mem.eql(u8, b.data[0..], cloned.data[0..]));
@@ -434,12 +420,12 @@ test "BitVectorType - tree roundtrip 128 bits" {
     defer pool.deinit();
 
     for (test_cases) |tc| {
-        var value: Bits.Type = undefined;
+        var value: Bits = undefined;
         try Bits.deserializeFromBytes(&tc.serialized, &value);
 
         const tree_node = try Bits.tree.fromValue(&pool, &value);
 
-        var value_from_tree: Bits.Type = undefined;
+        var value_from_tree: Bits = undefined;
         try Bits.tree.toValue(tree_node, &pool, &value_from_tree);
 
         try std.testing.expect(Bits.equals(&value, &value_from_tree));
@@ -490,12 +476,12 @@ test "BitVectorType - tree roundtrip 512 bits" {
     defer pool.deinit();
 
     for (test_cases) |tc| {
-        var value: Bits.Type = undefined;
+        var value: Bits = undefined;
         try Bits.deserializeFromBytes(&tc.serialized, &value);
 
         const tree_node = try Bits.tree.fromValue(&pool, &value);
 
-        var value_from_tree: Bits.Type = undefined;
+        var value_from_tree: Bits = undefined;
         try Bits.tree.toValue(tree_node, &pool, &value_from_tree);
 
         try std.testing.expect(Bits.equals(&value, &value_from_tree));
@@ -546,7 +532,7 @@ test "BitVectorType - tree.deserializeFromBytes 128 bits" {
         const node_root = tree_node.getRoot(&pool);
         try std.testing.expectEqualSlices(u8, &tc.expected_root, node_root);
 
-        var value_from_tree: Bits.Type = undefined;
+        var value_from_tree: Bits = undefined;
         try Bits.tree.toValue(tree_node, &pool, &value_from_tree);
 
         var tree_serialized: [Bits.fixed_size]u8 = undefined;
