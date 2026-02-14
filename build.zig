@@ -990,6 +990,7 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("ssz", module_ssz);
     module_state_transition.addImport("config", module_config);
     module_state_transition.addImport("consensus_types", module_consensus_types);
+    module_state_transition.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_state_transition.addImport("blst", dep_blst.module("blst"));
     module_state_transition.addImport("fork_types", module_fork_types);
     module_state_transition.addImport("preset", module_preset);
