@@ -135,6 +135,27 @@ pub fn PublicKey_toBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     }
 }
 
+pub fn PublicKey_toHex(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const pk = try env.unwrap(PublicKey, cb.this());
+    const compress = try if (cb.getArg(0)) |c| coerceToBool(c) else true;
+
+    if (compress) {
+        const bytes = pk.compress();
+
+        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        defer allocator.free(hex);
+
+        return try env.createStringUtf8(hex);
+    } else {
+        const bytes = pk.serialize();
+
+        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        defer allocator.free(hex);
+
+        return try env.createStringUtf8(hex);
+    }
+}
+
 pub fn Signature_finalize(_: napi.Env, sig: *Signature, _: ?*anyopaque) void {
     allocator.destroy(sig);
 }
@@ -193,6 +214,27 @@ pub fn Signature_toBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     }
 }
 
+pub fn Signature_toHex(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const sig = try env.unwrap(Signature, cb.this());
+    const compress = try if (cb.getArg(0)) |c| coerceToBool(c) else true;
+
+    if (compress) {
+        const bytes = sig.compress();
+
+        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        defer allocator.free(hex);
+
+        return try env.createStringUtf8(hex);
+    } else {
+        const bytes = sig.serialize();
+
+        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        defer allocator.free(hex);
+
+        return try env.createStringUtf8(hex);
+    }
+}
+
 pub fn SecretKey_finalize(_: napi.Env, sk: *SecretKey, _: ?*anyopaque) void {
     allocator.destroy(sk);
 }
@@ -218,6 +260,16 @@ pub fn SecretKey_fromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value 
     sk.* = SecretKey.deserialize(bytes_info.data[0..SecretKey.serialize_size]) catch return error.DeserializationFailed;
 
     return sk_value;
+}
+
+pub fn SecretKey_toHex(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const sk = try env.unwrap(SecretKey, cb.this());
+    const bytes = sk.serialize();
+
+    const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+    defer allocator.free(hex);
+
+    return try env.createStringUtf8(hex);
 }
 
 /// Generates a `SecretKey` from a seed (IKM) using key derivation.
@@ -653,6 +705,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             method(1, SecretKey_sign),
             method(0, SecretKey_toPublicKey),
             method(0, SecretKey_toBytes),
+            method(0, SecretKey_toHex),
         },
     );
     try sk_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{
@@ -667,6 +720,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         null,
         &[_]napi.c.napi_property_descriptor{
             method(1, PublicKey_toBytes),
+            method(1, PublicKey_toHex),
             method(0, PublicKey_validate),
         },
     );
@@ -681,6 +735,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         null,
         &[_]napi.c.napi_property_descriptor{
             method(1, Signature_toBytes),
+            method(1, Signature_toHex),
             method(1, Signature_validate),
         },
     );

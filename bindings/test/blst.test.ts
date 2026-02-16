@@ -44,6 +44,7 @@ describe("blst", () => {
       expect(bytes).toBeInstanceOf(Uint8Array);
       expect(bytes.length).toBe(96);
       expect(Buffer.from(bytes).toString("hex")).toBe(Buffer.from(TEST_VECTORS.publicKey.uncompressed).toString("hex"));
+      expect(pk.toHex(false)).toBe(`0x${Buffer.from(TEST_VECTORS.publicKey.uncompressed).toString("hex")}`);
     });
 
     it("should throw on invalid key", () => {
@@ -80,6 +81,7 @@ describe("blst", () => {
       expect(bytes).toBeInstanceOf(Uint8Array);
       expect(bytes.length).toBe(96);
       expect(Buffer.from(bytes).toString("hex")).toBe(Buffer.from(TEST_VECTORS.signature.compressed).toString("hex"));
+      expect(sig.toHex()).toBe(`0x${Buffer.from(TEST_VECTORS.signature.compressed).toString("hex")}`);
     });
 
     describe("argument validation", () => {
@@ -153,6 +155,7 @@ describe("blst", () => {
         it("should reconstruct the same key", () => {
           const serialized = key.toBytes();
           expectEqualHex(SecretKey.fromBytes(serialized).toBytes(), serialized);
+          expect(key.toHex()).toBe(`0x${Buffer.from(SECRET_KEY_BYTES).toString("hex")}`);
         });
       });
       describe("toPublicKey", () => {

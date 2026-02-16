@@ -12,6 +12,12 @@ export class PublicKey {
    * If `compress` is `false`, the public key will be serialized in uncompressed form.
    */
   toBytes(compress?: boolean): Uint8Array;
+  /**
+   * Serialize a public key to a 0x-prefixed hex string.
+   *
+   * If `compress` is `false`, the public key will be serialized in uncompressed form.
+   */
+  toHex(compress?: boolean): string;
 }
 
 export class SecretKey {
@@ -20,6 +26,10 @@ export class SecretKey {
   sign(msg: Uint8Array): Signature;
   toPublicKey(): PublicKey;
   toBytes(): Uint8Array;
+  /**
+   * Serialize a secret key to a 0x-prefixed hex string.
+   */
+  toHex(): string;
 }
 
 export class Signature {
@@ -38,6 +48,12 @@ export class Signature {
    * If `compress` is `false`, the signature will be serialized in uncompressed form.
    */
   toBytes(compress?: boolean): Uint8Array;
+  /**
+   * Serialize a signature to a 0x-prefixed hex string.
+   *
+   * If `compress` is `false`, the signature will be serialized in uncompressed form.
+   */
+  toHex(compress?: boolean): string;
   validate(sigInfcheck: boolean): void;
 }
 
