@@ -152,7 +152,13 @@ pub fn Signature_fromBytes(env: napi.Env, cb: napi.CallbackInfo(3)) !napi.Value 
     const sig_value = try env.newInstance(ctor, .{});
     const sig = try env.unwrap(Signature, sig_value);
 
-    sig.* = Signature.deserialize(bytes_info.data[0..], sig_validate, sig_infcheck) catch return error.DeserializationFailed;
+    sig.* = Signature.deserialize(bytes_info.data[0..]) catch return error.DeserializationFailed;
+
+    if (sig_validate) {
+        sig.validate(sig_infcheck) catch return error.InvalidSignature;
+    } else if (sig_infcheck and sig.isInfinity()) {
+        return error.InvalidSignature;
+    }
 
     return sig_value;
 }
@@ -607,7 +613,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         },
     );
     try sig_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{
-        method(1, Signature_fromBytes),
+        method(3, Signature_fromBytes),
         method(1, Signature_aggregate),
     });
 
