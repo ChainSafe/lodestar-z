@@ -234,3 +234,5 @@ type Bindings = {
   deinit: () => void;
 };
 
+import bindings from "./bindings.js";
+export default bindings as Bindings;
