@@ -234,5 +234,4 @@ type Bindings = {
   deinit: () => void;
 };
 
-import bindings from "./bindings.ts";
-export default bindings as Bindings;
+export default Bindings;

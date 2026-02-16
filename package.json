@@ -8,7 +8,10 @@
   ],
   "type": "module",
   "exports": {
-    ".": "./bindings/src/index.ts",
+    ".": {
+      "import": "./bindings/src/index.js",
+      "types": "./bindings/src/index.d.ts"
+    },
     "./blst": {
       "import": "./bindings/src/blst.js",
       "types": "./bindings/src/blst.d.ts"

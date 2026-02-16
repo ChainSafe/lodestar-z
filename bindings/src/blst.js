@@ -1,4 +1,4 @@
-import bindings from "./bindings.ts";
+import bindings from "./bindings.js";
 
 const blst = bindings.blst;
 
