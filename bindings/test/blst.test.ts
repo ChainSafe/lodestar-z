@@ -204,8 +204,8 @@ describe("blst", () => {
     });
     describe("should default to false", () => {
       it("should handle invalid message", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+        const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
+        const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
         expect(aggregateVerify([sullyUint8Array(TEST_VECTORS.message)], [pk], sig)).to.be.false;
       });
     });

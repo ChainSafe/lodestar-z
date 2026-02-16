@@ -61,7 +61,13 @@ export function verify(
  *
  * If `sigGroupcheck` is `true`, the signatures will be group checked.
  */
-export function aggregateVerify(msgs: Uint8Array[], pks: PublicKey[], sig: Signature, pksValidate?: boolean, sigGroupcheck?: boolean): boolean
+export function aggregateVerify(
+  msgs: Uint8Array[],
+  pks: PublicKey[],
+  sig: Signature,
+  pksValidate?: boolean,
+  sigGroupcheck?: boolean
+): boolean;
 
 /**
  * Verify an aggregated signature against a single message and multiple public keys.
@@ -70,7 +76,12 @@ export function aggregateVerify(msgs: Uint8Array[], pks: PublicKey[], sig: Signa
  *
  * If `sigsGroupcheck` is `true`, the signatures will be group checked.
  */
-export function fastAggregateVerify(msg: Uint8Array, pks: PublicKey[], sig: Signature, sigsGroupcheck?: boolean): boolean;
+export function fastAggregateVerify(
+  msg: Uint8Array,
+  pks: PublicKey[],
+  sig: Signature,
+  sigsGroupcheck?: boolean
+): boolean;
 
 /**
  * Verify multiple aggregated signatures against multiple messages and multiple public keys.
@@ -84,7 +95,7 @@ export function fastAggregateVerify(msg: Uint8Array, pks: PublicKey[], sig: Sign
 export function verifyMultipleAggregateSignatures(
   sets: SignatureSet[],
   pksValidate?: boolean,
-  sigsGroupcheck?: boolean,
+  sigsGroupcheck?: boolean
 ): boolean;
 
 /**
