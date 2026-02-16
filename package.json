@@ -3,13 +3,19 @@
   "version": "0.1.0",
   "description": "Lodestar-z NAPI bindings",
   "files": [
-    "bindings/src/"
+    "bindings/src/",
+    "zig-out/lib/"
   ],
   "type": "module",
   "exports": {
-    ".": "./bindings/src/index.ts"
+    ".": "./bindings/src/index.ts",
+    "./blst": {
+      "import": "./bindings/src/blst.js",
+      "types": "./bindings/src/blst.d.ts"
+    }
   },
   "scripts": {
+    "prepare": "zig build build-lib:bindings -Doptimize=ReleaseSafe",
     "lint": "biome check",
     "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts"
   },

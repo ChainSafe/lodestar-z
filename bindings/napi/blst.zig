@@ -55,6 +55,11 @@ pub fn newSignatureInstance(env: napi.Env) !napi.Value {
     return try env.newInstance(ctor, .{});
 }
 
+fn coerceToBool(boolish: napi.Value) napi.status.NapiError!bool {
+    const b = try boolish.coerceToBool();
+    return b.getValueBool();
+}
+
 pub fn deinit() void {
     if (public_key_ctor_ref) |ref| {
         napi.status.check(napi.c.napi_delete_reference(null, ref)) catch {};
@@ -78,14 +83,24 @@ pub fn PublicKey_ctor(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
 }
 
 /// Converts given array of bytes to a `PublicKey`.
-pub fn PublicKey_fromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+/// 1) bytes: Uint8Array
+/// 2) pk_validate: ?bool
+pub fn PublicKey_fromBytes(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const ctor = cb.this();
     const bytes_info = try cb.arg(0).getTypedarrayInfo();
+    const pk_validate: bool = if (cb.getArg(1)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
 
     const pk_value = try env.newInstance(ctor, .{});
     const pk = try env.unwrap(PublicKey, pk_value);
 
     pk.* = try PublicKey.deserialize(bytes_info.data[0..]);
+
+    if (pk_validate) {
+        try pk.validate();
+    }
 
     return pk_value;
 }
@@ -98,26 +113,47 @@ pub fn PublicKey_validate(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     return try env.getUndefined();
 }
 
-/// Serializes and compresses this public key to bytes.
-pub fn PublicKey_toBytesCompress(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+/// Serializes this public key to bytes.
+pub fn PublicKey_toBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const pk = try env.unwrap(PublicKey, cb.this());
-    const bytes = pk.compress();
+    const compress = try if (cb.getArg(0)) |c| coerceToBool(c) else true;
 
-    var arraybuffer_bytes: [*]u8 = undefined;
-    const arraybuffer = try env.createArrayBuffer(PublicKey.COMPRESS_SIZE, &arraybuffer_bytes);
-    @memcpy(arraybuffer_bytes[0..PublicKey.COMPRESS_SIZE], &bytes);
-    return try env.createTypedarray(.uint8, PublicKey.COMPRESS_SIZE, arraybuffer, 0);
+    if (compress) {
+        const bytes = pk.compress();
+
+        var arraybuffer_bytes: [*]u8 = undefined;
+        const arraybuffer = try env.createArrayBuffer(PublicKey.COMPRESS_SIZE, &arraybuffer_bytes);
+        @memcpy(arraybuffer_bytes[0..PublicKey.COMPRESS_SIZE], &bytes);
+        return try env.createTypedarray(.uint8, PublicKey.COMPRESS_SIZE, arraybuffer, 0);
+    } else {
+        const bytes = pk.serialize();
+
+        var arraybuffer_bytes: [*]u8 = undefined;
+        const arraybuffer = try env.createArrayBuffer(PublicKey.SERIALIZE_SIZE, &arraybuffer_bytes);
+        @memcpy(arraybuffer_bytes[0..PublicKey.SERIALIZE_SIZE], &bytes);
+        return try env.createTypedarray(.uint8, PublicKey.SERIALIZE_SIZE, arraybuffer, 0);
+    }
 }
 
-/// Serializes this public key to bytes.
-pub fn PublicKey_toBytes(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+pub fn PublicKey_toHex(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const pk = try env.unwrap(PublicKey, cb.this());
-    const bytes = pk.serialize();
+    const compress = try if (cb.getArg(0)) |c| coerceToBool(c) else true;
 
-    var arraybuffer_bytes: [*]u8 = undefined;
-    const arraybuffer = try env.createArrayBuffer(PublicKey.SERIALIZE_SIZE, &arraybuffer_bytes);
-    @memcpy(arraybuffer_bytes[0..PublicKey.SERIALIZE_SIZE], &bytes);
-    return try env.createTypedarray(.uint8, PublicKey.SERIALIZE_SIZE, arraybuffer, 0);
+    if (compress) {
+        const bytes = pk.compress();
+
+        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        defer allocator.free(hex);
+
+        return try env.createStringUtf8(hex);
+    } else {
+        const bytes = pk.serialize();
+
+        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        defer allocator.free(hex);
+
+        return try env.createStringUtf8(hex);
+    }
 }
 
 pub fn Signature_finalize(_: napi.Env, sig: *Signature, _: ?*anyopaque) void {
@@ -132,62 +168,71 @@ pub fn Signature_ctor(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
 }
 
 /// Converts given array of bytes to a `Signature`.
-pub fn Signature_fromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+pub fn Signature_fromBytes(env: napi.Env, cb: napi.CallbackInfo(3)) !napi.Value {
     const ctor = cb.this();
     const bytes_info = try cb.arg(0).getTypedarrayInfo();
+    const sig_validate: bool = if (cb.getArg(1)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
+    const sig_infcheck: bool = if (cb.getArg(2)) |v|
+        try coerceToBool(v)
+    else
+        false;
 
     const sig_value = try env.newInstance(ctor, .{});
     const sig = try env.unwrap(Signature, sig_value);
 
     sig.* = Signature.deserialize(bytes_info.data[0..]) catch return error.DeserializationFailed;
 
+    if (sig_validate) {
+        try sig.validate(sig_infcheck);
+    }
+
     return sig_value;
 }
 
 /// Serializes this signature to bytes.
-pub fn Signature_toBytes(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+pub fn Signature_toBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const sig = try env.unwrap(Signature, cb.this());
-    const bytes = sig.serialize();
+    const compress = try if (cb.getArg(0)) |c| coerceToBool(c) else true;
 
-    var arraybuffer_bytes: [*]u8 = undefined;
-    const arraybuffer = try env.createArrayBuffer(Signature.SERIALIZE_SIZE, &arraybuffer_bytes);
-    @memcpy(arraybuffer_bytes[0..Signature.SERIALIZE_SIZE], &bytes);
-    return try env.createTypedarray(.uint8, Signature.SERIALIZE_SIZE, arraybuffer, 0);
+    if (compress) {
+        const bytes = sig.compress();
+
+        var arraybuffer_bytes: [*]u8 = undefined;
+        const arraybuffer = try env.createArrayBuffer(Signature.COMPRESS_SIZE, &arraybuffer_bytes);
+        @memcpy(arraybuffer_bytes[0..Signature.COMPRESS_SIZE], &bytes);
+        return try env.createTypedarray(.uint8, Signature.COMPRESS_SIZE, arraybuffer, 0);
+    } else {
+        const bytes = sig.serialize();
+
+        var arraybuffer_bytes: [*]u8 = undefined;
+        const arraybuffer = try env.createArrayBuffer(Signature.SERIALIZE_SIZE, &arraybuffer_bytes);
+        @memcpy(arraybuffer_bytes[0..Signature.SERIALIZE_SIZE], &bytes);
+        return try env.createTypedarray(.uint8, Signature.SERIALIZE_SIZE, arraybuffer, 0);
+    }
 }
 
-/// Serializes and compresses this signature to bytes.
-pub fn Signature_toBytesCompress(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+pub fn Signature_toHex(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const sig = try env.unwrap(Signature, cb.this());
-    const bytes = sig.compress();
+    const compress = try if (cb.getArg(0)) |c| coerceToBool(c) else true;
 
-    var arraybuffer_bytes: [*]u8 = undefined;
-    const arraybuffer = try env.createArrayBuffer(Signature.COMPRESS_SIZE, &arraybuffer_bytes);
-    @memcpy(arraybuffer_bytes[0..Signature.COMPRESS_SIZE], &bytes);
-    return try env.createTypedarray(.uint8, Signature.COMPRESS_SIZE, arraybuffer, 0);
-}
+    if (compress) {
+        const bytes = sig.compress();
 
-/// Verifies a given `msg` against a `Signature` and a `PublicKey`.
-///
-/// Returns `true` if signature is valid, `false` otherwise.
-///
-/// Arguments:
-/// 1) msg: Uint8Array
-/// 2) pk: PublicKey
-/// 3) sig: Signature
-/// 4) pk_validate: bool
-/// 5) sig_groupcheck: bool
-pub fn blst_verify(env: napi.Env, cb: napi.CallbackInfo(5)) !napi.Value {
-    const msg_info = try cb.arg(0).getTypedarrayInfo();
-    const pk = try env.unwrap(PublicKey, cb.arg(1));
-    const sig = try env.unwrap(Signature, cb.arg(2));
-    const pk_validate = try cb.arg(3).getValueBool();
-    const sig_groupcheck = try cb.arg(4).getValueBool();
+        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        defer allocator.free(hex);
 
-    sig.verify(sig_groupcheck, msg_info.data, DST, null, pk, pk_validate) catch {
-        return try env.getBoolean(false);
-    };
+        return try env.createStringUtf8(hex);
+    } else {
+        const bytes = sig.serialize();
 
-    return try env.getBoolean(true);
+        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        defer allocator.free(hex);
+
+        return try env.createStringUtf8(hex);
+    }
 }
 
 pub fn SecretKey_finalize(_: napi.Env, sk: *SecretKey, _: ?*anyopaque) void {
@@ -215,6 +260,16 @@ pub fn SecretKey_fromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value 
     sk.* = SecretKey.deserialize(bytes_info.data[0..SecretKey.serialize_size]) catch return error.DeserializationFailed;
 
     return sk_value;
+}
+
+pub fn SecretKey_toHex(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const sk = try env.unwrap(SecretKey, cb.this());
+    const bytes = sk.serialize();
+
+    const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+    defer allocator.free(hex);
+
+    return try env.createStringUtf8(hex);
 }
 
 /// Generates a `SecretKey` from a seed (IKM) using key derivation.
@@ -282,7 +337,7 @@ pub fn SecretKey_toBytes(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
 pub fn Signature_aggregate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const ctor = cb.this();
     const sigs_array = cb.arg(0);
-    const sigs_groupcheck = try cb.arg(1).getValueBool();
+    const sigs_groupcheck = try coerceToBool(cb.arg(1));
 
     const sigs_len = try sigs_array.getArrayLength();
     if (sigs_len == 0) return error.EmptySignatureArray;
@@ -309,11 +364,101 @@ pub fn Signature_aggregate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value 
 /// Throws an error if the signature is invalid.
 pub fn Signature_validate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const sig = try env.unwrap(Signature, cb.this());
-    const sig_infcheck = try cb.arg(0).getValueBool();
+    const sig_infcheck = try coerceToBool(cb.arg(0));
 
     sig.validate(sig_infcheck) catch return error.InvalidSignature;
 
     return try env.getUndefined();
+}
+
+/// Verifies a given `msg` against a `Signature` and a `PublicKey`.
+///
+/// Returns `true` if signature is valid, `false` otherwise.
+///
+/// Arguments:
+/// 1) msg: Uint8Array
+/// 2) pk: PublicKey
+/// 3) sig: Signature
+/// 4) pk_validate: ?bool
+/// 5) sig_groupcheck: ?bool
+pub fn blst_verify(env: napi.Env, cb: napi.CallbackInfo(5)) !napi.Value {
+    const msg_info = try cb.arg(0).getTypedarrayInfo();
+    const pk = try env.unwrap(PublicKey, cb.arg(1));
+    const sig = try env.unwrap(Signature, cb.arg(2));
+    const pk_validate: bool = if (cb.getArg(3)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
+    const sig_groupcheck: bool = if (cb.getArg(4)) |v|
+        try coerceToBool(v)
+    else
+        false;
+
+    sig.verify(sig_groupcheck, msg_info.data, DST, null, pk, pk_validate) catch {
+        return try env.getBoolean(false);
+    };
+
+    return try env.getBoolean(true);
+}
+
+/// Verify an aggregated signature against multiple messages and multiple public keys.
+/// 1) msgs: Uint8Array[]
+/// 2) pks: PublicKey[]
+/// 3) sig: Signature
+/// 4) pks_validate: ?bool
+/// 5) sig_groupcheck: ?bool
+pub fn blst_aggregateVerify(
+    env: napi.Env,
+    cb: napi.CallbackInfo(5),
+) !napi.Value {
+    const msgs_array = cb.arg(0);
+    const pks_array = cb.arg(1);
+    const sig = try env.unwrap(Signature, cb.arg(2));
+    const pks_validate: bool = if (cb.getArg(3)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
+    const sig_groupcheck: bool = if (cb.getArg(4)) |v|
+        try coerceToBool(v)
+    else
+        false;
+
+    const msgs_len = try msgs_array.getArrayLength();
+    const pks_len = try pks_array.getArrayLength();
+    if (msgs_len == 0 or pks_len == 0 or msgs_len != pks_len) {
+        return error.InvalidAggregateVerifyInput;
+    }
+
+    const msgs = try allocator.alloc([32]u8, msgs_len);
+    defer allocator.free(msgs);
+    const pks = try allocator.alloc(PublicKey, pks_len);
+    defer allocator.free(pks);
+
+    for (0..msgs_len) |i| {
+        const msg_value = try msgs_array.getElement(@intCast(i));
+        const msg_info = try msg_value.getTypedarrayInfo();
+        if (msg_info.data.len != 32) return error.InvalidMessageLength;
+        @memcpy(&msgs[i], msg_info.data[0..32]);
+
+        const pk_value = try pks_array.getElement(@intCast(i));
+        const pk = try env.unwrap(PublicKey, pk_value);
+        pks[i] = pk.*;
+    }
+
+    var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
+
+    const result = sig.aggregateVerify(
+        sig_groupcheck,
+        &pairing_buf,
+        msgs,
+        DST,
+        pks,
+        pks_validate,
+    ) catch {
+        return try env.getBoolean(false);
+    };
+
+    return try env.getBoolean(result);
 }
 
 /// Aggregate and verify an array of `PublicKey`s. Returns `false` if pks array is empty or if signature is invalid.
@@ -324,14 +469,17 @@ pub fn Signature_validate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 /// 1) msg: Uint8Array
 /// 2) pks: PublicKey[]
 /// 3) sig: Signature
-/// 4) sig_groupcheck: bool
+/// 4) sigs_groupcheck: ?bool
 pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.Value {
     const msg_info = try cb.arg(0).getTypedarrayInfo();
     if (msg_info.data.len != 32) return error.InvalidMessageLength;
 
     const pks_array = cb.arg(1);
     const sig = try env.unwrap(Signature, cb.arg(2));
-    const sig_groupcheck = try cb.arg(3).getValueBool();
+    const sigs_groupcheck = if (cb.getArg(3)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
 
     const pks_len = try pks_array.getArrayLength();
     if (pks_len == 0) {
@@ -349,7 +497,7 @@ pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.V
 
     var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
     // `pks_validate` is always false here since we assume proof of possession for public keys.
-    const result = sig.fastAggregateVerify(sig_groupcheck, &pairing_buf, msg_info.data[0..32], DST, pks, false) catch {
+    const result = sig.fastAggregateVerify(sigs_groupcheck, &pairing_buf, msg_info.data[0..32], DST, pks, false) catch {
         return try env.getBoolean(false);
     };
 
@@ -361,14 +509,20 @@ pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.V
 ///
 /// Arguments:
 /// 1) sets: Array of { msg: Uint8Array, pk: PublicKey, sig: Signature }
-/// 2) sigs_groupcheck: bool
-/// 3) pks_validate: bool
+/// 2) pks_validate: ?bool
+/// 3) sigs_groupcheck: ?bool
 pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackInfo(3)) !napi.Value {
     const sets = cb.arg(0);
     const n_elems = try sets.getArrayLength();
 
-    const sigs_groupcheck = try cb.arg(1).getValueBool();
-    const pks_validate = try cb.arg(2).getValueBool();
+    const pks_validate: bool = if (cb.getArg(1)) |v|
+        try coerceToBool(v)
+    else
+        false;
+    const sigs_groupcheck: bool = if (cb.getArg(2)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
 
     if (n_elems == 0) {
         return try env.getBoolean(false);
@@ -430,10 +584,14 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
 ///
 /// Arguments:
 /// 1) signatures: Signature[]
-/// 2) sigs_groupcheck: bool
+/// 2) sigs_groupcheck: ?bool
 pub fn blst_aggregateSignatures(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const sigs_array = cb.arg(0);
-    const sigs_groupcheck = try cb.arg(1).getValueBool();
+
+    const sigs_groupcheck: bool = if (cb.getArg(1)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
 
     const sigs_len = try sigs_array.getArrayLength();
 
@@ -462,11 +620,15 @@ pub fn blst_aggregateSignatures(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.V
 ///
 /// Arguments:
 /// 1) pks: PublicKey[]
-/// 2) pks_validate: bool
+/// 2) pks_validate: ?bool
 pub fn blst_aggregatePublicKeys(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const pks_array = cb.arg(0);
     const pks_len = try pks_array.getArrayLength();
-    const pks_validate = try cb.arg(1).getValueBool();
+
+    const pks_validate: bool = if (cb.getArg(1)) |v|
+        try coerceToBool(v)
+    else
+        false;
 
     if (pks_len == 0) {
         return error.EmptyPublicKeyArray;
@@ -498,7 +660,10 @@ pub fn blst_aggregatePublicKeys(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.V
 pub fn blst_aggregateSerializedPublicKeys(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const pks_array = cb.arg(0);
     const pks_len = try pks_array.getArrayLength();
-    const pks_validate = try cb.arg(1).getValueBool();
+    const pks_validate: bool = if (cb.getArg(1)) |v|
+        try coerceToBool(v)
+    else
+        false;
 
     if (pks_len == 0) return error.EmptyPublicKeyArray;
 
@@ -696,6 +861,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             method(1, SecretKey_sign),
             method(0, SecretKey_toPublicKey),
             method(0, SecretKey_toBytes),
+            method(0, SecretKey_toHex),
         },
     );
     try sk_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{
@@ -709,13 +875,13 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         PublicKey_ctor,
         null,
         &[_]napi.c.napi_property_descriptor{
-            method(0, PublicKey_toBytes),
-            method(0, PublicKey_toBytesCompress),
+            method(1, PublicKey_toBytes),
+            method(1, PublicKey_toHex),
             method(0, PublicKey_validate),
         },
     );
     try pk_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{
-        method(1, PublicKey_fromBytes),
+        method(2, PublicKey_fromBytes),
     });
 
     const sig_ctor = try env.defineClass(
@@ -724,13 +890,13 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         Signature_ctor,
         null,
         &[_]napi.c.napi_property_descriptor{
-            method(0, Signature_toBytes),
-            method(0, Signature_toBytesCompress),
+            method(1, Signature_toBytes),
+            method(1, Signature_toHex),
             method(1, Signature_validate),
         },
     );
     try sig_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{
-        method(1, Signature_fromBytes),
+        method(3, Signature_fromBytes),
         method(1, Signature_aggregate),
     });
 
@@ -742,6 +908,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     try blst_obj.setNamedProperty("Signature", sig_ctor);
 
     try blst_obj.setNamedProperty("verify", try env.createFunction("verify", 5, blst_verify, null));
+    try blst_obj.setNamedProperty("aggregateVerify", try env.createFunction("aggregateVerify", 5, blst_aggregateVerify, null));
     try blst_obj.setNamedProperty("fastAggregateVerify", try env.createFunction("fastAggregateVerify", 4, blst_fastAggregateVerify, null));
     try blst_obj.setNamedProperty("verifyMultipleAggregateSignatures", try env.createFunction("verifyMultipleAggregateSignatures", 3, blst_verifyMultipleAggregateSignatures, null));
     try blst_obj.setNamedProperty("aggregateSignatures", try env.createFunction("aggregateSignatures", 2, blst_aggregateSignatures, null));

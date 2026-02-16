@@ -1,3 +1,5 @@
+import type {PublicKey} from "./blst.js";
+
 interface BeaconBlockHeader {
   slot: number;
   proposerIndex: number;
@@ -207,58 +209,6 @@ declare class BeaconStateView {
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
 }
 
-declare class PublicKey {
-  static fromBytes(bytes: Uint8Array): PublicKey;
-  validate(): void;
-  toBytes(): Uint8Array;
-  toBytesCompress(): Uint8Array;
-}
-
-declare class SecretKey {
-  static fromBytes(bytes: Uint8Array): SecretKey;
-  static fromKeygen(ikm: Uint8Array, keyInfo?: Uint8Array): SecretKey;
-  sign(msg: Uint8Array): Signature;
-  toPublicKey(): PublicKey;
-  toBytes(): Uint8Array;
-}
-
-declare class Signature {
-  static fromBytes(bytes: Uint8Array): Signature;
-  static aggregate(sigs: Signature[], sigsGroupcheck: boolean): Signature;
-  toBytes(): Uint8Array;
-  toBytesCompress(): Uint8Array;
-  validate(sigInfcheck: boolean): void;
-}
-
-interface SignatureSet {
-  msg: Uint8Array;
-  pk: PublicKey;
-  sig: Signature;
-}
-
-interface PkAndSerializedSig {
-  pk: PublicKey;
-  sig: Uint8Array;
-}
-
-interface PkAndSig {
-  pk: PublicKey;
-  sig: Signature;
-}
-
-interface Blst {
-  PublicKey: typeof PublicKey;
-  SecretKey: typeof SecretKey;
-  Signature: typeof Signature;
-  verify(msg: Uint8Array, pk: PublicKey, sig: Signature, pkValidate: boolean, sigGroupcheck: boolean): boolean;
-  fastAggregateVerify(msg: Uint8Array, pks: PublicKey[], sig: Signature, sigGroupcheck: boolean): boolean;
-  verifyMultipleAggregateSignatures(sets: SignatureSet[], sigsGroupcheck: boolean, pksValidate: boolean): boolean;
-  aggregateSignatures(signatures: Signature[], sigsGroupcheck: boolean): Signature;
-  aggregatePublicKeys(pks: PublicKey[], pksValidate: boolean): PublicKey;
-  aggregateSerializedPublicKeys(serializedPublicKeys: Uint8Array[], pksValidate: boolean): PublicKey;
-  asyncAggregateWithRandomness(sets: PkAndSerializedSig[]): Promise<PkAndSig>;
-}
-
 type Bindings = {
   pool: {
     ensureCapacity: (capacity: number) => void;
@@ -281,11 +231,6 @@ type Bindings = {
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
   };
   BeaconStateView: typeof BeaconStateView;
-  blst: Blst;
   deinit: () => void;
 };
 
-import {join} from "node:path";
-import {requireNapiLibrary} from "@chainsafe/zapi";
-
-export default requireNapiLibrary(join(import.meta.dirname, "../..")) as Bindings;
