@@ -20,17 +20,17 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
       - name: Install dependencies
         run: |
           pnpm install
       - name: Run bindings formatter
         run: |
           pnpm biome ci
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
       - name: Build and publish to npm
         run: |
           pnpm zapi build-artifacts --optimize ReleaseSafe
