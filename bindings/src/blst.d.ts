@@ -6,8 +6,12 @@ export class PublicKey {
    */
   static fromBytes(bytes: Uint8Array, pkValidate?: boolean): PublicKey;
   validate(): void;
-  toBytes(): Uint8Array;
-  toBytesCompress(): Uint8Array;
+  /**
+   * Serialize a public key to a byte array.
+   *
+   * If `compress` is `false`, the public key will be serialized in uncompressed form.
+   */
+  toBytes(compress?: boolean): Uint8Array;
 }
 
 export class SecretKey {
@@ -28,8 +32,12 @@ export class Signature {
    */
   static fromBytes(bytes: Uint8Array, sigValidate?: boolean, sigInfcheck?: boolean): Signature;
   static aggregate(sigs: Signature[], sigsGroupcheck: boolean): Signature;
-  toBytes(): Uint8Array;
-  toBytesCompress(): Uint8Array;
+  /**
+   * Serialize a signature to a byte array.
+   * 
+   * If `compress` is `false`, the signature will be serialized in uncompressed form.
+   */
+  toBytes(compress?: boolean): Uint8Array;
   validate(sigInfcheck: boolean): void;
 }
 

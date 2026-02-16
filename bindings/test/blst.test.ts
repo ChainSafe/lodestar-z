@@ -19,11 +19,11 @@ describe("blst", () => {
 
     it("should take uncompressed byte arrays", () => {
       expectEqualHex(
-        PublicKey.fromBytes(TEST_VECTORS.publicKey.uncompressed).toBytes(),
+        PublicKey.fromBytes(TEST_VECTORS.publicKey.uncompressed).toBytes(false),
         TEST_VECTORS.publicKey.uncompressed
       );
       expectEqualHex(
-        PublicKey.fromBytes(TEST_VECTORS.publicKey.uncompressed).toBytesCompress(),
+        PublicKey.fromBytes(TEST_VECTORS.publicKey.uncompressed).toBytes(),
         TEST_VECTORS.publicKey.compressed
       );
     });
@@ -40,7 +40,7 @@ describe("blst", () => {
 
     it("should serialize to bytes", () => {
       const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.uncompressed);
-      const bytes = pk.toBytes();
+      const bytes = pk.toBytes(false);
       expect(bytes).toBeInstanceOf(Uint8Array);
       expect(bytes.length).toBe(96);
       expect(Buffer.from(bytes).toString("hex")).toBe(Buffer.from(TEST_VECTORS.publicKey.uncompressed).toString("hex"));
@@ -62,13 +62,13 @@ describe("blst", () => {
     describe("fromBytes()", () => {
       it("should take uncompressed byte arrays", () => {
         expectEqualHex(
-          Signature.fromBytes(TEST_VECTORS.signature.uncompressed).toBytes(),
+          Signature.fromBytes(TEST_VECTORS.signature.uncompressed).toBytes(false),
           TEST_VECTORS.signature.uncompressed
         );
       });
       it("should take compressed byte arrays", () => {
         expectEqualHex(
-          Signature.fromBytes(TEST_VECTORS.signature.compressed).toBytes(),
+          Signature.fromBytes(TEST_VECTORS.signature.compressed).toBytes(false),
           TEST_VECTORS.signature.uncompressed
         );
       });
@@ -76,7 +76,7 @@ describe("blst", () => {
 
     it("should serialize to bytes", () => {
       const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
-      const bytes = sig.toBytesCompress();
+      const bytes = sig.toBytes();
       expect(bytes).toBeInstanceOf(Uint8Array);
       expect(bytes.length).toBe(96);
       expect(Buffer.from(bytes).toString("hex")).toBe(Buffer.from(TEST_VECTORS.signature.compressed).toString("hex"));

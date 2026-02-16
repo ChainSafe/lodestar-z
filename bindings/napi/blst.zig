@@ -113,26 +113,26 @@ pub fn PublicKey_validate(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     return try env.getUndefined();
 }
 
-/// Serializes and compresses this public key to bytes.
-pub fn PublicKey_toBytesCompress(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const pk = try env.unwrap(PublicKey, cb.this());
-    const bytes = pk.compress();
-
-    var arraybuffer_bytes: [*]u8 = undefined;
-    const arraybuffer = try env.createArrayBuffer(PublicKey.COMPRESS_SIZE, &arraybuffer_bytes);
-    @memcpy(arraybuffer_bytes[0..PublicKey.COMPRESS_SIZE], &bytes);
-    return try env.createTypedarray(.uint8, PublicKey.COMPRESS_SIZE, arraybuffer, 0);
-}
-
 /// Serializes this public key to bytes.
-pub fn PublicKey_toBytes(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+pub fn PublicKey_toBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const pk = try env.unwrap(PublicKey, cb.this());
-    const bytes = pk.serialize();
+    const compress = try if (cb.getArg(0)) |c| coerceToBool(c) else true;
 
-    var arraybuffer_bytes: [*]u8 = undefined;
-    const arraybuffer = try env.createArrayBuffer(PublicKey.SERIALIZE_SIZE, &arraybuffer_bytes);
-    @memcpy(arraybuffer_bytes[0..PublicKey.SERIALIZE_SIZE], &bytes);
-    return try env.createTypedarray(.uint8, PublicKey.SERIALIZE_SIZE, arraybuffer, 0);
+    if (compress) {
+        const bytes = pk.compress();
+
+        var arraybuffer_bytes: [*]u8 = undefined;
+        const arraybuffer = try env.createArrayBuffer(PublicKey.COMPRESS_SIZE, &arraybuffer_bytes);
+        @memcpy(arraybuffer_bytes[0..PublicKey.COMPRESS_SIZE], &bytes);
+        return try env.createTypedarray(.uint8, PublicKey.COMPRESS_SIZE, arraybuffer, 0);
+    } else {
+        const bytes = pk.serialize();
+
+        var arraybuffer_bytes: [*]u8 = undefined;
+        const arraybuffer = try env.createArrayBuffer(PublicKey.SERIALIZE_SIZE, &arraybuffer_bytes);
+        @memcpy(arraybuffer_bytes[0..PublicKey.SERIALIZE_SIZE], &bytes);
+        return try env.createTypedarray(.uint8, PublicKey.SERIALIZE_SIZE, arraybuffer, 0);
+    }
 }
 
 pub fn Signature_finalize(_: napi.Env, sig: *Signature, _: ?*anyopaque) void {
@@ -172,25 +172,25 @@ pub fn Signature_fromBytes(env: napi.Env, cb: napi.CallbackInfo(3)) !napi.Value 
 }
 
 /// Serializes this signature to bytes.
-pub fn Signature_toBytes(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+pub fn Signature_toBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const sig = try env.unwrap(Signature, cb.this());
-    const bytes = sig.serialize();
+    const compress = try if (cb.getArg(0)) |c| coerceToBool(c) else true;
 
-    var arraybuffer_bytes: [*]u8 = undefined;
-    const arraybuffer = try env.createArrayBuffer(Signature.SERIALIZE_SIZE, &arraybuffer_bytes);
-    @memcpy(arraybuffer_bytes[0..Signature.SERIALIZE_SIZE], &bytes);
-    return try env.createTypedarray(.uint8, Signature.SERIALIZE_SIZE, arraybuffer, 0);
-}
+    if (compress) {
+        const bytes = sig.compress();
 
-/// Serializes and compresses this signature to bytes.
-pub fn Signature_toBytesCompress(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const sig = try env.unwrap(Signature, cb.this());
-    const bytes = sig.compress();
+        var arraybuffer_bytes: [*]u8 = undefined;
+        const arraybuffer = try env.createArrayBuffer(Signature.COMPRESS_SIZE, &arraybuffer_bytes);
+        @memcpy(arraybuffer_bytes[0..Signature.COMPRESS_SIZE], &bytes);
+        return try env.createTypedarray(.uint8, Signature.COMPRESS_SIZE, arraybuffer, 0);
+    } else {
+        const bytes = sig.serialize();
 
-    var arraybuffer_bytes: [*]u8 = undefined;
-    const arraybuffer = try env.createArrayBuffer(Signature.COMPRESS_SIZE, &arraybuffer_bytes);
-    @memcpy(arraybuffer_bytes[0..Signature.COMPRESS_SIZE], &bytes);
-    return try env.createTypedarray(.uint8, Signature.COMPRESS_SIZE, arraybuffer, 0);
+        var arraybuffer_bytes: [*]u8 = undefined;
+        const arraybuffer = try env.createArrayBuffer(Signature.SERIALIZE_SIZE, &arraybuffer_bytes);
+        @memcpy(arraybuffer_bytes[0..Signature.SERIALIZE_SIZE], &bytes);
+        return try env.createTypedarray(.uint8, Signature.SERIALIZE_SIZE, arraybuffer, 0);
+    }
 }
 
 pub fn SecretKey_finalize(_: napi.Env, sk: *SecretKey, _: ?*anyopaque) void {
@@ -666,8 +666,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         PublicKey_ctor,
         null,
         &[_]napi.c.napi_property_descriptor{
-            method(0, PublicKey_toBytes),
-            method(0, PublicKey_toBytesCompress),
+            method(1, PublicKey_toBytes),
             method(0, PublicKey_validate),
         },
     );
@@ -681,8 +680,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         Signature_ctor,
         null,
         &[_]napi.c.napi_property_descriptor{
-            method(0, Signature_toBytes),
-            method(0, Signature_toBytesCompress),
+            method(1, Signature_toBytes),
             method(1, Signature_validate),
         },
     );
