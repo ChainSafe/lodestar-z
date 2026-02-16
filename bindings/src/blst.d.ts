@@ -34,7 +34,7 @@ export class Signature {
   static aggregate(sigs: Signature[], sigsGroupcheck: boolean): Signature;
   /**
    * Serialize a signature to a byte array.
-   * 
+   *
    * If `compress` is `false`, the signature will be serialized in uncompressed form.
    */
   toBytes(compress?: boolean): Uint8Array;
