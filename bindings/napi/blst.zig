@@ -688,9 +688,165 @@ pub fn blst_aggregateSerializedPublicKeys(env: napi.Env, cb: napi.CallbackInfo(2
     return pk_value;
 }
 
-//TODO: implement
-pub fn blst_asyncAggregateWithRandomness(_: napi.Env, _: napi.CallbackInfo(1)) !napi.Value {
-    unreachable;
+const MAX_AGGREGATE_PER_JOB = blst.MAX_AGGREGATE_PER_JOB;
+
+const AsyncAggregateData = struct {
+    // Inputs (copied on main thread, freed in complete)
+    pks: []PublicKey,
+    sigs: []Signature,
+    n: usize,
+
+    // Outputs (set in execute)
+    result_pk: PublicKey = .{},
+    result_sig: Signature = .{},
+    err: bool = false,
+
+    // NAPI handles
+    deferred: napi.Deferred,
+    work: napi.AsyncWork(AsyncAggregateData) = undefined,
+};
+
+fn asyncAggregateExecute(_: napi.Env, data: *AsyncAggregateData) void {
+    const n = data.n;
+
+    // Generate 32 bytes of randomness per element, 64 meaningful bits (nbits=64)
+    var rands: [32 * MAX_AGGREGATE_PER_JOB]u8 = undefined;
+    std.crypto.random.bytes(rands[0 .. n * 32]);
+
+    // Build pointer arrays (stack-allocated, MAX_AGGREGATE_PER_JOB is 128)
+    var pk_refs: [MAX_AGGREGATE_PER_JOB]*const PublicKey = undefined;
+    var sig_refs: [MAX_AGGREGATE_PER_JOB]*const Signature = undefined;
+    for (0..n) |i| {
+        pk_refs[i] = &data.pks[i];
+        sig_refs[i] = &data.sigs[i];
+    }
+
+    // Per-call scratch allocation (safe for worker threads)
+    const p1_scratch_size = blst.c.blst_p1s_mult_pippenger_scratch_sizeof(n);
+    const p2_scratch_size = blst.c.blst_p2s_mult_pippenger_scratch_sizeof(n);
+    const scratch_size = @max(p1_scratch_size, p2_scratch_size);
+    const scratch = allocator.alloc(u64, scratch_size) catch {
+        data.err = true;
+        return;
+    };
+    defer allocator.free(scratch);
+
+    // Pippenger multi-scalar multiplication on G1 (pubkeys)
+    const agg_pk = AggregatePublicKey.aggregateWithRandomness(
+        pk_refs[0..n],
+        rands[0 .. n * 32],
+        false, // already validated
+        scratch,
+    ) catch {
+        data.err = true;
+        return;
+    };
+
+    // Pippenger multi-scalar multiplication on G2 (signatures)
+    const agg_sig = AggregateSignature.aggregateWithRandomness(
+        sig_refs[0..n],
+        rands[0 .. n * 32],
+        false, // already validated during deserialization
+        scratch,
+    ) catch {
+        data.err = true;
+        return;
+    };
+
+    data.result_pk = agg_pk.toPublicKey();
+    data.result_sig = agg_sig.toSignature();
+}
+
+fn asyncAggregateComplete(env: napi.Env, _: napi.status.Status, data: *AsyncAggregateData) void {
+    defer {
+        data.work.delete() catch {};
+        allocator.free(data.pks);
+        allocator.free(data.sigs);
+        allocator.destroy(data);
+    }
+
+    if (data.err) {
+        const msg = env.createStringUtf8("BLST_ERROR: Aggregation failed") catch return;
+        data.deferred.reject(msg) catch return;
+        return;
+    }
+
+    // Wrap results as NAPI PublicKey/Signature instances
+    const pk_value = newPublicKeyInstance(env) catch return;
+    const pk = env.unwrap(PublicKey, pk_value) catch return;
+    pk.* = data.result_pk;
+
+    const sig_value = newSignatureInstance(env) catch return;
+    const sig = env.unwrap(Signature, sig_value) catch return;
+    sig.* = data.result_sig;
+
+    // Create {pk, sig} JS object and resolve promise
+    const result = env.createObject() catch return;
+    result.setNamedProperty("pk", pk_value) catch return;
+    result.setNamedProperty("sig", sig_value) catch return;
+
+    data.deferred.resolve(result) catch return;
+}
+
+/// Asynchronously aggregates public keys and signatures with randomness using
+/// Pippenger multi-scalar multiplication. Heavy math runs on the libuv thread pool.
+///
+/// Arguments:
+/// 1) sets: Array of {pk: PublicKey, sig: Uint8Array}
+///
+/// Returns: Promise<{pk: PublicKey, sig: Signature}>
+pub fn blst_asyncAggregateWithRandomness(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const sets = cb.arg(0);
+    const n = try sets.getArrayLength();
+
+    if (n == 0) return error.EmptyArray;
+    // Max set size enforced at MAX_AGGREGATE_PER_JOB (128) to match blst-z internal limits
+    if (n > MAX_AGGREGATE_PER_JOB) return error.TooManySets;
+
+    const pks = try allocator.alloc(PublicKey, n);
+    errdefer allocator.free(pks);
+
+    const sigs = try allocator.alloc(Signature, n);
+    errdefer allocator.free(sigs);
+
+    for (0..n) |i| {
+        const set_value = try sets.getElement(@intCast(i));
+
+        // Unwrap PublicKey (already validated when created via fromBytes)
+        const pk_value = try set_value.getNamedProperty("pk");
+        const unwrapped_pk = try env.unwrap(PublicKey, pk_value);
+        pks[i] = unwrapped_pk.*;
+
+        // Deserialize signature from Uint8Array with validation (infinity + group check),
+        // matching blst-ts Rust behavior
+        const sig_value = try set_value.getNamedProperty("sig");
+        const sig_bytes = try sig_value.getTypedarrayInfo();
+        sigs[i] = Signature.deserialize(sig_bytes.data[0..]) catch return error.DeserializationFailed;
+        sigs[i].validate(true) catch return error.InvalidSignature;
+    }
+
+    const data = try allocator.create(AsyncAggregateData);
+    errdefer allocator.destroy(data);
+
+    data.* = .{
+        .pks = pks,
+        .sigs = sigs,
+        .n = n,
+        .deferred = try napi.Deferred.create(env.env),
+    };
+
+    const resource_name = try env.createStringUtf8("asyncAggregateWithRandomness");
+    data.work = try napi.AsyncWork(AsyncAggregateData).create(
+        env,
+        null,
+        resource_name,
+        asyncAggregateExecute,
+        asyncAggregateComplete,
+        data,
+    );
+    try data.work.queue();
+
+    return data.deferred.getPromise();
 }
 
 pub fn register(env: napi.Env, exports: napi.Value) !void {
@@ -758,6 +914,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     try blst_obj.setNamedProperty("aggregateSignatures", try env.createFunction("aggregateSignatures", 2, blst_aggregateSignatures, null));
     try blst_obj.setNamedProperty("aggregatePublicKeys", try env.createFunction("aggregatePublicKeys", 2, blst_aggregatePublicKeys, null));
     try blst_obj.setNamedProperty("aggregateSerializedPublicKeys", try env.createFunction("aggregateSerializedPublicKeys", 2, blst_aggregateSerializedPublicKeys, null));
+    try blst_obj.setNamedProperty("asyncAggregateWithRandomness", try env.createFunction("asyncAggregateWithRandomness", 1, blst_asyncAggregateWithRandomness, null));
 
     try exports.setNamedProperty("blst", blst_obj);
 }

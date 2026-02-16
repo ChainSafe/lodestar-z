@@ -63,6 +63,17 @@ export interface SignatureSet {
   sig: Signature;
 }
 
+export interface PkAndSerializedSig {
+  pk: PublicKey;
+  sig: Uint8Array;
+}
+
+export interface PkAndSig {
+  pk: PublicKey;
+  sig: Signature;
+}
+
+
 /**
  * Verify a signature against a message and public key.
  *
@@ -121,6 +132,14 @@ export function verifyMultipleAggregateSignatures(
   pksValidate?: boolean,
   sigsGroupcheck?: boolean
 ): boolean;
+
+
+/**
+ * Aggregate multiple public keys and multiple serialized signatures into a single blinded public key and blinded signature.
+ *
+ * Signatures are deserialized and validated with infinity and group checks before aggregation.
+ */
+export declare function aggregateWithRandomness(sets: Array<PkAndSerializedSig>): PkAndSig
 
 /**
  * Aggregate multiple signatures into a single signature.
