@@ -357,14 +357,17 @@ pub fn blst_verify(env: napi.Env, cb: napi.CallbackInfo(5)) !napi.Value {
 /// 1) msg: Uint8Array
 /// 2) pks: PublicKey[]
 /// 3) sig: Signature
-/// 4) sig_groupcheck: bool
+/// 4) sigs_groupcheck: ?bool
 pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.Value {
     const msg_info = try cb.arg(0).getTypedarrayInfo();
     if (msg_info.data.len != 32) return error.InvalidMessageLength;
 
     const pks_array = cb.arg(1);
     const sig = try env.unwrap(Signature, cb.arg(2));
-    const sig_groupcheck = try coerceToBool(cb.arg(3));
+    const sigs_groupcheck = if (cb.getArg(3)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
 
     const pks_len = try pks_array.getArrayLength();
     if (pks_len == 0) {
@@ -382,7 +385,7 @@ pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.V
 
     var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
     // `pks_validate` is always false here since we assume proof of possession for public keys.
-    const result = sig.fastAggregateVerify(sig_groupcheck, &pairing_buf, msg_info.data[0..32], DST, pks, false) catch {
+    const result = sig.fastAggregateVerify(sigs_groupcheck, &pairing_buf, msg_info.data[0..32], DST, pks, false) catch {
         return try env.getBoolean(false);
     };
 
@@ -394,18 +397,18 @@ pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.V
 ///
 /// Arguments:
 /// 1) sets: Array of { msg: Uint8Array, pk: PublicKey, sig: Signature }
-/// 2) sigs_groupcheck: ?bool
-/// 3) pks_validate: ?bool
+/// 2) pks_validate: ?bool
+/// 3) sigs_groupcheck: ?bool
 pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackInfo(3)) !napi.Value {
     const sets = cb.arg(0);
     const n_elems = try sets.getArrayLength();
 
-    const sigs_groupcheck: bool = if (cb.getArg(1)) |sgc|
-        try coerceToBool(sgc)
+    const pks_validate: bool = if (cb.getArg(1)) |v|
+        try coerceToBool(v)
     else
         false;
-    const pks_validate: bool = if (cb.getArg(2)) |v|
-        try coerceToBool(v)
+    const sigs_groupcheck: bool = if (cb.getArg(2)) |sgc|
+        try coerceToBool(sgc)
     else
         false;
 
@@ -545,7 +548,10 @@ pub fn blst_aggregatePublicKeys(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.V
 pub fn blst_aggregateSerializedPublicKeys(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const pks_array = cb.arg(0);
     const pks_len = try pks_array.getArrayLength();
-    const pks_validate = try coerceToBool(cb.arg(1));
+    const pks_validate: bool = if (cb.getArg(1)) |v|
+        try coerceToBool(v)
+    else
+        false;
 
     if (pks_len == 0) return error.EmptyPublicKeyArray;
 

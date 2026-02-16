@@ -39,6 +39,13 @@ export interface SignatureSet {
   sig: Signature;
 }
 
+/**
+ * Verify a signature against a message and public key.
+ *
+ * If `pkValidate` is `true`, the public key will be infinity and group checked.
+ *
+ * If `sigGroupcheck` is `true`, the signature will be group checked.
+ */
 export function verify(
   msg: Uint8Array,
   pk: PublicKey,
@@ -47,16 +54,47 @@ export function verify(
   sigGroupcheck?: boolean
 ): boolean;
 
-export function fastAggregateVerify(msg: Uint8Array, pks: PublicKey[], sig: Signature, sigGroupcheck: boolean): boolean;
+/**
+ * Verify an aggregated signature against a single message and multiple public keys.
+ *
+ * Proof-of-possession is required for public keys.
+ *
+ * If `sigsGroupcheck` is `true`, the signatures will be group checked.
+ */
+export function fastAggregateVerify(msg: Uint8Array, pks: PublicKey[], sig: Signature, sigsGroupcheck?: boolean): boolean;
 
+/**
+ * Verify multiple aggregated signatures against multiple messages and multiple public keys.
+ *
+ * If `pksValidate` is `true`, the public keys will be infinity and group checked.
+ *
+ * If `sigsGroupcheck` is `true`, the signatures will be group checked.
+ *
+ * See https://ethresear.ch/t/fast-verification-of-multiple-bls-signatures/5407
+ */
 export function verifyMultipleAggregateSignatures(
   sets: SignatureSet[],
+  pksValidate?: boolean,
   sigsGroupcheck?: boolean,
-  pksValidate?: boolean
 ): boolean;
 
+/**
+ * Aggregate multiple signatures into a single signature.
+ *
+ * If `sigsGroupcheck` is `true`, the signatures will be group checked.
+ */
 export function aggregateSignatures(signatures: Signature[], sigsGroupcheck?: boolean): Signature;
 
+/**
+ * Aggregate multiple public keys into a single public key.
+ *
+ * If `pksValidate` is `true`, the public keys will be infinity and group checked.
+ */
 export function aggregatePublicKeys(pks: PublicKey[], pksValidate?: boolean): PublicKey;
 
-export function aggregateSerializedPublicKeys(serializedPublicKeys: Uint8Array[], pksValidate: boolean): PublicKey;
+/**
+ * Aggregate multiple serialized public keys into a single public key.
+ *
+ * If `pksValidate` is `true`, the public keys will be infinity and group checked.
+ */
+export function aggregateSerializedPublicKeys(serializedPublicKeys: Uint8Array[], pksValidate?: boolean): PublicKey;
