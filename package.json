@@ -8,7 +8,11 @@
   ],
   "type": "module",
   "exports": {
-    ".": "./bindings/src/index.ts"
+    ".": "./bindings/src/index.ts",
+    "./blst": {
+      "import": "./bindings/src/blst.js",
+      "types": "./bindings/src/blst.d.ts"
+    }
   },
   "scripts": {
     "prepare": "zig build build-lib:bindings -Doptimize=ReleaseSafe",
