@@ -349,6 +349,66 @@ pub fn blst_verify(env: napi.Env, cb: napi.CallbackInfo(5)) !napi.Value {
     return try env.getBoolean(true);
 }
 
+/// Verify an aggregated signature against multiple messages and multiple public keys.
+/// 1) msgs: Uint8Array[]
+/// 2) pks: PublicKey[]
+/// 3) sig: Signature
+/// 4) pks_validate: ?bool
+/// 5) sig_groupcheck: ?bool
+pub fn blst_aggregateVerify(
+    env: napi.Env,
+    cb: napi.CallbackInfo(5),
+) !napi.Value {
+    const msgs_array = cb.arg(0);
+    const pks_array = cb.arg(1);
+    const sig = try env.unwrap(Signature, cb.arg(2));
+    const pks_validate: bool = if (cb.getArg(3)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
+    const sig_groupcheck: bool = if (cb.getArg(4)) |v|
+        try coerceToBool(v)
+    else
+        false;
+
+    const msgs_len = try msgs_array.getArrayLength();
+    const pks_len = try pks_array.getArrayLength();
+    if (msgs_len == 0 or pks_len == 0 or msgs_len != pks_len) {
+        return error.InvalidAggregateVerifyInput;
+    }
+
+    const msgs = try allocator.alloc([32]u8, msgs_len);
+    defer allocator.free(msgs);
+    const pks = try allocator.alloc(PublicKey, pks_len);
+    defer allocator.free(pks);
+
+    for (0..msgs_len) |i| {
+        const msg_value = try msgs_array.getElement(@intCast(i));
+        const msg_info = try msg_value.getTypedarrayInfo();
+        if (msg_info.data.len != 32) return error.InvalidMessageLength;
+        @memcpy(&msgs[i], msg_info.data[0..32]);
+
+        const pk_value = try pks_array.getElement(@intCast(i));
+        const pk = try env.unwrap(PublicKey, pk_value);
+        pks[i] = pk.*;
+    }
+
+    var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
+
+    const result = sig.aggregateVerify(
+        sig_groupcheck,
+        &pairing_buf,
+        msgs,
+        DST,
+        pks,
+        pks_validate,
+    ) catch {
+        return try env.getBoolean(false);
+    };
+
+    return try env.getBoolean(result);
+}
+
 /// Aggregate and verify an array of `PublicKey`s. Returns `false` if pks array is empty or if signature is invalid.
 ///
 /// `msg` (signing root) must be exactly 32 bytes.
@@ -639,6 +699,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     try blst_obj.setNamedProperty("Signature", sig_ctor);
 
     try blst_obj.setNamedProperty("verify", try env.createFunction("verify", 5, blst_verify, null));
+    try blst_obj.setNamedProperty("aggregateVerify", try env.createFunction("aggregateVerify", 5, blst_aggregateVerify, null));
     try blst_obj.setNamedProperty("fastAggregateVerify", try env.createFunction("fastAggregateVerify", 4, blst_fastAggregateVerify, null));
     try blst_obj.setNamedProperty("verifyMultipleAggregateSignatures", try env.createFunction("verifyMultipleAggregateSignatures", 3, blst_verifyMultipleAggregateSignatures, null));
     try blst_obj.setNamedProperty("aggregateSignatures", try env.createFunction("aggregateSignatures", 2, blst_aggregateSignatures, null));

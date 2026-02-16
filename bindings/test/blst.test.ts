@@ -4,6 +4,7 @@ import {
   PublicKey,
   SecretKey,
   Signature,
+  aggregateVerify,
   fastAggregateVerify,
   verify,
   verifyMultipleAggregateSignatures,
@@ -192,6 +193,26 @@ describe("blst", () => {
       const wrongMessage = new Uint8Array(32).fill(0);
       const result = verify(wrongMessage, pk, sig, false, false);
       expect(result).toBe(false);
+    });
+  });
+
+  describe("aggregateVerify", () => {
+    it("should return a boolean", () => {
+      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
+      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      expect(aggregateVerify([TEST_VECTORS.message], [pk], sig)).to.be.a("boolean");
+    });
+    describe("should default to false", () => {
+      it("should handle invalid message", () => {
+      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
+      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+        expect(aggregateVerify([sullyUint8Array(TEST_VECTORS.message)], [pk], sig)).to.be.false;
+      });
+    });
+    it("should return true for valid sets", () => {
+      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
+      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      expect(aggregateVerify([TEST_VECTORS.message], [pk], sig)).to.be.true;
     });
   });
 

@@ -55,6 +55,15 @@ export function verify(
 ): boolean;
 
 /**
+ * Verify an aggregated signature against multiple messages and multiple public keys.
+ *
+ * If `pksValidate` is `true`, the public keys will be infinity and group checked.
+ *
+ * If `sigGroupcheck` is `true`, the signatures will be group checked.
+ */
+export function aggregateVerify(msgs: Uint8Array[], pks: PublicKey[], sig: Signature, pksValidate?: boolean, sigGroupcheck?: boolean): boolean
+
+/**
  * Verify an aggregated signature against a single message and multiple public keys.
  *
  * Proof-of-possession is required for public keys.

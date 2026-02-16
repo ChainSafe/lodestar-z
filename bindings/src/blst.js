@@ -7,6 +7,7 @@ export const SecretKey = blst.SecretKey;
 export const Signature = blst.Signature;
 
 export const verify = blst.verify;
+export const aggregateVerify = blst.aggregateVerify;
 export const fastAggregateVerify = blst.fastAggregateVerify;
 export const verifyMultipleAggregateSignatures = blst.verifyMultipleAggregateSignatures;
 export const aggregateSignatures = blst.aggregateSignatures;
