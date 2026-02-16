@@ -193,36 +193,6 @@ pub fn Signature_toBytesCompress(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.
     return try env.createTypedarray(.uint8, Signature.COMPRESS_SIZE, arraybuffer, 0);
 }
 
-/// Verifies a given `msg` against a `Signature` and a `PublicKey`.
-///
-/// Returns `true` if signature is valid, `false` otherwise.
-///
-/// Arguments:
-/// 1) msg: Uint8Array
-/// 2) pk: PublicKey
-/// 3) sig: Signature
-/// 4) pk_validate: ?bool
-/// 5) sig_groupcheck: ?bool
-pub fn blst_verify(env: napi.Env, cb: napi.CallbackInfo(5)) !napi.Value {
-    const msg_info = try cb.arg(0).getTypedarrayInfo();
-    const pk = try env.unwrap(PublicKey, cb.arg(1));
-    const sig = try env.unwrap(Signature, cb.arg(2));
-    const pk_validate: bool = if (cb.getArg(3)) |sgc|
-        try coerceToBool(sgc)
-    else
-        false;
-    const sig_groupcheck: bool = if (cb.getArg(4)) |v|
-        try coerceToBool(v)
-    else
-        false;
-
-    sig.verify(sig_groupcheck, msg_info.data, DST, null, pk, pk_validate) catch {
-        return try env.getBoolean(false);
-    };
-
-    return try env.getBoolean(true);
-}
-
 pub fn SecretKey_finalize(_: napi.Env, sk: *SecretKey, _: ?*anyopaque) void {
     allocator.destroy(sk);
 }
@@ -347,6 +317,36 @@ pub fn Signature_validate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     sig.validate(sig_infcheck) catch return error.InvalidSignature;
 
     return try env.getUndefined();
+}
+
+/// Verifies a given `msg` against a `Signature` and a `PublicKey`.
+///
+/// Returns `true` if signature is valid, `false` otherwise.
+///
+/// Arguments:
+/// 1) msg: Uint8Array
+/// 2) pk: PublicKey
+/// 3) sig: Signature
+/// 4) pk_validate: ?bool
+/// 5) sig_groupcheck: ?bool
+pub fn blst_verify(env: napi.Env, cb: napi.CallbackInfo(5)) !napi.Value {
+    const msg_info = try cb.arg(0).getTypedarrayInfo();
+    const pk = try env.unwrap(PublicKey, cb.arg(1));
+    const sig = try env.unwrap(Signature, cb.arg(2));
+    const pk_validate: bool = if (cb.getArg(3)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
+    const sig_groupcheck: bool = if (cb.getArg(4)) |v|
+        try coerceToBool(v)
+    else
+        false;
+
+    sig.verify(sig_groupcheck, msg_info.data, DST, null, pk, pk_validate) catch {
+        return try env.getBoolean(false);
+    };
+
+    return try env.getBoolean(true);
 }
 
 /// Aggregate and verify an array of `PublicKey`s. Returns `false` if pks array is empty or if signature is invalid.
