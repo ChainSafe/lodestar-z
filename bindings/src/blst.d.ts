@@ -27,11 +27,21 @@ export interface SignatureSet {
   sig: Signature;
 }
 
-export function verify(msg: Uint8Array, pk: PublicKey, sig: Signature, pkValidate?: boolean, sigGroupcheck?: boolean): boolean;
+export function verify(
+  msg: Uint8Array,
+  pk: PublicKey,
+  sig: Signature,
+  pkValidate?: boolean,
+  sigGroupcheck?: boolean
+): boolean;
 
 export function fastAggregateVerify(msg: Uint8Array, pks: PublicKey[], sig: Signature, sigGroupcheck: boolean): boolean;
 
-export function verifyMultipleAggregateSignatures(sets: SignatureSet[], sigsGroupcheck?: boolean, pksValidate?: boolean): boolean;
+export function verifyMultipleAggregateSignatures(
+  sets: SignatureSet[],
+  sigsGroupcheck?: boolean,
+  pksValidate?: boolean
+): boolean;
 
 export function aggregateSignatures(signatures: Signature[], sigsGroupcheck?: boolean): Signature;
 

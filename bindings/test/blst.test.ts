@@ -1,6 +1,13 @@
 import crypto from "node:crypto";
 import {beforeEach, describe, expect, it} from "vitest";
-import {PublicKey, SecretKey, Signature, verify, fastAggregateVerify, verifyMultipleAggregateSignatures} from "../src/blst.js";
+import {
+  PublicKey,
+  SecretKey,
+  Signature,
+  fastAggregateVerify,
+  verify,
+  verifyMultipleAggregateSignatures,
+} from "../src/blst.js";
 
 describe("blst", () => {
   describe("PublicKey", () => {
