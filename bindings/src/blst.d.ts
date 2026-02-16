@@ -73,7 +73,6 @@ export interface PkAndSig {
   sig: Signature;
 }
 
-
 /**
  * Verify a signature against a message and public key.
  *
@@ -132,7 +131,6 @@ export function verifyMultipleAggregateSignatures(
   pksValidate?: boolean,
   sigsGroupcheck?: boolean
 ): boolean;
-
 
 /**
  * Aggregate multiple public keys and multiple serialized signatures into a single blinded public key and blinded signature.

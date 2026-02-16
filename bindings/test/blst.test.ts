@@ -281,17 +281,13 @@ describe("blst", () => {
         expect(() => asyncAggregateWithRandomness([{pk: sets[0].pk, sig: sets[0].sig}])).not.toThrow();
       });
       it("should handle invalid publicKey property name", () => {
-        expect(() =>
-          asyncAggregateWithRandomness([{publicKey: sets[0].pk, sig: sets[0].sig} as any])
-        ).toThrow();
+        expect(() => asyncAggregateWithRandomness([{publicKey: sets[0].pk, sig: sets[0].sig} as any])).toThrow();
       });
       it("should handle invalid publicKey property value", () => {
         expect(() => asyncAggregateWithRandomness([{pk: 1 as any, sig: sets[0].sig}])).toThrow();
       });
       it("should handle invalid signature property name", () => {
-        expect(() =>
-          asyncAggregateWithRandomness([{pk: sets[0].pk, signature: sets[0].sig} as any])
-        ).toThrow();
+        expect(() => asyncAggregateWithRandomness([{pk: sets[0].pk, signature: sets[0].sig} as any])).toThrow();
       });
       it("should handle invalid signature property value", () => {
         expect(() => asyncAggregateWithRandomness([{pk: sets[0].pk, sig: "bar" as any}])).toThrow();
@@ -353,10 +349,7 @@ describe("blst", () => {
     });
 
     it("should not validate included key/sig for different message", async () => {
-      const {pk, sig} = await asyncAggregateWithRandomness([
-        ...sets,
-        {pk: randomSet.pk, sig: randomSet.sig.toBytes()},
-      ]);
+      const {pk, sig} = await asyncAggregateWithRandomness([...sets, {pk: randomSet.pk, sig: randomSet.sig.toBytes()}]);
       expect(verify(msg, pk, sig, false, false)).toBe(false);
     });
   });
