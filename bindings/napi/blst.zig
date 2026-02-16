@@ -83,14 +83,24 @@ pub fn PublicKey_ctor(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
 }
 
 /// Converts given array of bytes to a `PublicKey`.
-pub fn PublicKey_fromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+/// 1) bytes: Uint8Array
+/// 2) pk_validate: ?bool
+pub fn PublicKey_fromBytes(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const ctor = cb.this();
     const bytes_info = try cb.arg(0).getTypedarrayInfo();
+    const pk_validate: bool = if (cb.getArg(1)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
 
     const pk_value = try env.newInstance(ctor, .{});
     const pk = try env.unwrap(PublicKey, pk_value);
 
     pk.* = try PublicKey.deserialize(bytes_info.data[0..]);
+
+    if (pk_validate) {
+        try pk.validate();
+    }
 
     return pk_value;
 }
@@ -155,9 +165,7 @@ pub fn Signature_fromBytes(env: napi.Env, cb: napi.CallbackInfo(3)) !napi.Value 
     sig.* = Signature.deserialize(bytes_info.data[0..]) catch return error.DeserializationFailed;
 
     if (sig_validate) {
-        sig.validate(sig_infcheck) catch return error.InvalidSignature;
-    } else if (sig_infcheck and sig.isInfinity()) {
-        return error.InvalidSignature;
+        try sig.validate(sig_infcheck);
     }
 
     return sig_value;
@@ -199,11 +207,11 @@ pub fn blst_verify(env: napi.Env, cb: napi.CallbackInfo(5)) !napi.Value {
     const msg_info = try cb.arg(0).getTypedarrayInfo();
     const pk = try env.unwrap(PublicKey, cb.arg(1));
     const sig = try env.unwrap(Signature, cb.arg(2));
-    const sig_groupcheck: bool = if (cb.getArg(3)) |sgc|
+    const pk_validate: bool = if (cb.getArg(3)) |sgc|
         try coerceToBool(sgc)
     else
         false;
-    const pk_validate: bool = if (cb.getArg(4)) |v|
+    const sig_groupcheck: bool = if (cb.getArg(4)) |v|
         try coerceToBool(v)
     else
         false;
@@ -598,7 +606,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         },
     );
     try pk_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{
-        method(1, PublicKey_fromBytes),
+        method(2, PublicKey_fromBytes),
     });
 
     const sig_ctor = try env.defineClass(
