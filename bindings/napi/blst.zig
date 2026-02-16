@@ -55,6 +55,11 @@ pub fn newSignatureInstance(env: napi.Env) !napi.Value {
     return try env.newInstance(ctor, .{});
 }
 
+fn coerceToBool(boolish: napi.Value) napi.status.NapiError!bool {
+    const b = try boolish.coerceToBool();
+    return b.getValueBool();
+}
+
 pub fn deinit() void {
     if (public_key_ctor_ref) |ref| {
         napi.status.check(napi.c.napi_delete_reference(null, ref)) catch {};
@@ -135,12 +140,14 @@ pub fn Signature_ctor(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
 pub fn Signature_fromBytes(env: napi.Env, cb: napi.CallbackInfo(3)) !napi.Value {
     const ctor = cb.this();
     const bytes_info = try cb.arg(0).getTypedarrayInfo();
-    const sig_validate: bool = if (cb.getArg(1)) |sgc| blk: {
-        break :blk try sgc.getValueBool();
-    } else false;
-    const sig_infcheck: bool = if (cb.getArg(2)) |v| blk: {
-        break :blk try v.getValueBool();
-    } else false;
+    const sig_validate: bool = if (cb.getArg(1)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
+    const sig_infcheck: bool = if (cb.getArg(2)) |v|
+        try coerceToBool(v)
+    else
+        false;
 
     const sig_value = try env.newInstance(ctor, .{});
     const sig = try env.unwrap(Signature, sig_value);
@@ -186,12 +193,14 @@ pub fn blst_verify(env: napi.Env, cb: napi.CallbackInfo(5)) !napi.Value {
     const msg_info = try cb.arg(0).getTypedarrayInfo();
     const pk = try env.unwrap(PublicKey, cb.arg(1));
     const sig = try env.unwrap(Signature, cb.arg(2));
-    const sig_groupcheck: bool = if (cb.getArg(3)) |sgc| blk: {
-        break :blk try sgc.getValueBool();
-    } else false;
-    const pk_validate: bool = if (cb.getArg(4)) |v| blk: {
-        break :blk try v.getValueBool();
-    } else false;
+    const sig_groupcheck: bool = if (cb.getArg(3)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
+    const pk_validate: bool = if (cb.getArg(4)) |v|
+        try coerceToBool(v)
+    else
+        false;
 
     sig.verify(sig_groupcheck, msg_info.data, DST, null, pk, pk_validate) catch {
         return try env.getBoolean(false);
@@ -292,7 +301,7 @@ pub fn SecretKey_toBytes(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
 pub fn Signature_aggregate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const ctor = cb.this();
     const sigs_array = cb.arg(0);
-    const sigs_groupcheck = try cb.arg(1).getValueBool();
+    const sigs_groupcheck = try coerceToBool(cb.arg(1));
 
     const sigs_len = try sigs_array.getArrayLength();
     if (sigs_len == 0) return error.EmptySignatureArray;
@@ -319,7 +328,7 @@ pub fn Signature_aggregate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value 
 /// Throws an error if the signature is invalid.
 pub fn Signature_validate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const sig = try env.unwrap(Signature, cb.this());
-    const sig_infcheck = try cb.arg(0).getValueBool();
+    const sig_infcheck = try coerceToBool(cb.arg(0));
 
     sig.validate(sig_infcheck) catch return error.InvalidSignature;
 
@@ -341,7 +350,7 @@ pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.V
 
     const pks_array = cb.arg(1);
     const sig = try env.unwrap(Signature, cb.arg(2));
-    const sig_groupcheck = try cb.arg(3).getValueBool();
+    const sig_groupcheck = try coerceToBool(cb.arg(3));
 
     const pks_len = try pks_array.getArrayLength();
     if (pks_len == 0) {
@@ -377,12 +386,14 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
     const sets = cb.arg(0);
     const n_elems = try sets.getArrayLength();
 
-    const sigs_groupcheck: bool = if (cb.getArg(1)) |sgc| blk: {
-        break :blk try sgc.getValueBool();
-    } else false;
-    const pks_validate: bool = if (cb.getArg(2)) |v| blk: {
-        break :blk try v.getValueBool();
-    } else false;
+    const sigs_groupcheck: bool = if (cb.getArg(1)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
+    const pks_validate: bool = if (cb.getArg(2)) |v|
+        try coerceToBool(v)
+    else
+        false;
 
     if (n_elems == 0) {
         return try env.getBoolean(false);
@@ -448,9 +459,10 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
 pub fn blst_aggregateSignatures(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const sigs_array = cb.arg(0);
 
-    const sigs_groupcheck: bool = if (cb.getArg(1)) |sgc| blk: {
-        break :blk try sgc.getValueBool();
-    } else false;
+    const sigs_groupcheck: bool = if (cb.getArg(1)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
 
     const sigs_len = try sigs_array.getArrayLength();
 
@@ -484,9 +496,10 @@ pub fn blst_aggregatePublicKeys(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.V
     const pks_array = cb.arg(0);
     const pks_len = try pks_array.getArrayLength();
 
-    const pks_validate: bool = if (cb.getArg(1)) |v| blk: {
-        break :blk try v.getValueBool();
-    } else false;
+    const pks_validate: bool = if (cb.getArg(1)) |v|
+        try coerceToBool(v)
+    else
+        false;
 
     if (pks_len == 0) {
         return error.EmptyPublicKeyArray;
@@ -518,7 +531,7 @@ pub fn blst_aggregatePublicKeys(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.V
 pub fn blst_aggregateSerializedPublicKeys(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const pks_array = cb.arg(0);
     const pks_len = try pks_array.getArrayLength();
-    const pks_validate = try cb.arg(1).getValueBool();
+    const pks_validate = try coerceToBool(cb.arg(1));
 
     if (pks_len == 0) return error.EmptyPublicKeyArray;
 
