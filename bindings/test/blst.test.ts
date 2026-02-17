@@ -5,6 +5,7 @@ import {
   SecretKey,
   Signature,
   aggregatePublicKeys,
+  aggregateSerializedPublicKeys,
   aggregateSignatures,
   aggregateVerify,
   asyncAggregateWithRandomness,
@@ -260,6 +261,43 @@ describe("blst", () => {
       const sets = getTestSets(6);
       sets[0].sig = sets[1].sig;
       expect(verifyMultipleAggregateSignatures(sets, false, false)).to.be.false;
+    });
+  });
+
+  describe("aggregateSerializedPublicKeys", () => {
+    it("should aggregate compressed (48-byte) public keys", () => {
+      const sets = getTestSets(3);
+      const compressed = sets.map((s) => s.pk.toBytes()); // default is compressed (48 bytes)
+      expect(compressed[0].length).toBe(48);
+      const agg = aggregateSerializedPublicKeys(compressed);
+      expect(agg).toBeInstanceOf(PublicKey);
+      expect(() => agg.validate()).not.toThrow();
+    });
+
+    it("should aggregate uncompressed (96-byte) public keys", () => {
+      const sets = getTestSets(3);
+      const uncompressed = sets.map((s) => s.pk.toBytes(false)); // uncompressed (96 bytes)
+      expect(uncompressed[0].length).toBe(96);
+      const agg = aggregateSerializedPublicKeys(uncompressed);
+      expect(agg).toBeInstanceOf(PublicKey);
+      expect(() => agg.validate()).not.toThrow();
+    });
+
+    it("should produce the same result as aggregatePublicKeys", () => {
+      const sets = getTestSets(3);
+      const fromObjects = aggregatePublicKeys(sets.map((s) => s.pk), false);
+      const fromCompressed = aggregateSerializedPublicKeys(sets.map((s) => s.pk.toBytes()), false);
+      const fromUncompressed = aggregateSerializedPublicKeys(sets.map((s) => s.pk.toBytes(false)), false);
+      expectEqualHex(fromCompressed.toBytes(), fromObjects.toBytes());
+      expectEqualHex(fromUncompressed.toBytes(), fromObjects.toBytes());
+    });
+
+    it("should throw on empty array", () => {
+      expect(() => aggregateSerializedPublicKeys([])).toThrow();
+    });
+
+    it("should throw on invalid length bytes", () => {
+      expect(() => aggregateSerializedPublicKeys([new Uint8Array(32)])).toThrow();
     });
   });
 

@@ -704,7 +704,7 @@ pub fn blst_aggregateSerializedPublicKeys(env: napi.Env, cb: napi.CallbackInfo(2
         const pk_bytes_value = try pks_array.getElement(@intCast(i));
         const bytes_info = try pk_bytes_value.getTypedarrayInfo();
 
-        pks[i] = PublicKey.deserialize(bytes_info.data[0..PublicKey.SERIALIZE_SIZE]) catch
+        pks[i] = PublicKey.deserialize(bytes_info.data) catch
             return error.DeserializationFailed;
     }
 
