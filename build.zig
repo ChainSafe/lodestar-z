@@ -476,6 +476,8 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("bindings/napi/root.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = false,
+        .omit_frame_pointer = false,
     });
     b.modules.put(b.dupe("bindings"), module_bindings) catch @panic("OOM");
 
