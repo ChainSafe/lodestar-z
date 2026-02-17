@@ -231,7 +231,6 @@ type Bindings = {
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
   };
   BeaconStateView: typeof BeaconStateView;
-  deinit: () => void;
 };
 
 export default Bindings;

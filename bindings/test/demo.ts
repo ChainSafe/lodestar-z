@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
-import bindings from "../src/index.ts";
+import bindings from "../src/index.js";
 import {getFirstEraFilePath} from "./eraFiles.ts";
 
 console.log("loaded bindings");

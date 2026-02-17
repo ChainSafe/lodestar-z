@@ -20,9 +20,48 @@ const allocator = if (builtin.mode == .Debug)
 else
     std.heap.c_allocator;
 
-// Holds references to the constructors for PublicKey and Signature classes.
-var public_key_ctor_ref: ?napi.c.napi_ref = null;
-var signature_ctor_ref: ?napi.c.napi_ref = null;
+/// Per-context (per-thread) instance data for constructor references
+const InstanceData = struct {
+    public_key_ctor_ref: ?napi.c.napi_ref = null,
+    signature_ctor_ref: ?napi.c.napi_ref = null,
+
+    fn init(env: napi.Env) !*InstanceData {
+        const self = try allocator.create(InstanceData);
+        errdefer allocator.destroy(self);
+
+        self.* = .{};
+        try napi.status.check(napi.c.napi_set_instance_data(
+            env.env,
+            @ptrCast(self),
+            InstanceData.finalize,
+            null,
+        ));
+        return self;
+    }
+
+    fn finalize(env: napi.c.napi_env, data: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {
+        const self: *InstanceData = @ptrCast(@alignCast(data orelse return));
+        self.clearRefs(env);
+        allocator.destroy(self);
+    }
+
+    fn get(env: napi.Env) !*InstanceData {
+        var raw: ?*anyopaque = null;
+        try napi.status.check(napi.c.napi_get_instance_data(env.env, &raw));
+        return @ptrCast(@alignCast(raw orelse return error.InstanceDataNotInitialized));
+    }
+
+    fn clearRefs(self: *InstanceData, env: napi.c.napi_env) void {
+        if (self.public_key_ctor_ref) |ref| {
+            napi.status.check(napi.c.napi_delete_reference(env, ref)) catch {};
+            self.public_key_ctor_ref = null;
+        }
+        if (self.signature_ctor_ref) |ref| {
+            napi.status.check(napi.c.napi_delete_reference(env, ref)) catch {};
+            self.signature_ctor_ref = null;
+        }
+    }
+};
 
 fn setRef(env: napi.Env, ctor: napi.Value, slot: *?napi.c.napi_ref) !void {
     if (slot.*) |ref| {
@@ -46,29 +85,20 @@ fn getFromRef(env: napi.Env, slot: ?napi.c.napi_ref) !napi.Value {
 }
 
 pub fn newPublicKeyInstance(env: napi.Env) !napi.Value {
-    const ctor = try getFromRef(env, public_key_ctor_ref);
+    const state = try InstanceData.get(env);
+    const ctor = try getFromRef(env, state.public_key_ctor_ref);
     return try env.newInstance(ctor, .{});
 }
 
 pub fn newSignatureInstance(env: napi.Env) !napi.Value {
-    const ctor = try getFromRef(env, signature_ctor_ref);
+    const state = try InstanceData.get(env);
+    const ctor = try getFromRef(env, state.signature_ctor_ref);
     return try env.newInstance(ctor, .{});
 }
 
 fn coerceToBool(boolish: napi.Value) napi.status.NapiError!bool {
     const b = try boolish.coerceToBool();
     return b.getValueBool();
-}
-
-pub fn deinit() void {
-    if (public_key_ctor_ref) |ref| {
-        napi.status.check(napi.c.napi_delete_reference(null, ref)) catch {};
-        public_key_ctor_ref = null;
-    }
-    if (signature_ctor_ref) |ref| {
-        napi.status.check(napi.c.napi_delete_reference(null, ref)) catch {};
-        signature_ctor_ref = null;
-    }
 }
 
 pub fn PublicKey_finalize(_: napi.Env, pk: *PublicKey, _: ?*anyopaque) void {
@@ -900,8 +930,9 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         method(1, Signature_aggregate),
     });
 
-    try setRef(env, pk_ctor, &public_key_ctor_ref);
-    try setRef(env, sig_ctor, &signature_ctor_ref);
+    const state = try InstanceData.init(env);
+    try setRef(env, pk_ctor, &state.public_key_ctor_ref);
+    try setRef(env, sig_ctor, &state.signature_ctor_ref);
 
     try blst_obj.setNamedProperty("SecretKey", sk_ctor);
     try blst_obj.setNamedProperty("PublicKey", pk_ctor);
