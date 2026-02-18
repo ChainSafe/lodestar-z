@@ -1,5 +1,3 @@
-import type {PublicKey} from "./blst.js";
-
 interface BeaconBlockHeader {
   slot: number;
   proposerIndex: number;
@@ -209,25 +207,9 @@ declare class BeaconStateView {
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
 }
 
-interface PubkeyCache {
-  /** Get deserialized PublicKey by validator index */
-  get(index: number): PublicKey | undefined;
-  /** Get validator index by pubkey bytes */
-  getIndex(pubkey: Uint8Array): number | null;
-  /** Set both directions atomically — impl owns the PublicKey.fromBytes() deserialization */
-  set(index: number, pubkey: Uint8Array): void;
-  /** Number of entries */
-  readonly size: number;
-}
-
 declare const bindings: {
   pool: {
     ensureCapacity: (capacity: number) => void;
-  };
-  pubkeys: PubkeyCache & {
-    load(filepath: string): void;
-    save(filepath: string): void;
-    ensureCapacity(capacity: number): void;
   };
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;

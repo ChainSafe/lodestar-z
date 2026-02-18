@@ -15,6 +15,10 @@
     "./blst": {
       "import": "./bindings/src/blst.js",
       "types": "./bindings/src/blst.d.ts"
+    },
+    "./pubkeys": {
+      "import": "./bindings/src/pubkeys.js",
+      "types": "./bindings/src/pubkeys.d.ts"
     }
   },
   "scripts": {
