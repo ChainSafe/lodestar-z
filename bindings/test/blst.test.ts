@@ -285,9 +285,18 @@ describe("blst", () => {
 
     it("should produce the same result as aggregatePublicKeys", () => {
       const sets = getTestSets(3);
-      const fromObjects = aggregatePublicKeys(sets.map((s) => s.pk), false);
-      const fromCompressed = aggregateSerializedPublicKeys(sets.map((s) => s.pk.toBytes()), false);
-      const fromUncompressed = aggregateSerializedPublicKeys(sets.map((s) => s.pk.toBytes(false)), false);
+      const fromObjects = aggregatePublicKeys(
+        sets.map((s) => s.pk),
+        false
+      );
+      const fromCompressed = aggregateSerializedPublicKeys(
+        sets.map((s) => s.pk.toBytes()),
+        false
+      );
+      const fromUncompressed = aggregateSerializedPublicKeys(
+        sets.map((s) => s.pk.toBytes(false)),
+        false
+      );
       expectEqualHex(fromCompressed.toBytes(), fromObjects.toBytes());
       expectEqualHex(fromUncompressed.toBytes(), fromObjects.toBytes());
     });
