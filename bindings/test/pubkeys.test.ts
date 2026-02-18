@@ -1,65 +1,62 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import {config} from "@lodestar/config/default";
-import * as era from "@lodestar/era";
 import {afterAll, beforeAll, describe, expect, it} from "vitest";
+import {SecretKey} from "../src/blst.js";
 import bindings from "../src/index.js";
-import {getFirstEraFilePath} from "./eraFiles.ts";
+
+// Generate deterministic valid BLS keypairs for testing
+const keypairs = Array.from({length: 3}, (_, i) => {
+  const ikm = new Uint8Array(32);
+  ikm[0] = i + 1;
+  const sk = SecretKey.fromKeygen(ikm);
+  const pk = sk.toPublicKey();
+  return {index: i, pubkeyBytes: pk.toBytes()};
+});
 
 describe("pubkeys", () => {
-  let validatorIndex = 0;
-  let validatorPubkey: Uint8Array;
-  let tempPkixPath = "";
+  const tempPkixPath = path.join(os.tmpdir(), `lodestar-z-pubkeys-${process.pid}-${Date.now()}.pkix`);
 
-  beforeAll(async () => {
-    bindings.pool.ensureCapacity(10_000_000);
-    bindings.pubkeys.ensureCapacity(2_000_000);
-
-    const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
-    const stateBytes = await reader.readSerializedState();
-    const state = bindings.BeaconStateView.createFromBytes(stateBytes);
-
-    validatorIndex = Math.min(1024, state.validatorCount - 1);
-    validatorPubkey = state.getValidator(validatorIndex).pubkey;
-
-    tempPkixPath = path.join(os.tmpdir(), `lodestar-z-pubkeys-${process.pid}-${Date.now()}.pkix`);
-  }, 120_000);
+  beforeAll(() => {
+    bindings.pubkeys.ensureCapacity(1_000);
+  });
 
   afterAll(() => {
-    if (tempPkixPath.length > 0) {
-      fs.rmSync(tempPkixPath, {force: true});
+    fs.rmSync(tempPkixPath, {force: true});
+  });
+
+  it("set populates both directions and updates size", () => {
+    for (const {index, pubkeyBytes} of keypairs) {
+      bindings.pubkeys.set(index, pubkeyBytes);
+    }
+    expect(bindings.pubkeys.size).toBe(keypairs.length);
+
+    for (const {index, pubkeyBytes} of keypairs) {
+      expect(bindings.pubkeys.get(index)).toBeDefined();
+      expect(bindings.pubkeys.getIndex(pubkeyBytes)).toBe(index);
     }
   });
 
-  it("pubkey2index.get should return validator index for a cached pubkey", () => {
-    expect(bindings.pubkeys.pubkey2index.get(validatorPubkey)).toBe(validatorIndex);
+  it("get returns undefined for out-of-range index", () => {
+    expect(bindings.pubkeys.get(0xffffffff)).toBeUndefined();
   });
 
-  it("index2pubkey.get should return PublicKey for a cached index", () => {
-    const cachedPubkey = bindings.pubkeys.index2pubkey.get(validatorIndex);
-    expect(cachedPubkey).toBeDefined();
+  it("getIndex returns null for unknown pubkey", () => {
+    expect(bindings.pubkeys.getIndex(new Uint8Array(48))).toBeNull();
   });
 
-  it("pubkey2index.get should return undefined for unknown pubkey", () => {
-    expect(bindings.pubkeys.pubkey2index.get(new Uint8Array(48))).toBeUndefined();
+  it("getIndex throws for invalid pubkey length", () => {
+    expect(() => bindings.pubkeys.getIndex(new Uint8Array(47))).toThrow();
   });
 
-  it("index2pubkey.get should return undefined for out-of-range index", () => {
-    expect(bindings.pubkeys.index2pubkey.get(0xffffffff)).toBeUndefined();
-  });
-
-  it("pubkey2index.get should throw for invalid pubkey length", () => {
-    expect(() => bindings.pubkeys.pubkey2index.get(new Uint8Array(47))).toThrow();
-  });
-
-  it("pubkeys.save/load should roundtrip cache contents", () => {
+  it("save/load roundtrips cache contents", () => {
     bindings.pubkeys.save(tempPkixPath);
     bindings.pubkeys.load(tempPkixPath);
 
-    expect(bindings.pubkeys.pubkey2index.get(validatorPubkey)).toBe(validatorIndex);
-
-    const cachedPubkey = bindings.pubkeys.index2pubkey.get(validatorIndex);
-    expect(cachedPubkey).toBeDefined();
+    expect(bindings.pubkeys.size).toBe(keypairs.length);
+    for (const {index, pubkeyBytes} of keypairs) {
+      expect(bindings.pubkeys.getIndex(pubkeyBytes)).toBe(index);
+      expect(bindings.pubkeys.get(index)).toBeDefined();
+    }
   });
 });

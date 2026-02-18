@@ -209,20 +209,25 @@ declare class BeaconStateView {
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
 }
 
-type Bindings = {
+interface PubkeyCache {
+  /** Get deserialized PublicKey by validator index */
+  get(index: number): PublicKey | undefined;
+  /** Get validator index by pubkey bytes */
+  getIndex(pubkey: Uint8Array): number | null;
+  /** Set both directions atomically — impl owns the PublicKey.fromBytes() deserialization */
+  set(index: number, pubkey: Uint8Array): void;
+  /** Number of entries */
+  readonly size: number;
+}
+
+declare const bindings: {
   pool: {
     ensureCapacity: (capacity: number) => void;
   };
-  pubkeys: {
+  pubkeys: PubkeyCache & {
     load(filepath: string): void;
     save(filepath: string): void;
-    ensureCapacity: (capacity: number) => void;
-    pubkey2index: {
-      get: (pubkey: Uint8Array) => number | undefined;
-    };
-    index2pubkey: {
-      get: (index: number) => PublicKey | undefined;
-    };
+    ensureCapacity(capacity: number): void;
   };
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
@@ -233,4 +238,4 @@ type Bindings = {
   BeaconStateView: typeof BeaconStateView;
 };
 
-export default Bindings;
+export default bindings;
