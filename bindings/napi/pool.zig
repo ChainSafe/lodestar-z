@@ -6,41 +6,38 @@ const Node = @import("persistent_merkle_tree").Node;
 /// It's recommended to never reallocate the pool after initialization.
 const allocator = std.heap.page_allocator;
 
-/// A global pool for N-API bindings to use.
-pub var pool: Node.Pool = undefined;
-var initialized: bool = false;
-
 const default_pool_size: u32 = 0;
 
-pub fn init() !void {
-    if (initialized) {
-        return;
+pub const State = struct {
+    pool: Node.Pool = undefined,
+    initialized: bool = false,
+
+    pub fn init(self: *State) !void {
+        if (self.initialized) return;
+        self.pool = try Node.Pool.init(allocator, default_pool_size);
+        self.initialized = true;
     }
 
-    pool = try Node.Pool.init(allocator, default_pool_size);
-    initialized = true;
-}
-
-pub fn deinit() void {
-    if (!initialized) {
-        return;
+    pub fn deinit(self: *State) void {
+        if (!self.initialized) return;
+        self.pool.deinit();
+        self.initialized = false;
     }
+};
 
-    pool.deinit();
-    initialized = false;
-}
+pub var state: State = .{};
 
 pub fn Pool_ensureCapacity(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    if (!initialized) {
+    if (!state.initialized) {
         return error.PoolNotInitialized;
     }
 
-    const old_size = pool.nodes.capacity;
+    const old_size = state.pool.nodes.capacity;
     const new_size = try cb.arg(0).getValueUint32();
     if (new_size <= old_size) {
         return env.getUndefined();
     }
-    try pool.preheat(@intCast(new_size - pool.nodes.capacity));
+    try state.pool.preheat(@intCast(new_size - state.pool.nodes.capacity));
     return env.getUndefined();
 }
 

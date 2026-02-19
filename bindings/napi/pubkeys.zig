@@ -4,39 +4,37 @@ const blst = @import("blst");
 const blst_bindings = @import("./blst.zig");
 const PubkeyIndexMap = @import("state_transition").PubkeyIndexMap;
 const Index2PubkeyCache = @import("state_transition").Index2PubkeyCache;
+const getter = @import("napi_property_descriptor.zig").getter;
+const method = @import("napi_property_descriptor.zig").method;
 
-/// Pool uses page allocator for internal allocations.
+/// Uses page allocator for internal allocations.
 /// It's recommended to never reallocate the pubkey2index after initialization.
 const allocator = std.heap.page_allocator;
 
-/// A global pubkey2index for N-API bindings to use.
-pub var pubkey2index: PubkeyIndexMap = undefined;
-/// A global index2pubkey for N-API bindings to use.
-pub var index2pubkey: Index2PubkeyCache = undefined;
-var initialized: bool = false;
-
 const default_initial_capacity: u32 = 0;
 
-pub fn init() !void {
-    if (initialized) {
-        return;
+pub const State = struct {
+    pubkey2index: PubkeyIndexMap = undefined,
+    index2pubkey: Index2PubkeyCache = undefined,
+    initialized: bool = false,
+
+    pub fn init(self: *State) !void {
+        if (self.initialized) return;
+        self.pubkey2index = PubkeyIndexMap.init(allocator);
+        try self.pubkey2index.ensureTotalCapacity(default_initial_capacity);
+        self.index2pubkey = try Index2PubkeyCache.initCapacity(allocator, default_initial_capacity);
+        self.initialized = true;
     }
 
-    pubkey2index = PubkeyIndexMap.init(allocator);
-    try pubkey2index.ensureTotalCapacity(default_initial_capacity);
-    index2pubkey = try Index2PubkeyCache.initCapacity(allocator, default_initial_capacity);
-    initialized = true;
-}
-
-pub fn deinit() void {
-    if (!initialized) {
-        return;
+    pub fn deinit(self: *State) void {
+        if (!self.initialized) return;
+        self.pubkey2index.deinit();
+        self.index2pubkey.deinit();
+        self.initialized = false;
     }
+};
 
-    pubkey2index.deinit();
-    index2pubkey.deinit();
-    initialized = false;
-}
+pub var state: State = .{};
 
 /// Must only be called after pubkey2index has been initialized with a capacity.
 /// Must be kept in sync with std/hashmap.zig
@@ -58,7 +56,7 @@ fn pubkey2indexWrittenSize() usize {
     const val_align = @alignOf(V);
     const max_align = comptime @max(header_align, key_align, val_align);
 
-    const new_cap: usize = pubkey2index.capacity();
+    const new_cap: usize = state.pubkey2index.capacity();
     const meta_size = @sizeOf(Header) + new_cap * @sizeOf(Metadata);
 
     const keys_start = std.mem.alignForward(usize, meta_size, key_align);
@@ -72,7 +70,7 @@ fn pubkey2indexWrittenSize() usize {
     return total_size - @sizeOf(Header);
 }
 
-pub fn save(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+pub fn pubkeys_save(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     var file_path_buf: [1024]u8 = undefined;
     const file_path = try cb.arg(0).getValueStringUtf8(&file_path_buf);
     var file = try std.fs.cwd().createFile(file_path, .{ .truncate = true });
@@ -82,30 +80,30 @@ pub fn save(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     // Magic "PKIX" + len + capacity
 
     var header: [12]u8 = [_]u8{ 'P', 'K', 'I', 'X', 0, 0, 0, 0, 0, 0, 0, 0 };
-    std.mem.writeInt(u32, header[4..8], @intCast(index2pubkey.items.len), .little);
-    std.mem.writeInt(u32, header[8..12], @intCast(index2pubkey.capacity), .little);
+    std.mem.writeInt(u32, header[4..8], @intCast(state.index2pubkey.items.len), .little);
+    std.mem.writeInt(u32, header[8..12], @intCast(state.index2pubkey.capacity), .little);
     try file.writeAll(header[0..12]);
 
     // Write pubkey2index entries
     const p2i_size = pubkey2indexWrittenSize();
-    const ptr: [*]u8 = @ptrCast(pubkey2index.unmanaged.metadata.?);
+    const ptr: [*]u8 = @ptrCast(state.pubkey2index.unmanaged.metadata.?);
     const slice = ptr[0..p2i_size];
     try file.writeAll(slice);
 
     // Write index2pubkey entries
-    try file.writeAll(std.mem.sliceAsBytes(index2pubkey.items));
+    try file.writeAll(std.mem.sliceAsBytes(state.index2pubkey.items));
 
     return env.getUndefined();
 }
 
-pub fn load(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+pub fn pubkeys_load(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     var file_path_buf: [1024]u8 = undefined;
     const file_path = try cb.arg(0).getValueStringUtf8(&file_path_buf);
     var file = try std.fs.cwd().openFile(file_path, .{});
     defer file.close();
 
-    if (initialized) {
-        deinit();
+    if (state.initialized) {
+        state.deinit();
     }
 
     var header: [12]u8 = undefined;
@@ -123,12 +121,12 @@ pub fn load(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 
     const file_size = try file.getEndPos();
 
-    pubkey2index = PubkeyIndexMap.init(allocator);
-    try pubkey2index.ensureTotalCapacity(capacity);
-    errdefer pubkey2index.deinit();
-    index2pubkey = try Index2PubkeyCache.initCapacity(allocator, capacity);
-    errdefer index2pubkey.deinit();
-    index2pubkey.items.len = len;
+    state.pubkey2index = PubkeyIndexMap.init(allocator);
+    try state.pubkey2index.ensureTotalCapacity(capacity);
+    errdefer state.pubkey2index.deinit();
+    state.index2pubkey = try Index2PubkeyCache.initCapacity(allocator, capacity);
+    errdefer state.index2pubkey.deinit();
+    state.index2pubkey.items.len = len;
 
     const p2i_size = pubkey2indexWrittenSize();
     const i2p_size = @sizeOf(blst.PublicKey) * len;
@@ -138,23 +136,23 @@ pub fn load(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     }
 
     // Read pubkey2index entries
-    const ptr: [*]u8 = @ptrCast(pubkey2index.unmanaged.metadata.?);
+    const ptr: [*]u8 = @ptrCast(state.pubkey2index.unmanaged.metadata.?);
     const slice = ptr[0..p2i_size];
     _ = try file.readAll(slice);
 
-    pubkey2index.unmanaged.size = len;
-    pubkey2index.unmanaged.available = capacity - len;
+    state.pubkey2index.unmanaged.size = len;
+    state.pubkey2index.unmanaged.available = capacity - len;
 
     // Read index2pubkey entries
-    const index2pubkey_bytes = std.mem.sliceAsBytes(index2pubkey.items);
+    const index2pubkey_bytes = std.mem.sliceAsBytes(state.index2pubkey.items);
     _ = try file.readAll(index2pubkey_bytes);
 
-    initialized = true;
+    state.initialized = true;
     return env.getUndefined();
 }
 
-pub fn pubkey2indexGet(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    if (!initialized) {
+pub fn pubkeys_getIndex(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    if (!state.initialized) {
         return error.PubkeyIndexNotInitialized;
     }
 
@@ -163,81 +161,95 @@ pub fn pubkey2indexGet(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
         return error.InvalidPubkeyLength;
     }
 
-    const index = pubkey2index.get(pubkey_info.data[0..48].*) orelse return env.getUndefined();
+    const index = state.pubkey2index.get(pubkey_info.data[0..48].*) orelse return env.getNull();
     return try env.createUint32(@intCast(index));
 }
 
-pub fn index2pubkeyGet(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    if (!initialized) {
+pub fn pubkeys_get(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    if (!state.initialized) {
         return error.PubkeyIndexNotInitialized;
     }
 
     const index = try cb.arg(0).getValueUint32();
-    if (index >= index2pubkey.items.len) {
+    if (index >= state.index2pubkey.items.len) {
         return env.getUndefined();
     }
 
     const out = try blst_bindings.newPublicKeyInstance(env);
     const out_pubkey = try env.unwrap(blst.PublicKey, out);
-    out_pubkey.* = index2pubkey.items[@intCast(index)];
+    out_pubkey.* = state.index2pubkey.items[@intCast(index)];
     return out;
 }
 
-pub fn ensureCapacity(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    if (!initialized) {
+pub fn pubkeys_set(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
+    if (!state.initialized) {
         return error.PubkeyIndexNotInitialized;
     }
 
-    const old_size = index2pubkey.capacity;
+    const index = try cb.arg(0).getValueUint32();
+    const pubkey_info = try cb.arg(1).getTypedarrayInfo();
+    if (pubkey_info.data.len != 48) {
+        return error.InvalidPubkeyLength;
+    }
+
+    const pubkey_bytes = pubkey_info.data[0..48];
+
+    // Ensure capacity if needed
+    if (index >= state.index2pubkey.capacity) {
+        const new_cap: u32 = @intCast(@max(index + 1, state.index2pubkey.capacity * 2));
+        try state.pubkey2index.ensureTotalCapacity(new_cap);
+        try state.index2pubkey.ensureTotalCapacity(new_cap);
+    }
+
+    // Extend length if needed
+    if (index >= state.index2pubkey.items.len) {
+        state.index2pubkey.items.len = index + 1;
+    }
+
+    // Set pubkey2index
+    state.pubkey2index.put(pubkey_bytes.*, @intCast(index)) catch return error.PubkeyIndexInsertFailed;
+
+    // Deserialize and set index2pubkey
+    state.index2pubkey.items[@intCast(index)] = try blst.PublicKey.uncompress(pubkey_bytes);
+
+    return env.getUndefined();
+}
+
+pub fn pubkeys_size(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
+    if (!state.initialized) {
+        return error.PubkeyIndexNotInitialized;
+    }
+
+    return try env.createUint32(@intCast(state.index2pubkey.items.len));
+}
+
+pub fn pubkeys_ensureCapacity(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    if (!state.initialized) {
+        return error.PubkeyIndexNotInitialized;
+    }
+
+    const old_size = state.index2pubkey.capacity;
     const new_size = try cb.arg(0).getValueUint32();
     if (new_size <= old_size) {
         return env.getUndefined();
     }
-    try pubkey2index.ensureTotalCapacity(new_size);
-    try index2pubkey.ensureTotalCapacity(new_size);
+    try state.pubkey2index.ensureTotalCapacity(new_size);
+    try state.index2pubkey.ensureTotalCapacity(new_size);
     return env.getUndefined();
 }
 
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const pubkeys_obj = try env.createObject();
-    try pubkeys_obj.setNamedProperty("ensureCapacity", try env.createFunction(
-        "ensureCapacity",
-        1,
-        ensureCapacity,
-        null,
-    ));
-    try pubkeys_obj.setNamedProperty("load", try env.createFunction(
-        "load",
-        1,
-        load,
-        null,
-    ));
-    try pubkeys_obj.setNamedProperty("save", try env.createFunction(
-        "save",
-        1,
-        save,
-        null,
-    ));
 
-    const pubkey2index_obj = try env.createObject();
-    const index2pubkey_obj = try env.createObject();
-
-    try pubkey2index_obj.setNamedProperty("get", try env.createFunction(
-        "get",
-        1,
-        pubkey2indexGet,
-        null,
-    ));
-
-    try index2pubkey_obj.setNamedProperty("get", try env.createFunction(
-        "get",
-        1,
-        index2pubkeyGet,
-        null,
-    ));
-
-    try pubkeys_obj.setNamedProperty("pubkey2index", pubkey2index_obj);
-    try pubkeys_obj.setNamedProperty("index2pubkey", index2pubkey_obj);
+    try pubkeys_obj.defineProperties(&[_]napi.c.napi_property_descriptor{
+        method(1, pubkeys_load),
+        method(1, pubkeys_save),
+        method(1, pubkeys_ensureCapacity),
+        method(1, pubkeys_get),
+        method(1, pubkeys_getIndex),
+        method(2, pubkeys_set),
+        getter(pubkeys_size),
+    });
 
     try exports.setNamedProperty("pubkeys", pubkeys_obj);
 }

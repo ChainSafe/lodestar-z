@@ -3,7 +3,7 @@ import * as era from "@lodestar/era";
 import {computeEpochAtSlot} from "@lodestar/state-transition";
 import {ssz} from "@lodestar/types";
 import {beforeAll, describe, expect, it} from "vitest";
-import bindings from "../src/index.ts";
+import bindings from "../src/index.js";
 import {getFirstEraFilePath} from "./eraFiles.ts";
 
 describe("BeaconStateView", () => {
