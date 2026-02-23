@@ -19,10 +19,6 @@
     "./pubkeys": {
       "import": "./bindings/src/pubkeys.js",
       "types": "./bindings/src/pubkeys.d.ts"
-    },
-    "./bls-batch": {
-      "import": "./bindings/src/bls-batch.js",
-      "types": "./bindings/src/bls-batch.d.ts"
     }
   },
   "scripts": {
