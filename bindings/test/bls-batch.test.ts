@@ -24,6 +24,8 @@ describe("blsBatch", () => {
     for (let i = 0; i < N; i++) {
       pubkeyCache.set(i, keypairs[i].pubkeyBytes);
     }
+    // Pre-allocate pool: 4 concurrent job slots
+    blsBatch.init(4);
   });
 
   // ── verifyIndexed ──────────────────────────────────────────

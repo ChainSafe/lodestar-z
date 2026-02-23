@@ -26,6 +26,21 @@ export interface BlsBatch {
    * verify once. Dispatched to a worker thread.
    */
   asyncVerifySameMessage(sets: {index: number; signature: Uint8Array}[], message: Uint8Array): Promise<boolean>;
+
+  // ── Pool management ──────────────────────────────────────────
+
+  /**
+   * Pre-allocate the buffer pool.  Call once at startup before dispatching work.
+   * Each slot holds up to 128 verification sets.
+   * @param maxJobs — maximum number of concurrent async jobs
+   */
+  init(maxJobs: number): void;
+
+  /**
+   * Returns true if the pool has a free buffer slot for another async job.
+   * Use this for backpressure before dispatching async work.
+   */
+  canAcceptWork(): boolean;
 }
 
 export declare const blsBatch: BlsBatch;

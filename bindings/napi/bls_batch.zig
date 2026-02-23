@@ -1,6 +1,23 @@
 //! blsBatch — high-level BLS batch verification that resolves pubkeys by
 //! validator index from the shared pubkey cache and dispatches heavy crypto
 //! to the libuv thread-pool.
+//!
+//! All NAPI parsing, pubkey resolution, and signature deserialization happen
+//! on the main thread.  Async jobs pass fully-resolved (msgs, pks, sigs) to
+//! a worker thread that only does the expensive pairing math.
+//!
+//! Memory strategy
+//! ───────────────
+//! Sync path: threadlocal arena, reset with retain_capacity after each call.
+//!
+//! Async path: a fixed pool of reusable buffer triples (msgs, pks, sigs),
+//! all pre-allocated at init time.  On dispatch, pop a buffer from the pool;
+//! on completion, push it back.  The hot path does zero allocator calls.
+//! The JS-side manager gates dispatching via canAcceptWork() to ensure a
+//! free slot is available before dispatching.
+//!
+//! Worker threads use a threadlocal arena for per-job temporaries (random
+//! scalars, Pippenger scratch).  The arena is reset after each job.
 const std = @import("std");
 const napi = @import("zapi:napi");
 const blst = @import("blst");
@@ -13,7 +30,12 @@ const Pairing = blst.Pairing;
 const AggregatePublicKey = blst.AggregatePublicKey;
 const AggregateSignature = blst.AggregateSignature;
 const DST = blst.DST;
-const MAX_AGGREGATE_PER_JOB = blst.MAX_AGGREGATE_PER_JOB;
+
+/// Maximum number of verification sets per async job.  This is comptime because
+/// the same-message Pippenger path needs stack-allocated pointer arrays of this
+/// size (heap-allocated arrays crash in blst assembly under optimized builds).
+/// All pool buffer slots are allocated to this capacity.
+const MAX_SETS_PER_JOB = blst.MAX_AGGREGATE_PER_JOB;
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
@@ -21,11 +43,87 @@ const allocator = if (builtin.mode == .Debug)
 else
     std.heap.c_allocator;
 
+/// Per-thread arena for batch verification scratch space.
+/// Retains capacity across calls via reset(.retain_capacity).
+threadlocal var batch_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+
+// ---------------------------------------------------------------------------
+// Buffer pool — fixed set of reusable (msgs, pks, sigs) triples for async jobs
+// ---------------------------------------------------------------------------
+
+/// Fixed-size pool of reusable buffer triples, all pre-allocated at init
+/// time.  All operations are main-thread only (dispatch and completion
+/// callbacks both run on the main thread), so no synchronization is needed.
+const SigSetsPool = struct {
+    /// stack[0..free_count] holds the currently-free buffer triples.
+    stack: []Buffers = &.{},
+    free_count: usize = 0,
+
+    /// A reusable triple of pre-allocated buffers.  Each job uses a prefix
+    /// `[0..n]` where n <= MAX_SETS_PER_JOB.
+    pub const Buffers = struct {
+        msgs: [][32]u8 = &.{},
+        pks: []PublicKey = &.{},
+        sigs: []Signature = &.{},
+    };
+
+    /// Allocate `max_jobs` buffer triples, each sized to MAX_SETS_PER_JOB.
+    fn init(self: *SigSetsPool, max_jobs: usize) !void {
+        self.stack = try allocator.alloc(Buffers, max_jobs);
+        errdefer allocator.free(self.stack);
+
+        var initialized: usize = 0;
+        errdefer for (self.stack[0..initialized]) |*slot| {
+            allocator.free(slot.msgs);
+            allocator.free(slot.pks);
+            allocator.free(slot.sigs);
+        };
+
+        for (self.stack) |*slot| {
+            slot.msgs = try allocator.alloc([32]u8, MAX_SETS_PER_JOB);
+            errdefer allocator.free(slot.msgs);
+            slot.pks = try allocator.alloc(PublicKey, MAX_SETS_PER_JOB);
+            errdefer allocator.free(slot.pks);
+            slot.sigs = try allocator.alloc(Signature, MAX_SETS_PER_JOB);
+            initialized += 1;
+        }
+        self.free_count = max_jobs;
+    }
+
+    fn pop(self: *SigSetsPool) ?Buffers {
+        if (self.free_count == 0) return null;
+        self.free_count -= 1;
+        return self.stack[self.free_count];
+    }
+
+    fn push(self: *SigSetsPool, bufs: Buffers) void {
+        self.stack[self.free_count] = bufs;
+        self.free_count += 1;
+    }
+
+    fn canAcceptWork(self: *SigSetsPool) bool {
+        return self.free_count > 0;
+    }
+
+    fn deinit(self: *SigSetsPool) void {
+        for (self.stack) |*slot| {
+            allocator.free(slot.msgs);
+            allocator.free(slot.pks);
+            allocator.free(slot.sigs);
+        }
+        if (self.stack.len > 0) allocator.free(self.stack);
+        self.* = .{};
+    }
+};
+
+var pool: SigSetsPool = .{};
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /// Look up a PublicKey from the shared cache by validator index.
+/// Called only from the main thread.
 fn getPubkey(index: u32) !*const PublicKey {
     if (!pubkeys.state.initialized) return error.PubkeyIndexNotInitialized;
     if (index >= pubkeys.state.index2pubkey.items.len) return error.PubkeyIndexOutOfRange;
@@ -51,9 +149,11 @@ fn deserializePubkey(pk_value: napi.Value) !PublicKey {
 const RAND_BYTES = 8;
 const RAND_BITS = 8 * RAND_BYTES;
 
-/// Batch-verify using Pairing.mulAndAggregate directly on value slices.
+/// Batch-verify using Pairing.mulAndAggregate.
+/// `arena_alloc` is used for temporary allocations (random scalars).
 /// Returns false for empty slices or verification failure.
 fn batchVerify(
+    arena_alloc: std.mem.Allocator,
     msgs: [][32]u8,
     pks: []PublicKey,
     sigs: []Signature,
@@ -62,9 +162,7 @@ fn batchVerify(
     std.debug.assert(pks.len == n and sigs.len == n);
     if (n == 0) return false;
 
-    const rands = try allocator.alloc([RAND_BYTES]u8, n);
-    defer allocator.free(rands);
-
+    const rands = try arena_alloc.alloc([RAND_BYTES]u8, n);
     for (0..n) |i| std.crypto.random.bytes(&rands[i]);
 
     var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
@@ -87,7 +185,7 @@ fn batchVerify(
 }
 
 // ---------------------------------------------------------------------------
-// Shared NAPI set parsing
+// Shared NAPI set parsing (used by both sync and async paths)
 // ---------------------------------------------------------------------------
 
 /// Parse sets of {index, message, signature} into pre-allocated slices.
@@ -111,7 +209,8 @@ fn parseIndexedSets(sets: napi.Value, n: usize, msgs: [][32]u8, pks: []PublicKey
 
 /// Parse sets of {indices, message, signature} into pre-allocated slices,
 /// aggregating pubkeys when multiple indices are provided.
-fn parseAggregateSets(sets: napi.Value, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature) !void {
+/// `alloc` is used for temporary pubkey aggregation buffers.
+fn parseAggregateSets(alloc: std.mem.Allocator, sets: napi.Value, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature) !void {
     for (0..n) |i| {
         const set = try sets.getElement(@intCast(i));
 
@@ -129,8 +228,8 @@ fn parseAggregateSets(sets: napi.Value, n: usize, msgs: [][32]u8, pks: []PublicK
             const idx = try idx_elem.getValueUint32();
             pks[i] = (try getPubkey(idx)).*;
         } else {
-            const tmp_pks = try allocator.alloc(PublicKey, indices_len);
-            defer allocator.free(tmp_pks);
+            const tmp_pks = try alloc.alloc(PublicKey, indices_len);
+            defer alloc.free(tmp_pks);
             for (0..indices_len) |j| {
                 const idx_elem = try indices_val.getElement(@intCast(j));
                 const idx = try idx_elem.getValueUint32();
@@ -165,115 +264,109 @@ fn parseSingleSets(sets: napi.Value, n: usize, msgs: [][32]u8, pks: []PublicKey,
 }
 
 // ---------------------------------------------------------------------------
-// 1. verifyIndexed(sets: {index, message, signature}[])
+// 1. verifyIndexed(sets: {index, message, signature}[])  — sync
 // ---------------------------------------------------------------------------
 
-/// Batch-verify sets where each set resolves its pubkey by validator index.
-///
-/// Arguments:
-/// 1) sets: Array<{ index: number, message: Uint8Array, signature: Uint8Array }>
-///
-/// Returns: boolean
 pub fn blsBatch_verifyIndexed(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const sets = cb.arg(0);
     const n = try sets.getArrayLength();
     if (n == 0) return try env.getBoolean(false);
 
-    const msgs = try allocator.alloc([32]u8, n);
-    defer allocator.free(msgs);
-    const pks = try allocator.alloc(PublicKey, n);
-    defer allocator.free(pks);
-    const sigs = try allocator.alloc(Signature, n);
-    defer allocator.free(sigs);
+    const arena_alloc = batch_arena.allocator();
+    defer _ = batch_arena.reset(.retain_capacity);
+
+    const msgs = try arena_alloc.alloc([32]u8, n);
+    const pks = try arena_alloc.alloc(PublicKey, n);
+    const sigs = try arena_alloc.alloc(Signature, n);
 
     try parseIndexedSets(sets, n, msgs, pks, sigs);
 
-    return try env.getBoolean(try batchVerify(msgs, pks, sigs));
+    return try env.getBoolean(try batchVerify(arena_alloc, msgs, pks, sigs));
 }
 
 // ---------------------------------------------------------------------------
-// 2. verifyAggregate(sets: {indices, message, signature}[])
+// 2. verifyAggregate(sets: {indices, message, signature}[])  — sync
 // ---------------------------------------------------------------------------
 
-/// Batch-verify sets where each set aggregates pubkeys from multiple indices.
-///
-/// Arguments:
-/// 1) sets: Array<{ indices: number[], message: Uint8Array, signature: Uint8Array }>
-///
-/// Returns: boolean
 pub fn blsBatch_verifyAggregate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const sets = cb.arg(0);
     const n = try sets.getArrayLength();
     if (n == 0) return try env.getBoolean(false);
 
-    const msgs = try allocator.alloc([32]u8, n);
-    defer allocator.free(msgs);
-    const pks = try allocator.alloc(PublicKey, n);
-    defer allocator.free(pks);
-    const sigs = try allocator.alloc(Signature, n);
-    defer allocator.free(sigs);
+    const arena_alloc = batch_arena.allocator();
+    defer _ = batch_arena.reset(.retain_capacity);
 
-    try parseAggregateSets(sets, n, msgs, pks, sigs);
+    const msgs = try arena_alloc.alloc([32]u8, n);
+    const pks = try arena_alloc.alloc(PublicKey, n);
+    const sigs = try arena_alloc.alloc(Signature, n);
 
-    return try env.getBoolean(try batchVerify(msgs, pks, sigs));
+    try parseAggregateSets(arena_alloc, sets, n, msgs, pks, sigs);
+
+    return try env.getBoolean(try batchVerify(arena_alloc, msgs, pks, sigs));
 }
 
 // ---------------------------------------------------------------------------
-// 3. verifySingle(sets: {publicKey, message, signature}[])
+// 3. verifySingle(sets: {publicKey, message, signature}[])  — sync
 // ---------------------------------------------------------------------------
 
-/// Batch-verify sets where each set provides an explicit pubkey as bytes.
-///
-/// Arguments:
-/// 1) sets: Array<{ publicKey: Uint8Array, message: Uint8Array, signature: Uint8Array }>
-///
-/// Returns: boolean
 pub fn blsBatch_verifySingle(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const sets = cb.arg(0);
     const n = try sets.getArrayLength();
     if (n == 0) return try env.getBoolean(false);
 
-    const msgs = try allocator.alloc([32]u8, n);
-    defer allocator.free(msgs);
-    const pks = try allocator.alloc(PublicKey, n);
-    defer allocator.free(pks);
-    const sigs = try allocator.alloc(Signature, n);
-    defer allocator.free(sigs);
+    const arena_alloc = batch_arena.allocator();
+    defer _ = batch_arena.reset(.retain_capacity);
+
+    const msgs = try arena_alloc.alloc([32]u8, n);
+    const pks = try arena_alloc.alloc(PublicKey, n);
+    const sigs = try arena_alloc.alloc(Signature, n);
 
     try parseSingleSets(sets, n, msgs, pks, sigs);
 
-    return try env.getBoolean(try batchVerify(msgs, pks, sigs));
+    return try env.getBoolean(try batchVerify(arena_alloc, msgs, pks, sigs));
 }
 
 // ---------------------------------------------------------------------------
-// Shared async batch-verify infrastructure
+// Async batch infrastructure
 // ---------------------------------------------------------------------------
 
-const AsyncBatchVerifyData = struct {
-    msgs: [][32]u8,
-    pks: []PublicKey,
-    sigs: []Signature,
+/// Create a Promise that is immediately resolved with false.
+fn resolveWithFalse(env: napi.Env) !napi.Value {
+    const deferred = try napi.Deferred.create(env.env);
+    try deferred.resolve(try env.getBoolean(false));
+    return deferred.getPromise();
+}
+
+const AsyncBatchJobData = struct {
+    bufs: SigSetsPool.Buffers,
+    n: usize,
 
     result: bool = false,
     err: bool = false,
 
     deferred: napi.Deferred,
-    work: napi.AsyncWork(AsyncBatchVerifyData) = undefined,
+    work: napi.AsyncWork(AsyncBatchJobData) = undefined,
 };
 
-fn asyncBatchExecute(_: napi.Env, data: *AsyncBatchVerifyData) void {
-    data.result = batchVerify(data.msgs, data.pks, data.sigs) catch {
+fn asyncBatchExecute(_: napi.Env, data: *AsyncBatchJobData) void {
+    const arena_alloc = batch_arena.allocator();
+    defer _ = batch_arena.reset(.retain_capacity);
+
+    data.result = batchVerify(
+        arena_alloc,
+        data.bufs.msgs[0..data.n],
+        data.bufs.pks[0..data.n],
+        data.bufs.sigs[0..data.n],
+    ) catch {
         data.err = true;
         return;
     };
 }
 
-fn asyncBatchComplete(env: napi.Env, _: napi.status.Status, data: *AsyncBatchVerifyData) void {
+fn asyncBatchComplete(env: napi.Env, _: napi.status.Status, data: *AsyncBatchJobData) void {
     defer {
         data.work.delete() catch {};
-        allocator.free(data.msgs);
-        allocator.free(data.pks);
-        allocator.free(data.sigs);
+        pool.push(data.bufs);
         allocator.destroy(data);
     }
 
@@ -288,11 +381,10 @@ fn asyncBatchComplete(env: napi.Env, _: napi.status.Status, data: *AsyncBatchVer
     data.deferred.resolve(result) catch return;
 }
 
-fn queueBatchVerify(
+fn queueBatchJob(
     env: napi.Env,
-    msgs: [][32]u8,
-    pks: []PublicKey,
-    sigs: []Signature,
+    bufs: SigSetsPool.Buffers,
+    n: usize,
     resource_name_str: [:0]const u8,
 ) !napi.Value {
     const deferred = try napi.Deferred.create(env.env);
@@ -302,18 +394,17 @@ fn queueBatchVerify(
         } else |_| {}
     }
 
-    const data = try allocator.create(AsyncBatchVerifyData);
+    const data = try allocator.create(AsyncBatchJobData);
     errdefer allocator.destroy(data);
 
     data.* = .{
-        .msgs = msgs,
-        .pks = pks,
-        .sigs = sigs,
+        .bufs = bufs,
+        .n = n,
         .deferred = deferred,
     };
 
     const resource_name = try env.createStringUtf8(resource_name_str);
-    data.work = try napi.AsyncWork(AsyncBatchVerifyData).create(
+    data.work = try napi.AsyncWork(AsyncBatchJobData).create(
         env,
         null,
         resource_name,
@@ -321,15 +412,9 @@ fn queueBatchVerify(
         asyncBatchComplete,
         data,
     );
+    errdefer data.work.delete() catch {};
     try data.work.queue();
 
-    return deferred.getPromise();
-}
-
-/// Create a Promise that is immediately resolved with false.
-fn resolveWithFalse(env: napi.Env) !napi.Value {
-    const deferred = try napi.Deferred.create(env.env);
-    try deferred.resolve(try env.getBoolean(false));
     return deferred.getPromise();
 }
 
@@ -337,72 +422,58 @@ fn resolveWithFalse(env: napi.Env) !napi.Value {
 // 4. asyncVerifyIndexed(sets)
 // ---------------------------------------------------------------------------
 
-/// Async version of verifyIndexed — dispatched to libuv threadpool.
-///
-/// Returns: Promise<boolean>
 pub fn blsBatch_asyncVerifyIndexed(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const sets = cb.arg(0);
     const n = try sets.getArrayLength();
     if (n == 0) return try resolveWithFalse(env);
+    if (n > MAX_SETS_PER_JOB) return error.TooManySets;
 
-    const msgs = try allocator.alloc([32]u8, n);
-    errdefer allocator.free(msgs);
-    const pks = try allocator.alloc(PublicKey, n);
-    errdefer allocator.free(pks);
-    const sigs = try allocator.alloc(Signature, n);
-    errdefer allocator.free(sigs);
+    const bufs = pool.pop() orelse return error.PoolExhausted;
+    errdefer pool.push(bufs);
 
-    try parseIndexedSets(sets, n, msgs, pks, sigs);
+    try parseIndexedSets(sets, n, bufs.msgs[0..n], bufs.pks[0..n], bufs.sigs[0..n]);
 
-    return try queueBatchVerify(env, msgs, pks, sigs, "asyncVerifyIndexed");
+    return try queueBatchJob(env, bufs, n, "asyncVerifyIndexed");
 }
 
 // ---------------------------------------------------------------------------
 // 5. asyncVerifyAggregate(sets)
 // ---------------------------------------------------------------------------
 
-/// Async version of verifyAggregate — dispatched to libuv threadpool.
-///
-/// Returns: Promise<boolean>
 pub fn blsBatch_asyncVerifyAggregate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const sets = cb.arg(0);
     const n = try sets.getArrayLength();
     if (n == 0) return try resolveWithFalse(env);
+    if (n > MAX_SETS_PER_JOB) return error.TooManySets;
 
-    const msgs = try allocator.alloc([32]u8, n);
-    errdefer allocator.free(msgs);
-    const pks = try allocator.alloc(PublicKey, n);
-    errdefer allocator.free(pks);
-    const sigs = try allocator.alloc(Signature, n);
-    errdefer allocator.free(sigs);
+    const bufs = pool.pop() orelse return error.PoolExhausted;
+    errdefer pool.push(bufs);
 
-    try parseAggregateSets(sets, n, msgs, pks, sigs);
+    // Use the main-thread arena for tmp_pks inside parseAggregateSets.
+    // Results are written into pool buffers; the arena is reset after.
+    const arena_alloc = batch_arena.allocator();
+    defer _ = batch_arena.reset(.retain_capacity);
+    try parseAggregateSets(arena_alloc, sets, n, bufs.msgs[0..n], bufs.pks[0..n], bufs.sigs[0..n]);
 
-    return try queueBatchVerify(env, msgs, pks, sigs, "asyncVerifyAggregate");
+    return try queueBatchJob(env, bufs, n, "asyncVerifyAggregate");
 }
 
 // ---------------------------------------------------------------------------
 // 6. asyncVerifySingle(sets)
 // ---------------------------------------------------------------------------
 
-/// Async version of verifySingle — dispatched to libuv threadpool.
-///
-/// Returns: Promise<boolean>
 pub fn blsBatch_asyncVerifySingle(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const sets = cb.arg(0);
     const n = try sets.getArrayLength();
     if (n == 0) return try resolveWithFalse(env);
+    if (n > MAX_SETS_PER_JOB) return error.TooManySets;
 
-    const msgs = try allocator.alloc([32]u8, n);
-    errdefer allocator.free(msgs);
-    const pks = try allocator.alloc(PublicKey, n);
-    errdefer allocator.free(pks);
-    const sigs = try allocator.alloc(Signature, n);
-    errdefer allocator.free(sigs);
+    const bufs = pool.pop() orelse return error.PoolExhausted;
+    errdefer pool.push(bufs);
 
-    try parseSingleSets(sets, n, msgs, pks, sigs);
+    try parseSingleSets(sets, n, bufs.msgs[0..n], bufs.pks[0..n], bufs.sigs[0..n]);
 
-    return try queueBatchVerify(env, msgs, pks, sigs, "asyncVerifySingle");
+    return try queueBatchJob(env, bufs, n, "asyncVerifySingle");
 }
 
 // ---------------------------------------------------------------------------
@@ -410,9 +481,9 @@ pub fn blsBatch_asyncVerifySingle(env: napi.Env, cb: napi.CallbackInfo(1)) !napi
 // ---------------------------------------------------------------------------
 
 const AsyncVerifySameMessageData = struct {
+    bufs: SigSetsPool.Buffers,
+    n: usize,
     msg: [32]u8,
-    pks: []PublicKey,
-    sigs: []Signature,
 
     result: bool = false,
     err: bool = false,
@@ -422,29 +493,34 @@ const AsyncVerifySameMessageData = struct {
 };
 
 fn asyncVerifySameMessageExecute(_: napi.Env, data: *AsyncVerifySameMessageData) void {
-    const n = data.pks.len;
+    const n = data.n;
+
+    const arena_alloc = batch_arena.allocator();
+    defer _ = batch_arena.reset(.retain_capacity);
 
     // Generate randomness
-    var rands: [32 * MAX_AGGREGATE_PER_JOB]u8 = undefined;
-    std.crypto.random.bytes(rands[0 .. n * 32]);
-
-    // Build pointer arrays on stack
-    var pk_refs: [MAX_AGGREGATE_PER_JOB]*const PublicKey = undefined;
-    var sig_refs: [MAX_AGGREGATE_PER_JOB]*const Signature = undefined;
-    for (0..n) |i| {
-        pk_refs[i] = &data.pks[i];
-        sig_refs[i] = &data.sigs[i];
-    }
-
-    // Scratch space for Pippenger
-    const p1_scratch_size = blst.c.blst_p1s_mult_pippenger_scratch_sizeof(n);
-    const p2_scratch_size = blst.c.blst_p2s_mult_pippenger_scratch_sizeof(n);
-    const scratch_size = @max(p1_scratch_size, p2_scratch_size);
-    const scratch = allocator.alloc(u64, scratch_size) catch {
+    const rands = arena_alloc.alloc(u8, n * 32) catch {
         data.err = true;
         return;
     };
-    defer allocator.free(scratch);
+    std.crypto.random.bytes(rands);
+
+    // Build pointer arrays on stack — blst Pippenger assembly crashes
+    // with heap-allocated pointer arrays under optimized builds.
+    var pk_refs: [MAX_SETS_PER_JOB]*const PublicKey = undefined;
+    var sig_refs: [MAX_SETS_PER_JOB]*const Signature = undefined;
+    for (0..n) |i| {
+        pk_refs[i] = &data.bufs.pks[i];
+        sig_refs[i] = &data.bufs.sigs[i];
+    }
+
+    const p1_scratch_size = blst.c.blst_p1s_mult_pippenger_scratch_sizeof(n);
+    const p2_scratch_size = blst.c.blst_p2s_mult_pippenger_scratch_sizeof(n);
+    const scratch_size = @max(p1_scratch_size, p2_scratch_size);
+    const scratch = arena_alloc.alloc(u64, scratch_size) catch {
+        data.err = true;
+        return;
+    };
 
     // Aggregate pubkeys with randomness (Pippenger)
     const agg_pk = AggregatePublicKey.aggregateWithRandomness(
@@ -482,8 +558,7 @@ fn asyncVerifySameMessageExecute(_: napi.Env, data: *AsyncVerifySameMessageData)
 fn asyncVerifySameMessageComplete(env: napi.Env, _: napi.status.Status, data: *AsyncVerifySameMessageData) void {
     defer {
         data.work.delete() catch {};
-        allocator.free(data.pks);
-        allocator.free(data.sigs);
+        pool.push(data.bufs);
         allocator.destroy(data);
     }
 
@@ -498,37 +573,27 @@ fn asyncVerifySameMessageComplete(env: napi.Env, _: napi.status.Status, data: *A
     data.deferred.resolve(result) catch return;
 }
 
-/// Async same-message optimization: aggregateWithRandomness over all sets,
-/// then a single pairing verify on a libuv worker thread.
-///
-/// Arguments:
-/// 1) sets: Array<{ index: number, signature: Uint8Array }>
-/// 2) message: Uint8Array (32 bytes)
-///
-/// Returns: Promise<boolean>
 pub fn blsBatch_asyncVerifySameMessage(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const sets = cb.arg(0);
     const n = try sets.getArrayLength();
     if (n == 0) return try resolveWithFalse(env);
-    if (n > MAX_AGGREGATE_PER_JOB) return error.TooManySets;
+    if (n > MAX_SETS_PER_JOB) return error.TooManySets;
 
     const msg_info = try cb.arg(1).getTypedarrayInfo();
     if (msg_info.data.len != 32) return error.InvalidMessageLength;
 
-    const pks = try allocator.alloc(PublicKey, n);
-    errdefer allocator.free(pks);
-    const sigs = try allocator.alloc(Signature, n);
-    errdefer allocator.free(sigs);
+    const bufs = pool.pop() orelse return error.PoolExhausted;
+    errdefer pool.push(bufs);
 
     for (0..n) |i| {
         const set = try sets.getElement(@intCast(i));
 
         const idx_val = try set.getNamedProperty("index");
         const idx = try idx_val.getValueUint32();
-        pks[i] = (try getPubkey(idx)).*;
+        bufs.pks[i] = (try getPubkey(idx)).*;
 
         const sig_val = try set.getNamedProperty("signature");
-        sigs[i] = try deserializeSig(sig_val);
+        bufs.sigs[i] = try deserializeSig(sig_val);
     }
 
     const deferred = try napi.Deferred.create(env.env);
@@ -542,9 +607,9 @@ pub fn blsBatch_asyncVerifySameMessage(env: napi.Env, cb: napi.CallbackInfo(2)) 
     errdefer allocator.destroy(data);
 
     data.* = .{
+        .bufs = bufs,
+        .n = n,
         .msg = msg_info.data[0..32].*,
-        .pks = pks,
-        .sigs = sigs,
         .deferred = deferred,
     };
 
@@ -557,9 +622,32 @@ pub fn blsBatch_asyncVerifySameMessage(env: napi.Env, cb: napi.CallbackInfo(2)) 
         asyncVerifySameMessageComplete,
         data,
     );
+    errdefer data.work.delete() catch {};
     try data.work.queue();
 
     return deferred.getPromise();
+}
+
+// ---------------------------------------------------------------------------
+// Init & backpressure
+// ---------------------------------------------------------------------------
+
+/// Pre-allocate the buffer pool.  Call once at startup before dispatching work.
+///   maxJobs — maximum number of concurrent async jobs (= number of buffer slots)
+/// Each slot is sized to MAX_SETS_PER_JOB (128) verification sets.
+pub fn blsBatch_init(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    try pool.init(try cb.arg(0).getValueUint32());
+    return try env.getUndefined();
+}
+
+/// Returns true if the pool has a free buffer slot for another async job.
+/// The JS-side manager can call this before dispatching async work or do its own tracking of in-flight jobs.
+pub fn blsBatch_canAcceptWork(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
+    return try env.getBoolean(pool.canAcceptWork());
+}
+
+pub fn deinit() void {
+    pool.deinit();
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +667,10 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     try obj.setNamedProperty("asyncVerifyAggregate", try env.createFunction("asyncVerifyAggregate", 1, blsBatch_asyncVerifyAggregate, null));
     try obj.setNamedProperty("asyncVerifySingle", try env.createFunction("asyncVerifySingle", 1, blsBatch_asyncVerifySingle, null));
     try obj.setNamedProperty("asyncVerifySameMessage", try env.createFunction("asyncVerifySameMessage", 2, blsBatch_asyncVerifySameMessage, null));
+
+    // Pool management
+    try obj.setNamedProperty("init", try env.createFunction("init", 1, blsBatch_init, null));
+    try obj.setNamedProperty("canAcceptWork", try env.createFunction("canAcceptWork", 0, blsBatch_canAcceptWork, null));
 
     try exports.setNamedProperty("blsBatch", obj);
 }
