@@ -17,6 +17,14 @@ export const pubkeyCache = {
     return pk;
   },
 
+  getOrThrow(index) {
+    const pk = pubkeyCache.get(index);
+    if (pk === undefined) {
+      throw Error(`pubkeyCache: index ${index} not found`);
+    }
+    return pk;
+  },
+
   getIndex(pubkey) {
     return native.getIndex(pubkey);
   },

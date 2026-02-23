@@ -3,6 +3,8 @@ import type {PublicKey} from "./blst.js";
 export interface PubkeyCache {
   /** Get deserialized PublicKey by validator index (cached at JS level) */
   get(index: number): PublicKey | undefined;
+  /** Same as get(), but throws if the index is not in the cache */
+  getOrThrow(index: number): PublicKey;
   /** Get validator index by pubkey bytes */
   getIndex(pubkey: Uint8Array): number | null;
   /** Set both directions atomically — impl owns the PublicKey.fromBytes() deserialization */
