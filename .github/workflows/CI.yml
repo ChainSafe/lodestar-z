@@ -251,7 +251,7 @@ jobs:
           pnpm biome ci
       - name: Build bindings
         run: |
-          zig build build-lib:bindings
+          zig build build-lib:bindings -Doptimize=ReleaseSafe
       - name: Restore era files cache
         uses: actions/cache@v4
         with:
