@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
 import bindings from "../src/index.ts";
-import {getFirstEraFilePath} from "./eraFiles.ts";
+import {getEraFilePaths, getFirstEraFilePath} from "./eraFiles.ts";
 
 console.log("loaded bindings");
 
@@ -41,9 +41,19 @@ if (hasPkix) {
 
 const reader = await printDurationAsync("load era reader", () => era.era.EraReader.open(config, getFirstEraFilePath()));
 
+const nextReader = await printDurationAsync("load era reader", () =>
+  era.era.EraReader.open(config, getEraFilePaths()[1])
+);
+
 const stateBytes = await printDurationAsync("read serialized state", () => reader.readSerializedState());
 
 const state = printDuration("create state view", () => bindings.BeaconStateView.createFromBytes(stateBytes));
+
+const signedBlockBytes = await printDurationAsync("read serialized block", () =>
+  nextReader.readSerializedBlock(state.slot + 1)
+);
+
+printDuration("state transition", () => bindings.stateTransition.stateTransition(state, signedBlockBytes));
 
 printDuration("write pkix to disk", () => bindings.pubkeys.save(PKIX_FILE));
 
