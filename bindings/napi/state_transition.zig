@@ -26,7 +26,7 @@ else
 /// Returns: BeaconStateView (the post-state)
 pub fn stateTransition(
     env: napi.Env,
-    cb: napi.CallbackInfo(4),
+    cb: napi.CallbackInfo(3),
 ) !napi.Value {
     const pre_state_value = cb.arg(0);
     const cached_state = try env.unwrap(CachedBeaconState, pre_state_value);
@@ -85,7 +85,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     const state_transition_obj = try env.createObject();
     try state_transition_obj.setNamedProperty("stateTransition", try env.createFunction(
         "stateTransition",
-        4,
+        3,
         stateTransition,
         null,
     ));
