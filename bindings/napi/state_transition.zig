@@ -6,7 +6,7 @@ const state_transition = @import("state_transition");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 
-pub var gpa: std.heap.DebugAllocator(.{}) = .init;
+var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
     gpa.allocator()
 else
