@@ -89,5 +89,5 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         stateTransition,
         null,
     ));
-    try exports.setNamedProperty("state_transition", state_transition_obj);
+    try exports.setNamedProperty("stateTransition", state_transition_obj);
 }
