@@ -789,6 +789,7 @@ pub fn blst_aggregateSerializedPublicKeys(env: napi.Env, cb: napi.CallbackInfo(2
     return pk_value;
 }
 
+/// Unpacks a hex string from a `napi.Value`. Returns the slice representing the hex string.
 fn hexFromValue(value: napi.Value, buf: []u8) ![]const u8 {
     const hex_str = try value.getValueStringUtf8(buf);
     const hex = if (hex_str.len >= 2 and hex_str[0] == '0' and hex_str[1] == 'x') hex_str[2..] else hex_str;
