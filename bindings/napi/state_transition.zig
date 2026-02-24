@@ -32,6 +32,10 @@ pub fn stateTransition(
     const cached_state = try env.unwrap(CachedBeaconState, pre_state_value);
 
     const bytes_info = try cb.arg(1).getTypedarrayInfo();
+
+    if (bytes_info.array_type != .uint8) {
+        return error.InvalidSignedBlockBytesType;
+    }
     const current_epoch = state_transition.computeEpochAtSlot(try cached_state.state.slot());
     const fork = cached_state.config.forkSeqAtEpoch(current_epoch);
     const signed_block = try AnySignedBeaconBlock.deserialize(
