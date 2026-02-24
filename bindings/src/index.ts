@@ -58,6 +58,14 @@ interface CompactMultiProof {
   descriptor: Uint8Array;
 }
 
+/**
+ * Options to control how state transition is run.
+ *
+ * @property verifyStateRoot - Verify the post-state root matches the block's state root. Default: true.
+ * @property verifyProposer - Verify the proposer signature on the signed block. Default: true.
+ * @property verifySignatures - Verify BLS signatures during block processing. Default: false.
+ * @property transferCache - Clone the state with transfer cache for memory efficiency. Default: true.
+ */
 interface TransitionOpts {
   verifyStateRoot?: boolean;
   verifyProposer?: boolean;
