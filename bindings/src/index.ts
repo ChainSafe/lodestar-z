@@ -58,7 +58,7 @@ interface CompactMultiProof {
   descriptor: Uint8Array;
 }
 
- /** Options to control how state transition is run */
+/** Options to control how state transition is run */
 interface TransitionOpts {
   /** Verify the post-state root matches the block's state root. Default: true. */
   verifyStateRoot?: boolean;
