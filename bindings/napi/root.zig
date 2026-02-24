@@ -6,11 +6,8 @@ const config = @import("./config.zig");
 const shuffle = @import("./shuffle.zig");
 const BeaconStateView = @import("./BeaconStateView.zig");
 const blst = @import("./blst.zig");
-<<<<<<< HEAD
 const bls_batch = @import("./bls_batch.zig");
-=======
 const state_transition = @import("./state_transition.zig");
->>>>>>> bing/integrate-lodestar
 
 comptime {
     napi.module.register(register);
