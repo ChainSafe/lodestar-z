@@ -58,6 +58,18 @@ interface CompactMultiProof {
   descriptor: Uint8Array;
 }
 
+/** Options to control how state transition is run */
+interface TransitionOpts {
+  /** Verify the post-state root matches the block's state root. Default: true. */
+  verifyStateRoot?: boolean;
+  /** Verify the proposer signature on the signed block. Default: true. */
+  verifyProposer?: boolean;
+  /** Verify BLS signatures during block processing. Default: true. */
+  verifySignatures?: boolean;
+  /** Clone the state with transfer cache for memory efficiency. Default: true. */
+  transferCache?: boolean;
+}
+
 interface ProposerRewards {
   attestations: bigint;
   syncAggregate: bigint;
@@ -216,6 +228,13 @@ declare const bindings: {
   };
   shuffle: {
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
+  };
+  stateTransition: {
+    stateTransition: (
+      preState: BeaconStateView,
+      signedBlockBytes: Uint8Array,
+      options?: TransitionOpts
+    ) => BeaconStateView;
   };
   BeaconStateView: typeof BeaconStateView;
 };
