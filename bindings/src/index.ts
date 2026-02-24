@@ -293,7 +293,7 @@ type Bindings = {
   deinit: () => void;
 };
 
-import { join } from "node:path";
-import { requireNapiLibrary } from "@chainsafe/zapi";
+import {join} from "node:path";
+import {requireNapiLibrary} from "@chainsafe/zapi";
 
 export default requireNapiLibrary(join(import.meta.dirname, "../..")) as Bindings;
