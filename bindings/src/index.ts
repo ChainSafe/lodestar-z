@@ -283,12 +283,6 @@ type Bindings = {
       options?: TransitionOpts
     ) => BeaconStateView;
   };
-  computeProposerIndex: (
-    fork: string,
-    effectiveBalanceIncrements: Uint16Array,
-    indices: Uint32Array,
-    seed: Uint8Array
-  ) => number;
   BeaconStateView: typeof BeaconStateView;
   blst: Blst;
   deinit: () => void;
