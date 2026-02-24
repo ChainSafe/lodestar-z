@@ -53,7 +53,7 @@ pub fn processSlots(
     _: EpochTransitionCacheOpts,
 ) !void {
     const config = cached_state.config;
-    const epoch_cache = cached_state.getEpochCache();
+    const epoch_cache = cached_state.epoch_cache;
     const state = cached_state.state;
 
     if (try state.slot() > slot) return error.outdatedSlot;
@@ -157,7 +157,8 @@ pub fn processSlots(
 pub const TransitionOpt = struct {
     verify_state_root: bool = true,
     verify_proposer: bool = true,
-    verify_signatures: bool = false,
+    /// NOTE: verifying BLS signatures is expensive - make sure to turn this off for tests.
+    verify_signatures: bool = true,
     transfer_cache: bool = true,
 };
 
@@ -199,7 +200,7 @@ pub fn stateTransition(
     );
 
     const config = post_cached_state.config;
-    const post_epoch_cache = post_cached_state.getEpochCache();
+    const post_epoch_cache = post_cached_state.epoch_cache;
     const post_state = post_cached_state.state;
 
     // Verify proposer signature only
@@ -287,7 +288,7 @@ const Node = @import("persistent_merkle_tree").Node;
 
 test "state transition - electra block" {
     const test_cases = [_]TestCase{
-        .{ .transition_opt = .{ .verify_signatures = true }, .expect_error = true },
+        .{ .transition_opt = .{}, .expect_error = true },
         .{ .transition_opt = .{ .verify_signatures = false, .verify_proposer = true }, .expect_error = true },
         .{ .transition_opt = .{ .verify_signatures = false, .verify_proposer = false, .verify_state_root = true }, .expect_error = true },
         // this runs through epoch transition + process block without verifications

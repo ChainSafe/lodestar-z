@@ -3,16 +3,17 @@ const testing = std.testing;
 
 pub const stateTransition = @import("state_transition.zig").stateTransition;
 pub const processSlots = @import("state_transition.zig").processSlots;
+pub const TransitionOpt = @import("state_transition.zig").TransitionOpt;
 
 pub const metrics = @import("metrics.zig");
 
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
+pub const computeEpochAtSlot = @import("./utils/epoch.zig").computeEpochAtSlot;
 pub const CachedBeaconState = @import("./cache/state_cache.zig").CachedBeaconState;
 pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
 pub const buildSlashingsCacheFromStateIfNeeded = @import("./cache/slashings_cache.zig").buildFromStateIfNeeded;
 
 pub const EpochCacheImmutableData = @import("./cache/epoch_cache.zig").EpochCacheImmutableData;
-pub const EpochCacheRc = @import("./cache/epoch_cache.zig").EpochCacheRc;
 pub const EpochCache = @import("./cache/epoch_cache.zig").EpochCache;
 
 pub const shuffle = @import("./utils/shuffle.zig");

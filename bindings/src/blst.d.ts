@@ -5,6 +5,12 @@ export class PublicKey {
    * If `pkValidate` is `true`, the public key will be infinity and group checked.
    */
   static fromBytes(bytes: Uint8Array, pkValidate?: boolean): PublicKey;
+  /**
+   * Deserialize a public key from a hex string.
+   *
+   * If `pk_validate` is `true`, the public key will be infinity and group checked.
+   */
+  static fromHex(hex: string, pkValidate?: boolean | undefined | null): PublicKey;
   validate(): void;
   /**
    * Serialize a public key to a byte array.
@@ -41,6 +47,18 @@ export class Signature {
    * If `sigInfcheck` is `false`, the infinity check will be skipped.
    */
   static fromBytes(bytes: Uint8Array, sigValidate?: boolean, sigInfcheck?: boolean): Signature;
+  /**
+   * Deserialize a signature from a hex string.
+   *
+   * If `sig_validate` is `true`, the public key will be infinity and group checked.
+   *
+   * If `sig_infcheck` is `false`, the infinity check will be skipped.
+   */
+  static fromHex(
+    hex: string,
+    sigValidate?: boolean | undefined | null,
+    sigInfcheck?: boolean | undefined | null
+  ): Signature;
   static aggregate(sigs: Signature[], sigsGroupcheck: boolean): Signature;
   /**
    * Serialize a signature to a byte array.

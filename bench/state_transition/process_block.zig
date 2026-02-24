@@ -45,7 +45,7 @@ fn ProcessBlockHeaderBench(comptime fork: ForkSeq) type {
             state_transition.processBlockHeader(
                 fork,
                 allocator,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
                 .full,
                 self.block,
@@ -78,7 +78,7 @@ fn ProcessWithdrawalsBench(comptime fork: ForkSeq) type {
             state_transition.getExpectedWithdrawals(
                 fork,
                 allocator,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 state,
                 &withdrawals_result,
                 &withdrawal_balances,
@@ -117,7 +117,7 @@ fn ProcessExecutionPayloadBench(comptime fork: ForkSeq) type {
                 allocator,
                 cloned.config,
                 cloned.state.castToFork(fork),
-                cloned.getEpochCache().epoch,
+                cloned.epoch_cache.epoch,
                 .full,
                 self.body,
                 external_data,
@@ -142,7 +142,7 @@ fn ProcessRandaoBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
             state_transition.processRandao(
                 fork,
                 cloned.config,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
                 .full,
                 self.body,
@@ -190,7 +190,7 @@ fn ProcessOperationsBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type
                 fork,
                 allocator,
                 cloned.config,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
                 &cloned.slashings_cache,
                 .full,
@@ -217,7 +217,7 @@ fn ProcessSyncAggregateBench(comptime fork: ForkSeq, comptime opts: BenchOpts) t
                 fork,
                 allocator,
                 cloned.config,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
                 self.body.syncAggregate(),
                 opts.verify_signature,
@@ -243,7 +243,7 @@ fn ProcessBlockBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
                 fork,
                 allocator,
                 cloned.config,
-                cloned.getEpochCache(),
+                cloned.epoch_cache,
                 cloned.state.castToFork(fork),
                 &cloned.slashings_cache,
                 .full,
@@ -322,7 +322,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
             }
 
             const state = cloned.state.castToFork(fork);
-            const epoch_cache = cloned.getEpochCache();
+            const epoch_cache = cloned.epoch_cache;
 
             const block_start = std.time.nanoTimestamp();
 

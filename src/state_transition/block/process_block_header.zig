@@ -91,7 +91,7 @@ test "process block header - sanity" {
     defer test_state.deinit();
     const slot = config.mainnet.chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
 
-    const proposers = test_state.cached_state.getEpochCache().proposers;
+    const proposers = test_state.cached_state.epoch_cache.proposers;
 
     var message: types.electra.BeaconBlock.Type = types.electra.BeaconBlock.default_value;
     const proposer_index = proposers[slot % preset.SLOTS_PER_EPOCH];
@@ -108,7 +108,7 @@ test "process block header - sanity" {
     try processBlockHeader(
         .electra,
         allocator,
-        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.electra),
         .full,
         &fork_block,

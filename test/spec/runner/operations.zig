@@ -144,7 +144,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
             switch (operation) {
                 .attestation => {
                     const config = cached_state.config;
-                    const epoch_cache = cached_state.getEpochCache();
+                    const epoch_cache = cached_state.epoch_cache;
                     var attestations = [_]ForkTypes.Attestation.Type{self.op};
                     try state_transition.processAttestations(
                         fork,
@@ -159,7 +159,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 },
                 .attester_slashing => {
                     const config = cached_state.config;
-                    const epoch_cache = cached_state.getEpochCache();
+                    const epoch_cache = cached_state.epoch_cache;
                     const current_epoch = epoch_cache.epoch;
                     try state_transition.processAttesterSlashing(
                         fork,
@@ -174,7 +174,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     );
                 },
                 .block_header => {
-                    const epoch_cache = cached_state.getEpochCache();
+                    const epoch_cache = cached_state.epoch_cache;
                     const fork_block = BeaconBlock(.full, fork){ .inner = self.op };
                     try state_transition.processBlockHeader(
                         fork,
@@ -191,12 +191,12 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 },
                 .consolidation_request => {
                     const config = cached_state.config;
-                    const epoch_cache = cached_state.getEpochCache();
+                    const epoch_cache = cached_state.epoch_cache;
                     try state_transition.processConsolidationRequest(fork, config, epoch_cache, state, &self.op);
                 },
                 .deposit => {
                     const config = cached_state.config;
-                    const epoch_cache = cached_state.getEpochCache();
+                    const epoch_cache = cached_state.epoch_cache;
                     try state_transition.processDeposit(fork, allocator, config, epoch_cache, state, &self.op);
                 },
                 .deposit_request => {
@@ -204,7 +204,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 },
                 .execution_payload => {
                     const config = cached_state.config;
-                    const epoch_cache = cached_state.getEpochCache();
+                    const epoch_cache = cached_state.epoch_cache;
                     const current_epoch = epoch_cache.epoch;
                     const fork_body = BeaconBlockBody(.full, fork){ .inner = self.op };
                     try state_transition.processExecutionPayload(
@@ -223,7 +223,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 },
                 .proposer_slashing => {
                     const config = cached_state.config;
-                    const epoch_cache = cached_state.getEpochCache();
+                    const epoch_cache = cached_state.epoch_cache;
                     try state_transition.processProposerSlashing(
                         fork,
                         allocator,
@@ -237,7 +237,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 },
                 .sync_aggregate => {
                     const config = cached_state.config;
-                    const epoch_cache = cached_state.getEpochCache();
+                    const epoch_cache = cached_state.epoch_cache;
                     try state_transition.processSyncAggregate(
                         fork,
                         allocator,
@@ -250,7 +250,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 },
                 .voluntary_exit => {
                     const config = cached_state.config;
-                    const epoch_cache = cached_state.getEpochCache();
+                    const epoch_cache = cached_state.epoch_cache;
                     try state_transition.processVoluntaryExit(
                         fork,
                         config,
@@ -262,11 +262,11 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 },
                 .withdrawal_request => {
                     const config = cached_state.config;
-                    const epoch_cache = cached_state.getEpochCache();
+                    const epoch_cache = cached_state.epoch_cache;
                     try state_transition.processWithdrawalRequest(fork, config, epoch_cache, state, &self.op);
                 },
                 .withdrawals => {
-                    const epoch_cache = cached_state.getEpochCache();
+                    const epoch_cache = cached_state.epoch_cache;
                     var withdrawals_result = WithdrawalsResult{
                         .withdrawals = try Withdrawals.initCapacity(
                             allocator,

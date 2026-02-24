@@ -46,7 +46,7 @@ test "processSyncCommitteeUpdates - sanity" {
     try processSyncCommitteeUpdates(
         .electra,
         allocator,
-        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.electra),
     );
 }

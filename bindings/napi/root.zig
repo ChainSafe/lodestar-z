@@ -6,7 +6,11 @@ const config = @import("./config.zig");
 const shuffle = @import("./shuffle.zig");
 const BeaconStateView = @import("./BeaconStateView.zig");
 const blst = @import("./blst.zig");
+<<<<<<< HEAD
 const bls_batch = @import("./bls_batch.zig");
+=======
+const state_transition = @import("./state_transition.zig");
+>>>>>>> bing/integrate-lodestar
 
 comptime {
     napi.module.register(register);
@@ -48,4 +52,5 @@ fn register(env: napi.Env, exports: napi.Value) !void {
     try BeaconStateView.register(env, exports);
     try blst.register(env, exports);
     try bls_batch.register(env, exports);
+    try state_transition.register(env, exports);
 }

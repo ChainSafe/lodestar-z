@@ -380,7 +380,7 @@ pub fn BeaconStateView_getShufflingDecisionRoot(env: napi.Env, cb: napi.Callback
 
 pub fn BeaconStateView_previousProposers(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    if (cached_state.getEpochCache().proposers_prev_epoch) |*proposers| {
+    if (cached_state.epoch_cache.proposers_prev_epoch) |*proposers| {
         return numberSliceToNapiValue(
             env,
             u64,
@@ -395,14 +395,14 @@ pub fn BeaconStateView_currentProposers(env: napi.Env, cb: napi.CallbackInfo(0))
     return numberSliceToNapiValue(
         env,
         u64,
-        &cached_state.getEpochCache().proposers,
+        &cached_state.epoch_cache.proposers,
         .{},
     );
 }
 
 pub fn BeaconStateView_nextProposers(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    if (cached_state.getEpochCache().proposers_next_epoch) |*proposers| {
+    if (cached_state.epoch_cache.proposers_next_epoch) |*proposers| {
         return numberSliceToNapiValue(
             env,
             u64,
@@ -420,7 +420,7 @@ pub fn BeaconStateView_nextProposers(env: napi.Env, cb: napi.CallbackInfo(0)) !n
 pub fn BeaconStateView_getBeaconProposer(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const slot: u64 = @intCast(try cb.arg(0).getValueInt64());
-    const proposer = try cached_state.getEpochCache().getBeaconProposer(slot);
+    const proposer = try cached_state.epoch_cache.getBeaconProposer(slot);
     return try env.createInt64(@intCast(proposer));
 }
 
@@ -442,7 +442,7 @@ pub fn BeaconStateView_nextSyncCommittee(env: napi.Env, cb: napi.CallbackInfo(0)
 
 pub fn BeaconStateView_currentSyncCommitteeIndexed(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const sync_committee_cache = cached_state.getEpochCache().current_sync_committee_indexed.get();
+    const sync_committee_cache = cached_state.epoch_cache.current_sync_committee_indexed.get();
     const validator_indices = sync_committee_cache.getValidatorIndices();
     const validator_index_map = sync_committee_cache.getValidatorIndexMap();
     const obj = try env.createObject();
@@ -480,7 +480,7 @@ pub fn BeaconStateView_currentSyncCommitteeIndexed(env: napi.Env, cb: napi.Callb
 
 pub fn BeaconStateView_syncProposerReward(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const sync_proposer_reward = cached_state.getEpochCache().sync_proposer_reward;
+    const sync_proposer_reward = cached_state.epoch_cache.sync_proposer_reward;
     return try env.createInt64(@intCast(sync_proposer_reward));
 }
 
@@ -492,7 +492,7 @@ pub fn BeaconStateView_getIndexedSyncCommitteeAtEpoch(env: napi.Env, cb: napi.Ca
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const epoch: u64 = @intCast(try cb.arg(0).getValueInt64());
 
-    const sync_committee = cached_state.getEpochCache().getIndexedSyncCommitteeAtEpoch(epoch) catch {
+    const sync_committee = cached_state.epoch_cache.getIndexedSyncCommitteeAtEpoch(epoch) catch {
         try env.throwError("NO_SYNC_COMMITTEE", "Sync committee not available for requested epoch");
         return env.getNull();
     };
@@ -507,7 +507,7 @@ pub fn BeaconStateView_getIndexedSyncCommitteeAtEpoch(env: napi.Env, cb: napi.Ca
 
 pub fn BeaconStateView_effectiveBalanceIncrements(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const increments = cached_state.getEpochCache().getEffectiveBalanceIncrements();
+    const increments = cached_state.epoch_cache.getEffectiveBalanceIncrements();
     return try numberSliceToNapiValue(env, u16, increments.items, .{ .typed_array = .uint16 });
 }
 
@@ -548,7 +548,7 @@ pub fn BeaconStateView_getValidator(env: napi.Env, cb: napi.CallbackInfo(1)) !na
 pub fn BeaconStateView_getValidatorStatus(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const index: u64 = @intCast(try cb.arg(0).getValueInt64());
-    const current_epoch = cached_state.getEpochCache().epoch;
+    const current_epoch = cached_state.epoch_cache.epoch;
 
     var validators = try cached_state.state.validators();
     var validator_view = try validators.get(index);
@@ -569,7 +569,7 @@ pub fn BeaconStateView_validatorCount(env: napi.Env, cb: napi.CallbackInfo(0)) !
 /// Get the number of active validators at the current epoch.
 pub fn BeaconStateView_activeValidatorCount(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const epoch_cache = cached_state.getEpochCache();
+    const epoch_cache = cached_state.epoch_cache;
     const count = epoch_cache.current_shuffling.get().active_indices.len;
     return try env.createInt64(@intCast(count));
 }
@@ -677,7 +677,7 @@ pub fn BeaconStateView_getVoluntaryExitValidity(env: napi.Env, cb: napi.Callback
         inline else => |f| st.getVoluntaryExitValidity(
             f,
             cached_state.config,
-            cached_state.getEpochCache(),
+            cached_state.epoch_cache,
             cached_state.state.castToFork(f),
             &signed_voluntary_exit,
             verify_signature,
@@ -708,7 +708,7 @@ pub fn BeaconStateView_isValidVoluntaryExit(env: napi.Env, cb: napi.CallbackInfo
         inline else => |f| st.isValidVoluntaryExit(
             f,
             cached_state.config,
-            cached_state.getEpochCache(),
+            cached_state.epoch_cache,
             cached_state.state.castToFork(f),
             &signed_voluntary_exit,
             verify_signature,

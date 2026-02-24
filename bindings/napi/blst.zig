@@ -135,6 +135,31 @@ pub fn PublicKey_fromBytes(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value 
     return pk_value;
 }
 
+/// Converts given hex string to a `PublicKey`.
+///
+/// 1) bytes: Uint8Array
+/// 2) pk_validate: ?bool
+pub fn PublicKey_fromHex(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
+    const ctor = cb.this();
+    var hex_buf: [PublicKey.SERIALIZE_SIZE * 2 + 2]u8 = undefined;
+    const hex = try hexFromValue(cb.arg(0), &hex_buf);
+    const pk_validate: bool = if (cb.getArg(1)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
+
+    const pk_value = try env.newInstance(ctor, .{});
+    const pk = try env.unwrap(PublicKey, pk_value);
+
+    var buf: [PublicKey.SERIALIZE_SIZE]u8 = undefined;
+    const bytes = try std.fmt.hexToBytes(&buf, hex);
+    pk.* = try PublicKey.deserialize(bytes);
+
+    if (pk_validate) try pk.validate();
+
+    return pk_value;
+}
+
 /// Converts given array of bytes to a `PublicKey`.
 pub fn PublicKey_validate(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const pk = try env.unwrap(PublicKey, cb.this());
@@ -222,6 +247,36 @@ pub fn Signature_fromBytes(env: napi.Env, cb: napi.CallbackInfo(3)) !napi.Value 
     return sig_value;
 }
 
+/// Converts given hex string to a `Signature`.
+///
+/// If `sig_validate` is `true`, the public key will be infinity and group checked.
+/// If `sig_infcheck` is `false`, the infinity check will be skipped.
+pub fn Signature_fromHex(env: napi.Env, cb: napi.CallbackInfo(3)) !napi.Value {
+    const ctor = cb.this();
+
+    var hex_buf: [Signature.SERIALIZE_SIZE * 2 + 2]u8 = undefined;
+    const hex = try hexFromValue(cb.arg(0), &hex_buf);
+    const sig_validate: bool = if (cb.getArg(1)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
+    const sig_infcheck: bool = if (cb.getArg(2)) |v|
+        try coerceToBool(v)
+    else
+        false;
+
+    const sig_value = try env.newInstance(ctor, .{});
+    const sig = try env.unwrap(Signature, sig_value);
+
+    var buf: [Signature.SERIALIZE_SIZE]u8 = undefined;
+    const bytes = try std.fmt.hexToBytes(&buf, hex);
+    sig.* = Signature.deserialize(bytes) catch return error.DeserializationFailed;
+
+    if (sig_validate) try sig.validate(sig_infcheck);
+
+    return sig_value;
+}
+
 /// Serializes this signature to bytes.
 pub fn Signature_toBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const sig = try env.unwrap(Signature, cb.this());
@@ -288,6 +343,22 @@ pub fn SecretKey_fromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value 
     const sk_value = try env.newInstance(ctor, .{});
     const sk = try env.unwrap(SecretKey, sk_value);
     sk.* = SecretKey.deserialize(bytes_info.data[0..SecretKey.serialize_size]) catch return error.DeserializationFailed;
+
+    return sk_value;
+}
+
+/// Creates a `SecretKey` from a hex string.
+pub fn SecretKey_fromHex(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const ctor = cb.this();
+
+    var hex_buf: [SecretKey.serialize_size * 2 + 2]u8 = undefined;
+    const hex = try hexFromValue(cb.arg(0), &hex_buf);
+    const sk_value = try env.newInstance(ctor, .{});
+    const sk = try env.unwrap(SecretKey, sk_value);
+
+    var buf: [SecretKey.serialize_size]u8 = undefined;
+    const bytes = try std.fmt.hexToBytes(&buf, hex);
+    sk.* = SecretKey.deserialize(bytes) catch return error.DeserializationFailed;
 
     return sk_value;
 }
@@ -718,6 +789,13 @@ pub fn blst_aggregateSerializedPublicKeys(env: napi.Env, cb: napi.CallbackInfo(2
     return pk_value;
 }
 
+/// Unpacks a hex string from a `napi.Value`. Returns the slice representing the hex string.
+fn hexFromValue(value: napi.Value, buf: []u8) ![]const u8 {
+    const hex_str = try value.getValueStringUtf8(buf);
+    const hex = if (hex_str.len >= 2 and hex_str[0] == '0' and hex_str[1] == 'x') hex_str[2..] else hex_str;
+    return hex;
+}
+
 const MAX_AGGREGATE_PER_JOB = blst.MAX_AGGREGATE_PER_JOB;
 
 const AsyncAggregateData = struct {
@@ -912,6 +990,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     );
     try pk_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{
         method(2, PublicKey_fromBytes),
+        method(2, PublicKey_fromHex),
     });
 
     const sig_ctor = try env.defineClass(
@@ -927,6 +1006,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     );
     try sig_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{
         method(3, Signature_fromBytes),
+        method(3, Signature_fromHex),
         method(1, Signature_aggregate),
     });
 

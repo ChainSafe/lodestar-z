@@ -17,24 +17,29 @@ import {
 describe("blst", () => {
   describe("PublicKey", () => {
     it("should deserialize from bytes", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
+      const pk = PublicKey.fromBytes(fromHex(TEST_VECTORS.publicKey.compressed));
+      expect(pk).toBeDefined();
+    });
+
+    it("should deserialize from hex", () => {
+      const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
       expect(pk).toBeDefined();
     });
 
     it("should take uncompressed byte arrays", () => {
       expectEqualHex(
-        PublicKey.fromBytes(TEST_VECTORS.publicKey.uncompressed).toBytes(false),
-        TEST_VECTORS.publicKey.uncompressed
+        PublicKey.fromHex(TEST_VECTORS.publicKey.uncompressed).toBytes(false),
+        fromHex(TEST_VECTORS.publicKey.uncompressed)
       );
       expectEqualHex(
-        PublicKey.fromBytes(TEST_VECTORS.publicKey.uncompressed).toBytes(),
-        TEST_VECTORS.publicKey.compressed
+        PublicKey.fromHex(TEST_VECTORS.publicKey.uncompressed).toBytes(),
+        fromHex(TEST_VECTORS.publicKey.compressed)
       );
     });
     describe("argument validation", () => {
       for (const [type, invalid] of invalidInputs) {
         it(`should throw on invalid pkBytes type: ${type}`, () => {
-          expect(() => PublicKey.fromBytes(invalid)).to.throw();
+          expect(() => PublicKey.fromHex(invalid)).to.throw();
         });
       }
       it("should throw incorrect length pkBytes", () => {
@@ -43,16 +48,20 @@ describe("blst", () => {
     });
 
     it("should serialize to bytes", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.uncompressed);
+      const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.uncompressed);
       const bytes = pk.toBytes(false);
       expect(bytes).toBeInstanceOf(Uint8Array);
       expect(bytes.length).toBe(96);
-      expect(Buffer.from(bytes).toString("hex")).toBe(Buffer.from(TEST_VECTORS.publicKey.uncompressed).toString("hex"));
-      expect(pk.toHex(false)).toBe(`0x${Buffer.from(TEST_VECTORS.publicKey.uncompressed).toString("hex")}`);
+      expect(Buffer.from(bytes).toString("hex")).toBe(
+        Buffer.from(fromHex(TEST_VECTORS.publicKey.uncompressed)).toString("hex")
+      );
+      expect(pk.toHex(false)).toBe(`0x${Buffer.from(fromHex(TEST_VECTORS.publicKey.uncompressed)).toString("hex")}`);
     });
 
     it("should throw on invalid key", () => {
-      expect(() => PublicKey.fromBytes(sullyUint8Array(TEST_VECTORS.publicKey.compressed))).to.throw("BadEncoding");
+      expect(() => PublicKey.fromBytes(sullyUint8Array(fromHex(TEST_VECTORS.publicKey.compressed)))).to.throw(
+        "BadEncoding"
+      );
     });
 
     it("should throw on zero key", () => {
@@ -67,25 +76,27 @@ describe("blst", () => {
     describe("fromBytes()", () => {
       it("should take uncompressed byte arrays", () => {
         expectEqualHex(
-          Signature.fromBytes(TEST_VECTORS.signature.uncompressed).toBytes(false),
-          TEST_VECTORS.signature.uncompressed
+          Signature.fromBytes(fromHex(TEST_VECTORS.signature.uncompressed)).toBytes(false),
+          fromHex(TEST_VECTORS.signature.uncompressed)
         );
       });
       it("should take compressed byte arrays", () => {
         expectEqualHex(
-          Signature.fromBytes(TEST_VECTORS.signature.compressed).toBytes(false),
-          TEST_VECTORS.signature.uncompressed
+          Signature.fromBytes(fromHex(TEST_VECTORS.signature.compressed)).toBytes(false),
+          fromHex(TEST_VECTORS.signature.uncompressed)
         );
       });
     });
 
     it("should serialize to bytes", () => {
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const sig = Signature.fromBytes(fromHex(TEST_VECTORS.signature.compressed));
       const bytes = sig.toBytes();
       expect(bytes).toBeInstanceOf(Uint8Array);
       expect(bytes.length).toBe(96);
-      expect(Buffer.from(bytes).toString("hex")).toBe(Buffer.from(TEST_VECTORS.signature.compressed).toString("hex"));
-      expect(sig.toHex()).toBe(`0x${Buffer.from(TEST_VECTORS.signature.compressed).toString("hex")}`);
+      expect(Buffer.from(bytes).toString("hex")).toBe(
+        Buffer.from(fromHex(TEST_VECTORS.signature.compressed)).toString("hex")
+      );
+      expect(sig.toHex()).toBe(`0x${Buffer.from(fromHex(TEST_VECTORS.signature.compressed)).toString("hex")}`);
     });
 
     describe("argument validation", () => {
@@ -188,15 +199,15 @@ describe("blst", () => {
 
   describe("verify", () => {
     it("should verify valid signature", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+      const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
       const result = verify(TEST_VECTORS.message, pk, sig, false, false);
       expect(result).toBe(true);
     });
 
     it("should reject wrong message", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+      const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
       const wrongMessage = new Uint8Array(32).fill(0);
       const result = verify(wrongMessage, pk, sig, false, false);
       expect(result).toBe(false);
@@ -205,49 +216,49 @@ describe("blst", () => {
 
   describe("aggregateVerify", () => {
     it("should return a boolean", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+      const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
       expect(aggregateVerify([TEST_VECTORS.message], [pk], sig)).to.be.a("boolean");
     });
     describe("should default to false", () => {
       it("should handle invalid message", () => {
-        const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-        const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+        const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+        const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
         expect(aggregateVerify([sullyUint8Array(TEST_VECTORS.message)], [pk], sig)).to.be.false;
       });
     });
     it("should return true for valid sets", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+      const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
       expect(aggregateVerify([TEST_VECTORS.message], [pk], sig)).to.be.true;
     });
   });
 
   describe("fastAggregateVerify", () => {
     it("should verify with single pubkey", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+      const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
       const result = fastAggregateVerify(TEST_VECTORS.message, [pk], sig, false);
       expect(result).toBe(true);
     });
 
     it("should return false for empty pubkeys", () => {
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
       const result = fastAggregateVerify(TEST_VECTORS.message, [], sig, false);
       expect(result).toBe(false);
     });
 
     it("should reject wrong message", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+      const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
       const wrongMessage = new Uint8Array(32).fill(0);
       const result = fastAggregateVerify(wrongMessage, [pk], sig, false);
       expect(result).toBe(false);
     });
 
     it("should throw on wrong message length", () => {
-      const pk = PublicKey.fromBytes(TEST_VECTORS.publicKey.compressed);
-      const sig = Signature.fromBytes(TEST_VECTORS.signature.compressed);
+      const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+      const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
       expect(() => fastAggregateVerify(new Uint8Array(31), [pk], sig, false)).toThrow();
     });
   });
@@ -471,20 +482,15 @@ function fromHex(str: string): Uint8Array {
 const TEST_VECTORS = {
   message: DEFAULT_TEST_MESSAGE,
   publicKey: {
-    compressed: fromHex(
-      "8ae7e5822ba97ab07877ea318e747499da648b27302414f9d0b9bb7e3646d248be90c9fdaddfdb93485a6e9334f01093"
-    ),
-    uncompressed: fromHex(
-      "0ae7e5822ba97ab07877ea318e747499da648b27302414f9d0b9bb7e3646d248be90c9fdaddfdb93485a6e9334f0109301f36856007e1bc875ab1b00dbf47f9ead16c5562d889d8b270002ade81e78d473204fcb51ede8659bce3d95c67903bc"
-    ),
+    compressed: "8ae7e5822ba97ab07877ea318e747499da648b27302414f9d0b9bb7e3646d248be90c9fdaddfdb93485a6e9334f01093",
+    uncompressed:
+      "0ae7e5822ba97ab07877ea318e747499da648b27302414f9d0b9bb7e3646d248be90c9fdaddfdb93485a6e9334f0109301f36856007e1bc875ab1b00dbf47f9ead16c5562d889d8b270002ade81e78d473204fcb51ede8659bce3d95c67903bc",
   },
   signature: {
-    compressed: fromHex(
-      "81faa68cb2d12b67c54a5a8ac52a7f351f187e4a4f446296c46d56b961159d52ad34a3015cff5753743c1ac2ec7ddbb708dc18431e8b9a53738a5fd08db1981711ae7f6669b9f0486c20546e3bd9e7a1d6cf239563a4b4ffbe0f572086c735aa"
-    ),
-    uncompressed: fromHex(
-      "01faa68cb2d12b67c54a5a8ac52a7f351f187e4a4f446296c46d56b961159d52ad34a3015cff5753743c1ac2ec7ddbb708dc18431e8b9a53738a5fd08db1981711ae7f6669b9f0486c20546e3bd9e7a1d6cf239563a4b4ffbe0f572086c735aa0aa269bc3fccc963c752b96499f0ba79750ca53eb90a0feb116387b59e40baa427f75bea3094ae9123d35cd543db9e1d07a95a35d5f7371f7315306603c41c473b8bf3af1a812c5ee121cfcdb73536ad28631ded94f86e97684f5f8a0bbd0a3d"
-    ),
+    compressed:
+      "81faa68cb2d12b67c54a5a8ac52a7f351f187e4a4f446296c46d56b961159d52ad34a3015cff5753743c1ac2ec7ddbb708dc18431e8b9a53738a5fd08db1981711ae7f6669b9f0486c20546e3bd9e7a1d6cf239563a4b4ffbe0f572086c735aa",
+    uncompressed:
+      "01faa68cb2d12b67c54a5a8ac52a7f351f187e4a4f446296c46d56b961159d52ad34a3015cff5753743c1ac2ec7ddbb708dc18431e8b9a53738a5fd08db1981711ae7f6669b9f0486c20546e3bd9e7a1d6cf239563a4b4ffbe0f572086c735aa0aa269bc3fccc963c752b96499f0ba79750ca53eb90a0feb116387b59e40baa427f75bea3094ae9123d35cd543db9e1d07a95a35d5f7371f7315306603c41c473b8bf3af1a812c5ee121cfcdb73536ad28631ded94f86e97684f5f8a0bbd0a3d",
   },
 };
 
