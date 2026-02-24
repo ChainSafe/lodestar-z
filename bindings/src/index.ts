@@ -64,7 +64,7 @@ interface TransitionOpts {
   verifyStateRoot?: boolean;
   /** Verify the proposer signature on the signed block. Default: true. */
   verifyProposer?: boolean;
-  /** Verify BLS signatures during block processing. Default: false. */
+  /** Verify BLS signatures during block processing. Default: true. */
   verifySignatures?: boolean;
   /** Clone the state with transfer cache for memory efficiency. Default: true. */
   transferCache?: boolean;
