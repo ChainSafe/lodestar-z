@@ -64,7 +64,7 @@ interface TransitionOpts {
   verifyStateRoot?: boolean;
   /** Verify the proposer signature on the signed block. Default: true. */
   verifyProposer?: boolean;
-  /** Verify BLS signatures during block processing. Default: false. */
+  /** Verify BLS signatures during block processing. Default: true. */
   verifySignatures?: boolean;
   /** Clone the state with transfer cache for memory efficiency. Default: true. */
   transferCache?: boolean;
@@ -293,7 +293,7 @@ type Bindings = {
   deinit: () => void;
 };
 
-import {join} from "node:path";
-import {requireNapiLibrary} from "@chainsafe/zapi";
+import { join } from "node:path";
+import { requireNapiLibrary } from "@chainsafe/zapi";
 
 export default requireNapiLibrary(join(import.meta.dirname, "../..")) as Bindings;
