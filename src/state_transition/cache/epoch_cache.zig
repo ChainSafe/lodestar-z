@@ -49,8 +49,6 @@ const ForkTypes = @import("fork_types").ForkTypes;
 
 const syncPubkeys = @import("./pubkey_cache.zig").syncPubkeys;
 
-const ReferenceCount = @import("../utils/reference_count.zig").ReferenceCount;
-
 pub const EpochCacheImmutableData = struct {
     config: *const BeaconConfig,
     pubkey_to_index: *PubkeyIndexMap,
@@ -66,11 +64,6 @@ const proposer_weight: f64 = @floatFromInt(c.PROPOSER_WEIGHT);
 const weight_denominator: f64 = @floatFromInt(c.WEIGHT_DENOMINATOR);
 
 pub const proposer_weight_factor: f64 = proposer_weight / (weight_denominator - proposer_weight);
-
-/// an EpochCache is shared by multiple CachedBeaconState instances
-/// a CachedBeaconState should increase the reference count of EpochCache when it is created
-/// and decrease the reference count when it is deinitialized
-pub const EpochCacheRc = ReferenceCount(*EpochCache);
 
 pub const EpochCache = struct {
     allocator: Allocator,
@@ -401,7 +394,7 @@ pub const EpochCache = struct {
 
     pub fn clone(self: *const EpochCache, allocator: Allocator) !*EpochCache {
         const epoch_cache = EpochCache{
-            .allocator = self.allocator,
+            .allocator = allocator,
             .config = self.config,
             // Common append-only structures shared with all states, no need to clone
             .pubkey_to_index = self.pubkey_to_index,
@@ -410,6 +403,9 @@ pub const EpochCache = struct {
             .proposers = self.proposers,
             .proposers_prev_epoch = self.proposers_prev_epoch,
             .proposers_next_epoch = self.proposers_next_epoch,
+            .previous_decision_root = self.previous_decision_root,
+            .current_decision_root = self.current_decision_root,
+            .next_decision_root = self.next_decision_root,
             // reuse the same instances, increase reference count
             .previous_shuffling = self.previous_shuffling.acquire(),
             .current_shuffling = self.current_shuffling.acquire(),
@@ -549,9 +545,7 @@ pub const EpochCache = struct {
 
     pub fn beforeEpochTransition(self: *EpochCache) !void {
         // Clone (copy) before being mutated in processEffectiveBalanceUpdates
-        var effective_balance_increments = try EffectiveBalanceIncrements.initCapacity(self.allocator, self.effective_balance_increments.get().items.len);
-        try effective_balance_increments.appendSlice(self.effective_balance_increments.get().items);
-        // unref the previous effective balance increment
+        const effective_balance_increments = try self.effective_balance_increments.get().clone();
         self.effective_balance_increments.release();
         self.effective_balance_increments = try EffectiveBalanceIncrementsRc.init(self.allocator, effective_balance_increments);
     }
@@ -784,10 +778,16 @@ pub const EpochCache = struct {
     /// This is different from typescript version: only allocate new EffectiveBalanceIncrements if needed
     pub fn effectiveBalanceIncrementsSet(self: *EpochCache, allocator: Allocator, index: usize, effective_balance: u64) !void {
         if (index >= self.effective_balance_increments.get().items.len) {
-            // Clone and extend effectiveBalanceIncrements, preserving existing data
             const old = self.effective_balance_increments.get();
-            var new_increments = try effectiveBalanceIncrementsInit(self.allocator, index + 1);
+            const new_len = index + 1;
+            const capacity = 1024 * @divFloor(new_len + 1024, 1024);
+            var new_increments = try EffectiveBalanceIncrements.initCapacity(self.allocator, capacity);
+            errdefer new_increments.deinit();
+
+            new_increments.items.len = new_len;
             @memcpy(new_increments.items[0..old.items.len], old.items);
+            @memset(new_increments.items[old.items.len..new_len], 0);
+
             self.effective_balance_increments.release();
             self.effective_balance_increments = try EffectiveBalanceIncrementsRc.init(allocator, new_increments);
         }

@@ -69,7 +69,7 @@ test "process randao - sanity" {
 
     const slot = config.mainnet.chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
 
-    const proposers = test_state.cached_state.getEpochCache().proposers;
+    const proposers = test_state.cached_state.epoch_cache.proposers;
 
     var message: types.electra.BeaconBlock.Type = types.electra.BeaconBlock.default_value;
     const proposer_index = proposers[slot % preset.SLOTS_PER_EPOCH];
@@ -87,7 +87,7 @@ test "process randao - sanity" {
     try processRandao(
         .electra,
         test_state.cached_state.config,
-        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.electra),
         .full,
         &fork_body,

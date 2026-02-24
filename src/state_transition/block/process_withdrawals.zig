@@ -243,7 +243,7 @@ test "process withdrawals - sanity" {
     try getExpectedWithdrawals(
         .electra,
         allocator,
-        test_state.cached_state.getEpochCache(),
+        test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.electra),
         &withdrawals_result,
         &withdrawal_balances,

@@ -99,7 +99,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
             const allocator = self.pre.allocator;
             const cached_state = self.pre.cached_state;
             const config = cached_state.config;
-            const epoch_cache = cached_state.getEpochCache();
+            const epoch_cache = cached_state.epoch_cache;
             const state = cached_state.state;
 
             var epoch_transition_cache = try EpochTransitionCache.init(

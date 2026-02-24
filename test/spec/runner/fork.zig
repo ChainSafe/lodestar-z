@@ -98,7 +98,7 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
         fn upgrade(self: *Self) !void {
             const cached_state = self.pre.cached_state;
             const config = cached_state.config;
-            const epoch_cache = cached_state.getEpochCache();
+            const epoch_cache = cached_state.epoch_cache;
             switch (target_fork) {
                 .altair => {
                     const upgraded = try upgradeStateToAltair(
