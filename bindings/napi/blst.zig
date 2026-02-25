@@ -435,7 +435,7 @@ pub fn SecretKey_toBytes(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
 ///
 /// 1) sigs_array: []Signature
 /// 2) sigs_groupcheck: bool
-pub fn Signature_aggregate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+pub fn Signature_aggregate(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const ctor = cb.this();
     const sigs_array = cb.arg(0);
     const sigs_groupcheck = try coerceToBool(cb.arg(1));
@@ -1007,7 +1007,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     try sig_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{
         method(3, Signature_fromBytes),
         method(3, Signature_fromHex),
-        method(1, Signature_aggregate),
+        method(2, Signature_aggregate),
     });
 
     const state = try InstanceData.init(env);
