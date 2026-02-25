@@ -4,29 +4,70 @@ Lodestar-z is a Zig library providing consensus modules for [Lodestar](https://g
 
 ## Quick Reference
 
+### Zig (core library)
+
 ```bash
 # Build
 zig build
 
-# Run all tests
+# Run all unit tests
 zig build test
 
 # Run specific test
 zig build test -- --test-filter "test name"
 
-# Run spec tests (download first, then run specific suite)
-zig build run:download_spec_tests
-zig build test:ssz          # SSZ spec tests
-zig build test:consensus_types  # consensus type tests
+# Run specific module test with filter
+zig build test:ssz -Dtest:ssz.filters="your filter"
+```
 
-# Run benchmarks (specific benchmark)
+### Spec Tests
+
+```bash
+# 1. Download spec test vectors
+zig build run:download_spec_tests
+
+# 2. Generate spec test code
+zig build run:write_spec_tests
+zig build run:write_ssz_generic_spec_tests
+zig build run:write_ssz_static_spec_tests
+
+# 3. Run spec tests (use -Dpreset=minimal for faster runs)
+zig build test:consensus_types -Dpreset=minimal
+zig build test:ssz -Dpreset=minimal
+
+# Run with filter
+zig build test:consensus_types -Dtest:consensus_types.filters="your filter"
+```
+
+### Benchmarks
+
+```bash
+# Download ERA files first (required for some benchmarks)
+zig build run:download_era_files
+
+# Run specific benchmarks
 zig build run:bench_ssz_attestation
 zig build run:bench_ssz_block
 zig build run:bench_ssz_state
 zig build run:bench_hashing
 zig build run:bench_merkle_node
+zig build run:bench_merkle_gindex
+```
 
-# Lint (JS/TS parts)
+### JS/TS Bindings
+
+```bash
+# Install JS dependencies
+pnpm i
+
+# Build NAPI bindings
+zig build build-lib:bindings                          # debug
+zig build build-lib:bindings -Doptimize=ReleaseSafe   # release
+
+# Run JS/TS tests
+pnpm test
+
+# Lint JS/TS
 pnpm biome check
 ```
 
