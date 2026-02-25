@@ -351,7 +351,7 @@ pub fn SecretKey_fromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value 
 pub fn SecretKey_fromHex(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const ctor = cb.this();
 
-    var hex_buf: [SecretKey.serialize_size * 2 + 2]u8 = undefined;
+    var hex_buf: [SecretKey.serialize_size * 2 + 3]u8 = undefined;
     const hex = try hexFromValue(cb.arg(0), &hex_buf);
     const sk_value = try env.newInstance(ctor, .{});
     const sk = try env.unwrap(SecretKey, sk_value);
