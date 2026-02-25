@@ -32,11 +32,12 @@ zig build run:write_ssz_generic_spec_tests
 zig build run:write_ssz_static_spec_tests
 
 # 3. Run spec tests (use -Dpreset=minimal for faster runs)
-zig build test:consensus_types -Dpreset=minimal
-zig build test:ssz -Dpreset=minimal
+zig build test:spec_tests -Dpreset=minimal
+zig build test:ssz_generic_spec_tests -Dpreset=minimal
+zig build test:ssz_static_spec_tests -Dpreset=minimal
 
 # Run with filter
-zig build test:consensus_types -Dtest:consensus_types.filters="your filter"
+zig build test:spec_tests -Dtest:spec_tests.filters="your filter"
 ```
 
 ### Benchmarks
