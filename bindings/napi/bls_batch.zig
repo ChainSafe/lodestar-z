@@ -426,7 +426,7 @@ fn resolveWithFalse(env: napi.Env) !napi.Value {
     return deferred.getPromise();
 }
 
-fn queueJob(env: napi.Env, data: *AsyncJobData) !napi.Value {
+fn queueJob(env: napi.Env, data: *AsyncJobData, comptime execute: *const fn (napi.Env, *AsyncJobData) void) !napi.Value {
     data.result = false;
     data.err_msg = null;
     data.deferred = try napi.Deferred.create(env.env);
@@ -441,7 +441,7 @@ fn queueJob(env: napi.Env, data: *AsyncJobData) !napi.Value {
         env,
         null,
         resource_name,
-        asyncExecute,
+        execute,
         asyncComplete,
         data,
     );
@@ -472,7 +472,7 @@ pub fn blsBatch_asyncVerify(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value
     data.n = n;
     try parseSets(kind, sets, n, data.msgs[0..n], data.pks[0..n], data.sigs[0..n]);
 
-    return try queueJob(env, data);
+    return try queueJob(env, data, asyncExecute);
 }
 
 /// asyncVerifySameMessage(sets, message) — Pippenger same-message verify on a worker thread.
@@ -493,7 +493,7 @@ pub fn blsBatch_asyncVerifySameMessage(env: napi.Env, cb: napi.CallbackInfo(2)) 
     data.msg = msg_info.data[0..32].*;
     try parseSameMessageSets(sets, n, data.pks[0..n], data.sigs[0..n]);
 
-    return try queueJob(env, data);
+    return try queueJob(env, data, asyncExecute);
 }
 
 // ---------------------------------------------------------------------------
@@ -529,31 +529,9 @@ fn testAsyncRejectExecute(_: napi.Env, data: *AsyncJobData) void {
 pub fn blsBatch__testAsyncReject(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     const data = pool.pop() orelse return error.PoolExhausted;
     errdefer pool.push(data);
-
-    data.result = false;
-    data.err_msg = null;
     data.kind = .batch;
     data.n = 0;
-    data.deferred = try napi.Deferred.create(env.env);
-    errdefer {
-        if (env.getBoolean(false)) |val| {
-            data.deferred.resolve(val) catch {};
-        } else |_| {}
-    }
-
-    const resource_name = try env.createStringUtf8("testAsyncReject");
-    data.work = try napi.AsyncWork(AsyncJobData).create(
-        env,
-        null,
-        resource_name,
-        testAsyncRejectExecute,
-        asyncComplete,
-        data,
-    );
-    errdefer data.work.delete() catch {};
-    try data.work.queue();
-
-    return data.deferred.getPromise();
+    return try queueJob(env, data, testAsyncRejectExecute);
 }
 
 // ---------------------------------------------------------------------------
