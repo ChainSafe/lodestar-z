@@ -351,14 +351,14 @@ pub fn SecretKey_fromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value 
 pub fn SecretKey_fromHex(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const ctor = cb.this();
 
-    var hex_buf: [SecretKey.serialize_size * 2 + 2]u8 = undefined;
+    var hex_buf: [SecretKey.serialize_size * 2 + 3]u8 = undefined;
     const hex = try hexFromValue(cb.arg(0), &hex_buf);
     const sk_value = try env.newInstance(ctor, .{});
     const sk = try env.unwrap(SecretKey, sk_value);
 
     var buf: [SecretKey.serialize_size]u8 = undefined;
     const bytes = try std.fmt.hexToBytes(&buf, hex);
-    sk.* = SecretKey.deserialize(bytes) catch return error.DeserializationFailed;
+    sk.* = SecretKey.deserialize(bytes[0..SecretKey.serialize_size]) catch return error.DeserializationFailed;
 
     return sk_value;
 }
@@ -435,7 +435,7 @@ pub fn SecretKey_toBytes(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
 ///
 /// 1) sigs_array: []Signature
 /// 2) sigs_groupcheck: bool
-pub fn Signature_aggregate(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+pub fn Signature_aggregate(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const ctor = cb.this();
     const sigs_array = cb.arg(0);
     const sigs_groupcheck = try coerceToBool(cb.arg(1));
@@ -974,6 +974,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     );
     try sk_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{
         method(1, SecretKey_fromBytes),
+        method(1, SecretKey_fromHex),
         method(2, SecretKey_fromKeygen),
     });
 
@@ -1007,7 +1008,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     try sig_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{
         method(3, Signature_fromBytes),
         method(3, Signature_fromHex),
-        method(1, Signature_aggregate),
+        method(2, Signature_aggregate),
     });
 
     const state = try InstanceData.init(env);

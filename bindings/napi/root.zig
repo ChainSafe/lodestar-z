@@ -13,9 +13,9 @@ comptime {
     napi.module.register(register);
 }
 
-// Tracks how many NAPI environments reference the shared module state.
-// Shared state (pool, pubkeys, config) is initialized on the first register
-// and torn down only when the last environment exits.
+/// Tracks how many NAPI environments reference the shared module state.
+/// Shared state (pool, pubkeys, config) is initialized on the first register
+/// and torn down only when the last environment exits.
 var env_refcount: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
 const EnvCleanup = struct {

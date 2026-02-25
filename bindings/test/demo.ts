@@ -50,9 +50,9 @@ const stateBytes = await printDurationAsync("read serialized state", () => reade
 
 const state = printDuration("create state view", () => bindings.BeaconStateView.createFromBytes(stateBytes));
 
-const signedBlockBytes = await printDurationAsync("read serialized block", () =>
+const signedBlockBytes = (await printDurationAsync("read serialized block", () =>
   nextReader.readSerializedBlock(state.slot + 1)
-) as Uint8Array;
+)) as Uint8Array;
 
 printDuration("state transition", () => bindings.stateTransition.stateTransition(state, signedBlockBytes));
 
