@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(zig build *)",
+      "Bash(zig test *)",
+      "Bash(zig fmt *)",
+      "Bash(pnpm biome *)",
+      "Bash(pnpm install)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git branch *)",
+      "Bash(git show *)",
+      "Bash(git fetch *)",
+      "Bash(gh pr *)",
+      "Bash(gh issue *)",
+      "Bash(gh api *)",
+      "Bash(gh run *)",
+      "Bash(gh search *)",
+      "Bash(grep *)",
+      "Bash(find *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(ls *)"
+    ],
+    "deny": [
+      "Bash(rm -rf / *)",
+      "Bash(sudo *)"
+    ]
+  },
+  "enabledPlugins": {
+    "ethereum-rnd@lodestar-claude-plugins": true,
+    "consensus-clients@lodestar-claude-plugins": true,
+    "zig-lsp@lodestar-claude-plugins": true
+  },
+  "extraKnownMarketplaces": {
+    "lodestar-claude-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "ChainSafe/lodestar-claude-plugins"
+      }
+    }
+  }
+}
