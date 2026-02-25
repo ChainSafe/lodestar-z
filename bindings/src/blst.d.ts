@@ -28,6 +28,7 @@ export class PublicKey {
 
 export class SecretKey {
   static fromBytes(bytes: Uint8Array): SecretKey;
+  static fromHex(hex: string): SecretKey;
   static fromKeygen(ikm: Uint8Array, keyInfo?: Uint8Array): SecretKey;
   sign(msg: Uint8Array): Signature;
   toPublicKey(): PublicKey;

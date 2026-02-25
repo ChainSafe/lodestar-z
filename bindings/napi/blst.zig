@@ -358,7 +358,7 @@ pub fn SecretKey_fromHex(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 
     var buf: [SecretKey.serialize_size]u8 = undefined;
     const bytes = try std.fmt.hexToBytes(&buf, hex);
-    sk.* = SecretKey.deserialize(bytes) catch return error.DeserializationFailed;
+    sk.* = SecretKey.deserialize(bytes[0..SecretKey.serialize_size]) catch return error.DeserializationFailed;
 
     return sk_value;
 }
@@ -974,6 +974,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     );
     try sk_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{
         method(1, SecretKey_fromBytes),
+        method(1, SecretKey_fromHex),
         method(2, SecretKey_fromKeygen),
     });
 
