@@ -40,9 +40,6 @@ const DST = blst.DST;
 /// Maximum number of verification sets per job.
 const MAX_SETS_PER_JOB = blst.MAX_AGGREGATE_PER_JOB;
 
-/// Maximum number of validator indices that can be aggregated in a single set.
-const MAX_INDICES_PER_SET = 2048;
-
 /// Stack scratch buffer size (u64 count) for Pippenger.  Derived from
 /// MAX_SETS_PER_JOB; verified against the actual blst requirement at pool init.
 const MAX_SCRATCH_SIZE = 128 * MAX_SETS_PER_JOB;
@@ -152,19 +149,20 @@ fn parseAggregateSets(sets: napi.Value, n: usize, msgs: [][32]u8, pks: []PublicK
         const indices_len = try indices_val.getArrayLength();
         if (indices_len == 0) return error.EmptyIndicesArray;
 
+        const first_idx = try (try indices_val.getElement(0)).getValueUint32();
         if (indices_len == 1) {
-            const idx = try (try indices_val.getElement(0)).getValueUint32();
-            pks[i] = (try getPubkey(idx)).*;
+            pks[i] = (try getPubkey(first_idx)).*;
         } else {
-            if (indices_len > MAX_INDICES_PER_SET) return error.TooManyIndices;
-            var tmp_pks: [MAX_INDICES_PER_SET]PublicKey = undefined;
-            for (0..indices_len) |j| {
+            // Incremental aggregation: accumulate in projective coords
+            // one pubkey at a time from the cache — no temp buffer needed.
+            // TODO add this to upstream blst-z?
+            var agg: blst.c.blst_p1 = undefined;
+            blst.c.blst_p1_from_affine(&agg, &(try getPubkey(first_idx)).point);
+            for (1..indices_len) |j| {
                 const idx = try (try indices_val.getElement(@intCast(j))).getValueUint32();
-                tmp_pks[j] = (try getPubkey(idx)).*;
+                blst.c.blst_p1_add_or_double_affine(&agg, &agg, &(try getPubkey(idx)).point);
             }
-            const agg_pk = AggregatePublicKey.aggregate(tmp_pks[0..indices_len], false) catch
-                return error.AggregationFailed;
-            pks[i] = agg_pk.toPublicKey();
+            blst.c.blst_p1_to_affine(&pks[i].point, &agg);
         }
 
         sigs[i] = try deserializeSig(try set.getNamedProperty("signature"));
