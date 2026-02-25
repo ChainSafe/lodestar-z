@@ -14,12 +14,17 @@ zig build test
 # Run specific test
 zig build test -- --test-filter "test name"
 
-# Run spec tests (download first)
-cd test/spec && pnpm install && node download_tests.mjs
-zig build spec-test
+# Run spec tests (download first, then run specific suite)
+zig build run:download_spec_tests
+zig build test:ssz          # SSZ spec tests
+zig build test:consensus_types  # consensus type tests
 
-# Run benchmarks
-zig build bench
+# Run benchmarks (specific benchmark)
+zig build run:bench_ssz_attestation
+zig build run:bench_ssz_block
+zig build run:bench_ssz_state
+zig build run:bench_hashing
+zig build run:bench_merkle_node
 
 # Lint (JS/TS parts)
 pnpm biome check
@@ -47,7 +52,7 @@ test/                    # Integration and spec tests
 
 ## Key Conventions
 
-- **Style:** Follow [TigerStyle](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md) — see `README.md` for the full guide
+- **Style:** Follow [TigerStyle](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md)
 - **Safety first:** No recursion, limits on everything, fail-fast, zero technical debt
 - **Fork order:** phase0 → altair → bellatrix → capella → deneb → electra → fulu
 - **SSZ types:** Defined as compile-time type definitions returning namespaces of operations
