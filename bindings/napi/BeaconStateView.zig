@@ -50,8 +50,8 @@ pub fn BeaconStateView_createFromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) 
     errdefer allocator.destroy(state);
 
     const slot = fork_types.readSlotFromAnyBeaconStateBytes(bytes_info.data);
-    const fork = config.config.forkSeq(slot);
-    state.* = try AnyBeaconState.deserialize(allocator, &pool.pool, fork, bytes_info.data);
+    const fork = config.state.config.forkSeq(slot);
+    state.* = try AnyBeaconState.deserialize(allocator, &pool.state.pool, fork, bytes_info.data);
     errdefer state.deinit();
 
     const cached_state_value = try env.newInstance(ctor, .{});
@@ -62,9 +62,9 @@ pub fn BeaconStateView_createFromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) 
         allocator,
         state,
         .{
-            .config = &config.config,
-            .index_to_pubkey = &pubkey.index2pubkey,
-            .pubkey_to_index = &pubkey.pubkey2index,
+            .config = &config.state.config,
+            .index_to_pubkey = &pubkey.state.index2pubkey,
+            .pubkey_to_index = &pubkey.state.pubkey2index,
         },
         null,
     );
@@ -788,7 +788,7 @@ pub fn BeaconStateView_createMultiProof(env: napi.Env, cb: napi.CallbackInfo(1))
 
     var proof = persistent_merkle_tree.proof.createProof(
         allocator,
-        &pool.pool,
+        &pool.state.pool,
         root_node,
         proof_input,
     ) catch {

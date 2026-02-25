@@ -9,30 +9,40 @@ const ChainConfig = @import("config").ChainConfig;
 /// Creating ChainConfigs allocate memory for certain fields.
 const allocator = std.heap.page_allocator;
 
-/// A global config for N-API bindings to use.
-pub var config: BeaconConfig = undefined;
-var initialized: bool = false;
+pub const State = struct {
+    config: BeaconConfig = undefined,
+    initialized: bool = false,
 
-pub fn init() void {
-    if (initialized) {
-        return;
+    pub fn init(self: *State) void {
+        if (self.initialized) return;
+
+        switch (active_preset) {
+            .mainnet => self.config = c.mainnet.config,
+            .minimal => self.config = c.minimal.config,
+            .gnosis => self.config = c.chiado.config,
+        }
     }
 
-    switch (active_preset) {
-        .mainnet => {
-            config = c.mainnet.config;
-        },
-        .minimal => {
-            config = c.minimal.config;
-        },
-        .gnosis => {
-            config = c.chiado.config;
-        },
+    pub fn deinit(self: *State) void {
+        if (!self.initialized) return;
+
+        // Free any allocated fields in config here
+        inline for (std.meta.fields(ChainConfig)) |field| {
+            switch (field.type) {
+                []const u8 => allocator.free(@field(self.config.chain, field.name)),
+                []ChainConfig.BlobScheduleEntry => allocator.free(@field(self.config.chain, field.name)),
+                else => {},
+            }
+        }
+
+        self.initialized = false;
     }
-}
+};
+
+pub var state: State = .{};
 
 pub fn Config_set(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
-    if (!initialized) {
+    if (!state.initialized) {
         return error.ConfigNotInitialized;
     }
 
@@ -43,37 +53,14 @@ pub fn Config_set(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
         return error.InvalidGenesisValidatorsRootLength;
     }
 
-    config = BeaconConfig.init(
+    state.config = BeaconConfig.init(
         chain_config,
         genesis_validators_root_info.data[0..32].*,
     );
 
-    initialized = true;
+    state.initialized = true;
 
     return env.getUndefined();
-}
-
-pub fn deinit() void {
-    if (!initialized) {
-        return;
-    }
-
-    // Free any allocated fields in config here
-    inline for (std.meta.fields(ChainConfig)) |field| {
-        switch (field.type) {
-            []const u8 => {
-                const field_value = @field(config.chain, field.name);
-                allocator.free(field_value);
-            },
-            []ChainConfig.BlobScheduleEntry => {
-                const field_value = @field(config.chain, field.name);
-                allocator.free(field_value);
-            },
-            else => {},
-        }
-    }
-
-    initialized = false;
 }
 
 pub fn chainConfigFromObject(env: napi.Env, obj: napi.Value) !ChainConfig {

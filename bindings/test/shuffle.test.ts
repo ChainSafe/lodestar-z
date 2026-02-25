@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 
-const bindings = await import("../src/index.ts");
+const bindings = await import("../src/index.js");
 const innerShuffleList = bindings.default.shuffle.innerShuffleList;
 const SEED_SIZE = 32;
 
