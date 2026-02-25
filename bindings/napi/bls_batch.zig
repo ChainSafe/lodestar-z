@@ -244,7 +244,7 @@ const AsyncJobData = struct {
     msg: [32]u8 = undefined,
 
     result: bool = false,
-    err: bool = false,
+    err_msg: ?[:0]const u8 = null,
 
     deferred: napi.Deferred = undefined,
     work: napi.AsyncWork(AsyncJobData) = undefined,
@@ -363,8 +363,8 @@ fn sameMessageExecute(data: *AsyncJobData) void {
         std.mem.sliceAsBytes(rands[0..n]),
         false,
         &scratch,
-    ) catch {
-        data.err = true;
+    ) catch |err| {
+        data.err_msg = @errorName(err);
         return;
     };
 
@@ -373,8 +373,8 @@ fn sameMessageExecute(data: *AsyncJobData) void {
         std.mem.sliceAsBytes(rands[0..n]),
         false,
         &scratch,
-    ) catch {
-        data.err = true;
+    ) catch |err| {
+        data.err_msg = @errorName(err);
         return;
     };
 
@@ -382,27 +382,42 @@ fn sameMessageExecute(data: *AsyncJobData) void {
     const sig = agg_sig.toSignature();
 
     var pairing_buf: [Pairing.sizeOf()]u8 align(32) = undefined;
-    data.result = sig.fastAggregateVerifyPreAggregated(false, &pairing_buf, &data.msg, DST, &pk) catch {
-        data.err = true;
+    data.result = sig.fastAggregateVerifyPreAggregated(false, &pairing_buf, &data.msg, DST, &pk) catch |err| {
+        data.err_msg = @errorName(err);
         return;
     };
 }
 
-fn asyncComplete(env: napi.Env, _: napi.status.Status, data: *AsyncJobData) void {
+fn asyncComplete(env: napi.Env, status: napi.status.Status, data: *AsyncJobData) void {
     defer {
         data.work.delete() catch {};
-        pool.push(data);
+        // Don't push back to pool during shutdown — pool may already be deinitialized.
+        if (status != .cancelled) pool.push(data);
     }
 
-    if (data.err) {
-        if (env.createStringUtf8("BLST_ERROR: Batch verification failed")) |msg| {
-            data.deferred.reject(msg) catch {};
-        } else |_| {}
+    if (data.err_msg) |err_name| {
+        const code = env.createStringUtf8(err_name) catch {
+            data.deferred.reject(env.getUndefined() catch return) catch {};
+            return;
+        };
+        const msg = env.createStringUtf8("BLST_ERROR: Batch verification failed") catch {
+            data.deferred.reject(code) catch {};
+            return;
+        };
+        const err_obj = env.createError(code, msg) catch {
+            data.deferred.reject(code) catch {};
+            return;
+        };
+        data.deferred.reject(err_obj) catch {};
         return;
     }
 
-    const result = env.getBoolean(data.result) catch return;
-    data.deferred.resolve(result) catch return;
+    const result = env.getBoolean(data.result) catch {
+        // Ensure the promise always settles even if env is shutting down.
+        data.deferred.reject(env.getUndefined() catch return) catch {};
+        return;
+    };
+    data.deferred.resolve(result) catch {};
 }
 
 fn resolveWithFalse(env: napi.Env) !napi.Value {
@@ -413,7 +428,7 @@ fn resolveWithFalse(env: napi.Env) !napi.Value {
 
 fn queueJob(env: napi.Env, data: *AsyncJobData) !napi.Value {
     data.result = false;
-    data.err = false;
+    data.err_msg = null;
     data.deferred = try napi.Deferred.create(env.env);
     errdefer {
         if (env.getBoolean(false)) |val| {
@@ -499,6 +514,49 @@ pub fn deinit() void {
 }
 
 // ---------------------------------------------------------------------------
+// Test helper
+// ---------------------------------------------------------------------------
+
+/// Worker that unconditionally sets an error — used to exercise the
+/// Error-object rejection path in asyncComplete from tests.
+fn testAsyncRejectExecute(_: napi.Env, data: *AsyncJobData) void {
+    data.err_msg = "TestError";
+}
+
+/// Test-only: queue an async job whose worker always fails, returning a
+/// promise that rejects with a proper Error object.  Allows JS tests to
+/// assert on the shape of the rejection (instanceof Error, .code, .message).
+pub fn blsBatch__testAsyncReject(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
+    const data = pool.pop() orelse return error.PoolExhausted;
+    errdefer pool.push(data);
+
+    data.result = false;
+    data.err_msg = null;
+    data.kind = .batch;
+    data.n = 0;
+    data.deferred = try napi.Deferred.create(env.env);
+    errdefer {
+        if (env.getBoolean(false)) |val| {
+            data.deferred.resolve(val) catch {};
+        } else |_| {}
+    }
+
+    const resource_name = try env.createStringUtf8("testAsyncReject");
+    data.work = try napi.AsyncWork(AsyncJobData).create(
+        env,
+        null,
+        resource_name,
+        testAsyncRejectExecute,
+        asyncComplete,
+        data,
+    );
+    errdefer data.work.delete() catch {};
+    try data.work.queue();
+
+    return data.deferred.getPromise();
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -517,6 +575,9 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     // Pool management
     try obj.setNamedProperty("init", try env.createFunction("init", 1, blsBatch_init, null));
     try obj.setNamedProperty("canAcceptWork", try env.createFunction("canAcceptWork", 0, blsBatch_canAcceptWork, null));
+
+    // Test helpers
+    try obj.setNamedProperty("__testAsyncReject", try env.createFunction("__testAsyncReject", 0, blsBatch__testAsyncReject, null));
 
     try exports.setNamedProperty("blsBatch", obj);
 }

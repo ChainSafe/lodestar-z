@@ -38,6 +38,9 @@ export interface BlsBatch {
 
   init(maxJobs: number): void;
   canAcceptWork(): boolean;
+
+  /** @internal Test-only: returns a promise that rejects with an Error object. */
+  __testAsyncReject(): Promise<boolean>;
 }
 
 export declare const blsBatch: BlsBatch;
