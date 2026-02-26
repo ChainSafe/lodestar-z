@@ -75,6 +75,8 @@ pub fn syncPubkeysParallel(
     }
 
     try index_to_pubkey.resize(new_count);
+    errdefer index_to_pubkey.shrinkRetainingCapacity(old_len);
+
     try pubkey_to_index.ensureTotalCapacity(@intCast(new_count));
 
     var thread_pool: std.Thread.Pool = undefined;
