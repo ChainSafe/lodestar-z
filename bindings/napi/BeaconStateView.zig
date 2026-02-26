@@ -872,6 +872,8 @@ pub fn BeaconStateView_createdWithTransferCache(env: napi.Env, cb: napi.Callback
 pub fn BeaconStateView_serialize(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const result = try cached_state.state.serialize(allocator);
+    defer allocator.free(result);
+
     return try numberSliceToNapiValue(env, u8, result, .{ .typed_array = .uint8 });
 }
 
