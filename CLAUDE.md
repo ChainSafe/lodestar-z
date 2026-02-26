@@ -94,8 +94,8 @@ test/                    # Integration and spec tests
 
 ## Key Conventions
 
-- **Style:** Follow [TigerStyle](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md)
+- **Style:** Follow the project style guide at `.gemini/styleguide.md` (modified [TigerStyle](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md))
 - **Safety first:** No recursion, limits on everything, fail-fast, zero technical debt
-- **Fork order:** phase0 → altair → bellatrix → capella → deneb → electra → fulu
+- **Fork order:** phase0 → altair → bellatrix → capella → deneb → electra → fulu → gloas → heze
 - **SSZ types:** Defined as compile-time type definitions returning namespaces of operations
 - **Testing:** Ethereum consensus spec tests are the source of truth
