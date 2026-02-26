@@ -42,6 +42,10 @@ fn uncompressPubkeys(
     index_to_pubkey: *Index2PubkeyCache,
     uncompress_error: *std.atomic.Value(bool),
 ) void {
+    std.debug.assert(start_index <= end_index_exclusive);
+    std.debug.assert(end_index_exclusive <= validators.len);
+    std.debug.assert(end_index_exclusive <= index_to_pubkey.items.len);
+
     for (start_index..end_index_exclusive) |i| {
         if (uncompress_error.load(.monotonic)) return;
         const pubkey = &validators[i].pubkey;
@@ -103,7 +107,7 @@ pub fn syncPubkeysParallel(
         return error.InvalidPubkey;
     }
 
-    // update the shared map in single thread
+    // Update the shared map in single thread
     for (old_len..new_count) |j| {
         pubkey_to_index.putAssumeCapacity(validators[j].pubkey, @intCast(j));
     }
