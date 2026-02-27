@@ -149,12 +149,14 @@ pub const EpochCache = struct {
         active_indices: []const ValidatorIndex,
         epoch: Epoch,
     ) !*EpochShufflingRc {
-        const owned_active_indices = try allocator.alloc(ValidatorIndex, active_indices.len);
-        errdefer allocator.free(owned_active_indices);
+        const epoch_shuffling = blk: {
+            const owned_active_indices = try allocator.alloc(ValidatorIndex, active_indices.len);
+            errdefer allocator.free(owned_active_indices);
 
-        std.mem.copyForwards(ValidatorIndex, owned_active_indices, active_indices);
+            std.mem.copyForwards(ValidatorIndex, owned_active_indices, active_indices);
 
-        const epoch_shuffling = try computeEpochShuffling(allocator, state, owned_active_indices, epoch);
+            break :blk try computeEpochShuffling(allocator, state, owned_active_indices, epoch);
+        };
         errdefer epoch_shuffling.deinit();
 
         return try EpochShufflingRc.init(allocator, epoch_shuffling);
