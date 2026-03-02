@@ -11,6 +11,8 @@ pub fn build(b: *std.Build) void {
     options_build_options.addOption(?u8, "zero_hash_max_depth", option_zero_hash_max_depth);
     const option_preset = b.option([]const u8, "preset", "") orelse "mainnet";
     options_build_options.addOption([]const u8, "preset", option_preset);
+    const option_enable_test_helpers = b.option(bool, "enable_test_helpers", "");
+    options_build_options.addOption(?bool, "enable_test_helpers", option_enable_test_helpers);
     const options_module_build_options = options_build_options.createModule();
 
     const options_download_era_options = b.addOptions();
@@ -1069,6 +1071,7 @@ pub fn build(b: *std.Build) void {
     module_bench_process_epoch.addImport("download_era_options", options_module_download_era_options);
     module_bench_process_epoch.addImport("era", module_era);
 
+    module_bindings.addImport("build_options", options_module_build_options);
     module_bindings.addImport("blst", dep_blst.module("blst"));
     module_bindings.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_bindings.addImport("ssz", module_ssz);
