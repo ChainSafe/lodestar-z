@@ -47,7 +47,7 @@ pub fn OffsetIterator(comptime ST: type) type {
                 return error.offsetNotDivisibleBy4;
             }
 
-            const offset_count = @divExact(first_offset, 4);
+            const offset_count: usize = first_offset / 4;
             if (ST.kind == .vector) {
                 if (offset_count != ST.length) {
                     return error.invalidOffsetCount;
