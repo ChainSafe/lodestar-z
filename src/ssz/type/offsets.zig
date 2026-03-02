@@ -34,6 +34,9 @@ pub fn OffsetIterator(comptime ST: type) type {
         }
 
         pub fn firstOffset(self: Self) !u32 {
+            if (self.data.len < 4) {
+                return error.offsetOutOfRange;
+            }
             const first_offset = std.mem.readInt(u32, self.data[0..4], .little);
 
             if (first_offset == 0) {
@@ -44,7 +47,7 @@ pub fn OffsetIterator(comptime ST: type) type {
                 return error.offsetNotDivisibleBy4;
             }
 
-            const offset_count: usize = first_offset / 4;
+            const offset_count = @divExact(first_offset, 4);
             if (ST.kind == .vector) {
                 if (offset_count != ST.length) {
                     return error.invalidOffsetCount;
