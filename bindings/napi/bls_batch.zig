@@ -28,13 +28,7 @@ const std = @import("std");
 const napi = @import("zapi:napi");
 const blst = @import("blst");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 const pubkeys = @import("./pubkeys.zig");
-
-const enable_test_helpers = if (@hasDecl(build_options, "enable_test_helpers"))
-    build_options.enable_test_helpers orelse false
-else
-    false;
 
 const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;
@@ -520,7 +514,7 @@ pub fn deinit() void {
 }
 
 // ---------------------------------------------------------------------------
-// Test helper (only registered with -Denable_test_helpers=true)
+// Test helper
 // ---------------------------------------------------------------------------
 
 /// Worker that unconditionally sets an error — used to exercise the
@@ -532,7 +526,7 @@ fn testAsyncRejectExecute(_: napi.Env, data: *AsyncJobData) void {
 /// Test-only: queue an async job whose worker always fails, returning a
 /// promise that rejects with a proper Error object.  Allows JS tests to
 /// assert on the shape of the rejection (instanceof Error, .code, .message).
-fn blsBatch__testAsyncReject(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
+pub fn blsBatch__testAsyncReject(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     const data = pool.pop() orelse return error.PoolExhausted;
     errdefer pool.push(data);
     data.kind = .batch;
@@ -560,10 +554,8 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     try obj.setNamedProperty("init", try env.createFunction("init", 1, blsBatch_init, null));
     try obj.setNamedProperty("canAcceptWork", try env.createFunction("canAcceptWork", 0, blsBatch_canAcceptWork, null));
 
-    // Test helpers (only available with -Denable_test_helpers=true)
-    if (enable_test_helpers) {
-        try obj.setNamedProperty("__testAsyncReject", try env.createFunction("__testAsyncReject", 0, blsBatch__testAsyncReject, null));
-    }
+    // Test helpers
+    try obj.setNamedProperty("__testAsyncReject", try env.createFunction("__testAsyncReject", 0, blsBatch__testAsyncReject, null));
 
     try exports.setNamedProperty("blsBatch", obj);
 }

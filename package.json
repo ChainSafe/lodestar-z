@@ -26,10 +26,9 @@
     }
   },
   "scripts": {
-    "build:test": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Denable_test_helpers=true",
     "prepare": "zig build build-lib:bindings -Doptimize=ReleaseSafe",
     "lint": "biome check",
-    "test": "pnpm build:test && NODE_OPTIONS='--expose-gc' vitest run"
+    "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts"
   },
   "keywords": [],
   "author": "ChainSafe Systems",

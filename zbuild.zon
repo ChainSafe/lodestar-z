@@ -43,9 +43,6 @@
                 .default = "mainnet",
                 .type = "string",
             },
-            .enable_test_helpers = .{
-                .type = "bool",
-            },
         },
         .download_era_options = .{
             .era_base_url = .{
@@ -236,7 +233,6 @@
             .root_module = .{
                 .root_source_file = "bindings/napi/root.zig",
                 .imports = .{
-                    .build_options,
                     .blst,
                     .persistent_merkle_tree,
                     .ssz,
