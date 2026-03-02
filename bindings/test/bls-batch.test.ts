@@ -186,30 +186,45 @@ describe("blsBatch", () => {
     });
   });
 
-  // ── error handling: async rejection shape ───────────────────
+  // ── error handling for invalid inputs ────────────────────────
 
-  describe("async rejection produces Error objects", () => {
-    it("rejects with an Error instance, not a string", async () => {
-      await expect(blsBatch.__testAsyncReject()).rejects.toThrow();
+  describe("error handling for invalid inputs", () => {
+    it("asyncVerify throws for an invalid signature (bad bytes)", () => {
+      expect(() =>
+        blsBatch.asyncVerify(blsBatch.single, [{
+          publicKey: keypairs[0].pubkeyBytes,
+          message: makeMsg(80),
+          signature: new Uint8Array(96), // all zeros — fails deserialization
+        }])
+      ).toThrow();
     });
 
-    it("rejected Error has .message", async () => {
+    it("thrown error is an Error instance with .code", () => {
       try {
-        await blsBatch.__testAsyncReject();
-        expect.unreachable("should have rejected");
+        blsBatch.asyncVerify(blsBatch.single, [{
+          publicKey: keypairs[0].pubkeyBytes,
+          message: makeMsg(81),
+          signature: new Uint8Array(96),
+        }]);
+        expect.unreachable("should have thrown");
       } catch (err) {
         expect(err).toBeInstanceOf(Error);
-        expect((err as Error).message).toBe("Batch verification failed");
+        expect((err as Error & {code: string}).code).toBe("DeserializationFailed");
       }
     });
 
-    it("rejected Error has .code set to the Zig error name", async () => {
+    it("asyncVerify throws for an out-of-range pubkey index", () => {
+      const msg = makeMsg(82);
       try {
-        await blsBatch.__testAsyncReject();
-        expect.unreachable("should have rejected");
+        blsBatch.asyncVerify(blsBatch.indexed, [{
+          index: 99999,
+          message: msg,
+          signature: keypairs[0].sk.sign(msg).toBytes(),
+        }]);
+        expect.unreachable("should have thrown");
       } catch (err) {
         expect(err).toBeInstanceOf(Error);
-        expect((err as Error & {code: string}).code).toBe("VerifyFail");
+        expect((err as Error & {code: string}).code).toBe("PubkeyIndexOutOfRange");
       }
     });
   });

@@ -514,27 +514,6 @@ pub fn deinit() void {
 }
 
 // ---------------------------------------------------------------------------
-// Test helper
-// ---------------------------------------------------------------------------
-
-/// Worker that unconditionally sets an error — used to exercise the
-/// Error-object rejection path in asyncComplete from tests.
-fn testAsyncRejectExecute(_: napi.Env, data: *AsyncJobData) void {
-    data.err = error.VerifyFail;
-}
-
-/// Test-only: queue an async job whose worker always fails, returning a
-/// promise that rejects with a proper Error object.  Allows JS tests to
-/// assert on the shape of the rejection (instanceof Error, .code, .message).
-pub fn blsBatch__testAsyncReject(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
-    const data = pool.pop() orelse return error.PoolExhausted;
-    errdefer pool.push(data);
-    data.kind = .batch;
-    data.n = 0;
-    return try queueJob(env, data, testAsyncRejectExecute);
-}
-
-// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -553,9 +532,6 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     // Pool management
     try obj.setNamedProperty("init", try env.createFunction("init", 1, blsBatch_init, null));
     try obj.setNamedProperty("canAcceptWork", try env.createFunction("canAcceptWork", 0, blsBatch_canAcceptWork, null));
-
-    // Test helpers
-    try obj.setNamedProperty("__testAsyncReject", try env.createFunction("__testAsyncReject", 0, blsBatch__testAsyncReject, null));
 
     try exports.setNamedProperty("blsBatch", obj);
 }
