@@ -193,13 +193,13 @@ describe("blsBatch", () => {
       await expect(blsBatch.__testAsyncReject()).rejects.toThrow();
     });
 
-    it("rejected Error has .message with BLST_ERROR prefix", async () => {
+    it("rejected Error has .message", async () => {
       try {
         await blsBatch.__testAsyncReject();
         expect.unreachable("should have rejected");
       } catch (err) {
         expect(err).toBeInstanceOf(Error);
-        expect((err as Error).message).toBe("BLST_ERROR: Batch verification failed");
+        expect((err as Error).message).toBe("Batch verification failed");
       }
     });
 
@@ -209,7 +209,7 @@ describe("blsBatch", () => {
         expect.unreachable("should have rejected");
       } catch (err) {
         expect(err).toBeInstanceOf(Error);
-        expect((err as Error & {code: string}).code).toBe("TestError");
+        expect((err as Error & {code: string}).code).toBe("VerifyFail");
       }
     });
   });

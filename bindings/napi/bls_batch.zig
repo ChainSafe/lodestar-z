@@ -250,7 +250,7 @@ const AsyncJobData = struct {
     msg: [32]u8 = undefined,
 
     result: bool = false,
-    err_msg: ?[:0]const u8 = null,
+    err: ?blst.BlstError = null,
 
     deferred: napi.Deferred = undefined,
     work: napi.AsyncWork(AsyncJobData) = undefined,
@@ -370,7 +370,7 @@ fn sameMessageExecute(data: *AsyncJobData) void {
         false,
         &scratch,
     ) catch |err| {
-        data.err_msg = @errorName(err);
+        data.err = err;
         return;
     };
 
@@ -380,7 +380,7 @@ fn sameMessageExecute(data: *AsyncJobData) void {
         false,
         &scratch,
     ) catch |err| {
-        data.err_msg = @errorName(err);
+        data.err = err;
         return;
     };
 
@@ -389,7 +389,7 @@ fn sameMessageExecute(data: *AsyncJobData) void {
 
     var pairing_buf: [Pairing.sizeOf()]u8 align(32) = undefined;
     data.result = sig.fastAggregateVerifyPreAggregated(false, &pairing_buf, &data.msg, DST, &pk) catch |err| {
-        data.err_msg = @errorName(err);
+        data.err = err;
         return;
     };
 }
@@ -401,12 +401,12 @@ fn asyncComplete(env: napi.Env, status: napi.status.Status, data: *AsyncJobData)
         if (status != .cancelled) pool.push(data);
     }
 
-    if (data.err_msg) |err_name| {
-        const code = env.createStringUtf8(err_name) catch {
+    if (data.err) |err| {
+        const code = env.createStringUtf8(@errorName(err)) catch {
             data.deferred.reject(env.getUndefined() catch return) catch {};
             return;
         };
-        const msg = env.createStringUtf8("BLST_ERROR: Batch verification failed") catch {
+        const msg = env.createStringUtf8("Batch verification failed") catch {
             data.deferred.reject(code) catch {};
             return;
         };
@@ -434,7 +434,7 @@ fn resolveWithFalse(env: napi.Env) !napi.Value {
 
 fn queueJob(env: napi.Env, data: *AsyncJobData, comptime execute: *const fn (napi.Env, *AsyncJobData) void) !napi.Value {
     data.result = false;
-    data.err_msg = null;
+    data.err = null;
     data.deferred = try napi.Deferred.create(env.env);
     errdefer {
         if (env.getBoolean(false)) |val| {
@@ -526,7 +526,7 @@ pub fn deinit() void {
 /// Worker that unconditionally sets an error — used to exercise the
 /// Error-object rejection path in asyncComplete from tests.
 fn testAsyncRejectExecute(_: napi.Env, data: *AsyncJobData) void {
-    data.err_msg = "TestError";
+    data.err = error.VerifyFail;
 }
 
 /// Test-only: queue an async job whose worker always fails, returning a
