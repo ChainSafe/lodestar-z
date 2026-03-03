@@ -63,8 +63,8 @@ pub fn processConsolidationRequest(
     var validators = try state.validators();
     var source_validator = try validators.get(@intCast(source_index));
     var target_validator = try validators.get(@intCast(target_index));
-    const source_withdrawal_credentials = try source_validator.getRoot("withdrawal_credentials");
-    const target_withdrawal_credentials = try target_validator.getRoot("withdrawal_credentials");
+    const source_withdrawal_credentials = try source_validator.getFieldRoot("withdrawal_credentials");
+    const target_withdrawal_credentials = try target_validator.getFieldRoot("withdrawal_credentials");
     const source_withdrawal_address = source_withdrawal_credentials[12..];
     const current_epoch = epoch_cache.epoch;
 
@@ -81,7 +81,7 @@ pub fn processConsolidationRequest(
     }
 
     // Verify the source and the target are active
-    if (!(try isActiveValidatorView(&source_validator, current_epoch)) or !(try isActiveValidatorView(&target_validator, current_epoch))) {
+    if (!(try isActiveValidatorView(source_validator, current_epoch)) or !(try isActiveValidatorView(target_validator, current_epoch))) {
         return;
     }
 
@@ -134,7 +134,7 @@ fn isValidSwitchToCompoundRequest(
 
     var validators = try state.validators();
     var source_validator = try validators.get(@intCast(source_index));
-    const source_withdrawal_credentials = try source_validator.getRoot("withdrawal_credentials");
+    const source_withdrawal_credentials = try source_validator.getFieldRoot("withdrawal_credentials");
     const source_withdrawal_address = source_withdrawal_credentials[12..];
 
     // Verify request has been authorized
@@ -148,7 +148,7 @@ fn isValidSwitchToCompoundRequest(
     }
 
     // Verify the source is active
-    if (!try isActiveValidatorView(&source_validator, epoch_cache.epoch)) {
+    if (!try isActiveValidatorView(source_validator, epoch_cache.epoch)) {
         return false;
     }
 

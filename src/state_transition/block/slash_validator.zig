@@ -34,7 +34,7 @@ pub fn slashValidator(
     var validator = try validators.get(@intCast(slashed_index));
 
     // TODO: Bellatrix initiateValidatorExit validators.update() with the one below
-    try initiateValidatorExit(fork, config, epoch_cache, state, &validator);
+    try initiateValidatorExit(fork, config, epoch_cache, state, validator);
 
     try validator.set("slashed", true);
     var latest_block_header = try state.latestBlockHeader();
@@ -96,8 +96,8 @@ pub fn slashValidator(
 
     if (fork.gte(.altair)) {
         const previous_epoch = computePreviousEpoch(epoch);
-        const is_active_previous_epoch = try isActiveValidatorView(&validator, previous_epoch);
-        const is_active_current_epoch = try isActiveValidatorView(&validator, epoch);
+        const is_active_previous_epoch = try isActiveValidatorView(validator, previous_epoch);
+        const is_active_current_epoch = try isActiveValidatorView(validator, epoch);
 
         var previous_participation = try state.previousEpochParticipation();
         if (is_active_previous_epoch and (try previous_participation.get(@intCast(slashed_index))) & TIMELY_TARGET == TIMELY_TARGET) {

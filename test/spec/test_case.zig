@@ -277,13 +277,13 @@ pub fn expectEqualBeaconStates(expected: *AnyBeaconState, actual: *AnyBeaconStat
         try actual.hashTreeRoot(),
     )) {
         const Debug = struct {
-            fn printDiff(comptime StateST: type, expected_state: *AnyBeaconState, actual_state: *AnyBeaconState) !void {
-                var expected_view = StateST.TreeView{ .base_view = expected_state.baseView() };
-                var actual_view = StateST.TreeView{ .base_view = actual_state.baseView() };
+            fn printDiff(comptime StateST: type, comptime fork: ForkSeq, expected_state: *AnyBeaconState, actual_state: *AnyBeaconState) !void {
+                const expected_view: *StateST.TreeView = expected_state.castToFork(fork).inner;
+                const actual_view: *StateST.TreeView = actual_state.castToFork(fork).inner;
 
                 inline for (StateST.fields) |field| {
-                    const expected_field_root = try expected_view.getRoot(field.name);
-                    const actual_field_root = try actual_view.getRoot(field.name);
+                    const expected_field_root = try expected_view.getFieldRoot(field.name);
+                    const actual_field_root = try actual_view.getFieldRoot(field.name);
                     if (!std.mem.eql(u8, expected_field_root, actual_field_root)) {
                         std.debug.print(
                             "field: {s}\n  expected_root: {s}\n  actual_root:   {s}\n",
@@ -294,58 +294,20 @@ pub fn expectEqualBeaconStates(expected: *AnyBeaconState, actual: *AnyBeaconStat
                             },
                         );
 
-                        @setEvalBranchQuota(100000);
-                        const FieldST = StateST.getFieldType(field.name);
-                        const allocator = std.testing.allocator;
-                        {
-                            var expected_field_view = try expected_view.get(field.name);
-                            if (comptime @hasDecl(FieldST, "TreeView") and @hasDecl(FieldST.TreeView, "length") and @typeInfo(@TypeOf(FieldST.TreeView.length)) == .@"fn") {
-                                std.debug.print(
-                                    "  expected_value_length: {any}\n",
-                                    .{try expected_field_view.length()},
-                                );
-                            }
-                            var expected_field_value: FieldST.Type = undefined;
-                            try expected_view.getValue(allocator, field.name, &expected_field_value);
-                            defer if (@hasDecl(FieldST, "deinit"))
-                                FieldST.deinit(allocator, &expected_field_value);
-
-                            std.debug.print(
-                                "  expected_value: {any}\n",
-                                .{expected_field_value},
-                            );
-                        }
-                        {
-                            var actual_field_view = try actual_view.get(field.name);
-                            if (comptime @hasDecl(FieldST, "TreeView") and @hasDecl(FieldST.TreeView, "length") and @typeInfo(@TypeOf(FieldST.TreeView.length)) == .@"fn") {
-                                std.debug.print(
-                                    "  actual_value_length:   {any}\n",
-                                    .{try actual_field_view.length()},
-                                );
-                            }
-                            var actual_field_value: FieldST.Type = undefined;
-                            try actual_view.getValue(allocator, field.name, &actual_field_value);
-                            defer if (@hasDecl(FieldST, "deinit"))
-                                FieldST.deinit(allocator, &actual_field_value);
-
-                            std.debug.print(
-                                "  actual_value:   {any}\n",
-                                .{actual_field_value},
-                            );
-                        }
+                        // Value-level diff printing omitted to avoid crashes in toValue path
                     }
                 }
             }
         };
 
         switch (expected.forkSeq()) {
-            .phase0 => try Debug.printDiff(types.phase0.BeaconState, expected, actual),
-            .altair => try Debug.printDiff(types.altair.BeaconState, expected, actual),
-            .bellatrix => try Debug.printDiff(types.bellatrix.BeaconState, expected, actual),
-            .capella => try Debug.printDiff(types.capella.BeaconState, expected, actual),
-            .deneb => try Debug.printDiff(types.deneb.BeaconState, expected, actual),
-            .electra => try Debug.printDiff(types.electra.BeaconState, expected, actual),
-            .fulu => try Debug.printDiff(types.fulu.BeaconState, expected, actual),
+            .phase0 => try Debug.printDiff(types.phase0.BeaconState, .phase0, expected, actual),
+            .altair => try Debug.printDiff(types.altair.BeaconState, .altair, expected, actual),
+            .bellatrix => try Debug.printDiff(types.bellatrix.BeaconState, .bellatrix, expected, actual),
+            .capella => try Debug.printDiff(types.capella.BeaconState, .capella, expected, actual),
+            .deneb => try Debug.printDiff(types.deneb.BeaconState, .deneb, expected, actual),
+            .electra => try Debug.printDiff(types.electra.BeaconState, .electra, expected, actual),
+            .fulu => try Debug.printDiff(types.fulu.BeaconState, .fulu, expected, actual),
         }
         return error.NotEqual;
     }

@@ -90,9 +90,9 @@ fn translateParticipation(
     epoch_cache: *const EpochCache,
     root_cache: *RootCache(.phase0),
     validators_count: usize,
-    pending_attestations_tree: types.phase0.EpochAttestations.TreeView,
+    pending_attestations_tree: *types.phase0.EpochAttestations.TreeView,
 ) !types.altair.EpochParticipation.Type {
-    const pending_attestations = try @constCast(&pending_attestations_tree).getAllReadonlyValues(allocator);
+    const pending_attestations = try pending_attestations_tree.getAllReadonlyValues(allocator);
     defer {
         for (pending_attestations) |*attestation| {
             types.phase0.PendingAttestation.deinit(allocator, attestation);
