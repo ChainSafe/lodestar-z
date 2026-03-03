@@ -185,4 +185,47 @@ describe("blsBatch", () => {
       expect(await blsBatch.asyncVerifySameMessage([], makeMsg(70))).toBe(false);
     });
   });
+
+  // ── error handling for invalid inputs ────────────────────────
+
+  describe("error handling for invalid inputs", () => {
+    it("asyncVerify throws for an invalid signature (bad bytes)", () => {
+      expect(() =>
+        blsBatch.asyncVerify(blsBatch.single, [{
+          publicKey: keypairs[0].pubkeyBytes,
+          message: makeMsg(80),
+          signature: new Uint8Array(96), // all zeros — fails deserialization
+        }])
+      ).toThrow();
+    });
+
+    it("thrown error is an Error instance with .code", () => {
+      try {
+        blsBatch.asyncVerify(blsBatch.single, [{
+          publicKey: keypairs[0].pubkeyBytes,
+          message: makeMsg(81),
+          signature: new Uint8Array(96),
+        }]);
+        expect.unreachable("should have thrown");
+      } catch (err) {
+        expect(err).toBeInstanceOf(Error);
+        expect((err as Error & {code: string}).code).toBe("DeserializationFailed");
+      }
+    });
+
+    it("asyncVerify throws for an out-of-range pubkey index", () => {
+      const msg = makeMsg(82);
+      try {
+        blsBatch.asyncVerify(blsBatch.indexed, [{
+          index: 99999,
+          message: msg,
+          signature: keypairs[0].sk.sign(msg).toBytes(),
+        }]);
+        expect.unreachable("should have thrown");
+      } catch (err) {
+        expect(err).toBeInstanceOf(Error);
+        expect((err as Error & {code: string}).code).toBe("PubkeyIndexOutOfRange");
+      }
+    });
+  });
 });
