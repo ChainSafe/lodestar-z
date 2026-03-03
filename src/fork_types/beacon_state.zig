@@ -211,7 +211,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             if (comptime f == .phase0) return error.InvalidAtFork;
 
             var current_epoch_participation = try self.inner.get("current_epoch_participation");
-            try current_epoch_participation.commit();
+            // try current_epoch_participation.commit();
             const length = try current_epoch_participation.length();
 
             // Clone the view to preserve any uncommitted in-memory updates while avoiding pointer aliasing
@@ -292,8 +292,10 @@ pub fn BeaconState(comptime f: ForkSeq) type {
 
         pub fn rotateSyncCommittees(self: *Self, next_sync_committee: *const ForkTypes(.altair).SyncCommittee.Type) !void {
             if (comptime f == .phase0) return error.InvalidAtFork;
-            const next_sync_committee_root = try self.inner.getRootNode("next_sync_committee");
-            try self.inner.setRootNode("current_sync_committee", next_sync_committee_root);
+            var next_sync_committee_view = try self.inner.get("next_sync_committee");
+            var next_sync_committee_copy = try next_sync_committee_view.clone(.{ .transfer_cache = true });
+            errdefer next_sync_committee_copy.deinit();
+            try self.inner.set("current_sync_committee", next_sync_committee_copy);
             try self.inner.setValue("next_sync_committee", next_sync_committee);
         }
 
