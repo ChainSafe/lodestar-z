@@ -46,7 +46,6 @@ pub fn addFuzzerRun(
     run.addDirectoryArg(output_dir);
     run.addArgs(&.{"--"});
     run.addFileArg(exe);
-    run.addArgs(&.{"@@"});
     return run;
 }
 
