@@ -34,6 +34,7 @@ pub fn build(b: *std.Build) void {
     const dep_blst = b.dependency("blst", .{
         .optimize = optimize,
         .target = target,
+        .portable = true,
     });
 
     const dep_hashtree = b.dependency("hashtree", .{
