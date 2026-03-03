@@ -38,7 +38,6 @@ export interface BlsBatch {
 
   init(maxJobs: number): void;
   canAcceptWork(): boolean;
-
 }
 
 export declare const blsBatch: BlsBatch;
