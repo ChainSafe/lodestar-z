@@ -778,7 +778,7 @@ pub fn BeaconStateView_createMultiProof(env: napi.Env, cb: napi.CallbackInfo(1))
     // Get the root node from the state
     try cached_state.state.commit();
     const root_node = switch (cached_state.state.*) {
-        inline else => |*state| state.base_view.data.root,
+        inline else => |state| state.root,
     };
 
     // Create proof input for compact multi-proof
@@ -880,7 +880,7 @@ pub fn BeaconStateView_serialize(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.
 pub fn BeaconStateView_serializedSize(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
     const size = switch (cached_state.state.*) {
-        inline else => |*state| try state.serializedSize(),
+        inline else => |state| try state.serializedSize(),
     };
     return try env.createInt64(@intCast(size));
 }
@@ -902,7 +902,7 @@ pub fn BeaconStateView_serializeToBytes(env: napi.Env, cb: napi.CallbackInfo(2))
 
     const output_slice = output_info.data[offset..];
     const bytes_written = switch (cached_state.state.*) {
-        inline else => |*state| try state.serializeIntoBytes(output_slice),
+        inline else => |state| try state.serializeIntoBytes(output_slice),
     };
 
     return try env.createInt64(@intCast(bytes_written));

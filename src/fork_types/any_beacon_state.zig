@@ -168,10 +168,10 @@ pub const AnyBeaconState = union(ForkSeq) {
         try self.commit();
         const gindex: Gindex = @enumFromInt(gindex_value);
         return switch (self.*) {
-            inline else => |*state| try createSingleProof(
+            inline else => |state| try createSingleProof(
                 allocator,
-                state.base_view.pool,
-                state.base_view.data.root,
+                state.pool,
+                state.root,
                 gindex,
             ),
         };
