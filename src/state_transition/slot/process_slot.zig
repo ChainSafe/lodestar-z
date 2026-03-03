@@ -12,7 +12,7 @@ pub fn processSlot(state: *AnyBeaconState) !void {
 
     // Cache latest block header state root
     var latest_block_header = try state.latestBlockHeader();
-    var latest_header_state_root = try latest_block_header.getRoot("state_root");
+    var latest_header_state_root = try latest_block_header.getFieldRoot("state_root");
 
     if (std.mem.eql(u8, latest_header_state_root[0..], ZERO_HASH[0..])) {
         try latest_block_header.setValue("state_root", previous_state_root);

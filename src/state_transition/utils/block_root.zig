@@ -20,7 +20,7 @@ pub fn getBlockRootAtSlot(comptime fork: ForkSeq, state: *BeaconState(fork), slo
     }
 
     var block_roots = try state.blockRoots();
-    return try block_roots.getRoot(slot % SLOTS_PER_HISTORICAL_ROOT);
+    return try block_roots.getFieldRoot(slot % SLOTS_PER_HISTORICAL_ROOT);
 }
 
 pub fn getBlockRoot(comptime fork: ForkSeq, state: *BeaconState(fork), epoch: Epoch) !*const [32]u8 {

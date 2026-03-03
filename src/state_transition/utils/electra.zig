@@ -25,7 +25,7 @@ pub fn hasExecutionWithdrawalCredential(withdrawal_credentials: *const Withdrawa
 pub fn switchToCompoundingValidator(comptime fork: ForkSeq, state: *BeaconState(fork), index: ValidatorIndex) !void {
     var validators = try state.validators();
     var validator = try validators.get(index);
-    const old_withdrawal_credentials = try validator.getRoot("withdrawal_credentials");
+    const old_withdrawal_credentials = try validator.getFieldRoot("withdrawal_credentials");
 
     var new_withdrawal_credentials: [32]u8 = undefined;
     @memcpy(new_withdrawal_credentials[0..], old_withdrawal_credentials[0..]);

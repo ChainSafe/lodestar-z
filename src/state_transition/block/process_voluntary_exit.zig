@@ -25,8 +25,8 @@ pub fn processVoluntaryExit(
     }
 
     var validators = try state.validators();
-    var validator = try validators.get(@intCast(signed_voluntary_exit.message.validator_index));
-    try initiateValidatorExit(fork, config, epoch_cache, state, &validator);
+    const validator = try validators.get(@intCast(signed_voluntary_exit.message.validator_index));
+    try initiateValidatorExit(fork, config, epoch_cache, state, validator);
 }
 
 pub fn isValidVoluntaryExit(
@@ -70,7 +70,7 @@ pub fn getVoluntaryExitValidity(
     const current_epoch = epoch_cache.epoch;
 
     // verify the validator is active
-    if (!try isActiveValidatorView(&validator, current_epoch)) {
+    if (!try isActiveValidatorView(validator, current_epoch)) {
         return .inactive;
     }
 
