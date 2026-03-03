@@ -211,7 +211,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             if (comptime f == .phase0) return error.InvalidAtFork;
 
             var current_epoch_participation = try self.inner.get("current_epoch_participation");
-            // try current_epoch_participation.commit();
+            try current_epoch_participation.commit();
             const length = try current_epoch_participation.length();
 
             // Clone the view to preserve any uncommitted in-memory updates while avoiding pointer aliasing
