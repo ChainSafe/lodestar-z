@@ -450,8 +450,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             pool: *Node.Pool,
             state: *F.TreeView,
         ) !*T.TreeView {
-            var committed_state = state;
-            try committed_state.commit();
+            try state.commit();
 
             var upgraded = try T.TreeView.fromValue(allocator, pool, &T.default_value);
             errdefer upgraded.deinit();
@@ -461,9 +460,9 @@ pub fn BeaconState(comptime f: ForkSeq) type {
                     if (T.getFieldType(fld.name) != fld.type) continue;
 
                     if (comptime isBasicType(fld.type)) {
-                        try upgraded.set(fld.name, try committed_state.get(fld.name));
+                        try upgraded.set(fld.name, try state.get(fld.name));
                     } else {
-                        var field_view = try committed_state.get(fld.name);
+                        var field_view = try state.get(fld.name);
                         var owned_field_view = try field_view.clone(.{ .transfer_cache = true });
                         errdefer owned_field_view.deinit();
                         try upgraded.set(fld.name, owned_field_view);
