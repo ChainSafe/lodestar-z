@@ -426,7 +426,7 @@ fn resolveWithFalse(env: napi.Env) !napi.Value {
     return deferred.getPromise();
 }
 
-fn queueJob(env: napi.Env, data: *AsyncJobData, comptime execute: *const fn (napi.Env, *AsyncJobData) void) !napi.Value {
+fn queueJob(env: napi.Env, data: *AsyncJobData) !napi.Value {
     data.result = false;
     data.err = null;
     data.deferred = try napi.Deferred.create(env.env);
@@ -441,7 +441,7 @@ fn queueJob(env: napi.Env, data: *AsyncJobData, comptime execute: *const fn (nap
         env,
         null,
         resource_name,
-        execute,
+        asyncExecute,
         asyncComplete,
         data,
     );
@@ -472,7 +472,7 @@ pub fn blsBatch_asyncVerify(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value
     data.n = n;
     try parseSets(kind, sets, n, data.msgs[0..n], data.pks[0..n], data.sigs[0..n]);
 
-    return try queueJob(env, data, asyncExecute);
+    return try queueJob(env, data);
 }
 
 /// asyncVerifySameMessage(sets, message) — Pippenger same-message verify on a worker thread.
@@ -493,7 +493,7 @@ pub fn blsBatch_asyncVerifySameMessage(env: napi.Env, cb: napi.CallbackInfo(2)) 
     data.msg = msg_info.data[0..32].*;
     try parseSameMessageSets(sets, n, data.pks[0..n], data.sigs[0..n]);
 
-    return try queueJob(env, data, asyncExecute);
+    return try queueJob(env, data);
 }
 
 // ---------------------------------------------------------------------------
