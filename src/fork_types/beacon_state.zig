@@ -292,10 +292,8 @@ pub fn BeaconState(comptime f: ForkSeq) type {
 
         pub fn rotateSyncCommittees(self: *Self, next_sync_committee: *const ForkTypes(.altair).SyncCommittee.Type) !void {
             if (comptime f == .phase0) return error.InvalidAtFork;
-            var next_sync_committee_view = try self.inner.get("next_sync_committee");
-            var next_sync_committee_copy = try next_sync_committee_view.clone(.{ .transfer_cache = true });
-            errdefer next_sync_committee_copy.deinit();
-            try self.inner.set("current_sync_committee", next_sync_committee_copy);
+            const next_sync_committee_root = try self.inner.getRootNode("next_sync_committee");
+            try self.inner.setRootNode("current_sync_committee", next_sync_committee_root);
             try self.inner.setValue("next_sync_committee", next_sync_committee);
         }
 
