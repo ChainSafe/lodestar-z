@@ -298,7 +298,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             }
         }
 
-        pub fn deserialize(allocator: Allocator, pool: *Node.Pool, bytes: []const u8) !Self {
+        pub fn deserialize(allocator: Allocator, pool: *Node.Pool, bytes: []const u8) !*Self {
             const root = try ST.tree.deserializeFromBytes(pool, bytes);
             return try Self.init(allocator, pool, root);
         }
