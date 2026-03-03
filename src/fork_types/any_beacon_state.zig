@@ -440,10 +440,8 @@ pub const AnyBeaconState = union(ForkSeq) {
     pub fn rotateEpochPendingAttestations(self: *AnyBeaconState) !void {
         return switch (self.*) {
             .phase0 => |state| {
-                // const current_root = try state.getRootNode("current_epoch_attestations");
-                // try state.setRootNode("previous_epoch_attestations", current_root);
-                // TODO - treeview
-                try state.set("previous_epoch_attestations", try state.get("current_epoch_attestations"));
+                const current_root = try state.getRootNode("current_epoch_attestations");
+                try state.setRootNode("previous_epoch_attestations", current_root);
                 try state.setValue("current_epoch_attestations", &ct.phase0.EpochAttestations.default_value);
             },
             else => error.InvalidAtFork,
