@@ -65,7 +65,9 @@ describe("blsBatch", () => {
     it("aggregate: returns false for wrong indices", () => {
       const msg = makeMsg(20);
       const aggSig = aggregateSignatures([keypairs[0].sk.sign(msg), keypairs[1].sk.sign(msg)], false);
-      expect(blsBatch.verify(blsBatch.aggregate, [{indices: [0, 2], message: msg, signature: aggSig.toBytes()}])).toBe(false);
+      expect(blsBatch.verify(blsBatch.aggregate, [{indices: [0, 2], message: msg, signature: aggSig.toBytes()}])).toBe(
+        false
+      );
     });
 
     it("single: returns true for valid sets", () => {
@@ -191,21 +193,25 @@ describe("blsBatch", () => {
   describe("error handling for invalid inputs", () => {
     it("asyncVerify throws for an invalid signature (bad bytes)", () => {
       expect(() =>
-        blsBatch.asyncVerify(blsBatch.single, [{
-          publicKey: keypairs[0].pubkeyBytes,
-          message: makeMsg(80),
-          signature: new Uint8Array(96), // all zeros — fails deserialization
-        }])
+        blsBatch.asyncVerify(blsBatch.single, [
+          {
+            message: makeMsg(80),
+            publicKey: keypairs[0].pubkeyBytes,
+            signature: new Uint8Array(96), // all zeros — fails deserialization
+          },
+        ])
       ).toThrow();
     });
 
     it("thrown error is an Error instance with .code", () => {
       try {
-        blsBatch.asyncVerify(blsBatch.single, [{
-          publicKey: keypairs[0].pubkeyBytes,
-          message: makeMsg(81),
-          signature: new Uint8Array(96),
-        }]);
+        blsBatch.asyncVerify(blsBatch.single, [
+          {
+            message: makeMsg(81),
+            publicKey: keypairs[0].pubkeyBytes,
+            signature: new Uint8Array(96),
+          },
+        ]);
         expect.unreachable("should have thrown");
       } catch (err) {
         expect(err).toBeInstanceOf(Error);
@@ -216,11 +222,13 @@ describe("blsBatch", () => {
     it("asyncVerify throws for an out-of-range pubkey index", () => {
       const msg = makeMsg(82);
       try {
-        blsBatch.asyncVerify(blsBatch.indexed, [{
-          index: 99999,
-          message: msg,
-          signature: keypairs[0].sk.sign(msg).toBytes(),
-        }]);
+        blsBatch.asyncVerify(blsBatch.indexed, [
+          {
+            index: 99999,
+            message: msg,
+            signature: keypairs[0].sk.sign(msg).toBytes(),
+          },
+        ]);
         expect.unreachable("should have thrown");
       } catch (err) {
         expect(err).toBeInstanceOf(Error);
