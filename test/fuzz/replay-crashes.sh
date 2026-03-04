@@ -34,7 +34,7 @@ for target in "${targets[@]}"; do
         continue
     fi
 
-    crashes=("$crash_dir"/id:* 2>/dev/null) || true
+    crashes=("$crash_dir"/id:*)
     if [ ! -e "${crashes[0]}" ]; then
         echo "OK   ${target}: no crashes"
         continue
