@@ -225,6 +225,29 @@ jobs:
         run: |
           zig build test:spec_tests -Dpreset=mainnet
 
+  build-fuzz:
+    name: build fuzz harnesses
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Install AFL++
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y afl++ llvm
+      - name: Verify AFL++ is available
+        run: |
+          afl-cc --version
+      - name: Build fuzz harnesses
+        run: |
+          cd test/fuzz && zig build
+
   bindings-test:
     name: bindings - test
     runs-on: ubuntu-latest
