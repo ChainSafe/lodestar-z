@@ -25,11 +25,9 @@ pub export fn zig_fuzz_test(
 ) callconv(.c) void {
     // Precondition: need at least selector + 1 byte of data.
     if (len < 2) return;
-    assert(len >= 2);
 
     const selector = buf[0];
     const data = buf[1..len];
-    assert(data.len > 0);
 
     switch (selector % selector_count) {
         0 => fuzzBitVector(ssz.BitVectorType(4), data),
@@ -44,8 +42,6 @@ fn fuzzBitVector(
     comptime BitVectorT: type,
     data: []const u8,
 ) void {
-    assert(data.len > 0);
-
     var value: BitVectorT.Type = undefined;
     BitVectorT.deserializeFromBytes(data, &value) catch return;
 

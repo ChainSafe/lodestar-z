@@ -34,7 +34,6 @@ pub export fn zig_fuzz_test(
 ) callconv(.c) void {
     // Precondition: need at least selector + 1 byte of data.
     if (len < 2) return;
-    assert(len >= 2);
 
     var fixed_buffer_allocator =
         std.heap.FixedBufferAllocator.init(&fuzz_buf);
@@ -42,7 +41,6 @@ pub export fn zig_fuzz_test(
 
     const selector = buf[0];
     const data = buf[1..len];
-    assert(data.len > 0);
 
     switch (selector % selector_count) {
         0 => fuzzFixedList(
@@ -74,8 +72,6 @@ fn fuzzFixedList(
     allocator: std.mem.Allocator,
     data: []const u8,
 ) void {
-    assert(data.len > 0);
-
     var value: ListT.Type = ListT.Type.empty;
     ListT.deserializeFromBytes(
         allocator,
@@ -107,8 +103,6 @@ fn fuzzVariableList(
     allocator: std.mem.Allocator,
     data: []const u8,
 ) void {
-    assert(data.len > 0);
-
     var value: ListT.Type = ListT.Type.empty;
     ListT.deserializeFromBytes(
         allocator,
