@@ -143,20 +143,16 @@ pub const EpochCache = struct {
         return try EffectiveBalanceIncrementsRc.init(allocator, effective_balance_increments);
     }
 
+    /// Initializes a reference counted `EpochShuffling` in a `EpochShufflingRc`.
+    ///
+    /// The `EpochShuffling` takes ownership of the given `active_indices`.
     fn initEpochShufflingRc(
         allocator: Allocator,
         state: *AnyBeaconState,
-        active_indices: []const ValidatorIndex,
+        active_indices: []ValidatorIndex,
         epoch: Epoch,
     ) !*EpochShufflingRc {
-        const epoch_shuffling = blk: {
-            const owned_active_indices = try allocator.alloc(ValidatorIndex, active_indices.len);
-            errdefer allocator.free(owned_active_indices);
-
-            std.mem.copyForwards(ValidatorIndex, owned_active_indices, active_indices);
-
-            break :blk try computeEpochShuffling(allocator, state, owned_active_indices, epoch);
-        };
+        const epoch_shuffling = try computeEpochShuffling(allocator, state, active_indices, epoch);
         errdefer epoch_shuffling.deinit();
 
         return try EpochShufflingRc.init(allocator, epoch_shuffling);
@@ -233,13 +229,13 @@ pub const EpochCache = struct {
             inline else => |f| try getTotalSlashingsByIncrement(f, state.castToFork(f)),
         };
         var previous_active_indices_array_list = std.ArrayList(ValidatorIndex).init(allocator);
-        defer previous_active_indices_array_list.deinit();
+        errdefer previous_active_indices_array_list.deinit();
         try previous_active_indices_array_list.ensureTotalCapacity(validator_count);
         var current_active_indices_array_list = std.ArrayList(ValidatorIndex).init(allocator);
-        defer current_active_indices_array_list.deinit();
+        errdefer current_active_indices_array_list.deinit();
         try current_active_indices_array_list.ensureTotalCapacity(validator_count);
         var next_active_indices_array_list = std.ArrayList(ValidatorIndex).init(allocator);
-        defer next_active_indices_array_list.deinit();
+        errdefer next_active_indices_array_list.deinit();
         try next_active_indices_array_list.ensureTotalCapacity(validator_count);
 
         for (0..validator_count) |i| {
@@ -278,29 +274,26 @@ pub const EpochCache = struct {
             total_active_balance_increments = 1;
         }
 
-        // ownership of the active indices is transferred to EpochShuffling
         const previous_shuffling_rc = try initEpochShufflingRc(
             allocator,
             state,
-            previous_active_indices_array_list.items,
+            try previous_active_indices_array_list.toOwnedSlice(),
             previous_epoch,
         );
         errdefer previous_shuffling_rc.release();
 
-        // ownership of the active indices is transferred to EpochShuffling
         const current_shuffling_rc = try initEpochShufflingRc(
             allocator,
             state,
-            current_active_indices_array_list.items,
+            try current_active_indices_array_list.toOwnedSlice(),
             current_epoch,
         );
         errdefer current_shuffling_rc.release();
 
-        // ownership of the active indices is transferred to EpochShuffling
         const next_shuffling_rc = try initEpochShufflingRc(
             allocator,
             state,
-            next_active_indices_array_list.items,
+            try next_active_indices_array_list.toOwnedSlice(),
             next_epoch,
         );
         errdefer next_shuffling_rc.release();
