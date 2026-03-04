@@ -231,9 +231,11 @@ pub const EpochCache = struct {
         var previous_active_indices_array_list = std.ArrayList(ValidatorIndex).init(allocator);
         errdefer previous_active_indices_array_list.deinit();
         try previous_active_indices_array_list.ensureTotalCapacity(validator_count);
+
         var current_active_indices_array_list = std.ArrayList(ValidatorIndex).init(allocator);
         errdefer current_active_indices_array_list.deinit();
         try current_active_indices_array_list.ensureTotalCapacity(validator_count);
+
         var next_active_indices_array_list = std.ArrayList(ValidatorIndex).init(allocator);
         errdefer next_active_indices_array_list.deinit();
         try next_active_indices_array_list.ensureTotalCapacity(validator_count);
