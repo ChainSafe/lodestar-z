@@ -44,9 +44,9 @@ const MAX_SETS_PER_JOB = blst.MAX_AGGREGATE_PER_JOB;
 /// MAX_SETS_PER_JOB; verified against the actual blst requirement at pool init.
 const MAX_SCRATCH_SIZE = 128 * MAX_SETS_PER_JOB;
 
-var gpa: std.heap.DebugAllocator(.{}) = .init;
+var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
-    gpa.allocator()
+    debug_allocator.allocator()
 else
     std.heap.c_allocator;
 
@@ -68,14 +68,16 @@ fn getPubkey(index: u32) !*const PublicKey {
 
 fn deserializeSig(sig_value: napi.Value) !Signature {
     const info = try sig_value.getTypedarrayInfo();
-    var sig = Signature.deserialize(info.data[0..]) catch return error.DeserializationFailed;
+    if (info.data.len != 96) return error.InvalidSignatureLength;
+    var sig = Signature.deserialize(info.data[0..96]) catch return error.DeserializationFailed;
     sig.validate(true) catch return error.InvalidSignature;
     return sig;
 }
 
 fn deserializePubkey(pk_value: napi.Value) !PublicKey {
     const info = try pk_value.getTypedarrayInfo();
-    const pk = PublicKey.deserialize(info.data[0..]) catch return error.DeserializationFailed;
+    if (info.data.len != 48) return error.InvalidPublicKeyLength;
+    const pk = PublicKey.deserialize(info.data[0..48]) catch return error.DeserializationFailed;
     pk.validate() catch return error.InvalidPublicKey;
     return pk;
 }
@@ -92,7 +94,9 @@ fn batchVerify(
     rands: [][RAND_BYTES]u8,
 ) bool {
     const n = msgs.len;
-    std.debug.assert(pks.len == n and sigs.len == n and rands.len >= n);
+    std.debug.assert(pks.len == n);
+    std.debug.assert(sigs.len == n);
+    std.debug.assert(rands.len >= n);
     if (n == 0) return false;
 
     for (0..n) |i| std.crypto.random.bytes(&rands[i]);
@@ -122,6 +126,9 @@ fn batchVerify(
 
 /// Parse {index, message, signature} sets.
 fn parseIndexedSets(sets: napi.Value, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature) !void {
+    std.debug.assert(msgs.len >= n);
+    std.debug.assert(pks.len >= n);
+    std.debug.assert(sigs.len >= n);
     for (0..n) |i| {
         const set = try sets.getElement(@intCast(i));
 
@@ -138,6 +145,9 @@ fn parseIndexedSets(sets: napi.Value, n: usize, msgs: [][32]u8, pks: []PublicKey
 
 /// Parse {indices, message, signature} sets, aggregating pubkeys per set.
 fn parseAggregateSets(sets: napi.Value, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature) !void {
+    std.debug.assert(msgs.len >= n);
+    std.debug.assert(pks.len >= n);
+    std.debug.assert(sigs.len >= n);
     for (0..n) |i| {
         const set = try sets.getElement(@intCast(i));
 
@@ -171,6 +181,9 @@ fn parseAggregateSets(sets: napi.Value, n: usize, msgs: [][32]u8, pks: []PublicK
 
 /// Parse {publicKey, message, signature} sets.
 fn parseSingleSets(sets: napi.Value, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature) !void {
+    std.debug.assert(msgs.len >= n);
+    std.debug.assert(pks.len >= n);
+    std.debug.assert(sigs.len >= n);
     for (0..n) |i| {
         const set = try sets.getElement(@intCast(i));
 
@@ -186,6 +199,8 @@ fn parseSingleSets(sets: napi.Value, n: usize, msgs: [][32]u8, pks: []PublicKey,
 
 /// Parse {index, signature} sets (same-message path, no per-set message).
 fn parseSameMessageSets(sets: napi.Value, n: usize, pks: []PublicKey, sigs: []Signature) !void {
+    std.debug.assert(pks.len >= n);
+    std.debug.assert(sigs.len >= n);
     for (0..n) |i| {
         const set = try sets.getElement(@intCast(i));
         const idx = try (try set.getNamedProperty("index")).getValueUint32();
@@ -298,6 +313,7 @@ const JobPool = struct {
     }
 
     fn push(self: *JobPool, job: *AsyncJobData) void {
+        std.debug.assert(self.free_count < self.stack.len);
         self.stack[self.free_count] = job;
         self.free_count += 1;
     }
@@ -343,7 +359,11 @@ fn asyncExecute(_: napi.Env, data: *AsyncJobData) void {
 
 fn sameMessageExecute(data: *AsyncJobData) void {
     const n = data.n;
+    std.debug.assert(n > 0);
+    std.debug.assert(n <= MAX_SETS_PER_JOB);
 
+    // Uses 32-byte randoms (vs 8-byte in batchVerify) because
+    // aggregateWithRandomness consumes 32 bytes per element from a flat slice.
     var rands: [MAX_SETS_PER_JOB][32]u8 = undefined;
     std.crypto.random.bytes(std.mem.sliceAsBytes(rands[0..n]));
 
@@ -429,9 +449,12 @@ fn queueJob(env: napi.Env, data: *AsyncJobData) !napi.Value {
     data.err = null;
     data.deferred = try napi.Deferred.create(env.env);
     errdefer {
-        if (env.getBoolean(false)) |val| {
-            data.deferred.resolve(val) catch {};
-        } else |_| {}
+        // Reject the promise so JS sees an error, not a silent `false`.
+        const err_msg = env.createStringUtf8("Failed to queue async job") catch {
+            data.deferred.reject(env.getUndefined() catch return) catch {};
+            return;
+        };
+        data.deferred.reject(err_msg) catch {};
     }
 
     const resource_name = try env.createStringUtf8("asyncVerify");
@@ -498,8 +521,14 @@ pub fn blsBatch_asyncVerifySameMessage(env: napi.Env, cb: napi.CallbackInfo(2)) 
 // Init & backpressure
 // ---------------------------------------------------------------------------
 
+/// Maximum number of concurrent async jobs allowed.
+const MAX_POOL_JOBS = 256;
+
 pub fn blsBatch_init(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    try pool.init(try cb.arg(0).getValueUint32());
+    if (pool.slots.len > 0) return error.AlreadyInitialized;
+    const max_jobs = try cb.arg(0).getValueUint32();
+    if (max_jobs == 0 or max_jobs > MAX_POOL_JOBS) return error.InvalidPoolSize;
+    try pool.init(max_jobs);
     return try env.getUndefined();
 }
 
