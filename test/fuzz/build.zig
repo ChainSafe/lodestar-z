@@ -41,7 +41,21 @@ pub fn build(b: *std.Build) void {
         extract_step.dependOn(&run_extract.step);
     }
 
-    const fuzzers = &[_]struct { name: []const u8 }{
+    const Fuzzer = struct {
+        name: []const u8,
+
+        /// Returns the corpus directory path for this fuzzer.
+        /// Change the suffix to switch between -cmin and -initial.
+        fn corpus(comptime self: @This()) []const u8 {
+            return "corpus/" ++ self.name ++ "-cmin";
+        }
+
+        fn source(comptime self: @This()) []const u8 {
+            return "src/fuzz_" ++ self.name ++ ".zig";
+        }
+    };
+
+    const fuzzers = &[_]Fuzzer{
         .{ .name = "ssz_basic" },
         .{ .name = "ssz_bitlist" },
         .{ .name = "ssz_bitvector" },
@@ -57,7 +71,7 @@ pub fn build(b: *std.Build) void {
         );
 
         const lib_mod = b.createModule(.{
-            .root_source_file = b.path("src/fuzz_" ++ fuzzer.name ++ ".zig"),
+            .root_source_file = b.path(fuzzer.source()),
             .target = target,
             .optimize = optimize,
         });
@@ -80,7 +94,7 @@ pub fn build(b: *std.Build) void {
         const run = afl.addFuzzerRun(
             b,
             exe,
-            b.path("corpus/" ++ fuzzer.name ++ "-cmin"),
+            b.path(fuzzer.corpus()),
             b.path(b.fmt("afl-out/{s}", .{fuzzer.name})),
         );
         run_step.dependOn(&run.step);
