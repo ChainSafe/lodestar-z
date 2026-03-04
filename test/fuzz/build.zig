@@ -91,12 +91,19 @@ pub fn build(b: *std.Build) void {
         lib.root_module.fuzz = true;
 
         const exe = afl.addInstrumentedExe(b, lib);
+        const mkdir = b.addSystemCommand(&.{
+            "mkdir", "-p",
+        });
+        mkdir.addDirectoryArg(
+            b.path(b.fmt("afl-out/{s}", .{fuzzer.name})),
+        );
         const run = afl.addFuzzerRun(
             b,
             exe,
             b.path(fuzzer.corpus()),
             b.path(b.fmt("afl-out/{s}", .{fuzzer.name})),
         );
+        run.step.dependOn(&mkdir.step);
         run_step.dependOn(&run.step);
 
         const install = b.addInstallBinFile(
