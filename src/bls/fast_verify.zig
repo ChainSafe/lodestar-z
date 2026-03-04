@@ -10,7 +10,7 @@ const RAND_BITS = 8 * RAND_BYTES;
 ///
 /// Returns true if verification succeeds, false if verification fails, `BlstError` on error.
 pub fn verifyMultipleAggregateSignatures(
-    pairing_buf: *[Pairing.sizeOf()]u8,
+    pairing_buf: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
     n_elems: usize,
     msgs: []const [32]u8,
     dst: []const u8,

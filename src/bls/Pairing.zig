@@ -3,6 +3,10 @@ ctx: *c.blst_pairing,
 
 const Self = @This();
 
+/// Required alignment for the pairing buffer. The opaque C struct contains
+/// `uptr_t` (64-bit) fields that require 8-byte alignment.
+pub const buf_align = 8;
+
 /// Initializes a pairing context with the provided `buffer` and other parameters.
 /// This `Pairing` instance owns the given memory.
 ///
@@ -11,7 +15,7 @@ const Self = @This();
 /// - it does not have allocator in its api
 /// - can use stack allocation at consumer side
 /// - can reuse memory if it makes sense at consumer side
-pub fn init(buffer: *[Self.sizeOf()]u8, hash_or_encode: bool, dst: []const u8) Self {
+pub fn init(buffer: *align(buf_align) [Self.sizeOf()]u8, hash_or_encode: bool, dst: []const u8) Self {
     const obj = Self{ .ctx = @ptrCast(buffer) };
     c.blst_pairing_init(obj.ctx, hash_or_encode, @ptrCast(dst.ptr), dst.len);
 
@@ -129,12 +133,10 @@ pub fn asFp12(self: *Self) *c.blst_fp12 {
 }
 
 test "init Pairing" {
-    const allocator = std.testing.allocator;
-    const buffer = try allocator.alloc(u8, @This().sizeOf());
-    defer allocator.free(buffer);
+    var buffer: [sizeOf()]u8 align(buf_align) = undefined;
 
     const dst = "destination";
-    _ = @This().init(@ptrCast(buffer), true, dst);
+    _ = @This().init(&buffer, true, dst);
 }
 
 test "sizeOf Pairing" {

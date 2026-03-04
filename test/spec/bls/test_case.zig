@@ -85,7 +85,7 @@ pub fn aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
 
         var pk_buf: [blst.PublicKey.COMPRESS_SIZE]u8 = undefined;
         var sig_buf: [blst.Signature.COMPRESS_SIZE]u8 = undefined;
-        var pairing_buf: [blst.Pairing.sizeOf()]u8 = undefined;
+        var pairing_buf: [blst.Pairing.sizeOf()]u8 align(blst.Pairing.buf_align) = undefined;
 
         for (aggregate_verify_test_data.input.pubkeys, 0..) |pk_hex_bytes, i| {
             const pk_bytes = try std.fmt.hexToBytes(
@@ -155,7 +155,7 @@ pub fn fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
         var msg_bytes: [32]u8 = undefined;
         var pk_buf: [blst.PublicKey.COMPRESS_SIZE]u8 = undefined;
         var sig_buf: [blst.Signature.COMPRESS_SIZE]u8 = undefined;
-        var pairing_buf: [blst.Pairing.sizeOf()]u8 = undefined;
+        var pairing_buf: [blst.Pairing.sizeOf()]u8 align(blst.Pairing.buf_align) = undefined;
 
         for (fast_aggregate_verify_test_data.input.pubkeys, 0..) |pk_hex_bytes, i| {
             const pk_bytes = try std.fmt.hexToBytes(
@@ -381,7 +381,7 @@ pub fn eth_fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
         var msg_bytes: [32]u8 = undefined;
         var pk_buf: [blst.PublicKey.COMPRESS_SIZE]u8 = undefined;
         var sig_buf: [blst.Signature.COMPRESS_SIZE]u8 = undefined;
-        var pairing_buf: [blst.Pairing.sizeOf()]u8 = undefined;
+        var pairing_buf: [blst.Pairing.sizeOf()]u8 align(blst.Pairing.buf_align) = undefined;
 
         for (eth_fast_aggregate_verify_test_data.input.pubkeys, 0..) |pk_hex_bytes, i| {
             const pk_bytes = try std.fmt.hexToBytes(

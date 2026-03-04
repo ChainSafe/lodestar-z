@@ -61,7 +61,7 @@ pub fn verify(
 pub fn aggregateVerify(
     self: *const Self,
     sig_groupcheck: bool,
-    buffer: *[Pairing.sizeOf()]u8,
+    buffer: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
     msgs: []const [32]u8,
     dst: []const u8,
     pks: []const PublicKey,
@@ -105,7 +105,7 @@ pub fn aggregateVerify(
 pub fn fastAggregateVerify(
     self: *const Self,
     sig_groupcheck: bool,
-    buffer: *[Pairing.sizeOf()]u8,
+    buffer: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
     msg: *const [32]u8,
     dst: []const u8,
     pks: []const PublicKey,
@@ -130,7 +130,7 @@ pub fn fastAggregateVerify(
 pub fn fastAggregateVerifyPreAggregated(
     self: *const Self,
     sig_groupcheck: bool,
-    buffer: *[Pairing.sizeOf()]u8,
+    buffer: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
     msg: *const [32]u8,
     dst: []const u8,
     pk: *const PublicKey,
@@ -264,7 +264,7 @@ test aggregateVerify {
 
     const num_sigs = 10;
 
-    var buffer: [3192]u8 = undefined;
+    var buffer: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined;
 
     var msgs: [num_sigs][32]u8 = undefined;
     var sks: [num_sigs]SecretKey = undefined;
