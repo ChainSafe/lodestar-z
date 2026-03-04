@@ -108,14 +108,18 @@ cd test/fuzz && zig build extract-corpus
 Reduce the evolved queue to a minimal set covering all discovered edges:
 
 ```sh
-AFL_NO_FORKSRV=1 afl-cmin.bash \
+__AFL_DEFER_FORKSRV=1 AFL_NO_FORKSRV=1 afl-cmin.bash \
   -i afl-out/ssz_basic/default/queue \
   -o corpus/ssz_basic-cmin \
   -- zig-out/bin/fuzz-ssz_basic
 ```
 
-`AFL_NO_FORKSRV=1` is required because the Python `afl-cmin` wrapper has
-a bug in some AFL++ versions. Use the `afl-cmin.bash` script instead.
+`__AFL_DEFER_FORKSRV=1` is needed because `afl-showmap` (used internally
+by `afl-cmin.bash`) does not auto-detect the deferred fork server marker —
+without it the binary aborts with SIGABRT on some platforms (observed on
+OrbStack/Linux). `AFL_NO_FORKSRV=1` is required because the Python
+`afl-cmin` wrapper has a bug in some AFL++ versions. Use the
+`afl-cmin.bash` script instead.
 
 ### Windows/macOS compatibility
 
