@@ -26,6 +26,7 @@ for target in "${targets[@]}"; do
     bin="${BIN_DIR}/fuzz-${target}"
 
     if [ ! -d "$crash_dir" ]; then
+        echo "OK   ${target}: no crashes directory"
         continue
     fi
 
