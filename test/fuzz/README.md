@@ -22,9 +22,9 @@ mapping.
 
 Install AFL++ so that `afl-cc` and `afl-fuzz` are on your `PATH`.
 
-- **Linux:** build from source or `apt install afl++`
-- **macOS:** not directly supported — use
-  [OrbStack](https://orbstack.dev/) or similar Linux VM
+- **macOS (Homebrew):** `brew install aflplusplus`
+- **Linux:** build from source or use your distro's package (e.g.
+  `apt install afl++` on Debian/Ubuntu).
 
 ## Building
 
@@ -34,7 +34,9 @@ From this directory (`test/fuzz`):
 zig build
 ```
 
-This compiles instrumented binaries at `zig-out/bin/fuzz-*`.
+This compiles Zig static libraries for each fuzz target, emits LLVM bitcode,
+then links each with `afl.c` using `afl-cc` to produce instrumented binaries
+at `zig-out/bin/fuzz-*`.
 
 ## Running the Fuzzer
 
@@ -52,51 +54,44 @@ afl-fuzz -i corpus/ssz_basic-cmin -o afl-out/ssz_basic \
   -- zig-out/bin/fuzz-ssz_basic @@
 ```
 
-Press `Ctrl-C` to stop. Resume later with `-i-` (resume mode).
+The fuzzer runs indefinitely. Let it run for as long as you like; meaningful
+coverage is usually reached within a few hours, but longer runs can find
+deeper bugs. Press `ctrl+c` to stop the fuzzer when you're done.
 
 ## Finding Crashes and Hangs
 
-Results are written to `afl-out/<target>/default/`:
+After (or during) a run, results are written to `afl-out/<target>/default/`:
 
 ```
 afl-out/ssz_basic/default/
-├── crashes/     Inputs that triggered crashes
-├── hangs/       Inputs that caused timeouts
-└── queue/       All interesting inputs (evolved corpus)
+├── crashes/ # Inputs that triggered crashes
+├── hangs/   # Inputs that triggered hangs/timeouts
+└── queue/   # All interesting inputs (the evolved corpus)
 ```
+
+Each file in `crashes/` or `hangs/` is a raw byte file that triggered the
+issue. The filename encodes metadata about how it was found (e.g.
+`id:000000,sig:06,...`).
 
 ## Reproducing a Crash
 
-Replay any crashing input by piping it into the harness via stdin:
+Replay any crashing input by piping it into the harness:
 
 ```sh
-./replay-crashes.sh                     # all targets
-./replay-crashes.sh ssz_lists           # one target
-
-# single file
-__AFL_DEFER_FORKSRV=1 ./zig-out/bin/fuzz-ssz_lists \
-  < afl-out/ssz_lists/default/crashes/<filename>
-```
-
-After fixing a crash, add the input as a regression seed:
-
-```sh
-cp afl-out/ssz_lists/default/crashes/<filename> \
-   corpus/ssz_lists-initial/06-regression-description
+cat afl-out/ssz_basic/default/crashes/<filename> | zig-out/bin/fuzz-ssz_basic
 ```
 
 ## Corpus Management
 
-> **Important:** The instrumented binary reads input from **stdin**,
-> not from file arguments. Do **not** use `@@` with `afl-cmin`,
-> `afl-tmin`, or `afl-showmap` — it will produce useless results.
+After a fuzzing run, the queue in `afl-out/<target>/default/queue/` typically
+contains many redundant inputs. Use `afl-cmin` to find the smallest
+subset that preserves full edge coverage, and `afl-tmin` to shrink
+individual test cases.
 
-### Corpus directories
-
-| Directory | Contents |
-|-----------|----------|
-| `corpus/<target>-initial/` | Hand-crafted seeds + spec test vectors |
-| `corpus/<target>-cmin/` | Output of `afl-cmin` (edge-deduplicated) |
+> **Important:** The instrumented binary reads input from **stdin**, not
+> from file arguments. Do **not** use `@@` with `afl-cmin`, `afl-tmin`,
+> or `afl-showmap` — it will cause them to see only the C harness
+> coverage (~4 tuples) instead of the Zig SSZ coverage.
 
 ### Populating seeds from spec tests
 
@@ -110,46 +105,37 @@ cd test/fuzz && zig build extract-corpus
 
 ### Corpus minimization (`afl-cmin`)
 
-After a fuzzing run, reduce the evolved queue to a minimal set:
-
-```sh
-./minimize-corpus.sh              # all targets
-./minimize-corpus.sh ssz_lists    # one target
-```
-
-This merges `-initial` seeds with the evolved queue, runs
-`afl-cmin.bash` to keep only edge-unique inputs, and writes
-the result to `corpus/<target>-cmin/`.
-
-The script uses `afl-cmin.bash` (not the Python `afl-cmin`) to
-avoid wrapper bugs in some AFL++ versions. It requires two
-environment variables for correct coverage:
+Reduce the evolved queue to a minimal set covering all discovered edges:
 
 ```sh
 __AFL_DEFER_FORKSRV=1 AFL_NO_FORKSRV=1 afl-cmin.bash \
-  -i INPUT -o OUTPUT -- ./zig-out/bin/fuzz-ssz_basic
+  -i afl-out/ssz_basic/default/queue \
+  -o corpus/ssz_basic-cmin \
+  -- zig-out/bin/fuzz-ssz_basic
 ```
 
-`__AFL_DEFER_FORKSRV=1` is needed because `afl-showmap` (used
-internally by `afl-cmin.bash`) does not auto-detect the deferred
-fork server marker — without it the binary aborts with SIGABRT.
-`afl-fuzz` does not need this variable.
+`__AFL_DEFER_FORKSRV=1` is needed because `afl-showmap` (used internally
+by `afl-cmin.bash`) does not auto-detect the deferred fork server marker —
+without it the binary aborts with SIGABRT. `AFL_NO_FORKSRV=1` is required
+because the Python `afl-cmin` wrapper has a bug in some AFL++ versions.
+Use the `afl-cmin.bash` script instead.
 
 ### Windows/macOS compatibility
 
-AFL++ output filenames contain colons (`id:000001,...`), which are
-invalid on NTFS/macOS. The minimize script automatically replaces
-colons with underscores.
+AFL++ output filenames contain colons (e.g., `id:000024,time:0,...`), which
+are invalid on Windows (NTFS). After running `afl-cmin`,
+rename the output files to replace colons with underscores before committing:
 
-### Workflow
+```sh
+./corpus/sanitize-filenames.sh
+```
 
-```
-1. Start with -initial seeds (hand-crafted + spec tests)
-2. Run AFL++ for hours/days
-3. ./minimize-corpus.sh → corpus/<target>-cmin/
-4. Commit -cmin to the repo
-5. Future runs use -cmin as input (faster startup)
-```
+### Corpus directories
+
+| Directory | Contents |
+|-----------|----------|
+| `corpus/<target>-initial/` | Hand-crafted seeds + spec test vectors |
+| `corpus/<target>-cmin/` | Output of `afl-cmin` (edge-deduplicated corpus) |
 
 ## Adding a New Target
 
@@ -157,5 +143,4 @@ colons with underscores.
    `zig_fuzz_test` with `callconv(.c)`.
 2. Add the name to the `fuzzers` array in `build.zig`.
 3. Create `corpus/<name>-initial/` with hand-crafted seed files.
-4. Add the target to `replay-crashes.sh` and
-   `minimize-corpus.sh` target lists.
+4. Add the target to `replay-crashes.sh` target list.
