@@ -8,6 +8,9 @@ pub fn addInstrumentedExe(
     b: *std.Build,
     obj: *std.Build.Step.Compile,
 ) std.Build.LazyPath {
+    // Force the build system to produce the binary artifact even though we
+    // only consume the LLVM bitcode below. Without this, the dependency
+    // tracking doesn't wire up correctly.
     _ = obj.getEmittedBin();
 
     const pkg = b.dependencyFromBuildZig(
@@ -27,9 +30,10 @@ pub fn addInstrumentedExe(
     return fuzz_exe;
 }
 
-/// Creates a run step that invokes `afl-fuzz` with the given
-/// instrumented executable, input corpus directory, and output
-/// directory.
+/// Creates a run step that invokes `afl-fuzz` with the given instrumented
+/// executable, input corpus directory, and output directory.
+///
+/// Returns the `Run` step so callers can wire it into a build step.
 pub fn addFuzzerRun(
     b: *std.Build,
     exe: std.Build.LazyPath,
