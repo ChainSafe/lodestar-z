@@ -148,6 +148,13 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("state_transition"), module_state_transition) catch @panic("OOM");
 
+    const module_fork_choice = b.createModule(.{
+        .root_source_file = b.path("src/fork_choice/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("fork_choice"), module_fork_choice) catch @panic("OOM");
+
     const module_download_era_files = b.createModule(.{
         .root_source_file = b.path("scripts/download_era_files.zig"),
         .target = target,
@@ -650,6 +657,20 @@ pub fn build(b: *std.Build) void {
     tls_run_test_state_transition.dependOn(&run_test_state_transition.step);
     tls_run_test.dependOn(&run_test_state_transition.step);
 
+    const test_fork_choice = b.addTest(.{
+        .name = "fork_choice",
+        .root_module = module_fork_choice,
+        .filters = b.option([][]const u8, "fork_choice.filters", "fork_choice test filters") orelse &[_][]const u8{},
+    });
+    const install_test_fork_choice = b.addInstallArtifact(test_fork_choice, .{});
+    const tls_install_test_fork_choice = b.step("build-test:fork_choice", "Install the fork_choice test");
+    tls_install_test_fork_choice.dependOn(&install_test_fork_choice.step);
+
+    const run_test_fork_choice = b.addRunArtifact(test_fork_choice);
+    const tls_run_test_fork_choice = b.step("test:fork_choice", "Run the fork_choice test");
+    tls_run_test_fork_choice.dependOn(&run_test_fork_choice.step);
+    tls_run_test.dependOn(&run_test_fork_choice.step);
+
     const test_download_era_files = b.addTest(.{
         .name = "download_era_files",
         .root_module = module_download_era_files,
@@ -997,6 +1018,13 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("hex", module_hex);
     module_state_transition.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
+
+    module_fork_choice.addImport("consensus_types", module_consensus_types);
+    module_fork_choice.addImport("config", module_config);
+    module_fork_choice.addImport("preset", module_preset);
+    module_fork_choice.addImport("state_transition", module_state_transition);
+    module_fork_choice.addImport("hex", module_hex);
+    module_fork_choice.addImport("constants", module_constants);
 
     module_download_era_files.addImport("download_era_options", options_module_download_era_options);
 

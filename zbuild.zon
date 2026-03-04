@@ -131,6 +131,17 @@
                 .metrics,
             },
         },
+        .fork_choice = .{
+            .root_source_file = "src/fork_choice/root.zig",
+            .imports = .{
+                .consensus_types,
+                .config,
+                .preset,
+                .state_transition,
+                .hex,
+                .constants,
+            },
+        },
     },
     .executables = .{
         .download_era_files = .{
