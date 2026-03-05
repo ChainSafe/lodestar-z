@@ -1,6 +1,6 @@
 .{
     .name = .lodestar_z_fuzz,
-    .version = "0.0.0",
+    .version = "0.1.0",
     .fingerprint = 0xa5f5892cc2169277,
     .minimum_zig_version = "0.14.1",
     .dependencies = .{

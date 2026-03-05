@@ -138,7 +138,7 @@ fn extractBasic(
     if (spec_dir.openDir(
         "boolean/valid",
         .{ .iterate = true },
-    )) |dir_obj| {
+    ) catch null) |dir_obj| {
         var dir = dir_obj;
         defer dir.close();
 
@@ -170,13 +170,13 @@ fn extractBasic(
             );
             count += 1;
         }
-    } else |_| {}
+    }
 
     // Uints → selectors 0x01-0x06.
     if (spec_dir.openDir(
         "uints/valid",
         .{ .iterate = true },
-    )) |dir_obj| {
+    ) catch null) |dir_obj| {
         var dir = dir_obj;
         defer dir.close();
 
@@ -214,7 +214,7 @@ fn extractBasic(
             );
             count += 1;
         }
-    } else |_| {}
+    }
 
     return count;
 }
@@ -430,15 +430,15 @@ fn findPrefixSelector(
 }
 
 pub fn main() !void {
-    var gpa_impl: std.heap.GeneralPurposeAllocator(.{}) = .init;
-    defer _ = gpa_impl.deinit();
-    const gpa = gpa_impl.allocator();
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
 
-    const read_buf = try gpa.alloc(u8, buf_len);
-    defer gpa.free(read_buf);
+    const read_buf = try allocator.alloc(u8, buf_len);
+    defer allocator.free(read_buf);
 
-    const decompress_buf = try gpa.alloc(u8, buf_len);
-    defer gpa.free(decompress_buf);
+    const decompress_buf = try allocator.alloc(u8, buf_len);
+    defer allocator.free(decompress_buf);
 
     var name_buf: [4096]u8 = undefined;
 

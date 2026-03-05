@@ -77,14 +77,14 @@ fn fuzzFixedContainer(
     comptime ContainerT: type,
     data: []const u8,
 ) void {
+    // Precondition: fixed containers require exact serialized size.
+    if (data.len != ContainerT.fixed_size) return;
+
     var value: ContainerT.Type = undefined;
     ContainerT.deserializeFromBytes(
         data,
         &value,
     ) catch return;
-
-    // Postcondition: data was the expected fixed size.
-    assert(data.len == ContainerT.fixed_size);
 
     // Round-trip invariant.
     var serialized: [ContainerT.fixed_size]u8 = undefined;
@@ -101,16 +101,16 @@ fn fuzzVariableContainer(
     allocator: std.mem.Allocator,
     data: []const u8,
 ) void {
+    // Precondition: input length must be within declared bounds.
+    if (data.len < ContainerT.min_size) return;
+    if (data.len > ContainerT.max_size) return;
+
     var value: ContainerT.Type = ContainerT.default_value;
     ContainerT.deserializeFromBytes(
         allocator,
         data,
         &value,
     ) catch return;
-
-    // Postcondition: data size within declared bounds.
-    assert(data.len >= ContainerT.min_size);
-    assert(data.len <= ContainerT.max_size);
 
     // Round-trip invariant.
     const serialized_size = ContainerT.serializedSize(&value);

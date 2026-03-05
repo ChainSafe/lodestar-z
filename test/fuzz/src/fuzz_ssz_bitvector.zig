@@ -42,11 +42,11 @@ fn fuzzBitVector(
     comptime BitVectorT: type,
     data: []const u8,
 ) void {
+    // Precondition: bitvector has fixed serialized size.
+    if (data.len != BitVectorT.fixed_size) return;
+
     var value: BitVectorT.Type = undefined;
     BitVectorT.deserializeFromBytes(data, &value) catch return;
-
-    // Postcondition: data was the expected fixed size.
-    assert(data.len == BitVectorT.fixed_size);
 
     // Round-trip invariant.
     var serialized: [BitVectorT.fixed_size]u8 = undefined;

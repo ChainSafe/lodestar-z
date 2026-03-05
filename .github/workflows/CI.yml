@@ -237,13 +237,18 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
-      - name: Install AFL++
+      - name: Install AFL++ and LLVM
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y afl++ llvm
-      - name: Verify AFL++ is available
+      - name: Verify AFL++ and LLVM are available
         run: |
           afl-cc --version
+          if command -v llvm-config >/dev/null 2>&1; then
+            llvm-config --version
+          else
+            llvm-config-18 --version
+          fi
       - name: Build fuzz harnesses
         run: |
           cd test/fuzz && zig build

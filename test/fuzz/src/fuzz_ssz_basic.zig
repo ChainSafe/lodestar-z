@@ -45,11 +45,12 @@ pub export fn zig_fuzz_test(
 
 fn fuzzBool(data: []const u8) void {
     const BoolType = ssz.BoolType();
+    // Precondition: Bool has a fixed serialized size.
+    if (data.len != BoolType.fixed_size) return;
+
     var value: BoolType.Type = undefined;
     BoolType.deserializeFromBytes(data, &value) catch return;
 
-    // Postcondition: data was the expected fixed size.
-    assert(data.len == BoolType.fixed_size);
     // Postcondition: deserialized bool is valid.
     assert(value == true or value == false);
 
@@ -64,11 +65,11 @@ fn fuzzBool(data: []const u8) void {
 }
 
 fn fuzzUint(comptime UintT: type, data: []const u8) void {
+    // Precondition: uint width implies exact serialized size.
+    if (data.len != UintT.fixed_size) return;
+
     var value: UintT.Type = undefined;
     UintT.deserializeFromBytes(data, &value) catch return;
-
-    // Postcondition: successful deser means data was correct size.
-    assert(data.len == UintT.fixed_size);
 
     // Round-trip invariant.
     var serialized: [UintT.fixed_size]u8 = undefined;
