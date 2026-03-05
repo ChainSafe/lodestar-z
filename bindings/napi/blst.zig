@@ -550,7 +550,7 @@ pub fn blst_aggregateVerify(
 
     const result = sig.aggregateVerify(
         sig_groupcheck,
-        &pairing_buf,
+        @alignCast(&pairing_buf),
         msgs,
         DST,
         pks,
@@ -598,7 +598,7 @@ pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.V
 
     var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
     // `pks_validate` is always false here since we assume proof of possession for public keys.
-    const result = sig.fastAggregateVerify(sigs_groupcheck, &pairing_buf, msg_info.data[0..32], DST, pks, false) catch {
+    const result = sig.fastAggregateVerify(sigs_groupcheck, @alignCast(&pairing_buf), msg_info.data[0..32], DST, pks, false) catch {
         return try env.getBoolean(false);
     };
 
@@ -632,10 +632,10 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
     const msgs = try allocator.alloc([32]u8, n_elems);
     defer allocator.free(msgs);
 
-    const pks = try allocator.alloc(*PublicKey, n_elems);
+    const pks = try allocator.alloc(*const PublicKey, n_elems);
     defer allocator.free(pks);
 
-    const sigs = try allocator.alloc(*Signature, n_elems);
+    const sigs = try allocator.alloc(*const Signature, n_elems);
     defer allocator.free(sigs);
 
     const rands = try allocator.alloc([32]u8, n_elems);
@@ -662,10 +662,7 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
         rand.bytes(&rands[i]);
     }
 
-    var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
     const result = blst.verifyMultipleAggregateSignatures(
-        &pairing_buf,
-        n_elems,
         msgs,
         DST,
         pks,
@@ -673,6 +670,7 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
         sigs,
         sigs_groupcheck,
         rands,
+        allocator,
     ) catch {
         return try env.getBoolean(false);
     };

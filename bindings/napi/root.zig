@@ -6,6 +6,7 @@ const config = @import("./config.zig");
 const shuffle = @import("./shuffle.zig");
 const BeaconStateView = @import("./BeaconStateView.zig");
 const blst = @import("./blst.zig");
+const blst_z = @import("blst");
 const bls_batch = @import("./bls_batch.zig");
 const state_transition = @import("./state_transition.zig");
 
@@ -22,6 +23,7 @@ const EnvCleanup = struct {
     fn hook(_: *EnvCleanup) void {
         if (env_refcount.fetchSub(1, .acq_rel) == 1) {
             // Last environment — tear down shared state.
+            blst_z.thread_pool.deinitializeThreadPool();
             bls_batch.deinit();
             config.state.deinit();
             pubkeys.state.deinit();
@@ -38,6 +40,7 @@ fn register(env: napi.Env, exports: napi.Value) !void {
         try pool.state.init();
         try pubkeys.state.init();
         config.state.init();
+        try blst_z.thread_pool.initializeThreadPool(null);
     }
 
     try env.addEnvCleanupHook(EnvCleanup, &env_cleanup, EnvCleanup.hook);

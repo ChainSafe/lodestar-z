@@ -27,7 +27,7 @@ pub fn fastAggregateVerify(msg: []const u8, pks: []const PublicKey, sig: *const 
 
     const sigs_groupcheck = in_sigs_group_check orelse false;
     const pks_validate = in_pk_validate orelse false;
-    return sig.fastAggregateVerify(sigs_groupcheck, &pairing_buf, msg[0..32], DST, pks, pks_validate) catch return false;
+    return sig.fastAggregateVerify(sigs_groupcheck, @alignCast(&pairing_buf), msg[0..32], DST, pks, pks_validate) catch return false;
 }
 
 // TODO: unit tests
