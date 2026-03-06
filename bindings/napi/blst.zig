@@ -502,6 +502,316 @@ pub fn blst_verify(env: napi.Env, cb: napi.CallbackInfo(5)) !napi.Value {
     return try env.getBoolean(true);
 }
 
+// --- Persistent thread pool for parallel pairing verification ---
+// Workers park on futex-backed ResetEvents between jobs, eliminating spawn/join overhead.
+// All per-dispatch buffers (pairing contexts, scratch arrays) are preallocated in the pool.
+// For n_elems <= SCRATCH_MAX, zero per-call heap allocations are needed.
+
+const RAND_BITS: usize = 64;
+const SCRATCH_MAX: usize = 512;
+
+const WorkItem = union(enum) {
+    aggregate_verify: *AggVerifyJob,
+    verify_multi: *VerifyMultiJob,
+};
+
+/// Job for parallel aggregateVerify. Uses pointer types for zero-copy from JS.
+const AggVerifyJob = struct {
+    pairing_bufs: [][Pairing.sizeOf()]u8,
+    has_work: []bool,
+    counter: std.atomic.Value(usize),
+    err_flag: std.atomic.Value(bool),
+    sig: *const Signature,
+    sig_groupcheck: bool,
+    msgs: []const *const [32]u8,
+    dst: []const u8,
+    pks: []const *const PublicKey,
+    pks_validate: bool,
+    n_elems: usize,
+};
+
+/// Job for parallel verifyMultipleAggregateSignatures. Uses pointer types for zero-copy.
+const VerifyMultiJob = struct {
+    pairing_bufs: [][Pairing.sizeOf()]u8,
+    has_work: []bool,
+    counter: std.atomic.Value(usize),
+    err_flag: std.atomic.Value(bool),
+    msgs: []const *const [32]u8,
+    dst: []const u8,
+    pks: []const *const PublicKey,
+    pks_validate: bool,
+    sigs: []const *const Signature,
+    sigs_groupcheck: bool,
+    rands: []const [32]u8,
+    n_elems: usize,
+};
+
+/// Persistent thread pool with preallocated buffers for parallel pairing verification.
+/// Workers park on ResetEvents between jobs. All dispatch buffers are preallocated.
+/// Scratch arrays for NAPI callers eliminate per-call allocs for n <= SCRATCH_MAX.
+const PairingPool = struct {
+    const max_workers = 256;
+
+    n_workers: usize,
+    workers: []std.Thread,
+    work_items: []?WorkItem,
+    work_ready: []std.Thread.ResetEvent,
+    work_done: []std.Thread.ResetEvent,
+
+    // Preallocated per-dispatch buffers (safe to reuse: dispatch is synchronous)
+    pairing_bufs: [][Pairing.sizeOf()]u8,
+    has_work: []bool,
+
+    // Scratch buffers for NAPI callers (eliminates per-call allocs for n <= SCRATCH_MAX)
+    scratch_msg_ptrs: []*const [32]u8,
+    scratch_pk_ptrs: []*const PublicKey,
+    scratch_sig_ptrs: []*const Signature,
+    scratch_rands: [][32]u8,
+
+    var instance: ?*PairingPool = null;
+
+    fn get() *PairingPool {
+        if (@as(*const ?*PairingPool, &instance).*) |p| return p;
+        return init();
+    }
+
+    fn init() *PairingPool {
+        const cpu_count = std.Thread.getCpuCount() catch 1;
+        const n_workers = @min(cpu_count, max_workers);
+        const n_bg = if (n_workers > 1) n_workers - 1 else 0;
+
+        const pool = allocator.create(PairingPool) catch @panic("PairingPool: OOM");
+        const work_items = allocator.alloc(?WorkItem, n_workers) catch @panic("PairingPool: OOM");
+        const work_ready = allocator.alloc(std.Thread.ResetEvent, n_workers) catch @panic("PairingPool: OOM");
+        const work_done = allocator.alloc(std.Thread.ResetEvent, n_workers) catch @panic("PairingPool: OOM");
+
+        @memset(work_items, null);
+        for (work_ready) |*e| e.* = .{};
+        for (work_done) |*e| e.* = .{};
+
+        const threads = allocator.alloc(std.Thread, n_bg) catch @panic("PairingPool: OOM");
+
+        pool.* = .{
+            .n_workers = n_workers,
+            .workers = threads,
+            .work_items = work_items,
+            .work_ready = work_ready,
+            .work_done = work_done,
+            .pairing_bufs = allocator.alloc([Pairing.sizeOf()]u8, n_workers) catch @panic("PairingPool: OOM"),
+            .has_work = allocator.alloc(bool, n_workers) catch @panic("PairingPool: OOM"),
+            .scratch_msg_ptrs = allocator.alloc(*const [32]u8, SCRATCH_MAX) catch @panic("PairingPool: OOM"),
+            .scratch_pk_ptrs = allocator.alloc(*const PublicKey, SCRATCH_MAX) catch @panic("PairingPool: OOM"),
+            .scratch_sig_ptrs = allocator.alloc(*const Signature, SCRATCH_MAX) catch @panic("PairingPool: OOM"),
+            .scratch_rands = allocator.alloc([32]u8, SCRATCH_MAX) catch @panic("PairingPool: OOM"),
+        };
+
+        for (0..n_bg) |i| {
+            threads[i] = std.Thread.spawn(.{}, workerLoop, .{ pool, i + 1 }) catch @panic("PairingPool: spawn failed");
+            threads[i].detach();
+        }
+
+        instance = pool;
+        return pool;
+    }
+
+    fn workerLoop(pool: *PairingPool, id: usize) void {
+        while (true) {
+            pool.work_ready[id].wait();
+            pool.work_ready[id].reset();
+
+            const item = pool.work_items[id] orelse {
+                pool.work_done[id].set();
+                continue;
+            };
+            switch (item) {
+                .aggregate_verify => |job| execAggVerify(job, id),
+                .verify_multi => |job| execVerifyMulti(job, id),
+            }
+            pool.work_items[id] = null;
+            pool.work_done[id].set();
+        }
+    }
+
+    fn execAggVerify(job: *AggVerifyJob, id: usize) void {
+        var pairing = Pairing.init(@ptrCast(@alignCast(&job.pairing_bufs[id])), true, job.dst);
+        var did_work = false;
+
+        while (!job.err_flag.load(.acquire)) {
+            const work = job.counter.fetchAdd(1, .monotonic);
+            if (work >= job.n_elems) break;
+            did_work = true;
+            const sig_ptr: ?*const Signature = if (work == 0) job.sig else null;
+            const sgc = if (work == 0) job.sig_groupcheck else false;
+            pairing.aggregate(job.pks[work], job.pks_validate, sig_ptr, sgc, job.msgs[work], null) catch {
+                job.err_flag.store(true, .release);
+                return;
+            };
+        }
+
+        if (did_work) {
+            pairing.commit();
+            job.has_work[id] = true;
+        }
+    }
+
+    fn execVerifyMulti(job: *VerifyMultiJob, id: usize) void {
+        var pairing = Pairing.init(@ptrCast(@alignCast(&job.pairing_bufs[id])), true, job.dst);
+        var did_work = false;
+
+        while (!job.err_flag.load(.acquire)) {
+            const work = job.counter.fetchAdd(1, .monotonic);
+            if (work >= job.n_elems) break;
+            did_work = true;
+            if (work == 0) {
+                // First element: r_0 = 1 (no scalar multiplication needed).
+                // See https://ethresear.ch/t/fast-verification-of-multiple-bls-signatures/5407
+                pairing.aggregate(
+                    job.pks[0],
+                    job.pks_validate,
+                    job.sigs[0],
+                    job.sigs_groupcheck,
+                    job.msgs[0],
+                    null,
+                ) catch {
+                    job.err_flag.store(true, .release);
+                    return;
+                };
+            } else {
+                pairing.mulAndAggregate(
+                    job.pks[work],
+                    job.pks_validate,
+                    job.sigs[work],
+                    job.sigs_groupcheck,
+                    &job.rands[work],
+                    RAND_BITS,
+                    job.msgs[work],
+                ) catch {
+                    job.err_flag.store(true, .release);
+                    return;
+                };
+            }
+        }
+
+        if (did_work) {
+            pairing.commit();
+            job.has_work[id] = true;
+        }
+    }
+
+    fn dispatch(pool: *PairingPool, item: WorkItem, n_active: usize) void {
+        const n_bg = if (n_active > 1) n_active - 1 else 0;
+        for (0..n_bg) |i| {
+            pool.work_done[i + 1].reset();
+            pool.work_items[i + 1] = item;
+            pool.work_ready[i + 1].set();
+        }
+
+        switch (item) {
+            .aggregate_verify => |job| execAggVerify(job, 0),
+            .verify_multi => |job| execVerifyMulti(job, 0),
+        }
+
+        for (0..n_bg) |i| {
+            pool.work_done[i + 1].wait();
+            pool.work_done[i + 1].reset();
+        }
+    }
+
+    /// Parallel aggregate verification using preallocated pool buffers.
+    fn aggregateVerify(
+        pool: *PairingPool,
+        sig: *const Signature,
+        sig_groupcheck: bool,
+        msg_ptrs: []const *const [32]u8,
+        dst: []const u8,
+        pk_ptrs: []const *const PublicKey,
+        pks_validate: bool,
+    ) bool {
+        const n_elems = pk_ptrs.len;
+        if (n_elems == 0 or msg_ptrs.len != n_elems) return false;
+
+        const n_active = @min(pool.n_workers, n_elems);
+        @memset(pool.has_work[0..n_active], false);
+
+        var job = AggVerifyJob{
+            .pairing_bufs = pool.pairing_bufs[0..n_active],
+            .has_work = pool.has_work[0..n_active],
+            .counter = std.atomic.Value(usize).init(0),
+            .err_flag = std.atomic.Value(bool).init(false),
+            .sig = sig,
+            .sig_groupcheck = sig_groupcheck,
+            .msgs = msg_ptrs,
+            .dst = dst,
+            .pks = pk_ptrs,
+            .pks_validate = pks_validate,
+            .n_elems = n_elems,
+        };
+
+        pool.dispatch(.{ .aggregate_verify = &job }, n_active);
+
+        if (job.err_flag.load(.acquire)) return false;
+
+        var acc: Pairing = .{ .ctx = @ptrCast(&pool.pairing_bufs[0]) };
+        for (1..n_active) |i| {
+            if (pool.has_work[i]) {
+                const other: Pairing = .{ .ctx = @ptrCast(&pool.pairing_bufs[i]) };
+                acc.merge(&other) catch return false;
+            }
+        }
+
+        var gtsig = blst.c.blst_fp12{};
+        Pairing.aggregated(&gtsig, sig);
+        return acc.finalVerify(&gtsig);
+    }
+
+    /// Parallel batch verification using preallocated pool buffers.
+    fn verifyMultiAggSig(
+        pool: *PairingPool,
+        msg_ptrs: []const *const [32]u8,
+        dst: []const u8,
+        pk_ptrs: []const *const PublicKey,
+        pks_validate: bool,
+        sig_ptrs: []const *const Signature,
+        sigs_groupcheck: bool,
+        rands: []const [32]u8,
+    ) bool {
+        const n_elems = msg_ptrs.len;
+        if (n_elems == 0) return false;
+
+        const n_active = @min(pool.n_workers, n_elems);
+        @memset(pool.has_work[0..n_active], false);
+
+        var job = VerifyMultiJob{
+            .pairing_bufs = pool.pairing_bufs[0..n_active],
+            .has_work = pool.has_work[0..n_active],
+            .counter = std.atomic.Value(usize).init(0),
+            .err_flag = std.atomic.Value(bool).init(false),
+            .msgs = msg_ptrs,
+            .dst = dst,
+            .pks = pk_ptrs,
+            .pks_validate = pks_validate,
+            .sigs = sig_ptrs,
+            .sigs_groupcheck = sigs_groupcheck,
+            .rands = rands,
+            .n_elems = n_elems,
+        };
+
+        pool.dispatch(.{ .verify_multi = &job }, n_active);
+
+        if (job.err_flag.load(.acquire)) return false;
+
+        var acc: Pairing = .{ .ctx = @ptrCast(&pool.pairing_bufs[0]) };
+        for (1..n_active) |i| {
+            if (pool.has_work[i]) {
+                const other: Pairing = .{ .ctx = @ptrCast(&pool.pairing_bufs[i]) };
+                acc.merge(&other) catch return false;
+            }
+        }
+
+        return acc.finalVerify(null);
+    }
+};
+
 /// Verify an aggregated signature against multiple messages and multiple public keys.
 /// 1) msgs: Uint8Array[]
 /// 2) pks: PublicKey[]
@@ -530,34 +840,31 @@ pub fn blst_aggregateVerify(
         return error.InvalidAggregateVerifyInput;
     }
 
-    const msgs = try allocator.alloc([32]u8, msgs_len);
-    defer allocator.free(msgs);
-    const pks = try allocator.alloc(PublicKey, pks_len);
-    defer allocator.free(pks);
+    const pool = PairingPool.get();
+
+    const msg_ptrs: []*const [32]u8 = if (msgs_len <= SCRATCH_MAX)
+        pool.scratch_msg_ptrs[0..msgs_len]
+    else
+        try allocator.alloc(*const [32]u8, msgs_len);
+    defer if (msgs_len > SCRATCH_MAX) allocator.free(msg_ptrs);
+
+    const pk_ptrs: []*const PublicKey = if (msgs_len <= SCRATCH_MAX)
+        pool.scratch_pk_ptrs[0..msgs_len]
+    else
+        try allocator.alloc(*const PublicKey, msgs_len);
+    defer if (msgs_len > SCRATCH_MAX) allocator.free(pk_ptrs);
 
     for (0..msgs_len) |i| {
         const msg_value = try msgs_array.getElement(@intCast(i));
         const msg_info = try msg_value.getTypedarrayInfo();
         if (msg_info.data.len != 32) return error.InvalidMessageLength;
-        @memcpy(&msgs[i], msg_info.data[0..32]);
+        msg_ptrs[i] = @ptrCast(msg_info.data.ptr);
 
         const pk_value = try pks_array.getElement(@intCast(i));
-        const pk = try env.unwrap(PublicKey, pk_value);
-        pks[i] = pk.*;
+        pk_ptrs[i] = try env.unwrap(PublicKey, pk_value);
     }
 
-    var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
-
-    const result = sig.aggregateVerify(
-        sig_groupcheck,
-        @alignCast(&pairing_buf),
-        msgs,
-        DST,
-        pks,
-        pks_validate,
-    ) catch {
-        return try env.getBoolean(false);
-    };
+    const result = pool.aggregateVerify(sig, sig_groupcheck, msg_ptrs, DST, pk_ptrs, pks_validate);
 
     return try env.getBoolean(result);
 }
@@ -629,17 +936,32 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
         return try env.getBoolean(false);
     }
 
-    const msgs = try allocator.alloc([32]u8, n_elems);
-    defer allocator.free(msgs);
+    const pool = PairingPool.get();
 
-    const pks = try allocator.alloc(*const PublicKey, n_elems);
-    defer allocator.free(pks);
+    // Zero-copy: store pointers into JS memory; use pool scratch to avoid allocs
+    const msg_ptrs: []*const [32]u8 = if (n_elems <= SCRATCH_MAX)
+        pool.scratch_msg_ptrs[0..n_elems]
+    else
+        try allocator.alloc(*const [32]u8, n_elems);
+    defer if (n_elems > SCRATCH_MAX) allocator.free(msg_ptrs);
 
-    const sigs = try allocator.alloc(*const Signature, n_elems);
-    defer allocator.free(sigs);
+    const pk_ptrs: []*const PublicKey = if (n_elems <= SCRATCH_MAX)
+        pool.scratch_pk_ptrs[0..n_elems]
+    else
+        try allocator.alloc(*const PublicKey, n_elems);
+    defer if (n_elems > SCRATCH_MAX) allocator.free(pk_ptrs);
 
-    const rands = try allocator.alloc([32]u8, n_elems);
-    defer allocator.free(rands);
+    const sig_ptrs: []*const Signature = if (n_elems <= SCRATCH_MAX)
+        pool.scratch_sig_ptrs[0..n_elems]
+    else
+        try allocator.alloc(*const Signature, n_elems);
+    defer if (n_elems > SCRATCH_MAX) allocator.free(sig_ptrs);
+
+    const rands: [][32]u8 = if (n_elems <= SCRATCH_MAX)
+        pool.scratch_rands[0..n_elems]
+    else
+        try allocator.alloc([32]u8, n_elems);
+    defer if (n_elems > SCRATCH_MAX) allocator.free(rands);
 
     var prng = std.Random.DefaultPrng.init(std.crypto.random.int(u64));
     const rand = prng.random();
@@ -650,30 +972,19 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
         const msg_value = try set_value.getNamedProperty("msg");
         const msg = try msg_value.getTypedarrayInfo();
         if (msg.data.len != 32) return error.InvalidMessageLength;
-        @memcpy(&msgs[i], msg.data[0..32]);
+        msg_ptrs[i] = @ptrCast(msg.data.ptr);
 
-        // Use unwrapped pointers directly - no copy needed
         const pk_value = try set_value.getNamedProperty("pk");
-        pks[i] = try env.unwrap(PublicKey, pk_value);
+        pk_ptrs[i] = try env.unwrap(PublicKey, pk_value);
 
         const sig_value = try set_value.getNamedProperty("sig");
-        sigs[i] = try env.unwrap(Signature, sig_value);
+        sig_ptrs[i] = try env.unwrap(Signature, sig_value);
 
-        rand.bytes(&rands[i]);
+        // Skip random for element 0: r_0 = 1 (no scalar mul needed)
+        if (i > 0) rand.bytes(&rands[i]);
     }
 
-    const result = blst.verifyMultipleAggregateSignatures(
-        msgs,
-        DST,
-        pks,
-        pks_validate,
-        sigs,
-        sigs_groupcheck,
-        rands,
-        allocator,
-    ) catch {
-        return try env.getBoolean(false);
-    };
+    const result = pool.verifyMultiAggSig(msg_ptrs, DST, pk_ptrs, pks_validate, sig_ptrs, sigs_groupcheck, rands);
 
     return try env.getBoolean(result);
 }

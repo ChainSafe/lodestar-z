@@ -22,7 +22,6 @@ const EnvCleanup = struct {
     fn hook(_: *EnvCleanup) void {
         if (env_refcount.fetchSub(1, .acq_rel) == 1) {
             // Last environment — tear down shared state.
-            blst_z.thread_pool.deinitializeThreadPool();
             config.state.deinit();
             pubkeys.state.deinit();
             pool.state.deinit();
@@ -38,7 +37,6 @@ fn register(env: napi.Env, exports: napi.Value) !void {
         try pool.state.init();
         try pubkeys.state.init();
         config.state.init();
-        try blst_z.thread_pool.initializeThreadPool(null);
     }
 
     try env.addEnvCleanupHook(EnvCleanup, &env_cleanup, EnvCleanup.hook);
