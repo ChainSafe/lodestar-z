@@ -6,7 +6,6 @@ const config = @import("./config.zig");
 const shuffle = @import("./shuffle.zig");
 const BeaconStateView = @import("./BeaconStateView.zig");
 const blst = @import("./blst.zig");
-const blst_z = @import("blst");
 const state_transition = @import("./state_transition.zig");
 
 comptime {

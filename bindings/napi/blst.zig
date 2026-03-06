@@ -507,8 +507,8 @@ pub fn blst_verify(env: napi.Env, cb: napi.CallbackInfo(5)) !napi.Value {
 // All per-dispatch buffers (pairing contexts, scratch arrays) are preallocated in the pool.
 // For n_elems <= SCRATCH_MAX, zero per-call heap allocations are needed.
 
-const RAND_BITS: usize = 64;
-const SCRATCH_MAX: usize = 512;
+const RAND_BITS: u32 = 64;
+const SCRATCH_MAX: u32 = 512;
 
 const WorkItem = union(enum) {
     aggregate_verify: *AggVerifyJob,
@@ -634,6 +634,7 @@ const PairingPool = struct {
 
     fn execAggVerify(job: *AggVerifyJob, id: usize) void {
         var pairing = Pairing.init(@ptrCast(@alignCast(&job.pairing_bufs[id])), true, job.dst);
+
         var did_work = false;
 
         while (!job.err_flag.load(.acquire)) {
@@ -699,6 +700,8 @@ const PairingPool = struct {
     }
 
     fn dispatch(pool: *PairingPool, item: WorkItem, n_active: usize) void {
+        std.debug.assert(n_active <= pool.n_workers);
+
         const n_bg = if (n_active > 1) n_active - 1 else 0;
         for (0..n_bg) |i| {
             pool.work_done[i + 1].reset();
