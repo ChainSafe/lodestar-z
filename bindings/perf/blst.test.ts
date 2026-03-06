@@ -52,19 +52,19 @@ function generateTSSets(count: number): SignatureSetTS[] {
 describe("aggregatePublicKeys", () => {
   for (const count of [1, 8, 32, 128, 256]) {
     bench({
-      id: `aggregatePublicKeys lodestar-z  ${count} keys`,
       beforeEach: () => generateZigSets(count).map((s) => s.pk),
       fn: (publicKeys) => {
         aggregatePublicKeysZig(publicKeys);
       },
+      id: `aggregatePublicKeys lodestar-z  ${count} keys`,
     });
 
     bench({
-      id: `aggregatePublicKeys @chainsafe/blst  ${count} keys`,
       beforeEach: () => generateTSSets(count).map((s) => s.pk),
       fn: (publicKeys) => {
         aggregatePublicKeysTS(publicKeys);
       },
+      id: `aggregatePublicKeys @chainsafe/blst  ${count} keys`,
     });
   }
 });
@@ -72,19 +72,19 @@ describe("aggregatePublicKeys", () => {
 describe("aggregateSignatures", () => {
   for (const count of [1, 8, 32, 128, 256]) {
     bench({
-      id: `aggregateSignatures lodestar-z  ${count} sigs`,
       beforeEach: () => generateZigSets(count).map((s) => s.sig),
       fn: (signatures) => {
         aggregateSignaturesZig(signatures);
       },
+      id: `aggregateSignatures lodestar-z  ${count} sigs`,
     });
 
     bench({
-      id: `aggregateSignatures @chainsafe/blst  ${count} sigs`,
       beforeEach: () => generateTSSets(count).map((s) => s.sig),
       fn: (signatures) => {
         aggregateSignaturesTS(signatures);
       },
+      id: `aggregateSignatures @chainsafe/blst  ${count} sigs`,
     });
   }
 });
