@@ -2,7 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 
 pub const proto_node = @import("proto_node.zig");
-pub const errors = @import("errors.zig");
+pub const vote_tracker = @import("vote_tracker.zig");
 
 pub const ProtoBlock = proto_node.ProtoBlock;
 pub const ProtoNode = proto_node.ProtoNode;
@@ -12,11 +12,17 @@ pub const BlockExtraMeta = proto_node.BlockExtraMeta;
 pub const LVHExecResponse = proto_node.LVHExecResponse;
 pub const LVHValidResponse = proto_node.LVHValidResponse;
 pub const LVHInvalidResponse = proto_node.LVHInvalidResponse;
+pub const LVHExecErrorCode = proto_node.LVHExecErrorCode;
 pub const ZERO_HASH = proto_node.ZERO_HASH;
-pub const NULL_VOTE_INDEX = proto_node.NULL_VOTE_INDEX;
 
-pub const ProtoArrayError = errors.ProtoArrayError;
-pub const ForkChoiceError = errors.ForkChoiceError;
+pub const ProtoArrayError = proto_node.ProtoArrayError;
+pub const ForkChoiceError = proto_node.ForkChoiceError;
+pub const InvalidBlockCode = proto_node.InvalidBlockCode;
+pub const InvalidAttestationCode = proto_node.InvalidAttestationCode;
+
+pub const VoteTracker = vote_tracker.VoteTracker;
+pub const Votes = vote_tracker.Votes;
+pub const NULL_VOTE_INDEX = vote_tracker.NULL_VOTE_INDEX;
 
 test {
     testing.refAllDecls(@This());

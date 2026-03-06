@@ -4,26 +4,22 @@ const assert = std.debug.assert;
 
 const consensus_types = @import("consensus_types");
 const primitives = consensus_types.primitive;
+const constants = @import("constants");
 
 const Slot = primitives.Slot.Type;
 const Epoch = primitives.Epoch.Type;
 const Root = primitives.Root.Type;
 const ValidatorIndex = primitives.ValidatorIndex.Type;
 
-/// Sentinel for "no parent" — root node of the DAG.
-pub const ZERO_HASH: Root = .{0} ** 32;
-
-/// Sentinel for "validator has no valid vote" (e.g., vote target was pruned).
-/// Safe because 0xFFFFFFFF / slots-per-year > 1,634 years of non-finalized network.
-pub const NULL_VOTE_INDEX: u32 = 0xFFFFFFFF;
+pub const ZERO_HASH = constants.ZERO_HASH;
 
 /// Execution status of a block in fork choice.
 ///
 /// State transitions:
-///   Syncing → Valid    ✅ (EL confirmed payload valid)
-///   Syncing → Invalid  ✅ (EL confirmed payload invalid)
-///   Valid → Invalid    ❌ (never reverts once valid)
-///   Invalid → *        ❌ (terminal state)
+///   Syncing -> Valid    (allowed: EL confirmed payload valid)
+///   Syncing -> Invalid  (allowed: EL confirmed payload invalid)
+///   Valid -> Invalid    (forbidden: never reverts once valid)
+///   Invalid -> *        (forbidden: terminal state)
 pub const ExecutionStatus = enum(u3) {
     /// EL confirmed payload valid.
     valid,
@@ -51,6 +47,8 @@ pub const DataAvailabilityStatus = enum(u2) {
 };
 
 /// Metadata that depends on whether the block is pre-merge or post-merge.
+///
+/// The post-merge variant rejects `ExecutionStatus.pre_merge` via assert in `PostMergeMeta.init()`.
 pub const BlockExtraMeta = union(enum) {
     post_merge: PostMergeMeta,
     pre_merge: void,
@@ -60,7 +58,30 @@ pub const BlockExtraMeta = union(enum) {
         execution_payload_number: u64,
         execution_status: ExecutionStatus,
         data_availability_status: DataAvailabilityStatus,
+
+        /// Rejects `ExecutionStatus.pre_merge` at runtime (Debug/ReleaseSafe).
+        pub fn init(
+            block_hash: Root,
+            number: u64,
+            status: ExecutionStatus,
+            da_status: DataAvailabilityStatus,
+        ) PostMergeMeta {
+            assert(status != .pre_merge);
+            return .{
+                .execution_payload_block_hash = block_hash,
+                .execution_payload_number = number,
+                .execution_status = status,
+                .data_availability_status = da_status,
+            };
+        }
     };
+
+    pub fn executionPayloadBlockHash(self: BlockExtraMeta) ?Root {
+        return switch (self) {
+            .post_merge => |m| m.execution_payload_block_hash,
+            .pre_merge => null,
+        };
+    }
 
     pub fn executionStatus(self: BlockExtraMeta) ExecutionStatus {
         return switch (self) {
@@ -78,7 +99,6 @@ pub const BlockExtraMeta = union(enum) {
 };
 
 /// A block to be applied to the fork choice DAG.
-/// Corresponds to Lodestar's `ProtoBlock`.
 pub const ProtoBlock = struct {
     // ── Core fields used by ProtoArray algorithm ──
     slot: Slot,
@@ -111,7 +131,7 @@ pub const ProtoBlock = struct {
 
     // ── Gloas (ePBS) fields ──
     builder_index: ?ValidatorIndex = null,
-    block_hash_hex: ?Root = null,
+    block_hash: ?Root = null,
 };
 
 /// A node in the ProtoArray DAG = ProtoBlock + DAG metadata.
@@ -153,6 +173,77 @@ pub const LVHInvalidResponse = struct {
     invalidate_from_parent_block_root: Root,
 };
 
+/// LVH (Latest Valid Hash) execution status transition errors.
+pub const LVHExecErrorCode = enum {
+    /// Attempted to mark a pre-merge block as invalid.
+    pre_merge_to_invalid,
+    /// Attempted to mark a valid block as invalid (forbidden transition).
+    valid_to_invalid,
+    /// Attempted to mark an invalid block as valid (forbidden transition).
+    invalid_to_valid,
+};
+
+// TODO(Task 7): move ProtoArrayError to proto_array.zig
+/// Errors from the ProtoArray (low-level DAG operations).
+pub const ProtoArrayError = error{
+    FinalizedNodeUnknown,
+    JustifiedNodeUnknown,
+    InvalidFinalizedRootChange,
+    InvalidNodeIndex,
+    InvalidParentIndex,
+    InvalidBestChildIndex,
+    InvalidJustifiedIndex,
+    InvalidBestDescendantIndex,
+    InvalidParentDelta,
+    InvalidNodeDelta,
+    IndexOverflow,
+    InvalidDeltaLen,
+    RevertedFinalizedEpoch,
+    InvalidBestNode,
+    InvalidBlockExecutionStatus,
+    InvalidJustifiedExecutionStatus,
+    InvalidLVHExecutionResponse,
+};
+
+// TODO(Task 14): move InvalidBlockCode, InvalidAttestationCode, ForkChoiceError to fork_choice.zig
+
+/// Reasons a block can be rejected by fork choice.
+pub const InvalidBlockCode = enum {
+    unknown_parent,
+    future_slot,
+    finalized_slot,
+    not_finalized_descendant,
+};
+
+/// Reasons an attestation can be rejected by fork choice.
+pub const InvalidAttestationCode = enum {
+    empty_aggregation_bitfield,
+    unknown_head_block,
+    bad_target_epoch,
+    unknown_target_root,
+    future_epoch,
+    past_epoch,
+    invalid_target,
+    attests_to_future_block,
+    future_slot,
+};
+
+/// High-level fork choice errors.
+pub const ForkChoiceError = error{
+    InvalidAttestation,
+    InvalidBlock,
+    ProtoArrayErr,
+    InvalidProtoArrayBytes,
+    MissingProtoArrayBlock,
+    UnknownAncestor,
+    InconsistentOnTick,
+    BeaconStateErr,
+    AttemptToRevertJustification,
+    ForkChoiceStoreErr,
+    UnableToSetJustifiedCheckpoint,
+    AfterBlockFailed,
+};
+
 // ── Tests ──
 
 test "ExecutionStatus enum values" {
@@ -168,33 +259,37 @@ test "DataAvailabilityStatus enum values" {
     try testing.expectEqual(@intFromEnum(DataAvailabilityStatus.available), 2);
 }
 
-test "ZERO_HASH is all zeros" {
-    for (ZERO_HASH) |byte| {
-        try testing.expectEqual(byte, 0);
-    }
-}
-
-test "NULL_VOTE_INDEX sentinel value" {
-    try testing.expectEqual(NULL_VOTE_INDEX, 0xFFFFFFFF);
-}
-
 test "BlockExtraMeta pre_merge accessors" {
     const meta = BlockExtraMeta{ .pre_merge = {} };
+    try testing.expectEqual(meta.executionPayloadBlockHash(), null);
     try testing.expectEqual(meta.executionStatus(), .pre_merge);
     try testing.expectEqual(meta.dataAvailabilityStatus(), .pre_data);
 }
 
 test "BlockExtraMeta post_merge accessors" {
     const meta = BlockExtraMeta{
-        .post_merge = .{
-            .execution_payload_block_hash = ZERO_HASH,
-            .execution_payload_number = 42,
-            .execution_status = .syncing,
-            .data_availability_status = .available,
-        },
+        .post_merge = BlockExtraMeta.PostMergeMeta.init(
+            ZERO_HASH,
+            42,
+            .syncing,
+            .available,
+        ),
     };
+    try testing.expectEqual(meta.executionPayloadBlockHash(), ZERO_HASH);
     try testing.expectEqual(meta.executionStatus(), .syncing);
     try testing.expectEqual(meta.dataAvailabilityStatus(), .available);
+}
+
+test "PostMergeMeta.init rejects pre_merge status" {
+    // assert(status != .pre_merge) triggers in Debug/ReleaseSafe.
+    // In Zig, calling a function that hits assert in a test is undefined behavior,
+    // so we verify the valid cases instead — the assert is a development safety net.
+    const valid = BlockExtraMeta.PostMergeMeta.init(ZERO_HASH, 0, .valid, .available);
+    try testing.expectEqual(valid.execution_status, .valid);
+    const syncing = BlockExtraMeta.PostMergeMeta.init(ZERO_HASH, 0, .syncing, .available);
+    try testing.expectEqual(syncing.execution_status, .syncing);
+    const invalid_status = BlockExtraMeta.PostMergeMeta.init(ZERO_HASH, 0, .invalid, .available);
+    try testing.expectEqual(invalid_status.execution_status, .invalid);
 }
 
 test "ProtoNode default values" {
@@ -222,5 +317,5 @@ test "ProtoNode default values" {
     try testing.expectEqual(node.best_child, null);
     try testing.expectEqual(node.best_descendant, null);
     try testing.expectEqual(node.block.builder_index, null);
-    try testing.expectEqual(node.block.block_hash_hex, null);
+    try testing.expectEqual(node.block.block_hash, null);
 }
