@@ -23,11 +23,11 @@ pub fn verify(msg: []const u8, pk: *const PublicKey, sig: *const Signature, in_p
 }
 
 pub fn fastAggregateVerify(msg: []const u8, pks: []const PublicKey, sig: *const Signature, in_pk_validate: ?bool, in_sigs_group_check: ?bool) !bool {
-    var pairing_buf: [blst.Pairing.sizeOf()]u8 = undefined;
+    var pairing_buf: [blst.Pairing.sizeOf()]u8 align(@alignOf(blst.Pairing)) = undefined;
 
     const sigs_groupcheck = in_sigs_group_check orelse false;
     const pks_validate = in_pk_validate orelse false;
-    return sig.fastAggregateVerify(sigs_groupcheck, &pairing_buf, msg[0..32], DST, pks, pks_validate) catch return false;
+    return sig.fastAggregateVerify(sigs_groupcheck, @alignCast(&pairing_buf), msg[0..32], DST, pks, pks_validate) catch return false;
 }
 
 // TODO: unit tests
