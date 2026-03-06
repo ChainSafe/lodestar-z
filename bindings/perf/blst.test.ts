@@ -3,6 +3,7 @@ import {bench, describe} from "@chainsafe/benchmark";
 import {
   SecretKey as SecretKeyTS,
   type Signature as SignatureTS,
+  aggregatePublicKeys as aggregatePublicKeysTS,
   aggregateSignatures as aggregateSignaturesTS,
   aggregateVerify as aggregateVerifyTS,
   verifyMultipleAggregateSignatures as verifyTS,
@@ -10,6 +11,7 @@ import {
 import {
   SecretKey as SecretKeyZig,
   type Signature as SignatureZig,
+  aggregatePublicKeys as aggregatePublicKeysZig,
   aggregateSignatures as aggregateSignaturesZig,
   aggregateVerify as aggregateVerifyZig,
   verifyMultipleAggregateSignatures as verifyZig,
@@ -46,6 +48,46 @@ function generateTSSets(count: number): SignatureSetTS[] {
     return {msg, pk, sig};
   });
 }
+
+describe("aggregatePublicKeys", () => {
+  for (const count of [1, 8, 32, 128, 256]) {
+    bench({
+      id: `aggregatePublicKeys lodestar-z  ${count} keys`,
+      beforeEach: () => generateZigSets(count).map((s) => s.pk),
+      fn: (publicKeys) => {
+        aggregatePublicKeysZig(publicKeys);
+      },
+    });
+
+    bench({
+      id: `aggregatePublicKeys @chainsafe/blst  ${count} keys`,
+      beforeEach: () => generateTSSets(count).map((s) => s.pk),
+      fn: (publicKeys) => {
+        aggregatePublicKeysTS(publicKeys);
+      },
+    });
+  }
+});
+
+describe("aggregateSignatures", () => {
+  for (const count of [1, 8, 32, 128, 256]) {
+    bench({
+      id: `aggregateSignatures lodestar-z  ${count} sigs`,
+      beforeEach: () => generateZigSets(count).map((s) => s.sig),
+      fn: (signatures) => {
+        aggregateSignaturesZig(signatures);
+      },
+    });
+
+    bench({
+      id: `aggregateSignatures @chainsafe/blst  ${count} sigs`,
+      beforeEach: () => generateTSSets(count).map((s) => s.sig),
+      fn: (signatures) => {
+        aggregateSignaturesTS(signatures);
+      },
+    });
+  }
+});
 
 describe("aggregateVerify", () => {
   for (const count of [3, 8, 32, 64, 128]) {
