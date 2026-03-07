@@ -101,45 +101,111 @@ pub const BlockExtraMeta = union(enum) {
 /// A block to be applied to the fork choice DAG.
 pub const ProtoBlock = struct {
     // ── Core fields used by ProtoArray algorithm ──
+
+    /// Slot at which this block was proposed.
     slot: Slot,
+    /// Hash-tree-root of the BeaconBlock.
     block_root: Root,
+    /// Hash-tree-root of the parent BeaconBlock.
     parent_root: Root,
 
     // ── Passthrough: not used by ProtoArray, but needed by upstream ──
+
+    /// Hash-tree-root of the post-state after applying this block.
     state_root: Root,
     /// The root that would be used for attestation.data.target.root
     /// if a LMD vote were cast for this block.
     target_root: Root,
 
     // ── FFG checkpoints (realized) ──
+
+    /// Epoch of the realized justified checkpoint from this block's state.
     justified_epoch: Epoch,
+    /// Root of the realized justified checkpoint from this block's state.
     justified_root: Root,
+    /// Epoch of the realized finalized checkpoint from this block's state.
     finalized_epoch: Epoch,
+    /// Root of the realized finalized checkpoint from this block's state.
     finalized_root: Root,
 
     // ── Unrealized checkpoints (pull-up FFG, anti-bouncing attack) ──
+
+    /// Epoch of the unrealized justified checkpoint (computed at block import, not epoch boundary).
     unrealized_justified_epoch: Epoch,
+    /// Root of the unrealized justified checkpoint.
     unrealized_justified_root: Root,
+    /// Epoch of the unrealized finalized checkpoint.
     unrealized_finalized_epoch: Epoch,
+    /// Root of the unrealized finalized checkpoint.
     unrealized_finalized_root: Root,
 
     // ── Execution layer metadata ──
+
+    /// Pre-merge vs post-merge metadata (execution status, block hash, DA status).
     extra_meta: BlockExtraMeta,
 
     /// Whether block arrived before the 4-second mark (timeliness for late-block reorg).
     timeliness: bool,
 
     // ── Gloas (ePBS) fields ──
+
+    /// Index of the builder that proposed this block (Gloas ePBS).
     builder_index: ?ValidatorIndex = null,
+    /// Execution block hash from the builder's bid (Gloas ePBS).
     block_hash: ?Root = null,
 };
 
-/// A node in the ProtoArray DAG = ProtoBlock + DAG metadata.
+/// A node in the ProtoArray DAG.
 ///
+/// Flat layout: all ProtoBlock fields + DAG metadata.
+/// Use `fromBlock()` / `toBlock()` to convert between ProtoBlock and ProtoNode.
 /// All indices refer to positions in the flat `nodes` array.
-/// This is a cache-friendly design: no pointers, no heap allocations per node.
 pub const ProtoNode = struct {
-    block: ProtoBlock,
+    // ── ProtoBlock fields ──
+
+    /// Slot at which this block was proposed.
+    slot: Slot,
+    /// Hash-tree-root of the BeaconBlock.
+    block_root: Root,
+    /// Hash-tree-root of the parent BeaconBlock.
+    parent_root: Root,
+
+    /// Hash-tree-root of the post-state after applying this block.
+    state_root: Root,
+    /// The root that would be used for attestation.data.target.root
+    /// if a LMD vote were cast for this block.
+    target_root: Root,
+
+    /// Epoch of the realized justified checkpoint from this block's state.
+    justified_epoch: Epoch,
+    /// Root of the realized justified checkpoint from this block's state.
+    justified_root: Root,
+    /// Epoch of the realized finalized checkpoint from this block's state.
+    finalized_epoch: Epoch,
+    /// Root of the realized finalized checkpoint from this block's state.
+    finalized_root: Root,
+
+    /// Epoch of the unrealized justified checkpoint (computed at block import, not epoch boundary).
+    unrealized_justified_epoch: Epoch,
+    /// Root of the unrealized justified checkpoint.
+    unrealized_justified_root: Root,
+    /// Epoch of the unrealized finalized checkpoint.
+    unrealized_finalized_epoch: Epoch,
+    /// Root of the unrealized finalized checkpoint.
+    unrealized_finalized_root: Root,
+
+    /// Pre-merge vs post-merge metadata (execution status, block hash, DA status).
+    extra_meta: BlockExtraMeta,
+
+    /// Whether block arrived before the 4-second mark (timeliness for late-block reorg).
+    timeliness: bool,
+
+    /// Index of the builder that proposed this block (Gloas ePBS).
+    builder_index: ?ValidatorIndex = null,
+    /// Execution block hash from the builder's bid (Gloas ePBS).
+    block_hash: ?Root = null,
+
+    // ── DAG metadata ──
 
     /// Index of parent node in the nodes array. null for the root.
     parent: ?u32 = null,
@@ -152,8 +218,30 @@ pub const ProtoNode = struct {
     best_child: ?u32 = null,
 
     /// Index of the best leaf reachable from this node.
-    /// findHead: justified_root → bestDescendant in O(1).
+    /// findHead: justified_root -> bestDescendant in O(1).
     best_descendant: ?u32 = null,
+
+    /// Create a ProtoNode from a ProtoBlock, copying all matching fields.
+    pub fn fromBlock(block: ProtoBlock) ProtoNode {
+        var node: ProtoNode = undefined;
+        inline for (std.meta.fields(ProtoBlock)) |field| {
+            @field(node, field.name) = @field(block, field.name);
+        }
+        node.parent = null;
+        node.weight = 0;
+        node.best_child = null;
+        node.best_descendant = null;
+        return node;
+    }
+
+    /// Extract a ProtoBlock from this node, copying all matching fields.
+    pub fn toBlock(self: ProtoNode) ProtoBlock {
+        var block: ProtoBlock = undefined;
+        inline for (std.meta.fields(ProtoBlock)) |field| {
+            @field(block, field.name) = @field(self, field.name);
+        }
+        return block;
+    }
 };
 
 /// Response from the execution layer about a payload's validity.
@@ -310,12 +398,43 @@ test "ProtoNode default values" {
         .extra_meta = .{ .pre_merge = {} },
         .timeliness = false,
     };
-    const node = ProtoNode{ .block = block };
+    const node = ProtoNode.fromBlock(block);
 
     try testing.expectEqual(node.parent, null);
     try testing.expectEqual(node.weight, 0);
     try testing.expectEqual(node.best_child, null);
     try testing.expectEqual(node.best_descendant, null);
-    try testing.expectEqual(node.block.builder_index, null);
-    try testing.expectEqual(node.block.block_hash, null);
+    try testing.expectEqual(node.builder_index, null);
+    try testing.expectEqual(node.block_hash, null);
+    try testing.expectEqual(node.slot, 0);
+    try testing.expectEqual(node.block_root, ZERO_HASH);
+}
+
+test "ProtoNode.toBlock round-trip" {
+    const block = ProtoBlock{
+        .slot = 42,
+        .block_root = ZERO_HASH,
+        .parent_root = ZERO_HASH,
+        .state_root = ZERO_HASH,
+        .target_root = ZERO_HASH,
+        .justified_epoch = 1,
+        .justified_root = ZERO_HASH,
+        .finalized_epoch = 0,
+        .finalized_root = ZERO_HASH,
+        .unrealized_justified_epoch = 1,
+        .unrealized_justified_root = ZERO_HASH,
+        .unrealized_finalized_epoch = 0,
+        .unrealized_finalized_root = ZERO_HASH,
+        .extra_meta = .{ .pre_merge = {} },
+        .timeliness = true,
+    };
+    var node = ProtoNode.fromBlock(block);
+    node.weight = 100;
+    node.parent = 5;
+
+    const recovered = node.toBlock();
+    try testing.expectEqual(recovered.slot, 42);
+    try testing.expectEqual(recovered.justified_epoch, 1);
+    try testing.expectEqual(recovered.timeliness, true);
+    try testing.expectEqual(recovered.builder_index, null);
 }
