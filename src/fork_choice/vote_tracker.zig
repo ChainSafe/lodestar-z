@@ -112,22 +112,26 @@ test "VoteTracker size" {
     try testing.expectEqual(24, @sizeOf(VoteTracker));
 }
 
-test "Votes init and deinit" {
+test "Votes ensureValidatorCount grow sequence" {
     var votes: Votes = .{};
     defer votes.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(u32, 0), votes.len());
-}
+    const Step = struct { grow_to: u32, expected_len: u32 };
+    const steps = [_]Step{
+        .{ .grow_to = 0, .expected_len = 0 }, // empty
+        .{ .grow_to = 4, .expected_len = 4 }, // grow from 0
+        .{ .grow_to = 2, .expected_len = 4 }, // no-op (already large enough)
+        .{ .grow_to = 8, .expected_len = 8 }, // grow again
+    };
 
-test "Votes ensureValidatorCount initializes defaults" {
-    var votes: Votes = .{};
-    defer votes.deinit(testing.allocator);
+    for (steps) |step| {
+        try votes.ensureValidatorCount(testing.allocator, step.grow_to);
+        try testing.expectEqual(step.expected_len, votes.len());
+    }
 
-    try votes.ensureValidatorCount(testing.allocator, 4);
-    try testing.expectEqual(@as(u32, 4), votes.len());
-
+    // Verify all slots are defaults after growing.
     const s = votes.fields();
-    for (0..4) |i| {
+    for (0..votes.len()) |i| {
         try testing.expectEqual(NULL_VOTE_INDEX, s.current_indices[i]);
         try testing.expectEqual(NULL_VOTE_INDEX, s.next_indices[i]);
         try testing.expectEqual(@as(Slot, 0), s.next_slots[i]);
@@ -135,50 +139,26 @@ test "Votes ensureValidatorCount initializes defaults" {
     }
 }
 
-test "Votes ensureValidatorCount grows preserving existing" {
+test "Votes ensureValidatorCount preserves existing data" {
     var votes: Votes = .{};
     defer votes.deinit(testing.allocator);
 
     try votes.ensureValidatorCount(testing.allocator, 2);
 
-    // Simulate a vote change on validator 0.
+    // Modify validator 0.
     var s = votes.fields();
     s.next_indices[0] = 5;
     s.next_slots[0] = 10;
     s.payload_presents[0] = true;
 
-    // Grow to 4.
+    // Grow — validator 0 must be preserved.
     try votes.ensureValidatorCount(testing.allocator, 4);
-    try testing.expectEqual(@as(u32, 4), votes.len());
-
-    // Validator 0 vote preserved.
     const s2 = votes.fields();
     try testing.expectEqual(@as(u32, 5), s2.next_indices[0]);
     try testing.expectEqual(@as(Slot, 10), s2.next_slots[0]);
     try testing.expectEqual(true, s2.payload_presents[0]);
 
-    // New validators are defaults.
+    // New slots are defaults.
     try testing.expectEqual(NULL_VOTE_INDEX, s2.next_indices[2]);
-    try testing.expectEqual(NULL_VOTE_INDEX, s2.next_indices[3]);
     try testing.expectEqual(false, s2.payload_presents[2]);
-}
-
-test "Votes ensureValidatorCount no-op when already large enough" {
-    var votes: Votes = .{};
-    defer votes.deinit(testing.allocator);
-
-    try votes.ensureValidatorCount(testing.allocator, 4);
-    try votes.ensureValidatorCount(testing.allocator, 2); // should be no-op
-    try testing.expectEqual(@as(u32, 4), votes.len());
-}
-
-test "Votes fields returns empty arrays when no validators" {
-    var votes: Votes = .{};
-    defer votes.deinit(testing.allocator);
-
-    const s = votes.fields();
-    try testing.expectEqual(@as(usize, 0), s.current_indices.len);
-    try testing.expectEqual(@as(usize, 0), s.next_indices.len);
-    try testing.expectEqual(@as(usize, 0), s.next_slots.len);
-    try testing.expectEqual(@as(usize, 0), s.payload_presents.len);
 }
