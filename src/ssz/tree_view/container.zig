@@ -6,6 +6,8 @@ const isBasicType = @import("../type/type_kind.zig").isBasicType;
 const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
 const isFixedType = @import("../type/type_kind.zig").isFixedType;
 const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
+const Optional = @import("utils/optional.zig").Optional;
+const Empty = @import("utils/optional.zig").Empty;
 
 /// A specialized tree view for SSZ container types, enabling efficient access and modification of container fields, given a backing merkle tree.
 ///
@@ -427,6 +429,184 @@ pub fn ContainerTreeView(comptime ST: type) type {
     return TreeView;
 }
 
+pub fn StructContainerTreeView(comptime ST: type) type {
+    const T = ST.Type;
+
+    const TreeView = struct {
+        allocator: Allocator,
+        pool: *Node.Pool,
+        root: Node.Id,
+        // owned by the pool; this view only borrows it
+        original_value: *const T,
+        changed: ?Optional(T),
+
+        pub const SszType = ST;
+
+        const Self = @This();
+
+        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
+            try pool.ref(root);
+            errdefer pool.unref(root);
+
+            const original_value = try pool.getStructPtr(root, T);
+
+            const ptr = try allocator.create(Self);
+            ptr.* = .{
+                .allocator = allocator,
+                .pool = pool,
+                .root = root,
+                .original_value = original_value,
+                .changed = null,
+            };
+            return ptr;
+        }
+
+        pub fn clone(self: *Self, opts: CloneOpts) !*Self {
+            _ = opts;
+            return try init(self.allocator, self.pool, self.root);
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.pool.unref(self.root);
+            self.allocator.destroy(self);
+        }
+
+        pub fn commit(self: *Self) !void {
+            if (self.changed == null) {
+                return;
+            }
+
+            var new_value: T = undefined;
+            inline for (std.meta.fields(T)) |field| {
+                @field(new_value, field.name) = try self.get(field.name);
+            }
+
+            const wrapped_value_ptr: *const ST.WrappedT = @ptrCast(@alignCast(&new_value));
+            const new_root = try self.pool.createBranchStruct(ST.WrappedT, wrapped_value_ptr);
+            self.original_value = try self.pool.getStructPtr(new_root, T);
+            self.changed = null;
+            try self.pool.ref(new_root);
+            self.pool.unref(self.root);
+            self.root = new_root;
+        }
+
+        pub fn getRoot(self: *const Self) Node.Id {
+            return self.root;
+        }
+
+        pub fn hashTreeRootInto(self: *Self, out: *[32]u8) !void {
+            try self.commit();
+            out.* = self.root.getRoot(self.pool).*;
+        }
+
+        pub fn hashTreeRoot(self: *Self) !*const [32]u8 {
+            try self.commit();
+            return self.root.getRoot(self.pool);
+        }
+
+        pub fn deserialize(allocator: Allocator, pool: *Node.Pool, bytes: []const u8) !*Self {
+            const root = try ST.tree.deserializeFromBytes(pool, bytes);
+            return try Self.init(allocator, pool, root);
+        }
+
+        pub fn fromValue(allocator: Allocator, pool: *Node.Pool, value: *const ST.Type) !*Self {
+            const root = try ST.tree.fromValue(pool, value);
+            errdefer pool.unref(root);
+            return try Self.init(allocator, pool, root);
+        }
+
+        pub fn toValue(self: *Self, allocator: Allocator, out: *ST.Type) !void {
+            _ = allocator;
+            try self.commit();
+            out.* = self.original_value.*;
+        }
+
+        pub fn Field(comptime field_name: []const u8) type {
+            const ChildST = ST.getFieldType(field_name);
+            return ChildST.Type;
+        }
+
+        pub fn get(self: *Self, comptime field_name: []const u8) !Field(field_name) {
+            if (self.changed) |changed| {
+                if (@field(changed, field_name)) |new_value| {
+                    return new_value;
+                }
+            }
+            return @field(self.original_value, field_name);
+        }
+
+        pub fn set(self: *Self, comptime field_name: []const u8, value: Field(field_name)) !void {
+            if (self.changed == null) {
+                self.changed = Empty(Optional(T));
+            }
+            @field(self.changed.?, field_name) = value;
+        }
+
+        pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
+            try self.commit();
+            return ST.serializeIntoBytes(self.original_value, out);
+        }
+
+        pub fn serializedSize(self: *Self) !usize {
+            try self.commit();
+            return ST.serializedSize(self.original_value);
+        }
+    };
+
+    assertTreeViewType(TreeView);
+    return TreeView;
+}
+
+test "StructContainerTreeView" {
+    const Validator = StructContainerType(struct {
+        pubkey: ByteVectorType(48),
+        withdrawal_credentials: ByteVectorType(32),
+        effective_balance: UintType(64),
+        slashed: BoolType(),
+        activation_eligibility_epoch: UintType(64),
+        activation_epoch: UintType(64),
+        exit_epoch: UintType(64),
+        withdrawable_epoch: UintType(64),
+    });
+
+    var pool = try Node.Pool.init(std.testing.allocator, 1000);
+    defer pool.deinit();
+
+    const validator_value: Validator.Type = .{
+        .pubkey = [_]u8{0} ** 48,
+        .withdrawal_credentials = [_]u8{1} ** 32,
+        .effective_balance = 32000000000,
+        .slashed = false,
+        .activation_eligibility_epoch = 0,
+        .activation_epoch = 0,
+        .exit_epoch = 18446744073709551615,
+        .withdrawable_epoch = 18446744073709551615,
+    };
+
+    const root_node = try Validator.tree.fromValue(&pool, &validator_value);
+    var validator_view = try StructContainerTreeView(Validator).init(std.testing.allocator, &pool, root_node);
+    defer validator_view.deinit();
+
+    var tree_root: [32]u8 = undefined;
+    try validator_view.hashTreeRootInto(&tree_root);
+    var out: [32]u8 = undefined;
+    try Validator.hashTreeRoot(&validator_value, &out);
+    try std.testing.expectEqualSlices(u8, out[0..], tree_root[0..]);
+
+    try std.testing.expectEqualSlices(u8, ([_]u8{0} ** 48)[0..], &(try validator_view.get("pubkey")));
+    try std.testing.expectEqual(32000000000, try validator_view.get("effective_balance"));
+    try std.testing.expectEqual(false, try validator_view.get("slashed"));
+
+    try validator_view.set("pubkey", [_]u8{2} ** 48);
+    try validator_view.set("effective_balance", 32100000000);
+    try validator_view.set("slashed", true);
+    try validator_view.commit();
+
+    try std.testing.expectEqualSlices(u8, ([_]u8{2} ** 48)[0..], &(try validator_view.get("pubkey")));
+    try std.testing.expectEqual(32100000000, try validator_view.get("effective_balance"));
+    try std.testing.expectEqual(true, try validator_view.get("slashed"));
+}
+
 test "ContainerTreeView" {
     const Foo = FixedContainerType(struct {
         a: UintType(64),
@@ -503,12 +683,14 @@ test "ContainerTreeView" {
 
 const FixedContainerType = @import("../type/container.zig").FixedContainerType;
 const VariableContainerType = @import("../type/container.zig").VariableContainerType;
+const StructContainerType = @import("../type/container.zig").StructContainerType;
 const UintType = @import("../type/uint.zig").UintType;
 const ByteVectorType = @import("../type/byte_vector.zig").ByteVectorType;
 const ByteListType = @import("../type/byte_list.zig").ByteListType;
 const FixedListType = @import("../type/list.zig").FixedListType;
 const VariableListType = @import("../type/list.zig").VariableListType;
 const FixedVectorType = @import("../type/vector.zig").FixedVectorType;
+const BoolType = @import("../type/bool.zig").BoolType;
 
 const Checkpoint = FixedContainerType(struct {
     epoch: UintType(64),
