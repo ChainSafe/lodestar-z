@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 const consensus_types = @import("consensus_types");
 const primitives = consensus_types.primitive;
 
-const Epoch = primitives.Epoch.Type;
+const Slot = primitives.Slot.Type;
 
 const proto_node = @import("proto_node.zig");
 
@@ -17,22 +17,20 @@ pub const NULL_VOTE_INDEX: u32 = 0xFFFFFFFF;
 
 /// Tracks a single validator's fork choice vote.
 ///
+/// Gloas spec: LatestMessage { slot, root, payload_present }.
 /// Fields are laid out for SoA storage via MultiArrayList:
 /// - `current_index` and `next_index` are accessed together in computeDeltas (hot path).
-/// - `next_epoch` is only accessed in onAttestation (cold path).
+/// - `next_slot` and `payload_present` are only accessed in onAttestation (cold path).
 pub const VoteTracker = struct {
     /// Index of the block this validator currently votes for (after last computeDeltas).
-    current_index: u32,
+    current_index: u32 = NULL_VOTE_INDEX,
     /// Index of the block this validator will vote for (on next computeDeltas).
-    next_index: u32,
-    /// Epoch of the validator's latest vote. Used by onAttestation to reject stale gossip.
-    next_epoch: Epoch,
-
-    pub const DEFAULT: VoteTracker = .{
-        .current_index = NULL_VOTE_INDEX,
-        .next_index = NULL_VOTE_INDEX,
-        .next_epoch = 0,
-    };
+    next_index: u32 = NULL_VOTE_INDEX,
+    /// Slot of the validator's latest vote. Used by onAttestation to reject stale votes.
+    next_slot: Slot = 0,
+    /// Whether the validator's vote supports the payload (Gloas ePBS).
+    /// Determines EMPTY vs FULL variant in is_supporting_vote.
+    payload_present: bool = false,
 };
 
 /// SoA storage for per-validator fork choice votes.
@@ -40,17 +38,12 @@ pub const VoteTracker = struct {
 /// Wraps `MultiArrayList(VoteTracker)` to provide cache-efficient access:
 /// - `computeDeltas` iterates only `current_index[]` and `next_index[]` arrays,
 ///   fitting 16 entries per cache line instead of 4 with AoS.
-/// - `onAttestation` accesses all three fields for a single validator (random access).
+/// - `onAttestation` accesses all fields for a single validator (random access).
 ///
 /// Memory is owned; caller provides allocator for init/deinit/resize.
 pub const Votes = struct {
     /// SoA storage. Each field stored as a separate contiguous array.
-    multi_list: std.MultiArrayList(VoteTracker),
-
-    /// Create an empty Votes with no allocation.
-    pub fn init() Votes {
-        return .{ .multi_list = .empty };
-    }
+    multi_list: std.MultiArrayList(VoteTracker) = .empty,
 
     /// Release all memory. Caller must pass the same allocator used for resize.
     pub fn deinit(self: *Votes, allocator: Allocator) void {
@@ -66,7 +59,7 @@ pub const Votes = struct {
     }
 
     /// Ensure capacity for at least `validator_count` validators.
-    /// New slots are initialized to VoteTracker.DEFAULT.
+    /// New slots are initialized to VoteTracker defaults.
     pub fn ensureValidatorCount(self: *Votes, allocator: Allocator, validator_count: u32) Allocator.Error!void {
         const current_len = self.multi_list.len;
         if (validator_count <= current_len) {
@@ -74,14 +67,16 @@ pub const Votes = struct {
         }
 
         try self.multi_list.ensureTotalCapacity(allocator, validator_count);
-        // Initialize new slots to DEFAULT.
+        // Initialize new slots to defaults.
         self.multi_list.resize(allocator, validator_count) catch unreachable; // capacity already ensured
         const current_indices = self.multi_list.items(.current_index);
         const next_indices = self.multi_list.items(.next_index);
-        const next_epochs = self.multi_list.items(.next_epoch);
+        const next_slots = self.multi_list.items(.next_slot);
+        const payload_presents = self.multi_list.items(.payload_present);
         @memset(current_indices[current_len..validator_count], NULL_VOTE_INDEX);
         @memset(next_indices[current_len..validator_count], NULL_VOTE_INDEX);
-        @memset(next_epochs[current_len..validator_count], 0);
+        @memset(next_slots[current_len..validator_count], 0);
+        @memset(payload_presents[current_len..validator_count], false);
     }
 
     /// Get the raw SoA arrays for direct field access.
@@ -89,56 +84,59 @@ pub const Votes = struct {
     pub fn fields(self: *Votes) struct {
         current_indices: []u32,
         next_indices: []u32,
-        next_epochs: []Epoch,
+        next_slots: []Slot,
+        payload_presents: []bool,
     } {
         assert(self.multi_list.len > 0 or self.multi_list.capacity == 0);
         return .{
             .current_indices = self.multi_list.items(.current_index),
             .next_indices = self.multi_list.items(.next_index),
-            .next_epochs = self.multi_list.items(.next_epoch),
+            .next_slots = self.multi_list.items(.next_slot),
+            .payload_presents = self.multi_list.items(.payload_present),
         };
     }
 };
 
 // ── Tests ──
 
-test "VoteTracker DEFAULT is null votes" {
-    const vote = VoteTracker.DEFAULT;
+test "VoteTracker default is null votes" {
+    const vote: VoteTracker = .{};
     try testing.expectEqual(NULL_VOTE_INDEX, vote.current_index);
     try testing.expectEqual(NULL_VOTE_INDEX, vote.next_index);
-    try testing.expectEqual(@as(Epoch, 0), vote.next_epoch);
+    try testing.expectEqual(@as(Slot, 0), vote.next_slot);
+    try testing.expectEqual(false, vote.payload_present);
 }
 
-test "VoteTracker size is 16 bytes" {
-    // 4 (current_index) + 4 (next_index) + 8 (next_epoch) = 16
-    try testing.expectEqual(16, @sizeOf(VoteTracker));
+test "VoteTracker size" {
+    // 4 (current_index) + 4 (next_index) + 8 (next_slot) + 1 (payload_present) + padding
+    try testing.expectEqual(24, @sizeOf(VoteTracker));
 }
 
 test "Votes init and deinit" {
-    var votes = Votes.init();
+    var votes: Votes = .{};
     defer votes.deinit(testing.allocator);
 
     try testing.expectEqual(@as(u32, 0), votes.len());
 }
 
 test "Votes ensureValidatorCount initializes defaults" {
-    var votes = Votes.init();
+    var votes: Votes = .{};
     defer votes.deinit(testing.allocator);
 
     try votes.ensureValidatorCount(testing.allocator, 4);
     try testing.expectEqual(@as(u32, 4), votes.len());
 
-    // All slots should be DEFAULT.
     const s = votes.fields();
     for (0..4) |i| {
         try testing.expectEqual(NULL_VOTE_INDEX, s.current_indices[i]);
         try testing.expectEqual(NULL_VOTE_INDEX, s.next_indices[i]);
-        try testing.expectEqual(@as(Epoch, 0), s.next_epochs[i]);
+        try testing.expectEqual(@as(Slot, 0), s.next_slots[i]);
+        try testing.expectEqual(false, s.payload_presents[i]);
     }
 }
 
 test "Votes ensureValidatorCount grows preserving existing" {
-    var votes = Votes.init();
+    var votes: Votes = .{};
     defer votes.deinit(testing.allocator);
 
     try votes.ensureValidatorCount(testing.allocator, 2);
@@ -146,7 +144,8 @@ test "Votes ensureValidatorCount grows preserving existing" {
     // Simulate a vote change on validator 0.
     var s = votes.fields();
     s.next_indices[0] = 5;
-    s.next_epochs[0] = 10;
+    s.next_slots[0] = 10;
+    s.payload_presents[0] = true;
 
     // Grow to 4.
     try votes.ensureValidatorCount(testing.allocator, 4);
@@ -155,15 +154,17 @@ test "Votes ensureValidatorCount grows preserving existing" {
     // Validator 0 vote preserved.
     const s2 = votes.fields();
     try testing.expectEqual(@as(u32, 5), s2.next_indices[0]);
-    try testing.expectEqual(@as(Epoch, 10), s2.next_epochs[0]);
+    try testing.expectEqual(@as(Slot, 10), s2.next_slots[0]);
+    try testing.expectEqual(true, s2.payload_presents[0]);
 
-    // New validators are DEFAULT.
+    // New validators are defaults.
     try testing.expectEqual(NULL_VOTE_INDEX, s2.next_indices[2]);
     try testing.expectEqual(NULL_VOTE_INDEX, s2.next_indices[3]);
+    try testing.expectEqual(false, s2.payload_presents[2]);
 }
 
 test "Votes ensureValidatorCount no-op when already large enough" {
-    var votes = Votes.init();
+    var votes: Votes = .{};
     defer votes.deinit(testing.allocator);
 
     try votes.ensureValidatorCount(testing.allocator, 4);
@@ -172,11 +173,12 @@ test "Votes ensureValidatorCount no-op when already large enough" {
 }
 
 test "Votes fields returns empty arrays when no validators" {
-    var votes = Votes.init();
+    var votes: Votes = .{};
     defer votes.deinit(testing.allocator);
 
     const s = votes.fields();
     try testing.expectEqual(@as(usize, 0), s.current_indices.len);
     try testing.expectEqual(@as(usize, 0), s.next_indices.len);
-    try testing.expectEqual(@as(usize, 0), s.next_epochs.len);
+    try testing.expectEqual(@as(usize, 0), s.next_slots.len);
+    try testing.expectEqual(@as(usize, 0), s.payload_presents.len);
 }
