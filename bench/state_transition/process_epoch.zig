@@ -698,11 +698,11 @@ fn runBenchmark(
     const validators = try beacon_state.?.validatorsSlice(allocator);
     defer allocator.free(validators);
 
-    try state_transition.syncPubkeys(validators, &pubkey_index_map, &index_pubkey_cache);
+    try state_transition.syncPubkeys(validators, &pubkey_index_map, index_pubkey_cache);
 
     const immutable_data = state_transition.EpochCacheImmutableData{
         .config = &beacon_config,
-        .index_to_pubkey = &index_pubkey_cache,
+        .index_to_pubkey = index_pubkey_cache,
         .pubkey_to_index = &pubkey_index_map,
     };
 
