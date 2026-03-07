@@ -504,6 +504,13 @@ pub fn StructContainerTreeView(comptime ST: type) type {
             return self.root.getRoot(self.pool);
         }
 
+        pub fn getFieldRoot(self: *Self, comptime field_name: []const u8) !*const [32]u8 {
+            const ChildST = ST.getFieldType(field_name);
+            const field_value = try self.get(field_name);
+            const node = try ChildST.tree.fromValue(self.pool, &field_value);
+            return node.getRoot(self.pool);
+        }
+
         pub fn deserialize(allocator: Allocator, pool: *Node.Pool, bytes: []const u8) !*Self {
             const root = try ST.tree.deserializeFromBytes(pool, bytes);
             return try Self.init(allocator, pool, root);
@@ -540,6 +547,15 @@ pub fn StructContainerTreeView(comptime ST: type) type {
                 self.changed = Empty(Optional(T));
             }
             @field(self.changed.?, field_name) = value;
+        }
+
+        pub fn getValue(self: *Self, allocator: Allocator, comptime field_name: []const u8, out: *Field(field_name)) !void {
+            _ = allocator;
+            out.* = try self.get(field_name);
+        }
+
+        pub fn setValue(self: *Self, comptime field_name: []const u8, value: *const Field(field_name)) !void {
+            try self.set(field_name, value.*);
         }
 
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {

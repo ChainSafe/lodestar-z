@@ -142,8 +142,8 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
     var validators = try beacon_state.validators();
     for (next_sync_committee_indices, 0..next_sync_committee_indices.len) |index, i| {
         var validator = try validators.get(@intCast(index));
-        var pubkey_view = try validator.get("pubkey");
-        _ = try pubkey_view.getAllInto(next_sync_committee_pubkeys[i][0..]);
+        const pubkey = try validator.get("pubkey");
+        next_sync_committee_pubkeys[i] = pubkey;
         next_sync_committee_pubkeys_slices[i] = try blst.PublicKey.uncompress(&next_sync_committee_pubkeys[i]);
     }
 

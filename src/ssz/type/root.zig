@@ -27,6 +27,7 @@ pub const VariableVectorType = @import("vector.zig").VariableVectorType;
 
 pub const FixedContainerType = @import("container.zig").FixedContainerType;
 pub const VariableContainerType = @import("container.zig").VariableContainerType;
+pub const StructContainerType = @import("container.zig").StructContainerType;
 
 const chunk = @import("chunk.zig");
 pub const BYTES_PER_CHUNK: usize = chunk.BYTES_PER_CHUNK;
