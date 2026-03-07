@@ -1020,10 +1020,6 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
 
     module_fork_choice.addImport("consensus_types", module_consensus_types);
-    module_fork_choice.addImport("config", module_config);
-    module_fork_choice.addImport("preset", module_preset);
-    module_fork_choice.addImport("state_transition", module_state_transition);
-    module_fork_choice.addImport("hex", module_hex);
     module_fork_choice.addImport("constants", module_constants);
 
     module_download_era_files.addImport("download_era_options", options_module_download_era_options);
