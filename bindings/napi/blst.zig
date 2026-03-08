@@ -1061,6 +1061,13 @@ pub fn blst_aggregatePublicKeys(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.V
 
     if (pks_len == 0) {
         return error.EmptyPublicKeyArray;
+    } else if (pks_len == 1) {
+        const pk_value_in = try pks_array.getElement(0);
+        const pk_in = try env.unwrap(PublicKey, pk_value_in);
+        const pk_value = try newPublicKeyInstance(env);
+        const pk = try env.unwrap(PublicKey, pk_value);
+        pk.* = pk_in.*;
+        return pk_value;
     }
 
     const pks = try allocator.alloc(PublicKey, pks_len);
