@@ -641,9 +641,9 @@ const PairingPool = struct {
             const work = job.counter.fetchAdd(1, .monotonic);
             if (work >= job.n_elems) break;
             did_work = true;
-            const sig_ptr: ?*const Signature = if (work == 0) job.sig else null;
-            const sgc = if (work == 0) job.sig_groupcheck else false;
-            pairing.aggregate(job.pks[work], job.pks_validate, sig_ptr, sgc, job.msgs[work], null) catch {
+            // No worker handles the signature — sig validation and sig→GT
+            // computation run on the main thread concurrently with workers.
+            pairing.aggregate(job.pks[work], job.pks_validate, null, false, job.msgs[work], null) catch {
                 job.err_flag.store(true, .release);
                 return;
             };
@@ -734,6 +734,7 @@ const PairingPool = struct {
         if (n_elems == 0 or msg_ptrs.len != n_elems) return false;
 
         const n_active = @min(pool.n_workers, n_elems);
+        const n_bg = if (n_active > 1) n_active - 1 else 0;
         @memset(pool.has_work[0..n_active], false);
 
         var job = AggVerifyJob{
@@ -750,7 +751,24 @@ const PairingPool = struct {
             .n_elems = n_elems,
         };
 
-        pool.dispatch(.{ .aggregate_verify = &job }, n_active);
+        for (0..n_bg) |i| {
+            pool.work_done[i + 1].reset();
+            pool.work_items[i + 1] = .{ .aggregate_verify = &job };
+            pool.work_ready[i + 1].set();
+        }
+
+        execAggVerify(&job, 0);
+
+        if (sig_groupcheck) sig.validate(false) catch job.err_flag.store(true, .release);
+
+        var gtsig = blst.c.blst_fp12{};
+        if (!job.err_flag.load(.acquire)) Pairing.aggregated(&gtsig, sig);
+
+        // Wait for background workers
+        for (0..n_bg) |i| {
+            pool.work_done[i + 1].wait();
+            pool.work_done[i + 1].reset();
+        }
 
         if (job.err_flag.load(.acquire)) return false;
 
@@ -762,8 +780,6 @@ const PairingPool = struct {
             }
         }
 
-        var gtsig = blst.c.blst_fp12{};
-        Pairing.aggregated(&gtsig, sig);
         return acc.finalVerify(&gtsig);
     }
 
