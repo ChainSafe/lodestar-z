@@ -575,12 +575,20 @@ const PairingPool = struct {
         return init();
     }
 
+    /// Initializes the singleton `PairingPool`: detects CPU count, allocates all
+    /// per-worker buffers and scratch arrays, and spawns n_workers-1 background
+    /// threads (slots 1..n_workers-1). The calling thread always acts as worker 0.
+    ///
+    /// Panics on OOM or thread spawn failure — this runs once at module load time.
     fn init() *PairingPool {
         const cpu_count = std.Thread.getCpuCount() catch 1;
         const n_workers = @min(cpu_count, max_workers);
-        const n_bg = if (n_workers > 1) n_workers - 1 else 0;
+        // main thread handles slot 0
+        const background_worker_count = if (n_workers > 1) n_workers - 1 else 0;
 
         const pool = allocator.create(PairingPool) catch @panic("PairingPool: OOM");
+        // These are sized `n_workers` (not `background_worker_count`) so worker IDs map directly to array indices.
+        // Slot 0 is unused — the main thread executes directly without parking.
         const work_items = allocator.alloc(?WorkItem, n_workers) catch @panic("PairingPool: OOM");
         const work_ready = allocator.alloc(std.Thread.ResetEvent, n_workers) catch @panic("PairingPool: OOM");
         const work_done = allocator.alloc(std.Thread.ResetEvent, n_workers) catch @panic("PairingPool: OOM");
@@ -589,7 +597,7 @@ const PairingPool = struct {
         for (work_ready) |*e| e.* = .{};
         for (work_done) |*e| e.* = .{};
 
-        const threads = allocator.alloc(std.Thread, n_bg) catch @panic("PairingPool: OOM");
+        const threads = allocator.alloc(std.Thread, background_worker_count) catch @panic("PairingPool: OOM");
 
         pool.* = .{
             .n_workers = n_workers,
@@ -605,7 +613,8 @@ const PairingPool = struct {
             .scratch_rands = allocator.alloc([32]u8, SCRATCH_MAX) catch @panic("PairingPool: OOM"),
         };
 
-        for (0..n_bg) |i| {
+        // Workers get IDs 1..n; ID 0 is reserved for the calling (main) thread.
+        for (0..background_worker_count) |i| {
             threads[i] = std.Thread.spawn(.{}, workerLoop, .{ pool, i + 1 }) catch @panic("PairingPool: spawn failed");
             threads[i].detach();
         }
@@ -614,21 +623,21 @@ const PairingPool = struct {
         return pool;
     }
 
-    fn workerLoop(pool: *PairingPool, id: usize) void {
+    fn workerLoop(pool: *PairingPool, worker_index: usize) void {
         while (true) {
-            pool.work_ready[id].wait();
-            pool.work_ready[id].reset();
+            pool.work_ready[worker_index].wait();
+            pool.work_ready[worker_index].reset();
 
-            const item = pool.work_items[id] orelse {
-                pool.work_done[id].set();
+            const item = pool.work_items[worker_index] orelse {
+                pool.work_done[worker_index].set();
                 continue;
             };
             switch (item) {
-                .aggregate_verify => |job| execAggVerify(job, id),
-                .verify_multi => |job| execVerifyMulti(job, id),
+                .aggregate_verify => |job| execAggVerify(job, worker_index),
+                .verify_multi => |job| execVerifyMulti(job, worker_index),
             }
-            pool.work_items[id] = null;
-            pool.work_done[id].set();
+            pool.work_items[worker_index] = null;
+            pool.work_done[worker_index].set();
         }
     }
 
@@ -655,8 +664,8 @@ const PairingPool = struct {
         }
     }
 
-    fn execVerifyMulti(job: *VerifyMultiJob, id: usize) void {
-        var pairing = Pairing.init(@ptrCast(@alignCast(&job.pairing_bufs[id])), true, job.dst);
+    fn execVerifyMulti(job: *VerifyMultiJob, worker_index: usize) void {
+        var pairing = Pairing.init(@ptrCast(@alignCast(&job.pairing_bufs[worker_index])), true, job.dst);
         var did_work = false;
 
         while (!job.err_flag.load(.acquire)) {
@@ -695,26 +704,36 @@ const PairingPool = struct {
 
         if (did_work) {
             pairing.commit();
-            job.has_work[id] = true;
+            job.has_work[worker_index] = true;
         }
     }
 
+    /// Dispatches a work item to `n_active` slots and blocks until all complete.
+    ///
+    /// Slot 0 is executed on the calling thread;
+    /// slots 1..n_active-1 are signalled to background workers.
+    /// Workers and the main thread run concurrently.
+    ///
+    /// Ordering matters: workers are signalled BEFORE the main thread starts work,
+    /// so all threads are active in parallel (not sequentially).
     fn dispatch(pool: *PairingPool, item: WorkItem, n_active: usize) void {
         std.debug.assert(n_active <= pool.n_workers);
 
-        const n_bg = if (n_active > 1) n_active - 1 else 0;
-        for (0..n_bg) |i| {
+        const background_worker_count = if (n_active > 1) n_active - 1 else 0;
+        // Signal background workers first so they start before the main thread blocks.
+        for (0..background_worker_count) |i| {
             pool.work_done[i + 1].reset();
             pool.work_items[i + 1] = item;
             pool.work_ready[i + 1].set();
         }
 
+        // Main thread handles slot 0 while background workers run concurrently.
         switch (item) {
             .aggregate_verify => |job| execAggVerify(job, 0),
             .verify_multi => |job| execVerifyMulti(job, 0),
         }
-
-        for (0..n_bg) |i| {
+        // Collect background workers before returning.
+        for (0..background_worker_count) |i| {
             pool.work_done[i + 1].wait();
             pool.work_done[i + 1].reset();
         }
@@ -734,7 +753,7 @@ const PairingPool = struct {
         if (n_elems == 0 or msg_ptrs.len != n_elems) return false;
 
         const n_active = @min(pool.n_workers, n_elems);
-        const n_bg = if (n_active > 1) n_active - 1 else 0;
+        const background_worker_count = if (n_active > 1) n_active - 1 else 0;
         @memset(pool.has_work[0..n_active], false);
 
         var job = AggVerifyJob{
@@ -751,7 +770,7 @@ const PairingPool = struct {
             .n_elems = n_elems,
         };
 
-        for (0..n_bg) |i| {
+        for (0..background_worker_count) |i| {
             pool.work_done[i + 1].reset();
             pool.work_items[i + 1] = .{ .aggregate_verify = &job };
             pool.work_ready[i + 1].set();
@@ -765,7 +784,7 @@ const PairingPool = struct {
         if (!job.err_flag.load(.acquire)) Pairing.aggregated(&gtsig, sig);
 
         // Wait for background workers
-        for (0..n_bg) |i| {
+        for (0..background_worker_count) |i| {
             pool.work_done[i + 1].wait();
             pool.work_done[i + 1].reset();
         }
@@ -784,6 +803,8 @@ const PairingPool = struct {
     }
 
     /// Parallel batch verification using preallocated pool buffers.
+    ///
+    /// This is the multi-threaded version of `verifyMultipleAggregateSignatures`.
     fn verifyMultiAggSig(
         pool: *PairingPool,
         msg_ptrs: []const *const [32]u8,
