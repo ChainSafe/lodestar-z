@@ -922,7 +922,7 @@ pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.V
         pks[i] = pk.*;
     }
 
-    var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
+    var pairing_buf: [Pairing.sizeOf()]u8 align(@alignOf(Pairing)) = undefined;
     // `pks_validate` is always false here since we assume proof of possession for public keys.
     const result = sig.fastAggregateVerify(sigs_groupcheck, @alignCast(&pairing_buf), msg_info.data[0..32], DST, pks, false) catch {
         return try env.getBoolean(false);
