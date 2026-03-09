@@ -549,7 +549,7 @@ const VerifyMultiJob = struct {
 /// Persistent thread pool with preallocated buffers for parallel pairing verification.
 /// Workers park on ResetEvents between jobs. All dispatch buffers are preallocated.
 /// Scratch arrays for NAPI callers eliminate per-call allocs for n <= SCRATCH_MAX.
-const PairingPool = struct {
+pub const PairingPool = struct {
     const max_workers = 256;
 
     n_workers: u32,
@@ -557,6 +557,7 @@ const PairingPool = struct {
     work_items: []?WorkItem,
     work_ready: []std.Thread.ResetEvent,
     work_done: []std.Thread.ResetEvent,
+    shutdown: std.atomic.Value(bool),
 
     // Preallocated per-dispatch buffers (safe to reuse: dispatch is synchronous)
     pairing_bufs: [][Pairing.sizeOf()]u8,
@@ -568,7 +569,7 @@ const PairingPool = struct {
     scratch_sig_ptrs: []*const Signature,
     scratch_rands: [][32]u8,
 
-    var instance: ?*PairingPool = null;
+    pub var instance: ?*PairingPool = null;
 
     fn get() *PairingPool {
         if (@as(*const ?*PairingPool, &instance).*) |p| return p;
@@ -605,6 +606,7 @@ const PairingPool = struct {
             .work_items = work_items,
             .work_ready = work_ready,
             .work_done = work_done,
+            .shutdown = std.atomic.Value(bool).init(false),
             .pairing_bufs = allocator.alloc([Pairing.sizeOf()]u8, n_workers) catch @panic("PairingPool: OOM"),
             .has_work = allocator.alloc(bool, n_workers) catch @panic("PairingPool: OOM"),
             .scratch_msg_ptrs = allocator.alloc(*const [32]u8, SCRATCH_MAX) catch @panic("PairingPool: OOM"),
@@ -616,7 +618,6 @@ const PairingPool = struct {
         // Workers get IDs 1..n; ID 0 is reserved for the calling (main) thread.
         for (0..background_worker_count) |i| {
             threads[i] = std.Thread.spawn(.{}, workerLoop, .{ pool, i + 1 }) catch @panic("PairingPool: spawn failed");
-            threads[i].detach();
         }
 
         instance = pool;
@@ -627,6 +628,8 @@ const PairingPool = struct {
         while (true) {
             pool.work_ready[worker_index].wait();
             pool.work_ready[worker_index].reset();
+
+            if (pool.shutdown.load(.acquire)) return;
 
             const item = pool.work_items[worker_index] orelse {
                 pool.work_done[worker_index].set();
@@ -849,6 +852,29 @@ const PairingPool = struct {
         }
 
         return acc.finalVerify(null);
+    }
+
+    pub fn deinit(pool: *PairingPool) void {
+        pool.shutdown.store(true, .release);
+
+        // Wake all background workers so they observe the shutdown flag and exit.
+        for (pool.work_ready[1..pool.n_workers]) |*e| e.set();
+
+        // Join all background threads.
+        for (pool.workers) |t| t.join();
+
+        allocator.free(pool.workers);
+        allocator.free(pool.work_items);
+        allocator.free(pool.work_ready);
+        allocator.free(pool.work_done);
+        allocator.free(pool.pairing_bufs);
+        allocator.free(pool.has_work);
+        allocator.free(pool.scratch_msg_ptrs);
+        allocator.free(pool.scratch_pk_ptrs);
+        allocator.free(pool.scratch_sig_ptrs);
+        allocator.free(pool.scratch_rands);
+        allocator.destroy(pool);
+        instance = null;
     }
 };
 
