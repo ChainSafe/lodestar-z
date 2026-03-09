@@ -552,7 +552,7 @@ const VerifyMultiJob = struct {
 const PairingPool = struct {
     const max_workers = 256;
 
-    n_workers: usize,
+    n_workers: u32,
     workers: []std.Thread,
     work_items: []?WorkItem,
     work_ready: []std.Thread.ResetEvent,
