@@ -31,6 +31,7 @@ pub const ExecutionStatus = enum(u3) {
     invalid,
     /// Gloas: beacon block without embedded execution payload (ePBS).
     /// The execution payload arrives separately via SignedExecutionPayloadEnvelope.
+    /// Gloas blocks WITH payload (FULL variant) use Valid/Invalid/Syncing instead.
     payload_separated,
 };
 
@@ -46,6 +47,21 @@ pub const DataAvailabilityStatus = enum(u2) {
     not_required,
 };
 
+/// Gloas (ePBS) payload resolution status for a block node.
+/// Spec: gloas/fork-choice.md#constants
+///
+/// Each Gloas block creates up to 3 variant nodes in ProtoArray:
+///   pending: initial state (block received, payload fate unknown)
+///   empty:   payload absent (no execution payload arrived)
+///   full:    payload arrived (execution payload received)
+///
+/// Pre-Gloas blocks are always full (payload embedded in block).
+pub const PayloadStatus = enum(u2) {
+    pending = 0,
+    empty = 1,
+    full = 2,
+};
+
 /// Metadata that depends on whether the block is pre-merge or post-merge.
 ///
 /// The post-merge variant rejects `ExecutionStatus.pre_merge` via assert in `PostMergeMeta.init()`.
@@ -54,6 +70,9 @@ pub const BlockExtraMeta = union(enum) {
     pre_merge: void,
 
     pub const PostMergeMeta = struct {
+        /// Pre-gloas: block hash of the execution payload embedded in this block.
+        /// Post-gloas (Gloas): parentBlockHash from the block's bid (payload arrives later);
+        ///   for FULL variant, this is the execution payload block hash.
         execution_payload_block_hash: Root,
         execution_payload_number: u64,
         execution_status: ExecutionStatus,
@@ -99,10 +118,12 @@ pub const BlockExtraMeta = union(enum) {
 };
 
 /// A block to be applied to the fork choice DAG.
+/// A simplified version of BeaconBlock.
 pub const ProtoBlock = struct {
     // ── Core fields used by ProtoArray algorithm ──
 
     /// Slot at which this block was proposed.
+    /// Not necessary for ProtoArray itself; exists for external components to query.
     slot: Slot,
     /// Hash-tree-root of the BeaconBlock.
     block_root: Root,
@@ -112,6 +133,7 @@ pub const ProtoBlock = struct {
     // ── Passthrough: not used by ProtoArray, but needed by upstream ──
 
     /// Hash-tree-root of the post-state after applying this block.
+    /// Not necessary for ProtoArray; exists for upstream components.
     state_root: Root,
     /// The root that would be used for attestation.data.target.root
     /// if a LMD vote were cast for this block.
@@ -150,12 +172,22 @@ pub const ProtoBlock = struct {
     // ── Gloas (ePBS) fields ──
 
     /// Index of the builder that proposed this block (Gloas ePBS).
+    /// Used for execution payload gossip validation.
     builder_index: ?ValidatorIndex = null,
     /// Execution block hash from the builder's bid (Gloas ePBS).
+    /// Used for execution payload gossip validation.
+    /// Not to be confused with executionPayloadBlockHash in BlockExtraMeta.
     block_hash: ?Root = null,
+    /// Parent execution block hash (Gloas ePBS).
+    /// Used to determine if this block extends its parent's EMPTY or FULL variant.
+    /// If parent_block_hash == parent.block_hash, parent is FULL; otherwise EMPTY.
+    parent_block_hash: ?Root = null,
+    /// Payload resolution status (Gloas ePBS). Pre-Gloas blocks are always .full.
+    payload_status: PayloadStatus = .full,
 };
 
 /// A node in the ProtoArray DAG.
+/// Also serves as ForkChoiceNode in the fork choice spec.
 ///
 /// Flat layout: all ProtoBlock fields + DAG metadata.
 /// Use `fromBlock()` / `toBlock()` to convert between ProtoBlock and ProtoNode.
@@ -164,6 +196,7 @@ pub const ProtoNode = struct {
     // ── ProtoBlock fields ──
 
     /// Slot at which this block was proposed.
+    /// Not necessary for ProtoArray itself; exists for external components to query.
     slot: Slot,
     /// Hash-tree-root of the BeaconBlock.
     block_root: Root,
@@ -171,6 +204,7 @@ pub const ProtoNode = struct {
     parent_root: Root,
 
     /// Hash-tree-root of the post-state after applying this block.
+    /// Not necessary for ProtoArray; exists for upstream components.
     state_root: Root,
     /// The root that would be used for attestation.data.target.root
     /// if a LMD vote were cast for this block.
@@ -201,25 +235,34 @@ pub const ProtoNode = struct {
     timeliness: bool,
 
     /// Index of the builder that proposed this block (Gloas ePBS).
+    /// Used for execution payload gossip validation.
     builder_index: ?ValidatorIndex = null,
     /// Execution block hash from the builder's bid (Gloas ePBS).
+    /// Used for execution payload gossip validation.
+    /// Not to be confused with executionPayloadBlockHash in BlockExtraMeta.
     block_hash: ?Root = null,
+    /// Parent execution block hash (Gloas ePBS).
+    /// Used to determine if this block extends its parent's EMPTY or FULL variant.
+    /// If parent_block_hash == parent.block_hash, parent is FULL; otherwise EMPTY.
+    parent_block_hash: ?Root = null,
+    /// Payload resolution status (Gloas ePBS). Pre-Gloas blocks are always .full.
+    payload_status: PayloadStatus = .full,
 
     // ── DAG metadata ──
 
     /// Index of parent node in the nodes array. null for the root.
-    parent: ?u32 = null,
+    parent: ?usize = null,
 
     /// LMD-GHOST weight: sum of effective balances of validators
     /// whose latest vote is for this subtree.
     weight: i64 = 0,
 
     /// Index of the highest-weight child.
-    best_child: ?u32 = null,
+    best_child: ?usize = null,
 
     /// Index of the best leaf reachable from this node.
     /// findHead: justified_root -> bestDescendant in O(1).
-    best_descendant: ?u32 = null,
+    best_descendant: ?usize = null,
 
     /// Create a ProtoNode from a ProtoBlock, copying all matching fields.
     pub fn fromBlock(block: ProtoBlock) ProtoNode {
@@ -271,26 +314,12 @@ pub const LVHExecErrorCode = enum {
     invalid_to_valid,
 };
 
-// TODO(Task 7): move ProtoArrayError to proto_array.zig
-/// Errors from the ProtoArray (low-level DAG operations).
-pub const ProtoArrayError = error{
-    FinalizedNodeUnknown,
-    JustifiedNodeUnknown,
-    InvalidFinalizedRootChange,
-    InvalidNodeIndex,
-    InvalidParentIndex,
-    InvalidBestChildIndex,
-    InvalidJustifiedIndex,
-    InvalidBestDescendantIndex,
-    InvalidParentDelta,
-    InvalidNodeDelta,
-    IndexOverflow,
-    InvalidDeltaLen,
-    RevertedFinalizedEpoch,
-    InvalidBestNode,
-    InvalidBlockExecutionStatus,
-    InvalidJustifiedExecutionStatus,
-    InvalidLVHExecutionResponse,
+/// Stored error from validateLatestHash when an irrecoverable
+/// execution status transition is detected.
+pub const LVHExecError = struct {
+    lvh_code: LVHExecErrorCode,
+    block_root: Root,
+    exec_hash: Root,
 };
 
 // TODO(Task 14): move InvalidBlockCode, InvalidAttestationCode, ForkChoiceError to fork_choice.zig

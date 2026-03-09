@@ -83,6 +83,7 @@ const PresetMainnet = struct {
     pub const DEPOSIT_CONTRACT_TREE_DEPTH = 32;
     pub const GENESIS_SLOT = 0;
     pub const MAX_PENDING_DEPOSITS_PER_EPOCH = 16;
+    pub const PTC_SIZE = 512;
 };
 
 const PresetMinimal = struct {
@@ -156,6 +157,7 @@ const PresetMinimal = struct {
     pub const KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH = 4;
     pub const MAX_PENDING_PARTIALS_PER_WITHDRAWALS_SWEEP = 2;
     pub const MAX_PENDING_DEPOSITS_PER_EPOCH = PresetMainnet.MAX_PENDING_DEPOSITS_PER_EPOCH;
+    pub const PTC_SIZE = 2;
 };
 
 const preset_str = @import("build_options").preset;

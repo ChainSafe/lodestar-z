@@ -13,7 +13,7 @@ const proto_node = @import("proto_node.zig");
 /// Sentinel for "validator has no valid vote" (e.g., vote target was pruned).
 /// Uses u32 (not ?u32) for SoA cache efficiency: 4 bytes vs 8 bytes per slot.
 /// Safe because 0xFFFFFFFF / slots-per-year > 1,634 years of non-finalized network.
-pub const NULL_VOTE_INDEX: u32 = 0xFFFFFFFF;
+pub const NULL_VOTE_INDEX: u32 = std.math.maxInt(u32);
 
 /// Tracks a single validator's fork choice vote.
 ///
@@ -54,7 +54,7 @@ pub const Votes = struct {
     /// Number of vote slots (one per validator index).
     pub fn len(self: *const Votes) u32 {
         const raw_len = self.multi_list.len;
-        assert(raw_len <= std.math.maxInt(u32));
+        assert(raw_len < NULL_VOTE_INDEX);
         return @intCast(raw_len);
     }
 
