@@ -1,3 +1,5 @@
+//TODO(bing): The ts benchmarks are here really to ensure perf is up to par on the zig side.
+// Remove once we are happy
 import crypto from "node:crypto";
 import {bench, describe} from "@chainsafe/benchmark";
 import {
