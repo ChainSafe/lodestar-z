@@ -12,6 +12,7 @@ const SecretKey = blst.SecretKey;
 const Pairing = blst.Pairing;
 const AggregatePublicKey = blst.AggregatePublicKey;
 const AggregateSignature = blst.AggregateSignature;
+const ThreadPool = blst.ThreadPool;
 const DST = blst.DST;
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -546,7 +547,7 @@ pub fn blst_aggregateVerify(
         pks[i] = pk.*;
     }
 
-    var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
+    var pairing_buf: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined;
 
     const result = sig.aggregateVerify(
         sig_groupcheck,
@@ -596,7 +597,7 @@ pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.V
         pks[i] = pk.*;
     }
 
-    var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
+    var pairing_buf: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined;
     // `pks_validate` is always false here since we assume proof of possession for public keys.
     const result = sig.fastAggregateVerify(sigs_groupcheck, &pairing_buf, msg_info.data[0..32], DST, pks, false) catch {
         return try env.getBoolean(false);
@@ -662,7 +663,7 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
         rand.bytes(&rands[i]);
     }
 
-    var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
+    var pairing_buf: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined;
     const result = blst.verifyMultipleAggregateSignatures(
         &pairing_buf,
         n_elems,
@@ -957,6 +958,140 @@ pub fn blst_asyncAggregateWithRandomness(env: napi.Env, cb: napi.CallbackInfo(1)
     return data.deferred.getPromise();
 }
 
+/// Multi-threaded version of aggregatePublicKeys using the native ThreadPool.
+pub fn blst_aggregatePublicKeysMt(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
+    const pks_array = cb.arg(0);
+    const pks_len = try pks_array.getArrayLength();
+
+    const pks_validate: bool = if (cb.getArg(1)) |v|
+        try coerceToBool(v)
+    else
+        false;
+
+    if (pks_len == 0) {
+        return error.EmptyPublicKeyArray;
+    }
+
+    const pks = try allocator.alloc(PublicKey, pks_len);
+    defer allocator.free(pks);
+
+    for (0..pks_len) |i| {
+        const pk_value = try pks_array.getElement(@intCast(i));
+        const pk = try env.unwrap(PublicKey, pk_value);
+        pks[i] = pk.*;
+    }
+
+    const pool = ThreadPool.get();
+    const agg_pk = pool.aggregatePublicKeys(pks, pks_validate) catch return error.AggregationFailed;
+    const result_pk = agg_pk.toPublicKey();
+
+    const pk_value = try newPublicKeyInstance(env);
+    const pk = try env.unwrap(PublicKey, pk_value);
+    pk.* = result_pk;
+
+    return pk_value;
+}
+
+/// Multi-threaded version of aggregateSignatures using the native ThreadPool.
+pub fn blst_aggregateSignaturesMt(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
+    const sigs_array = cb.arg(0);
+
+    const sigs_groupcheck: bool = if (cb.getArg(1)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
+
+    const sigs_len = try sigs_array.getArrayLength();
+
+    if (sigs_len == 0) return error.EmptySignatureArray;
+
+    const sigs = try allocator.alloc(Signature, sigs_len);
+    defer allocator.free(sigs);
+
+    for (0..sigs_len) |i| {
+        const sig_value = try sigs_array.getElement(@intCast(i));
+        const sig = try env.unwrap(Signature, sig_value);
+        sigs[i] = sig.*;
+    }
+
+    const pool = ThreadPool.get();
+    const agg_sig = pool.aggregateSignatures(sigs, sigs_groupcheck) catch return error.AggregationFailed;
+    const result_sig = agg_sig.toSignature();
+
+    const sig_value = try newSignatureInstance(env);
+    const sig = try env.unwrap(Signature, sig_value);
+    sig.* = result_sig;
+
+    return sig_value;
+}
+
+/// Multi-threaded version of verifyMultipleAggregateSignatures using the native ThreadPool.
+pub fn blst_verifyMultipleAggregateSignaturesMt(env: napi.Env, cb: napi.CallbackInfo(3)) !napi.Value {
+    const sets = cb.arg(0);
+    const n_elems = try sets.getArrayLength();
+
+    const pks_validate: bool = if (cb.getArg(1)) |v|
+        try coerceToBool(v)
+    else
+        false;
+    const sigs_groupcheck: bool = if (cb.getArg(2)) |sgc|
+        try coerceToBool(sgc)
+    else
+        false;
+
+    if (n_elems == 0) {
+        return try env.getBoolean(false);
+    }
+
+    const msgs = try allocator.alloc([32]u8, n_elems);
+    defer allocator.free(msgs);
+
+    const pks = try allocator.alloc(*PublicKey, n_elems);
+    defer allocator.free(pks);
+
+    const sigs = try allocator.alloc(*Signature, n_elems);
+    defer allocator.free(sigs);
+
+    const rands = try allocator.alloc([32]u8, n_elems);
+    defer allocator.free(rands);
+
+    var prng = std.Random.DefaultPrng.init(std.crypto.random.int(u64));
+    const rand = prng.random();
+
+    for (0..n_elems) |i| {
+        const set_value = try sets.getElement(@intCast(i));
+
+        const msg_value = try set_value.getNamedProperty("msg");
+        const msg = try msg_value.getTypedarrayInfo();
+        if (msg.data.len != 32) return error.InvalidMessageLength;
+        @memcpy(&msgs[i], msg.data[0..32]);
+
+        const pk_value = try set_value.getNamedProperty("pk");
+        pks[i] = try env.unwrap(PublicKey, pk_value);
+
+        const sig_value = try set_value.getNamedProperty("sig");
+        sigs[i] = try env.unwrap(Signature, sig_value);
+
+        rand.bytes(&rands[i]);
+    }
+
+    const pool = ThreadPool.get();
+    const result = pool.verifyMultipleAggregateSignatures(
+        n_elems,
+        msgs,
+        DST,
+        pks,
+        pks_validate,
+        sigs,
+        sigs_groupcheck,
+        rands,
+    ) catch {
+        return try env.getBoolean(false);
+    };
+
+    return try env.getBoolean(result);
+}
+
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const blst_obj = try env.createObject();
 
@@ -1027,6 +1162,9 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     try blst_obj.setNamedProperty("aggregatePublicKeys", try env.createFunction("aggregatePublicKeys", 2, blst_aggregatePublicKeys, null));
     try blst_obj.setNamedProperty("aggregateSerializedPublicKeys", try env.createFunction("aggregateSerializedPublicKeys", 2, blst_aggregateSerializedPublicKeys, null));
     try blst_obj.setNamedProperty("asyncAggregateWithRandomness", try env.createFunction("asyncAggregateWithRandomness", 1, blst_asyncAggregateWithRandomness, null));
+    try blst_obj.setNamedProperty("aggregatePublicKeysMt", try env.createFunction("aggregatePublicKeysMt", 2, blst_aggregatePublicKeysMt, null));
+    try blst_obj.setNamedProperty("aggregateSignaturesMt", try env.createFunction("aggregateSignaturesMt", 2, blst_aggregateSignaturesMt, null));
+    try blst_obj.setNamedProperty("verifyMultipleAggregateSignaturesMt", try env.createFunction("verifyMultipleAggregateSignaturesMt", 3, blst_verifyMultipleAggregateSignaturesMt, null));
 
     try exports.setNamedProperty("blst", blst_obj);
 }
