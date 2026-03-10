@@ -251,18 +251,18 @@ pub const ProtoNode = struct {
     // ── DAG metadata ──
 
     /// Index of parent node in the nodes array. null for the root.
-    parent: ?usize = null,
+    parent: ?u32 = null,
 
     /// LMD-GHOST weight: sum of effective balances of validators
     /// whose latest vote is for this subtree.
     weight: i64 = 0,
 
     /// Index of the highest-weight child.
-    best_child: ?usize = null,
+    best_child: ?u32 = null,
 
     /// Index of the best leaf reachable from this node.
     /// findHead: justified_root -> bestDescendant in O(1).
-    best_descendant: ?usize = null,
+    best_descendant: ?u32 = null,
 
     /// Create a ProtoNode from a ProtoBlock, copying all matching fields.
     pub fn fromBlock(block: ProtoBlock) ProtoNode {

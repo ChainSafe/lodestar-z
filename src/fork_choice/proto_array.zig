@@ -56,22 +56,22 @@ pub const RootContext = struct {
 /// Gloas: 2-3 node indices (PENDING, EMPTY, and optionally FULL).
 pub const VariantIndices = union(enum) {
     /// Pre-Gloas: single node (always PayloadStatus.full).
-    single: usize,
+    single: u32,
     /// Gloas: variant nodes for the same block root.
     gloas: GloasIndices,
 
     pub const GloasIndices = struct {
         /// Index of the PENDING variant node.
-        pending: usize,
+        pending: u32,
         /// Index of the EMPTY variant node.
-        empty: usize,
+        empty: u32,
         /// Index of the FULL variant node (null until payload arrives).
-        full: ?usize = null,
+        full: ?u32 = null,
     };
 
     /// Get the primary index for a block root.
     /// Pre-Gloas: the single index. Gloas: the PENDING index.
-    pub fn primaryIndex(self: VariantIndices) usize {
+    pub fn primaryIndex(self: VariantIndices) u32 {
         return switch (self) {
             .single => |idx| idx,
             .gloas => |g| g.pending,
@@ -81,7 +81,7 @@ pub const VariantIndices = union(enum) {
     /// Get the index for a specific payload status.
     /// Returns null if the requested Gloas variant does not exist yet.
     /// Asserts that pre-Gloas blocks are only queried with .full status.
-    pub fn getByPayloadStatus(self: VariantIndices, status: PayloadStatus) ?usize {
+    pub fn getByPayloadStatus(self: VariantIndices, status: PayloadStatus) ?u32 {
         return switch (self) {
             .single => |idx| switch (status) {
                 .full => idx,
@@ -99,8 +99,8 @@ pub const VariantIndices = union(enum) {
     }
 
     /// Get all valid indices as a bounded array (1 for pre-Gloas, 2-3 for Gloas).
-    pub fn allIndices(self: VariantIndices) std.BoundedArray(usize, 3) {
-        var result = std.BoundedArray(usize, 3){};
+    pub fn allIndices(self: VariantIndices) std.BoundedArray(u32, 3) {
+        var result = std.BoundedArray(u32, 3){};
         switch (self) {
             .single => |idx| result.appendAssumeCapacity(idx),
             .gloas => |g| {
@@ -128,7 +128,6 @@ pub const ProtoArrayError = error{
     InvalidParentDelta,
     InvalidNodeDelta,
     IndexOverflow,
-    InvalidDeltaLen,
     RevertedFinalizedEpoch,
     InvalidBestNode,
     InvalidBlockExecutionStatus,
@@ -220,7 +219,7 @@ pub const ProtoArray = struct {
         self: *const ProtoArray,
         root: Root,
         status: PayloadStatus,
-    ) ?usize {
+    ) ?u32 {
         const vi = self.indices.get(root) orelse return null;
         return vi.getByPayloadStatus(status);
     }
@@ -277,7 +276,7 @@ pub const ProtoArray = struct {
         try self.nodes.ensureUnusedCapacity(allocator, 1);
         try self.indices.ensureUnusedCapacity(allocator, 1);
 
-        const node_index = self.nodes.items.len;
+        const node_index: u32 = @intCast(self.nodes.items.len);
         self.nodes.appendAssumeCapacity(node);
         self.indices.putAssumeCapacity(block.block_root, .{ .single = node_index });
 
@@ -299,7 +298,7 @@ pub const ProtoArray = struct {
     ) (Allocator.Error || ProtoArrayError)!void {
         // Determine parent index for the PENDING node.
         // Use getParentPayloadStatus to decide which variant of the parent to link to.
-        var parent_index: ?usize = null;
+        var parent_index: ?u32 = null;
         if (self.indices.get(block.parent_root)) |parent_vi| {
             parent_index = switch (parent_vi) {
                 .single => |idx| idx,
@@ -327,7 +326,7 @@ pub const ProtoArray = struct {
         pending_node.payload_status = .pending;
         pending_node.parent = parent_index;
 
-        const pending_index = self.nodes.items.len;
+        const pending_index: u32 = @intCast(self.nodes.items.len);
         self.nodes.appendAssumeCapacity(pending_node);
 
         // Create EMPTY node as a child of PENDING.
@@ -335,7 +334,7 @@ pub const ProtoArray = struct {
         empty_node.payload_status = .empty;
         empty_node.parent = pending_index;
 
-        const empty_index = self.nodes.items.len;
+        const empty_index: u32 = @intCast(self.nodes.items.len);
         self.nodes.appendAssumeCapacity(empty_node);
 
         // Store variant indices.
@@ -407,7 +406,7 @@ pub const ProtoArray = struct {
                 // Pre-allocate capacity before mutating state.
                 try self.nodes.ensureUnusedCapacity(allocator, 1);
 
-                const full_index = self.nodes.items.len;
+                const full_index: u32 = @intCast(self.nodes.items.len);
                 self.nodes.appendAssumeCapacity(full_node);
                 g.full = full_index;
 
@@ -420,6 +419,134 @@ pub const ProtoArray = struct {
                 );
             },
         }
+    }
+
+    /// Apply score deltas, update weights, and recompute best child / best descendant links.
+    pub fn applyScoreChanges(
+        self: *ProtoArray,
+        deltas: []i64,
+        proposer_boost: ?ProposerBoost,
+        justified_epoch: Epoch,
+        justified_root: Root,
+        finalized_epoch: Epoch,
+        finalized_root: Root,
+        current_slot: Slot,
+    ) ProtoArrayError!void {
+        assert(deltas.len == self.nodes.items.len);
+        if (finalized_epoch < self.finalized_epoch) return error.RevertedFinalizedEpoch;
+
+        const checkpoints_changed = justified_epoch != self.justified_epoch or
+            !std.mem.eql(u8, &justified_root, &self.justified_root) or
+            finalized_epoch != self.finalized_epoch or
+            !std.mem.eql(u8, &finalized_root, &self.finalized_root);
+
+        if (checkpoints_changed) {
+            self.justified_epoch = justified_epoch;
+            self.justified_root = justified_root;
+            self.finalized_epoch = finalized_epoch;
+            self.finalized_root = finalized_root;
+        }
+
+        var node_index: usize = self.nodes.items.len;
+        while (node_index > 0) {
+            node_index -= 1;
+            const node = &self.nodes.items[node_index];
+
+            if (std.mem.eql(u8, &node.block_root, &ZERO_HASH)) continue;
+
+            const current_boost: u64 = blk: {
+                const boost = proposer_boost orelse break :blk 0;
+                if (!std.mem.eql(u8, &boost.root, &node.block_root)) break :blk 0;
+                break :blk boost.score;
+            };
+            const previous_boost: u64 = blk: {
+                const boost = self.previous_proposer_boost orelse break :blk 0;
+                if (!std.mem.eql(u8, &boost.root, &node.block_root)) break :blk 0;
+                break :blk boost.score;
+            };
+
+            const execution_status_is_invalid = node.extra_meta.executionStatus() == .invalid;
+
+            const node_delta = if (execution_status_is_invalid)
+                math.negate(node.weight) catch return error.InvalidNodeDelta
+            else blk: {
+                const without_previous = math.sub(
+                    i64,
+                    deltas[node_index],
+                    math.cast(i64, previous_boost) orelse return error.InvalidNodeDelta,
+                ) catch
+                    return error.InvalidNodeDelta;
+                break :blk math.add(
+                    i64,
+                    without_previous,
+                    math.cast(i64, current_boost) orelse return error.InvalidNodeDelta,
+                ) catch
+                    return error.InvalidNodeDelta;
+            };
+
+            if (execution_status_is_invalid) {
+                node.weight = 0;
+            } else if (node_delta < 0) {
+                const abs_delta = math.negate(node_delta) catch return error.InvalidNodeDelta;
+                if (abs_delta > node.weight) return error.InvalidNodeDelta;
+                node.weight = math.sub(i64, node.weight, abs_delta) catch return error.InvalidNodeDelta;
+            } else {
+                node.weight = math.add(i64, node.weight, node_delta) catch return error.InvalidNodeDelta;
+            }
+
+            if (node.parent) |parent_index| {
+                if (parent_index >= deltas.len) return error.InvalidParentDelta;
+                deltas[parent_index] = math.add(i64, deltas[parent_index], node_delta) catch
+                    return error.InvalidParentDelta;
+            }
+        }
+
+        node_index = self.nodes.items.len;
+        while (node_index > 0) {
+            node_index -= 1;
+            const node = &self.nodes.items[node_index];
+            if (node.parent) |parent_index| {
+                self.maybeUpdateBestChildAndDescendant(
+                    parent_index,
+                    @intCast(node_index),
+                    current_slot,
+                    if (proposer_boost) |boost| boost.root else null,
+                );
+            }
+        }
+
+        self.previous_proposer_boost = proposer_boost;
+    }
+
+    /// Follow best_descendant links from the justified root and return the head block root.
+    pub fn findHead(
+        self: *const ProtoArray,
+        justified_root: Root,
+        current_slot: Slot,
+    ) ProtoArrayError!Root {
+        if (self.lvh_error != null) return error.InvalidLVHExecutionResponse;
+
+        const justified_indices = self.indices.get(justified_root) orelse
+            return error.JustifiedNodeUnknown;
+        const justified_index = justified_indices.primaryIndex();
+        if (justified_index >= self.nodes.items.len) return error.InvalidJustifiedIndex;
+
+        const justified_node = &self.nodes.items[justified_index];
+        if (justified_node.extra_meta.executionStatus() == .invalid) {
+            return error.InvalidJustifiedExecutionStatus;
+        }
+
+        const best_descendant_index = justified_node.best_descendant orelse justified_index;
+        if (best_descendant_index >= self.nodes.items.len) return error.InvalidBestDescendantIndex;
+
+        const best_node = &self.nodes.items[best_descendant_index];
+        if (best_descendant_index != justified_index and
+            !self.nodeIsViableForHead(best_node, current_slot))
+        {
+            return error.InvalidBestNode;
+        }
+
+        return best_node.block_root;
     }
 
     // ── Parent payload status ──
@@ -534,8 +661,8 @@ pub const ProtoArray = struct {
     ///   4. The child is not the best child and does not become the best child.
     fn maybeUpdateBestChildAndDescendant(
         self: *ProtoArray,
-        parent_index: usize,
-        child_index: usize,
+        parent_index: u32,
+        child_index: u32,
         current_slot: Slot,
         proposer_boost_root: ?Root,
     ) void {
@@ -546,7 +673,7 @@ pub const ProtoArray = struct {
         const child_leads_to_viable = self.nodeLeadsToViableHead(child, current_slot);
 
         // Determine the new best_child and best_descendant.
-        const ChildAndDescendant = struct { best_child: ?usize, best_descendant: ?usize };
+        const ChildAndDescendant = struct { best_child: ?u32, best_descendant: ?u32 };
         const change_to_child = ChildAndDescendant{
             .best_child = child_index,
             .best_descendant = child.best_descendant orelse child_index,
@@ -783,8 +910,8 @@ pub const ProtoArray = struct {
     ///
     /// If PayloadSeparated, that means the node is either PENDING or EMPTY,
     /// there could be some ancestor still has syncing status.
-    fn propagateValidExecutionStatusByIndex(self: *ProtoArray, valid_node_index: usize) ProtoArrayError!void {
-        var node_index: ?usize = valid_node_index;
+    fn propagateValidExecutionStatusByIndex(self: *ProtoArray, valid_node_index: u32) ProtoArrayError!void {
+        var node_index: ?u32 = valid_node_index;
         while (node_index) |idx| {
             const node = &self.nodes.items[idx];
             switch (node.extra_meta) {
@@ -810,7 +937,7 @@ pub const ProtoArray = struct {
     /// Validate a single node's execution status.
     /// Throws if the node has Invalid status (Invalid → Valid is a consensus failure).
     /// If the node has Syncing status, promotes it to Valid.
-    fn validateNodeByIndex(self: *ProtoArray, node_index: usize) ProtoArrayError!void {
+    fn validateNodeByIndex(self: *ProtoArray, node_index: u32) ProtoArrayError!void {
         const node = &self.nodes.items[node_index];
         switch (node.extra_meta) {
             .post_merge => |*m| {
@@ -995,7 +1122,7 @@ test "onBlock adds genesis" {
 
     try testing.expectEqual(@as(usize,1), pa.nodes.items.len);
     const node = &pa.nodes.items[0];
-    try testing.expectEqual(@as(?usize,null), node.parent);
+    try testing.expectEqual(@as(?u32,null), node.parent);
     try testing.expectEqual(@as(i64, 0), node.weight);
     try testing.expectEqual(PayloadStatus.full, node.payload_status);
 
@@ -1041,7 +1168,7 @@ test "onBlock links parent" {
 
     try testing.expectEqual(@as(usize,2), pa.nodes.items.len);
     const child = &pa.nodes.items[1];
-    try testing.expectEqual(@as(?usize,0), child.parent);
+    try testing.expectEqual(@as(?u32,0), child.parent);
 }
 
 test "onBlock unknown parent stays null" {
@@ -1054,7 +1181,7 @@ test "onBlock unknown parent stays null" {
     try pa.onBlock(testing.allocator, block, 0, null);
 
     const node = &pa.nodes.items[0];
-    try testing.expectEqual(@as(?usize,null), node.parent);
+    try testing.expectEqual(@as(?u32,null), node.parent);
 }
 
 test "onBlock updates best_child" {
@@ -1068,8 +1195,8 @@ test "onBlock updates best_child" {
     try pa.onBlock(testing.allocator, TestBlock.withParent(TestBlock.withRoot(child_root), parent_root), 0, null);
 
     const parent = &pa.nodes.items[0];
-    try testing.expectEqual(@as(?usize,1), parent.best_child);
-    try testing.expectEqual(@as(?usize,1), parent.best_descendant);
+    try testing.expectEqual(@as(?u32,1), parent.best_child);
+    try testing.expectEqual(@as(?u32,1), parent.best_descendant);
 }
 
 test "onBlock multiple children root tiebreak" {
@@ -1086,7 +1213,7 @@ test "onBlock multiple children root tiebreak" {
 
     const parent = &pa.nodes.items[0];
     // child_b has higher root (0x03 > 0x02), so it should be best_child.
-    try testing.expectEqual(@as(?usize,2), parent.best_child);
+    try testing.expectEqual(@as(?u32,2), parent.best_child);
 }
 
 test "onBlock Gloas creates PENDING and EMPTY" {
@@ -1104,11 +1231,11 @@ test "onBlock Gloas creates PENDING and EMPTY" {
 
     const pending = &pa.nodes.items[0];
     try testing.expectEqual(PayloadStatus.pending, pending.payload_status);
-    try testing.expectEqual(@as(?usize,null), pending.parent);
+    try testing.expectEqual(@as(?u32,null), pending.parent);
 
     const empty = &pa.nodes.items[1];
     try testing.expectEqual(PayloadStatus.empty, empty.payload_status);
-    try testing.expectEqual(@as(?usize,0), empty.parent); // Parent is PENDING.
+    try testing.expectEqual(@as(?u32,0), empty.parent); // Parent is PENDING.
 }
 
 test "onBlock Gloas stores gloas VariantIndices" {
@@ -1121,9 +1248,9 @@ test "onBlock Gloas stores gloas VariantIndices" {
     const vi = pa.indices.get(root).?;
     switch (vi) {
         .gloas => |g| {
-            try testing.expectEqual(@as(usize,0), g.pending);
-            try testing.expectEqual(@as(usize,1), g.empty);
-            try testing.expectEqual(@as(?usize,null), g.full);
+            try testing.expectEqual(@as(u32,0), g.pending);
+            try testing.expectEqual(@as(u32,1), g.empty);
+            try testing.expectEqual(@as(?u32,null), g.full);
         },
         .single => return error.TestUnexpectedResult,
     }
@@ -1145,12 +1272,12 @@ test "onBlock Gloas with parent links correctly" {
 
     // PENDING's parent should point to the pre-Gloas parent (index 0).
     const pending = &pa.nodes.items[1];
-    try testing.expectEqual(@as(?usize,0), pending.parent);
+    try testing.expectEqual(@as(?u32,0), pending.parent);
     try testing.expectEqual(PayloadStatus.pending, pending.payload_status);
 
     // EMPTY's parent should point to own PENDING (index 1).
     const empty = &pa.nodes.items[2];
-    try testing.expectEqual(@as(?usize,1), empty.parent);
+    try testing.expectEqual(@as(?u32,1), empty.parent);
     try testing.expectEqual(PayloadStatus.empty, empty.payload_status);
 }
 
@@ -1170,7 +1297,7 @@ test "onPayload adds FULL variant" {
 
     const full = &pa.nodes.items[2];
     try testing.expectEqual(PayloadStatus.full, full.payload_status);
-    try testing.expectEqual(@as(?usize,0), full.parent); // Parent is PENDING.
+    try testing.expectEqual(@as(?u32,0), full.parent); // Parent is PENDING.
     // FULL node has EL metadata.
     try testing.expectEqual(ExecutionStatus.valid, full.extra_meta.executionStatus());
     try testing.expectEqual(payload_hash, full.extra_meta.executionPayloadBlockHash().?);
@@ -1178,7 +1305,7 @@ test "onPayload adds FULL variant" {
     // VariantIndices updated.
     const vi = pa.indices.get(root).?;
     switch (vi) {
-        .gloas => |g| try testing.expectEqual(@as(?usize,2), g.full),
+        .gloas => |g| try testing.expectEqual(@as(?u32,2), g.full),
         .single => return error.TestUnexpectedResult,
     }
 }
@@ -1234,27 +1361,27 @@ test "propagateValidExecutionStatusByIndex marks syncing ancestors" {
 
 test "VariantIndices primaryIndex" {
     const single = VariantIndices{ .single = 42 };
-    try testing.expectEqual(@as(usize,42), single.primaryIndex());
+    try testing.expectEqual(@as(u32,42), single.primaryIndex());
 
     const gloas = VariantIndices{ .gloas = .{ .pending = 10, .empty = 11, .full = 12 } };
-    try testing.expectEqual(@as(usize,10), gloas.primaryIndex());
+    try testing.expectEqual(@as(u32,10), gloas.primaryIndex());
 }
 
 test "VariantIndices getByPayloadStatus" {
     const single = VariantIndices{ .single = 5 };
-    try testing.expectEqual(@as(?usize,5), single.getByPayloadStatus(.full));
+    try testing.expectEqual(@as(?u32,5), single.getByPayloadStatus(.full));
 
     const gloas = VariantIndices{ .gloas = .{ .pending = 10, .empty = 11 } };
-    try testing.expectEqual(@as(?usize,10), gloas.getByPayloadStatus(.pending));
-    try testing.expectEqual(@as(?usize,11), gloas.getByPayloadStatus(.empty));
-    try testing.expectEqual(@as(?usize,null), gloas.getByPayloadStatus(.full));
+    try testing.expectEqual(@as(?u32,10), gloas.getByPayloadStatus(.pending));
+    try testing.expectEqual(@as(?u32,11), gloas.getByPayloadStatus(.empty));
+    try testing.expectEqual(@as(?u32,null), gloas.getByPayloadStatus(.full));
 }
 
 test "VariantIndices allIndices" {
     const single = VariantIndices{ .single = 5 };
     const single_all = single.allIndices();
     try testing.expectEqual(@as(usize, 1), single_all.len);
-    try testing.expectEqual(@as(usize,5), single_all.get(0));
+    try testing.expectEqual(@as(u32,5), single_all.get(0));
 
     const gloas_no_full = VariantIndices{ .gloas = .{ .pending = 10, .empty = 11 } };
     const gloas_all = gloas_no_full.allIndices();
@@ -1448,4 +1575,94 @@ test "shouldExtendPayload no proposer boost returns true" {
     // Not timely, but no proposer boost → extend.
     try testing.expect(try pa.shouldExtendPayload(root, null));
     try testing.expect(try pa.shouldExtendPayload(root, ZERO_HASH));
+}
+
+test "findHead returns justified root when only genesis exists" {
+    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    defer pa.deinit(testing.allocator);
+
+    try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
+
+    const head = try pa.findHead(ZERO_HASH, 0);
+    try testing.expectEqual(ZERO_HASH, head);
+}
+
+test "applyScoreChanges updates head via weight" {
+    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    defer pa.deinit(testing.allocator);
+
+    const child_a_root = makeRoot(1);
+    const child_b_root = makeRoot(2);
+
+    try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
+    try pa.onBlock(
+        testing.allocator,
+        TestBlock.withParent(TestBlock.withSlotAndRoot(1, child_a_root), ZERO_HASH),
+        1,
+        null,
+    );
+    try pa.onBlock(
+        testing.allocator,
+        TestBlock.withParent(TestBlock.withSlotAndRoot(1, child_b_root), ZERO_HASH),
+        1,
+        null,
+    );
+
+    var deltas = [_]i64{ 0, 10, 20 };
+    try pa.applyScoreChanges(&deltas, null, 0, ZERO_HASH, 0, ZERO_HASH, 1);
+
+    const head = try pa.findHead(ZERO_HASH, 1);
+    try testing.expectEqual(child_b_root, head);
+}
+
+test "applyScoreChanges proposer boost does not accumulate across repeated calls" {
+    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    defer pa.deinit(testing.allocator);
+
+    const child_root = makeRoot(1);
+    try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
+    try pa.onBlock(
+        testing.allocator,
+        TestBlock.withParent(TestBlock.withSlotAndRoot(1, child_root), ZERO_HASH),
+        1,
+        null,
+    );
+
+    const boost = ProtoArray.ProposerBoost{ .root = child_root, .score = 34 };
+
+    var deltas_1 = [_]i64{ 0, 0 };
+    try pa.applyScoreChanges(&deltas_1, boost, 0, ZERO_HASH, 0, ZERO_HASH, 1);
+    const weight_after_first = pa.nodes.items[1].weight;
+
+    var deltas_2 = [_]i64{ 0, 0 };
+    try pa.applyScoreChanges(&deltas_2, boost, 0, ZERO_HASH, 0, ZERO_HASH, 1);
+    try testing.expectEqual(weight_after_first, pa.nodes.items[1].weight);
+}
+
+test "applyScoreChanges zeroes invalid node weight and findHead falls back" {
+    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    defer pa.deinit(testing.allocator);
+
+    const child_root = makeRoot(1);
+
+    try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
+
+    var child_block = TestBlock.withParent(TestBlock.withSlotAndRoot(1, child_root), ZERO_HASH);
+    child_block.extra_meta = .{
+        .post_merge = BlockExtraMeta.PostMergeMeta.init(ZERO_HASH, 1, .syncing, .available),
+    };
+    try pa.onBlock(testing.allocator, child_block, 1, null);
+
+    var initial_deltas = [_]i64{ 0, 50 };
+    try pa.applyScoreChanges(&initial_deltas, null, 0, ZERO_HASH, 0, ZERO_HASH, 1);
+    try testing.expectEqual(@as(i64, 50), pa.nodes.items[1].weight);
+
+    pa.nodes.items[1].extra_meta.post_merge.execution_status = .invalid;
+
+    var zero_deltas = [_]i64{ 0, 0 };
+    try pa.applyScoreChanges(&zero_deltas, null, 0, ZERO_HASH, 0, ZERO_HASH, 1);
+    try testing.expectEqual(@as(i64, 0), pa.nodes.items[1].weight);
+
+    const head = try pa.findHead(ZERO_HASH, 1);
+    try testing.expectEqual(ZERO_HASH, head);
 }
