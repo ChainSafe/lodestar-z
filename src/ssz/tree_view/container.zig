@@ -563,9 +563,8 @@ pub fn StructContainerTreeView(comptime ST: type) type {
             return ST.serializeIntoBytes(self.original_value, out);
         }
 
-        pub fn serializedSize(self: *Self) !usize {
-            try self.commit();
-            return ST.serializedSize(self.original_value);
+        pub fn serializedSize(_: *const Self) usize {
+            return ST.fixed_size;
         }
     };
 

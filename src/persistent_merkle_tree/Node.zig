@@ -270,7 +270,7 @@ pub const Pool = struct {
         return node_id;
     }
 
-    /// Consumer transfers ownership of `*T` to the created node.
+    /// The pool allocates and owns a clone of `ptr`; the caller retains ownership of its data.
     pub fn createBranchStruct(self: *Pool, comptime T: type, ptr: *const T) Error!Id {
         const cloned = try T.init(self.allocator, ptr);
         errdefer @constCast(cloned).deinit(self.allocator);
