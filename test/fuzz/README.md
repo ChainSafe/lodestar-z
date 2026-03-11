@@ -22,7 +22,7 @@ mapping.
 
 Install AFL++ so that `afl-cc` and `afl-fuzz` are on your `PATH`.
 
-- **macOS (Homebrew):** `brew install aflplusplus`
+- **macOS (Homebrew):** `brew install afl++`
 - **Linux:** build from source or use your distro's package (e.g.
   `apt install afl++` on Debian/Ubuntu).
 
@@ -57,6 +57,13 @@ afl-fuzz -i corpus/ssz_basic-cmin -o afl-out/ssz_basic \
 The fuzzer runs indefinitely. Let it run for as long as you like; meaningful
 coverage is usually reached within a few hours, but longer runs can find
 deeper bugs. Press `ctrl+c` to stop the fuzzer when you're done.
+
+On Linux containers, AFL++ may abort if `/proc/sys/kernel/core_pattern` is
+configured to pipe core dumps. If you cannot change sysctl as root, run with:
+
+```sh
+AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 zig build run-ssz_basic
+```
 
 ## Finding Crashes and Hangs
 
