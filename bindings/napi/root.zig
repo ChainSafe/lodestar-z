@@ -22,6 +22,7 @@ const EnvCleanup = struct {
     fn hook(_: *EnvCleanup) void {
         if (env_refcount.fetchSub(1, .acq_rel) == 1) {
             // Last environment — tear down shared state.
+            blst.deinitThreadPool();
             config.state.deinit();
             pubkeys.state.deinit();
             pool.state.deinit();
@@ -35,6 +36,9 @@ var env_cleanup: EnvCleanup = .{};
 fn register(env: napi.Env, exports: napi.Value) !void {
     if (env_refcount.fetchAdd(1, .monotonic) == 0) {
         // First environment — initialize shared state.
+        const cpu_count = std.Thread.getCpuCount() catch 1;
+        const n_workers = @min(cpu_count, @import("bls").ThreadPool.MAX_WORKERS);
+        try blst.initThreadPool(n_workers);
         try pool.state.init();
         try pubkeys.state.init();
         config.state.init();

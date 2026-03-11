@@ -12,7 +12,24 @@ const SecretKey = bls.SecretKey;
 const Pairing = bls.Pairing;
 const AggregatePublicKey = bls.AggregatePublicKey;
 const AggregateSignature = bls.AggregateSignature;
+const ThreadPool = bls.ThreadPool;
 const DST = bls.DST;
+
+/// Cached thread pool reference for parallel verification.
+/// Initialized lazily on first use, torn down via `deinitThreadPool`.
+var thread_pool: ?*ThreadPool = null;
+
+pub fn initThreadPool(n_workers: u16) !void {
+    if (thread_pool != null) return error.PoolExists;
+    thread_pool = try ThreadPool.init(std.heap.page_allocator, .{ .n_workers = n_workers });
+}
+
+pub fn deinitThreadPool() void {
+    if (thread_pool) |p| {
+        p.deinit();
+        thread_pool = null;
+    }
+}
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
@@ -532,8 +549,8 @@ pub fn blst_aggregateVerify(
 
     const msgs = try allocator.alloc([32]u8, msgs_len);
     defer allocator.free(msgs);
-    const pks = try allocator.alloc(PublicKey, pks_len);
-    defer allocator.free(pks);
+    const pk_ptrs = try allocator.alloc(*PublicKey, pks_len);
+    defer allocator.free(pk_ptrs);
 
     for (0..msgs_len) |i| {
         const msg_value = try msgs_array.getElement(@intCast(i));
@@ -542,22 +559,11 @@ pub fn blst_aggregateVerify(
         @memcpy(&msgs[i], msg_info.data[0..32]);
 
         const pk_value = try pks_array.getElement(@intCast(i));
-        const pk = try env.unwrap(PublicKey, pk_value);
-        pks[i] = pk.*;
+        pk_ptrs[i] = try env.unwrap(PublicKey, pk_value);
     }
 
-    var pairing_buf: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined;
-
-    const result = sig.aggregateVerify(
-        sig_groupcheck,
-        &pairing_buf,
-        msgs,
-        DST,
-        pks,
-        pks_validate,
-    ) catch {
-        return try env.getBoolean(false);
-    };
+    const pool = thread_pool orelse @panic("ThreadPool not initialized; call initThreadPool first");
+    const result = try pool.aggregateVerify(sig, sig_groupcheck, msgs, DST, pk_ptrs, pks_validate);
 
     return try env.getBoolean(result);
 }
@@ -596,7 +602,7 @@ pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.V
         pks[i] = pk.*;
     }
 
-    var pairing_buf: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined;
+    var pairing_buf: [Pairing.sizeOf()]u8 align(@alignOf(Pairing)) = undefined;
     // `pks_validate` is always false here since we assume proof of possession for public keys.
     const result = sig.fastAggregateVerify(sigs_groupcheck, &pairing_buf, msg_info.data[0..32], DST, pks, false) catch {
         return try env.getBoolean(false);
@@ -662,9 +668,8 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
         rand.bytes(&rands[i]);
     }
 
-    var pairing_buf: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined;
-    const result = bls.verifyMultipleAggregateSignatures(
-        &pairing_buf,
+    const pool = thread_pool orelse @panic("ThreadPool not initialized; call initThreadPool first");
+    const result = pool.verifyMultipleAggregateSignatures(
         n_elems,
         msgs,
         DST,
