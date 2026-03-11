@@ -22,7 +22,7 @@
     }
   },
   "scripts": {
-    "prepare": "zig build build-lib:bindings -Doptimize=ReleaseSafe",
+    "prepare": "zig build build-lib:bindings -Doptimize=ReleaseFast",
     "lint": "biome check",
     "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts"
   },
@@ -47,7 +47,9 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.11",
+    "@chainsafe/benchmark": "^2.0.1",
     "@chainsafe/biomejs-config": "^1.0.0",
+    "@chainsafe/blst": "^2.2.0",
     "@lodestar/config": "^1.39.1",
     "@lodestar/era": "^1.39.1",
     "@lodestar/state-transition": "^1.39.1",
