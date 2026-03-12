@@ -236,6 +236,10 @@ declare const bindings: {
       options?: TransitionOpts
     ) => BeaconStateView;
   };
+  metrics: {
+    init: () => void;
+    scrapeMetrics: () => Uint8Array;
+  };
   BeaconStateView: typeof BeaconStateView;
 };
 
