@@ -17,7 +17,7 @@ const DOMAIN_DEPOSIT = c.DOMAIN_DEPOSIT;
 const ZERO_HASH = @import("constants").ZERO_HASH;
 const computeDomain = @import("../utils/domain.zig").computeDomain;
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
-const blst = @import("blst");
+const bls = @import("bls");
 const verify = @import("../utils/bls.zig").verify;
 const getMaxEffectiveBalance = @import("../utils/validator.zig").getMaxEffectiveBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
@@ -220,9 +220,9 @@ pub fn validateDepositSignature(
     try computeSigningRoot(types.phase0.DepositMessage, &deposit_message, &domain, &signing_root);
 
     // Pubkeys must be checked for group + inf. This must be done only once when the validator deposit is processed
-    const public_key = try blst.PublicKey.uncompress(pubkey);
+    const public_key = try bls.PublicKey.uncompress(pubkey);
     try public_key.validate();
-    const signature = try blst.Signature.uncompress(&deposit_signature);
+    const signature = try bls.Signature.uncompress(&deposit_signature);
     try signature.validate(true);
     try verify(&signing_root, &public_key, &signature, null, null);
 }

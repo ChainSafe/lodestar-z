@@ -1,6 +1,6 @@
 const std = @import("std");
 const napi = @import("zapi:napi");
-const blst = @import("blst");
+const bls = @import("bls");
 const blst_bindings = @import("./blst.zig");
 const PubkeyIndexMap = @import("state_transition").PubkeyIndexMap;
 const Index2PubkeyCache = @import("state_transition").Index2PubkeyCache;
@@ -129,7 +129,7 @@ pub fn pubkeys_load(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     state.index2pubkey.items.len = len;
 
     const p2i_size = pubkey2indexWrittenSize();
-    const i2p_size = @sizeOf(blst.PublicKey) * len;
+    const i2p_size = @sizeOf(bls.PublicKey) * len;
 
     if (file_size != 12 + p2i_size + i2p_size) {
         return error.InvalidPubkeyIndexFile;
@@ -176,7 +176,7 @@ pub fn pubkeys_get(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     }
 
     const out = try blst_bindings.newPublicKeyInstance(env);
-    const out_pubkey = try env.unwrap(blst.PublicKey, out);
+    const out_pubkey = try env.unwrap(bls.PublicKey, out);
     out_pubkey.* = state.index2pubkey.items[@intCast(index)];
     return out;
 }
@@ -210,7 +210,7 @@ pub fn pubkeys_set(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     state.pubkey2index.put(pubkey_bytes.*, @intCast(index)) catch return error.PubkeyIndexInsertFailed;
 
     // Deserialize and set index2pubkey
-    state.index2pubkey.items[@intCast(index)] = try blst.PublicKey.uncompress(pubkey_bytes);
+    state.index2pubkey.items[@intCast(index)] = try bls.PublicKey.uncompress(pubkey_bytes);
 
     return env.getUndefined();
 }

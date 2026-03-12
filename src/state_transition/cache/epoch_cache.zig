@@ -4,7 +4,7 @@ const preset = @import("preset").preset;
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const types = @import("consensus_types");
 const c = @import("constants");
-const blst = @import("blst");
+const bls = @import("bls");
 const Epoch = types.primitive.Epoch.Type;
 const Slot = types.primitive.Slot.Type;
 const BLSSignature = types.primitive.BLSSignature.Type;
@@ -704,7 +704,7 @@ pub const EpochCache = struct {
         std.debug.assert(index <= self.index_to_pubkey.items.len);
         try self.pubkey_to_index.put(pubkey.*, index);
         // this is deinit() by application
-        const pk = try blst.PublicKey.uncompress(pubkey);
+        const pk = try bls.PublicKey.uncompress(pubkey);
         if (index == self.index_to_pubkey.items.len) {
             try self.index_to_pubkey.append(pk);
             return;

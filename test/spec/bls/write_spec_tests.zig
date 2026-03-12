@@ -4,7 +4,7 @@ const spec_test_options = @import("spec_test_options");
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
-    const out = try std.fs.cwd().createFile("test/spec/spec_tests.zig", .{});
+    const out = try std.fs.cwd().createFile("test/spec/bls/spec_tests.zig", .{});
     defer out.close();
 
     var writer = out.writer().any();
@@ -46,7 +46,10 @@ pub fn main() !void {
         });
         defer allocator.free(fork_tests_dir_name);
 
-        const fork_tests_dir = try std.fs.cwd().openDir(fork_tests_dir_name, .{ .iterate = true });
+        const fork_tests_dir = std.fs.cwd().openDir(fork_tests_dir_name, .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
         var fork_tests_dir_it = fork_tests_dir.iterate();
         while (try fork_tests_dir_it.next()) |fork_test_entry| {
             switch (fork_test_entry.kind) {

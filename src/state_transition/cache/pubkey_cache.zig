@@ -1,5 +1,5 @@
 const std = @import("std");
-const blst = @import("blst");
+const bls = @import("bls");
 const types = @import("consensus_types");
 const Validator = types.phase0.Validator.Type;
 
@@ -7,7 +7,7 @@ const Validator = types.phase0.Validator.Type;
 pub const PubkeyIndexMap = std.AutoHashMap([48]u8, u64);
 
 /// Map from validator index to pubkey
-pub const Index2PubkeyCache = std.ArrayList(blst.PublicKey);
+pub const Index2PubkeyCache = std.ArrayList(bls.PublicKey);
 
 /// Populate `pubkey_to_index` and `index_to_pubkey` caches from validators list.
 pub fn syncPubkeys(
@@ -31,7 +31,7 @@ pub fn syncPubkeys(
     for (old_len..new_count) |i| {
         const pubkey = &validators[i].pubkey;
         pubkey_to_index.putAssumeCapacity(pubkey.*, @intCast(i));
-        index_to_pubkey.items[i] = try blst.PublicKey.uncompress(pubkey);
+        index_to_pubkey.items[i] = try bls.PublicKey.uncompress(pubkey);
     }
 }
 
@@ -49,7 +49,7 @@ fn uncompressPubkeys(
     for (start_index..end_index_exclusive) |i| {
         if (uncompress_error.load(.monotonic)) return;
         const pubkey = &validators[i].pubkey;
-        index_to_pubkey.items[i] = blst.PublicKey.uncompress(pubkey) catch {
+        index_to_pubkey.items[i] = bls.PublicKey.uncompress(pubkey) catch {
             uncompress_error.store(true, .release);
             return;
         };

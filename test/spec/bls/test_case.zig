@@ -1,6 +1,6 @@
 const std = @import("std");
 const yaml = @import("yaml");
-const blst = @import("blst");
+const bls = @import("bls");
 
 const Allocator = std.mem.Allocator;
 
@@ -23,29 +23,29 @@ pub fn aggregate(gpa: Allocator, path: std.fs.Dir) !void {
     const aggregate_test_data = try data_yaml.parse(allocator, AggregateTestData);
 
     {
-        const signatures = try allocator.alloc(blst.Signature, aggregate_test_data.input.len);
+        const signatures = try allocator.alloc(bls.Signature, aggregate_test_data.input.len);
         defer allocator.free(signatures);
 
-        var sig_buf: [blst.Signature.COMPRESS_SIZE]u8 = undefined;
+        var sig_buf: [bls.Signature.COMPRESS_SIZE]u8 = undefined;
 
         for (aggregate_test_data.input, 0..) |sig_hex_bytes, i| {
             const sig_bytes = try std.fmt.hexToBytes(
                 &sig_buf,
                 sig_hex_bytes[2..], // skip "0x" prefix
             );
-            signatures[i] = try blst.Signature.deserialize(sig_bytes);
+            signatures[i] = try bls.Signature.deserialize(sig_bytes);
         }
 
         // yaml library parses `null` as a string
         if (std.mem.eql(u8, aggregate_test_data.output, "null")) {
             // expect failure
-            try std.testing.expectError(blst.BlstError.AggrTypeMismatch, blst.AggregateSignature.aggregate(signatures, true));
+            try std.testing.expectError(bls.BlstError.AggrTypeMismatch, bls.AggregateSignature.aggregate(signatures, true));
         } else {
             const expected = try std.fmt.hexToBytes(
                 &sig_buf,
                 aggregate_test_data.output[2..], // skip "0x" prefix
             );
-            const aggregate_sig = try blst.AggregateSignature.aggregate(signatures, false);
+            const aggregate_sig = try bls.AggregateSignature.aggregate(signatures, false);
             const actual = aggregate_sig.toSignature().compress();
             try std.testing.expectEqualSlices(u8, expected, &actual);
         }
@@ -78,21 +78,21 @@ pub fn aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
         const num_sigs = aggregate_verify_test_data.input.pubkeys.len;
         try std.testing.expect(num_sigs == aggregate_verify_test_data.input.messages.len);
 
-        const pubkeys = try allocator.alloc(blst.PublicKey, num_sigs);
+        const pubkeys = try allocator.alloc(bls.PublicKey, num_sigs);
         defer allocator.free(pubkeys);
         const messages = try allocator.alloc([32]u8, num_sigs);
         defer allocator.free(messages);
 
-        var pk_buf: [blst.PublicKey.COMPRESS_SIZE]u8 = undefined;
-        var sig_buf: [blst.Signature.COMPRESS_SIZE]u8 = undefined;
-        var pairing_buf: [blst.Pairing.sizeOf()]u8 align(blst.Pairing.buf_align) = undefined;
+        var pk_buf: [bls.PublicKey.COMPRESS_SIZE]u8 = undefined;
+        var sig_buf: [bls.Signature.COMPRESS_SIZE]u8 = undefined;
+        var pairing_buf: [bls.Pairing.sizeOf()]u8 align(bls.Pairing.buf_align) = undefined;
 
         for (aggregate_verify_test_data.input.pubkeys, 0..) |pk_hex_bytes, i| {
             const pk_bytes = try std.fmt.hexToBytes(
                 &pk_buf,
                 pk_hex_bytes[2..], // skip "0x" prefix
             );
-            pubkeys[i] = try blst.PublicKey.deserialize(pk_bytes);
+            pubkeys[i] = try bls.PublicKey.deserialize(pk_bytes);
         }
 
         for (aggregate_verify_test_data.input.messages, 0..) |msg_hex_bytes, i| {
@@ -106,7 +106,7 @@ pub fn aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
             &sig_buf,
             aggregate_verify_test_data.input.signature[2..], // skip "0x" prefix
         );
-        const signature = blst.Signature.deserialize(sig_bytes) catch {
+        const signature = bls.Signature.deserialize(sig_bytes) catch {
             // if signature is invalid, expect false
             try std.testing.expect(!aggregate_verify_test_data.output);
             return;
@@ -116,7 +116,7 @@ pub fn aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
             true,
             &pairing_buf,
             messages,
-            blst.DST,
+            bls.DST,
             pubkeys,
             true,
         ) catch false;
@@ -149,20 +149,20 @@ pub fn fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
     {
         const num_sigs = fast_aggregate_verify_test_data.input.pubkeys.len;
 
-        const pubkeys = try allocator.alloc(blst.PublicKey, num_sigs);
+        const pubkeys = try allocator.alloc(bls.PublicKey, num_sigs);
         defer allocator.free(pubkeys);
 
         var msg_bytes: [32]u8 = undefined;
-        var pk_buf: [blst.PublicKey.COMPRESS_SIZE]u8 = undefined;
-        var sig_buf: [blst.Signature.COMPRESS_SIZE]u8 = undefined;
-        var pairing_buf: [blst.Pairing.sizeOf()]u8 align(blst.Pairing.buf_align) = undefined;
+        var pk_buf: [bls.PublicKey.COMPRESS_SIZE]u8 = undefined;
+        var sig_buf: [bls.Signature.COMPRESS_SIZE]u8 = undefined;
+        var pairing_buf: [bls.Pairing.sizeOf()]u8 align(bls.Pairing.buf_align) = undefined;
 
         for (fast_aggregate_verify_test_data.input.pubkeys, 0..) |pk_hex_bytes, i| {
             const pk_bytes = try std.fmt.hexToBytes(
                 &pk_buf,
                 pk_hex_bytes[2..], // skip "0x" prefix
             );
-            pubkeys[i] = try blst.PublicKey.deserialize(pk_bytes);
+            pubkeys[i] = try bls.PublicKey.deserialize(pk_bytes);
         }
 
         _ = try std.fmt.hexToBytes(
@@ -174,7 +174,7 @@ pub fn fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
             &sig_buf,
             fast_aggregate_verify_test_data.input.signature[2..], // skip "0x" prefix
         );
-        const signature = blst.Signature.deserialize(sig_bytes) catch {
+        const signature = bls.Signature.deserialize(sig_bytes) catch {
             // if signature is invalid, expect false
             try std.testing.expect(!fast_aggregate_verify_test_data.output);
             return;
@@ -184,7 +184,7 @@ pub fn fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
             true,
             &pairing_buf,
             &msg_bytes,
-            blst.DST,
+            bls.DST,
             pubkeys,
             true,
         ) catch false;
@@ -220,16 +220,16 @@ pub fn sign(gpa: Allocator, path: std.fs.Dir) !void {
         var msg: [32]u8 = undefined;
         _ = try std.fmt.hexToBytes(&msg, sign_test_data.input.message[2..]); // skip "0x" prefix
 
-        const sk = blst.SecretKey.deserialize(&privkey) catch {
+        const sk = bls.SecretKey.deserialize(&privkey) catch {
             // if secret key is invalid, expect signature to be "null"
             try std.testing.expect(std.mem.eql(u8, sign_test_data.output, "null"));
             return;
         };
 
-        const sig = sk.sign(&msg, blst.DST, null);
+        const sig = sk.sign(&msg, bls.DST, null);
         const actual = sig.compress();
 
-        var sig_buf: [blst.Signature.COMPRESS_SIZE]u8 = undefined;
+        var sig_buf: [bls.Signature.COMPRESS_SIZE]u8 = undefined;
         const expected = try std.fmt.hexToBytes(&sig_buf, sign_test_data.output[2..]); // skip "0x" prefix
 
         try std.testing.expectEqualSlices(u8, expected, &actual);
@@ -259,12 +259,12 @@ pub fn verify(gpa: Allocator, path: std.fs.Dir) !void {
     const verify_test_data = try data_yaml.parse(allocator, VerifyTestData);
 
     {
-        var pk_buf: [blst.PublicKey.COMPRESS_SIZE]u8 = undefined;
-        var sig_buf: [blst.Signature.COMPRESS_SIZE]u8 = undefined;
+        var pk_buf: [bls.PublicKey.COMPRESS_SIZE]u8 = undefined;
+        var sig_buf: [bls.Signature.COMPRESS_SIZE]u8 = undefined;
         var msg_bytes: [32]u8 = undefined;
 
         const pk_bytes = try std.fmt.hexToBytes(&pk_buf, verify_test_data.input.pubkey[2..]); // skip "0x" prefix
-        const pk = blst.PublicKey.deserialize(pk_bytes) catch {
+        const pk = bls.PublicKey.deserialize(pk_bytes) catch {
             // if public key is invalid, expect false
             try std.testing.expect(!verify_test_data.output);
             return;
@@ -273,7 +273,7 @@ pub fn verify(gpa: Allocator, path: std.fs.Dir) !void {
         _ = try std.fmt.hexToBytes(&msg_bytes, verify_test_data.input.message[2..]); // skip "0x" prefix
 
         const sig_bytes = try std.fmt.hexToBytes(&sig_buf, verify_test_data.input.signature[2..]); // skip "0x" prefix
-        const signature = blst.Signature.deserialize(sig_bytes) catch {
+        const signature = bls.Signature.deserialize(sig_bytes) catch {
             // if signature is invalid, expect false
             try std.testing.expectEqual(verify_test_data.output, false);
             return;
@@ -282,7 +282,7 @@ pub fn verify(gpa: Allocator, path: std.fs.Dir) !void {
         signature.verify(
             true,
             &msg_bytes,
-            blst.DST,
+            bls.DST,
             null,
             &pk,
             true,
@@ -314,17 +314,17 @@ pub fn eth_aggregate_pubkeys(gpa: Allocator, path: std.fs.Dir) !void {
     const eth_aggregate_pubkeys_test_data = try data_yaml.parse(allocator, EthAggregatePubkeysTestData);
 
     {
-        const pubkeys = try allocator.alloc(blst.PublicKey, eth_aggregate_pubkeys_test_data.input.len);
+        const pubkeys = try allocator.alloc(bls.PublicKey, eth_aggregate_pubkeys_test_data.input.len);
         defer allocator.free(pubkeys);
 
-        var pk_buf: [blst.PublicKey.COMPRESS_SIZE]u8 = undefined;
+        var pk_buf: [bls.PublicKey.COMPRESS_SIZE]u8 = undefined;
 
         for (eth_aggregate_pubkeys_test_data.input, 0..) |pk_hex_bytes, i| {
             const pk_bytes = try std.fmt.hexToBytes(
                 &pk_buf,
                 pk_hex_bytes[2..], // skip "0x" prefix
             );
-            pubkeys[i] = blst.PublicKey.deserialize(pk_bytes) catch {
+            pubkeys[i] = bls.PublicKey.deserialize(pk_bytes) catch {
                 // if any public key is invalid, expect output to be "null"
                 try std.testing.expect(std.mem.eql(u8, eth_aggregate_pubkeys_test_data.output, "null"));
                 return;
@@ -334,7 +334,7 @@ pub fn eth_aggregate_pubkeys(gpa: Allocator, path: std.fs.Dir) !void {
         // yaml library parses `null` as a string
         if (std.mem.eql(u8, eth_aggregate_pubkeys_test_data.output, "null")) {
             // expect failure
-            _ = blst.AggregatePublicKey.aggregate(pubkeys, true) catch {
+            _ = bls.AggregatePublicKey.aggregate(pubkeys, true) catch {
                 return;
             };
             try std.testing.expect(false);
@@ -343,7 +343,7 @@ pub fn eth_aggregate_pubkeys(gpa: Allocator, path: std.fs.Dir) !void {
                 &pk_buf,
                 eth_aggregate_pubkeys_test_data.output[2..], // skip "0x" prefix
             );
-            const aggregate_pk = try blst.AggregatePublicKey.aggregate(pubkeys, false);
+            const aggregate_pk = try bls.AggregatePublicKey.aggregate(pubkeys, false);
             const actual = aggregate_pk.toPublicKey().compress();
             try std.testing.expectEqualSlices(u8, expected, &actual);
         }
@@ -375,20 +375,20 @@ pub fn eth_fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
     {
         const num_sigs = eth_fast_aggregate_verify_test_data.input.pubkeys.len;
 
-        const pubkeys = try allocator.alloc(blst.PublicKey, num_sigs);
+        const pubkeys = try allocator.alloc(bls.PublicKey, num_sigs);
         defer allocator.free(pubkeys);
 
         var msg_bytes: [32]u8 = undefined;
-        var pk_buf: [blst.PublicKey.COMPRESS_SIZE]u8 = undefined;
-        var sig_buf: [blst.Signature.COMPRESS_SIZE]u8 = undefined;
-        var pairing_buf: [blst.Pairing.sizeOf()]u8 align(blst.Pairing.buf_align) = undefined;
+        var pk_buf: [bls.PublicKey.COMPRESS_SIZE]u8 = undefined;
+        var sig_buf: [bls.Signature.COMPRESS_SIZE]u8 = undefined;
+        var pairing_buf: [bls.Pairing.sizeOf()]u8 align(bls.Pairing.buf_align) = undefined;
 
         for (eth_fast_aggregate_verify_test_data.input.pubkeys, 0..) |pk_hex_bytes, i| {
             const pk_bytes = try std.fmt.hexToBytes(
                 &pk_buf,
                 pk_hex_bytes[2..], // skip "0x" prefix
             );
-            pubkeys[i] = blst.PublicKey.deserialize(pk_bytes) catch {
+            pubkeys[i] = bls.PublicKey.deserialize(pk_bytes) catch {
                 // if any public key is invalid, expect false
                 try std.testing.expect(!eth_fast_aggregate_verify_test_data.output);
                 return;
@@ -404,7 +404,7 @@ pub fn eth_fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
             &sig_buf,
             eth_fast_aggregate_verify_test_data.input.signature[2..], // skip "0x" prefix
         );
-        const signature = blst.Signature.deserialize(sig_bytes) catch {
+        const signature = bls.Signature.deserialize(sig_bytes) catch {
             // if signature is invalid, expect false
             try std.testing.expect(!eth_fast_aggregate_verify_test_data.output);
             return;
@@ -417,7 +417,7 @@ pub fn eth_fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
             true,
             &pairing_buf,
             &msg_bytes,
-            blst.DST,
+            bls.DST,
             pubkeys,
             true,
         ) catch false;

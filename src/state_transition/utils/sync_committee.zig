@@ -1,6 +1,6 @@
 const std = @import("std");
-const blst = @import("blst");
-const AggregatePublicKey = blst.AggregatePublicKey;
+const bls = @import("bls");
+const AggregatePublicKey = bls.AggregatePublicKey;
 const Allocator = std.mem.Allocator;
 const BeaconState = @import("fork_types").BeaconState;
 const EffectiveBalanceIncrements = @import("../cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
@@ -34,13 +34,13 @@ pub fn getNextSyncCommittee(
 
     // Using the index2pubkey cache is slower because it needs the serialized pubkey.
     const pubkeys = &out.sync_committee.pubkeys;
-    var pubkeys_uncompressed: [preset.SYNC_COMMITTEE_SIZE]blst.PublicKey = undefined;
+    var pubkeys_uncompressed: [preset.SYNC_COMMITTEE_SIZE]bls.PublicKey = undefined;
     for (indices, 0..indices.len) |index, i| {
         var validator_view = try validators_view.get(index);
         var validator: types.phase0.Validator.Type = undefined;
         try validator_view.toValue(allocator, &validator);
         pubkeys[i] = validator.pubkey;
-        pubkeys_uncompressed[i] = try blst.PublicKey.uncompress(&pubkeys[i]);
+        pubkeys_uncompressed[i] = try bls.PublicKey.uncompress(&pubkeys[i]);
     }
 
     const aggregated_pk = try AggregatePublicKey.aggregate(&pubkeys_uncompressed, false);
