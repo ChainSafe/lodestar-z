@@ -24,6 +24,7 @@ const EnvCleanup = struct {
             config.state.deinit();
             pubkeys.state.deinit();
             pool.state.deinit();
+            if (blst.PairingPool.instance) |p| p.deinit();
         }
     }
 };
