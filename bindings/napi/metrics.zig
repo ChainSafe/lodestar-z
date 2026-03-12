@@ -11,14 +11,6 @@ else
 
 var initialized: bool = false;
 
-pub fn Metrics_init(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
-    if (!initialized) {
-        try state_transition.metrics.init(allocator, .{});
-        initialized = true;
-    }
-    return env.getUndefined();
-}
-
 pub fn Metrics_scrapeMetrics(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     var buf = std.ArrayList(u8).init(allocator);
     defer buf.deinit();
@@ -34,12 +26,7 @@ pub fn deinit() void {
 
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const metrics_obj = try env.createObject();
-    try metrics_obj.setNamedProperty("init", try env.createFunction(
-        "init",
-        0,
-        Metrics_init,
-        null,
-    ));
+
     try metrics_obj.setNamedProperty("scrapeMetrics", try env.createFunction(
         "scrapeMetrics",
         0,
