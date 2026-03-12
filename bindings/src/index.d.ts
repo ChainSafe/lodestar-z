@@ -238,7 +238,7 @@ declare const bindings: {
   };
   metrics: {
     init: () => void;
-    scrapeMetrics: () => Uint8Array;
+    scrapeMetrics: () => string;
   };
   BeaconStateView: typeof BeaconStateView;
 };
