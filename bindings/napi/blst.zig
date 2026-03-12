@@ -15,8 +15,6 @@ const AggregateSignature = bls.AggregateSignature;
 const ThreadPool = bls.ThreadPool;
 const DST = bls.DST;
 
-/// Cached thread pool reference for parallel verification.
-/// Initialized lazily on first use, torn down via `deinitThreadPool`.
 var thread_pool: ?*ThreadPool = null;
 
 pub fn initThreadPool(n_workers: u16) !void {
@@ -24,6 +22,14 @@ pub fn initThreadPool(n_workers: u16) !void {
     thread_pool = try ThreadPool.init(std.heap.page_allocator, .{ .n_workers = n_workers });
 }
 
+/// Closes the `ThreadPool` used for blst operations.
+///
+/// Note: this can invalidate any inflight verification requests. Consumer is responsible
+/// for the lifecycle of their program and should only call this when all work is done.
+///
+/// This note is however application dependent. For the use case of lodestar,
+/// it's likely that this would not be called at all.
+/// Same goes for any other long-lived processes.
 pub fn deinitThreadPool() void {
     if (thread_pool) |p| {
         p.deinit();
@@ -563,7 +569,9 @@ pub fn blst_aggregateVerify(
     }
 
     const pool = thread_pool orelse @panic("ThreadPool not initialized; call initThreadPool first");
-    const result = try pool.aggregateVerify(sig, sig_groupcheck, msgs, DST, pk_ptrs, pks_validate);
+    const result = pool.aggregateVerify(sig, sig_groupcheck, msgs, DST, pk_ptrs, pks_validate) catch {
+        return try env.getBoolean(false);
+    };
 
     return try env.getBoolean(result);
 }
