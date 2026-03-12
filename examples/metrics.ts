@@ -8,6 +8,22 @@
  *
  * On startup it initializes the NAPI bindings, loads (or creates) a PKIX pubkey
  * cache, and deserializes a beacon state from the first available ERA file.
+ *
+ * To check if it works:
+ *
+ * First download era files:
+ *
+ * ```sh
+ * $ zig build run:download_era_files
+ * ```
+ *
+ * Then run the server:
+ *
+ * ```sh
+ * $ node examples/metrics.ts
+ * ```
+ *
+ * Visit the endpoints stated above to interact with the example and check metrics.
  */
 import * as fs from "node:fs";
 import http from "node:http";
