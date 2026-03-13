@@ -106,8 +106,9 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
             try self.chunks.set(index, value);
         }
 
-        pub fn getAll(self: *Self, allocator: ?Allocator) ![]Element {
-            return try self.chunks.getAll(allocator orelse self.allocator, length);
+        /// Caller is responsible for freeing the returned slice using the same allocator.
+        pub fn getAll(self: *Self, allocator: Allocator) ![]Element {
+            return try self.chunks.getAll(allocator, length);
         }
 
         pub fn getAllInto(self: *Self, values: []Element) ![]Element {
@@ -212,7 +213,7 @@ test "TreeView vector getAllAlloc roundtrip" {
     var view = try VectorType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
-    const filled = try view.getAll(null);
+    const filled = try view.getAll(allocator);
     defer allocator.free(filled);
 
     try std.testing.expectEqualSlices(u16, values[0..], filled);
@@ -231,13 +232,13 @@ test "TreeView vector getAllAlloc repeat reflects updates" {
     var view = try VectorType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
-    const first = try view.getAll(null);
+    const first = try view.getAll(allocator);
     defer allocator.free(first);
     try std.testing.expectEqualSlices(u32, values[0..], first);
 
     try view.set(3, 99);
 
-    const second = try view.getAll(null);
+    const second = try view.getAll(allocator);
     defer allocator.free(second);
     values[3] = 99;
     try std.testing.expectEqualSlices(u32, values[0..], second);

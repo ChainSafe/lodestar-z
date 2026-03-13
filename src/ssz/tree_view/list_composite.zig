@@ -800,7 +800,7 @@ test "TreeView list of list commits inner length updates" {
     try vec.set(0, @as(u32, 9));
     try vec.set(1, @as(u32, 10));
     {
-        const all = try vec.getAll(null);
+        const all = try vec.getAll(allocator);
         defer allocator.free(all);
         try std.testing.expectEqual(@as(usize, 2), all.len);
         try std.testing.expectEqual(@as(u32, 9), all[0]);

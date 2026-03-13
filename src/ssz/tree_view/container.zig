@@ -640,7 +640,7 @@ test "TreeView container nested types set/get/commit" {
         try basic_vec_view.set(0, @as(u16, 1));
         try basic_vec_view.set(3, @as(u16, 4));
 
-        const all = try basic_vec_view.getAll(null);
+        const all = try basic_vec_view.getAll(allocator);
         defer allocator.free(all);
         try std.testing.expectEqual(@as(usize, 4), all.len);
         try std.testing.expectEqual(@as(u16, 1), all[0]);
