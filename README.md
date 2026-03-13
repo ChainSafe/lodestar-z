@@ -126,14 +126,49 @@ pub fn main() !void {
 }
 ```
 
-## Developer Usage
-- `git clone https://github.com/ChainSafe/lodestar-z.git`
-- `zig build run:download_spec_tests`
-- `zig build run:write_spec_tests`
-- `zig build test:int`
-- `zig build test:generic_spec_tests`
-- `zig build test:static_spec_tests -Dpreset=mainnet`
-- `zig build test:static_spec_tests -Dpreset=minimal`
+## Developer usage
+
+Clone the repository:
+
+```bash
+git clone https://github.com/ChainSafe/lodestar-z.git
+```
+
+After cloning:
+
+```bash
+# Build the project
+zig build
+
+# Run all unit tests
+zig build test
+```
+
+To run Ethereum consensus spec tests (recommended for contributors):
+
+1. Download and generate spec test vectors (one-time or when updating spec version):
+   ```bash
+   zig build run:download_spec_tests
+   zig build run:write_spec_tests
+   zig build run:write_ssz_generic_spec_tests
+   zig build run:write_ssz_static_spec_tests
+   ```
+2. Run spec tests (use `-Dpreset=minimal` for faster runs):
+   ```bash
+   zig build test:int
+   zig build test:spec_tests -Dpreset=minimal
+   zig build test:ssz_generic_spec_tests -Dpreset=minimal
+   zig build test:ssz_static_spec_tests -Dpreset=minimal
+   ```
+   For mainnet preset: replace `-Dpreset=minimal` with `-Dpreset=mainnet`.
+
+Alternatively use the [Makefile](Makefile) for common tasks: `make help`.
+
+## Contributing
+
+- **Style:** Follow [.gemini/styleguide.md](.gemini/styleguide.md) (TigerStyle-based).
+- **Testing:** Run `zig build test` before submitting; run spec tests when changing consensus or SSZ behavior.
+- **First steps:** See the [Makefile](Makefile) (`make help`) for build, test, spec, and benchmark targets.
 
 # License
 
