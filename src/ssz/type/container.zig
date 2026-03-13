@@ -13,6 +13,7 @@ const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const Depth = @import("persistent_merkle_tree").Depth;
 const ContainerTreeView = @import("../tree_view/root.zig").ContainerTreeView;
+const StructContainerTreeView = @import("../tree_view/root.zig").StructContainerTreeView;
 
 pub fn FixedContainerType(comptime ST: type) type {
     const ssz_fields = switch (@typeInfo(ST)) {
@@ -759,6 +760,114 @@ pub fn VariableContainerType(comptime ST: type) type {
                 .object_end => {},
                 else => return error.InvalidJson,
             }
+        }
+    };
+}
+
+/// Fixed-size container type that uses `StructContainerTreeView` for tree-view operations.
+pub fn StructContainerType(comptime ST: type) type {
+    const FixedCT = FixedContainerType(ST);
+
+    return struct {
+        pub const kind = TypeKind.container;
+        pub const Fields: type = ST;
+        pub const fields: []const std.builtin.Type.StructField = FixedCT.fields;
+        pub const Type: type = FixedCT.Type;
+        pub const TreeView: type = StructContainerTreeView(@This());
+        pub const fixed_size: usize = FixedCT.fixed_size;
+        pub const field_offsets: [fields.len]usize = FixedCT.field_offsets;
+        pub const chunk_count: usize = fields.len;
+        pub const chunk_depth: Depth = maxChunksToDepth(chunk_count);
+        pub const default_value: Type = FixedCT.default_value;
+        pub const default_root: [32]u8 = FixedCT.default_root;
+        pub const serialized = FixedCT.serialized;
+        const Self = @This();
+
+        /// Required interface for branch-struct nodes.
+        pub const WrappedT = struct {
+            value: Type,
+
+            pub fn getRoot(self: *const WrappedT, out: *[32]u8) void {
+                hashTreeRoot(&self.value, out) catch unreachable;
+            }
+
+            pub fn init(allocator: std.mem.Allocator, wrapped: *const WrappedT) !*const WrappedT {
+                const ptr = try allocator.create(WrappedT);
+                errdefer allocator.destroy(ptr);
+                try clone(&wrapped.value, &ptr.value);
+                return ptr;
+            }
+
+            pub fn deinit(self: *WrappedT, allocator: std.mem.Allocator) void {
+                allocator.destroy(self);
+            }
+        };
+
+        pub fn equals(a: *const Type, b: *const Type) bool {
+            return FixedCT.equals(a, b);
+        }
+
+        pub fn clone(value: *const Type, out: anytype) !void {
+            return FixedCT.clone(value, out);
+        }
+
+        pub fn hashTreeRoot(value: *const Type, out: *[32]u8) !void {
+            return FixedCT.hashTreeRoot(value, out);
+        }
+
+        pub fn serializeIntoBytes(value: *const Type, out: []u8) usize {
+            return FixedCT.serializeIntoBytes(value, out);
+        }
+
+        pub fn deserializeFromBytes(data: []const u8, out: *Type) !void {
+            return FixedCT.deserializeFromBytes(data, out);
+        }
+
+        pub const tree = struct {
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
+                if (data.len != fixed_size) {
+                    return error.InvalidSize;
+                }
+
+                var wrapped: WrappedT = undefined;
+                try Self.deserializeFromBytes(data, &wrapped.value);
+                return try pool.createBranchStruct(WrappedT, &wrapped);
+            }
+
+            pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
+                const wrapped = try pool.getStructPtr(node, WrappedT);
+                try clone(&wrapped.value, out);
+            }
+
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
+                const wrapped_ptr: *const WrappedT = @ptrCast(value);
+                return try pool.createBranchStruct(WrappedT, wrapped_ptr);
+            }
+
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                const wrapped = try pool.getStructPtr(node, WrappedT);
+                return Self.serializeIntoBytes(&wrapped.value, out);
+            }
+        };
+
+        pub fn serializeIntoJson(writer: anytype, in: *const Type) !void {
+            return FixedCT.serializeIntoJson(writer, in);
+        }
+
+        pub fn deserializeFromJson(source: *std.json.Scanner, out: *Type) !void {
+            return FixedCT.deserializeFromJson(source, out);
+        }
+
+        pub fn getFieldIndex(comptime name: []const u8) usize {
+            return FixedCT.getFieldIndex(name);
+        }
+
+        pub fn getFieldType(comptime name: []const u8) type {
+            return FixedCT.getFieldType(name);
+        }
+
+        pub fn getFieldGindex(comptime name: []const u8) Gindex {
+            return FixedCT.getFieldGindex(name);
         }
     };
 }
