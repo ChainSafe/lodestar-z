@@ -31,7 +31,7 @@ pub fn effectiveBalanceIncrementsInit(allocator: Allocator, validator_count: usi
 /// `active_indices` must be sorted in ascending order (as produced by EpochShuffling).
 /// Writes into caller-provided `out` buffer. The caller owns the memory.
 pub fn getEffectiveBalanceIncrementsZeroInactive(
-    effective_balance_increments: EffectiveBalanceIncrements,
+    effective_balance_increments: *const EffectiveBalanceIncrements,
     active_indices: []const ValidatorIndex,
     validators: []const Validator.Type,
     out: []u16,
@@ -39,33 +39,18 @@ pub fn getEffectiveBalanceIncrementsZeroInactive(
     const validator_count = validators.len;
     std.debug.assert(effective_balance_increments.items.len >= validator_count);
     std.debug.assert(out.len >= validator_count);
-    // active_indices must not exceed validator_count
     std.debug.assert(active_indices.len <= validator_count);
 
-    // Copy all effective balance increments into the output buffer
-    @memcpy(out[0..validator_count], effective_balance_increments.items[0..validator_count]);
+    // Zero the entire output buffer, then selectively set balances for active non-slashed validators.
+    // This is more efficient than copying all balances and then zeroing inactive ones, because
+    // active_indices is typically a small subset and we avoid touching every element twice.
+    @memset(out[0..validator_count], 0);
 
-    // Walk through validators and active_indices together.
-    // active_indices is sorted, so we advance through it with index j.
-    // For each validator:
-    //   - if it matches active_indices[j], it's active: keep balance unless slashed
-    //   - otherwise it's inactive: zero it out
-    var j: usize = 0;
-    for (0..validator_count) |i| {
-        if (j < active_indices.len and i == active_indices[j]) {
-            // Active validator
-            j += 1;
-            if (validators[i].slashed) {
-                out[i] = 0;
-            }
-        } else {
-            // Inactive validator
-            out[i] = 0;
+    for (active_indices) |vi| {
+        if (!validators[vi].slashed) {
+            out[vi] = effective_balance_increments.items[vi];
         }
     }
-
-    // Assert we consumed all active indices
-    std.debug.assert(j == active_indices.len);
 }
 
 test "getEffectiveBalanceIncrementsZeroInactive: zeroes inactive and slashed validators" {
@@ -84,38 +69,15 @@ test "getEffectiveBalanceIncrementsZeroInactive: zeroes inactive and slashed val
     // active_indices: validators 0, 2, 3 are active (sorted)
     const active_indices = &[_]ValidatorIndex{ 0, 2, 3 };
 
-    // Build minimal validators - only slashed field matters for this function
-    const current_epoch: u64 = 10;
+    // Only the slashed field matters — active/inactive is determined by active_indices
     var validators: [5]Validator.Type = undefined;
     for (&validators) |*v| {
         v.* = std.mem.zeroes(Validator.Type);
-        // Default: inactive (exit_epoch <= current_epoch)
-        v.activation_epoch = 0;
-        v.exit_epoch = 0;
     }
-    // Validator 0: active, not slashed
-    validators[0].activation_epoch = 0;
-    validators[0].exit_epoch = current_epoch + 1;
-    validators[0].slashed = false;
-    // Validator 1: inactive
-    validators[1].activation_epoch = 0;
-    validators[1].exit_epoch = current_epoch - 1;
-    validators[1].slashed = false;
-    // Validator 2: active, slashed
-    validators[2].activation_epoch = 0;
-    validators[2].exit_epoch = current_epoch + 1;
-    validators[2].slashed = true;
-    // Validator 3: active, not slashed
-    validators[3].activation_epoch = 0;
-    validators[3].exit_epoch = current_epoch + 1;
-    validators[3].slashed = false;
-    // Validator 4: inactive
-    validators[4].activation_epoch = 0;
-    validators[4].exit_epoch = current_epoch - 1;
-    validators[4].slashed = false;
+    validators[2].slashed = true; // validator 2: active but slashed -> zero
 
     var out: [5]u16 = undefined;
-    getEffectiveBalanceIncrementsZeroInactive(increments, active_indices, &validators, &out);
+    getEffectiveBalanceIncrementsZeroInactive(&increments, active_indices, &validators, &out);
 
     try std.testing.expectEqual(@as(u16, 32), out[0]); // active, not slashed -> kept
     try std.testing.expectEqual(@as(u16, 0), out[1]); // inactive -> zeroed
@@ -139,13 +101,10 @@ test "getEffectiveBalanceIncrementsZeroInactive: all active" {
     var validators: [3]Validator.Type = undefined;
     for (&validators) |*v| {
         v.* = std.mem.zeroes(Validator.Type);
-        v.activation_epoch = 0;
-        v.exit_epoch = 100;
-        v.slashed = false;
     }
 
     var out: [3]u16 = undefined;
-    getEffectiveBalanceIncrementsZeroInactive(increments, active_indices, &validators, &out);
+    getEffectiveBalanceIncrementsZeroInactive(&increments, active_indices, &validators, &out);
 
     try std.testing.expectEqual(@as(u16, 32), out[0]);
     try std.testing.expectEqual(@as(u16, 32), out[1]);
@@ -167,13 +126,10 @@ test "getEffectiveBalanceIncrementsZeroInactive: all inactive" {
     var validators: [3]Validator.Type = undefined;
     for (&validators) |*v| {
         v.* = std.mem.zeroes(Validator.Type);
-        v.activation_epoch = 0;
-        v.exit_epoch = 0;
-        v.slashed = false;
     }
 
     var out: [3]u16 = undefined;
-    getEffectiveBalanceIncrementsZeroInactive(increments, active_indices, &validators, &out);
+    getEffectiveBalanceIncrementsZeroInactive(&increments, active_indices, &validators, &out);
 
     try std.testing.expectEqual(@as(u16, 0), out[0]);
     try std.testing.expectEqual(@as(u16, 0), out[1]);
