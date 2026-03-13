@@ -47,7 +47,7 @@ pub fn BasicPackedChunks(
         }
 
         pub fn clone(self: *Self, opts: CloneOpts, out: *Self) !void {
-            try ChildNodes.Change.clone(Self, self, opts, out);
+            try ChildNodes.Change.cloneAndTransferCache(Self, self, opts, out);
         }
 
         pub fn deinit(self: *Self) void {

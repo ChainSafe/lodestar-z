@@ -83,7 +83,7 @@ pub const ChildNodes = struct {
             self.changed.clearRetainingCapacity();
         }
 
-        pub fn clone(comptime T: type, self: *T, opts: CloneOpts, out: *T) !void {
+        pub fn cloneAndTransferCache(comptime T: type, self: *T, opts: CloneOpts, out: *T) !void {
             try T.init(out, self.allocator, self.pool, self.root);
 
             if (!opts.transfer_cache) {
