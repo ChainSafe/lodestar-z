@@ -1,0 +1,96 @@
+/**
+ * Metrics example server that loads a beacon state from an ERA file and exposes
+ * two HTTP endpoints:
+ *
+ * - `GET /metrics` — scrapes and returns Prometheus-formatted metrics.
+ * - `GET /stf` — advances the beacon state by one slot, applying a block if one
+ *   exists or processing an empty slot otherwise.
+ *
+ * On startup it initializes the NAPI bindings, loads (or creates) a PKIX pubkey
+ * cache, and deserializes a beacon state from the first available ERA file.
+ */
+import * as fs from "node:fs";
+import http from "node:http";
+import { config } from "@lodestar/config/default";
+import * as era from "@lodestar/era";
+import bindings from "../bindings/src/index.js";
+import { getFirstEraFilePath, getEraFilePaths } from "../bindings/test/eraFiles.ts";
+
+const PORT = 8008;
+const PKIX_FILE = "./mainnet.pkix";
+
+const hasPkix = (() => {
+  try {
+    fs.accessSync(PKIX_FILE);
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+if (hasPkix) {
+  console.log("Loading pkix cache from disk...");
+  bindings.pubkeys.load(PKIX_FILE);
+} else {
+  console.log("No pkix cache found, initializing pool and pkix cache...");
+  bindings.pool.ensureCapacity(10_000_000);
+  bindings.pubkeys.ensureCapacity(2_000_000);
+}
+
+console.log("Initializing metrics...");
+bindings.metrics.init();
+
+console.log("Opening era readers...");
+const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
+const nextReader = await era.era.EraReader.open(config, getEraFilePaths()[1]);
+
+console.log("Reading serialized state...");
+const stateBytes = await reader.readSerializedState();
+
+console.log("Creating BeaconStateView...");
+var state = bindings.BeaconStateView.createFromBytes(stateBytes);
+
+if (!hasPkix) {
+  console.log("Saving pkix cache to disk...");
+  bindings.pubkeys.save(PKIX_FILE);
+}
+
+console.log(`State loaded at slot ${state.slot}, epoch ${state.epoch}`);
+
+const server = http.createServer(async (_req, res) => {
+  if (_req.url === "/metrics") {
+    const metrics = bindings.metrics.scrapeMetrics();
+    res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4" });
+    res.end(metrics);
+  } else if (_req.url === "/stf") {
+    try {
+      const nextSlot = state.slot + 1;
+      const signedBlockBytes = await nextReader.readSerializedBlock(nextSlot);
+
+      console.time("stateTransition");
+      if (signedBlockBytes) {
+        state = bindings.stateTransition.stateTransition(state, signedBlockBytes as Uint8Array);
+      } else {
+        state = state.processSlots(nextSlot);
+      }
+      console.timeEnd("stateTransition");
+
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(`State transitioned to slot ${state.slot}, epoch ${state.epoch}\n`);
+    } catch (e) {
+      console.error("stateTransition error:", e);
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end(`Error in state transition: ${e}\n`);
+    }
+  } else {
+    res.writeHead(404);
+    res.end("Not found. Use /metrics endpoint.\n");
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`Metrics server listening on http://localhost:${PORT}/metrics`);
+  console.log("You can scrape metrics with: curl http://localhost:8008/metrics");
+  console.log("You can transition state with: curl http://localhost:8008/stf");
+  console.log("Or run Prometheus with: docker run -p 9090:9090 -v $(pwd)/examples/prometheus.yml:/etc/prometheus/prometheus.yml prom/prometheus");
+});
