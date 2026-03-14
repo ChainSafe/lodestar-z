@@ -134,9 +134,9 @@ pub fn main() !void {
     const block_bytes: []u8 = @constCast(try era_reader.readSerializedBlock(allocator, block_slot) orelse return error.InvalidEraFile);
     defer allocator.free(block_bytes);
 
-    var block = SignedBeaconBlock.default_value;
-    defer block.deinit();
-    try SignedBeaconBlock.deserializeFromBytes(allocator, block_bytes, &block);
+    const block = allocator.create(SignedBeaconBlock.Type) catch unreachable;
+    block.* = SignedBeaconBlock.default_value;
+    try SignedBeaconBlock.deserializeFromBytes(allocator, block_bytes, block);
 
     const attestation = &block.message.body.attestations.items[0];
     const attestation_bytes = try allocator.alloc(u8, Attestation.serializedSize(attestation));
