@@ -73,7 +73,7 @@ pub fn getTotalSlashingsByIncrement(
 ) !u64 {
     var total_slashings_by_increment: u64 = 0;
     var slashings = try state.slashings();
-    const slashings_len = @TypeOf(slashings).length;
+    const slashings_len = @TypeOf(slashings.*).length;
     for (0..slashings_len) |i| {
         const slashing = try slashings.get(i);
         total_slashings_by_increment += @divFloor(slashing, preset.EFFECTIVE_BALANCE_INCREMENT);

@@ -23,8 +23,8 @@ pub fn processRegistryUpdates(
     for (cache.indices_to_eject.items) |i| {
         // set validator exit epoch and withdrawable epoch
         // TODO: Figure out a way to quickly set properties on the validators tree
-        var validator = try validators.get(i);
-        try initiateValidatorExit(fork, config, epoch_cache, state, &validator);
+        const validator = try validators.get(i);
+        try initiateValidatorExit(fork, config, epoch_cache, state, validator);
     }
 
     // set new activation eligibilities
