@@ -1,12 +1,12 @@
 //! Simple example to show collection of metrics using metrics.zig, with mainnet era files.
-//!
+//!ny
 //! Metrics are served on `port` on a separate thread, which is visualized through Prometheus,
 //! while we continuously run the state transition function using data from 2 consecutive era files.
 //! Run a Prometheus instance to see the data visually.
 //!
 //! To run this example, we first require era files: `zig build run:download_era_files`.
 //!
-//! Then, run `zig build run:metrics_era`.
+//! Then, run `zig build run:metrics_stf`.
 //!
 //! Note: this example is mainly meant to test that our metrics is working; realistically we do not need
 //! such an example. The bulk of this code should be moved to our beacon node implementation once it's ready.
@@ -20,14 +20,14 @@ const state_transition = @import("state_transition");
 const types = @import("consensus_types");
 
 const CachedBeaconState = state_transition.CachedBeaconState;
-const SignedBlock = state_transition.SignedBlock;
+const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 const active_preset = @import("preset").active_preset;
 const mainnet_chain_config = @import("config").mainnet.chain_config;
 const minimal_chain_config = @import("config").minimal.chain_config;
 const BeaconConfig = @import("config").BeaconConfig;
 const ValidatorIndex = @import("consensus_types").primitive.ValidatorIndex.Type;
 const Index2PubkeyCache = state_transition.Index2PubkeyCache;
-const PubkeyIndexMap = state_transition.PubkeyIndexMap(ValidatorIndex);
+const PubkeyIndexMap = state_transition.PubkeyIndexMap;
 const chain_config = if (active_preset == .mainnet) mainnet_chain_config else minimal_chain_config;
 
 const MetricsHandler = struct {
@@ -96,7 +96,7 @@ pub fn main() !void {
     defer reader_blocks.close(allocator);
 
     std.debug.print("Reading state\n", .{});
-    var state_ptr = try allocator.create(state_transition.BeaconState);
+    var state_ptr = try allocator.create(@import("fork_types").AnyBeaconState);
     errdefer allocator.destroy(state_ptr);
     state_ptr.* = try reader_state.readState(allocator, null);
     const blocks_index = reader_blocks.group_indices[0].blocks_index orelse return error.NoBlockIndex;
@@ -106,7 +106,7 @@ pub fn main() !void {
         allocator.destroy(index_pubkey_cache);
     }
     index_pubkey_cache.* = Index2PubkeyCache.init(allocator);
-    const pubkey_index_map = try PubkeyIndexMap.init(allocator);
+    var pubkey_index_map = PubkeyIndexMap.init(allocator);
     errdefer pubkey_index_map.deinit();
 
     const config = try allocator.create(BeaconConfig);
@@ -116,7 +116,7 @@ pub fn main() !void {
     const immutable_data = state_transition.EpochCacheImmutableData{
         .config = config,
         .index_to_pubkey = index_pubkey_cache,
-        .pubkey_to_index = pubkey_index_map,
+        .pubkey_to_index = &pubkey_index_map,
     };
 
     std.debug.print("Creating cached beacon state\n", .{});
@@ -131,14 +131,11 @@ pub fn main() !void {
     );
     std.debug.print("Running state transition.\nYou may open up a local prometheus instance to check out metrics in action.\n", .{});
     for (blocks_index.start_slot + 1..blocks_index.start_slot + blocks_index.offsets.len) |slot| {
-        const raw_block = try reader_blocks.readBlock(allocator, slot) orelse continue;
-        defer raw_block.deinit(allocator);
+        const block = try reader_blocks.readBlock(allocator, slot) orelse continue;
 
-        const block: SignedBlock = .{ .regular = raw_block };
-
-        const block_num = switch (block.message().beaconBlockBody()) {
-            .regular => |b| b.executionPayload().getBlockNumber(),
-            .blinded => |b| b.executionPayloadHeader().getBlockNumber(),
+        const block_num = switch (block.blockType()) {
+            .full => (try block.beaconBlock().beaconBlockBody().executionPayload()).blockNumber(),
+            .blinded => (try block.beaconBlock().beaconBlockBody().executionPayloadHeader()).blockNumber(),
         };
         std.debug.print("state slot = {}, block number = {}\n", .{ try cached_state.state.slot(), block_num });
 
