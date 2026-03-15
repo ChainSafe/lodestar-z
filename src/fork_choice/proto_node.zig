@@ -174,13 +174,13 @@ pub const ProtoBlock = struct {
     /// Index of the builder that proposed this block (Gloas ePBS).
     /// Used for execution payload gossip validation.
     builder_index: ?ValidatorIndex = null,
-    /// Execution block hash from the builder's bid (Gloas ePBS).
+    /// Block hash from the builder's bid (Gloas ePBS).
     /// Used for execution payload gossip validation.
-    /// Not to be confused with executionPayloadBlockHash in BlockExtraMeta.
-    block_hash: ?Root = null,
+    /// TS ref: blockHashFromBid. Not to be confused with executionPayloadBlockHash in BlockExtraMeta.
+    block_hash_from_bid: ?Root = null,
     /// Parent execution block hash (Gloas ePBS).
     /// Used to determine if this block extends its parent's EMPTY or FULL variant.
-    /// If parent_block_hash == parent.block_hash, parent is FULL; otherwise EMPTY.
+    /// If parent_block_hash == parent.block_hash_from_bid, parent is FULL; otherwise EMPTY.
     parent_block_hash: ?Root = null,
     /// Payload resolution status (Gloas ePBS). Pre-Gloas blocks are always .full.
     payload_status: PayloadStatus = .full,
@@ -237,13 +237,13 @@ pub const ProtoNode = struct {
     /// Index of the builder that proposed this block (Gloas ePBS).
     /// Used for execution payload gossip validation.
     builder_index: ?ValidatorIndex = null,
-    /// Execution block hash from the builder's bid (Gloas ePBS).
+    /// Block hash from the builder's bid (Gloas ePBS).
     /// Used for execution payload gossip validation.
-    /// Not to be confused with executionPayloadBlockHash in BlockExtraMeta.
-    block_hash: ?Root = null,
+    /// TS ref: blockHashFromBid. Not to be confused with executionPayloadBlockHash in BlockExtraMeta.
+    block_hash_from_bid: ?Root = null,
     /// Parent execution block hash (Gloas ePBS).
     /// Used to determine if this block extends its parent's EMPTY or FULL variant.
-    /// If parent_block_hash == parent.block_hash, parent is FULL; otherwise EMPTY.
+    /// If parent_block_hash == parent.block_hash_from_bid, parent is FULL; otherwise EMPTY.
     parent_block_hash: ?Root = null,
     /// Payload resolution status (Gloas ePBS). Pre-Gloas blocks are always .full.
     payload_status: PayloadStatus = .full,
@@ -434,7 +434,7 @@ test "ProtoNode default values" {
     try testing.expectEqual(node.best_child, null);
     try testing.expectEqual(node.best_descendant, null);
     try testing.expectEqual(node.builder_index, null);
-    try testing.expectEqual(node.block_hash, null);
+    try testing.expectEqual(node.block_hash_from_bid, null);
     try testing.expectEqual(node.slot, 0);
     try testing.expectEqual(node.block_root, ZERO_HASH);
 }

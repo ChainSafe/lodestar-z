@@ -16,7 +16,6 @@ pub const LVHExecResponse = proto_node.LVHExecResponse;
 pub const LVHValidResponse = proto_node.LVHValidResponse;
 pub const LVHInvalidResponse = proto_node.LVHInvalidResponse;
 pub const LVHExecErrorCode = proto_node.LVHExecErrorCode;
-pub const ZERO_HASH = proto_node.ZERO_HASH;
 
 pub const ProtoArrayError = proto_array.ProtoArrayError;
 pub const ForkChoiceError = proto_node.ForkChoiceError;
@@ -24,6 +23,7 @@ pub const InvalidBlockCode = proto_node.InvalidBlockCode;
 pub const InvalidAttestationCode = proto_node.InvalidAttestationCode;
 
 pub const ProtoArrayStruct = proto_array.ProtoArray;
+pub const DEFAULT_PRUNE_THRESHOLD = proto_array.DEFAULT_PRUNE_THRESHOLD;
 pub const VariantIndices = proto_array.VariantIndices;
 pub const RootContext = proto_array.RootContext;
 

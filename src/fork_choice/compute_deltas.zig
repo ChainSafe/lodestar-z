@@ -45,7 +45,7 @@ pub const DeltasCache = std.ArrayListUnmanaged(i64);
 pub fn computeDeltas(
     allocator: Allocator,
     deltas_cache: *DeltasCache,
-    num_proto_nodes: usize,
+    num_proto_nodes: u32,
     vote_current_indices: []VoteIndex,
     vote_next_indices: []const VoteIndex,
     old_balances: []const u16,
@@ -56,14 +56,13 @@ pub fn computeDeltas(
     assert(num_proto_nodes < NULL_VOTE_INDEX);
 
     // deltas.length = numProtoNodes; deltas.fill(0)
-    try deltas_cache.resize(allocator, num_proto_nodes);
+    try deltas_cache.resize(allocator, @intCast(num_proto_nodes));
     const deltas = deltas_cache.items;
     @memset(deltas, 0);
 
     const num_validators = vote_next_indices.len;
 
     // Sort equivocating indices for pointer advancement in the loop.
-    // Heap-allocated like TS's Array.from(equivocatingIndicesSet).sort().
     const sorted_eq = try sortEquivocatingKeys(allocator, equivocating_indices);
     defer allocator.free(sorted_eq);
 
@@ -159,7 +158,7 @@ const TestContext = struct {
 
     fn run(
         self: *TestContext,
-        num_nodes: usize,
+        num_nodes: u32,
         old_bal: []const u16,
         new_bal: []const u16,
         eq: EquivocatingIndices,
