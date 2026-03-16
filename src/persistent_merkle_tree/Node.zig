@@ -34,8 +34,8 @@ pub const Error = error{
 ///
 /// `[1, next_free]`
 ///
-/// If the high bit is not set, the next 3 bits determine the `node_type`
-/// The following 28 bits are used for the `ref_count`.
+/// If the high bit is not set, the next two bits determine the `node_type`
+/// The following 29 bits are used for the `ref_count`.
 ///
 /// `[0, node_type, ref_count]`
 pub const State = enum(u32) {
@@ -45,16 +45,14 @@ pub const State = enum(u32) {
 
     pub const max_next_free = 0x7FFFFFFF;
 
-    // five types of nodes, use 3 bits
-    const node_type = 0x70000000;
+    // four types of nodes
+    const node_type = 0x60000000;
     pub const zero: State = @enumFromInt(0x00000000);
-    pub const leaf: State = @enumFromInt(0x10000000);
-    pub const branch_lazy: State = @enumFromInt(0x20000000);
-    pub const branch_computed: State = @enumFromInt(0x30000000);
-    pub const branch_struct_lazy: State = @enumFromInt(0x40000000);
-    pub const branch_struct_computed: State = @enumFromInt(0x50000000);
+    pub const leaf: State = @enumFromInt(0x20000000);
+    pub const branch_lazy: State = @enumFromInt(0x40000000);
+    pub const branch_computed: State = @enumFromInt(0x60000000);
 
-    pub const max_ref_count = 0x0FFFFFFF;
+    pub const max_ref_count = 0x1FFFFFFF;
 
     pub inline fn isFree(node: State) bool {
         return @intFromEnum(node) & @intFromEnum(free) != 0;
@@ -88,24 +86,8 @@ pub const State = enum(u32) {
         return @intFromEnum(node) & node_type == @intFromEnum(branch_computed);
     }
 
-    pub inline fn isBranchStruct(node: State) bool {
-        return @intFromEnum(node) & @intFromEnum(branch_struct_lazy) != 0;
-    }
-
-    pub inline fn isBranchStructLazy(node: State) bool {
-        return @intFromEnum(node) & node_type == @intFromEnum(branch_struct_lazy);
-    }
-
-    pub inline fn isBranchStructComputed(node: State) bool {
-        return @intFromEnum(node) & node_type == @intFromEnum(branch_struct_computed);
-    }
-
     pub inline fn setBranchComputed(node: *State) void {
         node.* = @enumFromInt(@intFromEnum(node.*) | @intFromEnum(branch_computed));
-    }
-
-    pub inline fn setBranchStructComputed(node: *State) void {
-        node.* = @enumFromInt(@intFromEnum(node.*) | @intFromEnum(branch_struct_computed));
     }
 
     pub inline fn initRefCount(node: State) State {
@@ -140,12 +122,6 @@ pub const Pool = struct {
     allocator: Allocator,
     nodes: std.MultiArrayList(Node).Slice,
     next_free_node: Id,
-
-    pub const BranchStructRef = struct {
-        ptr: *anyopaque,
-        get_root: *const fn (ptr: *const anyopaque, out: *[32]u8) void,
-        deinit: *const fn (ptr: *anyopaque, allocator: Allocator) void,
-    };
 
     pub const free_bit: u32 = 0x80000000;
     pub const max_ref_count: u32 = 0x7FFFFFFF;
@@ -270,44 +246,6 @@ pub const Pool = struct {
         return node_id;
     }
 
-    /// The pool allocates and owns a clone of `ptr`; the caller retains ownership of its data.
-    pub fn createBranchStruct(self: *Pool, comptime T: type, ptr: *const T) Error!Id {
-        const cloned = try T.init(self.allocator, ptr);
-        errdefer @constCast(cloned).deinit(self.allocator);
-
-        const branch_struct_ref = try self.allocator.create(BranchStructRef);
-        errdefer self.allocator.destroy(branch_struct_ref);
-
-        branch_struct_ref.* = .{
-            .ptr = @ptrCast(@constCast(cloned)),
-            .get_root = struct {
-                fn call(ptr_erased: *const anyopaque, out: *[32]u8) void {
-                    const typed_ptr: *const T = @ptrCast(@alignCast(ptr_erased));
-                    typed_ptr.getRoot(out);
-                }
-            }.call,
-            .deinit = struct {
-                fn call(ptr_erased: *anyopaque, allocator: Allocator) void {
-                    const typed_ptr: *T = @ptrCast(@alignCast(ptr_erased));
-                    typed_ptr.deinit(allocator);
-                }
-            }.call,
-        };
-
-        const node_id = try self.create();
-        const ptr_usize = @intFromPtr(branch_struct_ref);
-        const right_ptr_value: u32 = @intCast(ptr_usize & 0xFFFFFFFF);
-        self.nodes.items(.right)[@intFromEnum(node_id)] = @enumFromInt(right_ptr_value);
-        if (comptime @sizeOf(usize) == 8) {
-            const left_ptr_value: u32 = @intCast(ptr_usize >> 32);
-            self.nodes.items(.left)[@intFromEnum(node_id)] = @enumFromInt(left_ptr_value);
-        } else {
-            self.nodes.items(.left)[@intFromEnum(node_id)] = @enumFromInt(0);
-        }
-        self.nodes.items(.state)[@intFromEnum(node_id)] = State.branch_struct_lazy.initRefCount();
-        return node_id;
-    }
-
     /// Allocates nodes into the pool.
     ///
     /// All nodes are allocated with refcount=0.
@@ -395,26 +333,6 @@ pub const Pool = struct {
         _ = try states[@intFromEnum(node_id)].incRefCount();
     }
 
-    pub fn getStructPtr(self: *Pool, node_id: Id, comptime T: type) Error!*const T {
-        const state = self.nodes.items(.state)[@intFromEnum(node_id)];
-        if (!state.isBranchStruct()) {
-            return Error.InvalidNode;
-        }
-        const struct_ref = self.getBranchStructRefUnsafe(node_id);
-        const ptr: *const T = @ptrCast(@alignCast(struct_ref.ptr));
-        return ptr;
-    }
-
-    pub fn getBranchStructRefUnsafe(self: *Pool, node_id: Id) *BranchStructRef {
-        const left_ptr_value: u32 = @intFromEnum(self.nodes.items(.left)[@intFromEnum(node_id)]);
-        const right_ptr_value: u32 = @intFromEnum(self.nodes.items(.right)[@intFromEnum(node_id)]);
-        const ptr_int: usize = if (comptime @sizeOf(usize) == 8)
-            @as(u64, left_ptr_value) << 32 | @as(u64, right_ptr_value)
-        else
-            right_ptr_value;
-        return @ptrFromInt(ptr_int);
-    }
-
     pub fn unref(self: *Pool, node_id: Id) void {
         const states = self.nodes.items(.state);
         const lefts = self.nodes.items(.left);
@@ -464,12 +382,6 @@ pub const Pool = struct {
                 current = null;
             }
 
-            if (states[@intFromEnum(id)].isBranchStruct()) {
-                const struct_ref = self.getBranchStructRefUnsafe(id);
-                struct_ref.deinit(struct_ref.ptr, self.allocator);
-                self.allocator.destroy(struct_ref);
-            }
-
             // Return the node to the free list
             states[@intFromEnum(id)] = State.initNextFree(self.next_free_node);
             self.next_free_node = id;
@@ -485,7 +397,7 @@ pub const Id = enum(u32) {
 
     /// Returns true if navigation to the child node is not possible
     pub inline fn noChild(node_id: Id, state: State) bool {
-        return state.isLeaf() or state.isBranchStruct() or @intFromEnum(node_id) == 0;
+        return state.isLeaf() or @intFromEnum(node_id) == 0;
     }
 
     /// Returns the root hash of the tree, computing any lazy branches as needed.
@@ -500,11 +412,6 @@ pub const Id = enum(u32) {
             state.setBranchComputed();
         }
 
-        if (state.isBranchStructLazy()) {
-            const struct_ref = pool.getBranchStructRefUnsafe(node_id);
-            struct_ref.get_root(struct_ref.ptr, hash);
-            state.setBranchStructComputed();
-        }
         return hash;
     }
 

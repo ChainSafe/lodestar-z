@@ -57,7 +57,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
         /// a tuple of either Optional(Value) for basic type or Optional(ChildTreeView) for composite type
         child_data: TreeViewData,
         /// whether the corresponding child node/data has changed since the last update of the root
-        changed: std.AutoArrayHashMapUnmanaged(usize, void),
+        changed: std.StaticBitSet(ST.chunk_count),
         original_nodes: [ST.chunk_count]?Node.Id,
         pub const SszType = ST;
 
@@ -74,7 +74,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 .child_data = .{null} ** ST.chunk_count,
                 .original_nodes = .{null} ** ST.chunk_count,
                 .root = root,
-                .changed = .empty,
+                .changed = std.StaticBitSet(ST.chunk_count).initEmpty(),
             };
             return ptr;
         }
@@ -89,7 +89,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             ptr.original_nodes = self.original_nodes;
 
             inline for (0..ST.fields.len) |i| {
-                if (self.changed.contains(i)) {
+                if (self.changed.isSet(i)) {
                     if (ptr.child_data[i]) |child_view_ptr| {
                         if (!comptime isBasicType(ST.fields[i].type)) {
                             @constCast(child_view_ptr).deinit();
@@ -102,7 +102,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             // clear self's caches
             self.child_data = .{null} ** ST.chunk_count;
             self.original_nodes = .{null} ** ST.chunk_count;
-            self.changed.clearRetainingCapacity();
+            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
 
             return ptr;
         }
@@ -126,7 +126,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 // these nodes are unref by root
                 self.original_nodes[i] = null;
             }
-            self.changed.deinit(self.allocator);
+            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
         }
 
         pub fn commit(self: *Self) !void {
@@ -139,7 +139,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
             var changed_idx: usize = 0;
             inline for (ST.fields, 0..) |field, i| {
-                if (self.changed.get(i) != null) {
+                if (self.changed.isSet(i)) {
                     const ChildST = ST.getFieldType(field.name);
                     if (comptime isBasicType(ChildST)) {
                         const child_value = self.child_data[i] orelse return error.MissingChildValue;
@@ -168,7 +168,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 }
             }
 
-            self.changed.clearRetainingCapacity();
+            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
             if (changed_idx == 0) {
                 return;
             }
@@ -237,7 +237,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                     return child_value;
                 }
             } else {
-                try self.changed.put(self.allocator, field_index, {});
+                self.changed.set(field_index);
 
                 const existing_ptr = self.child_data[field_index];
                 if (existing_ptr) |child_view_ptr| {
@@ -280,7 +280,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 self.child_data[field_index] = value;
             }
 
-            try self.changed.put(self.allocator, field_index, {});
+            self.changed.set(field_index);
         }
 
         /// Serialize the tree view into a provided buffer.
@@ -436,8 +436,7 @@ pub fn StructContainerTreeView(comptime ST: type) type {
         allocator: Allocator,
         pool: *Node.Pool,
         root: Node.Id,
-        // owned by the pool; this view only borrows it
-        original_value: *const T,
+        original_value: T,
         changed: ?Optional(T),
 
         pub const SszType = ST;
@@ -448,16 +447,15 @@ pub fn StructContainerTreeView(comptime ST: type) type {
             try pool.ref(root);
             errdefer pool.unref(root);
 
-            const original_value = try pool.getStructPtr(root, T);
-
             const ptr = try allocator.create(Self);
-            ptr.* = .{
-                .allocator = allocator,
-                .pool = pool,
-                .root = root,
-                .original_value = original_value,
-                .changed = null,
-            };
+            errdefer allocator.destroy(ptr);
+
+            try ST.tree.toValue(root, pool, &ptr.original_value);
+
+            ptr.allocator = allocator;
+            ptr.pool = pool;
+            ptr.root = root;
+            ptr.changed = null;
             return ptr;
         }
 
@@ -481,13 +479,12 @@ pub fn StructContainerTreeView(comptime ST: type) type {
                 @field(new_value, field.name) = try self.get(field.name);
             }
 
-            const wrapped_value_ptr: *const ST.WrappedT = @ptrCast(@alignCast(&new_value));
-            const new_root = try self.pool.createBranchStruct(ST.WrappedT, wrapped_value_ptr);
-            self.original_value = try self.pool.getStructPtr(new_root, T);
-            self.changed = null;
+            const new_root = try ST.tree.fromValue(self.pool, &new_value);
             try self.pool.ref(new_root);
             self.pool.unref(self.root);
             self.root = new_root;
+            self.original_value = new_value;
+            self.changed = null;
         }
 
         pub fn getRoot(self: *const Self) Node.Id {
@@ -525,7 +522,7 @@ pub fn StructContainerTreeView(comptime ST: type) type {
         pub fn toValue(self: *Self, allocator: Allocator, out: *ST.Type) !void {
             _ = allocator;
             try self.commit();
-            out.* = self.original_value.*;
+            out.* = self.original_value;
         }
 
         pub fn Field(comptime field_name: []const u8) type {
@@ -560,7 +557,7 @@ pub fn StructContainerTreeView(comptime ST: type) type {
 
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
             try self.commit();
-            return ST.serializeIntoBytes(self.original_value, out);
+            return ST.serializeIntoBytes(&self.original_value, out);
         }
 
         pub fn serializedSize(_: *const Self) usize {
