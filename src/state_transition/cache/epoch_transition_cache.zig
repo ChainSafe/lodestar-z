@@ -557,6 +557,18 @@ pub const EpochTransitionCache = struct {
             balances.deinit();
         }
     }
+
+    /// Ensure rewards/penalties arrays match the current validator count.
+    pub fn syncRewardPenaltyLengths(self: *EpochTransitionCache, validator_count: usize) !void {
+        _reused_lock.lock();
+        defer _reused_lock.unlock();
+
+        const reused_cache = _reused_cache orelse return error.ReusedEpochTransitionCacheUnavailable;
+        try reused_cache.rewards.resize(validator_count);
+        try reused_cache.penalties.resize(validator_count);
+        self.rewards = reused_cache.rewards.items;
+        self.penalties = reused_cache.penalties.items;
+    }
 };
 
 test "EpochTransitionCache - finalProcessEpoch" {
