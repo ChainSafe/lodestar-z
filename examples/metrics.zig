@@ -132,6 +132,7 @@ pub fn main() !void {
     std.debug.print("Running state transition.\nYou may open up a local prometheus instance to check out metrics in action.\n", .{});
     for (blocks_index.start_slot + 1..blocks_index.start_slot + blocks_index.offsets.len) |slot| {
         const block = try reader_blocks.readBlock(allocator, slot) orelse continue;
+        defer block.deinit(allocator);
 
         const block_num = switch (block.blockType()) {
             .full => (try block.beaconBlock().beaconBlockBody().executionPayload()).blockNumber(),
