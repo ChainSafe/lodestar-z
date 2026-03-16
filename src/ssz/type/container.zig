@@ -783,26 +783,6 @@ pub fn StructContainerType(comptime ST: type) type {
         pub const serialized = FixedCT.serialized;
         const Self = @This();
 
-        /// Required interface for branch-struct nodes.
-        pub const WrappedT = struct {
-            value: Type,
-
-            pub fn getRoot(self: *const WrappedT, out: *[32]u8) void {
-                hashTreeRoot(&self.value, out) catch unreachable;
-            }
-
-            pub fn init(allocator: std.mem.Allocator, wrapped: *const WrappedT) !*const WrappedT {
-                const ptr = try allocator.create(WrappedT);
-                errdefer allocator.destroy(ptr);
-                try clone(&wrapped.value, &ptr.value);
-                return ptr;
-            }
-
-            pub fn deinit(self: *WrappedT, allocator: std.mem.Allocator) void {
-                allocator.destroy(self);
-            }
-        };
-
         pub fn equals(a: *const Type, b: *const Type) bool {
             return FixedCT.equals(a, b);
         }
@@ -823,32 +803,7 @@ pub fn StructContainerType(comptime ST: type) type {
             return FixedCT.deserializeFromBytes(data, out);
         }
 
-        pub const tree = struct {
-            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
-                if (data.len != fixed_size) {
-                    return error.InvalidSize;
-                }
-
-                var wrapped: WrappedT = undefined;
-                try Self.deserializeFromBytes(data, &wrapped.value);
-                return try pool.createBranchStruct(WrappedT, &wrapped);
-            }
-
-            pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
-                const wrapped = try pool.getStructPtr(node, WrappedT);
-                try clone(&wrapped.value, out);
-            }
-
-            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                const wrapped_ptr: *const WrappedT = @ptrCast(value);
-                return try pool.createBranchStruct(WrappedT, wrapped_ptr);
-            }
-
-            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
-                const wrapped = try pool.getStructPtr(node, WrappedT);
-                return Self.serializeIntoBytes(&wrapped.value, out);
-            }
-        };
+        pub const tree = FixedCT.tree;
 
         pub fn serializeIntoJson(writer: anytype, in: *const Type) !void {
             return FixedCT.serializeIntoJson(writer, in);
