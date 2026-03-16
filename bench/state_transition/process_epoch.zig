@@ -326,7 +326,6 @@ fn ProcessHistoricalSummariesUpdateBench(comptime fork: ForkSeq) type {
 fn ProcessParticipationFlagUpdatesBench(comptime fork: ForkSeq) type {
     return struct {
         cached_state: *CachedBeaconState,
-        epoch_transition_cache: *EpochTransitionCache,
 
         pub fn run(self: @This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
@@ -860,7 +859,6 @@ fn runBenchmark(
     if (comptime fork.gte(.altair)) {
         try bench.addParam("participation_flags", &ProcessParticipationFlagUpdatesBench(fork){
             .cached_state = cached_state,
-            .epoch_transition_cache = &epoch_transition_cache,
         }, .{});
 
         try bench.addParam("sync_committee_updates", &ProcessSyncCommitteeUpdatesBench(fork){
