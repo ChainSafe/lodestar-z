@@ -1,5 +1,5 @@
 //! Simple example to show collection of metrics using metrics.zig, with mainnet era files.
-//!ny
+//!
 //! Metrics are served on `port` on a separate thread, which is visualized through Prometheus,
 //! while we continuously run the state transition function using data from 2 consecutive era files.
 //! Run a Prometheus instance to see the data visually.
