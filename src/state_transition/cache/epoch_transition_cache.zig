@@ -559,6 +559,7 @@ pub const EpochTransitionCache = struct {
     }
 
     /// Ensure rewards/penalties arrays match the current validator count.
+    /// This is only used in benchmark tests where we want to reuse the cache across steps.
     pub fn syncRewardPenaltyLengths(self: *EpochTransitionCache, validator_count: usize) !void {
         _reused_lock.lock();
         defer _reused_lock.unlock();

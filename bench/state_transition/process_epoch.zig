@@ -37,6 +37,26 @@ fn ProcessJustificationAndFinalizationBench(comptime fork: ForkSeq) type {
     };
 }
 
+fn ProcessBeforeProcessEpochBench(comptime fork: ForkSeq) type {
+    comptime _ = fork;
+    return struct {
+        cached_state: *CachedBeaconState,
+
+        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+            const cloned = self.cached_state;
+            cloned.state.commit() catch unreachable;
+
+            var epoch_transition_cache = EpochTransitionCache.init(
+                allocator,
+                cloned.config,
+                cloned.epoch_cache,
+                cloned.state,
+            ) catch unreachable;
+            defer epoch_transition_cache.deinit();
+        }
+    };
+}
+
 fn ProcessInactivityUpdatesBench(comptime fork: ForkSeq) type {
     return struct {
         cached_state: *CachedBeaconState,
@@ -322,6 +342,7 @@ fn ProcessProposerLookaheadBench(comptime fork: ForkSeq) type {
 
 const Step = enum {
     epoch_total,
+    before_process_epoch,
     justification_finalization,
     inactivity_updates,
     rewards_and_penalties,
@@ -693,6 +714,10 @@ fn runBenchmark(
 
     var bench = zbench.Benchmark.init(allocator, .{ .iterations = 50 });
     defer bench.deinit();
+
+    try bench.addParam("before_process_epoch", &ProcessBeforeProcessEpochBench(fork){
+        .cached_state = cached_state,
+    }, .{});
 
     try bench.addParam("justification_finalization", &ProcessJustificationAndFinalizationBench(fork){
         .cached_state = cached_state,
