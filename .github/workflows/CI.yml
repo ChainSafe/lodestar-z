@@ -263,3 +263,19 @@ jobs:
       - name: Test bindings
         run: |
           pnpm test
+
+  build-examples:
+    name: spec tests - mainnet
+    # It takes time to download and run spec tests, so we only run them on ubuntu-latest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Build metrics example
+        run: |
+          zig build build-exe:metrics_stf
