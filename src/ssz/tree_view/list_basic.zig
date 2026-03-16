@@ -83,12 +83,12 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
         pub fn hashTreeRootInto(self: *Self, out: *[32]u8) !void {
             try self.commit();
-            out.* = self.chunks.root.getRoot(self.chunks.pool).*;
+            out.* = self.chunks.state.root.getRoot(self.chunks.state.pool).*;
         }
 
         pub fn hashTreeRoot(self: *Self) !*const [32]u8 {
             try self.commit();
-            return self.chunks.root.getRoot(self.chunks.pool);
+            return self.chunks.state.root.getRoot(self.chunks.state.pool);
         }
 
         pub fn fromValue(allocator: Allocator, pool: *Node.Pool, value: *const ST.Type) !*Self {
@@ -99,7 +99,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
         pub fn toValue(self: *Self, allocator: Allocator, out: *ST.Type) !void {
             try self.commit();
-            try ST.tree.toValue(allocator, self.chunks.root, self.chunks.pool, out);
+            try ST.tree.toValue(allocator, self.chunks.state.root, self.chunks.state.pool, out);
         }
 
         pub fn setLength(self: *Self, new_length: usize) !void {
@@ -120,8 +120,8 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                 return .{
                     .tree_view = tree_view,
                     .depth_iterator = Node.DepthIterator.init(
-                        tree_view.chunks.pool,
-                        tree_view.chunks.root,
+                        tree_view.chunks.state.pool,
+                        tree_view.chunks.state.root,
                         ST.chunk_depth + 1,
                         ST.chunkIndex(start_index),
                     ),
@@ -138,7 +138,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                     try self.depth_iterator.next();
                 self.elem_node = n;
                 var value: Element = undefined;
-                try ST.Element.tree.toValuePacked(n, self.tree_view.chunks.pool, elem_index, &value);
+                try ST.Element.tree.toValuePacked(n, self.tree_view.chunks.state.pool, elem_index, &value);
                 self.elem_index += 1;
                 if (self.elem_index % items_per_chunk == 0) {
                     self.elem_node = null;
@@ -148,7 +148,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         };
 
         pub fn getRoot(self: *const Self) Node.Id {
-            return self.chunks.root;
+            return self.chunks.state.root;
         }
 
         pub fn length(self: *const Self) !usize {
@@ -194,7 +194,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
             const list_length = try self.length();
             if (list_length == 0 or index >= list_length - 1) {
-                return try Self.init(self.allocator, self.chunks.pool, self.chunks.root);
+                return try Self.init(self.allocator, self.chunks.state.pool, self.chunks.state.root);
             }
 
             const new_length = index + 1;
@@ -204,52 +204,52 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
             const chunk_index = index / items_per_chunk;
             const chunk_offset = index % items_per_chunk;
-            const chunk_node = try Node.Id.getNodeAtDepth(self.chunks.root, self.chunks.pool, chunk_depth, chunk_index);
+            const chunk_node = try Node.Id.getNodeAtDepth(self.chunks.state.root, self.chunks.state.pool, chunk_depth, chunk_index);
 
-            var chunk_bytes = chunk_node.getRoot(self.chunks.pool).*;
+            var chunk_bytes = chunk_node.getRoot(self.chunks.state.pool).*;
             const keep_bytes = (chunk_offset + 1) * ST.Element.fixed_size;
             if (keep_bytes < BYTES_PER_CHUNK) {
                 @memset(chunk_bytes[keep_bytes..], 0);
             }
 
-            var truncated_chunk_node: ?Node.Id = try self.chunks.pool.createLeaf(&chunk_bytes);
-            defer if (truncated_chunk_node) |id| self.chunks.pool.unref(id);
+            var truncated_chunk_node: ?Node.Id = try self.chunks.state.pool.createLeaf(&chunk_bytes);
+            defer if (truncated_chunk_node) |id| self.chunks.state.pool.unref(id);
             var updated: ?Node.Id = try Node.Id.setNodeAtDepth(
-                self.chunks.root,
-                self.chunks.pool,
+                self.chunks.state.root,
+                self.chunks.state.pool,
                 chunk_depth,
                 chunk_index,
                 truncated_chunk_node.?,
             );
-            defer if (updated) |id| self.chunks.pool.unref(id);
+            defer if (updated) |id| self.chunks.state.pool.unref(id);
             truncated_chunk_node = null;
 
-            var new_root: ?Node.Id = try Node.Id.truncateAfterIndex(updated.?, self.chunks.pool, chunk_depth, chunk_index);
-            defer if (new_root) |id| self.chunks.pool.unref(id);
+            var new_root: ?Node.Id = try Node.Id.truncateAfterIndex(updated.?, self.chunks.state.pool, chunk_depth, chunk_index);
+            defer if (new_root) |id| self.chunks.state.pool.unref(id);
             updated = null;
 
-            var length_node: ?Node.Id = try self.chunks.pool.createLeafFromUint(@intCast(new_length));
-            defer if (length_node) |id| self.chunks.pool.unref(id);
-            const root_with_length = try Node.Id.setNode(new_root.?, self.chunks.pool, @enumFromInt(3), length_node.?);
-            errdefer self.chunks.pool.unref(root_with_length);
+            var length_node: ?Node.Id = try self.chunks.state.pool.createLeafFromUint(@intCast(new_length));
+            defer if (length_node) |id| self.chunks.state.pool.unref(id);
+            const root_with_length = try Node.Id.setNode(new_root.?, self.chunks.state.pool, @enumFromInt(3), length_node.?);
+            errdefer self.chunks.state.pool.unref(root_with_length);
 
             length_node = null;
             new_root = null;
 
-            return try Self.init(self.allocator, self.chunks.pool, root_with_length);
+            return try Self.init(self.allocator, self.chunks.state.pool, root_with_length);
         }
 
         /// Serialize the tree view into a provided buffer.
         /// Returns the number of bytes written.
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
             try self.commit();
-            return try ST.tree.serializeIntoBytes(self.chunks.root, self.chunks.pool, out);
+            return try ST.tree.serializeIntoBytes(self.chunks.state.root, self.chunks.state.pool, out);
         }
 
         /// Get the serialized size of this tree view.
         pub fn serializedSize(self: *Self) !usize {
             try self.commit();
-            return try ST.tree.serializedSize(self.chunks.root, self.chunks.pool);
+            return try ST.tree.serializedSize(self.chunks.state.root, self.chunks.state.pool);
         }
 
         fn updateListLength(self: *Self) !void {
@@ -591,13 +591,13 @@ test "TreeView list basic clone(true) does not transfer cache" {
     defer view.deinit();
 
     _ = try view.get(0);
-    try std.testing.expect(view.chunks.children_nodes.count() > 0);
+    try std.testing.expect(view.chunks.state.children_nodes.count() > 0);
 
     var cloned_no_cache = try view.clone(.{ .transfer_cache = false });
     defer cloned_no_cache.deinit();
 
-    try std.testing.expect(view.chunks.children_nodes.count() > 0);
-    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.chunks.children_nodes.count());
+    try std.testing.expect(view.chunks.state.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.chunks.state.children_nodes.count());
 }
 
 test "TreeView list basic clone(false) transfers cache and clears source" {
@@ -617,13 +617,13 @@ test "TreeView list basic clone(false) transfers cache and clears source" {
     defer view.deinit();
 
     _ = try view.get(0);
-    try std.testing.expect(view.chunks.children_nodes.count() > 0);
+    try std.testing.expect(view.chunks.state.children_nodes.count() > 0);
 
     var cloned = try view.clone(.{});
     defer cloned.deinit();
 
-    try std.testing.expectEqual(@as(usize, 0), view.chunks.children_nodes.count());
-    try std.testing.expect(cloned.chunks.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), view.chunks.state.children_nodes.count());
+    try std.testing.expect(cloned.chunks.state.children_nodes.count() > 0);
 }
 
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listBasic/tree.test.ts#L180-L203
