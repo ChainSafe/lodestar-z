@@ -55,7 +55,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
         /// a tuple of either Optional(Value) for basic type or Optional(ChildTreeView) for composite type
         child_data: TreeViewData,
         /// whether the corresponding child node/data has changed since the last update of the root
-        changed: std.AutoArrayHashMapUnmanaged(usize, void),
+        changed: std.StaticBitSet(ST.chunk_count),
         original_nodes: [ST.chunk_count]?Node.Id,
         pub const SszType = ST;
 
@@ -72,7 +72,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 .child_data = .{null} ** ST.chunk_count,
                 .original_nodes = .{null} ** ST.chunk_count,
                 .root = root,
-                .changed = .empty,
+                .changed = std.StaticBitSet(ST.chunk_count).initEmpty(),
             };
             return ptr;
         }
@@ -87,7 +87,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             ptr.original_nodes = self.original_nodes;
 
             inline for (0..ST.fields.len) |i| {
-                if (self.changed.contains(i)) {
+                if (self.changed.isSet(i)) {
                     if (ptr.child_data[i]) |child_view_ptr| {
                         if (!comptime isBasicType(ST.fields[i].type)) {
                             @constCast(child_view_ptr).deinit();
@@ -100,7 +100,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             // clear self's caches
             self.child_data = .{null} ** ST.chunk_count;
             self.original_nodes = .{null} ** ST.chunk_count;
-            self.changed.clearRetainingCapacity();
+            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
 
             return ptr;
         }
@@ -124,7 +124,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 // these nodes are unref by root
                 self.original_nodes[i] = null;
             }
-            self.changed.deinit(self.allocator);
+            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
         }
 
         pub fn commit(self: *Self) !void {
@@ -137,7 +137,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
             var changed_idx: usize = 0;
             inline for (ST.fields, 0..) |field, i| {
-                if (self.changed.get(i) != null) {
+                if (self.changed.isSet(i)) {
                     const ChildST = ST.getFieldType(field.name);
                     if (comptime isBasicType(ChildST)) {
                         const child_value = self.child_data[i] orelse return error.MissingChildValue;
@@ -166,7 +166,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 }
             }
 
-            self.changed.clearRetainingCapacity();
+            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
             if (changed_idx == 0) {
                 return;
             }
@@ -235,7 +235,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                     return child_value;
                 }
             } else {
-                try self.changed.put(self.allocator, field_index, {});
+                self.changed.set(field_index);
 
                 const existing_ptr = self.child_data[field_index];
                 if (existing_ptr) |child_view_ptr| {
@@ -278,7 +278,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 self.child_data[field_index] = value;
             }
 
-            try self.changed.put(self.allocator, field_index, {});
+            self.changed.set(field_index);
         }
 
         /// Serialize the tree view into a provided buffer.
