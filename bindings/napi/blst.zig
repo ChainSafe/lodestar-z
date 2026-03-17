@@ -698,6 +698,10 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
         sigs[i] = try env.unwrap(Signature, sig_value);
 
         rand.bytes(&rands[i]);
+        // Ensure first 8 bytes (RAND_BITS=64) are non-zero
+        while (std.mem.allEqual(u8, rands[i][0..8], 0)) {
+            rand.bytes(rands[i][0..8]);
+        }
     }
 
     const pool = thread_pool orelse @panic("ThreadPool not initialized; call initThreadPool first");
