@@ -15,6 +15,8 @@ const AggregateSignature = bls.AggregateSignature;
 const ThreadPool = bls.ThreadPool;
 const DST = bls.DST;
 
+/// Cached thread pool reference for parallel verification.
+/// Initialized lazily on first use, torn down via `deinitThreadPool`.
 var thread_pool: ?*ThreadPool = null;
 
 pub fn initThreadPool(n_workers: u16) !void {
