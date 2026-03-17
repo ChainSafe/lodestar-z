@@ -265,8 +265,7 @@ jobs:
           pnpm test
 
   build-examples:
-    name: spec tests - mainnet
-    # It takes time to download and run spec tests, so we only run them on ubuntu-latest
+    name: build examples
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
