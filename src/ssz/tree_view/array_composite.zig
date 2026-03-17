@@ -76,12 +76,12 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
 
         pub fn hashTreeRootInto(self: *Self, out: *[32]u8) !void {
             try self.commit();
-            out.* = self.chunks.root.getRoot(self.chunks.pool).*;
+            out.* = self.chunks.state.root.getRoot(self.chunks.state.pool).*;
         }
 
         pub fn hashTreeRoot(self: *Self) !*const [32]u8 {
             try self.commit();
-            return self.chunks.root.getRoot(self.chunks.pool);
+            return self.chunks.state.root.getRoot(self.chunks.state.pool);
         }
 
         pub fn fromValue(allocator: Allocator, pool: *Node.Pool, value: *const ST.Type) !*Self {
@@ -96,14 +96,14 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
         pub fn toValue(self: *Self, allocator: Allocator, out: *ST.Type) !void {
             try self.commit();
             if (comptime isFixedType(ST)) {
-                try ST.tree.toValue(self.chunks.root, self.chunks.pool, out);
+                try ST.tree.toValue(self.chunks.state.root, self.chunks.state.pool, out);
             } else {
-                try ST.tree.toValue(allocator, self.chunks.root, self.chunks.pool, out);
+                try ST.tree.toValue(allocator, self.chunks.state.root, self.chunks.state.pool, out);
             }
         }
 
         pub fn getRoot(self: *const Self) Node.Id {
-            return self.chunks.root;
+            return self.chunks.state.root;
         }
 
         pub fn get(self: *Self, index: usize) !Element {
@@ -130,7 +130,7 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
             if (index >= length) return error.IndexOutOfBounds;
             const elem = try self.chunks.get(index);
             try elem.commit();
-            return elem.getRoot().getRoot(self.chunks.pool);
+            return elem.getRoot().getRoot(self.chunks.state.pool);
         }
 
         pub fn set(self: *Self, index: usize, value: Element) !void {
@@ -150,7 +150,7 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
         /// Returns the number of bytes written.
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
             try self.commit();
-            return try ST.tree.serializeIntoBytes(self.chunks.root, self.chunks.pool, out);
+            return try ST.tree.serializeIntoBytes(self.chunks.state.root, self.chunks.state.pool, out);
         }
 
         /// Get the serialized size of this tree view.
@@ -159,7 +159,7 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
             if (comptime isFixedType(ST)) {
                 return ST.fixed_size;
             } else {
-                return ST.tree.serializedSize(self.chunks.root, self.chunks.pool);
+                return ST.tree.serializedSize(self.chunks.state.root, self.chunks.state.pool);
             }
         }
     };

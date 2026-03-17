@@ -69,16 +69,16 @@ pub fn BitListTreeView(comptime ST: type) type {
 
         pub fn hashTreeRoot(self: *Self, out: *[32]u8) !void {
             try self.commit();
-            out.* = self.data.root.getRoot(self.data.pool).*;
+            out.* = self.data.state.root.getRoot(self.data.state.pool).*;
         }
 
         pub fn getRoot(self: *const Self) Node.Id {
-            return self.data.root;
+            return self.data.state.root;
         }
 
         fn readLength(self: *Self) !usize {
             const length_node = try self.data.getChildNode(@enumFromInt(3));
-            const length_chunk = length_node.getRoot(self.data.pool);
+            const length_chunk = length_node.getRoot(self.data.state.pool);
             return std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
         }
 
@@ -167,13 +167,13 @@ test "BitListTreeView clone(true) does not transfer cache" {
     defer view.deinit();
 
     _ = try view.get(0);
-    try std.testing.expect(view.data.children_nodes.count() > 0);
+    try std.testing.expect(view.data.state.children_nodes.count() > 0);
 
     var cloned_no_cache = try view.clone(.{ .transfer_cache = false });
     defer cloned_no_cache.deinit();
 
-    try std.testing.expect(view.data.children_nodes.count() > 0);
-    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.data.children_nodes.count());
+    try std.testing.expect(view.data.state.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.data.state.children_nodes.count());
 }
 
 test "BitListTreeView clone(false) transfers cache and clears source" {
@@ -193,13 +193,13 @@ test "BitListTreeView clone(false) transfers cache and clears source" {
     defer view.deinit();
 
     _ = try view.get(0);
-    try std.testing.expect(view.data.children_nodes.count() > 0);
+    try std.testing.expect(view.data.state.children_nodes.count() > 0);
 
     var cloned = try view.clone(.{});
     defer cloned.deinit();
 
-    try std.testing.expectEqual(@as(usize, 0), view.data.children_nodes.count());
-    try std.testing.expect(cloned.data.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), view.data.state.children_nodes.count());
+    try std.testing.expect(cloned.data.state.children_nodes.count() > 0);
 }
 
 test "BitListTreeView clone isolates updates" {

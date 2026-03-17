@@ -73,12 +73,12 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
 
         pub fn hashTreeRootInto(self: *Self, out: *[32]u8) !void {
             try self.commit();
-            out.* = self.chunks.root.getRoot(self.chunks.pool).*;
+            out.* = self.chunks.state.root.getRoot(self.chunks.state.pool).*;
         }
 
         pub fn hashTreeRoot(self: *Self) !*const [32]u8 {
             try self.commit();
-            return self.chunks.root.getRoot(self.chunks.pool);
+            return self.chunks.state.root.getRoot(self.chunks.state.pool);
         }
 
         pub fn fromValue(allocator: Allocator, pool: *Node.Pool, value: *const ST.Type) !*Self {
@@ -89,11 +89,11 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
 
         pub fn toValue(self: *Self, _: Allocator, out: *ST.Type) !void {
             try self.commit();
-            try ST.tree.toValue(self.chunks.root, self.chunks.pool, out);
+            try ST.tree.toValue(self.chunks.state.root, self.chunks.state.pool, out);
         }
 
         pub fn getRoot(self: *const Self) Node.Id {
-            return self.chunks.root;
+            return self.chunks.state.root;
         }
 
         pub fn get(self: *Self, index: usize) !Element {
@@ -119,7 +119,7 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
         /// Returns the number of bytes written.
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
             try self.commit();
-            return try ST.tree.serializeIntoBytes(self.chunks.root, self.chunks.pool, out);
+            return try ST.tree.serializeIntoBytes(self.chunks.state.root, self.chunks.state.pool, out);
         }
 
         /// Get the serialized size of this tree view.
@@ -330,13 +330,13 @@ test "TreeView vector clone(true) does not transfer cache" {
     defer v.deinit();
 
     _ = try v.get(0);
-    try std.testing.expect(v.chunks.children_nodes.count() > 0);
+    try std.testing.expect(v.chunks.state.children_nodes.count() > 0);
 
     var cloned_no_cache = try v.clone(.{ .transfer_cache = false });
     defer cloned_no_cache.deinit();
 
-    try std.testing.expect(v.chunks.children_nodes.count() > 0);
-    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.chunks.children_nodes.count());
+    try std.testing.expect(v.chunks.state.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.chunks.state.children_nodes.count());
 }
 
 test "TreeView vector clone(false) transfers cache and clears source" {
@@ -354,13 +354,13 @@ test "TreeView vector clone(false) transfers cache and clears source" {
     defer v.deinit();
 
     _ = try v.get(0);
-    try std.testing.expect(v.chunks.children_nodes.count() > 0);
+    try std.testing.expect(v.chunks.state.children_nodes.count() > 0);
 
     var cloned = try v.clone(.{});
     defer cloned.deinit();
 
-    try std.testing.expectEqual(@as(usize, 0), v.chunks.children_nodes.count());
-    try std.testing.expect(cloned.chunks.children_nodes.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), v.chunks.state.children_nodes.count());
+    try std.testing.expect(cloned.chunks.state.children_nodes.count() > 0);
 }
 
 // Tests ported from TypeScript ssz packages/ssz/test/unit/byType/vector/tree.test.ts

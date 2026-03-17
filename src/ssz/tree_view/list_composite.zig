@@ -84,12 +84,12 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
         pub fn hashTreeRootInto(self: *Self, out: *[32]u8) !void {
             try self.commit();
-            out.* = self.chunks.root.getRoot(self.chunks.pool).*;
+            out.* = self.chunks.state.root.getRoot(self.chunks.state.pool).*;
         }
 
         pub fn hashTreeRoot(self: *Self) !*const [32]u8 {
             try self.commit();
-            return self.chunks.root.getRoot(self.chunks.pool);
+            return self.chunks.state.root.getRoot(self.chunks.state.pool);
         }
 
         pub fn fromValue(allocator: Allocator, pool: *Node.Pool, value: *const ST.Type) !*Self {
@@ -100,7 +100,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
         pub fn toValue(self: *Self, allocator: Allocator, out: *ST.Type) !void {
             try self.commit();
-            try ST.tree.toValue(allocator, self.chunks.root, self.chunks.pool, out);
+            try ST.tree.toValue(allocator, self.chunks.state.root, self.chunks.state.pool, out);
         }
 
         pub fn setLength(self: *Self, new_length: usize) !void {
@@ -108,7 +108,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         }
 
         pub fn getRoot(self: *const Self) Node.Id {
-            return self.chunks.root;
+            return self.chunks.state.root;
         }
 
         pub fn length(self: *const Self) !usize {
@@ -144,7 +144,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             if (index >= list_length) return error.IndexOutOfBounds;
             const elem = try self.chunks.get(index);
             try elem.commit();
-            return elem.getRoot().getRoot(self.chunks.pool);
+            return elem.getRoot().getRoot(self.chunks.state.pool);
         }
 
         pub fn set(self: *Self, index: usize, value: Element) !void {
@@ -180,9 +180,9 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
         /// Push an SSZ value type, creating a TreeView internally.
         pub fn pushValue(self: *Self, value: *const ST.Element.Type) !void {
-            const root = try ST.Element.tree.fromValue(self.chunks.pool, value);
-            errdefer self.chunks.pool.unref(root);
-            const child_view = try ST.Element.TreeView.init(self.allocator, self.chunks.pool, root);
+            const root = try ST.Element.tree.fromValue(self.chunks.state.pool, value);
+            errdefer self.chunks.state.pool.unref(root);
+            const child_view = try ST.Element.TreeView.init(self.allocator, self.chunks.state.pool, root);
             errdefer child_view.deinit();
             try self.push(child_view);
         }
@@ -200,8 +200,8 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                 return .{
                     .tree_view = tree_view,
                     .depth_iterator = Node.DepthIterator.init(
-                        tree_view.chunks.pool,
-                        tree_view.chunks.root,
+                        tree_view.chunks.state.pool,
+                        tree_view.chunks.state.root,
                         chunk_depth,
                         start_index,
                     ),
@@ -213,7 +213,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                 const node = try self.depth_iterator.next();
                 const child_view = try ST.Element.TreeView.init(
                     self.tree_view.allocator,
-                    self.tree_view.chunks.pool,
+                    self.tree_view.chunks.state.pool,
                     node,
                 );
                 self.elem_index += 1;
@@ -224,7 +224,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             pub fn nextRoot(self: *ReadonlyIterator) !*const [32]u8 {
                 const node = try self.depth_iterator.next();
                 self.elem_index += 1;
-                return node.getRoot(self.tree_view.chunks.pool);
+                return node.getRoot(self.tree_view.chunks.state.pool);
             }
 
             /// Get the next element as an SSZ value type.
@@ -233,9 +233,9 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                 self.elem_index += 1;
                 var value: ST.Element.Type = undefined;
                 if (comptime isFixedType(ST.Element)) {
-                    try ST.Element.tree.toValue(node, self.tree_view.chunks.pool, &value);
+                    try ST.Element.tree.toValue(node, self.tree_view.chunks.state.pool, &value);
                 } else {
-                    try ST.Element.tree.toValue(allocator, node, self.tree_view.chunks.pool, &value);
+                    try ST.Element.tree.toValue(allocator, node, self.tree_view.chunks.state.pool, &value);
                 }
                 return value;
             }
@@ -248,7 +248,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
             const list_length = try self.length();
             if (list_length == 0 or index >= list_length - 1) {
-                return try Self.init(self.allocator, self.chunks.pool, self.chunks.root);
+                return try Self.init(self.allocator, self.chunks.state.pool, self.chunks.state.root);
             }
 
             const new_length = index + 1;
@@ -256,17 +256,17 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                 return error.LengthOverLimit;
             }
 
-            var chunk_root: ?Node.Id = try Node.Id.truncateAfterIndex(self.chunks.root, self.chunks.pool, chunk_depth, index);
-            defer if (chunk_root) |id| self.chunks.pool.unref(id);
+            var chunk_root: ?Node.Id = try Node.Id.truncateAfterIndex(self.chunks.state.root, self.chunks.state.pool, chunk_depth, index);
+            defer if (chunk_root) |id| self.chunks.state.pool.unref(id);
 
-            var length_node: ?Node.Id = try self.chunks.pool.createLeafFromUint(@intCast(new_length));
-            defer if (length_node) |id| self.chunks.pool.unref(id);
-            const root_with_length = try Node.Id.setNode(chunk_root.?, self.chunks.pool, @enumFromInt(3), length_node.?);
-            errdefer self.chunks.pool.unref(root_with_length);
+            var length_node: ?Node.Id = try self.chunks.state.pool.createLeafFromUint(@intCast(new_length));
+            defer if (length_node) |id| self.chunks.state.pool.unref(id);
+            const root_with_length = try Node.Id.setNode(chunk_root.?, self.chunks.state.pool, @enumFromInt(3), length_node.?);
+            errdefer self.chunks.state.pool.unref(root_with_length);
             length_node = null;
             chunk_root = null;
 
-            return try Self.init(self.allocator, self.chunks.pool, root_with_length);
+            return try Self.init(self.allocator, self.chunks.state.pool, root_with_length);
         }
 
         /// Return a new view containing all elements from `index` to the end.
@@ -276,46 +276,46 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
             const list_length = try self.length();
             if (index == 0) {
-                return try Self.init(self.allocator, self.chunks.pool, self.chunks.root);
+                return try Self.init(self.allocator, self.chunks.state.pool, self.chunks.state.root);
             }
 
             const target_length = if (index >= list_length) 0 else list_length - index;
 
             var chunk_root: ?Node.Id = null;
-            defer if (chunk_root) |id| self.chunks.pool.unref(id);
+            defer if (chunk_root) |id| self.chunks.state.pool.unref(id);
 
             if (target_length == 0) {
                 chunk_root = @enumFromInt(base_chunk_depth);
             } else {
                 const nodes = try self.allocator.alloc(Node.Id, target_length);
                 defer self.allocator.free(nodes);
-                try self.chunks.root.getNodesAtDepth(self.chunks.pool, chunk_depth, index, nodes);
+                try self.chunks.state.root.getNodesAtDepth(self.chunks.state.pool, chunk_depth, index, nodes);
 
-                chunk_root = try Node.fillWithContents(self.chunks.pool, nodes, base_chunk_depth);
+                chunk_root = try Node.fillWithContents(self.chunks.state.pool, nodes, base_chunk_depth);
             }
 
-            var length_node: ?Node.Id = try self.chunks.pool.createLeafFromUint(@intCast(target_length));
-            defer if (length_node) |id| self.chunks.pool.unref(id);
+            var length_node: ?Node.Id = try self.chunks.state.pool.createLeafFromUint(@intCast(target_length));
+            defer if (length_node) |id| self.chunks.state.pool.unref(id);
 
-            const new_root = try self.chunks.pool.createBranch(chunk_root.?, length_node.?);
-            errdefer self.chunks.pool.unref(new_root);
+            const new_root = try self.chunks.state.pool.createBranch(chunk_root.?, length_node.?);
+            errdefer self.chunks.state.pool.unref(new_root);
             length_node = null;
             chunk_root = null;
 
-            return try Self.init(self.allocator, self.chunks.pool, new_root);
+            return try Self.init(self.allocator, self.chunks.state.pool, new_root);
         }
 
         /// Serialize the tree view into a provided buffer.
         /// Returns the number of bytes written.
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
             try self.commit();
-            return try ST.tree.serializeIntoBytes(self.chunks.root, self.chunks.pool, out);
+            return try ST.tree.serializeIntoBytes(self.chunks.state.root, self.chunks.state.pool, out);
         }
 
         /// Get the serialized size of this tree view.
         pub fn serializedSize(self: *Self) !usize {
             try self.commit();
-            return try ST.tree.serializedSize(self.chunks.root, self.chunks.pool);
+            return try ST.tree.serializedSize(self.chunks.state.root, self.chunks.state.pool);
         }
 
         fn updateListLength(self: *Self) !void {
