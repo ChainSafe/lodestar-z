@@ -5,7 +5,6 @@ pub const proto_node = @import("proto_node.zig");
 pub const vote_tracker = @import("vote_tracker.zig");
 pub const compute_deltas = @import("compute_deltas.zig");
 pub const proto_array = @import("proto_array.zig");
-pub const any_proto_array = @import("any_proto_array.zig");
 
 pub const ProtoBlock = proto_node.ProtoBlock;
 pub const ProtoNode = proto_node.ProtoNode;
@@ -23,11 +22,10 @@ pub const ForkChoiceError = proto_node.ForkChoiceError;
 pub const InvalidBlockCode = proto_node.InvalidBlockCode;
 pub const InvalidAttestationCode = proto_node.InvalidAttestationCode;
 
-pub const ProtoArrayFn = proto_array.ProtoArray;
+pub const ProtoArrayStruct = proto_array.ProtoArray;
 pub const DEFAULT_PRUNE_THRESHOLD = proto_array.DEFAULT_PRUNE_THRESHOLD;
+pub const VariantIndices = proto_array.VariantIndices;
 pub const RootContext = proto_array.RootContext;
-
-pub const AnyProtoArray = any_proto_array.AnyProtoArray;
 
 pub const VoteTracker = vote_tracker.VoteTracker;
 pub const Votes = vote_tracker.Votes;
