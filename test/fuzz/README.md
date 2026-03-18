@@ -191,7 +191,7 @@ rename the output files to replace colons with underscores before committing:
 
 ## On MacOs
 
-If you are on MacOs, you could temperarily comment these two lines in `pkg/afl++/afl.c`:
+If you are on macOS, you could temporarily comment these two lines in `pkg/afl++/afl.c`:
 
 ```c
 __sanitizer_cov_trace_pc_guard_init(&__start___sancov_guards,
