@@ -429,9 +429,14 @@ pub fn ProtoArray(comptime fork: ForkSeq) type {
 
             // Update EL payload metadata on the FULL node, preserving
             // data_availability_status inherited from the PENDING node.
-            full_node.extra_meta.post_merge.execution_payload_block_hash = execution_payload_block_hash;
-            full_node.extra_meta.post_merge.execution_payload_number = execution_payload_number;
-            full_node.extra_meta.post_merge.execution_status = .valid;
+            switch (full_node.extra_meta) {
+                .post_merge => |*m| {
+                    m.execution_payload_block_hash = execution_payload_block_hash;
+                    m.execution_payload_number = execution_payload_number;
+                    m.execution_status = .valid;
+                },
+                .pre_merge => unreachable, // Gloas blocks must be post-merge
+            }
             full_node.state_root = execution_payload_state_root;
 
             const full_index: u32 = @intCast(self.nodes.items.len);
@@ -647,7 +652,7 @@ pub fn ProtoArray(comptime fork: ForkSeq) type {
         pub fn getParent(
             self: *const Self,
             parent_root: Root,
-            parent_block_hash: if (is_gloas) ?Root else ?Root,
+            parent_block_hash: ?Root,
         ) ?*const Node {
             if (is_gloas) {
                 const parent_bh = parent_block_hash orelse {
@@ -719,9 +724,9 @@ pub fn ProtoArray(comptime fork: ForkSeq) type {
                     const default_idx = self.getDefaultNodeIndex(parent_root) orelse return error.UnknownParentBlock;
                     const default_node = &self.nodes.items[default_idx];
                     if (default_node.extra_meta == .pre_merge) return .full;
-                    // Also treat pre-Gloas post-merge blocks (fork transition) as FULL
                     if (!is_gloas) return .full;
-                    if (is_gloas and default_node.extra_meta.executionPayloadBlockHash() == null) return .full;
+                    // Gloas: treat pre-Gloas post-merge blocks (fork transition) as FULL
+                    if (default_node.extra_meta.executionPayloadBlockHash() == null) return .full;
                 }
                 return error.UnknownParentBlock;
             };
