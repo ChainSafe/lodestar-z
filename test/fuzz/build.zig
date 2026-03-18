@@ -10,6 +10,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const dep_blst = b.dependency("blst", .{
+        .optimize = optimize,
+        .target = target,
+    });
+
     const dep_snappy = b.dependency("snappy", .{
         .target = target,
         .optimize = optimize,
@@ -43,6 +48,7 @@ pub fn build(b: *std.Build) void {
 
     const Fuzzer = struct {
         name: []const u8,
+        needs_blst: bool = false,
 
         /// Returns the corpus directory path for this fuzzer.
         /// Change the suffix to switch between -cmin and -initial.
@@ -62,6 +68,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ssz_bytelist" },
         .{ .name = "ssz_containers" },
         .{ .name = "ssz_lists" },
+        .{ .name = "bls_public_key", .needs_blst = true },
+        .{ .name = "bls_aggregate_pk", .needs_blst = true },
     };
 
     inline for (fuzzers) |fuzzer| {
@@ -76,6 +84,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         lib_mod.addImport("ssz", lodestar_z.module("ssz"));
+        lib_mod.addImport("bls", lodestar_z.module("bls"));
         lib_mod.addImport(
             "consensus_types",
             lodestar_z.module("consensus_types"),
@@ -90,7 +99,8 @@ pub fn build(b: *std.Build) void {
         lib.root_module.stack_check = false;
         lib.root_module.fuzz = true;
 
-        const exe = afl.addInstrumentedExe(b, lib);
+        const extra_libs: []const *std.Build.Step.Compile = if (fuzzer.needs_blst) &.{dep_blst.artifact("blst")} else &.{};
+        const exe = afl.addInstrumentedExe(b, lib, extra_libs);
         const mkdir = b.addSystemCommand(&.{
             "mkdir", "-p",
         });

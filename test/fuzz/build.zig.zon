@@ -4,6 +4,10 @@
     .fingerprint = 0xa5f5892cc2169277,
     .minimum_zig_version = "0.14.1",
     .dependencies = .{
+        .blst = .{
+            .url = "git+https://github.com/ChainSafe/blst.zig#98868a621ea921ec7dd7c1a4057bc2947586ed3c",
+            .hash = "blst_zig-0.0.0-cnAxzu0IAABK3ChhGISQMEe6PaX6x8Z8yOtYsp63xh54",
+        },
         .lodestar_z = .{ .path = "../../" },
         .afl = .{ .path = "../../pkg/afl++" },
         .snappy = .{
