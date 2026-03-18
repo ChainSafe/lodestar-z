@@ -460,20 +460,25 @@ pub fn StructContainerTreeView(comptime ST: type) type {
         /// Clone creates a new view sharing the same committed state.
         /// Uncommitted changes are committed first so the clone sees the current state.
         pub fn clone(self: *Self, opts: CloneOpts) !*Self {
-            _ = opts;
             try self.commit();
 
             try self.pool.ref(self.root);
             errdefer self.pool.unref(self.root);
 
             const ptr = try self.allocator.create(Self);
-            ptr.* = .{
-                .allocator = self.allocator,
-                .pool = self.pool,
-                .root = self.root,
-                .value = self.value,
-                .changed = std.StaticBitSet(ST.chunk_count).initEmpty(),
-            };
+            errdefer self.allocator.destroy(ptr);
+
+            ptr.allocator = self.allocator;
+            ptr.pool = self.pool;
+            ptr.root = self.root;
+            ptr.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
+
+            if (opts.transfer_cache) {
+                ptr.value = self.value;
+            } else {
+                try ST.tree.toValue(self.root, self.pool, &ptr.value);
+            }
+
             return ptr;
         }
 
@@ -512,7 +517,8 @@ pub fn StructContainerTreeView(comptime ST: type) type {
             changed_idx = 0; // disarm errdefer — nodes are now tree-owned
 
             // Phase 3: Update root ownership.
-            errdefer self.pool.unref(new_root);
+            // new_root is at refcount 0 from setNodesAtDepth. ref to take ownership.
+            // ref can only fail with RefCountOverflow, which can't happen at refcount 0.
             try self.pool.ref(new_root);
             self.pool.unref(self.root);
             self.root = new_root;
@@ -546,10 +552,19 @@ pub fn StructContainerTreeView(comptime ST: type) type {
         }
 
         pub fn fromValue(allocator: Allocator, pool: *Node.Pool, value: *const ST.Type) !*Self {
-            // tree.fromValue returns root at refcount 0. Use init which refs it.
             const root = try ST.tree.fromValue(pool, value);
-            const ptr = try Self.init(allocator, pool, root);
-            ptr.value = value.*;
+            // root is at refcount 0. ref can't overflow at 0.
+            try pool.ref(root);
+            errdefer pool.unref(root);
+
+            const ptr = try allocator.create(Self);
+            ptr.* = .{
+                .allocator = allocator,
+                .pool = pool,
+                .root = root,
+                .value = value.*,
+                .changed = std.StaticBitSet(ST.chunk_count).initEmpty(),
+            };
             return ptr;
         }
 
