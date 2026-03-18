@@ -69,7 +69,9 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ssz_containers" },
         .{ .name = "ssz_lists" },
         .{ .name = "bls_public_key", .needs_blst = true },
+        .{ .name = "bls_signature", .needs_blst = true },
         .{ .name = "bls_aggregate_pk", .needs_blst = true },
+        .{ .name = "bls_aggregate_sig", .needs_blst = true },
     };
 
     inline for (fuzzers) |fuzzer| {
