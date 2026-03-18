@@ -107,21 +107,18 @@ pub fn deinit(pool: *ThreadPool) void {
 
 fn workerLoop(pool: *ThreadPool) void {
     while (true) {
-        var item: *WorkItem = undefined;
-
-        {
+        const item: *WorkItem = blk: {
             pool.queue.mutex.lock();
             defer pool.queue.mutex.unlock();
 
             while (true) {
                 if (pool.shutdown.load(.acquire)) return;
                 if (pool.queue.pop()) |wi| {
-                    item = wi;
-                    break;
+                    break :blk wi;
                 }
                 pool.queue.cond.wait(&pool.queue.mutex);
             }
-        }
+        };
 
         item.exec_fn(item);
         item.done.set();
