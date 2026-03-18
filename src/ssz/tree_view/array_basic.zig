@@ -213,7 +213,7 @@ test "TreeView vector getAllAlloc roundtrip" {
     var view = try VectorType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
-    const filled = try view.getAll(null);
+    const filled = try view.getAll(allocator);
     defer allocator.free(filled);
 
     try std.testing.expectEqualSlices(u16, values[0..], filled);
@@ -232,7 +232,7 @@ test "TreeView vector getAllAlloc repeat reflects updates" {
     var view = try VectorType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
-    const first = try view.getAll(null);
+    const first = try view.getAll(allocator);
     defer allocator.free(first);
     try std.testing.expectEqualSlices(u32, values[0..], first);
 
