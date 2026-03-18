@@ -77,7 +77,9 @@ const WorkItem = struct {
 /// Creates a thread pool with the specified number of workers.
 /// The caller owns the returned pool and must call `deinit` when done.
 pub fn init(allocator_: Allocator, opts: Opts) (Allocator.Error || std.Thread.SpawnError)!*ThreadPool {
-    std.debug.assert(opts.n_workers >= 1 and opts.n_workers <= MAX_WORKERS);
+    std.debug.assert(opts.n_workers >= 1);
+    std.debug.assert(opts.n_workers <= MAX_WORKERS);
+
     const pool = try allocator_.create(ThreadPool);
     pool.* = .{
         .allocator = allocator_,
