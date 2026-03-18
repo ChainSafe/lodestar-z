@@ -1019,6 +1019,7 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
 
+    module_fork_choice.addImport("config", module_config);
     module_fork_choice.addImport("consensus_types", module_consensus_types);
     module_fork_choice.addImport("constants", module_constants);
     module_fork_choice.addImport("preset", module_preset);

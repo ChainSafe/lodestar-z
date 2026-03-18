@@ -22,9 +22,8 @@ pub const ForkChoiceError = proto_node.ForkChoiceError;
 pub const InvalidBlockCode = proto_node.InvalidBlockCode;
 pub const InvalidAttestationCode = proto_node.InvalidAttestationCode;
 
-pub const ProtoArrayStruct = proto_array.ProtoArray;
+pub const ProtoArrayFn = proto_array.ProtoArray;
 pub const DEFAULT_PRUNE_THRESHOLD = proto_array.DEFAULT_PRUNE_THRESHOLD;
-pub const VariantIndices = proto_array.VariantIndices;
 pub const RootContext = proto_array.RootContext;
 
 pub const VoteTracker = vote_tracker.VoteTracker;
