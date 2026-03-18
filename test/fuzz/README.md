@@ -5,6 +5,8 @@ for SSZ deserialization in lodestar-z.
 
 ## Fuzz Targets
 
+### SSZ
+
 | Target | Binary | Description |
 |--------|--------|-------------|
 | `ssz_basic` | `fuzz-ssz_basic` | Bool, Uint8/16/32/64/128/256 |
@@ -14,9 +16,19 @@ for SSZ deserialization in lodestar-z.
 | `ssz_containers` | `fuzz-ssz_containers` | Fork, Checkpoint, Eth1Data, Attestation, etc. |
 | `ssz_lists` | `fuzz-ssz_lists` | FixedList(Uint64/32/Bool), VariableList(ByteList) |
 
-Each input is `[selector_byte][ssz_data...]`. The first byte selects
-which SSZ type to test within the target. See source files for the
-mapping.
+Each SSZ input is `[selector_byte][ssz_data...]`. The first byte selects
+which SSZ type to test within the target. See source files for the mapping.
+
+### BLS
+
+| Target | Binary | Description |
+|--------|--------|-------------|
+| `bls_public_key` | `fuzz-bls_public_key` | Deserialize → validate → serialize roundtrip for `PublicKey` |
+| `bls_signature` | `fuzz-bls_signature` | Deserialize → validate → serialize roundtrip for `Signature` |
+| `bls_aggregate_pk` | `fuzz-bls_aggregate_pk` | Aggregate multiple `PublicKey`s, with and without randomness |
+| `bls_aggregate_sig` | `fuzz-bls_aggregate_sig` | Aggregate multiple `Signature`s, with and without randomness |
+
+BLS inputs are raw bytes interpreted directly as compressed point encodings.
 
 ## Prerequisites
 
@@ -64,6 +76,33 @@ configured to pipe core dumps. If you cannot change sysctl as root, run with:
 ```sh
 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 zig build run-ssz_basic
 ```
+
+BLS targets work the same way:
+
+```sh
+zig build run-bls_public_key
+zig build run-bls_signature
+zig build run-bls_aggregate_pk
+zig build run-bls_aggregate_sig
+```
+
+### Running all BLS targets in a loop
+
+`fuzz-loop.sh` runs all four BLS fuzzers in parallel, minimizes the corpus
+with `afl-cmin` after each round, and repeats indefinitely:
+
+```sh
+./fuzz-loop.sh
+```
+
+Each round lasts 1 hour by default. Override with:
+
+```sh
+ROUND_DURATION=7200 ./fuzz-loop.sh
+```
+
+Logs are written to `logs/<target>.log`. Crashes are reported at the end of
+each round; run `./replay-crashes.sh` to inspect them.
 
 ## Finding Crashes and Hangs
 
@@ -145,6 +184,26 @@ rename the output files to replace colons with underscores before committing:
 
 1. Create `src/fuzz_<name>.zig` exporting `zig_fuzz_init` and
    `zig_fuzz_test` with `callconv(.c)`.
-2. Add the name to the `fuzzers` array in `build.zig`.
+2. Add the name to the `fuzzers` array in `build.zig`. If the target links
+   against blst (i.e. it uses BLS operations), set `needs_blst = true`.
 3. Create `corpus/<name>-initial/` with hand-crafted seed files.
 4. Add the target to `replay-crashes.sh` target list.
+
+## On MacOs
+
+If you are on MacOs, you could temperarily comment these two lines in `pkg/afl++/afl.c`:
+
+```c
+__sanitizer_cov_trace_pc_guard_init(&__start___sancov_guards,
+                                      &__stop___sancov_guards);
+```
+
+On Linux (ELF), the linker automatically synthesizes `__start___sancov_guards`
+and `__stop___sancov_guards` symbols for any custom section. On macOS (Mach-O),
+these symbols are not automatic — they only exist if the section is present and
+non-empty in the final binary. If the Zig-compiled bitcode does not produce the
+`__sancov_guards` section in the expected Mach-O layout, the symbols are absent
+and calling `__sanitizer_cov_trace_pc_guard_init` crashes at startup.
+
+AFL++ has its own coverage tracking that does not depend on this call, so
+commenting it out is safe.
