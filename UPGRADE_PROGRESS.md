@@ -49,16 +49,15 @@
 - ✅ test:state_transition
 
 ## Tests not yet wired
-- ❌ test:era — not wired in build.zig yet
-- ❌ test:fork_types — not wired in build.zig yet
+- ✅ test:era
+- ✅ test:fork_types
 
 ## Still TODO
 1. **Metrics dep**: Fork or upgrade `karlseguin/metrics.zig` for 0.16 (currently using metrics_stub.zig)
 2. **zbench dep**: Fork or upgrade for 0.16
 3. **zapi/bindings**: Fork or upgrade for 0.16
-4. **Wire era/fork_types tests** into build.zig
-5. **Extract tar/gzip**: download_spec_tests.zig extraction needs 0.16 reader API
-6. **httpz**: Fork or upgrade for 0.16
+4. **Extract tar/gzip**: download_spec_tests.zig extraction needs 0.16 reader API
+5. **httpz**: Fork or upgrade for 0.16
 
 ## Build command
 ```bash
