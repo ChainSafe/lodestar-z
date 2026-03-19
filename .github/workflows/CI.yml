@@ -91,9 +91,18 @@ jobs:
       - name: Run config tests
         run: |
           zig build test:config
+      - name: Run constants tests
+        run: |
+          zig build test:constants
       - name: Run consensus-type tests
         run: |
           zig build test:consensus_types
+      - name: Run fork_types tests
+        run: |
+          zig build test:fork_types
+      - name: Run era tests
+        run: |
+          zig build test:era
       - name: Run preset tests
         run: |
           zig build test:preset
