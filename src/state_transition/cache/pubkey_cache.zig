@@ -79,31 +79,22 @@ pub fn syncPubkeysParallel(
 
     try pubkey_to_index.ensureTotalCapacity(@intCast(new_count));
 
-    var thread_pool: std.Thread.Pool = undefined;
-    try thread_pool.init(.{ .allocator = allocator });
-    defer thread_pool.deinit();
-
-    var wg = std.Thread.WaitGroup{};
+    // TODO: Re-parallelize with std.Io batch API when 0.16 patterns are settled.
+    // For now, run serially.
     var uncompress_error = std.atomic.Value(bool).init(false);
 
     var i = old_len;
     const batch_size = 1000;
 
     while (i < new_count) : (i += batch_size) {
-        thread_pool.spawnWg(
-            &wg,
-            uncompressPubkeys,
-            .{
-                i,
-                @min(i + batch_size, new_count),
-                validators,
-                index_to_pubkey,
-                &uncompress_error,
-            },
+        uncompressPubkeys(
+            i,
+            @min(i + batch_size, new_count),
+            validators,
+            index_to_pubkey,
+            &uncompress_error,
         );
     }
-
-    wg.wait();
 
     if (uncompress_error.load(.acquire)) {
         return error.InvalidPubkey;

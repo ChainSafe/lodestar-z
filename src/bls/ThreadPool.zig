@@ -47,7 +47,7 @@ partial_p1: [MAX_WORKERS]c.blst_p1 = undefined,
 partial_p2: [MAX_WORKERS]c.blst_p2 = undefined,
 has_work: [MAX_WORKERS]bool = [_]bool{false} ** MAX_WORKERS,
 /// Mutex for dispatching multi-threaded verification work.
-dispatch_mutex: std.Thread.Mutex = .{},
+dispatch_mutex: std.atomic.Mutex = .{},
 
 /// Creates a thread pool with the specified number of workers.
 /// The caller owns the returned pool and must call `deinit` when done.
@@ -383,7 +383,7 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch unreachable;
+        seed = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
         break :blk seed;
     });
     const rand = prng.random();
@@ -438,7 +438,7 @@ test "aggregateVerify multi-threaded" {
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch unreachable;
+        seed = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
         break :blk seed;
     });
     const rand = prng.random();

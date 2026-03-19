@@ -8,7 +8,7 @@ point: c.blst_p1 = c.blst_p1{},
 /// This converts from projective coordinates back to affine coordinates.
 pub fn toPublicKey(self: *const Self) PublicKey {
     var pk = PublicKey{};
-    c.blst_p1_to_affine(&pk.point, &self.point);
+    c.blst_p1_to_affine(@ptrCast(&pk.point), @ptrCast(&self.point));
     return pk;
 }
 
@@ -87,7 +87,7 @@ test aggregateWithRandomness {
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch unreachable;
+        seed = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
         break :blk seed;
     });
     const rand = prng.random();

@@ -7,14 +7,14 @@ point: c.blst_p2 = c.blst_p2{},
 
 /// Validates that the aggregate signature is in the correct subgroup (G2).
 pub fn validate(self: *const Self) BlstError!void {
-    if (!c.blst_p2_in_g2(&self.point)) return BlstError.PointNotInGroup;
+    if (!c.blst_p2_in_g2(@ptrCast(&self.point))) return BlstError.PointNotInGroup;
 }
 
 /// Converts an aggregate signature back to a regular signature.
 /// Converts from projective coordinates back to affine coordinates.
 pub fn toSignature(self: *const Self) Signature {
     var sig = Signature{};
-    c.blst_p2_to_affine(@ptrCast(&sig.point), &self.point);
+    c.blst_p2_to_affine(@ptrCast(@ptrCast(&sig.point)), @ptrCast(&self.point));
     return sig;
 }
 
@@ -92,7 +92,7 @@ test aggregateWithRandomness {
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch unreachable;
+        seed = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
         break :blk seed;
     });
     const rand = prng.random();

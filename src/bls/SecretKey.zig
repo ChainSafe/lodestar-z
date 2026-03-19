@@ -102,14 +102,14 @@ pub fn deriveMasterEip2333(ikm: []const u8) BlstError!Self {
 /// Derive and return a child `SecretKey` using EIP-2333 key derivation.
 pub fn deriveChildEip2333(self: *const Self, child_index: u32) BlstError!Self {
     var sk = Self{};
-    c.blst_derive_child_eip2333(&sk.value, &self.value, child_index);
+    c.blst_derive_child_eip2333(&sk.value, @ptrCast(&self.value), child_index);
     return sk;
 }
 
 /// Derive the `PublicKey` from this `SecretKey`.
 pub fn toPublicKey(self: *const Self) PublicKey {
     var pk = PublicKey{};
-    c.blst_sk_to_pk2_in_g1(null, @ptrCast(&pk.point), &self.value);
+    c.blst_sk_to_pk2_in_g1(null, @ptrCast(@ptrCast(&pk.point)), @ptrCast(&self.value));
     return pk;
 }
 
@@ -126,14 +126,14 @@ pub fn sign(self: *const Self, msg: []const u8, dst: []const u8, aug: ?[]const u
         if (aug) |a| a.ptr else null,
         if (aug) |a| a.len else 0,
     );
-    c.blst_sign_pk2_in_g1(null, @ptrCast(&sig.point), @ptrCast(&q.point), &self.value);
+    c.blst_sign_pk2_in_g1(null, @ptrCast(@ptrCast(&sig.point)), @ptrCast(&q.point), @ptrCast(&self.value));
     return sig;
 }
 
 /// Serialize the `SecretKey` to bytes.
 pub fn serialize(self: *const Self) [32]u8 {
     var sk_out = [_]u8{0} ** 32;
-    c.blst_bendian_from_scalar(&sk_out[0], &self.value);
+    c.blst_bendian_from_scalar(&sk_out[0], @ptrCast(&self.value));
     return sk_out;
 }
 

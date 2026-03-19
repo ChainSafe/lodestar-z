@@ -17,8 +17,8 @@ pub const COMPRESS_SIZE = 96;
 ///
 /// Returns `BlstError` if validation fails.
 pub fn validate(self: *const Self, sig_infcheck: bool) BlstError!void {
-    if (sig_infcheck and c.blst_p2_affine_is_inf(&self.point)) return BlstError.PkIsInfinity;
-    if (!c.blst_p2_affine_in_g2(&self.point)) return BlstError.PointNotInGroup;
+    if (sig_infcheck and c.blst_p2_affine_is_inf(@ptrCast(&self.point))) return BlstError.PkIsInfinity;
+    if (!c.blst_p2_affine_in_g2(@ptrCast(&self.point))) return BlstError.PointNotInGroup;
 }
 
 /// Verify the `Signature` against a `PublicKey` and message.
@@ -149,21 +149,21 @@ pub fn fastAggregateVerifyPreAggregated(
 /// Convert an `AggregateSignature` to a regular `Signature`.
 pub fn fromAggregate(agg_sig: *const AggregateSignature) Self {
     var sig = Self{};
-    c.blst_p2_to_affine(&sig.point, &agg_sig.point);
+    c.blst_p2_to_affine(@ptrCast(&sig.point), &agg_sig.point);
     return sig;
 }
 
 /// Compress the `Signature` to bytes.
 pub fn compress(self: *const Self) [COMPRESS_SIZE]u8 {
     var sig_comp = [_]u8{0} ** COMPRESS_SIZE;
-    c.blst_p2_affine_compress(&sig_comp, &self.point);
+    c.blst_p2_affine_compress(&sig_comp, @ptrCast(&self.point));
     return sig_comp;
 }
 
 /// Serialize the `Signature` to bytes.
 pub fn serialize(self: *const Self) [SERIALIZE_SIZE]u8 {
     var sig_out = [_]u8{0} ** SERIALIZE_SIZE;
-    c.blst_p2_affine_serialize(&sig_out, &self.point);
+    c.blst_p2_affine_serialize(&sig_out, @ptrCast(&self.point));
     return sig_out;
 }
 
@@ -173,7 +173,7 @@ pub fn serialize(self: *const Self) [SERIALIZE_SIZE]u8 {
 pub fn uncompress(sig_comp: []const u8) BlstError!Self {
     if (sig_comp.len == COMPRESS_SIZE and (sig_comp[0] & 0x80) != 0) {
         var sig = Self{};
-        try errorFromInt(c.blst_p2_uncompress(&sig.point, &sig_comp[0]));
+        try errorFromInt(c.blst_p2_uncompress(@ptrCast(&sig.point), &sig_comp[0]));
         return sig;
     }
 
@@ -188,7 +188,7 @@ pub fn deserialize(sig_in: []const u8) BlstError!Self {
         (sig_in.len == COMPRESS_SIZE and (sig_in[0] & 0x80) != 0))
     {
         var sig = Self{};
-        try errorFromInt(c.blst_p2_deserialize(&sig.point, &sig_in[0]));
+        try errorFromInt(c.blst_p2_deserialize(@ptrCast(&sig.point), &sig_in[0]));
         return sig;
     }
 
@@ -197,17 +197,17 @@ pub fn deserialize(sig_in: []const u8) BlstError!Self {
 
 /// Check if the `Signature` is in the correct subgroup.
 pub fn subgroupCheck(self: *const Self) bool {
-    return c.blst_p2_affine_in_g2(&self.point);
+    return c.blst_p2_affine_in_g2(@ptrCast(&self.point));
 }
 
 /// Check if the `Signature` is the point at infinity.
 pub fn isInfinity(self: *const Self) bool {
-    return c.blst_p2_affine_is_inf(&self.point);
+    return c.blst_p2_affine_is_inf(@ptrCast(&self.point));
 }
 
 /// Check if two signatures are equal.
 pub fn isEqual(self: *const Self, other: *const Self) bool {
-    return c.blst_p2_affine_is_equal(&self.point, &other.point);
+    return c.blst_p2_affine_is_equal(@ptrCast(&self.point), @ptrCast(&other.point));
 }
 
 const std = @import("std");

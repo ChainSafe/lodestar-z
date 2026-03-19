@@ -139,7 +139,7 @@ const ReusedEpochTransitionCache = struct {
 };
 
 var _reused_cache: ?*ReusedEpochTransitionCache = null;
-var _reused_lock: std.Thread.Mutex = std.Thread.Mutex{};
+var _reused_lock: std.atomic.Mutex = std.atomic.Mutex{};
 
 fn getReusedEpochTransitionCache(allocator: Allocator, validator_count: usize) !*ReusedEpochTransitionCache {
     _reused_lock.lock();
