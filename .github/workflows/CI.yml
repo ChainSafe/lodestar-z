@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ZIG_VERSION: "0.14.1"
+  ZIG_VERSION: "0.16.0-dev.2915+065c6e794"
   NODE_VERSION: "24"
 
 jobs:
@@ -103,6 +103,18 @@ jobs:
       - name: Run state-transition tests
         run: |
           zig build test:state_transition
+
+      - name: Run fork_types tests
+        run: |
+          zig build test:fork_types
+
+      - name: Run era tests
+        run: |
+          zig build test:era
+
+      - name: Run constants tests
+        run: |
+          zig build test:constants
 
       - name: Build benchmarks
         run: |
