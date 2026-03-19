@@ -441,7 +441,6 @@ pub fn main(init: std.process.Init) !void {
     defer std.debug.assert(gpa.deinit() == .ok);
 
     const allocator = gpa.allocator();
-    _ = init; // TODO: wire up Io for bench output
     var pool = try Node.Pool.init(allocator, 10_000_000);
     defer pool.deinit();
 
@@ -453,7 +452,7 @@ pub fn main(init: std.process.Init) !void {
     );
     defer allocator.free(era_path_0);
 
-    var era_reader_0 = try era.Reader.open(allocator, config.mainnet.config, era_path_0);
+    var era_reader_0 = try era.Reader.open(allocator, init.io, config.mainnet.config, era_path_0);
     defer era_reader_0.close(allocator);
 
     const state_bytes = try era_reader_0.readSerializedState(allocator, null);
@@ -472,7 +471,7 @@ pub fn main(init: std.process.Init) !void {
     );
     defer allocator.free(era_path_1);
 
-    var era_reader_1 = try era.Reader.open(allocator, config.mainnet.config, era_path_1);
+    var era_reader_1 = try era.Reader.open(allocator, init.io, config.mainnet.config, era_path_1);
     defer era_reader_1.close(allocator);
 
     const block_slot = try era.era.computeStartBlockSlotFromEraNumber(era_reader_1.era_number) + 1;
@@ -481,7 +480,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(block_bytes);
 
     inline for (comptime std.enums.values(ForkSeq)) |fork| {
-        if (detected_fork == fork) return runBenchmark(fork, allocator, &pool, stdout, state_bytes, block_bytes, chain_config);
+        if (detected_fork == fork) return runBenchmark(fork, allocator, &pool, init.io, state_bytes, block_bytes, chain_config);
     }
     return error.NoBenchmarkRan;
 }
@@ -490,7 +489,7 @@ fn runBenchmark(
     comptime fork: ForkSeq,
     allocator: std.mem.Allocator,
     pool: *Node.Pool,
-    stdout: anytype,
+    io: std.Io,
     state_bytes: []const u8,
     block_bytes: []const u8,
     chain_config: config.ChainConfig,
@@ -580,6 +579,6 @@ fn runBenchmark(
     resetSegmentStats();
     try bench.addParam("block(segments)", &ProcessBlockSegmentedBench(fork){ .cached_state = cached_state, .block = block, .body = body }, .{});
 
-    try bench.run(init.io, std.Io.File.stdout());
+    try bench.run(io, std.Io.File.stdout());
     printSegmentStats();
 }

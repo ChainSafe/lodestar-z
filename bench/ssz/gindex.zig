@@ -32,7 +32,6 @@ const Path = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
-    _ = init; // TODO: wire up Io for bench output
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 

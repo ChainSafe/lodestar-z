@@ -42,23 +42,27 @@ fn TestWriter(comptime kind: RunnerKind) type {
 
 pub fn main() !void {
     const test_case_dir = "test/spec/test_case/";
-    try std.Io.Dir.cwd().createDirPath(test_case_dir);
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, test_case_dir);
 
     inline for (supported_test_runners) |kind| {
         const test_case_file = test_case_dir ++ @tagName(kind) ++ "_tests.zig";
-        const out = try std.Io.Dir.cwd().createFile(test_case_file, .{});
-        defer out.close();
+        const out = try std.Io.Dir.cwd().createFile(std.Options.debug_io, test_case_file, .{});
+        defer out.close(std.Options.debug_io);
 
-        const writer = out.writer().any();
+        var _write_buf: [4096]u8 = undefined;
+        var file_writer = out.writer(std.Options.debug_io, &_write_buf);
+        const writer = &file_writer.interface;
         try writeTests(&supported_forks, kind, writer);
     }
 
     {
         const test_root_file = "test/spec/root.zig";
-        try std.Io.Dir.cwd().createDirPath("test/spec");
-        const out = try std.Io.Dir.cwd().createFile(test_root_file, .{});
-        defer out.close();
-        const writer = out.writer().any();
+        try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, "test/spec");
+        const out = try std.Io.Dir.cwd().createFile(std.Options.debug_io, test_root_file, .{});
+        defer out.close(std.Options.debug_io);
+        var _write_buf: [4096]u8 = undefined;
+        var file_writer = out.writer(std.Options.debug_io, &_write_buf);
+        const writer = &file_writer.interface;
         try writeTestRoot(&supported_test_runners, writer);
     }
 }
@@ -92,41 +96,41 @@ pub fn writeTests(
 ) !void {
     try TestWriter(kind).writeHeader(writer);
 
-    var root_dir = try std.Io.Dir.cwd().openDir(spec_test_options.spec_test_out_dir ++ "/" ++ spec_test_options.spec_test_version, .{});
-    defer root_dir.close();
+    var root_dir = try std.Io.Dir.cwd().openDir(std.Options.debug_io, spec_test_options.spec_test_out_dir ++ "/" ++ spec_test_options.spec_test_version, .{});
+    defer root_dir.close(std.Options.debug_io);
 
     // minimal preset includes many more testcases and is a superset of mainnet testcases
-    var preset_dir = try root_dir.openDir("minimal/tests/minimal", .{});
-    defer preset_dir.close();
+    var preset_dir = try root_dir.openDir(std.Options.debug_io, "minimal/tests/minimal", .{});
+    defer preset_dir.close(std.Options.debug_io);
 
     inline for (forks) |fork| {
         const fork_path = @tagName(fork) ++ "/" ++ @tagName(kind);
-        const maybe_fork_dir = preset_dir.openDir(fork_path, .{ .iterate = true }) catch |err| switch (err) {
+        const maybe_fork_dir = preset_dir.openDir(std.Options.debug_io, fork_path, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
         };
 
         if (maybe_fork_dir) |dir| {
             var fork_dir = dir;
-            defer fork_dir.close();
+            defer fork_dir.close(std.Options.debug_io);
 
             inline for (TestWriter(kind).handlers) |handler| handler_loop: {
-                var suite_dir = fork_dir.openDir(comptime handler.suiteName(), .{ .iterate = true }) catch |err| switch (err) {
+                var suite_dir = fork_dir.openDir(std.Options.debug_io, comptime handler.suiteName(), .{ .iterate = true }) catch |err| switch (err) {
                     error.FileNotFound => break :handler_loop,
                     else => return err,
                 };
-                defer suite_dir.close();
+                defer suite_dir.close(std.Options.debug_io);
 
                 var suite_iter = suite_dir.iterate();
-                while (try suite_iter.next()) |suite_entry| {
+                while (try suite_iter.next(std.Options.debug_io)) |suite_entry| {
                     if (suite_entry.kind != .directory) continue;
 
                     if (comptime kind.hasSuiteCase()) {
-                        var case_dir = suite_dir.openDir(suite_entry.name, .{ .iterate = true }) catch continue;
-                        defer case_dir.close();
+                        var case_dir = suite_dir.openDir(std.Options.debug_io, suite_entry.name, .{ .iterate = true }) catch continue;
+                        defer case_dir.close(std.Options.debug_io);
 
                         var case_iter = case_dir.iterate();
-                        while (try case_iter.next()) |case_entry| {
+                        while (try case_iter.next(std.Options.debug_io)) |case_entry| {
                             if (case_entry.kind != .directory) continue;
                             try TestWriter(kind).writeTest(writer, fork, handler, suite_entry.name, case_entry.name);
                         }

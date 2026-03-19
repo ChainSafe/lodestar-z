@@ -658,7 +658,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
     };
 }
 
-fn loadStateBytesFromConfiguredEraFiles(allocator: std.mem.Allocator, stdout: anytype) ![]const u8 {
+fn loadStateBytesFromConfiguredEraFiles(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
     if (download_era_options.era_files.len == 0) return error.NoEraFilesConfigured;
 
     var last_err: ?anyerror = null;
@@ -670,7 +670,7 @@ fn loadStateBytesFromConfiguredEraFiles(allocator: std.mem.Allocator, stdout: an
         );
         defer allocator.free(era_path);
 
-        var era_reader = era.Reader.open(allocator, config.mainnet.config, era_path) catch |err| {
+        var era_reader = era.Reader.open(allocator, io, config.mainnet.config, era_path) catch |err| {
             last_err = err;
             std.debug.print("Skipping ERA file {s}: {s}\n", .{ era_path, @errorName(err) });
             continue;
@@ -696,11 +696,10 @@ pub fn main(init: std.process.Init) !void {
     defer std.debug.assert(gpa.deinit() == .ok);
 
     const allocator = gpa.allocator();
-    _ = init; // TODO: wire up Io for bench output
     var pool = try Node.Pool.init(allocator, 10_000_000);
     defer pool.deinit();
 
-    const state_bytes = try loadStateBytesFromConfiguredEraFiles(allocator, stdout);
+    const state_bytes = try loadStateBytesFromConfiguredEraFiles(allocator, init.io);
     defer allocator.free(state_bytes);
 
     // Detect fork from state SSZ bytes
@@ -712,7 +711,7 @@ pub fn main(init: std.process.Init) !void {
     // Dispatch to fork-specific loading
     inline for (comptime std.enums.values(ForkSeq)) |fork| {
         if (detected_fork == fork) {
-            return runBenchmark(fork, allocator, &pool, stdout, state_bytes, chain_config);
+            return runBenchmark(fork, allocator, &pool, init.io, state_bytes, chain_config);
         }
     }
     return error.NoBenchmarkRan;
@@ -722,7 +721,7 @@ fn runBenchmark(
     comptime fork: ForkSeq,
     allocator: std.mem.Allocator,
     pool: *Node.Pool,
-    stdout: anytype,
+    io: std.Io,
     state_bytes: []const u8,
     chain_config: config.ChainConfig,
 ) !void {
@@ -885,6 +884,6 @@ fn runBenchmark(
         .cached_state = cached_state,
     }, .{});
 
-    try bench.run(init.io, std.Io.File.stdout());
+    try bench.run(io, std.Io.File.stdout());
     printSegmentStats();
 }

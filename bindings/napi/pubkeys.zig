@@ -73,8 +73,8 @@ fn pubkey2indexWrittenSize() usize {
 pub fn pubkeys_save(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     var file_path_buf: [1024]u8 = undefined;
     const file_path = try cb.arg(0).getValueStringUtf8(&file_path_buf);
-    var file = try std.Io.Dir.cwd().createFile(file_path, .{ .truncate = true });
-    defer file.close();
+    var file = try std.Io.Dir.cwd().createFile(std.Options.debug_io, std.Options.debug_io, file_path, .{ .truncate = true });
+    defer file.close(std.Options.debug_io);
 
     // Write header
     // Magic "PKIX" + len + capacity
@@ -99,8 +99,8 @@ pub fn pubkeys_save(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 pub fn pubkeys_load(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     var file_path_buf: [1024]u8 = undefined;
     const file_path = try cb.arg(0).getValueStringUtf8(&file_path_buf);
-    var file = try std.Io.Dir.cwd().openFile(file_path, .{});
-    defer file.close();
+    var file = try std.Io.Dir.cwd().openFile(std.Options.debug_io, std.Options.debug_io, file_path, .{});
+    defer file.close(std.Options.debug_io);
 
     if (state.initialized) {
         state.deinit();

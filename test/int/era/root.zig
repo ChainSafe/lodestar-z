@@ -13,13 +13,13 @@ test "validate an existing era file" {
     defer allocator.free(era_path);
 
     // First check that the era file exists
-    if (std.Io.Dir.cwd().openFile(era_path, .{})) |f| {
-        f.close();
+    if (std.Io.Dir.cwd().openFile(std.Options.debug_io, std.testing.io, era_path, .{})) |f| {
+        f.close(std.testing.io);
     } else |_| {
         return error.SkipZigTest;
     }
 
-    var reader = try era.Reader.open(allocator, c.mainnet.config, era_path);
+    var reader = try era.Reader.open(allocator, std.testing.io, c.mainnet.config, era_path);
     defer reader.close(allocator);
 
     // Main validation
@@ -34,14 +34,14 @@ test "write an era file from an existing era file" {
     defer allocator.free(era_path);
 
     // First check that the era file exists
-    if (std.Io.Dir.cwd().openFile(era_path, .{})) |f| {
-        f.close();
+    if (std.Io.Dir.cwd().openFile(std.Options.debug_io, std.testing.io, era_path, .{})) |f| {
+        f.close(std.testing.io);
     } else |_| {
         return error.SkipZigTest;
     }
 
     // Read known-good era file
-    var reader = try era.Reader.open(allocator, c.mainnet.config, era_path);
+    var reader = try era.Reader.open(allocator, std.testing.io, c.mainnet.config, era_path);
     defer reader.close(allocator);
 
     var tmp_dir = std.testing.tmpDir(.{});

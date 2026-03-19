@@ -80,8 +80,8 @@ pub fn readGroupIndex(allocator: std.mem.Allocator, file: std.Io.File, end: u64)
 /// Read all indices from an era file
 ///
 /// Ownership of the returned GroupIndex slice is transferred to the caller
-pub fn readAllGroupIndices(allocator: std.mem.Allocator, file: std.Io.File) ![]GroupIndex {
-    var end: i64 = @intCast(try file.getEndPos());
+pub fn readAllGroupIndices(allocator: std.mem.Allocator, io: std.Io, file: std.Io.File) ![]GroupIndex {
+    var end: i64 = @intCast(try file.length(io));
 
     var group_indices = try std.array_list.AlignedManaged(GroupIndex, null).initCapacity(
         allocator,
@@ -146,6 +146,6 @@ pub fn getShortHistoricalRoot(state: fork_types.AnyBeaconState) ![8]u8 {
         try last.toValue(allocator, &historical_root);
     }
 
-    _ = try std.fmt.bufPrint(&short_historical_root, "{x}", .{std.fmt.fmtSliceHexLower(historical_root[0..4])});
+    _ = try std.fmt.bufPrint(&short_historical_root, "{x}", .{historical_root[0..4]});
     return short_historical_root;
 }

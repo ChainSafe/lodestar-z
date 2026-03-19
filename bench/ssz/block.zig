@@ -107,7 +107,6 @@ const HashBlockSerialized = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
-    _ = init; // TODO: wire up Io for bench output
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
@@ -117,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
     );
     defer allocator.free(era_path);
 
-    var era_reader = try era.Reader.open(allocator, config.mainnet.config, era_path);
+    var era_reader = try era.Reader.open(allocator, init.io, config.mainnet.config, era_path);
     defer era_reader.close(allocator);
 
     const block_slot = try era.era.computeStartBlockSlotFromEraNumber(era_reader.era_number) + 1;

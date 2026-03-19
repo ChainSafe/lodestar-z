@@ -4,9 +4,6 @@
     .fingerprint = 0xd1ddb6abe067ee04,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .zbuild = .{
-            .path = "deps/zbuild",
-        },
         .blst = .{
             .path = "deps/blst",
         },
@@ -19,15 +16,11 @@
         .yaml = .{
             .path = "deps/yaml",
         },
-        .zapi = .{
-            .path = "deps/zapi",
-        },
-        .zbench = .{
-            .path = "deps/zbench",
-        },
-        .metrics = .{
-            .path = "deps/metrics",
-        },
+        // TODO: re-enable when 0.16-compatible
+        // .zapi = .{ .path = "deps/zapi" },
+        // .zbench = .{ .url = "..." },
+        // .metrics = .{ .url = "..." },
+        // .httpz = .{ .url = "..." },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
 }

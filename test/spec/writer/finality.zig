@@ -40,7 +40,7 @@ const test_template =
     \\        @tagName(active_preset) ++ "/tests/" ++ @tagName(active_preset) ++ "/{s}/finality/{s}/pyspec_tests/{s}",
     \\    }});
     \\    defer allocator.free(test_dir_name);
-    \\    const test_dir = std.fs.cwd().openDir(test_dir_name, .{{}}) catch return error.SkipZigTest;
+    \\    const test_dir = std.Io.Dir.cwd().openDir(std.testing.io, test_dir_name, .{{}}) catch return error.SkipZigTest;
     \\
     \\    try Sanity.BlocksTestCase(.{s}).execute(allocator, &pool, test_dir);
     \\}}

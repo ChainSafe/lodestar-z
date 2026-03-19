@@ -10,6 +10,8 @@ const e2s = @import("e2s.zig");
 const era = @import("era.zig");
 
 config: c.BeaconConfig,
+/// The Io context
+io: std.Io,
 /// The file being read
 file: std.Io.File,
 /// The era number retrieved from the file name
@@ -25,9 +27,9 @@ const Reader = @This();
 
 pub fn open(allocator: std.mem.Allocator, io: std.Io, config: c.BeaconConfig, path: []const u8) !Reader {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    errdefer file.close();
+    errdefer file.close(io);
     const era_file_name = try era.EraFileName.parse(path);
-    const group_indices = try era.readAllGroupIndices(allocator, file);
+    const group_indices = try era.readAllGroupIndices(allocator, io, file);
     errdefer {
         for (group_indices) |group_index| {
             allocator.free(group_index.state_index.offsets);
@@ -44,6 +46,7 @@ pub fn open(allocator: std.mem.Allocator, io: std.Io, config: c.BeaconConfig, pa
     errdefer pool.deinit();
     return .{
         .config = config,
+        .io = io,
         .file = file,
         .era_number = era_file_name.era_number,
         .short_historical_root = era_file_name.short_historical_root,
@@ -53,7 +56,7 @@ pub fn open(allocator: std.mem.Allocator, io: std.Io, config: c.BeaconConfig, pa
 }
 
 pub fn close(self: *Reader, allocator: std.mem.Allocator) void {
-    self.file.close();
+    self.file.close(self.io);
     for (self.group_indices) |group_index| {
         allocator.free(group_index.state_index.offsets);
         if (group_index.blocks_index) |bi| {

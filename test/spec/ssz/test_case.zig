@@ -159,10 +159,9 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
 
     // read expected json
 
-    var expected_json = std.array_list.AlignedManaged(u8, null).init(allocator);
+    var expected_json: std.Io.Writer.Allocating = .init(allocator);
     defer expected_json.deinit();
-    var write_stream = std.json.writeStream(expected_json.writer(), .{});
-    defer write_stream.deinit();
+    var write_stream: std.json.Stringify = .{ .writer = &expected_json.writer };
 
     try parseYamlToJson(allocator, value_yaml.docs.items[0], &write_stream);
 
@@ -213,18 +212,17 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
     // test serialization - value to json
 
     {
-        var serialized_actual = std.array_list.AlignedManaged(u8, null).init(allocator);
+        var serialized_actual: std.Io.Writer.Allocating = .init(allocator);
         defer serialized_actual.deinit();
-        var write_stream_actual = std.json.writeStream(serialized_actual.writer(), .{});
-        defer write_stream_actual.deinit();
-
+        var write_stream_actual: std.json.Stringify = .{ .writer = &serialized_actual.writer };
+    
         if (comptime ssz.isFixedType(ST)) {
             try ST.serializeIntoJson(&write_stream_actual, value_expected);
         } else {
             try ST.serializeIntoJson(allocator, &write_stream_actual, value_expected);
         }
 
-        try std.testing.expectEqualSlices(u8, expected_json.items, serialized_actual.items);
+        try std.testing.expectEqualSlices(u8, expected_json.written(), serialized_actual.items);
     }
 
     // test deserialization - json to value
@@ -232,7 +230,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
         const value_actual = try allocator.create(ST.Type);
         value_actual.* = ST.default_value;
 
-        var scanner = std.json.Scanner.initCompleteInput(allocator, expected_json.items);
+        var scanner = std.json.Scanner.initCompleteInput(allocator, expected_json.written());
         defer scanner.deinit();
 
         if (comptime ssz.isFixedType(ST)) {

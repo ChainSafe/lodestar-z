@@ -116,7 +116,7 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
 
 pub fn loadBlsSetting(allocator: std.mem.Allocator, dir: std.Io.Dir) BlsSetting {
     var file = dir.openFile("meta.yaml", .{}) catch return .default;
-    defer file.close();
+    defer file.close(std.Options.debug_io);
 
     const contents = file.readToEndAlloc(allocator, 100) catch return .default;
     defer allocator.free(contents);
@@ -289,8 +289,8 @@ pub fn expectEqualBeaconStates(expected: *AnyBeaconState, actual: *AnyBeaconStat
                             "field: {s}\n  expected_root: {s}\n  actual_root:   {s}\n",
                             .{
                                 field.name,
-                                std.fmt.fmtSliceHexLower(expected_field_root),
-                                std.fmt.fmtSliceHexLower(actual_field_root),
+                                expected_field_root,
+                                actual_field_root,
                             },
                         );
 

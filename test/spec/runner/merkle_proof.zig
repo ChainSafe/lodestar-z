@@ -140,7 +140,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
         fn loadProof(allocator: std.mem.Allocator, dir: std.Io.Dir, out: *MerkleProof) !void {
             var file = try dir.openFile("proof.yaml", .{});
-            defer file.close();
+            defer file.close(std.Options.debug_io);
 
             const contents = try file.readToEndAlloc(allocator, 4096);
             defer allocator.free(contents);
