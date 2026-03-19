@@ -136,7 +136,7 @@ test "UintType - sanity" {
     try Uint8.deserializeFromJson(&json, &u);
 
     // Serialize u into "255"
-    var output_json = std.ArrayList(u8).init(allocator);
+    var output_json = std.array_list.AlignedManaged(u8, null).init(allocator);
     defer output_json.deinit();
     var write_stream = std.json.writeStream(output_json.writer(), .{});
     defer write_stream.deinit();

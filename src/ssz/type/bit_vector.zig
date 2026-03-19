@@ -131,8 +131,8 @@ pub fn BitVector(comptime _length: comptime_int) type {
             comptime T: type,
             allocator: std.mem.Allocator,
             values: *const [length]T,
-        ) !std.ArrayList(T) {
-            var indices = try std.ArrayList(T).initCapacity(allocator, byte_len * 8);
+        ) !std.array_list.AlignedManaged(T, null) {
+            var indices = try std.array_list.AlignedManaged(T, null).initCapacity(allocator, byte_len * 8);
 
             for (0..byte_len) |i_byte| {
                 var b = self.data[i_byte];

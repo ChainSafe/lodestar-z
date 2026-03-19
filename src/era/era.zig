@@ -83,7 +83,7 @@ pub fn readGroupIndex(allocator: std.mem.Allocator, file: std.fs.File, end: u64)
 pub fn readAllGroupIndices(allocator: std.mem.Allocator, file: std.fs.File) ![]GroupIndex {
     var end: i64 = @intCast(try file.getEndPos());
 
-    var group_indices = try std.ArrayList(GroupIndex).initCapacity(
+    var group_indices = try std.array_list.AlignedManaged(GroupIndex, null).initCapacity(
         allocator,
         // Most era files have a single group, though the spec allows for multiple
         1,

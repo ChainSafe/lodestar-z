@@ -133,7 +133,7 @@ test "BoolType - sanity" {
     try Bool.deserializeFromJson(&json, &b);
 
     // Serialize
-    var output_json = std.ArrayList(u8).init(allocator);
+    var output_json = std.array_list.AlignedManaged(u8, null).init(allocator);
     defer output_json.deinit();
     var write_stream = std.json.writeStream(output_json.writer(), .{});
     defer write_stream.deinit();

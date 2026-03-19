@@ -47,7 +47,7 @@ pub fn proposerSlashingsSignatureSets(
     epoch_cache: *const EpochCache,
     state: *const BeaconState(fork),
     signed_block: *const ForkTypes(fork).SignedBeaconBlock.Type,
-    out: std.ArrayList(SingleSignatureSet),
+    out: std.array_list.AlignedManaged(SingleSignatureSet, null),
 ) !void {
     const proposer_slashings = signed_block.message.body.proposer_slashings.items;
     for (proposer_slashings) |*proposer_slashing| {

@@ -20,7 +20,9 @@ pub fn FixedContainerType(comptime ST: type) type {
         else => @compileError("Expected a struct type."),
     };
 
-    comptime var native_fields: [ssz_fields.len]std.builtin.Type.StructField = undefined;
+    comptime var _field_names: [ssz_fields.len][:0]const u8 = undefined;
+    comptime var _field_types: [ssz_fields.len]type = undefined;
+    comptime var _field_attrs: [ssz_fields.len]std.builtin.Type.StructField.Attributes = undefined;
     comptime var _offsets: [ssz_fields.len]usize = undefined;
     comptime var _fixed_size: usize = 0;
     inline for (ssz_fields, 0..) |field, i| {
@@ -28,27 +30,14 @@ pub fn FixedContainerType(comptime ST: type) type {
             @compileError("FixedContainerType must only contain fixed fields");
         }
 
-        native_fields[i] = .{
-            .name = field.name,
-            .type = field.type.Type,
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = @alignOf(field.type.Type),
-        };
+        _field_names[i] = field.name;
+        _field_types[i] = field.type.Type;
+        _field_attrs[i] = .{};
         _offsets[i] = _fixed_size;
         _fixed_size += field.type.fixed_size;
     }
 
-    const T = @Type(.{
-        .@"struct" = .{
-            .layout = .auto,
-            .backing_integer = null,
-            .fields = native_fields[0..],
-            // TODO: do we need to assign this value?
-            .decls = &[_]std.builtin.Type.Declaration{},
-            .is_tuple = false,
-        },
-    });
+    const T = @Struct(.auto, null, &_field_names, &_field_types, &_field_attrs);
 
     return struct {
         pub const kind = TypeKind.container;
@@ -308,7 +297,9 @@ pub fn VariableContainerType(comptime ST: type) type {
         else => @compileError("Expected a struct type."),
     };
 
-    comptime var native_fields: [ssz_fields.len]std.builtin.Type.StructField = undefined;
+    comptime var _field_names: [ssz_fields.len][:0]const u8 = undefined;
+    comptime var _field_types: [ssz_fields.len]type = undefined;
+    comptime var _field_attrs: [ssz_fields.len]std.builtin.Type.StructField.Attributes = undefined;
     comptime var _offsets: [ssz_fields.len]usize = undefined;
     comptime var _min_size: usize = 0;
     comptime var _max_size: usize = 0;
@@ -327,13 +318,9 @@ pub fn VariableContainerType(comptime ST: type) type {
             _fixed_end += 4;
         }
 
-        native_fields[i] = .{
-            .name = field.name,
-            .type = field.type.Type,
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = @alignOf(field.type.Type),
-        };
+        _field_names[i] = field.name;
+        _field_types[i] = field.type.Type;
+        _field_attrs[i] = .{};
     }
 
     comptime {
@@ -344,16 +331,7 @@ pub fn VariableContainerType(comptime ST: type) type {
 
     const var_count = ssz_fields.len - _fixed_count;
 
-    const T = @Type(.{
-        .@"struct" = .{
-            .layout = .auto,
-            .backing_integer = null,
-            .fields = native_fields[0..],
-            // TODO: do we need to assign this value?
-            .decls = &[_]std.builtin.Type.Declaration{},
-            .is_tuple = false,
-        },
-    });
+    const T = @Struct(.auto, null, &_field_names, &_field_types, &_field_attrs);
 
     return struct {
         pub const kind = TypeKind.container;

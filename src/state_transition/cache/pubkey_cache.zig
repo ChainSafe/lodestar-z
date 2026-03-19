@@ -7,7 +7,7 @@ const Validator = types.phase0.Validator.Type;
 pub const PubkeyIndexMap = std.AutoHashMap([48]u8, u64);
 
 /// Map from validator index to pubkey
-pub const Index2PubkeyCache = std.ArrayList(bls.PublicKey);
+pub const Index2PubkeyCache = std.array_list.AlignedManaged(bls.PublicKey, null);
 
 /// Populate `pubkey_to_index` and `index_to_pubkey` caches from validators list.
 pub fn syncPubkeys(

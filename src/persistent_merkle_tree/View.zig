@@ -19,7 +19,7 @@ pub const Pool = struct {
     allocator: Allocator,
     node_pool: *Node.Pool,
 
-    views: std.ArrayList(View),
+    views: std.array_list.AlignedManaged(View, null),
     next_free: Id,
 
     /// denormalized parent data: parent -> children
@@ -29,7 +29,7 @@ pub const Pool = struct {
         var pool = Pool{
             .allocator = allocator,
             .node_pool = node_pool,
-            .views = std.ArrayList(View).init(allocator),
+            .views = std.array_list.AlignedManaged(View, null).init(allocator),
             .next_free = @enumFromInt(0),
             .parent_views = std.AutoHashMap(Id, std.AutoArrayHashMap(Id, void)).init(allocator),
         };

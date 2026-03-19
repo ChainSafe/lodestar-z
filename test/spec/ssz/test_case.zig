@@ -159,7 +159,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
 
     // read expected json
 
-    var expected_json = std.ArrayList(u8).init(allocator);
+    var expected_json = std.array_list.AlignedManaged(u8, null).init(allocator);
     defer expected_json.deinit();
     var write_stream = std.json.writeStream(expected_json.writer(), .{});
     defer write_stream.deinit();
@@ -213,7 +213,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     // test serialization - value to json
 
     {
-        var serialized_actual = std.ArrayList(u8).init(allocator);
+        var serialized_actual = std.array_list.AlignedManaged(u8, null).init(allocator);
         defer serialized_actual.deinit();
         var write_stream_actual = std.json.writeStream(serialized_actual.writer(), .{});
         defer write_stream_actual.deinit();

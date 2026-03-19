@@ -29,7 +29,7 @@ pub fn isValidAttestationSlot(attestation_slot: Slot, current_slot: Slot) bool {
 ///
 /// Pre-requisite: isValidIndexedAttestation already checks for attesting indices to be sorted and unique.
 /// Without that check, this would be incorrect.
-pub fn findAttesterSlashableIndices(attester_slashing: *const AttesterSlashing, indices: *std.ArrayList(ValidatorIndex)) !void {
+pub fn findAttesterSlashableIndices(attester_slashing: *const AttesterSlashing, indices: *std.array_list.AlignedManaged(ValidatorIndex, null)) !void {
     const a = attester_slashing.attestation_1.attesting_indices.items;
     const b = attester_slashing.attestation_2.attesting_indices.items;
     var i: usize = 0;

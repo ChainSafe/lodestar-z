@@ -31,7 +31,7 @@ pub const WriterState = union(enum) {
     write_group: struct {
         era_number: u64,
         current_offset: u64,
-        block_offsets: std.ArrayList(u64),
+        block_offsets: std.array_list.AlignedManaged(u64, null),
         last_block_slot: u64,
     },
     finished_group: struct {
@@ -103,7 +103,7 @@ pub fn writeVersion(self: *Writer, allocator: std.mem.Allocator) !void {
         .write_group = .{
             .era_number = self.state.init_group.era_number,
             .current_offset = self.state.init_group.current_offset + e2s.header_size,
-            .block_offsets = try std.ArrayList(u64).initCapacity(allocator, preset.SLOTS_PER_HISTORICAL_ROOT),
+            .block_offsets = try std.array_list.AlignedManaged(u64, null).initCapacity(allocator, preset.SLOTS_PER_HISTORICAL_ROOT),
             .last_block_slot = if (self.state.init_group.era_number == 0)
                 0
             else

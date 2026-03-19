@@ -7,7 +7,7 @@ const SyncCommittee = types.altair.SyncCommittee.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const BLSPubkey = types.primitive.BLSPubkey.Type;
 
-const SyncCommitteeIndices = std.ArrayList(u32);
+const SyncCommitteeIndices = std.array_list.AlignedManaged(u32, null);
 const SyncComitteeValidatorIndexMap = std.AutoHashMap(ValidatorIndex, SyncCommitteeIndices);
 const ReferenceCount = @import("../utils/reference_count.zig").ReferenceCount;
 

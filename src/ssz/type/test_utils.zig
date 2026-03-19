@@ -92,7 +92,7 @@ pub fn typeTest(comptime ST: type) type {
                 try ST.deserializeFromJson(&scanner, &json_value);
 
                 // serialize to json
-                var output_json = std.ArrayList(u8).init(allocator);
+                var output_json = std.array_list.AlignedManaged(u8, null).init(allocator);
                 defer output_json.deinit();
                 var write_stream = std.json.writeStream(output_json.writer(), .{});
                 defer write_stream.deinit();
@@ -130,7 +130,7 @@ pub fn typeTest(comptime ST: type) type {
                 try ST.deserializeFromJson(allocator, &scanner, &json_value);
 
                 // serialize to json
-                var output_json = std.ArrayList(u8).init(allocator);
+                var output_json = std.array_list.AlignedManaged(u8, null).init(allocator);
                 defer output_json.deinit();
                 var write_stream = std.json.writeStream(output_json.writer(), .{});
                 defer write_stream.deinit();

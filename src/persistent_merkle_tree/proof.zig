@@ -304,7 +304,7 @@ pub fn computeDescriptor(allocator: Allocator, gindices: []const Gindex) ![]u8 {
     }
 
     // Sort bitstrings lexicographically
-    var sorted_list = std.ArrayList([]const u8).init(allocator);
+    var sorted_list = std.array_list.AlignedManaged([]const u8, null).init(allocator);
     defer sorted_list.deinit();
 
     var proof_iter = proof_bitstrings.keyIterator();
@@ -321,7 +321,7 @@ pub fn computeDescriptor(allocator: Allocator, gindices: []const Gindex) ![]u8 {
     std.sort.pdq([]const u8, sorted_list.items, {}, bitstringLessThan);
 
     // Convert gindex bitstrings into descriptor bitstring
-    var descriptor_bitstring = std.ArrayList(u8).init(allocator);
+    var descriptor_bitstring = std.array_list.AlignedManaged(u8, null).init(allocator);
     defer descriptor_bitstring.deinit();
 
     for (sorted_list.items) |gindex_bitstring| {
@@ -377,7 +377,7 @@ fn getBit(bitlist: []const u8, bit_index: usize) bool {
 
 /// Convert descriptor bytes to bitlist
 pub fn descriptorToBitlist(allocator: Allocator, descriptor: []const u8) ![]bool {
-    var bools = std.ArrayList(bool).init(allocator);
+    var bools = std.array_list.AlignedManaged(bool, null).init(allocator);
     errdefer bools.deinit();
 
     const max_bit_length = descriptor.len * 8;
