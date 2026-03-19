@@ -41,8 +41,8 @@ pub fn verify(
     }
 
     const chk = errorFromInt(c.blst_core_verify_pk_in_g1(
-        &pk.point,
-        &self.point,
+        @ptrCast(&pk.point),
+        @ptrCast(&self.point),
         true,
         msg.ptr,
         msg.len,
@@ -94,9 +94,9 @@ pub fn aggregateVerify(
 
     pairing.commit();
     var gtsig = c.blst_fp12{};
-    Pairing.aggregated(&gtsig, self);
+    Pairing.aggregated(@ptrCast(&gtsig), self);
 
-    return pairing.finalVerify(&gtsig);
+    return pairing.finalVerify(@ptrCast(&gtsig));
 }
 
 /// Fast verify an `AggregateSignature` against a single message and a slice of `PublicKey`.
@@ -149,21 +149,21 @@ pub fn fastAggregateVerifyPreAggregated(
 /// Convert an `AggregateSignature` to a regular `Signature`.
 pub fn fromAggregate(agg_sig: *const AggregateSignature) Self {
     var sig = Self{};
-    c.blst_p2_to_affine(@ptrCast(&sig.point), &agg_sig.point);
+    c.blst_p2_to_affine(@ptrCast(&sig.point), @ptrCast(&agg_sig.point));
     return sig;
 }
 
 /// Compress the `Signature` to bytes.
 pub fn compress(self: *const Self) [COMPRESS_SIZE]u8 {
     var sig_comp = [_]u8{0} ** COMPRESS_SIZE;
-    c.blst_p2_affine_compress(&sig_comp, @ptrCast(&self.point));
+    c.blst_p2_affine_compress(@ptrCast(&sig_comp), @ptrCast(&self.point));
     return sig_comp;
 }
 
 /// Serialize the `Signature` to bytes.
 pub fn serialize(self: *const Self) [SERIALIZE_SIZE]u8 {
     var sig_out = [_]u8{0} ** SERIALIZE_SIZE;
-    c.blst_p2_affine_serialize(&sig_out, @ptrCast(&self.point));
+    c.blst_p2_affine_serialize(@ptrCast(&sig_out), @ptrCast(&self.point));
     return sig_out;
 }
 
@@ -173,7 +173,7 @@ pub fn serialize(self: *const Self) [SERIALIZE_SIZE]u8 {
 pub fn uncompress(sig_comp: []const u8) BlstError!Self {
     if (sig_comp.len == COMPRESS_SIZE and (sig_comp[0] & 0x80) != 0) {
         var sig = Self{};
-        try errorFromInt(c.blst_p2_uncompress(@ptrCast(&sig.point), &sig_comp[0]));
+        try errorFromInt(c.blst_p2_uncompress(@ptrCast(&sig.point), @ptrCast(&sig_comp[0])));
         return sig;
     }
 
@@ -188,7 +188,7 @@ pub fn deserialize(sig_in: []const u8) BlstError!Self {
         (sig_in.len == COMPRESS_SIZE and (sig_in[0] & 0x80) != 0))
     {
         var sig = Self{};
-        try errorFromInt(c.blst_p2_deserialize(@ptrCast(&sig.point), &sig_in[0]));
+        try errorFromInt(c.blst_p2_deserialize(@ptrCast(&sig.point), @ptrCast(&sig_in[0])));
         return sig;
     }
 

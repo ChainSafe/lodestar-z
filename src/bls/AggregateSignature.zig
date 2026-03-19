@@ -14,7 +14,7 @@ pub fn validate(self: *const Self) BlstError!void {
 /// Converts from projective coordinates back to affine coordinates.
 pub fn toSignature(self: *const Self) Signature {
     var sig = Signature{};
-    c.blst_p2_to_affine(@ptrCast(@ptrCast(&sig.point)), @ptrCast(&self.point));
+    c.blst_p2_to_affine(@ptrCast(&sig.point), @ptrCast(&self.point));
     return sig;
 }
 
@@ -27,9 +27,9 @@ pub fn aggregate(sigs: []const Signature, sigs_groupcheck: bool) BlstError!Self 
     if (sigs_groupcheck) for (sigs) |sig| try sig.validate(false);
 
     var agg_sig = Self{};
-    c.blst_p2_from_affine(&agg_sig.point, @ptrCast(&sigs[0].point));
+    c.blst_p2_from_affine(@ptrCast(&agg_sig.point), @ptrCast(&sigs[0].point));
     for (1..sigs.len) |i| {
-        c.blst_p2_add_or_double_affine(&agg_sig.point, &agg_sig.point, @ptrCast(&sigs[i].point));
+        c.blst_p2_add_or_double_affine(@ptrCast(&agg_sig.point), @ptrCast(&agg_sig.point), @ptrCast(&sigs[i].point));
     }
 
     return agg_sig;
@@ -92,7 +92,7 @@ test aggregateWithRandomness {
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
-        seed = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
+        var stack_dummy: u8 = 0; seed = @truncate(@intFromPtr(&stack_dummy));
         break :blk seed;
     });
     const rand = prng.random();

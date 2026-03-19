@@ -64,6 +64,7 @@ pub fn syncPubkeysParallel(
     pubkey_to_index: *PubkeyIndexMap,
     index_to_pubkey: *Index2PubkeyCache,
 ) !void {
+    _ = allocator; // TODO: re-use with parallel implementation
     const old_len = index_to_pubkey.items.len;
     if (pubkey_to_index.count() != old_len) {
         return error.InconsistentCache;

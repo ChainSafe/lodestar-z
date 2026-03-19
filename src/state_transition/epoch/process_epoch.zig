@@ -1,5 +1,5 @@
 const std = @import("std");
-const Timer = std.time.Timer;
+const Timer = @import("../timer.zig");
 const metrics = @import("../metrics.zig");
 const observeEpochTransitionStep = metrics.observeEpochTransitionStep;
 

@@ -36,10 +36,11 @@ pub const Opts = struct {
 };
 
 allocator: Allocator,
+io: std.Io,
 n_workers: usize,
 threads: [MAX_WORKERS - 1]std.Thread = undefined,
-work_ready: [MAX_WORKERS]std.Thread.ResetEvent = [_]std.Thread.ResetEvent{.{}} ** MAX_WORKERS,
-work_done: [MAX_WORKERS]std.Thread.ResetEvent = [_]std.Thread.ResetEvent{.{}} ** MAX_WORKERS,
+work_ready: [MAX_WORKERS]std.Io.Event = [_]std.Io.Event{.unset} ** MAX_WORKERS,
+work_done: [MAX_WORKERS]std.Io.Event = [_]std.Io.Event{.unset} ** MAX_WORKERS,
 work_items: [MAX_WORKERS]?WorkItem = [_]?WorkItem{null} ** MAX_WORKERS,
 shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 pairing_bufs: [MAX_WORKERS]PairingBuf = [_]PairingBuf{.{}} ** MAX_WORKERS,
@@ -47,14 +48,14 @@ partial_p1: [MAX_WORKERS]c.blst_p1 = undefined,
 partial_p2: [MAX_WORKERS]c.blst_p2 = undefined,
 has_work: [MAX_WORKERS]bool = [_]bool{false} ** MAX_WORKERS,
 /// Mutex for dispatching multi-threaded verification work.
-dispatch_mutex: std.atomic.Mutex = .{},
+dispatch_mutex: std.atomic.Mutex = .unlocked,
 
 /// Creates a thread pool with the specified number of workers.
 /// The caller owns the returned pool and must call `deinit` when done.
-pub fn init(allocator: Allocator, opts: Opts) (Allocator.Error || std.Thread.SpawnError)!*ThreadPool {
+pub fn init(allocator: Allocator, io: std.Io, opts: Opts) (Allocator.Error || std.Thread.SpawnError)!*ThreadPool {
     std.debug.assert(opts.n_workers >= 1 and opts.n_workers <= MAX_WORKERS);
     const pool = try allocator.create(ThreadPool);
-    pool.* = .{ .allocator = allocator, .n_workers = opts.n_workers };
+    pool.* = .{ .allocator = allocator, .io = io, .n_workers = opts.n_workers };
     // Workers start from index 1; index 0 is reserved for the calling thread
     // which executes as worker 0 inside dispatch() to avoid wasting a core.
     for (1..pool.n_workers) |i| {
@@ -69,7 +70,7 @@ pub fn deinit(pool: *ThreadPool) void {
     pool.shutdown.store(true, .release);
     const n_workers = pool.n_workers;
     for (1..n_workers) |i| {
-        pool.work_ready[i].set();
+        pool.work_ready[i].set(pool.io);
     }
     for (pool.threads[0 .. n_workers - 1]) |t| {
         t.join();
@@ -82,13 +83,13 @@ pub fn deinit(pool: *ThreadPool) void {
 /// Currently supports `aggregateVerify` and `verifyMultipleAggregateSignatures`.
 fn workerLoop(pool: *ThreadPool, worker_index: usize) void {
     while (true) {
-        pool.work_ready[worker_index].wait();
+        pool.work_ready[worker_index].wait(pool.io) catch unreachable;
         pool.work_ready[worker_index].reset();
 
         if (pool.shutdown.load(.acquire)) return;
 
         const item = pool.work_items[worker_index] orelse {
-            pool.work_done[worker_index].set();
+            pool.work_done[worker_index].set(pool.io);
             continue;
         };
 
@@ -98,7 +99,7 @@ fn workerLoop(pool: *ThreadPool, worker_index: usize) void {
         }
 
         pool.work_items[worker_index] = null;
-        pool.work_done[worker_index].set();
+        pool.work_done[worker_index].set(pool.io);
     }
 }
 
@@ -108,7 +109,7 @@ fn dispatch(pool: *ThreadPool, item: WorkItem, n_active: usize) void {
     // Signal background workers before main thread starts
     for (1..n_active) |i| {
         pool.work_items[i] = item;
-        pool.work_ready[i].set();
+        pool.work_ready[i].set(pool.io);
     }
 
     // Main thread executes as worker 0
@@ -121,7 +122,7 @@ fn dispatch(pool: *ThreadPool, item: WorkItem, n_active: usize) void {
 
     // Wait for all background workers
     for (1..n_active) |i| {
-        pool.work_done[i].wait();
+        pool.work_done[i].wait(pool.io) catch unreachable;
         pool.work_done[i].reset();
     }
 }
@@ -194,7 +195,7 @@ pub fn verifyMultipleAggregateSignatures(
         rands.len != n_elems)
         return BlstError.VerifyFail;
 
-    pool.dispatch_mutex.lock();
+    while (!pool.dispatch_mutex.tryLock()) { std.atomic.spinLoopHint(); }
     defer pool.dispatch_mutex.unlock();
 
     // Single-threaded fallback for small inputs or single worker
@@ -296,7 +297,7 @@ pub fn aggregateVerify(
     const n_elems = pks.len;
     if (n_elems == 0 or msgs.len != n_elems) return BlstError.VerifyFail;
 
-    pool.dispatch_mutex.lock();
+    while (!pool.dispatch_mutex.tryLock()) { std.atomic.spinLoopHint(); }
     defer pool.dispatch_mutex.unlock();
 
     // Single-threaded fallback
@@ -308,8 +309,8 @@ pub fn aggregateVerify(
         }
         pairing.commit();
         var gtsig = c.blst_fp12{};
-        Pairing.aggregated(&gtsig, sig);
-        return pairing.finalVerify(&gtsig);
+        Pairing.aggregated(@ptrCast(&gtsig), sig);
+        return pairing.finalVerify(@ptrCast(&gtsig));
     }
 
     const n_active = @min(pool.n_workers, n_elems);
@@ -332,7 +333,7 @@ pub fn aggregateVerify(
     if (job.err_flag.load(.acquire)) return false;
 
     var gtsig = c.blst_fp12{};
-    Pairing.aggregated(&gtsig, sig);
+    Pairing.aggregated(@ptrCast(&gtsig), sig);
 
     return mergeAndVerify(pool, n_active, &gtsig);
 }
@@ -359,11 +360,11 @@ fn mergeAndVerify(pool: *ThreadPool, n_active: usize, gtsig: ?*const c.blst_fp12
         }
     }
 
-    return acc.finalVerify(gtsig);
+    return acc.finalVerify(@ptrCast(gtsig));
 }
 
 test "verifyMultipleAggregateSignatures multi-threaded" {
-    const pool = try ThreadPool.init(std.testing.allocator, .{ .n_workers = 4 });
+    const pool = try ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 4 });
     defer pool.deinit();
 
     const ikm: [32]u8 = .{
@@ -383,7 +384,7 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
-        seed = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
+        var stack_dummy: u8 = 0; seed = @truncate(@intFromPtr(&stack_dummy));
         break :blk seed;
     });
     const rand = prng.random();
@@ -417,7 +418,7 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
 }
 
 test "aggregateVerify multi-threaded" {
-    const pool = try ThreadPool.init(std.testing.allocator, .{ .n_workers = 4 });
+    const pool = try ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 4 });
     defer pool.deinit();
 
     const AggregateSignature = blst.AggregateSignature;
@@ -438,7 +439,7 @@ test "aggregateVerify multi-threaded" {
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
-        seed = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
+        var stack_dummy: u8 = 0; seed = @truncate(@intFromPtr(&stack_dummy));
         break :blk seed;
     });
     const rand = prng.random();

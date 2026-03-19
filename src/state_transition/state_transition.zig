@@ -5,7 +5,7 @@ const metrics = @import("metrics.zig");
 const observeEpochTransitionStep = metrics.observeEpochTransitionStep;
 const observeEpochTransition = metrics.observeEpochTransition;
 const readSeconds = metrics.readSeconds;
-const Timer = std.time.Timer;
+const Timer = @import("timer.zig");
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;

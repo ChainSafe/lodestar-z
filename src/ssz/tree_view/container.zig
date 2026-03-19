@@ -13,6 +13,7 @@ const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
 ///
 /// For basic-type fields, it returns or accepts values directly; for complex fields, it returns or accepts corresponding tree view references.
 pub fn ContainerTreeView(comptime ST: type) type {
+    @setEvalBranchQuota(100000);
     comptime var _tv_field_names: [ST.fields.len][:0]const u8 = undefined;
     comptime var _tv_field_types: [ST.fields.len]type = undefined;
     comptime var _tv_field_attrs: [ST.fields.len]std.builtin.Type.StructField.Attributes = undefined;
