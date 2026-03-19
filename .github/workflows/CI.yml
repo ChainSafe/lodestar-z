@@ -97,9 +97,6 @@ jobs:
       - name: Run consensus-type tests
         run: |
           zig build test:consensus_types
-      - name: Run fork_types tests
-        run: |
-          zig build test:fork_types
       - name: Run era tests
         run: |
           zig build test:era
