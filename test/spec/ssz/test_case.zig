@@ -125,7 +125,7 @@ pub fn parseYamlToJson(allocator: Allocator, y: yaml.Yaml.Value, writer: anytype
     }
 }
 
-pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_file_name: []const u8) !void {
+pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_file_name: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -304,7 +304,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     }
 }
 
-pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir) !void {
+pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();

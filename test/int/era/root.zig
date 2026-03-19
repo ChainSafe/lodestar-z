@@ -13,7 +13,7 @@ test "validate an existing era file" {
     defer allocator.free(era_path);
 
     // First check that the era file exists
-    if (std.fs.cwd().openFile(era_path, .{})) |f| {
+    if (std.Io.Dir.cwd().openFile(era_path, .{})) |f| {
         f.close();
     } else |_| {
         return error.SkipZigTest;
@@ -34,7 +34,7 @@ test "write an era file from an existing era file" {
     defer allocator.free(era_path);
 
     // First check that the era file exists
-    if (std.fs.cwd().openFile(era_path, .{})) |f| {
+    if (std.Io.Dir.cwd().openFile(era_path, .{})) |f| {
         f.close();
     } else |_| {
         return error.SkipZigTest;

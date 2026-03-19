@@ -43,7 +43,7 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
 
         const Self = @This();
 
-        pub fn execute(allocator: Allocator, dir: std.fs.Dir) !void {
+        pub fn execute(allocator: Allocator, dir: std.Io.Dir) !void {
             const pool_size = if (active_preset == .mainnet) 10_000_000 else 1_000_000;
             var pool = try Node.Pool.init(allocator, pool_size);
             defer pool.deinit();
@@ -57,7 +57,7 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
             try tc.runTest();
         }
 
-        fn init(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
+        fn init(allocator: Allocator, pool: *Node.Pool, dir: std.Io.Dir) !Self {
             const meta_fork = try loadTargetFork(allocator, dir);
             if (meta_fork != target_fork) return error.InvalidMetaFile;
 
@@ -159,7 +159,7 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
     };
 }
 
-fn loadTargetFork(allocator: Allocator, dir: std.fs.Dir) !ForkSeq {
+fn loadTargetFork(allocator: Allocator, dir: std.Io.Dir) !ForkSeq {
     var meta_file = try dir.openFile("meta.yaml", .{});
     defer meta_file.close();
     const contents = try meta_file.readToEndAlloc(allocator, 256);

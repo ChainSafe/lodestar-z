@@ -4,7 +4,7 @@ const spec_test_options = @import("spec_test_options");
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
-    const out = try std.fs.cwd().createFile("test/spec/bls/spec_tests.zig", .{});
+    const out = try std.Io.Dir.cwd().createFile("test/spec/bls/spec_tests.zig", .{});
     defer out.close();
 
     var writer = out.writer().any();
@@ -46,7 +46,7 @@ pub fn main() !void {
         });
         defer allocator.free(fork_tests_dir_name);
 
-        const fork_tests_dir = std.fs.cwd().openDir(fork_tests_dir_name, .{ .iterate = true }) catch |err| switch (err) {
+        const fork_tests_dir = std.Io.Dir.cwd().openDir(fork_tests_dir_name, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
         };
@@ -67,7 +67,7 @@ pub fn main() !void {
             });
             defer allocator.free(test_type_dir_name);
 
-            const test_type_dir = try std.fs.cwd().openDir(test_type_dir_name, .{ .iterate = true });
+            const test_type_dir = try std.Io.Dir.cwd().openDir(test_type_dir_name, .{ .iterate = true });
             var test_type_dir_it = test_type_dir.iterate();
             while (try test_type_dir_it.next()) |test_type_entry| {
                 switch (test_type_entry.kind) {
@@ -91,7 +91,7 @@ pub fn main() !void {
 /// Assumes the following global decls
 /// - std, allocator, spec_test_options, bls_tests_dir_name, test_case, {tests_dir}
 fn writeTest(
-    writer: std.io.AnyWriter,
+    writer: *std.Io.Writer,
     fork_name: []const u8,
     test_type: []const u8,
     test_name: []const u8,
@@ -106,7 +106,7 @@ fn writeTest(
         \\    }});
         \\    defer allocator.free(test_dir_name);
         \\
-        \\    const test_dir = try std.fs.cwd().openDir(test_dir_name, .{{}});
+        \\    const test_dir = try std.Io.Dir.cwd().openDir(test_dir_name, .{{}});
         \\    try test_case.{s}(allocator, test_dir);
         \\}}
         \\

@@ -4,7 +4,7 @@ const bls = @import("bls");
 
 const Allocator = std.mem.Allocator;
 
-pub fn aggregate(gpa: Allocator, path: std.fs.Dir) !void {
+pub fn aggregate(gpa: Allocator, path: std.Io.Dir) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -52,7 +52,7 @@ pub fn aggregate(gpa: Allocator, path: std.fs.Dir) !void {
     }
 }
 
-pub fn aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
+pub fn aggregate_verify(gpa: Allocator, path: std.Io.Dir) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -124,7 +124,7 @@ pub fn aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
     }
 }
 
-pub fn fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
+pub fn fast_aggregate_verify(gpa: Allocator, path: std.Io.Dir) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -192,7 +192,7 @@ pub fn fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
     }
 }
 
-pub fn sign(gpa: Allocator, path: std.fs.Dir) !void {
+pub fn sign(gpa: Allocator, path: std.Io.Dir) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -236,7 +236,7 @@ pub fn sign(gpa: Allocator, path: std.fs.Dir) !void {
     }
 }
 
-pub fn verify(gpa: Allocator, path: std.fs.Dir) !void {
+pub fn verify(gpa: Allocator, path: std.Io.Dir) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -295,7 +295,7 @@ pub fn verify(gpa: Allocator, path: std.fs.Dir) !void {
     }
 }
 
-pub fn eth_aggregate_pubkeys(gpa: Allocator, path: std.fs.Dir) !void {
+pub fn eth_aggregate_pubkeys(gpa: Allocator, path: std.Io.Dir) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -350,7 +350,7 @@ pub fn eth_aggregate_pubkeys(gpa: Allocator, path: std.fs.Dir) !void {
     }
 }
 
-pub fn eth_fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
+pub fn eth_fast_aggregate_verify(gpa: Allocator, path: std.Io.Dir) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();

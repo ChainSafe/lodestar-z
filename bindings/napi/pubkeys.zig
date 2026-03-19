@@ -73,7 +73,7 @@ fn pubkey2indexWrittenSize() usize {
 pub fn pubkeys_save(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     var file_path_buf: [1024]u8 = undefined;
     const file_path = try cb.arg(0).getValueStringUtf8(&file_path_buf);
-    var file = try std.fs.cwd().createFile(file_path, .{ .truncate = true });
+    var file = try std.Io.Dir.cwd().createFile(file_path, .{ .truncate = true });
     defer file.close();
 
     // Write header
@@ -99,7 +99,7 @@ pub fn pubkeys_save(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 pub fn pubkeys_load(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     var file_path_buf: [1024]u8 = undefined;
     const file_path = try cb.arg(0).getValueStringUtf8(&file_path_buf);
-    var file = try std.fs.cwd().openFile(file_path, .{});
+    var file = try std.Io.Dir.cwd().openFile(file_path, .{});
     defer file.close();
 
     if (state.initialized) {

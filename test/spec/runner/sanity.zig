@@ -35,7 +35,7 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
 
         const Self = @This();
 
-        pub fn execute(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !void {
+        pub fn execute(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.Io.Dir) !void {
             var tc = try Self.init(allocator, pool, dir);
             defer {
                 tc.deinit();
@@ -45,7 +45,7 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
             try tc.runTest();
         }
 
-        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.Io.Dir) !Self {
             var tc = Self{
                 .pre = undefined,
                 .post = undefined,
@@ -107,7 +107,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
 
         const Self = @This();
 
-        pub fn execute(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !void {
+        pub fn execute(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.Io.Dir) !void {
             var tc = try Self.init(allocator, pool, dir);
             defer {
                 tc.deinit();
@@ -117,7 +117,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
             try tc.runTest();
         }
 
-        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.Io.Dir) !Self {
             var tc = Self{
                 .pre = undefined,
                 .post = undefined,

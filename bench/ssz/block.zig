@@ -105,9 +105,9 @@ const HashBlockSerialized = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
-    const stdout = std.io.getStdOut().writer();
+    _ = init; // TODO: wire up Io for bench output
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
@@ -160,5 +160,5 @@ pub fn main() !void {
     const hash_block_serialized = HashBlockSerialized{ .bytes = block_bytes };
     try bench.addParam("hash block serialized", &hash_block_serialized, .{});
 
-    try bench.run(stdout);
+    try bench.run(init.io, std.Io.File.stdout());
 }

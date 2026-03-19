@@ -11,7 +11,7 @@ const era = @import("era.zig");
 
 config: c.BeaconConfig,
 /// The file being read
-file: std.fs.File,
+file: std.Io.File,
 /// The era number retrieved from the file name
 era_number: u64,
 /// The short historical root retrieved from the file name
@@ -23,8 +23,8 @@ pool: *Node.Pool,
 
 const Reader = @This();
 
-pub fn open(allocator: std.mem.Allocator, config: c.BeaconConfig, path: []const u8) !Reader {
-    const file = try std.fs.cwd().openFile(path, .{});
+pub fn open(allocator: std.mem.Allocator, io: std.Io, config: c.BeaconConfig, path: []const u8) !Reader {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     errdefer file.close();
     const era_file_name = try era.EraFileName.parse(path);
     const group_indices = try era.readAllGroupIndices(allocator, file);

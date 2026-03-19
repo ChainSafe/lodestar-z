@@ -23,13 +23,13 @@ fn download_era_file(
     out_dir: []const u8,
 ) !void {
     // Ensure the output directory exists before creating the file
-    try std.fs.cwd().makePath(out_dir);
+    try std.Io.Dir.cwd().createDirPath(out_dir);
 
     // If the file already exists, return early
     const out_path = try std.fs.path.join(allocator, &[_][]const u8{ out_dir, era_file });
     defer allocator.free(out_path);
 
-    if (std.fs.cwd().openFile(out_path, .{})) |f| {
+    if (std.Io.Dir.cwd().openFile(out_path, .{})) |f| {
         std.log.info("{s} already downloaded", .{
             era_file,
         });
@@ -74,7 +74,7 @@ fn download_era_file(
         out_path,
     });
 
-    const file = try std.fs.cwd().createFile(out_path, .{});
+    const file = try std.Io.Dir.cwd().createFile(out_path, .{});
     defer file.close();
 
     var buf = try allocator.alloc(u8, 16 * 1024);

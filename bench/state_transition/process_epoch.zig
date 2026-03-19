@@ -429,10 +429,10 @@ fn elapsedSince(start: i128) u64 {
     return @as(u64, @intCast(std.time.nanoTimestamp() - start));
 }
 
-fn printSegmentStats(stdout: anytype) !void {
-    try stdout.print("\nSegmented epoch breakdown:\n", .{});
-    try stdout.print("{s:<28} {s:<8} {s:<14} {s:<14}\n", .{ "step", "runs", "total time", "time/run (avg)" });
-    try stdout.print("{s:-<66}\n", .{""});
+fn printSegmentStats() void {
+    std.debug.print("\nSegmented epoch breakdown:\n", .{});
+    std.debug.print("{s:<28} {s:<8} {s:<14} {s:<14}\n", .{ "step", "runs", "total time", "time/run (avg)" });
+    std.debug.print("{s:-<66}\n", .{""});
     for (std.enums.values(Step)) |step| {
         const idx = @intFromEnum(step);
         const count = step_run_counts[idx];
@@ -443,12 +443,12 @@ fn printSegmentStats(stdout: anytype) !void {
         const avg_ms = @as(f64, @floatFromInt(avg_ns)) / std.time.ns_per_ms;
         const total_s = total_ms / std.time.ms_per_s;
         if (total_ms >= std.time.ms_per_s) {
-            try stdout.print("{s:<28} {d:<8} {d:>10.3}s   {d:>10.3}ms\n", .{ @tagName(step), count, total_s, avg_ms });
+            std.debug.print("{s:<28} {d:<8} {d:>10.3}s   {d:>10.3}ms\n", .{ @tagName(step), count, total_s, avg_ms });
         } else {
-            try stdout.print("{s:<28} {d:<8} {d:>10.3}ms   {d:>10.3}ms\n", .{ @tagName(step), count, total_ms, avg_ms });
+            std.debug.print("{s:<28} {d:<8} {d:>10.3}ms   {d:>10.3}ms\n", .{ @tagName(step), count, total_ms, avg_ms });
         }
     }
-    try stdout.print("\n", .{});
+    std.debug.print("\n", .{});
 }
 
 fn ProcessEpochBench(comptime fork: ForkSeq) type {
@@ -672,18 +672,18 @@ fn loadStateBytesFromConfiguredEraFiles(allocator: std.mem.Allocator, stdout: an
 
         var era_reader = era.Reader.open(allocator, config.mainnet.config, era_path) catch |err| {
             last_err = err;
-            try stdout.print("Skipping ERA file {s}: {s}\n", .{ era_path, @errorName(err) });
+            std.debug.print("Skipping ERA file {s}: {s}\n", .{ era_path, @errorName(err) });
             continue;
         };
         defer era_reader.close(allocator);
 
         const state_bytes = era_reader.readSerializedState(allocator, null) catch |err| {
             last_err = err;
-            try stdout.print("Skipping ERA file {s}: {s}\n", .{ era_path, @errorName(err) });
+            std.debug.print("Skipping ERA file {s}: {s}\n", .{ era_path, @errorName(err) });
             continue;
         };
 
-        try stdout.print("State file loaded from {s}: {} bytes\n", .{ era_path, state_bytes.len });
+        std.debug.print("State file loaded from {s}: {} bytes\n", .{ era_path, state_bytes.len });
         return state_bytes;
     }
 
@@ -691,12 +691,12 @@ fn loadStateBytesFromConfiguredEraFiles(allocator: std.mem.Allocator, stdout: an
     return error.NoUsableEraStateFound;
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
 
     const allocator = gpa.allocator();
-    const stdout = std.io.getStdOut().writer();
+    _ = init; // TODO: wire up Io for bench output
     var pool = try Node.Pool.init(allocator, 10_000_000);
     defer pool.deinit();
 
@@ -707,7 +707,7 @@ pub fn main() !void {
     const chain_config = config.mainnet.chain_config;
     const slot = slotFromStateBytes(state_bytes);
     const detected_fork = config.mainnet.config.forkSeq(slot);
-    try stdout.print("Benchmarking processEpoch with state at fork: {s} (slot {})\n", .{ @tagName(detected_fork), slot });
+    std.debug.print("Benchmarking processEpoch with state at fork: {s} (slot {})\n", .{ @tagName(detected_fork), slot });
 
     // Dispatch to fork-specific loading
     inline for (comptime std.enums.values(ForkSeq)) |fork| {
@@ -734,7 +734,7 @@ fn runBenchmark(
         allocator.destroy(state);
     };
 
-    try stdout.print("State deserialized: slot={}, validators={}\n", .{
+    std.debug.print("State deserialized: slot={}, validators={}\n", .{
         try beacon_state.?.slot(),
         try beacon_state.?.validatorsCount(),
     });
@@ -780,8 +780,8 @@ fn runBenchmark(
     );
     defer epoch_transition_cache.deinit();
 
-    try stdout.print("Cached state created at slot {}\n", .{try cached_state.state.slot()});
-    try stdout.print("\nStarting process_epoch benchmarks for {s} fork...\n\n", .{@tagName(fork)});
+    std.debug.print("Cached state created at slot {}\n", .{try cached_state.state.slot()});
+    std.debug.print("\nStarting process_epoch benchmarks for {s} fork...\n\n", .{@tagName(fork)});
 
     var bench = zbench.Benchmark.init(allocator, .{ .iterations = 50 });
     defer bench.deinit();
@@ -885,6 +885,6 @@ fn runBenchmark(
         .cached_state = cached_state,
     }, .{});
 
-    try bench.run(stdout);
-    try printSegmentStats(stdout);
+    try bench.run(init.io, std.Io.File.stdout());
+    printSegmentStats();
 }

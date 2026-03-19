@@ -2,7 +2,7 @@ const std = @import("std");
 const snappy = @import("snappy").raw;
 
 const Allocator = std.mem.Allocator;
-const Dir = std.fs.Dir;
+const Dir = std.Io.Dir;
 
 /// Selector byte mapping for each fuzz target.
 /// First byte of corpus file selects which SSZ type to test.
@@ -444,7 +444,7 @@ pub fn main() !void {
 
     // Resolve paths relative to this tool's location.
     // Build system places the exe; we use CWD (test/fuzz/).
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
 
     // Spec test base paths
     const generic_path =

@@ -286,10 +286,10 @@ fn elapsedSince(start: i128) u64 {
     return @as(u64, @intCast(std.time.nanoTimestamp() - start));
 }
 
-fn printSegmentStats(stdout: anytype) !void {
-    try stdout.print("\nSegmented block breakdown :\n", .{});
-    try stdout.print("{s:<22} {s:<8} {s:<14} {s:<23}\n", .{ "step", "runs", "total time", "time/run (avg)" });
-    try stdout.print("{s:-<69}\n", .{""});
+fn printSegmentStats() void {
+    std.debug.print("\nSegmented block breakdown :\n", .{});
+    std.debug.print("{s:<22} {s:<8} {s:<14} {s:<23}\n", .{ "step", "runs", "total time", "time/run (avg)" });
+    std.debug.print("{s:-<69}\n", .{""});
     for (std.enums.values(Step)) |step| {
         const idx = @intFromEnum(step);
         const count = step_run_counts[idx];
@@ -300,12 +300,12 @@ fn printSegmentStats(stdout: anytype) !void {
         const avg_ms = @as(f64, @floatFromInt(avg_ns)) / std.time.ns_per_ms;
         const total_s = total_ms / std.time.ms_per_s;
         if (total_ms >= std.time.ms_per_s) {
-            try stdout.print("{s:<22} {d:<8} {d:.3}s         {d:.3}ms\n", .{ @tagName(step), count, total_s, avg_ms });
+            std.debug.print("{s:<22} {d:<8} {d:.3}s         {d:.3}ms\n", .{ @tagName(step), count, total_s, avg_ms });
         } else {
-            try stdout.print("{s:<22} {d:<8} {d:.3}ms        {d:.3}ms\n", .{ @tagName(step), count, total_ms, avg_ms });
+            std.debug.print("{s:<22} {d:<8} {d:.3}ms        {d:.3}ms\n", .{ @tagName(step), count, total_ms, avg_ms });
         }
     }
-    try stdout.print("\n", .{});
+    std.debug.print("\n", .{});
 }
 
 fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
@@ -436,12 +436,12 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
     };
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
 
     const allocator = gpa.allocator();
-    const stdout = std.io.getStdOut().writer();
+    _ = init; // TODO: wire up Io for bench output
     var pool = try Node.Pool.init(allocator, 10_000_000);
     defer pool.deinit();
 
@@ -462,7 +462,7 @@ pub fn main() !void {
     const chain_config = config.mainnet.chain_config;
     const slot = slotFromStateBytes(state_bytes);
     const detected_fork = config.mainnet.config.forkSeq(slot);
-    try stdout.print("Benchmarking processBlock with state at fork: {s} (slot {})\n", .{ @tagName(detected_fork), slot });
+    std.debug.print("Benchmarking processBlock with state at fork: {s} (slot {})\n", .{ @tagName(detected_fork), slot });
 
     // Use download_era_options.era_files[1] for state
 
@@ -502,7 +502,7 @@ fn runBenchmark(
     const block = any_block.castToFork(.full, fork);
     const body = block.body();
     const block_slot = block.slot();
-    try stdout.print("Block: slot: {}\n", .{block_slot});
+    std.debug.print("Block: slot: {}\n", .{block_slot});
 
     var beacon_state: ?*AnyBeaconState = try loadState(fork, allocator, pool, state_bytes);
     defer if (beacon_state) |state| {
@@ -546,7 +546,7 @@ fn runBenchmark(
     );
     try cached_state.state.commit();
     try state_transition.buildSlashingsCacheFromStateIfNeeded(allocator, cached_state.state, &cached_state.slashings_cache);
-    try stdout.print("State: slot={}, validators={}\n", .{ try cached_state.state.slot(), try cached_state.state.validatorsCount() });
+    std.debug.print("State: slot={}, validators={}\n", .{ try cached_state.state.slot(), try cached_state.state.validatorsCount() });
 
     var bench = zbench.Benchmark.init(allocator, .{
         .iterations = 50,
@@ -580,6 +580,6 @@ fn runBenchmark(
     resetSegmentStats();
     try bench.addParam("block(segments)", &ProcessBlockSegmentedBench(fork){ .cached_state = cached_state, .block = block, .body = body }, .{});
 
-    try bench.run(stdout);
-    try printSegmentStats(stdout);
+    try bench.run(init.io, std.Io.File.stdout());
+    printSegmentStats();
 }

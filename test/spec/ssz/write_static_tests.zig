@@ -8,7 +8,7 @@ pub fn main() !void {
     // so use that for generating tests
     const preset_str = "minimal";
 
-    const out = try std.fs.cwd().createFile("test/spec/ssz/static_tests.zig", .{});
+    const out = try std.Io.Dir.cwd().createFile("test/spec/ssz/static_tests.zig", .{});
     defer out.close();
 
     var writer = out.writer().any();
@@ -54,7 +54,7 @@ pub fn main() !void {
         });
         defer allocator.free(static_tests_dir_name);
 
-        const static_tests_dir = try std.fs.cwd().openDir(static_tests_dir_name, .{ .iterate = true });
+        const static_tests_dir = try std.Io.Dir.cwd().openDir(static_tests_dir_name, .{ .iterate = true });
         var static_tests_dir_it = static_tests_dir.iterate();
         while (try static_tests_dir_it.next()) |g_test_entry| {
             switch (g_test_entry.kind) {
@@ -72,7 +72,7 @@ pub fn main() !void {
             });
             defer allocator.free(type_name_tests_dir_name);
 
-            const type_name_tests_dir = try std.fs.cwd().openDir(type_name_tests_dir_name, .{ .iterate = true });
+            const type_name_tests_dir = try std.Io.Dir.cwd().openDir(type_name_tests_dir_name, .{ .iterate = true });
             var type_name_tests_dir_it = type_name_tests_dir.iterate();
             while (try type_name_tests_dir_it.next()) |type_name_test_entry| {
                 switch (type_name_test_entry.kind) {
@@ -90,7 +90,7 @@ pub fn main() !void {
                 });
                 defer allocator.free(test_suite_dir_name);
 
-                const test_suite_dir = try std.fs.cwd().openDir(test_suite_dir_name, .{ .iterate = true });
+                const test_suite_dir = try std.Io.Dir.cwd().openDir(test_suite_dir_name, .{ .iterate = true });
                 var test_suite_dir_it = test_suite_dir.iterate();
                 while (try test_suite_dir_it.next()) |test_suite_entry| {
                     switch (test_suite_entry.kind) {
@@ -118,7 +118,7 @@ pub fn main() !void {
 /// Assumes the following global decls
 /// - std, allocator, spec_test_options, generic_tests_dir_name, test_case, {tests_dir}, types.{type_name}
 fn writeStaticTest(
-    writer: std.io.AnyWriter,
+    writer: *std.Io.Writer,
     fork: []const u8,
     type_name: []const u8,
     test_suite_name: []const u8,
@@ -136,7 +136,7 @@ fn writeStaticTest(
         \\    }});
         \\    defer allocator.free(test_dir_name);
         \\
-        \\    var test_dir = std.fs.cwd().openDir(test_dir_name, .{{}}) catch return error.SkipZigTest;
+        \\    var test_dir = std.Io.Dir.cwd().openDir(test_dir_name, .{{}}) catch return error.SkipZigTest;
         \\    defer test_dir.close();
         \\    try test_case.validTestCase(types.{s}.{s}, allocator, test_dir, "roots.yaml");
         \\}}

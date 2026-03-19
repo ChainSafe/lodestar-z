@@ -23,7 +23,7 @@ pub fn main() !void {
 }
 
 fn write_version() !void {
-    const version_file = try std.fs.cwd().createFile("test/spec/version.txt", .{});
+    const version_file = try std.Io.Dir.cwd().createFile("test/spec/version.txt", .{});
     defer version_file.close();
 
     var writer = version_file.writer().any();
@@ -61,12 +61,12 @@ fn download_spec_test_archive(
     const archive_dirname = try std.fs.path.join(allocator, &[_][]const u8{ out_dir, spec_test_version });
     defer allocator.free(archive_dirname);
 
-    std.fs.cwd().makePath(archive_dirname) catch |err| {
-        if (err != std.fs.Dir.MakeError.PathAlreadyExists) {
+    std.Io.Dir.cwd().createDirPath(archive_dirname) catch |err| {
+        if (err != error.PathAlreadyExists) {
             return err;
         }
     };
-    const archive_dir = try std.fs.cwd().openDir(archive_dirname, .{});
+    const archive_dir = try std.Io.Dir.cwd().openDir(archive_dirname, .{});
 
     const already_downloaded = archive_dir.openFile(filename, .{}) catch null;
     if (already_downloaded != null) {
@@ -141,7 +141,7 @@ fn extract_spec_test_archive(
     const filename = try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{test_name});
     defer allocator.free(filename);
 
-    var archive_dir = try std.fs.cwd().openDir(archive_dirname, .{});
+    var archive_dir = try std.Io.Dir.cwd().openDir(archive_dirname, .{});
     defer archive_dir.close();
 
     var already_extracted = archive_dir.openDir(test_name, .{});
@@ -150,7 +150,7 @@ fn extract_spec_test_archive(
         std.log.info("already extracted {s}", .{filename});
         return;
     } else |err| {
-        if (err != std.fs.Dir.OpenError.FileNotFound) {
+        if (err != error.FileNotFound) {
             return err;
         }
     }
@@ -159,7 +159,7 @@ fn extract_spec_test_archive(
     defer archive_file.close();
 
     archive_dir.makeDir(test_name) catch |err| {
-        if (err != std.fs.Dir.MakeError.PathAlreadyExists) {
+        if (err != error.PathAlreadyExists) {
             return err;
         }
     };

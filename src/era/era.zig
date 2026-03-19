@@ -46,7 +46,7 @@ pub const GroupIndex = struct {
 /// Read state and block SlotIndex entries from an era file and validate alignment.
 ///
 /// Ownership of the returned GroupIndex is transferred to the caller.
-pub fn readGroupIndex(allocator: std.mem.Allocator, file: std.fs.File, end: u64) !GroupIndex {
+pub fn readGroupIndex(allocator: std.mem.Allocator, file: std.Io.File, end: u64) !GroupIndex {
     const state_index = try e2s.readSlotIndex(allocator, file, end);
     errdefer state_index.deinit(allocator);
 
@@ -80,7 +80,7 @@ pub fn readGroupIndex(allocator: std.mem.Allocator, file: std.fs.File, end: u64)
 /// Read all indices from an era file
 ///
 /// Ownership of the returned GroupIndex slice is transferred to the caller
-pub fn readAllGroupIndices(allocator: std.mem.Allocator, file: std.fs.File) ![]GroupIndex {
+pub fn readAllGroupIndices(allocator: std.mem.Allocator, file: std.Io.File) ![]GroupIndex {
     var end: i64 = @intCast(try file.getEndPos());
 
     var group_indices = try std.array_list.AlignedManaged(GroupIndex, null).initCapacity(

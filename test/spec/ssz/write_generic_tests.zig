@@ -6,7 +6,7 @@ const SKIPPED_TEST_DIR_NAMES = .{ "basic_progressive_list", "compatible_unions",
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
-    const out = try std.fs.cwd().createFile("test/spec/ssz/generic_tests.zig", .{});
+    const out = try std.Io.Dir.cwd().createFile("test/spec/ssz/generic_tests.zig", .{});
     defer out.close();
 
     var writer = out.writer().any();
@@ -37,7 +37,7 @@ pub fn main() !void {
     });
     defer allocator.free(generic_tests_dir_name);
 
-    const generic_tests_dir = try std.fs.cwd().openDir(generic_tests_dir_name, .{ .iterate = true });
+    const generic_tests_dir = try std.Io.Dir.cwd().openDir(generic_tests_dir_name, .{ .iterate = true });
     var generic_tests_dir_it = generic_tests_dir.iterate();
     outer: while (try generic_tests_dir_it.next()) |g_test_entry| {
         switch (g_test_entry.kind) {
@@ -62,7 +62,7 @@ pub fn main() !void {
         });
         defer allocator.free(valid_tests_dir_name);
 
-        const valid_tests_dir = try std.fs.cwd().openDir(valid_tests_dir_name, .{ .iterate = true });
+        const valid_tests_dir = try std.Io.Dir.cwd().openDir(valid_tests_dir_name, .{ .iterate = true });
         var valid_tests_dir_it = valid_tests_dir.iterate();
         while (try valid_tests_dir_it.next()) |valid_test_entry| {
             switch (valid_test_entry.kind) {
@@ -89,7 +89,7 @@ pub fn main() !void {
         });
         defer allocator.free(invalid_tests_dir_name);
 
-        const invalid_tests_dir = try std.fs.cwd().openDir(invalid_tests_dir_name, .{ .iterate = true });
+        const invalid_tests_dir = try std.Io.Dir.cwd().openDir(invalid_tests_dir_name, .{ .iterate = true });
         var invalid_tests_dir_it = invalid_tests_dir.iterate();
         while (try invalid_tests_dir_it.next()) |invalid_test_entry| {
             switch (invalid_test_entry.kind) {
@@ -139,7 +139,7 @@ fn getTypeName(test_dir_name: []const u8, test_name: []const u8) []const u8 {
 /// Assumes the following global decls
 /// - std, allocator, spec_test_options, generic_tests_dir_name, test_case, {tests_dir}, types.{type_name}
 fn writeValidTest(
-    writer: std.io.AnyWriter,
+    writer: *std.Io.Writer,
     test_name: []const u8,
     test_dir_name: []const u8,
     type_name: []const u8,
@@ -154,7 +154,7 @@ fn writeValidTest(
         \\    }});
         \\    defer allocator.free(test_dir_name);
         \\
-        \\    const test_dir = try std.fs.cwd().openDir(test_dir_name, .{{}});
+        \\    const test_dir = try std.Io.Dir.cwd().openDir(test_dir_name, .{{}});
         \\    try test_case.validTestCase(types.{s}, allocator, test_dir, "meta.yaml");
         \\}}
         \\
@@ -172,7 +172,7 @@ fn writeValidTest(
 /// Assumes the following global decls
 /// - std, allocator, spec_test_options, generic_tests_dir_name, test_case, {tests_dir}, types.{type_name}
 fn writeInvalidTest(
-    writer: std.io.AnyWriter,
+    writer: *std.Io.Writer,
     test_name: []const u8,
     test_dir_name: []const u8,
     type_name: []const u8,
@@ -189,7 +189,7 @@ fn writeInvalidTest(
         \\    }});
         \\    defer allocator.free(test_dir_name);
         \\
-        \\    const test_dir = try std.fs.cwd().openDir(test_dir_name, .{{}});
+        \\    const test_dir = try std.Io.Dir.cwd().openDir(test_dir_name, .{{}});
         \\    try test_case.invalidTestCase(types.{s}, allocator, test_dir);
         \\}}
         \\

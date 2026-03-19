@@ -17,7 +17,7 @@ const era = @import("era.zig");
 
 config: c.BeaconConfig,
 path: []const u8,
-file: std.fs.File,
+file: std.Io.File,
 era_number: u64,
 state: WriterState,
 
@@ -41,8 +41,8 @@ pub const WriterState = union(enum) {
     },
 };
 
-pub fn open(config: c.BeaconConfig, path: []const u8, era_number: u64) !Writer {
-    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+pub fn open(config: c.BeaconConfig, io: std.Io, path: []const u8, era_number: u64) !Writer {
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
     return .{
         .config = config,
         .path = path,
@@ -61,7 +61,7 @@ pub fn open(config: c.BeaconConfig, path: []const u8, era_number: u64) !Writer {
 /// Returns the path of the ERA file.
 ///
 /// Caller takes ownership of the returned slice.
-pub fn finish(self: *Writer, allocator: std.mem.Allocator) ![]const u8 {
+pub fn finish(self: *Writer, allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
     if (self.state != .finished_group) {
         return error.NotFinished;
     }
@@ -79,7 +79,8 @@ pub fn finish(self: *Writer, allocator: std.mem.Allocator) ![]const u8 {
         &[_][]const u8{ std.fs.path.dirname(self.path) orelse ".", new_base },
     );
     errdefer allocator.free(new_path);
-    try std.fs.cwd().rename(self.path, new_path);
+    const cwd = std.Io.Dir.cwd();
+    try cwd.rename(self.path, cwd, new_path, io);
 
     return new_path;
 }
