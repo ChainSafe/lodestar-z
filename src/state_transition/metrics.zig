@@ -242,13 +242,32 @@ pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
     };
 }
 
-/// Useful for conversion to seconds during isolated uses of `observe` that requires timing.
-/// Prometheus recommends that time coding be in seconds.
-///
-/// See for example: https://prometheus.io/docs/instrumenting/writing_clientlibs/#gauge
-pub fn readSeconds(timer: *@import("timer.zig")) f64 {
-    return @as(f64, @floatFromInt(timer.read())) / std.time.ns_per_s;
-}
+/// Monotonic timer using Zig 0.16's std.Io.Clock API.
+/// Wraps std.Io.Clock.Timestamp for convenient start/read timing.
+pub const Timer = struct {
+    start_time: std.Io.Clock.Timestamp,
+    io: std.Io,
+
+    pub fn start() Timer {
+        const io = std.Options.debug_io;
+        return .{
+            .start_time = std.Io.Clock.Timestamp.now(io, .awake),
+            .io = io,
+        };
+    }
+
+    /// Returns elapsed nanoseconds since start.
+    pub fn read(self: *Timer) u64 {
+        const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+        const duration = self.start_time.durationTo(now);
+        return @intCast(@max(0, duration.raw.nanoseconds));
+    }
+
+    /// Returns elapsed time in seconds (f64), suitable for Prometheus metrics.
+    pub fn readSeconds(self: *Timer) f64 {
+        return @as(f64, @floatFromInt(self.read())) / std.time.ns_per_s;
+    }
+};
 
 /// Observe a value in ns for the `epoch_transition_step` labelled histogram.
 pub fn observeEpochTransitionStep(

@@ -4,8 +4,7 @@ const ForkSeq = @import("config").ForkSeq;
 const metrics = @import("metrics.zig");
 const observeEpochTransitionStep = metrics.observeEpochTransitionStep;
 const observeEpochTransition = metrics.observeEpochTransition;
-const readSeconds = metrics.readSeconds;
-const Timer = @import("timer.zig");
+const Timer = @import("metrics.zig").Timer;
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -63,9 +62,9 @@ pub fn processSlots(
 
         const next_slot = try state.slot() + 1;
         if (next_slot % preset.SLOTS_PER_EPOCH == 0) {
-            var epoch_transition_timer = try Timer.start();
+            var epoch_transition_timer = Timer.start();
 
-            var timer = try Timer.start();
+            var timer = Timer.start();
             var epoch_transition_cache = try EpochTransitionCache.init(
                 allocator,
                 config,
@@ -91,7 +90,7 @@ pub fn processSlots(
 
             try state.setSlot(next_slot);
 
-            timer = try Timer.start();
+            timer = Timer.start();
             try epoch_cache.afterProcessEpoch(state, &epoch_transition_cache);
             try observeEpochTransitionStep(.{ .step = .after_process_epoch }, timer.read());
             // state.commit
@@ -147,7 +146,7 @@ pub fn processSlots(
             }
 
             try epoch_cache.finalProcessEpoch(state);
-            metrics.state_transition.epoch_transition.observe(readSeconds(&epoch_transition_timer));
+            metrics.state_transition.epoch_transition.observe(epoch_transition_timer.readSeconds());
         } else {
             try state.setSlot(next_slot);
         }
@@ -217,7 +216,7 @@ pub fn stateTransition(
         return error.InvalidBlockForkForState;
     }
     // Note: time only on success
-    var timer = try Timer.start();
+    var timer = Timer.start();
     switch (post_state.forkSeq()) {
         inline else => |f| {
             switch (block.blockType()) {
@@ -244,7 +243,7 @@ pub fn stateTransition(
             }
         },
     }
-    metrics.state_transition.process_block.observe(readSeconds(&timer));
+    metrics.state_transition.process_block.observe(timer.readSeconds());
 
     //
     // TODO(bing): commit
@@ -256,9 +255,9 @@ pub fn stateTransition(
 
     // Verify state root
     if (opts.verify_state_root) {
-        timer = try Timer.start();
+        timer = Timer.start();
         const post_state_root = try post_state.hashTreeRoot();
-        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .block_transition }, readSeconds(&timer));
+        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .block_transition }, timer.readSeconds());
 
         const block_state_root = block.stateRoot();
         if (!std.mem.eql(u8, post_state_root, block_state_root)) {
