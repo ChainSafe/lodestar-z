@@ -7,8 +7,8 @@
         .lodestar_z = .{ .path = "../../" },
         .afl = .{ .path = "../../pkg/afl++" },
         .snappy = .{
-            .url = "git+https://github.com/chainsafe/snappy.zig#206a3019ed9f5cb1e382bddca9a51d7c3e7d8cd3",
-            .hash = "snappy-0.1.0-n4Aaqtw4AAA1bcVRSEh4ERJs4_Tjzph4cXEMPdYtQbeA",
+            .url = "git+https://github.com/lodekeeper-z/snappy.zig#308e41ad078d684f2be45dfec5815d9304068174",
+            .hash = "snappy-0.1.0-n4AaqsA4AADR1GK5fReGMaaNyLsXRuarYpwqmVsbmvPk",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "tools" },
