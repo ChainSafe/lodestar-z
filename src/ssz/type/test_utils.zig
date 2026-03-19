@@ -95,7 +95,7 @@ pub fn typeTest(comptime ST: type) type {
                 var output_json: std.Io.Writer.Allocating = .init(allocator);
                 defer output_json.deinit();
                 var write_stream: std.json.Stringify = .{ .writer = &output_json.writer };
-            
+
                 try ST.serializeIntoJson(&write_stream, &json_value);
                 try std.testing.expectEqualSlices(u8, tc.json, output_json.written());
             } else {
@@ -132,7 +132,7 @@ pub fn typeTest(comptime ST: type) type {
                 var output_json: std.Io.Writer.Allocating = .init(allocator);
                 defer output_json.deinit();
                 var write_stream: std.json.Stringify = .{ .writer = &output_json.writer };
-            
+
                 try ST.serializeIntoJson(allocator, &write_stream, &json_value);
                 // sanity check first
                 try std.testing.expectEqual(tc.json.len, output_json.written().len);

@@ -5,19 +5,23 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .blst = .{
-            .path = "deps/blst",
+            .url = "git+https://github.com/lodekeeper-z/blst.zig#chore/zig-master",
+            .hash = "blst_zig-0.0.0-cnAxziwJAABSc0vyLhwp7CqfoMtVXUOwA5bne0-eSmus",
         },
         .hashtree = .{
-            .path = "deps/hashtree",
+            .url = "git+https://github.com/lodekeeper-z/hashtree-z#chore/zig-master",
+            .hash = "hashtree-0.1.0-sBOovusTAACtqJcseGh58icVpwNh1CX4m8XWZrnFKEtn",
         },
         .snappy = .{
-            .path = "deps/snappy",
+            .url = "git+https://github.com/lodekeeper-z/snappy.zig#chore/zig-master",
+            .hash = "snappy-0.1.0-n4AaquQ4AADY3nFWERyN1_YVryr0j2Adzr1ZZMb6MAc_",
         },
         .yaml = .{
-            .path = "deps/yaml",
+            .url = "git+https://github.com/lodekeeper-z/zig-yaml#chore/zig-master",
+            .hash = "zig_yaml-0.1.0-C1161sGAAgBVFRMUUwLvxZHw2d5mTAA9xbSpC7JV3iQg",
         },
         // TODO: re-enable when 0.16-compatible
-        // .zapi = .{ .path = "deps/zapi" },
+        // .zapi = .{ .url = "git+https://github.com/lodekeeper-z/zapi#chore/zig-master" },
         // .zbench = .{ .url = "..." },
         // .metrics = .{ .url = "..." },
         // .httpz = .{ .url = "..." },

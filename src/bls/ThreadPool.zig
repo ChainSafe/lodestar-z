@@ -195,7 +195,9 @@ pub fn verifyMultipleAggregateSignatures(
         rands.len != n_elems)
         return BlstError.VerifyFail;
 
-    while (!pool.dispatch_mutex.tryLock()) { std.atomic.spinLoopHint(); }
+    while (!pool.dispatch_mutex.tryLock()) {
+        std.atomic.spinLoopHint();
+    }
     defer pool.dispatch_mutex.unlock();
 
     // Single-threaded fallback for small inputs or single worker
@@ -297,7 +299,9 @@ pub fn aggregateVerify(
     const n_elems = pks.len;
     if (n_elems == 0 or msgs.len != n_elems) return BlstError.VerifyFail;
 
-    while (!pool.dispatch_mutex.tryLock()) { std.atomic.spinLoopHint(); }
+    while (!pool.dispatch_mutex.tryLock()) {
+        std.atomic.spinLoopHint();
+    }
     defer pool.dispatch_mutex.unlock();
 
     // Single-threaded fallback
@@ -384,7 +388,8 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
-        var stack_dummy: u8 = 0; seed = @truncate(@intFromPtr(&stack_dummy));
+        var stack_dummy: u8 = 0;
+        seed = @truncate(@intFromPtr(&stack_dummy));
         break :blk seed;
     });
     const rand = prng.random();
@@ -439,7 +444,8 @@ test "aggregateVerify multi-threaded" {
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
-        var stack_dummy: u8 = 0; seed = @truncate(@intFromPtr(&stack_dummy));
+        var stack_dummy: u8 = 0;
+        seed = @truncate(@intFromPtr(&stack_dummy));
         break :blk seed;
     });
     const rand = prng.random();

@@ -156,7 +156,6 @@ fn extract_spec_test_archive(
     };
 
     // TODO: Reader/decompressor/tar API may need further 0.16 adaptation
-    
 
     // For now, use a simpler approach - read all to memory and decompress
     // This may need to be revisited when the tar/gzip APIs are settled in 0.16

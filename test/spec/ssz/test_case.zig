@@ -215,7 +215,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
         var serialized_actual: std.Io.Writer.Allocating = .init(allocator);
         defer serialized_actual.deinit();
         var write_stream_actual: std.json.Stringify = .{ .writer = &serialized_actual.writer };
-    
+
         if (comptime ssz.isFixedType(ST)) {
             try ST.serializeIntoJson(&write_stream_actual, value_expected);
         } else {

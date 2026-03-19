@@ -87,7 +87,8 @@ test aggregateWithRandomness {
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
-        var stack_dummy: u8 = 0; seed = @truncate(@intFromPtr(&stack_dummy));
+        var stack_dummy: u8 = 0;
+        seed = @truncate(@intFromPtr(&stack_dummy));
         break :blk seed;
     });
     const rand = prng.random();

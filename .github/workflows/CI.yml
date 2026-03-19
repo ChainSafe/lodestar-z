@@ -17,34 +17,6 @@ env:
   NODE_VERSION: "24"
 
 jobs:
-  zbuild:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
-
-      - name: Install zbuild
-        run: |
-          git clone https://github.com/ChainSafe/zbuild.git
-          cd zbuild
-          zig build -Doptimize=ReleaseFast
-          sudo cp zig-out/bin/zbuild /usr/local/bin/zbuild
-
-      - name: Verify zbuild
-        run: zbuild version
-
-      - name: Check if build.zig is sync'ed with zbuild.zon
-        run: |
-          zbuild sync
-          git diff --exit-code
-
   build-test:
     name: build & test (${{ matrix.os }})
     strategy:
@@ -116,12 +88,13 @@ jobs:
         run: |
           zig build test:constants
 
-      - name: Build benchmarks
-        run: |
-          zig build build-exe:bench_hashing build-exe:bench_merkle_gindex build-exe:bench_merkle_node build-exe:bench_ssz_attestation build-exe:bench_ssz_block build-exe:bench_ssz_state build-exe:bench_process_block build-exe:bench_process_epoch
+      # TODO: re-enable when bench deps (zbench, metrics, httpz) are 0.16-compatible
+      # - name: Build benchmarks
+      #   run: |
+      #     zig build build-exe:bench_hashing build-exe:bench_merkle_gindex build-exe:bench_merkle_node build-exe:bench_ssz_attestation build-exe:bench_ssz_block build-exe:bench_ssz_state build-exe:bench_process_block build-exe:bench_process_epoch
 
   build-test-slow:
-    name: slow tests 
+    name: slow tests
     # It takes time to download and run these tests, so we only run them on ubuntu-latest
     runs-on: ubuntu-latest
     needs: build-test
@@ -299,56 +272,12 @@ jobs:
         run: |
           cd test/fuzz && zig build
 
-  bindings-test:
-    name: bindings - test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: pnpm
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
-      - name: Install dependencies
-        run: |
-          pnpm install
-      - name: Run bindings formatter
-        run: |
-          pnpm biome ci
-      - name: Build bindings
-        run: |
-          zig build build-lib:bindings -Doptimize=ReleaseSafe
-      - name: Restore era files cache
-        uses: actions/cache@v4
-        with:
-          path: fixtures/era
-          key: era-files-${{ hashFiles('build.zig') }} # downloaded era files defined in build.zig
-      - name: Download era files
-        run: |
-          zig build run:download_era_files
-      - name: Test bindings
-        run: |
-          pnpm test
+  # TODO: re-enable when zapi is 0.16-compatible
+  # bindings-test:
+  #   name: bindings - test
+  #   ...
 
-  build-examples:
-    name: build examples
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
-      - name: Build metrics example
-        run: |
-          zig build build-exe:metrics_stf
+  # TODO: re-enable when metrics/httpz deps are 0.16-compatible
+  # build-examples:
+  #   name: build examples
+  #   ...

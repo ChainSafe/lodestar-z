@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const m = @import("metrics_stub.zig");  // TODO: restore @import("metrics") when dep is 0.16-compatible
+const m = @import("metrics_stub.zig"); // TODO: restore @import("metrics") when dep is 0.16-compatible
 
 const CachedBeaconState = @import("cache/state_cache.zig").CachedBeaconState;
 

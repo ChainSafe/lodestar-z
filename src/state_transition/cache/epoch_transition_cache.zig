@@ -142,7 +142,9 @@ var _reused_cache: ?*ReusedEpochTransitionCache = null;
 var _reused_lock: std.atomic.Mutex = .unlocked;
 
 fn getReusedEpochTransitionCache(allocator: Allocator, validator_count: usize) !*ReusedEpochTransitionCache {
-    while (!_reused_lock.tryLock()) { std.atomic.spinLoopHint(); }
+    while (!_reused_lock.tryLock()) {
+        std.atomic.spinLoopHint();
+    }
     defer _reused_lock.unlock();
 
     if (_reused_cache) |cache| {
@@ -160,7 +162,9 @@ fn getReusedEpochTransitionCache(allocator: Allocator, validator_count: usize) !
 }
 
 pub fn deinitReusedEpochTransitionCache() void {
-    while (!_reused_lock.tryLock()) { std.atomic.spinLoopHint(); }
+    while (!_reused_lock.tryLock()) {
+        std.atomic.spinLoopHint();
+    }
     defer _reused_lock.unlock();
 
     if (_reused_cache) |cache| {
@@ -561,7 +565,9 @@ pub const EpochTransitionCache = struct {
     /// Ensure rewards/penalties arrays match the current validator count.
     /// This is only used in benchmark tests where we want to reuse the cache across steps.
     pub fn syncRewardPenaltyLengths(self: *EpochTransitionCache, validator_count: usize) !void {
-        while (!_reused_lock.tryLock()) { std.atomic.spinLoopHint(); }
+        while (!_reused_lock.tryLock()) {
+            std.atomic.spinLoopHint();
+        }
         defer _reused_lock.unlock();
 
         const reused_cache = _reused_cache orelse return error.ReusedEpochTransitionCacheUnavailable;
