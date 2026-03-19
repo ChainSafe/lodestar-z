@@ -38,7 +38,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
-          cache-key: ${{ matrix.os }}-${{ env.ZIG_VERSION }}
+          cache-key: ${{ matrix.os }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
 
       # Zig fmt is failing on windows and is redundant to run all platforms. So we run only on linux.
       - name: Check formatting
@@ -105,7 +105,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
       - name: Restore spec tests cache
         uses: actions/cache@v4
         with:
@@ -130,7 +130,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
       - name: Restore spec tests cache
         uses: actions/cache@v4
         with:
@@ -170,7 +170,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
       - name: Restore spec tests cache
         uses: actions/cache@v4
         with:
@@ -198,7 +198,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
       - name: Restore spec tests cache
         uses: actions/cache@v4
         with:
@@ -228,7 +228,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
       - name: Restore spec tests cache
         uses: actions/cache@v4
         with:
@@ -255,7 +255,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
       - name: Install AFL++ and LLVM
         run: |
           sudo apt-get update
