@@ -22,3 +22,4 @@ node_modules/
 .claude/plans/
 zig-pkg/
 test_al
+deps/
