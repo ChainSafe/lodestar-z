@@ -5,19 +5,19 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .blst = .{
-            .url = "git+https://github.com/lodekeeper-z/blst.zig#chore/zig-master",
+            .url = "git+https://github.com/lodekeeper-z/blst.zig#c58262a24ccef1ee85aa018465988b04f3f5ba2d",
             .hash = "blst_zig-0.0.0-cnAxziwJAABSc0vyLhwp7CqfoMtVXUOwA5bne0-eSmus",
         },
         .hashtree = .{
-            .url = "git+https://github.com/lodekeeper-z/hashtree-z?ref=chore/zig-master#1872bfe745b45b229020701b3adc956d869f245b",
-            .hash = "hashtree-0.1.0-sBOovusTAACtqJcseGh58icVpwNh1CX4m8XWZrnFKEtn",
+            .url = "git+https://github.com/lodekeeper-z/hashtree-z#1872bfe745b45b229020701b3adc956d869f245b",
+            .hash = "hashtree-0.1.0-sBOovvQTAADvFx7ywy2dNIfryDr44T6tWJxtkF0sQpG7",
         },
         .snappy = .{
-            .url = "git+https://github.com/lodekeeper-z/snappy.zig#chore/zig-master",
-            .hash = "snappy-0.1.0-n4AaquQ4AADY3nFWERyN1_YVryr0j2Adzr1ZZMb6MAc_",
+            .url = "git+https://github.com/lodekeeper-z/snappy.zig#308e41ad078d684f2be45dfec5815d9304068174",
+            .hash = "snappy-0.1.0-n4AaqsA4AADR1GK5fReGMaaNyLsXRuarYpwqmVsbmvPk",
         },
         .yaml = .{
-            .url = "git+https://github.com/lodekeeper-z/zig-yaml#chore/zig-master",
+            .url = "git+https://github.com/lodekeeper-z/zig-yaml#067e44b7e3a4f9bf809b0845af2b4aee84b1dc78",
             .hash = "zig_yaml-0.1.0-C1161sGAAgBVFRMUUwLvxZHw2d5mTAA9xbSpC7JV3iQg",
         },
         // TODO: re-enable when 0.16-compatible
