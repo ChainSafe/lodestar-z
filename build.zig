@@ -359,6 +359,26 @@ pub fn build(b: *std.Build) void {
     tls_run_test_state_transition.dependOn(&run_test_state_transition.step);
     tls_run_test.dependOn(&run_test_state_transition.step);
 
+
+    const test_fork_types = b.addTest(.{
+        .name = "fork_types",
+        .root_module = module_fork_types,
+        .filters = b.option([][]const u8, "fork_types.filters", "fork_types test filters") orelse &[_][]const u8{},
+    });
+    const run_test_fork_types = b.addRunArtifact(test_fork_types);
+    const tls_run_test_fork_types = b.step("test:fork_types", "Run the fork_types test");
+    tls_run_test_fork_types.dependOn(&run_test_fork_types.step);
+    tls_run_test.dependOn(&run_test_fork_types.step);
+
+    const test_era = b.addTest(.{
+        .name = "era",
+        .root_module = module_era,
+        .filters = b.option([][]const u8, "era.filters", "era test filters") orelse &[_][]const u8{},
+    });
+    const run_test_era = b.addRunArtifact(test_era);
+    const tls_run_test_era = b.step("test:era", "Run the era test");
+    tls_run_test_era.dependOn(&run_test_era.step);
+    tls_run_test.dependOn(&run_test_era.step);
     // Spec test modules
     const module_int = b.createModule(.{
         .root_source_file = b.path("test/int/era/root.zig"),
