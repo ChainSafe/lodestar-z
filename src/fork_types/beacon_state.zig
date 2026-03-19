@@ -104,7 +104,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             return try self.inner.get("eth1_data_votes");
         }
 
-        pub fn setEth1DataVotes(self: *Self, eth1_data_votes: ForkTypes(f).Eth1DataVotes.TreeView) !void {
+        pub fn setEth1DataVotes(self: *Self, eth1_data_votes: *ForkTypes(f).Eth1DataVotes.TreeView) !void {
             try self.inner.set("eth1_data_votes", eth1_data_votes);
         }
 
