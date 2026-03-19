@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .blst = .{
-            .url = "git+https://github.com/lodekeeper-z/blst.zig#1143280ad21731688caf7c71803c44fabb2e35b6",
-            .hash = "blst_zig-0.0.0-cnAxzmwLAAC-EyEf91pOx90icMXaWWoLXF_F3w2VR-jM",
+            .url = "git+https://github.com/lodekeeper-z/blst.zig#254f2869b9c72b7f70900b41ec90213807c7a675",
+            .hash = "blst_zig-0.0.0-cnAxzg4LAACIXTmj0X4unkf0FCYcFTZVzDdWE32PZl_A",
         },
         .hashtree = .{
             .url = "git+https://github.com/lodekeeper-z/hashtree-z#1872bfe745b45b229020701b3adc956d869f245b",
