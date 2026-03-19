@@ -9,7 +9,7 @@
             .hash = "blst_zig-0.0.0-cnAxziwJAABSc0vyLhwp7CqfoMtVXUOwA5bne0-eSmus",
         },
         .hashtree = .{
-            .url = "git+https://github.com/lodekeeper-z/hashtree-z#chore/zig-master",
+            .url = "git+https://github.com/lodekeeper-z/hashtree-z?ref=chore/zig-master#1872bfe745b45b229020701b3adc956d869f245b",
             .hash = "hashtree-0.1.0-sBOovusTAACtqJcseGh58icVpwNh1CX4m8XWZrnFKEtn",
         },
         .snappy = .{
