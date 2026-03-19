@@ -1,16 +1,16 @@
 # Zig 0.16 Upgrade Progress
 
-## Status: BUILD PASSES — Core tests passing
+## Status: ALL CORE TESTS PASSING ✅
 
 ## Zig version
 0.16.0-dev.2915+065c6e794 (installed at ~/zig-master)
 
 ## What's done
-- **Build system**: Replaced zbuild-dependent build.zig with standard 1200-line std.Build code
+- **Build system**: Replaced zbuild-dependent build.zig with standard std.Build code
 - **Dependencies**: blst, hashtree, snappy, yaml upgraded (path deps)
 - **Removed deps**: zbuild, zbench, metrics, httpz (not yet 0.16-compatible, skipped for now)
 - **Skipped modules**: bench_*, metrics_stf, bindings (deps not ready)
-- **4 commits on branch** chore/zig-master-upgrade
+- **Branch**: chore/zig-master-upgrade
 
 ### Core API migrations completed
 | Pattern | Old (0.14) | New (0.16) |
@@ -28,10 +28,13 @@
 | HTTP open | `client.open(.GET, uri, .{})` | `client.fetch(.{ .location = .{ .url = url } })` |
 | Thread.Mutex | `std.Thread.Mutex` | `std.atomic.Mutex` |
 | Thread.Pool | `std.Thread.Pool` | Removed — use serial or `std.Io.Batch` |
+| Thread.ResetEvent | `std.Thread.ResetEvent` | Removed — use `std.Io.Event` |
 | refAllDeclsRecursive | `testing.refAllDeclsRecursive` | `testing.refAllDecls` (recursive removed) |
 | Optional comparison | `optional > 0` | `if (optional) \|v\| (v > 0)` |
 | C pointers | `*T` auto-coerces to `[*c]T` | Must use `@ptrCast(&val)` |
 | posix.getrandom | `std.posix.getrandom(buf)` | Removed — use timestamp or crypto |
+| std.time.Timer | `std.time.Timer` | Removed — custom `timer.zig` shim using `std.Io.Clock` |
+| allocator.free on array ptr | `allocator.free(ptr)` accepts `*[N]T` | Must cast to `[]T` first: `allocator.free(@as([]T, ptr))` |
 
 ## Tests passing
 - ✅ test:constants
@@ -42,21 +45,20 @@
 - ✅ test:consensus_types
 - ✅ test:persistent_merkle_tree
 - ✅ test:ssz
+- ✅ test:bls
+- ✅ test:state_transition
 
-## Tests not yet working
-- ❌ test:bls — Thread.ResetEvent removed, ThreadPool needs Io.Event migration
-- ❌ test:state_transition — blocked on BLS + metrics dep
+## Tests not yet wired
 - ❌ test:era — not wired in build.zig yet
 - ❌ test:fork_types — not wired in build.zig yet
 
 ## Still TODO
-1. **BLS module**: ThreadPool needs `std.Io.Event` migration (replaces `Thread.ResetEvent`)
-2. **Metrics dep**: Fork or upgrade `karlseguin/metrics.zig` for 0.16
-3. **zbench dep**: Fork or upgrade for 0.16
-4. **zapi/bindings**: Fork or upgrade for 0.16
-5. **state_transition**: Wire up once BLS + metrics are fixed
-6. **Wire era/fork_types tests** into build.zig
-7. **Extract tar/gzip**: download_spec_tests.zig extraction needs 0.16 reader API
+1. **Metrics dep**: Fork or upgrade `karlseguin/metrics.zig` for 0.16 (currently using metrics_stub.zig)
+2. **zbench dep**: Fork or upgrade for 0.16
+3. **zapi/bindings**: Fork or upgrade for 0.16
+4. **Wire era/fork_types tests** into build.zig
+5. **Extract tar/gzip**: download_spec_tests.zig extraction needs 0.16 reader API
+6. **httpz**: Fork or upgrade for 0.16
 
 ## Build command
 ```bash
