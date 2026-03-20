@@ -1037,7 +1037,7 @@ pub const ProtoArray = struct {
     /// Performance optimization: checks finalized/justified epoch+root pairs before
     /// walking the parent chain, since these are known ancestors of `node` that are
     /// likely to coincide with the store's finalized checkpoint.
-    fn isFinalizedRootOrDescendant(
+    pub fn isFinalizedRootOrDescendant(
         self: *const ProtoArray,
         node: *const ProtoNode,
     ) bool {

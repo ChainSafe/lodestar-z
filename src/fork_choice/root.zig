@@ -5,6 +5,7 @@ pub const proto_node = @import("proto_node.zig");
 pub const vote_tracker = @import("vote_tracker.zig");
 pub const compute_deltas = @import("compute_deltas.zig");
 pub const proto_array = @import("proto_array.zig");
+pub const fork_choice = @import("fork_choice.zig");
 
 pub const ProtoBlock = proto_node.ProtoBlock;
 pub const ProtoNode = proto_node.ProtoNode;
@@ -36,6 +37,11 @@ pub const ComputeDeltasResult = compute_deltas.ComputeDeltasResult;
 pub const DeltasCache = compute_deltas.DeltasCache;
 pub const EquivocatingIndices = compute_deltas.EquivocatingIndices;
 pub const VoteIndex = compute_deltas.VoteIndex;
+
+pub const ForkChoiceStruct = fork_choice.ForkChoice;
+pub const Checkpoint = fork_choice.Checkpoint;
+pub const HeadResult = fork_choice.HeadResult;
+pub const EffectiveBalanceIncrements = fork_choice.EffectiveBalanceIncrements;
 
 test {
     testing.refAllDecls(@This());
