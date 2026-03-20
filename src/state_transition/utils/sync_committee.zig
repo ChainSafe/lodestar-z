@@ -34,15 +34,17 @@ pub fn getNextSyncCommittee(
     // Using the index2pubkey cache is slower because it needs the serialized pubkey.
     const pubkeys = &out.sync_committee.pubkeys;
     var pubkeys_uncompressed: [preset.SYNC_COMMITTEE_SIZE]bls.PublicKey = undefined;
+    var pubkey_ptrs: [preset.SYNC_COMMITTEE_SIZE]*const bls.PublicKey = undefined;
     for (indices, 0..indices.len) |index, i| {
         var validator_view = try validators_view.get(index);
         var validator: types.phase0.Validator.Type = undefined;
         try validator_view.toValue(allocator, &validator);
         pubkeys[i] = validator.pubkey;
         pubkeys_uncompressed[i] = try bls.PublicKey.uncompress(&pubkeys[i]);
+        pubkey_ptrs[i] = &pubkeys_uncompressed[i];
     }
 
-    const aggregated_pk = try AggregatePublicKey.aggregate(&pubkeys_uncompressed, false);
+    const aggregated_pk = try AggregatePublicKey.aggregate(&pubkey_ptrs, false);
     out.sync_committee.aggregate_pubkey = aggregated_pk.toPublicKey().compress();
 }
 

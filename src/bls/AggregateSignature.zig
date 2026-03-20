@@ -22,7 +22,7 @@ pub fn toSignature(self: *const Self) Signature {
 ///
 /// Validates each signature before aggregation if `sigs_groupcheck` is true.
 /// Errors if the `sigs` slice is empty or if any signature validation fails.
-pub fn aggregate(sigs: []const Signature, sigs_groupcheck: bool) BlstError!Self {
+pub fn aggregate(sigs: []const *const Signature, sigs_groupcheck: bool) BlstError!Self {
     if (sigs.len == 0) return BlstError.AggrTypeMismatch;
     if (sigs_groupcheck) for (sigs) |sig| try sig.validate(false);
 
