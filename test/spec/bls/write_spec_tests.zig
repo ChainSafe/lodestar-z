@@ -19,7 +19,7 @@ pub fn main() !void {
         \\const spec_test_options = @import("spec_test_options");
         \\const test_case = @import("test_case.zig");
         \\
-        \\const bls_tests_dir_name = "general/tests/general";
+        \\const bls_tests_dir_name = "general/general";
         \\const allocator = std.testing.allocator;
         \\
         \\
@@ -35,7 +35,6 @@ pub fn main() !void {
         spec_test_options.spec_test_out_dir,
         spec_test_options.spec_test_version,
         "general",
-        "tests",
         "general",
     });
     defer allocator.free(bls_tests_dir_name);

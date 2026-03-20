@@ -22,7 +22,7 @@ pub fn main() !void {
         \\const types = @import("generic_types.zig");
         \\const test_case = @import("test_case.zig");
         \\
-        \\const generic_tests_dir_name = "general/tests/general/phase0/ssz_generic";
+        \\const generic_tests_dir_name = "general/general/phase0/ssz_generic";
         \\const allocator = std.testing.allocator;
         \\
         \\
@@ -32,7 +32,6 @@ pub fn main() !void {
         spec_test_options.spec_test_out_dir,
         spec_test_options.spec_test_version,
         "general",
-        "tests",
         "general",
         "phase0",
         "ssz_generic",

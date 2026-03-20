@@ -34,7 +34,6 @@ pub fn main() !void {
         spec_test_options.spec_test_out_dir,
         spec_test_options.spec_test_version,
         preset_str,
-        "tests",
         preset_str,
     });
     defer allocator.free(preset_tests_dir_name);
@@ -132,7 +131,6 @@ fn writeStaticTest(
         \\        spec_test_options.spec_test_out_dir,
         \\        spec_test_options.spec_test_version,
         \\        build_options.preset,
-        \\        "tests",
         \\        build_options.preset,
         \\        "{s}/ssz_static/{s}/{s}/{s}",
         \\    }});

@@ -100,7 +100,7 @@ pub fn writeTests(
     defer root_dir.close(std.Options.debug_io);
 
     // minimal preset includes many more testcases and is a superset of mainnet testcases
-    var preset_dir = try root_dir.openDir(std.Options.debug_io, "minimal/tests/minimal", .{});
+    var preset_dir = try root_dir.openDir(std.Options.debug_io, "minimal/minimal", .{});
     defer preset_dir.close(std.Options.debug_io);
 
     inline for (forks) |fork| {
