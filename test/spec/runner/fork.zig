@@ -1,4 +1,11 @@
 const std = @import("std");
+const io = std.testing.io;
+
+fn readFileToEnd(file: std.Io.File, allocator: std.mem.Allocator, limit: usize) ![]u8 {
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    return file_reader.interface.allocRemaining(allocator, @enumFromInt(limit));
+}
 const Node = @import("persistent_merkle_tree").Node;
 const ForkSeq = @import("config").ForkSeq;
 const state_transition = @import("state_transition");
@@ -160,9 +167,9 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
 }
 
 fn loadTargetFork(allocator: Allocator, dir: std.Io.Dir) !ForkSeq {
-    var meta_file = try dir.openFile("meta.yaml", .{});
-    defer meta_file.close();
-    const contents = try meta_file.readToEndAlloc(allocator, 256);
+    var meta_file = try dir.openFile(io, "meta.yaml", .{});
+    defer meta_file.close(io);
+    const contents = try readFileToEnd(meta_file, allocator, 256);
     defer allocator.free(contents);
 
     const key = "fork: ";

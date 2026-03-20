@@ -1,4 +1,11 @@
 const std = @import("std");
+const io = std.testing.io;
+
+fn readFileToEnd(file: std.Io.File, allocator: std.mem.Allocator, limit: usize) ![]u8 {
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    return file_reader.interface.allocRemaining(allocator, @enumFromInt(limit));
+}
 const Node = @import("persistent_merkle_tree").Node;
 const ForkSeq = @import("config").ForkSeq;
 const state_transition = @import("state_transition");
@@ -42,9 +49,9 @@ pub fn Transition(comptime fork: ForkSeq) type {
             };
 
             // Load meta.yaml for blocks_count
-            var meta_file = try dir.openFile("meta.yaml", .{});
-            defer meta_file.close();
-            const meta_content = try meta_file.readToEndAlloc(allocator, 1024);
+            var meta_file = try dir.openFile(io, "meta.yaml", .{});
+            defer meta_file.close(io);
+            const meta_content = try readFileToEnd(meta_file, allocator, 1024);
             defer allocator.free(meta_content);
             const meta_content_one_line = std.mem.trim(u8, meta_content, " \n");
             // sample content of meta.yaml: {post_fork: electra, fork_epoch: 2, blocks_count: 96, fork_block: 62}

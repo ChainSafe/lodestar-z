@@ -1,4 +1,11 @@
 const std = @import("std");
+const io = std.testing.io;
+
+fn readFileToEnd(file: std.Io.File, allocator: std.mem.Allocator, limit: usize) ![]u8 {
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    return file_reader.interface.allocRemaining(allocator, @enumFromInt(limit));
+}
 const Node = @import("persistent_merkle_tree").Node;
 const ssz = @import("consensus_types");
 const ForkSeq = @import("config").ForkSeq;
@@ -61,9 +68,9 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
                 return error.PostStateNotFound;
 
             // load slots
-            var slots_file = try dir.openFile("slots.yaml", .{});
-            defer slots_file.close();
-            const slots_content = try slots_file.readToEndAlloc(allocator, 1024);
+            var slots_file = try dir.openFile(io, "slots.yaml", .{});
+            defer slots_file.close(io);
+            const slots_content = try readFileToEnd(slots_file, allocator, 1024);
             defer allocator.free(slots_content);
             // Parse YAML for slots (simplified; assume single value)
             tc.slots = std.fmt.parseInt(u64, std.mem.trim(u8, slots_content, "... \n"), 10) catch 0;
@@ -133,9 +140,9 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
             tc.post = try tc_utils.loadPostState(allocator, pool, dir);
 
             // Load meta.yaml for blocks_count
-            var meta_file = try dir.openFile("meta.yaml", .{});
-            defer meta_file.close();
-            const meta_content = try meta_file.readToEndAlloc(allocator, 1024);
+            var meta_file = try dir.openFile(io, "meta.yaml", .{});
+            defer meta_file.close(io);
+            const meta_content = try readFileToEnd(meta_file, allocator, 1024);
             defer allocator.free(meta_content);
             // Parse YAML for blocks_count (simplified; assume "blocks_count: N")
             const blocks_count_str = std.mem.trim(u8, meta_content, " \n{}");

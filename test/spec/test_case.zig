@@ -1,5 +1,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const io = std.testing.io;
+
+fn readFileToEnd(file: Io.File, allocator: Allocator, limit: usize) ![]u8 {
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    return file_reader.interface.allocRemaining(allocator, @enumFromInt(limit));
+}
 const snappy = @import("snappy").raw;
 const ForkSeq = @import("config").ForkSeq;
 const isFixedType = @import("ssz").isFixedType;
@@ -89,7 +97,7 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
 
         /// consumer should deinit the returned state and destroy the pointer
         pub fn loadPostState(allocator: Allocator, pool: *Node.Pool, dir: std.Io.Dir) !?*AnyBeaconState {
-            if (dir.statFile("post.ssz_snappy")) |_| {
+            if (dir.statFile(io, "post.ssz_snappy", .{})) |_| {
                 var post_state = ForkTypes.BeaconState.default_value;
                 try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", &post_state);
                 defer ForkTypes.BeaconState.deinit(allocator, &post_state);
@@ -115,10 +123,10 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
 }
 
 pub fn loadBlsSetting(allocator: std.mem.Allocator, dir: std.Io.Dir) BlsSetting {
-    var file = dir.openFile("meta.yaml", .{}) catch return .default;
-    defer file.close(std.Options.debug_io);
+    var file = dir.openFile(io, "meta.yaml", .{}) catch return .default;
+    defer file.close(io);
 
-    const contents = file.readToEndAlloc(allocator, 100) catch return .default;
+    const contents = readFileToEnd(file, allocator, 100) catch return .default;
     defer allocator.free(contents);
 
     if (std.mem.indexOf(u8, contents, "bls_setting: 0") != null) {
@@ -250,10 +258,10 @@ pub fn deinitSignedBeaconBlock(signed_block: AnySignedBeaconBlock, allocator: st
 }
 
 pub fn loadSszSnappyValue(comptime ST: type, allocator: std.mem.Allocator, dir: std.Io.Dir, file_name: []const u8, out: *ST.Type) !void {
-    var object_file = try dir.openFile(file_name, .{});
-    defer object_file.close();
+    var object_file = try dir.openFile(io, file_name, .{});
+    defer object_file.close(io);
 
-    const value_bytes = try object_file.readToEndAlloc(allocator, 100_000_000);
+    const value_bytes = try readFileToEnd(object_file, allocator, 100_000_000);
     defer allocator.free(value_bytes);
 
     const serialized_buf = try allocator.alloc(u8, try snappy.uncompressedLength(value_bytes));
