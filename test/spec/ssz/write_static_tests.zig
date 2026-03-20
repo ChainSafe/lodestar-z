@@ -13,6 +13,7 @@ pub fn main() !void {
 
     var write_buf: [4096]u8 = undefined;
     var file_writer = out.writer(std.Options.debug_io, &write_buf);
+    defer file_writer.flush() catch {};
     var writer = &file_writer.interface;
 
     try writer.writeAll(
