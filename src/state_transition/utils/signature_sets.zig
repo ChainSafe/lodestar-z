@@ -17,8 +17,7 @@ pub const SingleSignatureSet = struct {
 };
 
 pub const AggregatedSignatureSet = struct {
-    // fastAggregateVerify also requires []*const PublicKey
-    pubkeys: []const PublicKey,
+    pubkeys: []const *const PublicKey,
     signing_root: Root,
     signature: BLSSignature,
 };
@@ -47,7 +46,7 @@ pub fn createSingleSignatureSetFromComponents(pubkey: *const PublicKey, signing_
     };
 }
 
-pub fn createAggregateSignatureSetFromComponents(pubkeys: []const PublicKey, signing_root: Root, signature: BLSSignature) AggregatedSignatureSet {
+pub fn createAggregateSignatureSetFromComponents(pubkeys: []const *const PublicKey, signing_root: Root, signature: BLSSignature) AggregatedSignatureSet {
     return .{
         .pubkeys = pubkeys,
         .signing_root = signing_root,
