@@ -107,17 +107,13 @@ pub fn parseYaml(comptime ST: type, allocator: Allocator, y: yaml.Yaml, out: *ST
 pub fn parseYamlToJson(allocator: Allocator, y: yaml.Yaml.Value, writer: anytype) !void {
     switch (y) {
         .empty => return,
-        .boolean => |b| {
-            return try writer.print("{s}", .{if (b) "true" else "false"});
-        },
-        .int => |i| {
-            return try writer.print("\"{d}\"", .{i});
-        },
-        .float => |f| {
-            return try writer.print("\"{d}\"", .{f});
-        },
-        .string => |s| {
-            return try writer.print("\"{s}\"", .{s});
+        .scalar => |scalar| {
+            const isBool = std.mem.eql(u8, scalar, "true") or std.mem.eql(u8, scalar, "false");
+
+            return if (isBool)
+                try writer.print("{s}", .{scalar})
+            else
+                try writer.print("\"{s}\"", .{scalar});
         },
         .list => |list| {
             try writer.beginArray();
