@@ -51,6 +51,7 @@ pub fn main() !void {
 
         var _write_buf: [4096]u8 = undefined;
         var file_writer = out.writer(std.Options.debug_io, &_write_buf);
+        defer file_writer.flush() catch {};
         const writer = &file_writer.interface;
         try writeTests(&supported_forks, kind, writer);
     }
@@ -62,6 +63,7 @@ pub fn main() !void {
         defer out.close(std.Options.debug_io);
         var _write_buf: [4096]u8 = undefined;
         var file_writer = out.writer(std.Options.debug_io, &_write_buf);
+        defer file_writer.flush() catch {};
         const writer = &file_writer.interface;
         try writeTestRoot(&supported_test_runners, writer);
     }
