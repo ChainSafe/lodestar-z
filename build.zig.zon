@@ -17,8 +17,8 @@
             .hash = "snappy-0.1.0-n4AaqsA4AADR1GK5fReGMaaNyLsXRuarYpwqmVsbmvPk",
         },
         .yaml = .{
-            .url = "git+https://github.com/lodekeeper-z/zig-yaml#067e44b7e3a4f9bf809b0845af2b4aee84b1dc78",
-            .hash = "zig_yaml-0.1.0-C1161sGAAgBVFRMUUwLvxZHw2d5mTAA9xbSpC7JV3iQg",
+            .url = "git+https://github.com/lodekeeper-z/zig-yaml#6c8ce590822a463e9d579b6a674d0a0e4f4b71ad",
+            .hash = "zig_yaml-0.1.0-C1161gyFAgCAQyPfcYHI1dRgRLPXrWcBD_cPvYptsIv6",
         },
         // TODO: re-enable when 0.16-compatible
         // .zapi = .{ .url = "git+https://github.com/lodekeeper-z/zapi#chore/zig-master" },
