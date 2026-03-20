@@ -7,6 +7,14 @@ const Node = @import("persistent_merkle_tree").Node;
 
 const Allocator = std.mem.Allocator;
 
+const io = std.testing.io;
+
+fn readFileToEnd(file: std.Io.File, allocator: Allocator, limit: usize) ![]u8 {
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    return file_reader.interface.allocRemaining(allocator, @enumFromInt(limit));
+}
+
 pub fn parseYaml(comptime ST: type, allocator: Allocator, y: yaml.Yaml, out: *ST.Type) !void {
     if (comptime ssz.isBitVectorType(ST)) {
         const bytes_buf = try allocator.alloc(u8, ST.byte_length + 2);
@@ -99,13 +107,17 @@ pub fn parseYaml(comptime ST: type, allocator: Allocator, y: yaml.Yaml, out: *ST
 pub fn parseYamlToJson(allocator: Allocator, y: yaml.Yaml.Value, writer: anytype) !void {
     switch (y) {
         .empty => return,
-        .scalar => |scalar| {
-            const isBool = std.mem.eql(u8, scalar, "true") or std.mem.eql(u8, scalar, "false");
-
-            return if (isBool)
-                try writer.print("{s}", .{scalar})
-            else
-                try writer.print("\"{s}\"", .{scalar});
+        .boolean => |b| {
+            return try writer.print("{s}", .{if (b) "true" else "false"});
+        },
+        .int => |i| {
+            return try writer.print("\"{d}\"", .{i});
+        },
+        .float => |f| {
+            return try writer.print("\"{d}\"", .{f});
+        },
+        .string => |s| {
+            return try writer.print("\"{s}\"", .{s});
         },
         .list => |list| {
             try writer.beginArray();
@@ -132,12 +144,12 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
 
     // read expected root
 
-    const meta_file = try path.openFile(meta_file_name, .{});
-    defer meta_file.close();
+    const meta_file = try path.openFile(std.testing.io, meta_file_name, .{});
+    defer meta_file.close(std.testing.io);
     const Meta = struct {
         root: []const u8,
     };
-    const meta_bytes = try meta_file.readToEndAlloc(allocator, 1_000);
+    const meta_bytes = try readFileToEnd(meta_file, allocator, 1_000);
 
     var meta_yaml = yaml.Yaml{ .source = meta_bytes };
     try meta_yaml.load(allocator);
@@ -147,13 +159,13 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
 
     // read yaml
 
-    const value_file = try path.openFile("value.yaml", .{});
-    defer value_file.close();
-    const value_bytes = try value_file.readToEndAlloc(allocator, 100_000_000);
+    const value_file = try path.openFile(std.testing.io, "value.yaml", .{});
+    defer value_file.close(std.testing.io);
+    const value_bytes = try readFileToEnd(value_file, allocator, 100_000_000);
 
     var value_yaml = yaml.Yaml{ .source = value_bytes };
     value_yaml.load(allocator) catch |e| {
-        value_yaml.parse_errors.renderToStdErr(.{ .ttyconf = .no_color });
+        value_yaml.parse_errors.renderToStderr(io, .{}, .off) catch {};
         return e;
     };
 
@@ -173,9 +185,9 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
 
     // read expected serialized
 
-    const serialized_file = try path.openFile("serialized.ssz_snappy", .{});
-    defer serialized_file.close();
-    const serialized_snappy_bytes = try serialized_file.readToEndAlloc(allocator, 100_000_000);
+    const serialized_file = try path.openFile(std.testing.io, "serialized.ssz_snappy", .{});
+    defer serialized_file.close(std.testing.io);
+    const serialized_snappy_bytes = try readFileToEnd(serialized_file, allocator, 100_000_000);
 
     const serialized_buf = try allocator.alloc(u8, try snappy.uncompressedLength(serialized_snappy_bytes));
     const serialized_len = try snappy.uncompress(serialized_snappy_bytes, serialized_buf);
@@ -222,7 +234,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
             try ST.serializeIntoJson(allocator, &write_stream_actual, value_expected);
         }
 
-        try std.testing.expectEqualSlices(u8, expected_json.written(), serialized_actual.items);
+        try std.testing.expectEqualSlices(u8, expected_json.written(), serialized_actual.written());
     }
 
     // test deserialization - json to value
@@ -309,9 +321,9 @@ pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir) !voi
 
     // read expected serialized
 
-    const serialized_file = try path.openFile("serialized.ssz_snappy", .{});
-    defer serialized_file.close();
-    const serialized_snappy_bytes = try serialized_file.readToEndAlloc(allocator, 1_000_000);
+    const serialized_file = try path.openFile(std.testing.io, "serialized.ssz_snappy", .{});
+    defer serialized_file.close(std.testing.io);
+    const serialized_snappy_bytes = try readFileToEnd(serialized_file, allocator, 1_000_000);
 
     const serialized_buf = try allocator.alloc(u8, try snappy.uncompressedLength(serialized_snappy_bytes));
     const serialized_len = try snappy.uncompress(serialized_snappy_bytes, serialized_buf);
