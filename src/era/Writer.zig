@@ -89,10 +89,12 @@ pub fn finish(self: *Writer, allocator: std.mem.Allocator) ![]const u8 {
 
 pub fn writeVersion(self: *Writer, allocator: std.mem.Allocator) !void {
     if (self.state == .finished_group) {
+        const finished_era_number = self.state.finished_group.era_number;
+        const finished_current_offset = self.state.finished_group.current_offset;
         self.state = .{
             .init_group = .{
-                .era_number = self.state.finished_group.era_number + 1,
-                .current_offset = self.state.finished_group.current_offset,
+                .era_number = finished_era_number + 1,
+                .current_offset = finished_current_offset,
             },
         };
     }
@@ -101,16 +103,21 @@ pub fn writeVersion(self: *Writer, allocator: std.mem.Allocator) !void {
     }
     try e2s.writeEntry(self.file, self.io, self.state.init_group.current_offset, .Version, &[0]u8{});
 
+    // Save init_group values before transitioning state (Zig 0.16 enforces
+    // tagged union safety - can't read init_group after assigning write_group)
+    const init_era_number = self.state.init_group.era_number;
+    const init_current_offset = self.state.init_group.current_offset;
+
     // Move to writing blocks/state
     self.state = .{
         .write_group = .{
-            .era_number = self.state.init_group.era_number,
-            .current_offset = self.state.init_group.current_offset + e2s.header_size,
+            .era_number = init_era_number,
+            .current_offset = init_current_offset + e2s.header_size,
             .block_offsets = try std.array_list.AlignedManaged(u64, null).initCapacity(allocator, preset.SLOTS_PER_HISTORICAL_ROOT),
-            .last_block_slot = if (self.state.init_group.era_number == 0)
+            .last_block_slot = if (init_era_number == 0)
                 0
             else
-                (try era.computeStartBlockSlotFromEraNumber(self.state.init_group.era_number)) - 1,
+                (try era.computeStartBlockSlotFromEraNumber(init_era_number)) - 1,
         },
     };
 }
@@ -171,11 +178,13 @@ pub fn writeCompressedState(self: *Writer, allocator: std.mem.Allocator, slot: u
     self.state.write_group.current_offset += e2s.header_size + state_index_payload.len;
     self.state.write_group.last_block_slot = slot;
 
+    const write_era_number = self.state.write_group.era_number;
+    const write_current_offset = self.state.write_group.current_offset;
     self.state.write_group.block_offsets.deinit();
     self.state = .{
         .finished_group = .{
-            .era_number = self.state.write_group.era_number,
-            .current_offset = self.state.write_group.current_offset,
+            .era_number = write_era_number,
+            .current_offset = write_current_offset,
             .short_historical_root = short_historical_root,
         },
     };
