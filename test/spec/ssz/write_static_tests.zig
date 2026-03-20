@@ -138,7 +138,7 @@ fn writeStaticTest(
         \\    defer allocator.free(test_dir_name);
         \\
         \\    var test_dir = std.Io.Dir.cwd().openDir(std.testing.io, test_dir_name, .{{}}) catch return error.SkipZigTest;
-        \\    defer test_dir.close();
+        \\    defer test_dir.close(std.testing.io);
         \\    try test_case.validTestCase(types.{s}.{s}, allocator, test_dir, "roots.yaml");
         \\}}
         \\
