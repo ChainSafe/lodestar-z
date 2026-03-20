@@ -16,6 +16,7 @@ const e2s = @import("e2s.zig");
 const era = @import("era.zig");
 
 config: c.BeaconConfig,
+io: std.Io,
 path: []const u8,
 file: std.Io.File,
 era_number: u64,

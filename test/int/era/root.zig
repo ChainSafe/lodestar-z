@@ -13,7 +13,7 @@ test "validate an existing era file" {
     defer allocator.free(era_path);
 
     // First check that the era file exists
-    if (std.Io.Dir.cwd().openFile(std.Options.debug_io, std.testing.io, era_path, .{})) |f| {
+    if (std.Io.Dir.cwd().openFile(std.testing.io, era_path, .{})) |f| {
         f.close(std.testing.io);
     } else |_| {
         return error.SkipZigTest;
@@ -34,7 +34,7 @@ test "write an era file from an existing era file" {
     defer allocator.free(era_path);
 
     // First check that the era file exists
-    if (std.Io.Dir.cwd().openFile(std.Options.debug_io, std.testing.io, era_path, .{})) |f| {
+    if (std.Io.Dir.cwd().openFile(std.testing.io, era_path, .{})) |f| {
         f.close(std.testing.io);
     } else |_| {
         return error.SkipZigTest;
@@ -47,13 +47,13 @@ test "write an era file from an existing era file" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const tmp_dir_path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const tmp_dir_path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(tmp_dir_path);
     const out_path = try std.fs.path.join(allocator, &[_][]const u8{ tmp_dir_path, "out.era" });
     defer allocator.free(out_path);
 
     // Write known-good era to a new era file
-    var writer = try era.Writer.open(c.mainnet.config, out_path, reader.era_number);
+    var writer = try era.Writer.open(c.mainnet.config, std.testing.io, out_path, reader.era_number);
 
     const blocks_index = reader.group_indices[0].blocks_index orelse return error.NoBlockIndex;
     for (blocks_index.start_slot..blocks_index.start_slot + blocks_index.offsets.len) |slot| {
@@ -76,7 +76,7 @@ test "write an era file from an existing era file" {
     if (!std.mem.eql(u8, std.fs.path.basename(final_out_path), std.fs.path.basename(era_path))) {
         return error.IncorrectWrittenEraFileName;
     }
-    var out_reader = try era.Reader.open(allocator, c.mainnet.config, final_out_path);
+    var out_reader = try era.Reader.open(allocator, std.testing.io, c.mainnet.config, final_out_path);
     defer out_reader.close(allocator);
 
     // Compare struct fields

@@ -79,7 +79,7 @@ pub fn readCompressedState(self: Reader, allocator: std.mem.Allocator, era_numbe
     }
     const index = self.group_indices[group_index];
     const offset: u64 = @intCast(try std.math.add(i64, @intCast(index.state_index.record_start), index.state_index.offsets[0]));
-    const entry = try e2s.readEntry(allocator, self.file, offset);
+    const entry = try e2s.readEntry(allocator, self.file, self.io, offset);
     errdefer allocator.free(entry.data);
     if (entry.entry_type != .CompressedBeaconState) {
         return error.InvalidE2SHeader;
@@ -119,7 +119,7 @@ pub fn readCompressedBlock(self: Reader, allocator: std.mem.Allocator, slot: u64
     if (offset == 0) {
         return null; // Empty slot
     }
-    const entry = try e2s.readEntry(allocator, self.file, offset);
+    const entry = try e2s.readEntry(allocator, self.file, self.io, offset);
     errdefer allocator.free(entry.data);
     if (entry.entry_type != .CompressedSignedBeaconBlock) {
         return error.InvalidE2SHeader;
@@ -160,7 +160,7 @@ pub fn validate(self: Reader, allocator: std.mem.Allocator) !void {
         if (start < 0) {
             return error.InvalidGroupStartIndex;
         }
-        try e2s.readVersion(self.file, @intCast(start));
+        try e2s.readVersion(self.file, self.io, @intCast(start));
 
         // Genesis era cannot have a block index
         if (era_number == 0 and index.blocks_index != null) {

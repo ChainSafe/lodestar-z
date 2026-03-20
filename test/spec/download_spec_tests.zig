@@ -137,8 +137,13 @@ fn extract_spec_test_archive(
     var archive_dir = try std.Io.Dir.cwd().openDir(io, archive_dirname, .{});
     defer archive_dir.close(io);
 
-    if (archive_dir.openDir(io, test_name, .{})) |_| {
+    // Check for a marker file that indicates successful extraction.
+    const marker_name = try std.fmt.allocPrint(allocator, "{s}.extracted", .{test_name});
+    defer allocator.free(marker_name);
+
+    if (archive_dir.openFile(io, marker_name, .{})) |marker| {
         std.log.info("already extracted {s}", .{filename});
+        marker.close(io);
         return;
     } else |err| {
         if (err != error.FileNotFound) {
@@ -155,9 +160,31 @@ fn extract_spec_test_archive(
         }
     };
 
-    // TODO: Reader/decompressor/tar API may need further 0.16 adaptation
+    std.log.info("extracting {s}", .{filename});
 
-    // For now, use a simpler approach - read all to memory and decompress
-    // This may need to be revisited when the tar/gzip APIs are settled in 0.16
-    std.log.info("extracting {s} (TODO: needs tar API migration)", .{filename});
+    var extract_dir = try archive_dir.openDir(io, test_name, .{});
+    defer extract_dir.close(io);
+
+    // Read the gzip-compressed tar archive and pipe it to the file system.
+    var read_buf: [std.compress.flate.max_window_len * 2]u8 = undefined;
+    var file_reader = archive_file.reader(io, read_buf[0..std.compress.flate.max_window_len]);
+    var decompress_buf: [std.compress.flate.max_window_len * 2]u8 = undefined;
+    var decompressor = std.compress.flate.Decompress.init(
+        &file_reader.interface,
+        .gzip,
+        &decompress_buf,
+    );
+
+    try std.tar.pipeToFileSystem(io, extract_dir, &decompressor.reader, .{
+        .strip_components = 1,
+        .diagnostics = null,
+    });
+
+    std.log.info("extracted {s}", .{filename});
+
+    // Write marker file to indicate successful extraction.
+    const marker_name2 = try std.fmt.allocPrint(allocator, "{s}.extracted", .{test_name});
+    defer allocator.free(marker_name2);
+    const marker = try archive_dir.createFile(io, marker_name2, .{});
+    marker.close(io);
 }

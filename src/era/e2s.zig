@@ -40,7 +40,7 @@ pub const ReadError = error{
     InvalidHeaderReservedBytes,
     Overflow,
     DataSizeTooLarge,
-} || std.Io.File.PReadError || std.mem.Allocator.Error;
+} || std.Io.File.ReadPositionalError || std.mem.Allocator.Error;
 
 /// Parsed entry from an E2Store (.e2s) file.
 pub const Entry = struct {
@@ -158,7 +158,7 @@ pub fn readSlotIndex(allocator: std.mem.Allocator, file: std.Io.File, io: std.Io
     // Validate index position is within file bounds
     const record_start = try std.math.sub(u64, record_end, (8 * count + 24));
 
-    const entry = try readEntry(allocator, file, record_start);
+    const entry = try readEntry(allocator, file, io, record_start);
     defer allocator.free(entry.data);
 
     if (entry.entry_type != EntryType.SlotIndex) {
@@ -187,7 +187,7 @@ pub fn readSlotIndex(allocator: std.mem.Allocator, file: std.Io.File, io: std.Io
     };
 }
 
-pub const WriteError = error{} || std.Io.File.PWriteError;
+pub const WriteError = error{} || std.Io.File.WritePositionalError;
 
 pub fn writeEntry(file: std.Io.File, io: std.Io, offset: u64, entry_type: EntryType, payload: []const u8) WriteError!void {
     var header: [8]u8 = [_]u8{0} ** 8;

@@ -46,8 +46,8 @@ pub const GroupIndex = struct {
 /// Read state and block SlotIndex entries from an era file and validate alignment.
 ///
 /// Ownership of the returned GroupIndex is transferred to the caller.
-pub fn readGroupIndex(allocator: std.mem.Allocator, file: std.Io.File, end: u64) !GroupIndex {
-    const state_index = try e2s.readSlotIndex(allocator, file, end);
+pub fn readGroupIndex(allocator: std.mem.Allocator, file: std.Io.File, io: std.Io, end: u64) !GroupIndex {
+    const state_index = try e2s.readSlotIndex(allocator, file, io, end);
     errdefer state_index.deinit(allocator);
 
     if (state_index.offsets.len != 1) {
@@ -57,7 +57,7 @@ pub fn readGroupIndex(allocator: std.mem.Allocator, file: std.Io.File, end: u64)
     // Read block index if not genesis era (era 0)
     var blocks_index: ?e2s.SlotIndex = null;
     if (state_index.start_slot != 0) {
-        blocks_index = try e2s.readSlotIndex(allocator, file, state_index.record_start);
+        blocks_index = try e2s.readSlotIndex(allocator, file, io, state_index.record_start);
         errdefer blocks_index.?.deinit(allocator);
 
         if (blocks_index.?.offsets.len != preset.SLOTS_PER_HISTORICAL_ROOT) {
@@ -96,7 +96,7 @@ pub fn readAllGroupIndices(allocator: std.mem.Allocator, io: std.Io, file: std.I
     }
 
     while (end > e2s.header_size) {
-        const index = try readGroupIndex(allocator, file, @intCast(end));
+        const index = try readGroupIndex(allocator, file, io, @intCast(end));
         errdefer index.deinit(allocator);
 
         try group_indices.append(index);
