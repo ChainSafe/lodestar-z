@@ -1,4 +1,11 @@
 const std = @import("std");
+const io = std.testing.io;
+
+fn readFileToEnd(file: std.Io.File, allocator: std.mem.Allocator, limit: usize) ![]u8 {
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    return file_reader.interface.allocRemaining(allocator, @enumFromInt(limit));
+}
 const yaml = @import("yaml");
 const bls = @import("bls");
 
@@ -9,9 +16,9 @@ pub fn aggregate(gpa: Allocator, path: std.Io.Dir) !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const data_file = try path.openFile("data.yaml", .{});
-    defer data_file.close();
-    const data_bytes = try data_file.readToEndAlloc(allocator, 100_000_000);
+    const data_file = try path.openFile(io, "data.yaml", .{});
+    defer data_file.close(io);
+    const data_bytes = try readFileToEnd(data_file, allocator, 100_000_000);
 
     const AggregateTestData = struct {
         input: [][]const u8,
@@ -57,9 +64,9 @@ pub fn aggregate_verify(gpa: Allocator, path: std.Io.Dir) !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const data_file = try path.openFile("data.yaml", .{});
-    defer data_file.close();
-    const data_bytes = try data_file.readToEndAlloc(allocator, 100_000_000);
+    const data_file = try path.openFile(io, "data.yaml", .{});
+    defer data_file.close(io);
+    const data_bytes = try readFileToEnd(data_file, allocator, 100_000_000);
 
     const AggregateVerifyTestData = struct {
         input: struct {
@@ -129,9 +136,9 @@ pub fn fast_aggregate_verify(gpa: Allocator, path: std.Io.Dir) !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const data_file = try path.openFile("data.yaml", .{});
-    defer data_file.close();
-    const data_bytes = try data_file.readToEndAlloc(allocator, 100_000_000);
+    const data_file = try path.openFile(io, "data.yaml", .{});
+    defer data_file.close(io);
+    const data_bytes = try readFileToEnd(data_file, allocator, 100_000_000);
 
     const FastAggregateVerifyTestData = struct {
         input: struct {
@@ -197,9 +204,9 @@ pub fn sign(gpa: Allocator, path: std.Io.Dir) !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const data_file = try path.openFile("data.yaml", .{});
-    defer data_file.close();
-    const data_bytes = try data_file.readToEndAlloc(allocator, 100_000_000);
+    const data_file = try path.openFile(io, "data.yaml", .{});
+    defer data_file.close(io);
+    const data_bytes = try readFileToEnd(data_file, allocator, 100_000_000);
 
     const SignTestData = struct {
         input: struct {
@@ -241,9 +248,9 @@ pub fn verify(gpa: Allocator, path: std.Io.Dir) !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const data_file = try path.openFile("data.yaml", .{});
-    defer data_file.close();
-    const data_bytes = try data_file.readToEndAlloc(allocator, 100_000_000);
+    const data_file = try path.openFile(io, "data.yaml", .{});
+    defer data_file.close(io);
+    const data_bytes = try readFileToEnd(data_file, allocator, 100_000_000);
 
     const VerifyTestData = struct {
         input: struct {
@@ -300,9 +307,9 @@ pub fn eth_aggregate_pubkeys(gpa: Allocator, path: std.Io.Dir) !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const data_file = try path.openFile("data.yaml", .{});
-    defer data_file.close();
-    const data_bytes = try data_file.readToEndAlloc(allocator, 100_000_000);
+    const data_file = try path.openFile(io, "data.yaml", .{});
+    defer data_file.close(io);
+    const data_bytes = try readFileToEnd(data_file, allocator, 100_000_000);
 
     const EthAggregatePubkeysTestData = struct {
         input: [][]const u8,
@@ -355,9 +362,9 @@ pub fn eth_fast_aggregate_verify(gpa: Allocator, path: std.Io.Dir) !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const data_file = try path.openFile("data.yaml", .{});
-    defer data_file.close();
-    const data_bytes = try data_file.readToEndAlloc(allocator, 100_000_000);
+    const data_file = try path.openFile(io, "data.yaml", .{});
+    defer data_file.close(io);
+    const data_bytes = try readFileToEnd(data_file, allocator, 100_000_000);
 
     const EthFastAggregateVerifyTestData = struct {
         input: struct {
