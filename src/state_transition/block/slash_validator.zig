@@ -59,7 +59,6 @@ pub fn slashValidator(
     try slashings.set(@intCast(slashing_index), cur_slashings + effective_balance);
     epoch_cache.total_slashings_by_increment += slashed_effective_balance_increments;
 
-    // TODO(ct): define MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA
     const min_slashing_penalty_quotient: usize = switch (fork) {
         .phase0 => preset.MIN_SLASHING_PENALTY_QUOTIENT,
         .altair => preset.MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR,
@@ -70,7 +69,6 @@ pub fn slashValidator(
     try decreaseBalance(fork, state, slashed_index, @divFloor(effective_balance, min_slashing_penalty_quotient));
 
     // apply proposer and whistleblower rewards
-    // TODO(ct): define WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA
     const whistleblower_reward = switch (fork) {
         .electra, .fulu => @divFloor(effective_balance, preset.WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA),
         else => @divFloor(effective_balance, preset.WHISTLEBLOWER_REWARD_QUOTIENT),
