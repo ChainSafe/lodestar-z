@@ -1,14 +1,14 @@
 const std = @import("std");
-const assert = std.debug.assert;
 
 /// Return the largest integer `x` such that `x**2 <= n`.
 /// Matches the consensus spec `integer_squareroot` exactly using Newton's method
 /// with pure integer arithmetic (no floating-point precision loss).
 /// Spec: https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/beacon-chain.md#integer_squareroot
 pub inline fn intSqrt(n: u64) u64 {
-    const max_sqrt: u64 = std.math.maxInt(u32); // 2^32 - 1
+    const uint64_max_sqrt: u64 = 4294967295; // 2^32 - 1
+
     if (n == std.math.maxInt(u64)) {
-        return max_sqrt;
+        return uint64_max_sqrt;
     }
     var x = n;
     var y = @divFloor(x + 1, 2);
@@ -16,11 +16,16 @@ pub inline fn intSqrt(n: u64) u64 {
         x = y;
         y = @divFloor(x + @divFloor(n, x), 2);
     }
-    // Assert postcondition: x^2 <= n < (x+1)^2
-    assert(x * x <= n);
-    const x_plus_1 = x + 1;
-    const upper, const overflowed = @mulWithOverflow(x_plus_1, x_plus_1);
-    assert(overflowed == 1 or upper > n);
+
+    // Assert post-condition: x*x <= n < (x+1)*(x+1)
+    if (std.debug.runtime_safety) {
+        const x_sq = @mulWithOverflow(x, x);
+        const x1 = x + 1;
+        const x1_sq = @mulWithOverflow(x1, x1);
+        std.debug.assert(x_sq[1] == 0 and x_sq[0] <= n);
+        std.debug.assert(x1_sq[1] != 0 or x1_sq[0] > n);
+    }
+
     return x;
 }
 
