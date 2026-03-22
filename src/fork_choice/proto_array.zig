@@ -77,7 +77,6 @@ pub const VariantIndices = union(enum) {
 
     /// Get the default index for a block root.
     /// Pre-Gloas: the pre_gloas index. Gloas: the PENDING index.
-    /// TS: getDefaultVariant() + getNodeIndexByRootAndStatus().
     pub fn defaultIndex(self: VariantIndices) u32 {
         return switch (self) {
             .pre_gloas => |idx| idx,
@@ -1224,7 +1223,11 @@ pub const ProtoArray = struct {
     }
 
     /// Set a node's execution status to invalid.
-    /// Returns error if the node is valid or pre-merge (consensus failure).
+    ///
+    /// If the node is valid or pre-merge, this indicates a consensus failure
+    /// and non-recoverable damage. The proto-array is marked permanently damaged
+    /// via lvh_error and returns error.InvalidLVHExecutionResponse.
+    /// There is no further processing that can be done.
     fn invalidateNodeByIndex(
         self: *ProtoArray,
         node_index: u32,
@@ -1234,14 +1237,11 @@ pub const ProtoArray = struct {
         const node = &self.nodes.items[node_index];
         switch (node.extra_meta) {
             .post_merge => |*m| {
-                if (m.execution_status == .valid or m.execution_status == .pre_merge) {
-                    const lvh_code: LVHExecErrorCode = if (m.execution_status == .valid)
-                        .valid_to_invalid
-                    else
-                        .pre_merge_to_invalid;
-
+                // A post_merge node must never have pre_merge execution status.
+                assert(m.execution_status != .pre_merge);
+                if (m.execution_status == .valid) {
                     self.lvh_error = .{
-                        .lvh_code = lvh_code,
+                        .lvh_code = .valid_to_invalid,
                         .block_root = node.block_root,
                         .exec_hash = m.execution_payload_block_hash,
                     };
@@ -1262,8 +1262,6 @@ pub const ProtoArray = struct {
         node.best_descendant = null;
     }
 
-    /// Walk up parent chain from ancestor_from_index looking for a node
-    /// whose executionPayloadBlockHash matches latest_valid_exec_hash.
     /// Walk up the parent chain from `ancestor_from_index` looking for a node
     /// whose execution payload block hash matches `latest_valid_exec_hash`.
     /// Pre-merge nodes match against `ZERO_HASH`.
@@ -1272,6 +1270,7 @@ pub const ProtoArray = struct {
         latest_valid_exec_hash: Root,
         ancestor_from_index: u32,
     ) ?u32 {
+        assert(ancestor_from_index < self.nodes.items.len);
         var node_index: ?u32 = ancestor_from_index;
         while (node_index) |idx| {
             assert(idx < self.nodes.items.len);
@@ -1301,6 +1300,9 @@ pub const ProtoArray = struct {
         latest_valid_hash_index: u32,
         current_slot: Slot,
     ) (Allocator.Error || ProtoArrayError)!void {
+        assert(invalidate_from_index < self.nodes.items.len);
+        assert(latest_valid_hash_index < self.nodes.items.len);
+
         // Pass 1: walk UP marking ancestors invalid.
         var invalidate_index: ?u32 = invalidate_from_index;
         while (invalidate_index) |idx| {
@@ -1323,7 +1325,7 @@ pub const ProtoArray = struct {
         const num_nodes: u32 = @intCast(self.nodes.items.len);
         const zero_deltas = try allocator.alloc(i64, num_nodes);
         defer allocator.free(zero_deltas);
-        
+
         @memset(zero_deltas, 0);
 
         try self.applyScoreChanges(
@@ -1432,6 +1434,7 @@ pub const ProtoArray = struct {
     /// Return a ProtoNode by root and payload status, or null if not found.
     pub fn getNode(self: *const ProtoArray, root: Root, status: PayloadStatus) ?*const ProtoNode {
         const idx = self.getNodeIndexByRootAndStatus(root, status) orelse return null;
+        assert(idx < self.nodes.items.len);
         return &self.nodes.items[idx];
     }
 
@@ -1454,12 +1457,11 @@ pub const ProtoArray = struct {
     ///
     /// Pre-Gloas: uses raw node.parent index.
     /// Gloas: resolves the correct parent variant (EMPTY or FULL) via getParentPayloadStatus.
-    fn getParentNodeIndex(self: *const ProtoArray, node: *const ProtoNode) ?u32 {
+    fn getParentNodeIndex(self: *const ProtoArray, node: *const ProtoNode) ProtoArrayError!?u32 {
         if (node.parent_block_hash) |parent_bh| {
             // Gloas: resolve parent variant via block hash matching.
-            const parent_status = self.getParentPayloadStatus(node.parent_root, parent_bh) catch
-                return node.parent;
-            return self.getNodeIndexByRootAndStatus(node.parent_root, parent_status) orelse node.parent;
+            const parent_status = try self.getParentPayloadStatus(node.parent_root, parent_bh);
+            return self.getNodeIndexByRootAndStatus(node.parent_root, parent_status);
         } else {
             return node.parent;
         }
@@ -1472,12 +1474,13 @@ pub const ProtoArray = struct {
         proto_array: *const ProtoArray,
         current: ?*const ProtoNode,
 
-        pub fn next(self_iter: *AncestorIterator) ?*const ProtoNode {
+        pub fn next(self_iter: *AncestorIterator) ProtoArrayError!?*const ProtoNode {
             const node = self_iter.current orelse return null;
-            const parent_idx = self_iter.proto_array.getParentNodeIndex(node) orelse {
+            const parent_idx = (try self_iter.proto_array.getParentNodeIndex(node)) orelse {
                 self_iter.current = null;
                 return null;
             };
+            assert(parent_idx < self_iter.proto_array.nodes.items.len);
             const parent = &self_iter.proto_array.nodes.items[parent_idx];
             self_iter.current = parent;
             return parent;
@@ -1499,88 +1502,90 @@ pub const ProtoArray = struct {
     }
 
     /// Collect all ancestor nodes from a block root (includes start node, excludes PENDING for Gloas).
-    /// Caller owns the returned ArrayList and must deinit it.
+    /// Caller owns the returned slice and must free it with allocator.free().
     pub fn getAllAncestorNodes(
         self: *const ProtoArray,
         allocator: Allocator,
         root: Root,
         status: PayloadStatus,
-    ) Allocator.Error!std.ArrayList(*const ProtoNode) {
-        var result = std.ArrayList(*const ProtoNode).init(allocator);
-        errdefer result.deinit();
+    ) (Allocator.Error || ProtoArrayError)![]*const ProtoNode {
+        const start_node = self.getNode(root, status) orelse return &.{};
 
-        const start_node = self.getNode(root, status) orelse return result;
+        var result: std.ArrayListUnmanaged(*const ProtoNode) = .empty;
+        errdefer result.deinit(allocator);
 
         // Include start node if not PENDING (Gloas only; pre-Gloas always included).
         if (start_node.payload_status != .pending) {
-            try result.append(start_node);
+            try result.append(allocator, start_node);
         }
 
         var iter = AncestorIterator{ .proto_array = self, .current = start_node };
-        while (iter.next()) |ancestor| {
-            try result.append(ancestor);
+        while (try iter.next()) |ancestor| {
+            try result.append(allocator, ancestor);
         }
 
-        return result;
+        return result.toOwnedSlice(allocator);
+    }
+
+    /// Collect non-PENDING nodes between upper_index and lower_index (exclusive both ends).
+    fn appendNodesBetween(
+        self: *const ProtoArray,
+        result: *std.ArrayListUnmanaged(*const ProtoNode),
+        allocator: Allocator,
+        upper_index: u32,
+        lower_index: u32,
+    ) Allocator.Error!void {
+        if (upper_index <= lower_index + 1) return;
+        var i = upper_index - 1;
+        while (i > lower_index) : (i -= 1) {
+            assert(i < self.nodes.items.len);
+            const n = &self.nodes.items[i];
+            if (n.payload_status != .pending) {
+                try result.append(allocator, n);
+            }
+        }
     }
 
     /// Collect all non-ancestor nodes (nodes between ancestor-chain gaps).
-    /// Excludes PENDING nodes for Gloas. Caller owns the returned ArrayList.
+    /// Excludes PENDING nodes for Gloas. Caller owns the returned slice and must free it.
     pub fn getAllNonAncestorNodes(
         self: *const ProtoArray,
         allocator: Allocator,
         root: Root,
         status: PayloadStatus,
-    ) Allocator.Error!std.ArrayList(*const ProtoNode) {
-        var result = std.ArrayList(*const ProtoNode).init(allocator);
-        errdefer result.deinit();
+    ) (Allocator.Error || ProtoArrayError)![]*const ProtoNode {
+        const start_idx = self.getNodeIndexByRootAndStatus(root, status) orelse return &.{};
+        assert(start_idx < self.nodes.items.len);
 
-        const start_idx = self.getNodeIndexByRootAndStatus(root, status) orelse return result;
-        const start_node = &self.nodes.items[start_idx];
+        var result: std.ArrayListUnmanaged(*const ProtoNode) = .empty;
+        errdefer result.deinit(allocator);
 
         var node_index = start_idx;
-        var current = start_node;
+        var current = &self.nodes.items[start_idx];
 
-        while (true) {
-            const parent_idx = self.getParentNodeIndex(current) orelse break;
-
-            // Collect nodes between node_index and parent_idx (exclusive both ends).
-            if (node_index > parent_idx + 1) {
-                var i = node_index - 1;
-                while (i > parent_idx) : (i -= 1) {
-                    const n = &self.nodes.items[i];
-                    if (n.payload_status != .pending) {
-                        try result.append(n);
-                    }
-                }
-            }
-
+        while (current.parent != null) {
+            const parent_idx = (try self.getParentNodeIndex(current)) orelse break;
+            assert(parent_idx < self.nodes.items.len);
+            try self.appendNodesBetween(&result, allocator, node_index, parent_idx);
             node_index = parent_idx;
             current = &self.nodes.items[parent_idx];
         }
 
-        // Collect remaining nodes from node_index down to 0 (exclusive endpoints).
-        if (node_index > 1) {
-            var i = node_index - 1;
-            while (i > 0) : (i -= 1) {
-                const n = &self.nodes.items[i];
-                if (n.payload_status != .pending) {
-                    try result.append(n);
-                }
-            }
-        }
+        // Collect remaining nodes from node_index down to 0.
+        try self.appendNodesBetween(&result, allocator, node_index, 0);
 
-        return result;
+        return result.toOwnedSlice(allocator);
     }
 
     /// Result of getAllAncestorAndNonAncestorNodes.
     pub const AncestorAndNonAncestorResult = struct {
-        ancestors: std.ArrayList(*const ProtoNode),
-        non_ancestors: std.ArrayList(*const ProtoNode),
+        allocator: Allocator,
+        ancestors: []*const ProtoNode,
+        non_ancestors: []*const ProtoNode,
 
         pub fn deinit(self_result: *AncestorAndNonAncestorResult) void {
-            self_result.ancestors.deinit();
-            self_result.non_ancestors.deinit();
+            if (self_result.ancestors.len > 0) self_result.allocator.free(self_result.ancestors);
+            if (self_result.non_ancestors.len > 0) self_result.allocator.free(self_result.non_ancestors);
         }
     };
 
@@ -1591,55 +1596,43 @@ pub const ProtoArray = struct {
         allocator: Allocator,
         root: Root,
         status: PayloadStatus,
-    ) Allocator.Error!AncestorAndNonAncestorResult {
-        var ancestors = std.ArrayList(*const ProtoNode).init(allocator);
-        errdefer ancestors.deinit();
-        var non_ancestors = std.ArrayList(*const ProtoNode).init(allocator);
-        errdefer non_ancestors.deinit();
-
+    ) (Allocator.Error || ProtoArrayError)!AncestorAndNonAncestorResult {
         const start_idx = self.getNodeIndexByRootAndStatus(root, status) orelse
-            return .{ .ancestors = ancestors, .non_ancestors = non_ancestors };
+            return .{ .allocator = allocator, .ancestors = &.{}, .non_ancestors = &.{} };
+
+        assert(start_idx < self.nodes.items.len);
         const start_node = &self.nodes.items[start_idx];
 
+        var ancestors: std.ArrayListUnmanaged(*const ProtoNode) = .empty;
+        errdefer ancestors.deinit(allocator);
+        var non_ancestors: std.ArrayListUnmanaged(*const ProtoNode) = .empty;
+        errdefer non_ancestors.deinit(allocator);
+
         if (start_node.payload_status != .pending) {
-            try ancestors.append(start_node);
+            try ancestors.append(allocator, start_node);
         }
 
         var node_index = start_idx;
         var current = start_node;
 
-        while (true) {
-            const parent_idx = self.getParentNodeIndex(current) orelse break;
+        while (current.parent != null) {
+            const parent_idx = (try self.getParentNodeIndex(current)) orelse break;
+            assert(parent_idx < self.nodes.items.len);
             const parent = &self.nodes.items[parent_idx];
-            try ancestors.append(parent);
-
-            // Collect non-ancestor nodes between node_index and parent_idx.
-            if (node_index > parent_idx + 1) {
-                var i = node_index - 1;
-                while (i > parent_idx) : (i -= 1) {
-                    const n = &self.nodes.items[i];
-                    if (n.payload_status != .pending) {
-                        try non_ancestors.append(n);
-                    }
-                }
-            }
-
+            try ancestors.append(allocator, parent);
+            try self.appendNodesBetween(&non_ancestors, allocator, node_index, parent_idx);
             node_index = parent_idx;
             current = parent;
         }
 
         // Remaining non-ancestor nodes from node_index down to 0.
-        if (node_index > 1) {
-            var i = node_index - 1;
-            while (i > 0) : (i -= 1) {
-                const n = &self.nodes.items[i];
-                if (n.payload_status != .pending) {
-                    try non_ancestors.append(n);
-                }
-            }
-        }
+        try self.appendNodesBetween(&non_ancestors, allocator, node_index, 0);
 
-        return .{ .ancestors = ancestors, .non_ancestors = non_ancestors };
+        return .{
+            .allocator = allocator,
+            .ancestors = try ancestors.toOwnedSlice(allocator),
+            .non_ancestors = try non_ancestors.toOwnedSlice(allocator),
+        };
     }
 
     /// Check if descendantRoot is a descendant of (or equal to) ancestorRoot.
@@ -1650,7 +1643,7 @@ pub const ProtoArray = struct {
         ancestor_status: PayloadStatus,
         descendant_root: Root,
         descendant_status: PayloadStatus,
-    ) bool {
+    ) ProtoArrayError!bool {
         const ancestor_node = self.getNode(ancestor_root, ancestor_status) orelse return false;
 
         // Same identity check.
@@ -1660,7 +1653,7 @@ pub const ProtoArray = struct {
 
         // Walk descendant's ancestor chain looking for ancestor.
         var iter = self.iterateAncestors(descendant_root, descendant_status);
-        while (iter.next()) |node| {
+        while (try iter.next()) |node| {
             if (node.slot < ancestor_node.slot) return false;
             if (std.mem.eql(u8, &node.block_root, &ancestor_node.block_root) and
                 node.payload_status == ancestor_node.payload_status)
@@ -1694,7 +1687,9 @@ pub const ProtoArray = struct {
                     return node_a;
                 }
                 const parent_a = node_a.parent orelse return null;
+                assert(parent_a < self.nodes.items.len);
                 const parent_b = node_b.parent orelse return null;
+                assert(parent_b < self.nodes.items.len);
                 node_a = &self.nodes.items[parent_a];
                 node_b = &self.nodes.items[parent_b];
             }
@@ -3310,45 +3305,75 @@ test "ffg updates two branches with votes and justified epoch switch" {
     // Left branch: 1 → 3 → 5 → 7 → 9
     try pa.onBlock(testing.allocator, TestBlock.withCheckpoints(
         TestBlock.withParent(TestBlock.withSlotAndRoot(1, makeRoot(1)), root_0),
-        0, root_0, 0, root_0,
+        0,
+        root_0,
+        0,
+        root_0,
     ), 1, null);
     try pa.onBlock(testing.allocator, TestBlock.withCheckpoints(
         TestBlock.withParent(TestBlock.withSlotAndRoot(2, makeRoot(3)), makeRoot(1)),
-        1, root_0, 0, root_0,
+        1,
+        root_0,
+        0,
+        root_0,
     ), 2, null);
     try pa.onBlock(testing.allocator, TestBlock.withCheckpoints(
         TestBlock.withParent(TestBlock.withSlotAndRoot(3, makeRoot(5)), makeRoot(3)),
-        1, root_0, 0, root_0,
+        1,
+        root_0,
+        0,
+        root_0,
     ), 3, null);
     try pa.onBlock(testing.allocator, TestBlock.withCheckpoints(
         TestBlock.withParent(TestBlock.withSlotAndRoot(4, makeRoot(7)), makeRoot(5)),
-        1, root_0, 0, root_0,
+        1,
+        root_0,
+        0,
+        root_0,
     ), 4, null);
     try pa.onBlock(testing.allocator, TestBlock.withCheckpoints(
         TestBlock.withParent(TestBlock.withSlotAndRoot(4, makeRoot(9)), makeRoot(7)),
-        2, root_0, 0, root_0,
+        2,
+        root_0,
+        0,
+        root_0,
     ), 4, null);
 
     // Right branch: 2 → 4 → 6 → 8 → 10
     try pa.onBlock(testing.allocator, TestBlock.withCheckpoints(
         TestBlock.withParent(TestBlock.withSlotAndRoot(1, makeRoot(2)), root_0),
-        0, root_0, 0, root_0,
+        0,
+        root_0,
+        0,
+        root_0,
     ), 1, null);
     try pa.onBlock(testing.allocator, TestBlock.withCheckpoints(
         TestBlock.withParent(TestBlock.withSlotAndRoot(2, makeRoot(4)), makeRoot(2)),
-        0, root_0, 0, root_0,
+        0,
+        root_0,
+        0,
+        root_0,
     ), 2, null);
     try pa.onBlock(testing.allocator, TestBlock.withCheckpoints(
         TestBlock.withParent(TestBlock.withSlotAndRoot(3, makeRoot(6)), makeRoot(4)),
-        0, root_0, 0, root_0,
+        0,
+        root_0,
+        0,
+        root_0,
     ), 3, null);
     try pa.onBlock(testing.allocator, TestBlock.withCheckpoints(
         TestBlock.withParent(TestBlock.withSlotAndRoot(4, makeRoot(8)), makeRoot(6)),
-        1, root_0, 0, root_0,
+        1,
+        root_0,
+        0,
+        root_0,
     ), 4, null);
     try pa.onBlock(testing.allocator, TestBlock.withCheckpoints(
         TestBlock.withParent(TestBlock.withSlotAndRoot(4, makeRoot(10)), makeRoot(8)),
-        2, root_0, 0, root_0,
+        2,
+        root_0,
+        0,
+        root_0,
     ), 4, null);
 
     // 11 nodes: genesis + 5 left + 5 right.
@@ -3527,7 +3552,6 @@ test "weight propagation with positive deltas" {
     try testing.expectEqual(root_2, head.block_root);
 }
 
-// Prysm: TestForkChoice_NodeCount
 test "NodeCount returns number of unique block roots" {
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
@@ -3539,7 +3563,6 @@ test "NodeCount returns number of unique block roots" {
     try testing.expectEqual(@as(usize, 2), pa.length());
 }
 
-// Prysm: TestStore_NodeByRoot
 // Tree: genesis(0x00), child 0x01
 test "NodeByRoot returns correct node or null" {
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
@@ -3564,7 +3587,6 @@ test "NodeByRoot returns correct node or null" {
     try testing.expectEqual(@as(?ProtoBlock, null), pa.getBlock(makeRoot(0xFF), .full));
 }
 
-// Prysm: TestForkChoice_HasNode
 // Tree: genesis(0x00)
 test "HasNode returns true for known roots" {
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
@@ -3576,7 +3598,6 @@ test "HasNode returns true for known roots" {
     try testing.expect(!pa.hasBlock(makeRoot(0xFF)));
 }
 
-// Prysm: TestForkChoice_IsCanonical
 // Tree:
 //   genesis(0x00, slot=0)
 //      / \
@@ -3607,16 +3628,15 @@ test "IsCanonical identifies head chain via isDescendant" {
 
     // Head = 6 (longest chain). Check "is X an ancestor of head?"
     const head_root = makeRoot(6);
-    try testing.expect(pa.isDescendant(root_0, .full, head_root, .full)); // genesis
-    try testing.expect(!pa.isDescendant(makeRoot(1), .full, head_root, .full)); // branch 1
-    try testing.expect(pa.isDescendant(makeRoot(2), .full, head_root, .full)); // branch 2
-    try testing.expect(!pa.isDescendant(makeRoot(3), .full, head_root, .full)); // branch 1 leaf
-    try testing.expect(pa.isDescendant(makeRoot(4), .full, head_root, .full));
-    try testing.expect(pa.isDescendant(makeRoot(5), .full, head_root, .full));
-    try testing.expect(pa.isDescendant(makeRoot(6), .full, head_root, .full)); // self
+    try testing.expect(try pa.isDescendant(root_0, .full, head_root, .full)); // genesis
+    try testing.expect(!try pa.isDescendant(makeRoot(1), .full, head_root, .full)); // branch 1
+    try testing.expect(try pa.isDescendant(makeRoot(2), .full, head_root, .full)); // branch 2
+    try testing.expect(!try pa.isDescendant(makeRoot(3), .full, head_root, .full)); // branch 1 leaf
+    try testing.expect(try pa.isDescendant(makeRoot(4), .full, head_root, .full));
+    try testing.expect(try pa.isDescendant(makeRoot(5), .full, head_root, .full));
+    try testing.expect(try pa.isDescendant(makeRoot(6), .full, head_root, .full)); // self
 }
 
-// Prysm: TestStore_CommonAncestor (table-driven)
 // Tree:
 //        a(0)
 //       / \
@@ -3684,7 +3704,6 @@ test "CommonAncestor table-driven two-branch tree" {
     try testing.expectEqual(@as(Slot, 1), lca_self.?.slot);
 }
 
-// Prysm: TestForkChoice_AncestorRoot
 // Tree:
 //   genesis
 //     |
@@ -3713,7 +3732,6 @@ test "AncestorRoot returns correct ancestor at slot" {
     try testing.expectEqual(makeRoot(1), a3.block_root);
 }
 
-// Prysm: TestForkChoice_AncestorEqualSlot
 // Tree:
 //   genesis
 //     |
@@ -3732,7 +3750,6 @@ test "AncestorRoot equal slot returns parent" {
     try testing.expectEqual(makeRoot(1), a.block_root);
 }
 
-// Prysm: TestForkChoice_AncestorLowerSlot
 // Tree:
 //   genesis
 //     |
@@ -3752,9 +3769,8 @@ test "AncestorRoot lower slot returns nearest parent" {
     try testing.expectEqual(makeRoot(1), a.block_root);
 }
 
-// ── Prune tests (ported from Prysm) ──
+// ── Prune tests ──
 
-// Prysm: TestStore_Prune_MoreThanThreshold
 // 100 nodes in a chain, finalize node 99 -> only 1 node remains.
 test "Prune MoreThanThreshold leaves only finalized node" {
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
@@ -3785,7 +3801,6 @@ test "Prune MoreThanThreshold leaves only finalized node" {
     try testing.expectEqual(@as(usize, 1), pa.length());
 }
 
-// Prysm: TestStore_Prune_MoreThanOnce
 // 100 nodes chain. Prune to 10, then prune to 20.
 test "Prune MoreThanOnce prunes incrementally" {
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
@@ -3825,13 +3840,11 @@ test "Prune MoreThanOnce prunes incrementally" {
     try testing.expectEqual(@as(usize, 80), pa.length());
 }
 
-// Prysm: TestStore_Prune_NoDanglingBranch
 // Tree:
-//       +-- 1
-//   0 --+
-//       +-- 2
+//     0
+//    / \
+//   1   2
 // Finalize 1 -> node 0 (genesis) pruned.
-// Note: Unlike Prysm's tree-based store, proto_array keeps dangling branches
 // (node 2 survives because its index > finalized_index). It becomes unreachable
 // but stays in the array until a future prune removes it.
 test "Prune NoDanglingBranch keeps dangling node in flat array" {
@@ -3853,7 +3866,6 @@ test "Prune NoDanglingBranch keeps dangling node in flat array" {
     try testing.expectEqual(@as(usize, 2), pa.length());
 }
 
-// Prysm: TestStore_Prune_ReturnEarly
 // Finalized root is genesis (index 0) -> nothing to prune, node count unchanged.
 test "Prune ReturnEarly when finalized is at index 0" {
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
@@ -3878,13 +3890,14 @@ test "Prune unknown finalized root returns error" {
     try testing.expectError(error.FinalizedNodeUnknown, pa.maybePrune(testing.allocator, makeRoot(0xFF)));
 }
 
-// ── Optimistic sync tests (ported from Prysm) ──
+// ── Optimistic sync tests ──
 
-// Prysm: TestSetOptimisticToValid
 // Tree:
 //   genesis(0x00, syncing)
-//   +-- 0x01(syncing, exec_hash=0xA1)
-//       +-- 0x02(syncing, exec_hash=0xA2)
+//     |
+//   0x01(syncing, exec_hash=0xA1)
+//     |
+//   0x02(syncing, exec_hash=0xA2)
 //
 // validateLatestHash(valid, latestValidExecHash=0xA1)
 // -> 0x01 becomes valid.
@@ -3920,12 +3933,11 @@ test "SetOptimisticToValid propagates up from matching hash" {
     try testing.expectEqual(ExecutionStatus.syncing, pa.nodes.items[2].extra_meta.executionStatus());
 }
 
-// Prysm: TestSetOptimisticToInvalid_CorrectChildren
 // Tree:
-//        +-- B(syncing)
-//   A ---+
-//        +-- C(syncing)
-//        +-- D(syncing) <- INVALID
+//       A
+//     / | \
+//    B  C  D(INVALID)
+//  (syncing) (syncing) (syncing)
 //
 // Invalidate D with LVH=A. Only D becomes invalid; B and C stay syncing.
 test "SetOptimisticToInvalid only invalidates target not siblings" {
@@ -3979,7 +3991,6 @@ test "SetOptimisticToInvalid only invalidates target not siblings" {
     try testing.expectEqual(ExecutionStatus.syncing, pa.nodes.items[3].extra_meta.executionStatus());
 }
 
-// Prysm: TestSetOptimisticToInvalid_ForkAtMerge
 // Tree:
 //   Pow       |      PoS
 //   r(pre)
@@ -4069,10 +4080,10 @@ test "SetOptimisticToInvalid ForkAtMerge invalidates post-merge chain" {
     try testing.expectEqual(ExecutionStatus.syncing, pa.getNode(root_g, .full).?.extra_meta.executionStatus());
 }
 
-// Prysm: TestSetOptimisticToInvalid (LVH not found -> error)
 // Tree:
 //   genesis(0x00)
-//   +-- 0x01(syncing)
+//     |
+//   0x01(syncing)
 test "SetOptimisticToInvalid with null LVH returns error" {
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
@@ -4100,7 +4111,8 @@ test "SetOptimisticToInvalid with null LVH returns error" {
 // Prysm: ValidToInvalid stores lvh_error
 // Tree:
 //   genesis(0x00)
-//   +-- 0x01(valid)
+//     |
+//   0x01(valid)
 test "SetOptimisticToInvalid on valid node stores lvh_error" {
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);

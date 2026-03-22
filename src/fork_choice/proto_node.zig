@@ -9,7 +9,6 @@ const constants = @import("constants");
 const Slot = primitives.Slot.Type;
 const Epoch = primitives.Epoch.Type;
 const Root = primitives.Root.Type;
-const ValidatorIndex = primitives.ValidatorIndex.Type;
 
 pub const ZERO_HASH = constants.ZERO_HASH;
 
@@ -171,16 +170,9 @@ pub const ProtoBlock = struct {
 
     // ── Gloas (ePBS) fields ──
 
-    /// Index of the builder that proposed this block (Gloas ePBS).
-    /// Used for execution payload gossip validation.
-    builder_index: ?ValidatorIndex = null,
-    /// Block hash from the builder's bid (Gloas ePBS).
-    /// Used for execution payload gossip validation.
-    /// TS ref: blockHashFromBid. Not to be confused with executionPayloadBlockHash in BlockExtraMeta.
-    block_hash_from_bid: ?Root = null,
     /// Parent execution block hash (Gloas ePBS).
     /// Used to determine if this block extends its parent's EMPTY or FULL variant.
-    /// If parent_block_hash == parent.block_hash_from_bid, parent is FULL; otherwise EMPTY.
+    /// Spec: gloas/fork-choice.md#new-get_parent_payload_status
     parent_block_hash: ?Root = null,
     /// Payload resolution status (Gloas ePBS). Pre-Gloas blocks are always .full.
     payload_status: PayloadStatus = .full,
@@ -234,16 +226,9 @@ pub const ProtoNode = struct {
     /// Whether block arrived before the 4-second mark (timeliness for late-block reorg).
     timeliness: bool,
 
-    /// Index of the builder that proposed this block (Gloas ePBS).
-    /// Used for execution payload gossip validation.
-    builder_index: ?ValidatorIndex = null,
-    /// Block hash from the builder's bid (Gloas ePBS).
-    /// Used for execution payload gossip validation.
-    /// TS ref: blockHashFromBid. Not to be confused with executionPayloadBlockHash in BlockExtraMeta.
-    block_hash_from_bid: ?Root = null,
     /// Parent execution block hash (Gloas ePBS).
     /// Used to determine if this block extends its parent's EMPTY or FULL variant.
-    /// If parent_block_hash == parent.block_hash_from_bid, parent is FULL; otherwise EMPTY.
+    /// Spec: gloas/fork-choice.md#new-get_parent_payload_status
     parent_block_hash: ?Root = null,
     /// Payload resolution status (Gloas ePBS). Pre-Gloas blocks are always .full.
     payload_status: PayloadStatus = .full,
@@ -433,8 +418,6 @@ test "ProtoNode default values" {
     try testing.expectEqual(node.weight, 0);
     try testing.expectEqual(node.best_child, null);
     try testing.expectEqual(node.best_descendant, null);
-    try testing.expectEqual(node.builder_index, null);
-    try testing.expectEqual(node.block_hash_from_bid, null);
     try testing.expectEqual(node.slot, 0);
     try testing.expectEqual(node.block_root, ZERO_HASH);
 }
@@ -465,5 +448,5 @@ test "ProtoNode.toBlock round-trip" {
     try testing.expectEqual(recovered.slot, 42);
     try testing.expectEqual(recovered.justified_epoch, 1);
     try testing.expectEqual(recovered.timeliness, true);
-    try testing.expectEqual(recovered.builder_index, null);
+    try testing.expectEqual(recovered.parent_block_hash, null);
 }
