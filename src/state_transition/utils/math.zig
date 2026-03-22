@@ -1,20 +1,26 @@
 const std = @import("std");
+const assert = std.debug.assert;
 
 /// Return the largest integer `x` such that `x**2 <= n`.
 /// Matches the consensus spec `integer_squareroot` exactly using Newton's method
 /// with pure integer arithmetic (no floating-point precision loss).
 /// Spec: https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/beacon-chain.md#integer_squareroot
 pub inline fn intSqrt(n: u64) u64 {
+    const max_sqrt: u64 = std.math.maxInt(u32); // 2^32 - 1
     if (n == std.math.maxInt(u64)) {
-        // UINT64_MAX_SQRT = 2^32 - 1 = 4294967295
-        return 4294967295;
+        return max_sqrt;
     }
     var x = n;
-    var y = (x + 1) / 2;
+    var y = @divFloor(x + 1, 2);
     while (y < x) {
         x = y;
-        y = (x + n / x) / 2;
+        y = @divFloor(x + @divFloor(n, x), 2);
     }
+    // Assert postcondition: x^2 <= n < (x+1)^2
+    assert(x * x <= n);
+    const x_plus_1 = x + 1;
+    const upper, const overflowed = @mulWithOverflow(x_plus_1, x_plus_1);
+    assert(overflowed == 1 or upper > n);
     return x;
 }
 
