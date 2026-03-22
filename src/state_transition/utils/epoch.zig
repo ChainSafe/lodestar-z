@@ -115,3 +115,69 @@ pub fn computeSyncPeriodAtEpoch(epoch: Epoch) SyncPeriod {
 pub fn isStartSlotOfEpoch(slot: Slot) bool {
     return slot % preset.SLOTS_PER_EPOCH == 0;
 }
+
+// Unit tests for pure epoch utility functions.
+const std = @import("std");
+
+test "computeEpochAtSlot" {
+    // Slot 0 → epoch 0.
+    try std.testing.expectEqual(@as(Epoch, 0), computeEpochAtSlot(0));
+    // Slots within first epoch.
+    try std.testing.expectEqual(@as(Epoch, 0), computeEpochAtSlot(preset.SLOTS_PER_EPOCH - 1));
+    // First slot of epoch 1.
+    try std.testing.expectEqual(@as(Epoch, 1), computeEpochAtSlot(preset.SLOTS_PER_EPOCH));
+    // Arbitrary slot.
+    try std.testing.expectEqual(@as(Epoch, 3), computeEpochAtSlot(3 * preset.SLOTS_PER_EPOCH + 5));
+}
+
+test "computeStartSlotAtEpoch" {
+    try std.testing.expectEqual(@as(Slot, 0), computeStartSlotAtEpoch(0));
+    try std.testing.expectEqual(preset.SLOTS_PER_EPOCH, computeStartSlotAtEpoch(1));
+    try std.testing.expectEqual(5 * preset.SLOTS_PER_EPOCH, computeStartSlotAtEpoch(5));
+}
+
+test "computeEndSlotAtEpoch" {
+    try std.testing.expectEqual(preset.SLOTS_PER_EPOCH - 1, computeEndSlotAtEpoch(0));
+    try std.testing.expectEqual(2 * preset.SLOTS_PER_EPOCH - 1, computeEndSlotAtEpoch(1));
+}
+
+test "computeCheckpointEpochAtStateSlot" {
+    // At epoch boundary (start slot), checkpoint epoch equals the slot's epoch.
+    try std.testing.expectEqual(@as(Epoch, 0), computeCheckpointEpochAtStateSlot(0));
+    try std.testing.expectEqual(@as(Epoch, 1), computeCheckpointEpochAtStateSlot(preset.SLOTS_PER_EPOCH));
+    // Mid-epoch: checkpoint epoch is the next epoch.
+    try std.testing.expectEqual(@as(Epoch, 1), computeCheckpointEpochAtStateSlot(1));
+    try std.testing.expectEqual(@as(Epoch, 2), computeCheckpointEpochAtStateSlot(preset.SLOTS_PER_EPOCH + 1));
+}
+
+test "computeActivationExitEpoch" {
+    try std.testing.expectEqual(@as(Epoch, 1 + preset.MAX_SEED_LOOKAHEAD), computeActivationExitEpoch(0));
+    try std.testing.expectEqual(@as(Epoch, 11 + preset.MAX_SEED_LOOKAHEAD), computeActivationExitEpoch(10));
+}
+
+test "computePreviousEpoch" {
+    // Genesis epoch stays at genesis.
+    try std.testing.expectEqual(GENESIS_EPOCH, computePreviousEpoch(GENESIS_EPOCH));
+    // Non-genesis epoch decrements.
+    try std.testing.expectEqual(@as(Epoch, 0), computePreviousEpoch(1));
+    try std.testing.expectEqual(@as(Epoch, 9), computePreviousEpoch(10));
+}
+
+test "computeSyncPeriodAtEpoch" {
+    try std.testing.expectEqual(@as(SyncPeriod, 0), computeSyncPeriodAtEpoch(0));
+    try std.testing.expectEqual(@as(SyncPeriod, 0), computeSyncPeriodAtEpoch(preset.EPOCHS_PER_SYNC_COMMITTEE_PERIOD - 1));
+    try std.testing.expectEqual(@as(SyncPeriod, 1), computeSyncPeriodAtEpoch(preset.EPOCHS_PER_SYNC_COMMITTEE_PERIOD));
+}
+
+test "computeSyncPeriodAtSlot" {
+    try std.testing.expectEqual(@as(SyncPeriod, 0), computeSyncPeriodAtSlot(0));
+    const period_slots = preset.EPOCHS_PER_SYNC_COMMITTEE_PERIOD * preset.SLOTS_PER_EPOCH;
+    try std.testing.expectEqual(@as(SyncPeriod, 1), computeSyncPeriodAtSlot(period_slots));
+}
+
+test "isStartSlotOfEpoch" {
+    try std.testing.expect(isStartSlotOfEpoch(0));
+    try std.testing.expect(!isStartSlotOfEpoch(1));
+    try std.testing.expect(isStartSlotOfEpoch(preset.SLOTS_PER_EPOCH));
+    try std.testing.expect(!isStartSlotOfEpoch(preset.SLOTS_PER_EPOCH + 1));
+}
