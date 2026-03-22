@@ -23,6 +23,7 @@ const ProtoBlock = proto_node.ProtoBlock;
 const ProtoNode = proto_node.ProtoNode;
 const LVHExecResponse = proto_node.LVHExecResponse;
 const ForkChoiceError = proto_node.ForkChoiceError;
+const PayloadStatus = proto_node.PayloadStatus;
 
 const vote_tracker = @import("vote_tracker.zig");
 const Votes = vote_tracker.Votes;
@@ -52,6 +53,8 @@ pub const HeadResult = struct {
     state_root: Root,
     /// Whether execution status is optimistic (syncing or payload_separated).
     execution_optimistic: bool,
+    /// Payload status of the head node (Gloas ePBS). Pre-Gloas is always .full.
+    payload_status: PayloadStatus = .full,
 };
 
 /// Options for ForkChoice initialization.
@@ -266,6 +269,7 @@ pub const ForkChoice = struct {
             .slot = head_node.slot,
             .state_root = head_node.state_root,
             .execution_optimistic = exec_status == .syncing or exec_status == .payload_separated,
+            .payload_status = head_node.payload_status,
         };
         self.synced = true;
 
@@ -411,17 +415,46 @@ pub const ForkChoice = struct {
     }
 
     /// Check if one block is a descendant of another.
+    /// Both root + payload status must match for identity.
     pub fn isDescendant(
         self: *const ForkChoice,
         ancestor_root: Root,
+        ancestor_status: PayloadStatus,
         descendant_root: Root,
-    ) bool {
-        return self.proto_array.isDescendant(
+        descendant_status: PayloadStatus,
+    ) ProtoArrayError!bool {
+        return try self.proto_array.isDescendant(
             ancestor_root,
-            .full,
+            ancestor_status,
             descendant_root,
-            .full,
+            descendant_status,
         );
+    }
+
+    /// Get the canonical block matching the given root by walking the head's ancestor chain.
+    /// Returns null if the root is not on the canonical chain.
+    pub fn getCanonicalBlockByRoot(self: *const ForkChoice, block_root: Root) ProtoArrayError!?*const ProtoNode {
+        // Start from the head node in the proto array.
+        const head_node = self.proto_array.getNode(
+            self.head.block_root,
+            self.head.payload_status,
+        ) orelse return null;
+
+        if (std.mem.eql(u8, &head_node.block_root, &block_root)) {
+            return head_node;
+        }
+
+        var iter = self.proto_array.iterateAncestors(
+            self.head.block_root,
+            self.head.payload_status,
+        );
+        while (try iter.next()) |node| {
+            if (std.mem.eql(u8, &node.block_root, &block_root)) {
+                return node;
+            }
+        }
+
+        return null;
     }
 
     /// Get the head block root (from cache, without recomputing).
@@ -776,7 +809,7 @@ test "isDescendant checks ancestry" {
     try fc.onBlock(testing.allocator, makeTestBlock(1, block_a_root, genesis_root), 10);
     try fc.onBlock(testing.allocator, makeTestBlock(2, block_b_root, block_a_root), 10);
 
-    try testing.expect(fc.isDescendant(genesis_root, block_b_root));
-    try testing.expect(fc.isDescendant(block_a_root, block_b_root));
-    try testing.expect(!fc.isDescendant(block_b_root, block_a_root));
+    try testing.expect(try fc.isDescendant(genesis_root, .full, block_b_root, .full));
+    try testing.expect(try fc.isDescendant(block_a_root, .full, block_b_root, .full));
+    try testing.expect(!try fc.isDescendant(block_b_root, .full, block_a_root, .full));
 }
