@@ -137,14 +137,14 @@ pub const ForkChoiceStore = struct {
     ) !ForkChoiceStore {
         var balances_list = JustifiedBalances.init(allocator);
         errdefer balances_list.deinit();
-        
+
         try balances_list.appendSlice(justified_balances);
 
         const balances_rc = try EffectiveBalanceIncrementsRc.init(allocator, balances_list);
         errdefer balances_rc.release();
 
         const total = computeTotalBalance(justified_balances);
-        
+
         // referenced by `unrealized_justified`
         _ = balances_rc.acquire();
 
@@ -174,7 +174,7 @@ pub const ForkChoiceStore = struct {
     pub fn setJustified(self: *ForkChoiceStore, allocator: Allocator, checkpoint: CheckpointWithPayloadStatus, balances: []const u16) !void {
         var balances_list = JustifiedBalances.init(allocator);
         errdefer balances_list.deinit();
-        
+
         try balances_list.appendSlice(balances);
 
         const balances_rc = try EffectiveBalanceIncrementsRc.init(allocator, balances_list);
