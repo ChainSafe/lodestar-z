@@ -176,6 +176,13 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("chain"), module_chain) catch @panic("OOM");
 
+    const module_sync = b.createModule(.{
+        .root_source_file = b.path("src/sync/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("sync"), module_sync) catch @panic("OOM");
+
     const module_testing = b.createModule(.{
         .root_source_file = b.path("src/testing/root.zig"),
         .target = target,
@@ -457,6 +464,16 @@ pub fn build(b: *std.Build) void {
     tls_run_test_chain.dependOn(&run_test_chain.step);
     tls_run_test.dependOn(&run_test_chain.step);
 
+    const test_sync = b.addTest(.{
+        .name = "sync",
+        .root_module = module_sync,
+        .filters = b.option([][]const u8, "sync.filters", "sync test filters") orelse &[_][]const u8{},
+    });
+    const run_test_sync = b.addRunArtifact(test_sync);
+    const tls_run_test_sync = b.step("test:sync", "Run the sync module tests");
+    tls_run_test_sync.dependOn(&run_test_sync.step);
+    tls_run_test.dependOn(&run_test_sync.step);
+
     const test_db = b.addTest(.{
         .name = "db",
         .root_module = module_db,
@@ -684,6 +701,10 @@ pub fn build(b: *std.Build) void {
     module_chain.addImport("ssz", module_ssz);
     module_chain.addImport("config", module_config);
     module_chain.addImport("fork_types", module_fork_types);
+
+    // sync module imports
+    module_sync.addImport("db", module_db);
+    module_sync.addImport("networking", module_networking);
 
     // api module imports
     module_api.addImport("consensus_types", module_consensus_types);
