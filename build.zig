@@ -154,6 +154,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     b.modules.put(b.dupe("networking"), module_networking) catch @panic("OOM");
+
+    const module_testing = b.createModule(.{
+        .root_source_file = b.path("src/testing/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("testing"), module_testing) catch @panic("OOM");
     // === Executables ===
     const module_download_era_files = b.createModule(.{
         .root_source_file = b.path("scripts/download_era_files.zig"),
@@ -408,6 +415,16 @@ pub fn build(b: *std.Build) void {
     const tls_run_test_networking = b.step("test:networking", "Run the networking test");
     tls_run_test_networking.dependOn(&run_test_networking.step);
     tls_run_test.dependOn(&run_test_networking.step);
+
+    const test_testing = b.addTest(.{
+        .name = "testing",
+        .root_module = module_testing,
+        .filters = b.option([][]const u8, "testing.filters", "testing test filters") orelse &[_][]const u8{},
+    });
+    const run_test_testing = b.addRunArtifact(test_testing);
+    const tls_run_test_testing = b.step("test:testing", "Run the simulation testing primitives tests");
+    tls_run_test_testing.dependOn(&run_test_testing.step);
+    tls_run_test.dependOn(&run_test_testing.step);
     // Spec test modules
     const module_int = b.createModule(.{
         .root_source_file = b.path("test/int/era/root.zig"),
