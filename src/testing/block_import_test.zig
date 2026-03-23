@@ -170,6 +170,40 @@ const PipelineHarness = struct {
         return result;
     }
 
+    /// Generate a block with attestations for the next slot and import it.
+    fn generateAndImportWithAtts(self: *PipelineHarness, participation_rate: f64) !ImportResult {
+        const current_slot = try self.head_state.state.slot();
+        const target_slot = current_slot + 1;
+
+        // Clone head state for block generation.
+        var gen_state = try self.head_state.clone(self.allocator, .{ .transfer_cache = false });
+        defer {
+            gen_state.deinit();
+            self.allocator.destroy(gen_state);
+        }
+
+        try state_transition.processSlots(self.allocator, gen_state, target_slot, .{});
+
+        // Generate block with attestations from the advanced state.
+        const signed_block = try self.block_gen.generateBlockWithOpts(gen_state, target_slot, .{
+            .participation_rate = participation_rate,
+        });
+        defer {
+            types.electra.SignedBeaconBlock.deinit(self.allocator, signed_block);
+            self.allocator.destroy(signed_block);
+        }
+
+        // Import through the pipeline.
+        const result = try self.importer.importBlock(signed_block);
+
+        // Update our head reference.
+        if (self.block_cache.getSeedState()) |new_head| {
+            self.head_state = new_head;
+        }
+
+        return result;
+    }
+
     fn deinit(self: *PipelineHarness) void {
         self.head_tracker.deinit();
         self.allocator.destroy(self.head_tracker);
@@ -293,4 +327,25 @@ test "pipeline: state available in cache after import" {
     // Verify slot matches.
     const cached_slot = try state.?.state.slot();
     try testing.expectEqual(result.slot, cached_slot);
+}
+
+// ── Test 4: Full pipeline with attestations — finality progresses ────
+
+test "pipeline: multi-epoch with attestations — finality advances" {
+    var harness = try PipelineHarness.init(testing.allocator);
+    defer harness.deinit();
+
+    // Run enough slots for finality with attestations.
+    const slots_to_run = preset.SLOTS_PER_EPOCH * 5;
+    for (0..slots_to_run) |_| {
+        _ = try harness.generateAndImportWithAtts(1.0);
+    }
+
+    // Head tracker should have advanced.
+    try testing.expect(harness.head_tracker.head_slot > 0);
+
+    // Check that finality advanced via the state.
+    var finalized_cp: types.phase0.Checkpoint.Type = undefined;
+    try harness.head_state.state.finalizedCheckpoint(&finalized_cp);
+    try testing.expect(finalized_cp.epoch > 0);
 }
