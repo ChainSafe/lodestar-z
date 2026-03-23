@@ -105,6 +105,7 @@ pub const CPStateDatastore = @import("./cache/datastore.zig").CPStateDatastore;
 pub const MemoryCPStateDatastore = @import("./cache/datastore.zig").MemoryCPStateDatastore;
 pub const FileCPStateDatastore = @import("./cache/datastore.zig").FileCPStateDatastore;
 pub const CheckpointKey = @import("./cache/datastore.zig").CheckpointKey;
+pub const StateRegen = @import("./cache/state_regen.zig").StateRegen;
 const seed = @import("./utils/seed.zig");
 pub const state_transition = @import("./state_transition.zig");
 pub const BlockExternalData = state_transition.BlockExternalData;

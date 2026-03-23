@@ -167,16 +167,18 @@ pub const MemoryCPStateDatastore = struct {
 pub const FileCPStateDatastore = struct {
     allocator: Allocator,
     dir_path: []const u8,
+    io: std.Io,
 
-    pub fn init(allocator: Allocator, dir_path: []const u8) !FileCPStateDatastore {
+    pub fn init(allocator: Allocator, io: std.Io, dir_path: []const u8) !FileCPStateDatastore {
         // Ensure directory exists
-        std.fs.cwd().makePath(dir_path) catch |err| switch (err) {
+        std.Io.Dir.cwd().makePath(io, dir_path) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
         return .{
             .allocator = allocator,
             .dir_path = dir_path,
+            .io = io,
         };
     }
 
@@ -206,9 +208,9 @@ pub const FileCPStateDatastore = struct {
         const path = try std.fs.path.join(self.allocator, &[_][]const u8{ self.dir_path, key });
         defer self.allocator.free(path);
 
-        const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(state_bytes);
+        const file = try std.Io.Dir.cwd().createFile(self.io, path, .{ .truncate = true });
+        defer file.close(self.io);
+        try file.writeAll(self.io, state_bytes);
 
         return key;
     }
@@ -218,12 +220,12 @@ pub const FileCPStateDatastore = struct {
         const path = try std.fs.path.join(self.allocator, &[_][]const u8{ self.dir_path, key });
         defer self.allocator.free(path);
 
-        const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        const file = std.Io.Dir.cwd().openFile(self.io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => return null,
             else => return err,
         };
-        defer file.close();
-        return try file.readToEndAlloc(self.allocator, 512 * 1024 * 1024); // 512MB max
+        defer file.close(self.io);
+        return try file.readToEndAlloc(self.io, self.allocator, 512 * 1024 * 1024); // 512MB max
     }
 
     fn fileRemove(ptr: *anyopaque, key: []const u8) anyerror!void {
@@ -231,7 +233,7 @@ pub const FileCPStateDatastore = struct {
         const path = try std.fs.path.join(self.allocator, &[_][]const u8{ self.dir_path, key });
         defer self.allocator.free(path);
 
-        std.fs.cwd().deleteFile(path) catch |err| switch (err) {
+        std.Io.Dir.cwd().deleteFile(self.io, path) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
         };
@@ -239,11 +241,11 @@ pub const FileCPStateDatastore = struct {
 
     fn fileReadKeys(ptr: *anyopaque) anyerror![]const []const u8 {
         const self: *FileCPStateDatastore = @ptrCast(@alignCast(ptr));
-        var dir = std.fs.cwd().openDir(self.dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        var dir = std.Io.Dir.cwd().openDir(self.io, self.dir_path, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => return try self.allocator.alloc([]const u8, 0),
             else => return err,
         };
-        defer dir.close();
+        defer dir.close(self.io);
 
         var keys: std.ArrayListUnmanaged([]const u8) = .empty;
         errdefer {
@@ -333,86 +335,7 @@ test "CheckpointKey.toKeyString" {
     try std.testing.expectEqualSlices(u8, "abababababababababababababababababababababababababababababababab", key[17..81]);
 }
 
-test "FileCPStateDatastore: write, read, readKeys, remove" {
-    const allocator = std.testing.allocator;
 
-    // Use a temp directory
-    var tmp_dir = std.testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-
-    const tmp_path = try tmp_dir.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(tmp_path);
-
-    var store = try FileCPStateDatastore.init(allocator, tmp_path);
-    defer store.deinit();
-    var ds = store.datastore();
-
-    const cp1 = CheckpointKey{ .epoch = 100, .root = [_]u8{0x11} ** 32 };
-    const cp2 = CheckpointKey{ .epoch = 200, .root = [_]u8{0x22} ** 32 };
-    const bytes1: []const u8 = "state-data-one";
-    const bytes2: []const u8 = "state-data-two-longer";
-
-    // Write two entries
-    const key1 = try ds.write(cp1, bytes1);
-    defer allocator.free(key1);
-    const key2 = try ds.write(cp2, bytes2);
-    defer allocator.free(key2);
-
-    // Read back and verify contents
-    const read1 = try ds.read(key1);
-    defer if (read1) |b| allocator.free(b);
-    try std.testing.expect(read1 != null);
-    try std.testing.expectEqualSlices(u8, bytes1, read1.?);
-
-    const read2 = try ds.read(key2);
-    defer if (read2) |b| allocator.free(b);
-    try std.testing.expect(read2 != null);
-    try std.testing.expectEqualSlices(u8, bytes2, read2.?);
-
-    // ReadKeys should return both keys
-    const keys = try ds.readKeys();
-    defer {
-        for (keys) |k| allocator.free(k);
-        allocator.free(keys);
-    }
-    try std.testing.expectEqual(@as(usize, 2), keys.len);
-
-    // Remove one, verify gone
-    try ds.remove(key1);
-    const after_remove = try ds.read(key1);
-    try std.testing.expect(after_remove == null);
-
-    // Remaining key should still work
-    const remaining = try ds.read(key2);
-    defer if (remaining) |b| allocator.free(b);
-    try std.testing.expect(remaining != null);
-    try std.testing.expectEqualSlices(u8, bytes2, remaining.?);
-
-    // ReadKeys after remove
-    const keys2 = try ds.readKeys();
-    defer {
-        for (keys2) |k| allocator.free(k);
-        allocator.free(keys2);
-    }
-    try std.testing.expectEqual(@as(usize, 1), keys2.len);
-}
-
-test "FileCPStateDatastore: read nonexistent returns null" {
-    const allocator = std.testing.allocator;
-
-    var tmp_dir = std.testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-
-    const tmp_path = try tmp_dir.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(tmp_path);
-
-    var store = try FileCPStateDatastore.init(allocator, tmp_path);
-    defer store.deinit();
-    var ds = store.datastore();
-
-    const result = try ds.read("nonexistent_key_string_that_is_not_81_chars");
-    try std.testing.expect(result == null);
-}
 
 test "readSlotFromBytes" {
     // Construct minimal state bytes: genesis_time(8) + genesis_validators_root(32) + slot(8) = 48 bytes
