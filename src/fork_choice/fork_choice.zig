@@ -50,6 +50,11 @@ const interface_mod = @import("interface.zig");
 const ForkChoiceOpts = interface_mod.ForkChoiceOpts;
 const EpochDifference = interface_mod.EpochDifference;
 const AncestorResult = interface_mod.AncestorResult;
+const NotReorgedReason = interface_mod.NotReorgedReason;
+const ShouldOverrideForkChoiceUpdateResult = interface_mod.ShouldOverrideForkChoiceUpdateResult;
+const UpdateHeadOpt = interface_mod.UpdateHeadOpt;
+const UpdateAndGetHeadOpt = interface_mod.UpdateAndGetHeadOpt;
+const UpdateAndGetHeadResult = interface_mod.UpdateAndGetHeadResult;
 
 const fork_types = @import("fork_types");
 const AnyIndexedAttestation = fork_types.AnyIndexedAttestation;
@@ -453,6 +458,140 @@ pub const ForkChoice = struct {
     pub fn clearProposerBoost(self: *ForkChoice) void {
         self.proto_array.previous_proposer_boost = null;
         self.proposer_boost_root = null;
+    }
+
+    // ── Proposer boost reorg ──
+
+    /// Determine whether to override fork choice update for proposer boost reorg.
+    /// Matching TS `shouldOverrideForkChoiceUpdate()`.
+    pub fn shouldOverrideForkChoiceUpdate(
+        self: *ForkChoice,
+        head_block: ProtoBlock,
+        sec_from_slot: u32,
+        current_slot: Slot,
+    ) ShouldOverrideForkChoiceUpdateResult {
+        if (!self.opts.proposer_boost_reorg) {
+            return .{ .should_not_override = .{ .reason = .proposer_boost_reorg_disabled } };
+        }
+
+        if (!self.isProposingOnTime(sec_from_slot, current_slot)) {
+            return .{ .should_not_override = .{ .reason = .not_proposing_on_time } };
+        }
+
+        if (head_block.slot >= current_slot) {
+            return .{ .should_not_override = .{ .reason = .head_block_is_timely } };
+        }
+
+        const parent_idx = self.proto_array.getDefaultNodeIndex(head_block.parent_root) orelse {
+            return .{ .should_not_override = .{ .reason = .parent_block_not_available } };
+        };
+        const parent_node = self.proto_array.nodes.items[parent_idx];
+
+        if (head_block.slot > parent_node.slot + 1) {
+            return .{ .should_not_override = .{ .reason = .parent_block_distance_more_than_one_slot } };
+        }
+
+        const finalized_epoch = self.fcStore.finalized_checkpoint.epoch;
+        const current_epoch = computeEpochAtSlot(current_slot);
+        if (current_epoch > finalized_epoch + self.config.chain.REORG_MAX_EPOCHS_SINCE_FINALIZATION) {
+            return .{ .should_not_override = .{ .reason = .chain_long_unfinality } };
+        }
+
+        return .{ .should_override = .{ .parent_block = parent_node.toBlock() } };
+    }
+
+    /// Get the proposer head (may reorg if conditions are met).
+    fn getProposerHead(
+        self: *ForkChoice,
+        head_block: ProtoBlock,
+        sec_from_slot: u32,
+        slot: Slot,
+    ) struct { head: ProtoBlock, not_reorged_reason: ?NotReorgedReason } {
+        const result = self.shouldOverrideForkChoiceUpdate(head_block, sec_from_slot, slot);
+        return switch (result) {
+            .should_override => |r| .{ .head = r.parent_block, .not_reorged_reason = null },
+            .should_not_override => |r| .{ .head = head_block, .not_reorged_reason = r.reason },
+        };
+    }
+
+    /// Preliminary proposer head check (before full weight analysis).
+    fn getPreliminaryProposerHead(
+        self: *const ForkChoice,
+        head_block: ProtoBlock,
+        parent_block: ProtoBlock,
+        slot: Slot,
+    ) struct { should_reorg: bool, reason: ?NotReorgedReason } {
+        if (head_block.timeliness) {
+            return .{ .should_reorg = false, .reason = .head_block_is_timely };
+        }
+
+        if (head_block.slot + 1 != slot) {
+            return .{ .should_reorg = false, .reason = .reorg_more_than_one_slot };
+        }
+
+        if (head_block.slot > parent_block.slot + 1) {
+            return .{ .should_reorg = false, .reason = .parent_block_distance_more_than_one_slot };
+        }
+
+        const finalized_epoch = self.fcStore.finalized_checkpoint.epoch;
+        const current_epoch = computeEpochAtSlot(slot);
+        if (current_epoch > finalized_epoch + self.config.chain.REORG_MAX_EPOCHS_SINCE_FINALIZATION) {
+            return .{ .should_reorg = false, .reason = .chain_long_unfinality };
+        }
+
+        return .{ .should_reorg = true, .reason = null };
+    }
+
+    /// Predict the proposer head without full reorg analysis.
+    fn predictProposerHead(
+        self: *ForkChoice,
+        head_block: ProtoBlock,
+        sec_from_slot: u32,
+        current_slot: Slot,
+    ) ProtoBlock {
+        const result = self.shouldOverrideForkChoiceUpdate(head_block, sec_from_slot, current_slot);
+        return switch (result) {
+            .should_override => |r| r.parent_block,
+            .should_not_override => head_block,
+        };
+    }
+
+    /// Check if the proposer is proposing on time.
+    fn isProposingOnTime(self: *const ForkChoice, sec_from_slot: u32, slot: Slot) bool {
+        _ = slot;
+        const re_org_cutoff: u32 = @intCast(self.config.chain.SECONDS_PER_SLOT / 3);
+        return sec_from_slot == 0 or sec_from_slot <= re_org_cutoff;
+    }
+
+    /// Compute committee fraction of total balance.
+    pub fn getCommitteeFraction(total_balance: u64, committee_percent: u64) u64 {
+        return (total_balance * committee_percent) / 100;
+    }
+
+    /// Update head and return result. Multiplexer matching TS.
+    pub fn updateAndGetHead(
+        self: *ForkChoice,
+        allocator: Allocator,
+        opt: UpdateAndGetHeadOpt,
+    ) !UpdateAndGetHeadResult {
+        switch (opt) {
+            .get_canonical_head => {
+                try self.updateHead(allocator);
+                return .{ .head = self.head };
+            },
+            .get_proposer_head => |params| {
+                try self.updateHead(allocator);
+                const result = self.getProposerHead(self.head, params.sec_from_slot, params.slot);
+                return .{
+                    .head = result.head,
+                    .not_reorged_reason = result.not_reorged_reason,
+                };
+            },
+            .get_predicted_proposer_head => |params| {
+                const predicted = self.predictProposerHead(self.head, params.sec_from_slot, params.slot);
+                return .{ .head = predicted };
+            },
+        }
     }
 
     // ── Equivocation ──
@@ -1729,4 +1868,47 @@ test "getSlotsPresent counts nodes in window" {
     try testing.expectEqual(@as(u32, 1), fc.getSlotsPresent(3));
     // Window from slot 0: both included.
     try testing.expectEqual(@as(u32, 2), fc.getSlotsPresent(0));
+}
+
+test "updateAndGetHead returns head for canonical" {
+    const genesis_root = hashFromByte(0x01);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .config = getTestConfig(),
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &.{},
+        .justified_balances_getter = test_balances_getter,
+    }, genesis_block, 0);
+    defer fc.deinit(testing.allocator);
+
+    const result = try fc.updateAndGetHead(testing.allocator, .{ .get_canonical_head = {} });
+    try testing.expectEqual(genesis_root, result.head.block_root);
+}
+
+test "shouldOverrideForkChoiceUpdate disabled by default" {
+    const genesis_root = hashFromByte(0x01);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .config = getTestConfig(),
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &.{},
+        .justified_balances_getter = test_balances_getter,
+    }, genesis_block, 0);
+    defer fc.deinit(testing.allocator);
+
+    const result = fc.shouldOverrideForkChoiceUpdate(genesis_block, 0, 1);
+    switch (result) {
+        .should_not_override => |r| try testing.expectEqual(NotReorgedReason.proposer_boost_reorg_disabled, r.reason),
+        .should_override => return error.TestUnexpectedResult,
+    }
+}
+
+test "getCommitteeFraction computes correctly" {
+    try testing.expectEqual(@as(u64, 40), ForkChoice.getCommitteeFraction(100, 40));
+    try testing.expectEqual(@as(u64, 0), ForkChoice.getCommitteeFraction(0, 40));
+    try testing.expectEqual(@as(u64, 500), ForkChoice.getCommitteeFraction(1000, 50));
 }
