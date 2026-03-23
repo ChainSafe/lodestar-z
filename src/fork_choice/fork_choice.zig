@@ -135,13 +135,9 @@ pub const ForkChoice = struct {
     // ── Error state ──
     irrecoverable_error: bool,
 
-    /// Instantiate ForkChoice from pre-built components (in-place, heap-allocated).
+    /// Heap-allocate and initialize a ForkChoice from pre-built components.
     /// Matches TS: `new ForkChoice(config, fcStore, protoArray, validatorCount, metrics, opts)`
-    ///
-    /// The caller creates `ForkChoiceStore` and `ProtoArray` externally, then passes them in.
-    /// Votes are pre-allocated to `validator_count` and initialized to defaults.
-    /// Head is computed via `updateHead()`.
-    pub fn init(
+    pub fn create(
         allocator: Allocator,
         config: *const BeaconConfig,
         fc_store: ForkChoiceStore,
@@ -152,6 +148,24 @@ pub const ForkChoice = struct {
         const self = try allocator.create(ForkChoice);
         errdefer allocator.destroy(self);
 
+        try self.init(allocator, config, fc_store, proto_array, validator_count, opts);
+
+        return self;
+    }
+
+    /// Initialize ForkChoice in-place from pre-built components.
+    /// The caller is responsible for the memory backing `self`.
+    /// Votes are pre-allocated to `validator_count` and initialized to defaults.
+    /// Head is computed via `updateHead()`.
+    pub fn init(
+        self: *ForkChoice,
+        allocator: Allocator,
+        config: *const BeaconConfig,
+        fc_store: ForkChoiceStore,
+        proto_array: ProtoArray,
+        validator_count: u32,
+        opts: ForkChoiceOpts,
+    ) !void {
         self.* = .{
             .config = config,
             .opts = opts,
@@ -174,8 +188,6 @@ pub const ForkChoice = struct {
 
         // Compute initial head (matches TS: this.head = this.updateHead())
         try self.updateHead(allocator);
-
-        return self;
     }
 
     pub fn deinit(self: *ForkChoice, allocator: Allocator) void {
@@ -1395,7 +1407,7 @@ fn initTestForkChoice(
     );
     errdefer store.deinit();
 
-    return try ForkChoice.init(
+    return try ForkChoice.create(
         allocator,
         getTestConfig(),
         store,
