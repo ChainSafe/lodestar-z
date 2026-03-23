@@ -41,7 +41,10 @@ pub const EquivocatingIndices = compute_deltas.EquivocatingIndices;
 pub const VoteIndex = compute_deltas.VoteIndex;
 
 pub const ForkChoiceStruct = fork_choice.ForkChoice;
-pub const HeadResult = fork_choice.HeadResult;
+pub const QueuedAttestation = fork_choice.QueuedAttestation;
+pub const BlockAttestationMap = fork_choice.BlockAttestationMap;
+pub const QueuedAttestationMap = fork_choice.QueuedAttestationMap;
+pub const RootSet = fork_choice.RootSet;
 
 pub const ForkChoiceStore = store.ForkChoiceStore;
 pub const Checkpoint = store.Checkpoint;
