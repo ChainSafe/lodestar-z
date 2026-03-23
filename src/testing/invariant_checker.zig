@@ -59,17 +59,13 @@ pub const InvariantChecker = struct {
         // 3. Finalized epoch must never decrease.
         var finalized_cp: types.phase0.Checkpoint.Type = undefined;
         try state.finalizedCheckpoint(&finalized_cp);
-        if (finalized_cp.epoch < self.finalized_epoch) {
-            return error.FinalizedEpochDecreased;
-        }
+        if (finalized_cp.epoch < self.finalized_epoch) return error.FinalizedEpochDecreased;
         self.finalized_epoch = finalized_cp.epoch;
 
         // 4. Justified epoch must never decrease.
         var justified_cp: types.phase0.Checkpoint.Type = undefined;
         try state.currentJustifiedCheckpoint(&justified_cp);
-        if (justified_cp.epoch < self.justified_epoch) {
-            return error.JustifiedEpochDecreased;
-        }
+        if (justified_cp.epoch < self.justified_epoch) return error.JustifiedEpochDecreased;
         self.justified_epoch = justified_cp.epoch;
     }
 

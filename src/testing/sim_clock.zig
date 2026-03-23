@@ -5,9 +5,11 @@
 
 const std = @import("std");
 const Io = std.Io;
+const preset = @import("preset").preset;
 
-/// Number of slots per epoch (spec constant).
-pub const SLOTS_PER_EPOCH: u64 = 32;
+/// Number of slots per epoch — imported from the active preset.
+/// Minimal: 8, Mainnet: 32.
+pub const SLOTS_PER_EPOCH: u64 = preset.SLOTS_PER_EPOCH;
 
 pub const SlotClock = struct {
     /// Genesis time in seconds since Unix epoch.

@@ -17,6 +17,7 @@ pub const block_generator = @import("block_generator.zig");
 pub const attestation_generator = @import("attestation_generator.zig");
 pub const invariant_checker = @import("invariant_checker.zig");
 pub const sim_beacon_node = @import("sim_beacon_node.zig");
+pub const sim_test_harness = @import("sim_test_harness.zig");
 pub const sim_test = @import("sim_test.zig");
 pub const cluster_invariant_checker = @import("cluster_invariant_checker.zig");
 pub const sim_cluster = @import("sim_cluster.zig");
@@ -29,6 +30,7 @@ pub const SimStorage = sim_storage.SimStorage;
 pub const BlockGenerator = block_generator.BlockGenerator;
 pub const AttestationGenerator = attestation_generator;
 pub const InvariantChecker = invariant_checker.InvariantChecker;
+pub const SimTestHarness = sim_test_harness.SimTestHarness;
 pub const SimBeaconNode = sim_beacon_node.SimBeaconNode;
 pub const ClusterInvariantChecker = cluster_invariant_checker.ClusterInvariantChecker;
 pub const SimCluster = sim_cluster.SimCluster;
@@ -57,9 +59,9 @@ test "integration: SimIo + SlotClock advancing through slots" {
     sim.advanceToSlot(5, genesis, sps);
     try std.testing.expectEqual(@as(?u64, 5), clock.currentSlot(sio));
 
-    // Advance to first slot of epoch 1 (slot 32).
-    sim.advanceToSlot(32, genesis, sps);
-    try std.testing.expectEqual(@as(?u64, 32), clock.currentSlot(sio));
+    // Advance to first slot of epoch 1 (SLOTS_PER_EPOCH for any preset).
+    sim.advanceToSlot(SLOTS_PER_EPOCH, genesis, sps);
+    try std.testing.expectEqual(@as(?u64, SLOTS_PER_EPOCH), clock.currentSlot(sio));
     try std.testing.expectEqual(@as(?u64, 1), clock.currentEpoch(sio));
 }
 
@@ -219,6 +221,7 @@ comptime {
     _ = attestation_generator;
     _ = invariant_checker;
     _ = sim_beacon_node;
+    _ = sim_test_harness;
     _ = sim_test;
     _ = cluster_invariant_checker;
     _ = sim_cluster;

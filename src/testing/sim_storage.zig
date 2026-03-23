@@ -93,8 +93,9 @@ pub const SimStorage = struct {
     }
 
     pub fn deleteBlock(self: *SimStorage, root: Root) void {
-        self.delete(Root, &self.blocks);
-        _ = root;
+        if (self.blocks.fetchRemove(root)) |entry| {
+            self.allocator.free(entry.value);
+        }
     }
 
     // ── State operations ─────────────────────────────────────────────
@@ -176,11 +177,6 @@ pub const SimStorage = struct {
         }
 
         return data;
-    }
-
-    fn delete(self: *SimStorage, comptime K: type, map: *std.AutoHashMap(K, []const u8)) void {
-        _ = self;
-        _ = map;
     }
 
     fn randomFloat(self: *SimStorage) f64 {
@@ -309,6 +305,27 @@ test "SimStorage: overwrite existing data" {
     const retrieved = try storage.getBlock(root);
     try std.testing.expectEqualStrings("version2", retrieved.?);
     try std.testing.expectEqual(@as(u32, 1), storage.blockCount()); // No duplicates.
+}
+
+test "SimStorage: deleteBlock removes data" {
+    var prng = std.Random.DefaultPrng.init(42);
+    var storage = SimStorage.init(std.testing.allocator, &prng, .{});
+    defer storage.deinit();
+
+    const root = [_]u8{0xDD} ** 32;
+
+    // Store, verify, delete, verify gone.
+    try storage.putBlock(root, "ephemeral");
+    try std.testing.expect(storage.hasBlock(root));
+    try std.testing.expectEqual(@as(u32, 1), storage.blockCount());
+
+    storage.deleteBlock(root);
+    try std.testing.expect(!storage.hasBlock(root));
+    try std.testing.expectEqual(@as(u32, 0), storage.blockCount());
+
+    // Deleting non-existent key is a no-op.
+    storage.deleteBlock(root);
+    try std.testing.expectEqual(@as(u32, 0), storage.blockCount());
 }
 
 test "SimStorage: counts" {

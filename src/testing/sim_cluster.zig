@@ -110,8 +110,11 @@ pub const SimCluster = struct {
         net_prng.* = std.Random.DefaultPrng.init(config.seed +% 100);
 
         // Create a shared merkle tree pool.
+        // Pool size scales with node count: each node needs ~500k tree nodes
+        // for multi-epoch simulation with 64 validators (minimal preset).
+        const pool_nodes_per_sim_node: u32 = 500_000;
         const pool = try allocator.create(Node.Pool);
-        pool.* = try Node.Pool.init(allocator, 500_000 * @as(u32, config.num_nodes));
+        pool.* = try Node.Pool.init(allocator, pool_nodes_per_sim_node * @as(u32, config.num_nodes));
 
         // Create primary genesis state.
         var primary = try TestCachedBeaconState.init(

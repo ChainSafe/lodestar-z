@@ -9,9 +9,17 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const SimBeaconNode = @import("sim_beacon_node.zig").SimBeaconNode;
 
 pub const ClusterInvariantChecker = struct {
+    /// Info about the last detected state divergence (for test diagnostics).
+    pub const DivergenceInfo = struct {
+        slot: u64 = 0,
+        node_a: u8 = 0,
+        node_b: u8 = 0,
+        root_a: [32]u8 = [_]u8{0} ** 32,
+        root_b: [32]u8 = [_]u8{0} ** 32,
+    };
+
     allocator: Allocator,
     num_nodes: u8,
 
@@ -30,6 +38,9 @@ pub const ClusterInvariantChecker = struct {
 
     /// Maximum observed gap (in slots) between finality advances.
     max_finality_gap_slots: u64 = 0,
+
+    /// Last divergence details (inspectable in tests without stderr output).
+    last_divergence: DivergenceInfo = .{},
 
     /// Number of safety violations detected.
     safety_violations: u64 = 0,
@@ -123,6 +134,7 @@ pub const ClusterInvariantChecker = struct {
         nodes_that_processed: []const bool,
     ) !void {
         var reference_root: ?[32]u8 = null;
+        var reference_node: u8 = 0;
 
         for (0..self.num_nodes) |i| {
             if (!nodes_that_processed[i]) continue;
@@ -132,10 +144,18 @@ pub const ClusterInvariantChecker = struct {
 
             if (reference_root) |ref| {
                 if (!std.mem.eql(u8, &ref, &root)) {
+                    self.last_divergence = .{
+                        .slot = slot,
+                        .node_a = reference_node,
+                        .node_b = @intCast(i),
+                        .root_a = ref,
+                        .root_b = root,
+                    };
                     self.state_divergences += 1;
                 }
             } else {
                 reference_root = root;
+                reference_node = @intCast(i);
             }
         }
     }
