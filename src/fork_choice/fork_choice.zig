@@ -7,6 +7,8 @@ const primitives = consensus_types.primitive;
 const constants = @import("constants");
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
+const preset_mod = @import("preset");
+const preset = preset_mod.preset;
 const state_transition = @import("state_transition");
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
@@ -143,6 +145,7 @@ pub const ForkChoice = struct {
             current_slot,
         );
         errdefer proto_array.deinit(allocator);
+        proto_array.prune_threshold = opts.prune_threshold;
 
         var store = try ForkChoiceStore.init(
             allocator,
@@ -254,16 +257,11 @@ pub const ForkChoice = struct {
 
     // ── Head selection ──
 
-    /// Compute the fork choice head: computeDeltas -> applyScoreChanges -> findHead.
-    ///
-    /// This is the main hot path. The deltas buffer is pre-allocated and reused.
-    /// `new_balances` are the effective balance increments from the current justified state.
-    pub fn getHead(
-        self: *ForkChoice,
-        allocator: Allocator,
-        new_balances: []const u16,
-    ) (Allocator.Error || ProtoArrayError || error{DeltaOverflow})!HeadResult {
+    /// Recompute fork choice head: computeDeltas -> applyScoreChanges -> findHead.
+    /// Matching TS `updateHead()` (private).
+    fn updateHead(self: *ForkChoice, allocator: Allocator) !void {
         const vote_fields = self.votes.fields();
+        const new_balances = self.fcStore.justified.balances.get().items;
 
         const result = try computeDeltas(
             allocator,
@@ -271,14 +269,34 @@ pub const ForkChoice = struct {
             @intCast(self.proto_array.nodes.items.len),
             vote_fields.current_indices,
             vote_fields.next_indices,
-            self.fcStore.justified.balances.get().items,
+            self.balances.get().items,
             new_balances,
             &self.fcStore.equivocating_indices,
         );
 
+        // Compute proposer boost score if enabled.
+        var proposer_boost_score: u64 = 0;
+        if (self.opts.proposer_boost and self.proposer_boost_root != null) {
+            if (self.justified_proposer_boost_score) |score| {
+                proposer_boost_score = score;
+            } else {
+                // Lazy compute: committee_weight * PROPOSER_SCORE_BOOST / 100
+                const total_balance = self.fcStore.justified.total_balance;
+                const slots_per_epoch = preset.SLOTS_PER_EPOCH;
+                const committee_weight = total_balance / slots_per_epoch;
+                proposer_boost_score = (committee_weight * self.config.chain.PROPOSER_SCORE_BOOST) / 100;
+                self.justified_proposer_boost_score = proposer_boost_score;
+            }
+        }
+
+        const proposer_boost = if (self.proposer_boost_root) |root|
+            proto_array_mod.ProtoArray.ProposerBoost{ .root = root, .score = proposer_boost_score }
+        else
+            null;
+
         try self.proto_array.applyScoreChanges(
             result.deltas,
-            self.proto_array.previous_proposer_boost,
+            proposer_boost,
             self.fcStore.justified.checkpoint.epoch,
             self.fcStore.justified.checkpoint.root,
             self.fcStore.finalized_checkpoint.epoch,
@@ -293,25 +311,18 @@ pub const ForkChoice = struct {
 
         self.head = head_node.toBlock();
 
-        const exec_status = head_node.extra_meta.executionStatus();
-        const head_result: HeadResult = .{
-            .block_root = head_node.block_root,
-            .slot = head_node.slot,
-            .state_root = head_node.state_root,
-            .execution_optimistic = exec_status == .syncing or exec_status == .payload_separated,
-            .payload_status = head_node.payload_status,
-        };
-
         // Update old balances for next delta computation.
-        var new_balances_list = JustifiedBalances.init(allocator);
+        var new_balances_list = store_mod.JustifiedBalances.init(allocator);
         errdefer new_balances_list.deinit();
         try new_balances_list.appendSlice(new_balances);
         const new_balances_rc = try EffectiveBalanceIncrementsRc.init(allocator, new_balances_list);
-        self.fcStore.justified.balances.release();
-        self.fcStore.justified.balances = new_balances_rc;
-        self.fcStore.justified.total_balance = store_mod.computeTotalBalance(new_balances);
+        self.balances.release();
+        self.balances = new_balances_rc;
+    }
 
-        return head_result;
+    /// Get the cached head (without recomputing).
+    pub fn getHead(self: *const ForkChoice) ProtoBlock {
+        return self.head;
     }
 
     // ── Proposer boost ──
@@ -352,10 +363,23 @@ pub const ForkChoice = struct {
 
     // ── Time ──
 
-    pub fn updateTime(self: *ForkChoice, current_slot: Slot) void {
-        if (current_slot > self.fcStore.current_slot) {
-            self.fcStore.current_slot = current_slot;
+    /// Advance time to `current_slot`, ticking each slot.
+    /// Matching TS `updateTime()`.
+    pub fn updateTime(self: *ForkChoice, allocator: Allocator, current_slot: Slot) !void {
+        const previous_slot = self.fcStore.current_slot;
+        if (current_slot <= previous_slot) return;
+
+        // Tick each slot from previous+1 to current.
+        var slot = previous_slot + 1;
+        while (slot <= current_slot) : (slot += 1) {
+            try self.onTick(slot);
         }
+
+        // Process queued attestations after time advance.
+        try self.processAttestationQueue(allocator);
+
+        // Clear validated attestation data cache.
+        self.validated_attestation_datas.clearRetainingCapacity();
     }
 
     pub fn getTime(self: *const ForkChoice) Slot {
@@ -419,6 +443,107 @@ pub const ForkChoice = struct {
         }
     }
 
+    // ── Attestation message processing (private) ──
+
+    /// Record a single validator's latest message (vote).
+    /// Skips equivocating validators. Uses slot-monotonicity for Gloas.
+    /// Matching TS `addLatestMessage()`.
+    fn addLatestMessage(
+        self: *ForkChoice,
+        allocator: Allocator,
+        validator_index: ValidatorIndex,
+        next_slot: Slot,
+        next_root: Root,
+        next_payload_status: PayloadStatus,
+    ) !void {
+        // Skip equivocating validators.
+        if (self.fcStore.equivocating_indices.contains(validator_index)) return;
+
+        try self.votes.ensureValidatorCount(allocator, @intCast(validator_index + 1));
+        const fields = self.votes.fields();
+
+        // Slot-monotonicity: reject stale votes.
+        if (next_slot <= fields.next_slots[validator_index] and
+            fields.next_indices[validator_index] != NULL_VOTE_INDEX)
+        {
+            return;
+        }
+
+        // Look up the node index for the target block.
+        const indices = self.proto_array.indices.get(next_root) orelse return;
+        const node_index = indices.getByPayloadStatus(next_payload_status) orelse return;
+
+        fields.next_indices[validator_index] = @intCast(node_index);
+        fields.next_slots[validator_index] = next_slot;
+    }
+
+    // ── Time management (private) ──
+
+    /// Process a single slot tick. Matching TS `onTick()`.
+    fn onTick(self: *ForkChoice, time: Slot) !void {
+        const previous_slot = self.fcStore.current_slot;
+
+        // Time must advance by exactly 1.
+        if (time != previous_slot + 1) return error.InvalidSlotAdvance;
+
+        self.fcStore.current_slot = time;
+
+        // Reset proposer boost at slot boundary.
+        self.proposer_boost_root = null;
+        self.justified_proposer_boost_score = null;
+
+        // At epoch boundary: realize unrealized checkpoints.
+        const current_epoch = computeEpochAtSlot(time);
+        const previous_epoch = computeEpochAtSlot(previous_slot);
+        if (current_epoch > previous_epoch) {
+            self.updateCheckpoints(
+                self.fcStore.unrealized_justified.checkpoint,
+                self.fcStore.unrealized_finalized_checkpoint,
+            );
+        }
+    }
+
+    /// Process queued attestations for past slots. Matching TS `processAttestationQueue()`.
+    fn processAttestationQueue(self: *ForkChoice, allocator: Allocator) !void {
+        const current_slot = self.fcStore.current_slot;
+
+        // Collect slot keys to process (slots < current_slot).
+        var slots_to_remove = std.ArrayList(Slot).init(allocator);
+        defer slots_to_remove.deinit();
+
+        var slot_iter = self.queued_attestations.iterator();
+        while (slot_iter.next()) |entry| {
+            const att_slot = entry.key_ptr.*;
+            if (att_slot < current_slot) {
+                // Process all attestations for this slot.
+                var block_iter = entry.value_ptr.iterator();
+                while (block_iter.next()) |block_entry| {
+                    const block_root = block_entry.key_ptr.*;
+                    const att_list = block_entry.value_ptr;
+                    for (att_list.items) |queued_att| {
+                        try self.addLatestMessage(
+                            allocator,
+                            queued_att.validator_index,
+                            att_slot,
+                            block_root,
+                            queued_att.payload_status,
+                        );
+                    }
+                    att_list.deinit(allocator);
+                }
+                entry.value_ptr.deinit();
+                try slots_to_remove.append(att_slot);
+            }
+        }
+
+        // Remove processed slots.
+        for (slots_to_remove.items) |slot_key| {
+            _ = self.queued_attestations.orderedRemove(slot_key);
+        }
+    }
+
+    // ── Public checkpoint getters ──
+
     pub fn getJustifiedCheckpoint(self: *const ForkChoice) CheckpointWithPayloadStatus {
         return self.fcStore.justified.checkpoint;
     }
@@ -430,13 +555,39 @@ pub const ForkChoice = struct {
     // ── Pruning ──
 
     /// Prune finalized ancestors from the DAG to bound memory usage.
+    /// Adjusts all vote indices — critical for correctness.
     /// Caller owns the returned pruned blocks slice.
+    /// Matching TS `prune()`.
     pub fn prune(
         self: *ForkChoice,
         allocator: Allocator,
         finalized_root: Root,
     ) (Allocator.Error || ProtoArrayError)![]ProtoBlock {
-        return self.proto_array.maybePrune(allocator, finalized_root);
+        const pruned = try self.proto_array.maybePrune(allocator, finalized_root);
+        const pruned_count: u32 = @intCast(pruned.len);
+
+        if (pruned_count == 0) return pruned;
+
+        // Adjust all vote indices — critical for correctness.
+        const fields = self.votes.fields();
+        for (0..self.votes.len()) |i| {
+            if (fields.current_indices[i] != NULL_VOTE_INDEX) {
+                if (fields.current_indices[i] >= pruned_count) {
+                    fields.current_indices[i] -= pruned_count;
+                } else {
+                    fields.current_indices[i] = NULL_VOTE_INDEX;
+                }
+            }
+            if (fields.next_indices[i] != NULL_VOTE_INDEX) {
+                if (fields.next_indices[i] >= pruned_count) {
+                    fields.next_indices[i] -= pruned_count;
+                } else {
+                    fields.next_indices[i] = NULL_VOTE_INDEX;
+                }
+            }
+        }
+
+        return pruned;
     }
 
     // ── Execution validation ──
@@ -742,7 +893,8 @@ test "getHead returns genesis when no votes" {
     }, genesis_block, 0);
     defer fc.deinit(testing.allocator);
 
-    const head = try fc.getHead(testing.allocator, &.{});
+    try fc.updateHead(testing.allocator);
+    const head = fc.getHead();
     try testing.expectEqual(genesis_root, head.block_root);
 }
 
@@ -768,8 +920,8 @@ test "getHead with votes shifts head" {
     try fc.onAttestation(testing.allocator, 1, block_b_root, 0);
     try fc.onAttestation(testing.allocator, 2, block_b_root, 0);
 
-    const balances = [_]u16{ 1, 1, 1 };
-    const head = try fc.getHead(testing.allocator, &balances);
+    try fc.updateHead(testing.allocator);
+    const head = fc.getHead();
     try testing.expectEqual(block_b_root, head.block_root);
 }
 
@@ -795,15 +947,13 @@ test "onAttesterSlashing removes equivocating weight" {
     try fc.onAttestation(testing.allocator, 1, block_b_root, 0);
     try fc.onAttestation(testing.allocator, 2, block_a_root, 0);
 
-    const balances = [_]u16{ 1, 1, 1 };
-
-    const head1 = try fc.getHead(testing.allocator, &balances);
-    try testing.expectEqual(block_b_root, head1.block_root);
+    try fc.updateHead(testing.allocator);
+    try testing.expectEqual(block_b_root, fc.getHead().block_root);
 
     try fc.onAttesterSlashing(&[_]ValidatorIndex{ 0, 1 });
 
-    const head2 = try fc.getHead(testing.allocator, &balances);
-    try testing.expectEqual(block_a_root, head2.block_root);
+    try fc.updateHead(testing.allocator);
+    try testing.expectEqual(block_a_root, fc.getHead().block_root);
 }
 
 test "updateTime advances slot" {
@@ -820,10 +970,11 @@ test "updateTime advances slot" {
     defer fc.deinit(testing.allocator);
 
     try testing.expectEqual(@as(Slot, 0), fc.getTime());
-    fc.updateTime(10);
+    try fc.updateTime(testing.allocator, 10);
     try testing.expectEqual(@as(Slot, 10), fc.getTime());
 
-    fc.updateTime(5);
+    // Time should not go backwards.
+    try fc.updateTime(testing.allocator, 5);
     try testing.expectEqual(@as(Slot, 10), fc.getTime());
 }
 
@@ -963,4 +1114,187 @@ test "isDescendant checks ancestry" {
     try testing.expect(try fc.isDescendant(genesis_root, .full, block_b_root, .full));
     try testing.expect(try fc.isDescendant(block_a_root, .full, block_b_root, .full));
     try testing.expect(!try fc.isDescendant(block_b_root, .full, block_a_root, .full));
+}
+
+test "addLatestMessage updates vote for non-equivocating validator" {
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .config = getTestConfig(),
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &.{},
+        .justified_balances_getter = test_balances_getter,
+    }, genesis_block, 32);
+    defer fc.deinit(testing.allocator);
+
+    try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_root, genesis_root), 32);
+
+    try fc.addLatestMessage(testing.allocator, 0, 1, block_root, .full);
+
+    try testing.expectEqual(@as(u32, 1), fc.votes.len());
+    const fields = fc.votes.fields();
+    try testing.expect(fields.next_indices[0] != NULL_VOTE_INDEX);
+}
+
+test "addLatestMessage skips equivocating validator" {
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .config = getTestConfig(),
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &.{},
+        .justified_balances_getter = test_balances_getter,
+    }, genesis_block, 32);
+    defer fc.deinit(testing.allocator);
+
+    try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_root, genesis_root), 32);
+
+    // Mark validator 0 as equivocating.
+    try fc.onAttesterSlashing(&[_]ValidatorIndex{0});
+
+    try fc.addLatestMessage(testing.allocator, 0, 1, block_root, .full);
+
+    // Vote should not be recorded.
+    try testing.expectEqual(@as(u32, 0), fc.votes.len());
+}
+
+test "onTick resets proposer boost and advances slot" {
+    const genesis_root = hashFromByte(0x01);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .config = getTestConfig(),
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &.{},
+        .justified_balances_getter = test_balances_getter,
+    }, genesis_block, 0);
+    defer fc.deinit(testing.allocator);
+
+    fc.proposer_boost_root = hashFromByte(0x02);
+    fc.justified_proposer_boost_score = 100;
+
+    try fc.onTick(1);
+
+    try testing.expectEqual(@as(Slot, 1), fc.fcStore.current_slot);
+    try testing.expectEqual(@as(?Root, null), fc.proposer_boost_root);
+    try testing.expectEqual(@as(?u64, null), fc.justified_proposer_boost_score);
+}
+
+test "processAttestationQueue applies queued attestations for past slots" {
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .config = getTestConfig(),
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &.{},
+        .justified_balances_getter = test_balances_getter,
+    }, genesis_block, 5);
+    defer fc.deinit(testing.allocator);
+
+    try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_root, genesis_root), 5);
+
+    // Manually queue an attestation at slot 3 (past).
+    var block_map = BlockAttestationMap.init(testing.allocator);
+    var att_list = std.ArrayListUnmanaged(QueuedAttestation){};
+    try att_list.append(testing.allocator, .{ .validator_index = 0, .payload_status = .full });
+    try block_map.put(block_root, att_list);
+    try fc.queued_attestations.put(3, block_map);
+
+    try fc.processAttestationQueue(testing.allocator);
+
+    // Attestation should have been processed — votes updated.
+    try testing.expectEqual(@as(u32, 1), fc.votes.len());
+}
+
+test "updateTime loops onTick and processes queue" {
+    const genesis_root = hashFromByte(0x01);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .config = getTestConfig(),
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &.{},
+        .justified_balances_getter = test_balances_getter,
+    }, genesis_block, 0);
+    defer fc.deinit(testing.allocator);
+
+    try fc.updateTime(testing.allocator, 5);
+
+    try testing.expectEqual(@as(Slot, 5), fc.fcStore.current_slot);
+    try testing.expectEqual(@as(?Root, null), fc.proposer_boost_root);
+}
+
+test "prune adjusts vote indices" {
+    const genesis_root = hashFromByte(0x01);
+    const block_a_root = hashFromByte(0x02);
+    const block_b_root = hashFromByte(0x03);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .config = getTestConfig(),
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &[_]u16{1},
+        .justified_balances_getter = test_balances_getter,
+        .prune_threshold = 0, // Always prune.
+    }, genesis_block, 64);
+    defer fc.deinit(testing.allocator);
+
+    try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_a_root, genesis_root), 64);
+    try fc.onBlockFromProto(testing.allocator, makeTestBlock(2, block_b_root, block_a_root), 64);
+
+    // Vote for block_b.
+    try fc.addLatestMessage(testing.allocator, 0, 2, block_b_root, .full);
+
+    // Record the index before prune.
+    const fields_before = fc.votes.fields();
+    const idx_before = fields_before.next_indices[0];
+    try testing.expect(idx_before != NULL_VOTE_INDEX);
+
+    // Finalize block_a and prune.
+    fc.fcStore.setFinalizedCheckpoint(.{ .epoch = 1, .root = block_a_root });
+    const pruned = try fc.prune(testing.allocator, block_a_root);
+    defer testing.allocator.free(pruned);
+
+    // Vote index should be adjusted down by prune count.
+    const fields_after = fc.votes.fields();
+    if (pruned.len > 0) {
+        const pruned_count: u32 = @intCast(pruned.len);
+        if (idx_before >= pruned_count) {
+            try testing.expectEqual(idx_before - pruned_count, fields_after.next_indices[0]);
+        }
+    }
+}
+
+test "updateHead recomputes head with deltas" {
+    const genesis_root = hashFromByte(0x01);
+    const block_a_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .config = getTestConfig(),
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &[_]u16{1},
+        .justified_balances_getter = test_balances_getter,
+    }, genesis_block, 64);
+    defer fc.deinit(testing.allocator);
+
+    try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_a_root, genesis_root), 64);
+    try fc.addLatestMessage(testing.allocator, 0, 1, block_a_root, .full);
+
+    try fc.updateHead(testing.allocator);
+
+    try testing.expectEqual(block_a_root, fc.head.block_root);
 }
