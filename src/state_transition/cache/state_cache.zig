@@ -117,9 +117,9 @@ pub const CachedBeaconState = struct {
         self.slashings_cache.updateLatestBlockSlot(latest_block_slot);
     }
 
-    // TODO: implement loadCachedBeaconState
-    // this is used when we load a state from disc, given a seed state
-    // need to do this once we switch to TreeView
+    // loadCachedBeaconState is implemented in utils/load_cached_state.zig
+    
+    
 
     // TODO: implement getCachedBeaconState
     // this is used to create a CachedBeaconState based on a tree and an exising CachedBeaconState at fork transition

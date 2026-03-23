@@ -94,6 +94,9 @@ pub const WithdrawalsResult = @import("./block/process_withdrawals.zig").Withdra
 pub const test_utils = @import("test_utils/root.zig");
 
 pub const bls = @import("utils/bls.zig");
+pub const load_state = @import("./utils/load_state.zig");
+pub const load_cached_state = @import("./utils/load_cached_state.zig");
+pub const loadCachedBeaconState = load_cached_state.loadCachedBeaconState;
 const seed = @import("./utils/seed.zig");
 pub const state_transition = @import("./state_transition.zig");
 pub const BlockExternalData = state_transition.BlockExternalData;
