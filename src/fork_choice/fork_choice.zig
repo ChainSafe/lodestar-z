@@ -42,7 +42,7 @@ pub const ForkChoiceStore = store_mod.ForkChoiceStore;
 pub const Checkpoint = store_mod.Checkpoint;
 pub const CheckpointWithPayloadStatus = store_mod.CheckpointWithPayloadStatus;
 pub const JustifiedBalances = store_mod.JustifiedBalances;
-const EffectiveBalanceIncrementsRc = store_mod.EffectiveBalanceIncrementsRc;
+const EffectiveBalanceIncrementsRc = store_mod.JustifiedBalancesRc;
 const JustifiedBalancesGetter = store_mod.JustifiedBalancesGetter;
 const ForkChoiceStoreEvents = store_mod.ForkChoiceStoreEvents;
 
@@ -75,10 +75,10 @@ pub const QueuedAttestation = struct {
 };
 
 /// BlockRoot -> []QueuedAttestation for a single slot's queued attestations.
-pub const BlockAttestationMap = std.AutoHashMap(Root, std.ArrayListUnmanaged(QueuedAttestation));
+pub const BlockAttestationMap = std.AutoHashMapUnmanaged(Root, std.ArrayListUnmanaged(QueuedAttestation));
 
 /// Slot -> BlockAttestationMap for all queued attestations.
-pub const QueuedAttestationMap = std.AutoArrayHashMap(Slot, BlockAttestationMap);
+pub const QueuedAttestationMap = std.AutoArrayHashMapUnmanaged(Slot, BlockAttestationMap);
 
 /// Set of validated attestation data roots (cleared each slot).
 pub const RootSet = std.HashMapUnmanaged(Root, void, RootContext, 80);
@@ -135,7 +135,7 @@ pub const ForkChoice = struct {
     // ── Error state ──
     irrecoverable_error: bool,
 
-    /// Instantiate ForkChoice from pre-built components.
+    /// Instantiate ForkChoice from pre-built components (in-place, heap-allocated).
     /// Matches TS: `new ForkChoice(config, fcStore, protoArray, validatorCount, metrics, opts)`
     ///
     /// The caller creates `ForkChoiceStore` and `ProtoArray` externally, then passes them in.
@@ -148,8 +148,11 @@ pub const ForkChoice = struct {
         proto_array: ProtoArray,
         validator_count: u32,
         opts: ForkChoiceOpts,
-    ) !ForkChoice {
-        var self = ForkChoice{
+    ) !*ForkChoice {
+        const self = try allocator.create(ForkChoice);
+        errdefer allocator.destroy(self);
+
+        self.* = .{
             .config = config,
             .opts = opts,
             .proto_array = proto_array,
@@ -160,12 +163,11 @@ pub const ForkChoice = struct {
             .proposer_boost_root = null,
             .justified_proposer_boost_score = null,
             .balances = fc_store.justified.balances.acquire(),
-            .queued_attestations = QueuedAttestationMap.init(allocator),
+            .queued_attestations = .{},
             .queued_attestations_previous_slot = 0,
             .validated_attestation_datas = .{},
             .irrecoverable_error = false,
         };
-        errdefer self.deinit(allocator);
 
         // Pre-allocate votes for known validators (matches TS: new Array(validatorCount).fill(NULL_VOTE_INDEX))
         try self.votes.ensureValidatorCount(allocator, validator_count);
@@ -184,9 +186,9 @@ pub const ForkChoice = struct {
             while (block_iter.next()) |block_entry| {
                 block_entry.value_ptr.deinit(allocator);
             }
-            entry.value_ptr.deinit();
+            entry.value_ptr.deinit(allocator);
         }
-        self.queued_attestations.deinit();
+        self.queued_attestations.deinit(allocator);
 
         self.validated_attestation_datas.deinit(allocator);
         self.balances.release();
@@ -195,6 +197,7 @@ pub const ForkChoice = struct {
         self.votes.deinit(allocator);
         self.proto_array.deinit(allocator);
         self.* = undefined;
+        allocator.destroy(self);
     }
 
     // ── Block processing ──
@@ -366,7 +369,7 @@ pub const ForkChoice = struct {
         if (std.mem.eql(u8, &block_root, &ZERO_HASH)) return;
 
         // Validate the attestation.
-        try self.validateOnAttestation(attestation, att_data_root, force_import);
+        try self.validateOnAttestation(allocator, attestation, att_data_root, force_import);
 
         const att_slot = attestation.slot();
         const current_slot = self.fcStore.current_slot;
@@ -391,13 +394,13 @@ pub const ForkChoice = struct {
             // Current slot: queue for later processing.
             var slot_map = self.queued_attestations.getPtr(att_slot);
             if (slot_map == null) {
-                try self.queued_attestations.put(att_slot, BlockAttestationMap.init(allocator));
+                try self.queued_attestations.put(allocator, att_slot, .{});
                 slot_map = self.queued_attestations.getPtr(att_slot);
             }
 
             var block_list = slot_map.?.getPtr(block_root);
             if (block_list == null) {
-                try slot_map.?.put(block_root, .{});
+                try slot_map.?.put(allocator, block_root, .{});
                 block_list = slot_map.?.getPtr(block_root);
             }
 
@@ -415,16 +418,18 @@ pub const ForkChoice = struct {
     /// Validate an attestation for fork choice. Matching TS validation chain.
     fn validateOnAttestation(
         self: *ForkChoice,
+        allocator: Allocator,
         attestation: *const AnyIndexedAttestation,
         att_data_root: Root,
         force_import: bool,
     ) ForkChoiceError!void {
-        try self.validateAttestationData(attestation, att_data_root, force_import);
+        try self.validateAttestationData(allocator, attestation, att_data_root, force_import);
     }
 
     /// Validate attestation data fields. Matching TS `validateAttestationData()`.
     fn validateAttestationData(
         self: *ForkChoice,
+        allocator: Allocator,
         attestation: *const AnyIndexedAttestation,
         att_data_root: Root,
         force_import: bool,
@@ -463,7 +468,7 @@ pub const ForkChoice = struct {
 
         // Cache validated attestation data root.
         self.validated_attestation_datas.put(
-            self.queued_attestations.allocator,
+            allocator,
             att_data_root,
             {},
         ) catch {};
@@ -892,7 +897,7 @@ pub const ForkChoice = struct {
                     }
                     att_list.deinit(allocator);
                 }
-                entry.value_ptr.deinit();
+                entry.value_ptr.deinit(allocator);
                 try slots_to_remove.append(att_slot);
             }
         }
@@ -1371,7 +1376,7 @@ fn initTestForkChoice(
     justified_checkpoint: CheckpointWithPayloadStatus,
     finalized_checkpoint: CheckpointWithPayloadStatus,
     justified_balances: []const u16,
-) !ForkChoice {
+) !*ForkChoice {
     var proto_array = try ProtoArray.initialize(
         allocator,
         anchor_block,
@@ -1693,11 +1698,11 @@ test "processAttestationQueue applies queued attestations for past slots" {
     try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_root, genesis_root), 5);
 
     // Manually queue an attestation at slot 3 (past).
-    var block_map = BlockAttestationMap.init(testing.allocator);
+    var block_map = BlockAttestationMap{};
     var att_list = std.ArrayListUnmanaged(QueuedAttestation){};
     try att_list.append(testing.allocator, .{ .validator_index = 0, .payload_status = .full });
-    try block_map.put(block_root, att_list);
-    try fc.queued_attestations.put(3, block_map);
+    try block_map.put(testing.allocator, block_root, att_list);
+    try fc.queued_attestations.put(testing.allocator, 3, block_map);
 
     try fc.processAttestationQueue(testing.allocator);
 

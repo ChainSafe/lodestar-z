@@ -46,7 +46,7 @@ pub const CheckpointWithPayloadStatus = struct {
 };
 
 /// Reference-counted effective balance increments.
-pub const EffectiveBalanceIncrementsRc = state_transition.EffectiveBalanceIncrementsRc;
+pub const JustifiedBalancesRc = state_transition.EffectiveBalanceIncrementsRc;
 
 /// Effective balance increments (1 increment = 1 ETH effective balance).
 pub const JustifiedBalances = state_transition.EffectiveBalanceIncrements;
@@ -122,7 +122,7 @@ pub const ForkChoiceStore = struct {
     /// Balances are reference-counted: justified and unrealized_justified may share
     pub const JustifiedState = struct {
         checkpoint: CheckpointWithPayloadStatus,
-        balances: *EffectiveBalanceIncrementsRc,
+        balances: *JustifiedBalancesRc,
         total_balance: u64,
     };
 
@@ -140,7 +140,7 @@ pub const ForkChoiceStore = struct {
 
         try balances_list.appendSlice(justified_balances);
 
-        const balances_rc = try EffectiveBalanceIncrementsRc.init(allocator, balances_list);
+        const balances_rc = try JustifiedBalancesRc.init(allocator, balances_list);
         errdefer balances_rc.release();
 
         const total = computeTotalBalance(justified_balances);
@@ -177,7 +177,7 @@ pub const ForkChoiceStore = struct {
 
         try balances_list.appendSlice(balances);
 
-        const balances_rc = try EffectiveBalanceIncrementsRc.init(allocator, balances_list);
+        const balances_rc = try JustifiedBalancesRc.init(allocator, balances_list);
 
         self.justified.balances.release();
         self.justified = .{
