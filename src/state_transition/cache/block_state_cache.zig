@@ -19,7 +19,7 @@ pub const BlockStateCache = struct {
     /// State root (32 bytes) -> CachedBeaconState
     cache: std.AutoArrayHashMap([32]u8, *CachedBeaconState),
     /// Key order for FIFO eviction (index 0 = head/newest, last = oldest/tail)
-    key_order: std.ArrayList([32]u8),
+    key_order: std.ArrayListUnmanaged([32]u8),
     /// Max states to keep
     max_states: u32,
     /// Head state root (always kept, never evicted)
@@ -29,7 +29,7 @@ pub const BlockStateCache = struct {
         return .{
             .allocator = allocator,
             .cache = std.AutoArrayHashMap([32]u8, *CachedBeaconState).init(allocator),
-            .key_order = std.ArrayList([32]u8).init(allocator),
+            .key_order = .empty,
             .max_states = max_states,
             .head_root = null,
         };
@@ -42,7 +42,7 @@ pub const BlockStateCache = struct {
             self.allocator.destroy(state);
         }
         self.cache.deinit();
-        self.key_order.deinit();
+        self.key_order.deinit(self.allocator);
     }
 
     /// Get a state by its root.
@@ -71,11 +71,12 @@ pub const BlockStateCache = struct {
         errdefer _ = self.cache.orderedRemove(root);
 
         if (is_head) {
-            try self.key_order.insert(0, root);
+            try self.key_order.insert(self.allocator, 0, root);
+            self.head_root = root;
         } else {
             // Insert after head (position 1), or at front if empty
             const insert_pos: usize = if (self.key_order.items.len > 0) 1 else 0;
-            try self.key_order.insert(insert_pos, root);
+            try self.key_order.insert(self.allocator, insert_pos, root);
         }
 
         self.prune(root);
@@ -146,14 +147,14 @@ pub const BlockStateCache = struct {
 
     fn moveToHead(self: *BlockStateCache, root: [32]u8) void {
         self.removeFromKeyOrder(root);
-        self.key_order.insert(0, root) catch {};
+        self.key_order.insert(self.allocator, 0, root) catch {};
         self.head_root = root;
     }
 
     fn moveToSecond(self: *BlockStateCache, root: [32]u8) void {
         self.removeFromKeyOrder(root);
         const pos: usize = if (self.key_order.items.len > 0) 1 else 0;
-        self.key_order.insert(pos, root) catch {};
+        self.key_order.insert(self.allocator, pos, root) catch {};
     }
 
     fn removeFromKeyOrder(self: *BlockStateCache, root: [32]u8) void {
@@ -165,13 +166,18 @@ pub const BlockStateCache = struct {
         }
     }
 
-    /// Prune from tail until at or under max_states. Never prunes `last_added_key`.
+    /// Prune from tail until at or under max_states. Never prunes `last_added_key` or the head.
     fn prune(self: *BlockStateCache, last_added_key: [32]u8) void {
         while (self.key_order.items.len > self.max_states) {
             const tail = self.key_order.items[self.key_order.items.len - 1];
 
             // Don't prune the key we just added
             if (std.mem.eql(u8, &tail, &last_added_key)) break;
+
+            // Don't prune the head
+            if (self.head_root) |hr| {
+                if (std.mem.eql(u8, &tail, &hr)) break;
+            }
 
             _ = self.key_order.pop();
 
@@ -222,9 +228,9 @@ test "BlockStateCache: add, get, FIFO eviction" {
     const root3 = try cache.add(state3, false);
 
     try std.testing.expectEqual(@as(usize, 2), cache.size());
-    // state1 (tail) should be evicted
-    try std.testing.expect(cache.get(root1) == null);
-    try std.testing.expect(cache.get(root2) != null);
+    // state2 (tail, oldest non-first) should be evicted
+    try std.testing.expect(cache.get(root2) == null);
+    try std.testing.expect(cache.get(root1) != null);
     try std.testing.expect(cache.get(root3) != null);
 }
 
@@ -284,4 +290,102 @@ test "BlockStateCache: getSeedState" {
     _ = try cache.add(state1, false);
 
     try std.testing.expect(cache.getSeedState() != null);
+}
+
+test "BlockStateCache: head state survives multiple evictions" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 10;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    // Cache capacity of 3
+    var cache = BlockStateCache.init(allocator, 3);
+    defer cache.deinit();
+
+    // Set first state as head
+    const head = try test_state.cached_state.clone(allocator, .{});
+    const head_root = try cache.setHeadState(head);
+
+    // Add 5 more states, each should trigger eviction but head survives
+    var i: u64 = 1;
+    while (i <= 5) : (i += 1) {
+        const s = try test_state.cached_state.clone(allocator, .{});
+        try s.state.setSlot((try s.state.slot()) + i);
+        _ = try cache.add(s, false);
+    }
+
+    // Head should still be present
+    try std.testing.expect(cache.get(head_root) != null);
+    // Cache size should be at max (head + 2 others)
+    try std.testing.expectEqual(@as(usize, 3), cache.size());
+}
+
+test "BlockStateCache: pruneBeforeEpoch removes old states" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 10;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    var cache = BlockStateCache.init(allocator, 10);
+    defer cache.deinit();
+
+    // Set head at high slot
+    const head = try test_state.cached_state.clone(allocator, .{});
+    try head.state.setSlot(1024); // epoch 32 (with SLOTS_PER_EPOCH=32)
+    const head_root = try cache.setHeadState(head);
+
+    // Add state at slot 0 (epoch 0)
+    const old_state = try test_state.cached_state.clone(allocator, .{});
+    try old_state.state.setSlot(0);
+    _ = try cache.add(old_state, false);
+
+    try std.testing.expectEqual(@as(usize, 2), cache.size());
+
+    // Prune before epoch 10 — should remove slot 0 state
+    cache.pruneBeforeEpoch(10);
+
+    // Head (epoch 32) survives, old (epoch 0) pruned
+    try std.testing.expect(cache.get(head_root) != null);
+    try std.testing.expectEqual(@as(usize, 1), cache.size());
+}
+
+test "BlockStateCache: re-adding existing state moves position" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    var cache = BlockStateCache.init(allocator, 3);
+    defer cache.deinit();
+
+    const state1 = try test_state.cached_state.clone(allocator, .{});
+    const root1 = try cache.add(state1, false);
+
+    const state2 = try test_state.cached_state.clone(allocator, .{});
+    try state2.state.setSlot((try state2.state.slot()) + 1);
+    _ = try cache.add(state2, false);
+
+    const state3 = try test_state.cached_state.clone(allocator, .{});
+    try state3.state.setSlot((try state3.state.slot()) + 2);
+    _ = try cache.add(state3, false);
+
+    // Re-add state1 — should not increase size, just move position
+    _ = try cache.add(state1, false);
+    try std.testing.expectEqual(@as(usize, 3), cache.size());
+    try std.testing.expect(cache.get(root1) != null);
 }

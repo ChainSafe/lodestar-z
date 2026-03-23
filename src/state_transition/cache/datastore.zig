@@ -17,15 +17,24 @@ pub const CheckpointKey = struct {
     }
 
     /// Format as "{epoch:016x}_{root_hex}" for use as a filename / map key.
+    /// Caller owns the returned slice.
     pub fn toKeyString(self: CheckpointKey, allocator: Allocator) ![]u8 {
         // 16 hex chars for epoch + 1 underscore + 64 hex chars for root = 81 bytes
         const buf = try allocator.alloc(u8, 81);
-        _ = std.fmt.bufPrint(buf[0..16], "{x:0>16}", .{self.epoch}) catch unreachable;
-        buf[16] = '_';
-        _ = std.fmt.bufPrint(buf[17..81], "{s}", .{std.fmt.fmtSliceHexLower(&self.root)}) catch unreachable;
+        _ = std.fmt.bufPrint(buf[0..81], "{x:0>16}_{x}", .{ self.epoch, self.root }) catch unreachable;
         return buf;
     }
 };
+
+/// Read the slot from SSZ-encoded beacon state bytes.
+/// In all forks, the BeaconState SSZ layout starts with:
+///   genesis_time: u64 (offset 0, 8 bytes)
+///   genesis_validators_root: Bytes32 (offset 8, 32 bytes)
+///   slot: u64 (offset 40, 8 bytes)
+pub fn readSlotFromBytes(state_bytes: []const u8) u64 {
+    if (state_bytes.len < 48) return 0;
+    return std.mem.readInt(u64, state_bytes[40..48], .little);
+}
 
 /// Vtable-based interface for checkpoint state persistence.
 pub const CPStateDatastore = struct {
@@ -114,12 +123,16 @@ pub const MemoryCPStateDatastore = struct {
         errdefer self.allocator.free(bytes_copy);
 
         try self.data.put(key, bytes_copy);
-        return key;
+
+        // Return a caller-owned copy — internal key belongs to the hashmap
+        return try self.allocator.dupe(u8, key);
     }
 
     fn memRead(ptr: *anyopaque, key: []const u8) anyerror!?[]const u8 {
         const self: *MemoryCPStateDatastore = @ptrCast(@alignCast(ptr));
-        return self.data.get(key);
+        const data = self.data.get(key) orelse return null;
+        // Return owned copy — caller must free with the same allocator
+        return try self.allocator.dupe(u8, data);
     }
 
     fn memRemove(ptr: *anyopaque, key: []const u8) anyerror!void {
@@ -132,7 +145,7 @@ pub const MemoryCPStateDatastore = struct {
 
     fn memReadKeys(ptr: *anyopaque) anyerror![]const []const u8 {
         const self: *MemoryCPStateDatastore = @ptrCast(@alignCast(ptr));
-        var keys = try self.allocator.alloc([]const u8, self.data.count());
+        const keys = try self.allocator.alloc([]const u8, self.data.count());
         var i: usize = 0;
         var it = self.data.keyIterator();
         while (it.next()) |k| {
@@ -232,20 +245,20 @@ pub const FileCPStateDatastore = struct {
         };
         defer dir.close();
 
-        var keys = std.ArrayList([]const u8).init(self.allocator);
+        var keys: std.ArrayListUnmanaged([]const u8) = .empty;
         errdefer {
             for (keys.items) |k| self.allocator.free(k);
-            keys.deinit();
+            keys.deinit(self.allocator);
         }
 
         var it = dir.iterate();
         while (try it.next()) |entry| {
             if (entry.kind == .file and entry.name.len == 81) {
-                try keys.append(try self.allocator.dupe(u8, entry.name));
+                try keys.append(self.allocator, try self.allocator.dupe(u8, entry.name));
             }
         }
 
-        return try keys.toOwnedSlice();
+        return try keys.toOwnedSlice(self.allocator);
     }
 };
 
@@ -267,8 +280,9 @@ test "MemoryCPStateDatastore: write, read, remove" {
     const key = try ds.write(cp, state_bytes);
     defer allocator.free(key);
 
-    // Read
+    // Read (returns owned copy)
     const read_bytes = try ds.read(key);
+    defer if (read_bytes) |b| allocator.free(b);
     try std.testing.expect(read_bytes != null);
     try std.testing.expectEqualSlices(u8, state_bytes, read_bytes.?);
 
@@ -299,6 +313,7 @@ test "MemoryCPStateDatastore: overwrite existing key" {
     defer allocator.free(key2);
 
     const read_bytes = try ds.read(key2);
+    defer if (read_bytes) |b| allocator.free(b);
     try std.testing.expect(read_bytes != null);
     try std.testing.expectEqualSlices(u8, "second", read_bytes.?);
 }
@@ -315,5 +330,101 @@ test "CheckpointKey.toKeyString" {
     // separator
     try std.testing.expectEqual(@as(u8, '_'), key[16]);
     // root hex (64 chars of "ab" repeated)
-    try std.testing.expectEqualSlices(u8, "abababababababababababababababababababababababababababababababababab", key[17..81]);
+    try std.testing.expectEqualSlices(u8, "abababababababababababababababababababababababababababababababab", key[17..81]);
+}
+
+test "FileCPStateDatastore: write, read, readKeys, remove" {
+    const allocator = std.testing.allocator;
+
+    // Use a temp directory
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const tmp_path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    var store = try FileCPStateDatastore.init(allocator, tmp_path);
+    defer store.deinit();
+    var ds = store.datastore();
+
+    const cp1 = CheckpointKey{ .epoch = 100, .root = [_]u8{0x11} ** 32 };
+    const cp2 = CheckpointKey{ .epoch = 200, .root = [_]u8{0x22} ** 32 };
+    const bytes1: []const u8 = "state-data-one";
+    const bytes2: []const u8 = "state-data-two-longer";
+
+    // Write two entries
+    const key1 = try ds.write(cp1, bytes1);
+    defer allocator.free(key1);
+    const key2 = try ds.write(cp2, bytes2);
+    defer allocator.free(key2);
+
+    // Read back and verify contents
+    const read1 = try ds.read(key1);
+    defer if (read1) |b| allocator.free(b);
+    try std.testing.expect(read1 != null);
+    try std.testing.expectEqualSlices(u8, bytes1, read1.?);
+
+    const read2 = try ds.read(key2);
+    defer if (read2) |b| allocator.free(b);
+    try std.testing.expect(read2 != null);
+    try std.testing.expectEqualSlices(u8, bytes2, read2.?);
+
+    // ReadKeys should return both keys
+    const keys = try ds.readKeys();
+    defer {
+        for (keys) |k| allocator.free(k);
+        allocator.free(keys);
+    }
+    try std.testing.expectEqual(@as(usize, 2), keys.len);
+
+    // Remove one, verify gone
+    try ds.remove(key1);
+    const after_remove = try ds.read(key1);
+    try std.testing.expect(after_remove == null);
+
+    // Remaining key should still work
+    const remaining = try ds.read(key2);
+    defer if (remaining) |b| allocator.free(b);
+    try std.testing.expect(remaining != null);
+    try std.testing.expectEqualSlices(u8, bytes2, remaining.?);
+
+    // ReadKeys after remove
+    const keys2 = try ds.readKeys();
+    defer {
+        for (keys2) |k| allocator.free(k);
+        allocator.free(keys2);
+    }
+    try std.testing.expectEqual(@as(usize, 1), keys2.len);
+}
+
+test "FileCPStateDatastore: read nonexistent returns null" {
+    const allocator = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const tmp_path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    var store = try FileCPStateDatastore.init(allocator, tmp_path);
+    defer store.deinit();
+    var ds = store.datastore();
+
+    const result = try ds.read("nonexistent_key_string_that_is_not_81_chars");
+    try std.testing.expect(result == null);
+}
+
+test "readSlotFromBytes" {
+    // Construct minimal state bytes: genesis_time(8) + genesis_validators_root(32) + slot(8) = 48 bytes
+    var buf: [64]u8 = undefined;
+    @memset(&buf, 0);
+
+    // Set slot (offset 40) to 12345 in little-endian
+    const slot: u64 = 12345;
+    @memcpy(buf[40..48], std.mem.asBytes(&slot));
+
+    try std.testing.expectEqual(@as(u64, 12345), readSlotFromBytes(&buf));
+
+    // Too short buffer returns 0
+    try std.testing.expectEqual(@as(u64, 0), readSlotFromBytes(buf[0..16]));
 }
