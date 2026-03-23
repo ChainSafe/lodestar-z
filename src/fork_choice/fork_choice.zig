@@ -362,37 +362,61 @@ pub const ForkChoice = struct {
         return self.fcStore.current_slot;
     }
 
-    // ── Checkpoint management ──
+    // ── Checkpoint management (private) ──
 
-    /// Update justified checkpoint and balances.
-    /// Fires onJustified event if configured.
-    pub fn updateJustifiedCheckpoint(
-        self: *ForkChoice,
-        allocator: Allocator,
-        checkpoint: CheckpointWithPayloadStatus,
-        balances: []const u16,
-    ) !void {
-        try self.fcStore.setJustified(allocator, checkpoint, balances);
-    }
-
-    /// Update finalized checkpoint.
-    /// Delegates to ForkChoiceStore.setFinalizedCheckpoint which fires onFinalized event.
-    pub fn updateFinalizedCheckpoint(self: *ForkChoice, checkpoint: CheckpointWithPayloadStatus) void {
-        self.fcStore.setFinalizedCheckpoint(checkpoint);
-    }
-
-    /// Update unrealized checkpoints from pull-up FFG.
-    pub fn updateUnrealizedCheckpoints(
+    /// Update realized checkpoints from block processing.
+    /// Epoch-monotonic: only advances, never regresses.
+    /// Matching TS `updateCheckpoints()`.
+    fn updateCheckpoints(
         self: *ForkChoice,
         justified: CheckpointWithPayloadStatus,
         finalized: CheckpointWithPayloadStatus,
     ) void {
-        self.fcStore.unrealized_justified = .{
-            .checkpoint = justified,
-            .balances = self.fcStore.unrealized_justified.balances,
-            .total_balance = self.fcStore.unrealized_justified.total_balance,
-        };
-        self.fcStore.unrealized_finalized_checkpoint = finalized;
+        // Update justified if epoch advances.
+        if (justified.epoch > self.fcStore.justified.checkpoint.epoch) {
+            // Retrieve new balances lazily via getter.
+            const new_balances = self.fcStore.justified_balances_getter.get(justified);
+            const new_total = store_mod.computeTotalBalance(new_balances.items);
+
+            const new_rc = EffectiveBalanceIncrementsRc.init(
+                new_balances.allocator,
+                new_balances,
+            ) catch return; // OOM: silently skip — TS getter is expected to never fail.
+
+            self.fcStore.justified.balances.release();
+            self.fcStore.justified = .{
+                .checkpoint = justified,
+                .balances = new_rc,
+                .total_balance = new_total,
+            };
+
+            if (self.fcStore.events.on_justified) |cb| cb.call(justified);
+        }
+
+        // Update finalized if epoch advances.
+        if (finalized.epoch > self.fcStore.finalized_checkpoint.epoch) {
+            self.fcStore.setFinalizedCheckpoint(finalized);
+        }
+    }
+
+    /// Update unrealized checkpoints from pull-up FFG.
+    /// Epoch-monotonic: only advances, never regresses.
+    /// Matching TS `updateUnrealizedCheckpoints()`.
+    fn updateUnrealizedCheckpoints(
+        self: *ForkChoice,
+        justified: CheckpointWithPayloadStatus,
+        finalized: CheckpointWithPayloadStatus,
+    ) void {
+        if (justified.epoch > self.fcStore.unrealized_justified.checkpoint.epoch) {
+            self.fcStore.unrealized_justified = .{
+                .checkpoint = justified,
+                .balances = self.fcStore.unrealized_justified.balances,
+                .total_balance = self.fcStore.unrealized_justified.total_balance,
+            };
+        }
+        if (finalized.epoch > self.fcStore.unrealized_finalized_checkpoint.epoch) {
+            self.fcStore.unrealized_finalized_checkpoint = finalized;
+        }
     }
 
     pub fn getJustifiedCheckpoint(self: *const ForkChoice) CheckpointWithPayloadStatus {
@@ -803,7 +827,7 @@ test "updateTime advances slot" {
     try testing.expectEqual(@as(Slot, 10), fc.getTime());
 }
 
-test "checkpoint updates" {
+test "updateCheckpoints advances justified on higher epoch" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
@@ -817,11 +841,88 @@ test "checkpoint updates" {
     defer fc.deinit(testing.allocator);
 
     const new_root = hashFromByte(0x02);
-    try fc.updateJustifiedCheckpoint(testing.allocator, makeTestCheckpoint(1, new_root), &[_]u16{1});
-    try testing.expectEqual(@as(Epoch, 1), fc.getJustifiedCheckpoint().epoch);
+    fc.updateCheckpoints(
+        .{ .epoch = 1, .root = new_root },
+        .{ .epoch = 1, .root = new_root },
+    );
 
-    fc.updateFinalizedCheckpoint(makeTestCheckpoint(1, new_root));
-    try testing.expectEqual(@as(Epoch, 1), fc.getFinalizedCheckpoint().epoch);
+    try testing.expectEqual(@as(Epoch, 1), fc.fcStore.justified.checkpoint.epoch);
+    try testing.expectEqual(@as(Epoch, 1), fc.fcStore.finalized_checkpoint.epoch);
+}
+
+test "updateCheckpoints does not regress justified epoch" {
+    const genesis_root = hashFromByte(0x01);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .config = getTestConfig(),
+        .justified_checkpoint = makeTestCheckpoint(2, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(1, genesis_root),
+        .justified_balances = &.{},
+        .justified_balances_getter = test_balances_getter,
+    }, genesis_block, 64);
+    defer fc.deinit(testing.allocator);
+
+    fc.updateCheckpoints(
+        .{ .epoch = 1, .root = hashFromByte(0x02) },
+        .{ .epoch = 0, .root = hashFromByte(0x02) },
+    );
+
+    // Should not regress.
+    try testing.expectEqual(@as(Epoch, 2), fc.fcStore.justified.checkpoint.epoch);
+    try testing.expectEqual(@as(Epoch, 1), fc.fcStore.finalized_checkpoint.epoch);
+}
+
+test "updateUnrealizedCheckpoints advances unrealized" {
+    const genesis_root = hashFromByte(0x01);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .config = getTestConfig(),
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &.{},
+        .justified_balances_getter = test_balances_getter,
+    }, genesis_block, 0);
+    defer fc.deinit(testing.allocator);
+
+    const new_root = hashFromByte(0x02);
+    fc.updateUnrealizedCheckpoints(
+        .{ .epoch = 2, .root = new_root },
+        .{ .epoch = 1, .root = new_root },
+    );
+
+    try testing.expectEqual(@as(Epoch, 2), fc.fcStore.unrealized_justified.checkpoint.epoch);
+    try testing.expectEqual(@as(Epoch, 1), fc.fcStore.unrealized_finalized_checkpoint.epoch);
+}
+
+test "updateUnrealizedCheckpoints does not regress epoch" {
+    const genesis_root = hashFromByte(0x01);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .config = getTestConfig(),
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &.{},
+        .justified_balances_getter = test_balances_getter,
+    }, genesis_block, 0);
+    defer fc.deinit(testing.allocator);
+
+    // First advance unrealized to epoch 3/2.
+    fc.updateUnrealizedCheckpoints(
+        .{ .epoch = 3, .root = hashFromByte(0x02) },
+        .{ .epoch = 2, .root = hashFromByte(0x02) },
+    );
+
+    // Attempt to regress to epoch 1/1 — should be ignored.
+    fc.updateUnrealizedCheckpoints(
+        .{ .epoch = 1, .root = hashFromByte(0x03) },
+        .{ .epoch = 1, .root = hashFromByte(0x03) },
+    );
+
+    try testing.expectEqual(@as(Epoch, 3), fc.fcStore.unrealized_justified.checkpoint.epoch);
+    try testing.expectEqual(@as(Epoch, 2), fc.fcStore.unrealized_finalized_checkpoint.epoch);
 }
 
 test "prune delegates to ProtoArray" {
