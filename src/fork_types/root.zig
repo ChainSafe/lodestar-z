@@ -16,6 +16,7 @@ pub const AnyBeaconBlock = @import("./any_beacon_block.zig").AnyBeaconBlock;
 pub const AnyBeaconBlockBody = @import("./any_beacon_block.zig").AnyBeaconBlockBody;
 pub const AnyExecutionPayload = @import("./any_execution_payload.zig").AnyExecutionPayload;
 pub const AnyExecutionPayloadHeader = @import("./any_execution_payload.zig").AnyExecutionPayloadHeader;
+pub const AnyIndexedAttestation = @import("./any_indexed_attestation.zig").AnyIndexedAttestation;
 
 const testing = @import("std").testing;
 test {
@@ -32,4 +33,5 @@ test {
     testing.refAllDecls(AnyBeaconBlockBody);
     testing.refAllDecls(AnyExecutionPayload);
     testing.refAllDecls(AnyExecutionPayloadHeader);
+    testing.refAllDecls(AnyIndexedAttestation);
 }
