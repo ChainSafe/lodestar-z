@@ -609,4 +609,17 @@ pub fn build(b: *std.Build) void {
     module_bls_spec_tests.addImport("hex", module_hex);
     module_bls_spec_tests.addImport("yaml", dep_yaml.module("yaml"));
     module_bls_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
+
+    // testing module imports for DST simulation
+    module_testing.addImport("state_transition", module_state_transition);
+    module_testing.addImport("consensus_types", module_consensus_types);
+    module_testing.addImport("fork_types", module_fork_types);
+    module_testing.addImport("config", module_config);
+    module_testing.addImport("preset", module_preset);
+    module_testing.addImport("ssz", module_ssz);
+    module_testing.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_testing.addImport("bls", module_bls);
+    module_testing.addImport("hex", module_hex);
+    module_testing.addImport("constants", module_constants);
+    module_testing.addImport("build_options", options_module_build_options);
 }

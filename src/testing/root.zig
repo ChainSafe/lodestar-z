@@ -13,11 +13,18 @@ pub const sim_io = @import("sim_io.zig");
 pub const sim_clock = @import("sim_clock.zig");
 pub const sim_network = @import("sim_network.zig");
 pub const sim_storage = @import("sim_storage.zig");
+pub const block_generator = @import("block_generator.zig");
+pub const invariant_checker = @import("invariant_checker.zig");
+pub const sim_beacon_node = @import("sim_beacon_node.zig");
+pub const sim_test = @import("sim_test.zig");
 
 pub const SimIo = sim_io.SimIo;
 pub const SlotClock = sim_clock.SlotClock;
 pub const SimNetwork = sim_network.SimNetwork;
 pub const SimStorage = sim_storage.SimStorage;
+pub const BlockGenerator = block_generator.BlockGenerator;
+pub const InvariantChecker = invariant_checker.InvariantChecker;
+pub const SimBeaconNode = sim_beacon_node.SimBeaconNode;
 
 pub const SLOTS_PER_EPOCH = sim_clock.SLOTS_PER_EPOCH;
 
@@ -201,4 +208,8 @@ comptime {
     _ = sim_clock;
     _ = sim_network;
     _ = sim_storage;
+    _ = block_generator;
+    _ = invariant_checker;
+    _ = sim_beacon_node;
+    _ = sim_test;
 }
