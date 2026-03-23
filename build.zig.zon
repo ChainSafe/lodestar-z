@@ -20,6 +20,9 @@
             .url = "git+https://github.com/lodekeeper-z/zig-yaml#37bcbed3fbfe38ace6ada1020ebb4ea09747574c",
             .hash = "zig_yaml-0.1.0-C1161pOKAgAhsmZ2SAjaQ2cIzaccoi5dn4x6UmsN0eC_",
         },
+        .eth_p2p_z = .{
+            .path = "../lodekeeper-z/eth-p2p-z",
+        },
         // TODO: re-enable when 0.16-compatible
         // .zapi = .{ .url = "git+https://github.com/lodekeeper-z/zapi#chore/zig-master" },
         // .zbench = .{ .url = "..." },

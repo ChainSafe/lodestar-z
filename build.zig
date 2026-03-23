@@ -50,6 +50,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    // eth-p2p-z: optional libp2p dependency for gossipsub/req-resp integration
+    const dep_eth_p2p_z = b.dependency("eth_p2p_z", .{
+        .optimize = optimize,
+        .target = target,
+    });
+
     const dep_yaml = b.dependency("yaml", .{
         .optimize = optimize,
         .target = target,
@@ -391,6 +397,13 @@ pub fn build(b: *std.Build) void {
         .root_module = module_networking,
         .filters = b.option([][]const u8, "networking.filters", "networking test filters") orelse &[_][]const u8{},
     });
+    // Link eth-p2p-z's C dependencies (lsquic via transitive dep)
+    const lsquic_dep = dep_eth_p2p_z.builder.dependency("lsquic", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    test_networking.root_module.linkLibrary(lsquic_dep.artifact("lsquic"));
+    test_networking.root_module.addIncludePath(lsquic_dep.path("include"));
     const run_test_networking = b.addRunArtifact(test_networking);
     const tls_run_test_networking = b.step("test:networking", "Run the networking test");
     tls_run_test_networking.dependOn(&run_test_networking.step);
@@ -527,6 +540,7 @@ pub fn build(b: *std.Build) void {
     module_networking.addImport("consensus_types", module_consensus_types);
     module_networking.addImport("preset", module_preset);
     module_networking.addImport("constants", module_constants);
+    module_networking.addImport("zig-libp2p", dep_eth_p2p_z.module("zig-libp2p"));
 
     module_download_era_files.addImport("download_era_options", options_module_download_era_options);
 

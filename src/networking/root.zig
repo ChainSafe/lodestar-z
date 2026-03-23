@@ -15,6 +15,8 @@ pub const req_resp_handler = @import("req_resp_handler.zig");
 pub const gossip_topics = @import("gossip_topics.zig");
 pub const gossip_validation = @import("gossip_validation.zig");
 pub const gossip_decoding = @import("gossip_decoding.zig");
+pub const eth_gossip = @import("eth_gossip.zig");
+pub const eth_reqresp = @import("eth_reqresp.zig");
 
 // Re-export key types for convenience.
 pub const ResponseCode = protocol.ResponseCode;
@@ -22,6 +24,8 @@ pub const Method = protocol.Method;
 pub const Encoding = protocol.Encoding;
 
 pub const encodeRequest = req_resp_encoding.encodeRequest;
+pub const parseProtocolId = protocol.parseProtocolId;
+pub const formatProtocolId = protocol.formatProtocolId;
 pub const decodeRequest = req_resp_encoding.decodeRequest;
 pub const encodeResponseChunk = req_resp_encoding.encodeResponseChunk;
 pub const decodeResponseChunk = req_resp_encoding.decodeResponseChunk;
@@ -45,6 +49,10 @@ pub const SeenSet = gossip_validation.SeenSet;
 pub const DecodeError = gossip_decoding.DecodeError;
 pub const DecodedGossipMessage = gossip_decoding.DecodedGossipMessage;
 pub const decodeGossipMessage = gossip_decoding.decodeGossipMessage;
+
+// eth-p2p-z adapter re-exports.
+pub const EthGossipAdapter = eth_gossip.EthGossipAdapter;
+pub const EthReqRespAdapter = eth_reqresp.EthReqRespAdapter;
 
 test {
     testing.refAllDecls(@This());

@@ -203,3 +203,51 @@ test "protocolId formatting" {
     const id2 = protocolId(&buf, .beacon_blocks_by_range, .ssz_snappy);
     try testing.expectEqualStrings("/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy", id2);
 }
+
+/// Parse a protocol ID string to extract the method.
+///
+/// Expected format: `/eth2/beacon_chain/req/<method>/<version>/<encoding>`
+/// Returns null if the protocol ID doesn't match a known method.
+pub fn parseProtocolId(protocol_id_str: []const u8) ?Method {
+    // Strip the prefix.
+    const prefix_with_slash = protocol_prefix ++ "/";
+    if (!std.mem.startsWith(u8, protocol_id_str, prefix_with_slash)) return null;
+    const rest = protocol_id_str[prefix_with_slash.len..];
+
+    // Find the method name (up to next '/').
+    const method_end = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+    const method_name = rest[0..method_end];
+
+    // Match method name to enum.
+    inline for (std.meta.fields(Method)) |field| {
+        const m: Method = @enumFromInt(field.value);
+        if (std.mem.eql(u8, m.name(), method_name)) return m;
+    }
+    return null;
+}
+
+/// Format a protocol ID string with allocation.
+///
+/// Caller owns the returned string.
+pub fn formatProtocolId(allocator: std.mem.Allocator, method: Method) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/{s}/{d}/{s}", .{
+        protocol_prefix,
+        method.name(),
+        method.version(),
+        Encoding.ssz_snappy.suffix(),
+    });
+}
+
+test "parseProtocolId" {
+    try testing.expectEqual(Method.status, parseProtocolId("/eth2/beacon_chain/req/status/1/ssz_snappy").?);
+    try testing.expectEqual(Method.ping, parseProtocolId("/eth2/beacon_chain/req/ping/1/ssz_snappy").?);
+    try testing.expectEqual(Method.beacon_blocks_by_range, parseProtocolId("/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy").?);
+    try testing.expect(parseProtocolId("/unknown/protocol") == null);
+    try testing.expect(parseProtocolId("/eth2/beacon_chain/req/nonexistent/1/ssz_snappy") == null);
+}
+
+test "formatProtocolId" {
+    const id = try formatProtocolId(testing.allocator, .status);
+    defer testing.allocator.free(id);
+    try testing.expectEqualStrings("/eth2/beacon_chain/req/status/1/ssz_snappy", id);
+}
