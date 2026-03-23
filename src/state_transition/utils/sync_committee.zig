@@ -11,7 +11,6 @@ const SyncCommittee = types.altair.SyncCommittee.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const ForkSeq = @import("config").ForkSeq;
 
-
 pub const getNextSyncCommitteeIndices = @import("./seed.zig").getNextSyncCommitteeIndices;
 
 pub const SyncCommitteeInfo = struct {
