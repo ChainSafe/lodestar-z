@@ -58,6 +58,11 @@ const UpdateAndGetHeadResult = interface_mod.UpdateAndGetHeadResult;
 
 const fork_types = @import("fork_types");
 const AnyIndexedAttestation = fork_types.AnyIndexedAttestation;
+const AnyBeaconBlock = fork_types.AnyBeaconBlock;
+const ForkSeq = @import("config").ForkSeq;
+const CachedBeaconState = state_transition.CachedBeaconState;
+const UnrealizedCheckpoints = state_transition.UnrealizedCheckpoints;
+const BlockExtraMeta = proto_array_mod.BlockExtraMeta;
 
 const ZERO_HASH = constants.ZERO_HASH;
 
@@ -212,9 +217,137 @@ pub const ForkChoice = struct {
 
     // ── Block processing ──
 
+    /// Full block import matching TS `onBlock()`.
+    /// Extracts checkpoints from state, computes unrealized checkpoints,
+    /// updates fork choice store, and adds the block to the proto array.
+    pub fn onBlock(
+        self: *ForkChoice,
+        allocator: Allocator,
+        block: *const AnyBeaconBlock,
+        block_root: Root,
+        state: *CachedBeaconState,
+        block_delay_sec: u32,
+        current_slot: Slot,
+        execution_status: proto_array_mod.ExecutionStatus,
+        data_availability_status: proto_array_mod.DataAvailabilityStatus,
+    ) !ProtoBlock {
+        const slot = block.slot();
+        const parent_root = block.parentRoot().*;
+
+        // 1. Parent must be known.
+        if (!self.proto_array.indices.contains(parent_root)) return error.InvalidBlock;
+
+        // 2. Reject future slot.
+        if (slot > current_slot) return error.InvalidBlock;
+
+        // 3. Reject finalized slot.
+        const finalized_slot = computeStartSlotAtEpoch(self.fcStore.finalized_checkpoint.epoch);
+        if (slot <= finalized_slot) return error.InvalidBlock;
+
+        // 4. Check finalized descendant.
+        const parent_idx = self.proto_array.getDefaultNodeIndex(parent_root) orelse return error.InvalidBlock;
+        const parent_node = &self.proto_array.nodes.items[parent_idx];
+        if (!self.proto_array.isFinalizedRootOrDescendant(parent_node)) return error.InvalidBlock;
+
+        // 5. Timeliness and proposer boost.
+        const timely = self.isBlockTimely(slot, block_delay_sec);
+        if (timely and self.proposer_boost_root == null) {
+            self.proposer_boost_root = block_root;
+        }
+
+        // 6. Extract checkpoints from state.
+        var ssz_justified: consensus_types.phase0.Checkpoint.Type = undefined;
+        try state.state.currentJustifiedCheckpoint(&ssz_justified);
+        var ssz_finalized: consensus_types.phase0.Checkpoint.Type = undefined;
+        try state.state.finalizedCheckpoint(&ssz_finalized);
+
+        const justified_checkpoint: CheckpointWithPayloadStatus = .{
+            .epoch = ssz_justified.epoch,
+            .root = ssz_justified.root,
+        };
+        const finalized_checkpoint: CheckpointWithPayloadStatus = .{
+            .epoch = ssz_finalized.epoch,
+            .root = ssz_finalized.root,
+        };
+
+        // 7. Compute or inherit unrealized checkpoints.
+        var unrealized_justified = justified_checkpoint;
+        var unrealized_finalized = finalized_checkpoint;
+        if (self.opts.compute_unrealized) {
+            const unrealized = try state_transition.computeUnrealizedCheckpoints(state, allocator);
+            unrealized_justified = .{
+                .epoch = unrealized.justified_checkpoint.epoch,
+                .root = unrealized.justified_checkpoint.root,
+            };
+            unrealized_finalized = .{
+                .epoch = unrealized.finalized_checkpoint.epoch,
+                .root = unrealized.finalized_checkpoint.root,
+            };
+        }
+
+        // 8. Update realized checkpoints.
+        self.updateCheckpoints(justified_checkpoint, finalized_checkpoint);
+
+        // 9. Update unrealized checkpoints.
+        self.updateUnrealizedCheckpoints(unrealized_justified, unrealized_finalized);
+
+        // 10. If block from past epoch: update realized with unrealized.
+        const block_epoch = computeEpochAtSlot(slot);
+        const current_epoch = computeEpochAtSlot(current_slot);
+        if (block_epoch < current_epoch) {
+            self.updateCheckpoints(unrealized_justified, unrealized_finalized);
+        }
+
+        // 11. Construct BlockExtraMeta based on fork.
+        const fork_seq = block.forkSeq();
+        const extra_meta: BlockExtraMeta = if (fork_seq.gte(.bellatrix)) blk: {
+            const body = block.beaconBlockBody();
+            if (body.blockType() == .full) {
+                const payload = try body.executionPayload();
+                break :blk .{ .post_merge = BlockExtraMeta.PostMergeMeta.init(
+                    payload.blockHash().*,
+                    payload.blockNumber(),
+                    execution_status,
+                    data_availability_status,
+                ) };
+            } else {
+                const header = try body.executionPayloadHeader();
+                break :blk .{ .post_merge = BlockExtraMeta.PostMergeMeta.init(
+                    header.blockHash(),
+                    header.blockNumber(),
+                    execution_status,
+                    data_availability_status,
+                ) };
+            }
+        } else .{ .pre_merge = {} };
+
+        // 12. Construct ProtoBlock.
+        const proto_block = ProtoBlock{
+            .slot = slot,
+            .block_root = block_root,
+            .parent_root = parent_root,
+            .state_root = block.stateRoot().*,
+            .target_root = if (computeStartSlotAtEpoch(block_epoch) == slot) block_root else parent_node.toBlock().target_root,
+            .justified_epoch = justified_checkpoint.epoch,
+            .justified_root = justified_checkpoint.root,
+            .finalized_epoch = finalized_checkpoint.epoch,
+            .finalized_root = finalized_checkpoint.root,
+            .unrealized_justified_epoch = unrealized_justified.epoch,
+            .unrealized_justified_root = unrealized_justified.root,
+            .unrealized_finalized_epoch = unrealized_finalized.epoch,
+            .unrealized_finalized_root = unrealized_finalized.root,
+            .extra_meta = extra_meta,
+            .timeliness = timely,
+        };
+
+        // 13. Add to proto array.
+        try self.proto_array.onBlock(allocator, proto_block, current_slot, self.proposer_boost_root);
+
+        return proto_block;
+    }
+
     /// Simplified onBlock that takes a pre-constructed ProtoBlock.
     /// Used by tests and for cases where block/state processing is done externally.
-    /// The full onBlock (taking AnyBeaconBlock + CachedBeaconState) will be added later.
     pub fn onBlockFromProto(
         self: *ForkChoice,
         allocator: Allocator,
