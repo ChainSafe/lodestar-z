@@ -141,6 +141,13 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("state_transition"), module_state_transition) catch @panic("OOM");
 
+
+    const module_networking = b.createModule(.{
+        .root_source_file = b.path("src/networking/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("networking"), module_networking) catch @panic("OOM");
     // === Executables ===
     const module_download_era_files = b.createModule(.{
         .root_source_file = b.path("scripts/download_era_files.zig"),
@@ -378,6 +385,16 @@ pub fn build(b: *std.Build) void {
     const tls_run_test_era = b.step("test:era", "Run the era test");
     tls_run_test_era.dependOn(&run_test_era.step);
     tls_run_test.dependOn(&run_test_era.step);
+
+    const test_networking = b.addTest(.{
+        .name = "networking",
+        .root_module = module_networking,
+        .filters = b.option([][]const u8, "networking.filters", "networking test filters") orelse &[_][]const u8{},
+    });
+    const run_test_networking = b.addRunArtifact(test_networking);
+    const tls_run_test_networking = b.step("test:networking", "Run the networking test");
+    tls_run_test_networking.dependOn(&run_test_networking.step);
+    tls_run_test.dependOn(&run_test_networking.step);
     // Spec test modules
     const module_int = b.createModule(.{
         .root_source_file = b.path("test/int/era/root.zig"),
@@ -504,6 +521,12 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     // TODO: metrics dep not yet 0.16-compatible
     // module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
+
+    module_networking.addImport("snappy", dep_snappy.module("snappy"));
+    module_networking.addImport("ssz", module_ssz);
+    module_networking.addImport("consensus_types", module_consensus_types);
+    module_networking.addImport("preset", module_preset);
+    module_networking.addImport("constants", module_constants);
 
     module_download_era_files.addImport("download_era_options", options_module_download_era_options);
 
