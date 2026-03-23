@@ -839,13 +839,16 @@ pub const ForkChoice = struct {
     // ── Execution validation ──
 
     /// Propagate execution layer validity response through the DAG.
+    /// Sets irrecoverable_error on failure instead of propagating the error.
     pub fn validateLatestHash(
         self: *ForkChoice,
         allocator: Allocator,
         response: LVHExecResponse,
         current_slot: Slot,
-    ) (Allocator.Error || ProtoArrayError)!void {
-        try self.proto_array.validateLatestHash(allocator, response, current_slot);
+    ) void {
+        self.proto_array.validateLatestHash(allocator, response, current_slot) catch {
+            self.irrecoverable_error = true;
+        };
     }
 
     // ── Block queries ──
