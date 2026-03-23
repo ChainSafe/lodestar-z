@@ -183,6 +183,20 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("sync"), module_sync) catch @panic("OOM");
 
+    const module_node = b.createModule(.{
+        .root_source_file = b.path("src/node/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("node"), module_node) catch @panic("OOM");
+
+    const module_execution = b.createModule(.{
+        .root_source_file = b.path("src/execution/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("execution"), module_execution) catch @panic("OOM");
+
     const module_testing = b.createModule(.{
         .root_source_file = b.path("src/testing/root.zig"),
         .target = target,
@@ -474,6 +488,16 @@ pub fn build(b: *std.Build) void {
     tls_run_test_sync.dependOn(&run_test_sync.step);
     tls_run_test.dependOn(&run_test_sync.step);
 
+    const test_execution = b.addTest(.{
+        .name = "execution",
+        .root_module = module_execution,
+        .filters = b.option([][]const u8, "execution.filters", "execution test filters") orelse &[_][]const u8{},
+    });
+    const run_test_execution = b.addRunArtifact(test_execution);
+    const tls_run_test_execution = b.step("test:execution", "Run the execution engine tests");
+    tls_run_test_execution.dependOn(&run_test_execution.step);
+    tls_run_test.dependOn(&run_test_execution.step);
+
     const test_db = b.addTest(.{
         .name = "db",
         .root_module = module_db,
@@ -493,6 +517,17 @@ pub fn build(b: *std.Build) void {
     const tls_run_test_api = b.step("test:api", "Run the api test");
     tls_run_test_api.dependOn(&run_test_api.step);
     tls_run_test.dependOn(&run_test_api.step);
+
+    const test_node = b.addTest(.{
+        .name = "node",
+        .root_module = module_node,
+        .filters = b.option([][]const u8, "node.filters", "node test filters") orelse &[_][]const u8{},
+    });
+    const run_test_node = b.addRunArtifact(test_node);
+    const tls_run_test_node = b.step("test:node", "Run the node orchestrator tests");
+    tls_run_test_node.dependOn(&run_test_node.step);
+    tls_run_test.dependOn(&run_test_node.step);
+
     // Spec test modules
     const module_int = b.createModule(.{
         .root_source_file = b.path("test/int/era/root.zig"),
@@ -715,4 +750,21 @@ pub fn build(b: *std.Build) void {
     module_api.addImport("hex", module_hex);
     module_api.addImport("constants", module_constants);
     module_api.addImport("build_options", options_module_build_options);
+
+    // node module imports
+    module_node.addImport("consensus_types", module_consensus_types);
+    module_node.addImport("preset", module_preset);
+    module_node.addImport("config", module_config);
+    module_node.addImport("fork_types", module_fork_types);
+    module_node.addImport("state_transition", module_state_transition);
+    module_node.addImport("db", module_db);
+    module_node.addImport("chain", module_chain);
+    module_node.addImport("networking", module_networking);
+    module_node.addImport("api", module_api);
+    module_node.addImport("ssz", module_ssz);
+    module_node.addImport("constants", module_constants);
+    module_node.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_node.addImport("bls", module_bls);
+    module_node.addImport("hex", module_hex);
+    module_node.addImport("build_options", options_module_build_options);
 }
