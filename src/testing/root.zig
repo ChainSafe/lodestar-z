@@ -22,6 +22,9 @@ pub const sim_test = @import("sim_test.zig");
 pub const cluster_invariant_checker = @import("cluster_invariant_checker.zig");
 pub const sim_cluster = @import("sim_cluster.zig");
 pub const sim_cluster_test = @import("sim_cluster_test.zig");
+pub const head_tracker = @import("head_tracker.zig");
+pub const block_import = @import("block_import.zig");
+pub const block_import_test = @import("block_import_test.zig");
 
 pub const SimIo = sim_io.SimIo;
 pub const SlotClock = sim_clock.SlotClock;
@@ -34,6 +37,8 @@ pub const SimTestHarness = sim_test_harness.SimTestHarness;
 pub const SimBeaconNode = sim_beacon_node.SimBeaconNode;
 pub const ClusterInvariantChecker = cluster_invariant_checker.ClusterInvariantChecker;
 pub const SimCluster = sim_cluster.SimCluster;
+pub const HeadTracker = head_tracker.HeadTracker;
+pub const BlockImporter = block_import.BlockImporter;
 
 pub const SLOTS_PER_EPOCH = sim_clock.SLOTS_PER_EPOCH;
 
@@ -226,4 +231,7 @@ comptime {
     _ = cluster_invariant_checker;
     _ = sim_cluster;
     _ = sim_cluster_test;
+    _ = head_tracker;
+    _ = block_import;
+    _ = block_import_test;
 }
