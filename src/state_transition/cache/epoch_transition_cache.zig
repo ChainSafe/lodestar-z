@@ -442,14 +442,18 @@ pub const EpochTransitionCache = struct {
             @memcpy(reused_cache.previous_epoch_participation.items[0..validator_count], previous_epoch_participation);
             @memcpy(reused_cache.current_epoch_participation.items[0..validator_count], current_epoch_participation);
 
+            // Participation bytes use only bits 0-2 (TIMELY_SOURCE, TIMELY_TARGET, TIMELY_HEAD).
+            // Mask to prevent higher bits from bleeding into FLAG_CURR_* or FLAG_UNSLASHED/FLAG_ELIGIBLE
+            // positions when previous participation is OR'd directly into the flag byte.
+            const PARTICIPATION_FLAG_MASK: u8 = (1 << (c.TIMELY_HEAD_FLAG_INDEX + 1)) - 1; // 0b00000111
             for (0..validator_count) |i| {
                 reused_cache.flags.items[i] |=
                     // checking active status first is required to pass random spec tests in altair
                     // in practice, inactive validators will have 0 participation
                     // FLAG_PREV are indexes [0,1,2]
-                    (if (reused_cache.is_active_prev_epoch.items[i]) reused_cache.previous_epoch_participation.items[i] else 0) |
+                    (if (reused_cache.is_active_prev_epoch.items[i]) reused_cache.previous_epoch_participation.items[i] & PARTICIPATION_FLAG_MASK else 0) |
                     // FLAG_CURR are indexes [3,4,5], so shift by 3
-                    (if (reused_cache.is_active_current_epoch.items[i]) reused_cache.current_epoch_participation.items[i] << 3 else 0);
+                    (if (reused_cache.is_active_current_epoch.items[i]) (reused_cache.current_epoch_participation.items[i] & PARTICIPATION_FLAG_MASK) << 3 else 0);
             }
         }
 

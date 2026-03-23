@@ -225,25 +225,88 @@ test "cluster: single node — trivially consistent" {
 }
 
 // ── Test 9: Finality progresses with attestations ────────────────────
-//
-// KNOWN ISSUE: Tests 9, 10, and 12 are disabled because attestation
-// processing across multiple epoch boundaries triggers
-// InCorrectCurrentTargetUnslashedBalance in EpochTransitionCache.init.
-//
-// Root cause: The progressive balance tracking in EpochCache falls out
-// of sync with participation flags when processing attestations across
-// epoch boundaries.  This is a state transition bug, not a testing
-// infrastructure issue.
-//
-// Fix required in: src/state_transition/cache/epoch_transition_cache.zig:487
-// Tracked as a TODO for the state_transition module.
 
 test "cluster: finality progresses with 90% participation" {
-    return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var cluster = try SimCluster.init(allocator, .{
+        .num_nodes = 4,
+        .seed = 42,
+        .validator_count = 64,
+        .participation_rate = 0.9,
+    });
+    defer cluster.deinit();
+
+    // Run enough slots for finality to progress (3+ epochs minimum).
+    // With mainnet preset (32 slots/epoch), 128 slots = 4 epochs.
+    const preset_mod = @import("preset").preset;
+    const slots_for_finality = preset_mod.SLOTS_PER_EPOCH * 5;
+    const result = try cluster.run(slots_for_finality);
+
+    try testing.expectEqual(@as(u64, slots_for_finality), result.slots_processed);
+    try testing.expectEqual(@as(u64, 0), result.safety_violations);
+    try testing.expectEqual(@as(u64, 0), result.state_divergences);
+
+    // Finality must have progressed past epoch 0 with 90% participation.
+    try testing.expect(result.finalized_epoch > 0);
+
+    // All nodes must agree on state.
+    const root_0 = (try cluster.nodes[0].head_state.state.hashTreeRoot()).*;
+    for (1..4) |i| {
+        const root_i = (try cluster.nodes[i].head_state.state.hashTreeRoot()).*;
+        try testing.expectEqualSlices(u8, &root_0, &root_i);
+    }
 }
 
-test "cluster: low participation prevents finality" {
-    return error.SkipZigTest;
+test "cluster: low participation — finality stalls vs high participation" {
+    const allocator = testing.allocator;
+    const preset_mod = @import("preset").preset;
+    const num_epochs = 5;
+    const num_slots = preset_mod.SLOTS_PER_EPOCH * num_epochs;
+
+    // Run with LOW participation (30%).
+    var low_finalized: u64 = undefined;
+    {
+        var cluster = try SimCluster.init(allocator, .{
+            .num_nodes = 4,
+            .seed = 42,
+            .validator_count = 64,
+            .participation_rate = 0.3,
+        });
+        defer cluster.deinit();
+
+        const result = try cluster.run(num_slots);
+        try testing.expectEqual(@as(u64, 0), result.safety_violations);
+        try testing.expectEqual(@as(u64, 0), result.state_divergences);
+        low_finalized = result.finalized_epoch;
+
+        // All nodes must agree.
+        const root_0 = (try cluster.nodes[0].head_state.state.hashTreeRoot()).*;
+        for (1..4) |i| {
+            const root_i = (try cluster.nodes[i].head_state.state.hashTreeRoot()).*;
+            try testing.expectEqualSlices(u8, &root_0, &root_i);
+        }
+    }
+
+    // Run with HIGH participation (100%).
+    var high_finalized: u64 = undefined;
+    {
+        var cluster = try SimCluster.init(allocator, .{
+            .num_nodes = 4,
+            .seed = 42,
+            .validator_count = 64,
+            .participation_rate = 1.0,
+        });
+        defer cluster.deinit();
+
+        const result = try cluster.run(num_slots);
+        try testing.expectEqual(@as(u64, 0), result.safety_violations);
+        try testing.expectEqual(@as(u64, 0), result.state_divergences);
+        high_finalized = result.finalized_epoch;
+    }
+
+    // High participation should achieve more finality than low.
+    try testing.expect(high_finalized > low_finalized);
 }
 
 // ── Test 11: Deterministic attestation replay ────────────────────────
@@ -277,5 +340,25 @@ test "cluster: deterministic replay with attestations" {
 // ── Test 12: Single node cluster with attestations ───────────────────
 
 test "cluster: single node with attestations — finality progresses" {
-    return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var cluster = try SimCluster.init(allocator, .{
+        .num_nodes = 1,
+        .seed = 1,
+        .validator_count = 64,
+        .participation_rate = 1.0,
+    });
+    defer cluster.deinit();
+
+    // Run enough slots for finality with 100% participation.
+    const preset_mod = @import("preset").preset;
+    const slots_for_finality = preset_mod.SLOTS_PER_EPOCH * 5;
+    const result = try cluster.run(slots_for_finality);
+
+    try testing.expectEqual(@as(u64, slots_for_finality), result.slots_processed);
+    try testing.expectEqual(@as(u64, slots_for_finality), result.blocks_produced);
+    try testing.expectEqual(@as(u64, 0), result.safety_violations);
+
+    // With 100% participation, single node should reach finality.
+    try testing.expect(result.finalized_epoch > 0);
 }

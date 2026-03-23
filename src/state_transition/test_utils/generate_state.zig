@@ -80,8 +80,8 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
         try electra_state.validators.append(allocator, validator);
         try electra_state.balances.append(allocator, EFFECTIVE_BALANCE);
         try electra_state.inactivity_scores.append(allocator, 0);
-        try electra_state.previous_epoch_participation.append(allocator, 0b11111111);
-        try electra_state.current_epoch_participation.append(allocator, 0b11111111);
+        try electra_state.previous_epoch_participation.append(allocator, 0b00000111);
+        try electra_state.current_epoch_participation.append(allocator, 0b00000111);
     }
 
     electra_state.eth1_data = .{

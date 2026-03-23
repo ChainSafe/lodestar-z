@@ -148,21 +148,97 @@ test "sim: scenario with skip rate — some slots skipped deterministically" {
 
 // ── Test 6: Blocks with attestations — single-node ───────────────────
 
-// SKIP: Attestation progressive balance issue — see sim_cluster_test.zig comment.
 test "sim: blocks with attestations — single node, 40 slots" {
-    return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
+    defer pool.deinit();
+
+    var harness = try SimTestHarness.init(allocator, &pool, 42);
+    defer harness.deinit();
+
+    // Enable full attestation participation.
+    harness.sim.participation_rate = 1.0;
+
+    // Process 40 slots (slightly more than one epoch with mainnet preset).
+    try harness.sim.processSlots(40, 0.0);
+
+    try testing.expectEqual(@as(u64, 40), harness.sim.slots_processed);
+    try testing.expectEqual(@as(u64, 40), harness.sim.blocks_processed);
+
+    // Must have crossed at least one epoch boundary.
+    try testing.expect(harness.sim.epochs_processed >= 1);
+
+    // Invariant checker should have 40 entries.
+    try testing.expectEqual(@as(usize, 40), harness.sim.checker.state_history.items.len);
 }
 
 // ── Test 7: Deterministic attestation replay — single node ───────────
 
-// SKIP: Attestation progressive balance issue — see sim_cluster_test.zig comment.
 test "sim: deterministic attestation replay — same seed same finality" {
-    return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const num_slots = 40;
+
+    var final_roots: [2][32]u8 = undefined;
+    var finalized_epochs: [2]u64 = undefined;
+    var history_storage: [2]std.ArrayList(StateHistoryEntry) = .{ .empty, .empty };
+    defer history_storage[0].deinit(allocator);
+    defer history_storage[1].deinit(allocator);
+
+    for (0..2) |run| {
+        var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
+        defer pool.deinit();
+
+        var harness = try SimTestHarness.init(allocator, &pool, 42);
+        defer harness.deinit();
+
+        harness.sim.participation_rate = 1.0;
+
+        try harness.sim.processSlots(num_slots, 0.0);
+
+        final_roots[run] = (try harness.sim.head_state.state.hashTreeRoot()).*;
+        finalized_epochs[run] = harness.sim.checker.finalized_epoch;
+
+        // Copy checker history for post-run comparison.
+        try history_storage[run].appendSlice(allocator, harness.sim.checker.state_history.items);
+    }
+
+    // Same seed → identical final state root.
+    try testing.expectEqualSlices(u8, &final_roots[0], &final_roots[1]);
+
+    // Same seed → identical finalized epoch.
+    try testing.expectEqual(finalized_epochs[0], finalized_epochs[1]);
+
+    // Same seed → identical history length and state roots at every slot.
+    try testing.expectEqual(history_storage[0].items.len, history_storage[1].items.len);
+    for (history_storage[0].items, history_storage[1].items) |a, b| {
+        try testing.expectEqual(a.slot, b.slot);
+        try testing.expectEqualSlices(u8, &a.state_root, &b.state_root);
+    }
 }
 
 // ── Test 8: Minimal attestation epoch crossing ────────────────────────
 
-// SKIP: Attestation progressive balance issue — see sim_cluster_test.zig comment.
 test "sim: blocks with attestations — single epoch then boundary" {
-    return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
+    defer pool.deinit();
+
+    var harness = try SimTestHarness.init(allocator, &pool, 77);
+    defer harness.deinit();
+
+    harness.sim.participation_rate = 1.0;
+
+    // The test state starts 1 slot before an epoch boundary.
+    // Process to the boundary (1 slot) — triggers epoch transition.
+    const r1 = try harness.sim.processSlot(false);
+    try testing.expect(r1.block_processed);
+    try testing.expect(r1.epoch_transition);
+    try testing.expectEqual(@as(u64, 1), harness.sim.epochs_processed);
+
+    // Now process a full epoch beyond the boundary.
+    const preset_mod = @import("preset").preset;
+    try harness.sim.processSlots(preset_mod.SLOTS_PER_EPOCH, 0.0);
+
+    try testing.expectEqual(@as(u64, 1 + preset_mod.SLOTS_PER_EPOCH), harness.sim.slots_processed);
+    try testing.expectEqual(@as(u64, 2), harness.sim.epochs_processed);
 }

@@ -640,4 +640,5 @@ pub fn build(b: *std.Build) void {
     module_testing.addImport("hex", module_hex);
     module_testing.addImport("constants", module_constants);
     module_testing.addImport("build_options", options_module_build_options);
+    module_testing.addImport("db", module_db);
 }
