@@ -6,6 +6,8 @@ pub const compute_deltas = @import("compute_deltas.zig");
 pub const proto_array = @import("proto_array.zig");
 pub const store = @import("store.zig");
 pub const fork_choice = @import("fork_choice.zig");
+pub const interface = @import("interface.zig");
+pub const safe_blocks = @import("safe_blocks.zig");
 
 pub const ProtoBlock = proto_array.ProtoBlock;
 pub const ProtoNode = proto_array.ProtoNode;
@@ -50,6 +52,21 @@ pub const JustifiedBalancesGetter = store.JustifiedBalancesGetter;
 pub const EventCallback = store.EventCallback;
 pub const ForkChoiceStoreEvents = store.ForkChoiceStoreEvents;
 pub const computeTotalBalance = store.computeTotalBalance;
+
+pub const EpochDifference = interface.EpochDifference;
+pub const AncestorStatus = interface.AncestorStatus;
+pub const AncestorResult = interface.AncestorResult;
+pub const NotReorgedReason = interface.NotReorgedReason;
+pub const ShouldOverrideForkChoiceUpdateResult = interface.ShouldOverrideForkChoiceUpdateResult;
+pub const ForkChoiceOpts = interface.ForkChoiceOpts;
+pub const UpdateHeadOpt = interface.UpdateHeadOpt;
+pub const UpdateAndGetHeadOpt = interface.UpdateAndGetHeadOpt;
+pub const UpdateAndGetHeadResult = interface.UpdateAndGetHeadResult;
+pub const CheckpointWithPayloadAndBalance = interface.CheckpointWithPayloadAndBalance;
+pub const CheckpointWithPayloadAndTotalBalance = interface.CheckpointWithPayloadAndTotalBalance;
+
+pub const getSafeBeaconBlockRoot = safe_blocks.getSafeBeaconBlockRoot;
+pub const getSafeExecutionBlockHash = safe_blocks.getSafeExecutionBlockHash;
 
 test {
     testing.refAllDecls(@This());

@@ -336,6 +336,8 @@ pub const InvalidAttestationCode = enum {
     invalid_target,
     attests_to_future_block,
     future_slot,
+    /// Gloas: attestation data index must be 0 or 1.
+    invalid_data_index,
 };
 
 /// High-level fork choice errors.
