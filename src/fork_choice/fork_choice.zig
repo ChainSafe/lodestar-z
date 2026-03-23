@@ -96,25 +96,13 @@ pub const HeadResult = struct {
     payload_status: PayloadStatus = .full,
 };
 
-// ── InitOpts ──
-
-/// Options for ForkChoice initialization.
-pub const InitOpts = struct {
-    config: *const BeaconConfig,
-    opts: ForkChoiceOpts = .{},
-    justified_checkpoint: CheckpointWithPayloadStatus,
-    finalized_checkpoint: CheckpointWithPayloadStatus,
-    justified_balances: []const u16,
-    justified_balances_getter: JustifiedBalancesGetter,
-    events: ForkChoiceStoreEvents = .{},
-    prune_threshold: u32 = DEFAULT_PRUNE_THRESHOLD,
-};
-
 // ── ForkChoice ──
 
 /// High-level fork choice struct wrapping ProtoArray, Votes, and checkpoint state.
 ///
 /// This is the public API matching Lodestar TS IForkChoice.
+/// Instantiated from pre-built components (dependency injection), matching the TS constructor:
+///   `new ForkChoice(config, fcStore, protoArray, validatorCount, metrics, opts?, logger?)`
 /// Orchestrates: computeDeltas -> applyScoreChanges -> findHead.
 pub const ForkChoice = struct {
     // ── Config & options ──
@@ -147,51 +135,45 @@ pub const ForkChoice = struct {
     // ── Error state ──
     irrecoverable_error: bool,
 
-    /// Initialize ForkChoice from an anchor block.
+    /// Instantiate ForkChoice from pre-built components.
+    /// Matches TS: `new ForkChoice(config, fcStore, protoArray, validatorCount, metrics, opts)`
+    ///
+    /// The caller creates `ForkChoiceStore` and `ProtoArray` externally, then passes them in.
+    /// Votes are pre-allocated to `validator_count` and initialized to defaults.
+    /// Head is computed via `updateHead()`.
     pub fn init(
         allocator: Allocator,
-        opts: InitOpts,
-        anchor_block: ProtoBlock,
-        current_slot: Slot,
-    ) (Allocator.Error || ProtoArrayError)!ForkChoice {
-        var proto_array = try ProtoArray.initialize(
-            allocator,
-            anchor_block,
-            current_slot,
-        );
-        errdefer proto_array.deinit(allocator);
-        proto_array.prune_threshold = opts.prune_threshold;
-
-        var store = try ForkChoiceStore.init(
-            allocator,
-            current_slot,
-            opts.justified_checkpoint,
-            opts.finalized_checkpoint,
-            opts.justified_balances,
-            opts.justified_balances_getter,
-            opts.events,
-        );
-        errdefer store.deinit();
-
-        // Share the store's justified balances Rc for initial balance tracking.
-        const balances_rc = store.justified.balances.acquire();
-
-        return .{
-            .config = opts.config,
-            .opts = opts.opts,
+        config: *const BeaconConfig,
+        fc_store: ForkChoiceStore,
+        proto_array: ProtoArray,
+        validator_count: u32,
+        opts: ForkChoiceOpts,
+    ) !ForkChoice {
+        var self = ForkChoice{
+            .config = config,
+            .opts = opts,
             .proto_array = proto_array,
             .votes = .{},
-            .fcStore = store,
+            .fcStore = fc_store,
             .deltas_cache = .empty,
-            .head = anchor_block,
+            .head = undefined,
             .proposer_boost_root = null,
             .justified_proposer_boost_score = null,
-            .balances = balances_rc,
+            .balances = fc_store.justified.balances.acquire(),
             .queued_attestations = QueuedAttestationMap.init(allocator),
             .queued_attestations_previous_slot = 0,
             .validated_attestation_datas = .{},
             .irrecoverable_error = false,
         };
+        errdefer self.deinit(allocator);
+
+        // Pre-allocate votes for known validators (matches TS: new Array(validatorCount).fill(NULL_VOTE_INDEX))
+        try self.votes.ensureValidatorCount(allocator, validator_count);
+
+        // Compute initial head (matches TS: this.head = this.updateHead())
+        try self.updateHead(allocator);
+
+        return self;
     }
 
     pub fn deinit(self: *ForkChoice, allocator: Allocator) void {
@@ -1380,17 +1362,49 @@ fn getTestConfig() *const BeaconConfig {
 
 const test_balances_getter: JustifiedBalancesGetter = .{ .getFn = dummyBalancesGetter };
 
+/// Test-only helper: creates ProtoArray + ForkChoiceStore internally (old factory pattern).
+/// Keeps test call sites concise while the public API matches TS dependency injection.
+fn initTestForkChoice(
+    allocator: Allocator,
+    anchor_block: ProtoBlock,
+    current_slot: Slot,
+    justified_checkpoint: CheckpointWithPayloadStatus,
+    finalized_checkpoint: CheckpointWithPayloadStatus,
+    justified_balances: []const u16,
+) !ForkChoice {
+    var proto_array = try ProtoArray.initialize(
+        allocator,
+        anchor_block,
+        current_slot,
+    );
+    errdefer proto_array.deinit(allocator);
+
+    var store = try ForkChoiceStore.init(
+        allocator,
+        current_slot,
+        justified_checkpoint,
+        finalized_checkpoint,
+        justified_balances,
+        test_balances_getter,
+        .{},
+    );
+    errdefer store.deinit();
+
+    return try ForkChoice.init(
+        allocator,
+        getTestConfig(),
+        store,
+        proto_array,
+        0,
+        .{},
+    );
+}
+
 test "init and deinit" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 0);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 0, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     try testing.expect(fc.hasBlock(genesis_root));
@@ -1403,13 +1417,7 @@ test "onBlockFromProto adds block to DAG" {
     const block_a_root = hashFromByte(0x02);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 10);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 10, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     const block_a = makeTestBlock(1, block_a_root, genesis_root);
@@ -1423,13 +1431,7 @@ test "onBlockFromProto rejects future slot" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 5);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 5, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     const future_block = makeTestBlock(10, hashFromByte(0x02), genesis_root);
@@ -1440,13 +1442,7 @@ test "onBlockFromProto rejects unknown parent" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 10);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 10, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     const orphan_block = makeTestBlock(1, hashFromByte(0x02), hashFromByte(0xFF));
@@ -1461,13 +1457,7 @@ test "getHead returns genesis when no votes" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 0);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 0, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     try fc.updateHead(testing.allocator);
@@ -1481,13 +1471,7 @@ test "getHead with votes shifts head" {
     const block_b_root = hashFromByte(0x03);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &[_]u16{ 1, 1, 1 },
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 64);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 64, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &[_]u16{ 1, 1, 1 });
     defer fc.deinit(testing.allocator);
 
     try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_a_root, genesis_root), 64);
@@ -1508,13 +1492,7 @@ test "onAttesterSlashing removes equivocating weight" {
     const block_b_root = hashFromByte(0x03);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &[_]u16{ 1, 1, 1 },
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 64);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 64, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &[_]u16{ 1, 1, 1 });
     defer fc.deinit(testing.allocator);
 
     try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_a_root, genesis_root), 64);
@@ -1537,13 +1515,7 @@ test "updateTime advances slot" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 0);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 0, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     try testing.expectEqual(@as(Slot, 0), fc.getTime());
@@ -1559,13 +1531,7 @@ test "updateCheckpoints advances justified on higher epoch" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 0);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 0, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     const new_root = hashFromByte(0x02);
@@ -1582,13 +1548,7 @@ test "updateCheckpoints does not regress justified epoch" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(2, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(1, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 64);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 64, makeTestCheckpoint(2, genesis_root), makeTestCheckpoint(1, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     fc.updateCheckpoints(
@@ -1605,13 +1565,7 @@ test "updateUnrealizedCheckpoints advances unrealized" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 0);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 0, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     const new_root = hashFromByte(0x02);
@@ -1628,13 +1582,7 @@ test "updateUnrealizedCheckpoints does not regress epoch" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 0);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 0, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     // First advance unrealized to epoch 3/2.
@@ -1657,13 +1605,7 @@ test "prune delegates to ProtoArray" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 0);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 0, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     const pruned = try fc.prune(testing.allocator, genesis_root);
@@ -1676,13 +1618,7 @@ test "isDescendant checks ancestry" {
     const block_b_root = hashFromByte(0x03);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 10);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 10, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_a_root, genesis_root), 10);
@@ -1698,13 +1634,7 @@ test "addLatestMessage updates vote for non-equivocating validator" {
     const block_root = hashFromByte(0x02);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 32);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 32, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_root, genesis_root), 32);
@@ -1721,13 +1651,7 @@ test "addLatestMessage skips equivocating validator" {
     const block_root = hashFromByte(0x02);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 32);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 32, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_root, genesis_root), 32);
@@ -1745,13 +1669,7 @@ test "onTick resets proposer boost and advances slot" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 0);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 0, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     fc.proposer_boost_root = hashFromByte(0x02);
@@ -1769,13 +1687,7 @@ test "processAttestationQueue applies queued attestations for past slots" {
     const block_root = hashFromByte(0x02);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 5);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 5, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_root, genesis_root), 5);
@@ -1797,13 +1709,7 @@ test "updateTime loops onTick and processes queue" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 0);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 0, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     try fc.updateTime(testing.allocator, 5);
@@ -1818,15 +1724,9 @@ test "prune adjusts vote indices" {
     const block_b_root = hashFromByte(0x03);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &[_]u16{1},
-        .justified_balances_getter = test_balances_getter,
-        .prune_threshold = 0, // Always prune.
-    }, genesis_block, 64);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 64, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &[_]u16{1});
     defer fc.deinit(testing.allocator);
+    fc.setPruneThreshold(0); // Always prune.
 
     try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_a_root, genesis_root), 64);
     try fc.onBlockFromProto(testing.allocator, makeTestBlock(2, block_b_root, block_a_root), 64);
@@ -1859,13 +1759,7 @@ test "updateHead recomputes head with deltas" {
     const block_a_root = hashFromByte(0x02);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &[_]u16{1},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 64);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 64, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &[_]u16{1});
     defer fc.deinit(testing.allocator);
 
     try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_a_root, genesis_root), 64);
@@ -1880,13 +1774,7 @@ test "isBlockTimely for current slot within threshold" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 5);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 5, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     // Block at current slot with small delay is timely (SECONDS_PER_SLOT=6, threshold=6/3=2).
@@ -1900,13 +1788,7 @@ test "hasBlock checks finalized descendant" {
     const block_root = hashFromByte(0x02);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 10);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 10, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_root, genesis_root), 10);
@@ -1920,13 +1802,7 @@ test "getBlockDefaultStatus returns ProtoBlock" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 0);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 0, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     const block = fc.getBlockDefaultStatus(genesis_root);
@@ -1939,13 +1815,7 @@ test "getCanonicalBlockAtSlot finds block on canonical chain" {
     const block_a_root = hashFromByte(0x02);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &[_]u16{1},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 64);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 64, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &[_]u16{1});
     defer fc.deinit(testing.allocator);
 
     try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_a_root, genesis_root), 64);
@@ -1966,13 +1836,7 @@ test "getHeads returns leaf nodes" {
     const block_b_root = hashFromByte(0x03);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 10);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 10, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     try fc.onBlockFromProto(testing.allocator, makeTestBlock(1, block_a_root, genesis_root), 10);
@@ -1989,13 +1853,7 @@ test "getSlotsPresent counts nodes in window" {
     const block_a_root = hashFromByte(0x02);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 10);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 10, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     try fc.onBlockFromProto(testing.allocator, makeTestBlock(5, block_a_root, genesis_root), 10);
@@ -2010,13 +1868,7 @@ test "updateAndGetHead returns head for canonical" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 0);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 0, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     const result = try fc.updateAndGetHead(testing.allocator, .{ .get_canonical_head = {} });
@@ -2027,13 +1879,7 @@ test "shouldOverrideForkChoiceUpdate disabled by default" {
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
-    var fc = try ForkChoice.init(testing.allocator, .{
-        .config = getTestConfig(),
-        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
-        .justified_balances = &.{},
-        .justified_balances_getter = test_balances_getter,
-    }, genesis_block, 0);
+    var fc = try initTestForkChoice(testing.allocator, genesis_block, 0, makeTestCheckpoint(0, genesis_root), makeTestCheckpoint(0, genesis_root), &.{});
     defer fc.deinit(testing.allocator);
 
     const result = fc.shouldOverrideForkChoiceUpdate(genesis_block, 0, 1);
