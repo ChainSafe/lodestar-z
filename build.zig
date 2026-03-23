@@ -1023,6 +1023,7 @@ pub fn build(b: *std.Build) void {
     module_fork_choice.addImport("config", module_config);
     module_fork_choice.addImport("preset", module_preset);
     module_fork_choice.addImport("state_transition", module_state_transition);
+    module_fork_choice.addImport("fork_types", module_fork_types);
     module_fork_choice.addImport("hex", module_hex);
     module_fork_choice.addImport("constants", module_constants);
 
