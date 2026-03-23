@@ -15,10 +15,12 @@ pub const NULL_VOTE_INDEX: u32 = std.math.maxInt(u32);
 
 /// Tracks a single validator's fork choice vote.
 ///
-/// Gloas spec: LatestMessage { slot, root, payload_present }.
+/// Gloas spec: LatestMessage { slot, root }.
+/// Payload status (EMPTY vs FULL) is encoded in the node index itself — different
+/// variants have different ProtoArray indices, so no separate payload_present field is needed.
 /// Fields are laid out for SoA storage via MultiArrayList:
 /// - `current_index` and `next_index` are accessed together in computeDeltas (hot path).
-/// - `next_slot` and `payload_present` are only accessed in onAttestation (cold path).
+/// - `next_slot` is only accessed in onAttestation (cold path).
 pub const VoteTracker = struct {
     /// Index of the block this validator currently votes for (after last computeDeltas).
     current_index: u32 = NULL_VOTE_INDEX,
@@ -26,9 +28,6 @@ pub const VoteTracker = struct {
     next_index: u32 = NULL_VOTE_INDEX,
     /// Slot of the validator's latest vote. Used by onAttestation to reject stale votes.
     next_slot: Slot = 0,
-    /// Whether the validator's vote supports the payload (Gloas ePBS).
-    /// Determines EMPTY vs FULL variant in is_supporting_vote.
-    payload_present: bool = false,
 };
 
 /// SoA storage for per-validator fork choice votes.
@@ -70,11 +69,9 @@ pub const Votes = struct {
         const current_indices = self.multi_list.items(.current_index);
         const next_indices = self.multi_list.items(.next_index);
         const next_slots = self.multi_list.items(.next_slot);
-        const payload_presents = self.multi_list.items(.payload_present);
         @memset(current_indices[current_len..validator_count], NULL_VOTE_INDEX);
         @memset(next_indices[current_len..validator_count], NULL_VOTE_INDEX);
         @memset(next_slots[current_len..validator_count], 0);
-        @memset(payload_presents[current_len..validator_count], false);
     }
 
     /// Get the raw SoA arrays for direct field access.
@@ -83,14 +80,12 @@ pub const Votes = struct {
         current_indices: []u32,
         next_indices: []u32,
         next_slots: []Slot,
-        payload_presents: []bool,
     } {
         assert(self.multi_list.len > 0 or self.multi_list.capacity == 0);
         return .{
             .current_indices = self.multi_list.items(.current_index),
             .next_indices = self.multi_list.items(.next_index),
             .next_slots = self.multi_list.items(.next_slot),
-            .payload_presents = self.multi_list.items(.payload_present),
         };
     }
 };
@@ -102,12 +97,11 @@ test "VoteTracker default is null votes" {
     try testing.expectEqual(NULL_VOTE_INDEX, vote.current_index);
     try testing.expectEqual(NULL_VOTE_INDEX, vote.next_index);
     try testing.expectEqual(@as(Slot, 0), vote.next_slot);
-    try testing.expectEqual(false, vote.payload_present);
 }
 
 test "VoteTracker size" {
-    // 4 (current_index) + 4 (next_index) + 8 (next_slot) + 1 (payload_present) + padding
-    try testing.expectEqual(24, @sizeOf(VoteTracker));
+    // 4 (current_index) + 4 (next_index) + 8 (next_slot)
+    try testing.expectEqual(16, @sizeOf(VoteTracker));
 }
 
 test "Votes ensureValidatorCount grow sequence" {
@@ -133,7 +127,6 @@ test "Votes ensureValidatorCount grow sequence" {
         try testing.expectEqual(NULL_VOTE_INDEX, s.current_indices[i]);
         try testing.expectEqual(NULL_VOTE_INDEX, s.next_indices[i]);
         try testing.expectEqual(@as(Slot, 0), s.next_slots[i]);
-        try testing.expectEqual(false, s.payload_presents[i]);
     }
 }
 
@@ -147,16 +140,13 @@ test "Votes ensureValidatorCount preserves existing data" {
     var s = votes.fields();
     s.next_indices[0] = 5;
     s.next_slots[0] = 10;
-    s.payload_presents[0] = true;
 
     // Grow — validator 0 must be preserved.
     try votes.ensureValidatorCount(testing.allocator, 4);
     const s2 = votes.fields();
     try testing.expectEqual(@as(u32, 5), s2.next_indices[0]);
     try testing.expectEqual(@as(Slot, 10), s2.next_slots[0]);
-    try testing.expectEqual(true, s2.payload_presents[0]);
 
     // New slots are defaults.
     try testing.expectEqual(NULL_VOTE_INDEX, s2.next_indices[2]);
-    try testing.expectEqual(false, s2.payload_presents[2]);
 }
