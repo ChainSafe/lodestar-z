@@ -256,6 +256,10 @@ test "SlotIndex.serialize - basic" {
     // First 8 bytes: start_slot (8192 = 0x2000 LE)
     try std.testing.expectEqual(@as(u64, 8192), std.mem.readInt(u64, serialized[0..8], .little));
 
+    // Middle 16 bytes: offsets
+    try std.testing.expectEqual(@as(i64, 100), std.mem.readInt(i64, serialized[8..16], .little));
+    try std.testing.expectEqual(@as(i64, 200), std.mem.readInt(i64, serialized[16..24], .little));
+
     // Last 8 bytes: count (2)
     try std.testing.expectEqual(@as(u64, 2), std.mem.readInt(u64, serialized[24..32], .little));
 }
