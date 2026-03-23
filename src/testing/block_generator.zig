@@ -16,6 +16,7 @@ const fork_types = @import("fork_types");
 const state_transition = @import("state_transition");
 
 const CachedBeaconState = state_transition.CachedBeaconState;
+const attestation_gen = @import("attestation_generator.zig");
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const AnyBeaconState = fork_types.AnyBeaconState;
 const BeaconBlock = fork_types.BeaconBlock;
@@ -30,6 +31,9 @@ pub const BlockOpts = struct {
     wrong_proposer: bool = false,
     /// Use an incorrect parent root (for rejection testing).
     wrong_parent: bool = false,
+    /// Fraction of validators that produce attestations [0.0 - 1.0].
+    /// 0.0 (default) means no attestations are included.
+    participation_rate: f64 = 0.0,
 };
 
 pub const BlockGenerator = struct {
@@ -98,6 +102,17 @@ pub const BlockGenerator = struct {
         );
         execution_payload.prev_randao = randao_mix.*;
 
+        // Generate attestations for the previous slot.
+        const attestations = if (opts.participation_rate > 0.0) blk: {
+            const atts = try attestation_gen.generateAttestations(
+                self.allocator,
+                cached_state,
+                target_slot,
+                opts.participation_rate,
+            );
+            break :blk atts;
+        } else types.electra.Attestations.default_value;
+
         // Build the signed block.
         const signed_block = try self.allocator.create(types.electra.SignedBeaconBlock.Type);
         errdefer self.allocator.destroy(signed_block);
@@ -121,7 +136,7 @@ pub const BlockGenerator = struct {
                     .graffiti = [_]u8{0} ** 32,
                     .proposer_slashings = types.phase0.ProposerSlashings.default_value,
                     .attester_slashings = types.phase0.AttesterSlashings.default_value,
-                    .attestations = types.electra.Attestations.default_value,
+                    .attestations = attestations,
                     .deposits = types.phase0.Deposits.default_value,
                     .voluntary_exits = types.phase0.VoluntaryExits.default_value,
                     .sync_aggregate = .{

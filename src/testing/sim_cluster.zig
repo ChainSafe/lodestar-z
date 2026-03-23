@@ -40,6 +40,8 @@ pub const ClusterConfig = struct {
     proposer_offline_rate: f64 = 0.0,
     /// Number of validators in the test state.
     validator_count: usize = 64,
+    /// Fraction of validators producing attestations [0.0 - 1.0].
+    participation_rate: f64 = 0.0,
 };
 
 pub const TickResult = struct {
@@ -79,6 +81,9 @@ pub const SimCluster = struct {
 
     /// Offline rate for proposers.
     proposer_offline_rate: f64,
+
+    /// Attestation participation rate.
+    participation_rate: f64,
 
     /// Stats.
     total_slots: u64 = 0,
@@ -127,6 +132,7 @@ pub const SimCluster = struct {
         // Node 0: gets the primary state directly.
         const seed_0 = cluster_prng.random().int(u64);
         nodes[0] = try SimBeaconNode.init(allocator, primary.cached_state, seed_0);
+        nodes[0].participation_rate = config.participation_rate;
 
         // Nodes 1..N: get clones of node 0's head state.
         for (1..config.num_nodes) |i| {
@@ -136,6 +142,7 @@ pub const SimCluster = struct {
             );
             const seed_i = cluster_prng.random().int(u64);
             nodes[i] = try SimBeaconNode.init(allocator, cloned, seed_i);
+            nodes[i].participation_rate = config.participation_rate;
         }
 
         const checker = try ClusterInvariantChecker.init(allocator, config.num_nodes);
@@ -150,6 +157,7 @@ pub const SimCluster = struct {
             .checker = checker,
             .current_slot = start_slot,
             .proposer_offline_rate = config.proposer_offline_rate,
+            .participation_rate = config.participation_rate,
             .nodes_processed = nodes_processed,
             .primary_config = primary.config,
             .primary_pubkey_map = primary.pubkey_index_map,

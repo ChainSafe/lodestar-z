@@ -62,6 +62,8 @@ pub const SimBeaconNode = struct {
     blocks_processed: u64 = 0,
     epochs_processed: u64 = 0,
     skip_prng: std.Random.DefaultPrng,
+    /// Fraction of validators producing attestations [0.0 - 1.0].
+    participation_rate: f64 = 0.0,
 
     pub fn init(
         allocator: Allocator,
@@ -160,7 +162,9 @@ pub const SimBeaconNode = struct {
         );
 
         // Generate a block using post-advance state (correct proposer).
-        const signed_block = try self.block_gen.generateBlock(post_state, target_slot);
+        const signed_block = try self.block_gen.generateBlockWithOpts(post_state, target_slot, .{
+            .participation_rate = self.participation_rate,
+        });
         defer {
             types.electra.SignedBeaconBlock.deinit(self.allocator, signed_block);
             self.allocator.destroy(signed_block);

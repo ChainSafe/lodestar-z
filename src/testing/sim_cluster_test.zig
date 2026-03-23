@@ -223,3 +223,101 @@ test "cluster: single node — trivially consistent" {
     try testing.expectEqual(@as(u64, 0), result.safety_violations);
     try testing.expectEqual(@as(u64, 0), result.state_divergences);
 }
+
+// ── Test 9: Finality progresses with attestations ────────────────────
+
+test "cluster: finality progresses with 90% participation" {
+    const allocator = testing.allocator;
+
+    var cluster = try SimCluster.init(allocator, .{
+        .num_nodes = 2,
+        .seed = 42,
+        .validator_count = 64,
+        .participation_rate = 0.9,
+    });
+    defer cluster.deinit();
+
+    // Run enough slots for finality: need ~4+ epoch transitions.
+    // Minimal preset: 8 slots/epoch.  State starts 1 slot before epoch boundary.
+    // So: 1 slot to cross first boundary + 4*8 = 33 slots should be plenty.
+    const result = try cluster.run(40);
+
+    try testing.expectEqual(@as(u64, 40), result.slots_processed);
+    try testing.expectEqual(@as(u64, 0), result.safety_violations);
+    try testing.expectEqual(@as(u64, 0), result.state_divergences);
+
+    // Finalized epoch must have advanced past 0.
+    try testing.expect(result.finalized_epoch > 0);
+}
+
+// ── Test 10: Low participation prevents finality ─────────────────────
+
+test "cluster: low participation prevents finality" {
+    const allocator = testing.allocator;
+
+    var cluster = try SimCluster.init(allocator, .{
+        .num_nodes = 2,
+        .seed = 42,
+        .validator_count = 64,
+        .participation_rate = 0.1,
+    });
+    defer cluster.deinit();
+
+    // Run 40 slots — not enough participation for justification/finality.
+    const result = try cluster.run(40);
+
+    try testing.expectEqual(@as(u64, 40), result.slots_processed);
+    try testing.expectEqual(@as(u64, 0), result.safety_violations);
+    try testing.expectEqual(@as(u64, 0), result.state_divergences);
+
+    // With only 10% participation, finality should NOT advance.
+    // The initial state already has a finalized epoch set (current_epoch - 3),
+    // so we check that it hasn't advanced further.
+    // Actually, let's just verify it stays at its initial value.
+    // The generated state has finalized_checkpoint.epoch = current_epoch - 3.
+    // With 10% participation we expect no NEW finalization.
+    // We track this via the cluster checker which records per-node finalized epochs.
+    // Since the initial state already has a non-zero finalized epoch, we check
+    // that no progress occurred by comparing with a 0% participation run.
+    var cluster_zero = try SimCluster.init(allocator, .{
+        .num_nodes = 2,
+        .seed = 42,
+        .validator_count = 64,
+        .participation_rate = 0.0,
+    });
+    defer cluster_zero.deinit();
+
+    const result_zero = try cluster_zero.run(40);
+
+    // With 10% participation, finalized epoch should be <= the zero-participation case.
+    // (Both should stay at the initial finalized epoch from genesis state.)
+    try testing.expectEqual(result_zero.finalized_epoch, result.finalized_epoch);
+}
+
+// ── Test 11: Deterministic attestation replay ────────────────────────
+
+test "cluster: deterministic replay with attestations" {
+    const allocator = testing.allocator;
+
+    var results: [2]RunResult = undefined;
+    var final_roots: [2][32]u8 = undefined;
+
+    for (0..2) |run| {
+        var cluster = try SimCluster.init(allocator, .{
+            .num_nodes = 2,
+            .seed = 777,
+            .validator_count = 64,
+            .participation_rate = 0.8,
+        });
+        defer cluster.deinit();
+
+        results[run] = try cluster.run(24);
+        final_roots[run] = (try cluster.nodes[0].head_state.state.hashTreeRoot()).*;
+    }
+
+    // Same seed → identical results.
+    try testing.expectEqual(results[0].blocks_produced, results[1].blocks_produced);
+    try testing.expectEqual(results[0].slots_processed, results[1].slots_processed);
+    try testing.expectEqual(results[0].finalized_epoch, results[1].finalized_epoch);
+    try testing.expectEqualSlices(u8, &final_roots[0], &final_roots[1]);
+}

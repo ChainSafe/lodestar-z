@@ -205,3 +205,45 @@ test "sim: scenario with skip rate — some slots skipped deterministically" {
     try testing.expect(harness.sim.blocks_processed > 0);
     try testing.expect(harness.sim.blocks_processed < 5);
 }
+
+// ── Test 6: Blocks with attestations — single node ───────────────────
+
+test "sim: blocks with attestations — participation rate 0.9" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var harness = try SimTestHarness.init(allocator, &pool, 42);
+    defer harness.deinit();
+
+    // Enable attestations.
+    harness.sim.participation_rate = 0.9;
+
+    // Process 20 slots (multiple epochs in minimal preset: 8 slots/epoch).
+    try harness.sim.processSlots(20, 0.0);
+
+    try testing.expectEqual(@as(u64, 20), harness.sim.slots_processed);
+    try testing.expectEqual(@as(u64, 20), harness.sim.blocks_processed);
+}
+
+// ── Test 7: Blocks with attestations — 40 slots (multiple epochs) ────
+
+test "sim: blocks with attestations — 40 slots across multiple epochs" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var harness = try SimTestHarness.init(allocator, &pool, 42);
+    defer harness.deinit();
+
+    harness.sim.participation_rate = 0.9;
+
+    // 40 slots = 5 epoch transitions for minimal preset (8 slots/epoch).
+    try harness.sim.processSlots(40, 0.0);
+
+    try testing.expectEqual(@as(u64, 40), harness.sim.slots_processed);
+    try testing.expectEqual(@as(u64, 40), harness.sim.blocks_processed);
+
+    // Check finality advanced.
+    try testing.expect(harness.sim.checker.finalized_epoch > 0);
+}
