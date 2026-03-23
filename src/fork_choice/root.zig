@@ -1,27 +1,27 @@
 const std = @import("std");
 const testing = std.testing;
 
-pub const proto_node = @import("proto_node.zig");
 pub const vote_tracker = @import("vote_tracker.zig");
 pub const compute_deltas = @import("compute_deltas.zig");
 pub const proto_array = @import("proto_array.zig");
+pub const store = @import("store.zig");
 pub const fork_choice = @import("fork_choice.zig");
 
-pub const ProtoBlock = proto_node.ProtoBlock;
-pub const ProtoNode = proto_node.ProtoNode;
-pub const ExecutionStatus = proto_node.ExecutionStatus;
-pub const DataAvailabilityStatus = proto_node.DataAvailabilityStatus;
-pub const PayloadStatus = proto_node.PayloadStatus;
-pub const BlockExtraMeta = proto_node.BlockExtraMeta;
-pub const LVHExecResponse = proto_node.LVHExecResponse;
-pub const LVHValidResponse = proto_node.LVHValidResponse;
-pub const LVHInvalidResponse = proto_node.LVHInvalidResponse;
-pub const LVHExecErrorCode = proto_node.LVHExecErrorCode;
+pub const ProtoBlock = proto_array.ProtoBlock;
+pub const ProtoNode = proto_array.ProtoNode;
+pub const ExecutionStatus = proto_array.ExecutionStatus;
+pub const DataAvailabilityStatus = proto_array.DataAvailabilityStatus;
+pub const PayloadStatus = proto_array.PayloadStatus;
+pub const BlockExtraMeta = proto_array.BlockExtraMeta;
+pub const LVHExecResponse = proto_array.LVHExecResponse;
+pub const LVHValidResponse = proto_array.LVHValidResponse;
+pub const LVHInvalidResponse = proto_array.LVHInvalidResponse;
+pub const LVHExecErrorCode = proto_array.LVHExecErrorCode;
 
 pub const ProtoArrayError = proto_array.ProtoArrayError;
-pub const ForkChoiceError = proto_node.ForkChoiceError;
-pub const InvalidBlockCode = proto_node.InvalidBlockCode;
-pub const InvalidAttestationCode = proto_node.InvalidAttestationCode;
+pub const ForkChoiceError = proto_array.ForkChoiceError;
+pub const InvalidBlockCode = proto_array.InvalidBlockCode;
+pub const InvalidAttestationCode = proto_array.InvalidAttestationCode;
 
 pub const ProtoArrayStruct = proto_array.ProtoArray;
 pub const DEFAULT_PRUNE_THRESHOLD = proto_array.DEFAULT_PRUNE_THRESHOLD;
@@ -39,9 +39,17 @@ pub const EquivocatingIndices = compute_deltas.EquivocatingIndices;
 pub const VoteIndex = compute_deltas.VoteIndex;
 
 pub const ForkChoiceStruct = fork_choice.ForkChoice;
-pub const Checkpoint = fork_choice.Checkpoint;
 pub const HeadResult = fork_choice.HeadResult;
-pub const EffectiveBalanceIncrements = fork_choice.EffectiveBalanceIncrements;
+
+pub const ForkChoiceStore = store.ForkChoiceStore;
+pub const Checkpoint = store.Checkpoint;
+pub const CheckpointWithPayloadStatus = store.CheckpointWithPayloadStatus;
+pub const EffectiveBalanceIncrementsRc = store.EffectiveBalanceIncrementsRc;
+pub const JustifiedBalances = store.JustifiedBalances;
+pub const JustifiedBalancesGetter = store.JustifiedBalancesGetter;
+pub const EventCallback = store.EventCallback;
+pub const ForkChoiceStoreEvents = store.ForkChoiceStoreEvents;
+pub const computeTotalBalance = store.computeTotalBalance;
 
 test {
     testing.refAllDecls(@This());

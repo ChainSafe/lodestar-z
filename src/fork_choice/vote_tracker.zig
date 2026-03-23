@@ -8,7 +8,6 @@ const primitives = consensus_types.primitive;
 
 const Slot = primitives.Slot.Type;
 
-const proto_node = @import("proto_node.zig");
 
 /// Sentinel for "validator has no valid vote" (e.g., vote target was pruned).
 /// Uses u32 (not ?u32) for SoA cache efficiency: 4 bytes vs 8 bytes per slot.

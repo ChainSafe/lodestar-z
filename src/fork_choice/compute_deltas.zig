@@ -50,7 +50,7 @@ pub fn computeDeltas(
     vote_next_indices: []const VoteIndex,
     old_balances: []const u16,
     new_balances: []const u16,
-    equivocating_indices: EquivocatingIndices,
+    equivocating_indices: *const EquivocatingIndices,
 ) !ComputeDeltasResult {
     assert(vote_current_indices.len == vote_next_indices.len);
     assert(num_proto_nodes < NULL_VOTE_INDEX);
@@ -63,7 +63,7 @@ pub fn computeDeltas(
     const num_validators = vote_next_indices.len;
 
     // Sort equivocating indices for pointer advancement in the loop.
-    const sorted_eq = try sortEquivocatingKeys(allocator, equivocating_indices);
+    const sorted_eq = try sortEquivocatingKeys(allocator, equivocating_indices.*);
     defer allocator.free(sorted_eq);
 
     var result: ComputeDeltasResult = .{ .deltas = deltas, .equivocating_validators = @intCast(sorted_eq.len) };
@@ -161,7 +161,7 @@ const TestContext = struct {
         num_nodes: u32,
         old_bal: []const u16,
         new_bal: []const u16,
-        eq: EquivocatingIndices,
+        eq: *const EquivocatingIndices,
     ) !ComputeDeltasResult {
         const f = self.votes.fields();
         return computeDeltas(testing.allocator, &self.dc, num_nodes, f.current_indices, f.next_indices, old_bal, new_bal, eq);
@@ -183,7 +183,7 @@ test "zero hash" {
     @memset(f.current_indices, 0);
     @memset(f.next_indices, 0);
 
-    const result = try ctx.run(n, &([_]u16{0} ** n), &([_]u16{0} ** n), TestContext.empty_eq);
+    const result = try ctx.run(n, &([_]u16{0} ** n), &([_]u16{0} ** n), &TestContext.empty_eq);
     try expectDeltas(result.deltas, &([_]i64{0} ** n));
     // current_indices should be updated to match next_indices
     try testing.expectEqualSlices(VoteIndex, f.next_indices, f.current_indices);
@@ -197,7 +197,7 @@ test "all voted the same" {
     @memset(ctx.votes.fields().next_indices, 0);
 
     const bal = [_]u16{42} ** n;
-    const result = try ctx.run(n, &bal, &bal, TestContext.empty_eq);
+    const result = try ctx.run(n, &bal, &bal, &TestContext.empty_eq);
 
     var expected = [_]i64{0} ** n;
     expected[0] = 42 * n;
@@ -213,7 +213,7 @@ test "different votes" {
     for (0..n) |i| f.next_indices[i] = @intCast(i);
 
     const bal = [_]u16{42} ** n;
-    const result = try ctx.run(n, &bal, &bal, TestContext.empty_eq);
+    const result = try ctx.run(n, &bal, &bal, &TestContext.empty_eq);
     try expectDeltas(result.deltas, &([_]i64{42} ** n));
 }
 
@@ -227,7 +227,7 @@ test "moving votes" {
     @memset(f.next_indices, 1);
 
     const bal = [_]u16{42} ** n;
-    const result = try ctx.run(n, &bal, &bal, TestContext.empty_eq);
+    const result = try ctx.run(n, &bal, &bal, &TestContext.empty_eq);
 
     var expected = [_]i64{0} ** n;
     expected[0] = -42 * n;
@@ -244,7 +244,7 @@ test "changing balances" {
     @memset(f.current_indices, 0);
     @memset(f.next_indices, 1);
 
-    const result = try ctx.run(n, &([_]u16{42} ** n), &([_]u16{84} ** n), TestContext.empty_eq);
+    const result = try ctx.run(n, &([_]u16{42} ** n), &([_]u16{84} ** n), &TestContext.empty_eq);
 
     var expected = [_]i64{0} ** n;
     expected[0] = -42 * n;
@@ -261,7 +261,7 @@ test "validator appears" {
     @memset(f.next_indices, 1);
 
     // Only one validator in old balances, two in new
-    const result = try ctx.run(2, &.{42}, &.{ 42, 42 }, TestContext.empty_eq);
+    const result = try ctx.run(2, &.{42}, &.{ 42, 42 }, &TestContext.empty_eq);
     try expectDeltas(result.deltas, &.{ -42, 84 });
     try testing.expectEqualSlices(VoteIndex, f.next_indices, f.current_indices);
 }
@@ -275,7 +275,7 @@ test "validator disappears" {
     @memset(f.next_indices, 1);
 
     // Two validators in old balances, only one in new
-    const result = try ctx.run(2, &.{ 42, 42 }, &.{42}, TestContext.empty_eq);
+    const result = try ctx.run(2, &.{ 42, 42 }, &.{42}, &TestContext.empty_eq);
     try expectDeltas(result.deltas, &.{ -84, 42 });
     try testing.expectEqualSlices(VoteIndex, f.next_indices, f.current_indices);
 }
@@ -295,11 +295,11 @@ test "not empty equivocation set" {
     try eq.put(0, {});
 
     // Should disregard the 1st validator due to attester slashing
-    const r1 = try ctx.run(2, bal, bal, eq);
+    const r1 = try ctx.run(2, bal, bal, &eq);
     try expectDeltas(r1.deltas, &.{ -63, 32 });
 
     // Calling computeDeltas again should not have any effect on the weight
-    const r2 = try ctx.run(2, bal, bal, eq);
+    const r2 = try ctx.run(2, bal, bal, &eq);
     try expectDeltas(r2.deltas, &.{ 0, 0 });
 }
 
@@ -313,7 +313,7 @@ test "move out of tree" {
     @memset(f.next_indices, NULL_VOTE_INDEX);
 
     const bal: []const u16 = &.{ 42, 42 };
-    const result = try ctx.run(1, bal, bal, TestContext.empty_eq);
+    const result = try ctx.run(1, bal, bal, &TestContext.empty_eq);
     // Both old balances deducted, no new balance added anywhere
     try expectDeltas(result.deltas, &.{-84});
 }
