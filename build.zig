@@ -155,6 +155,13 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("networking"), module_networking) catch @panic("OOM");
 
+    const module_db = b.createModule(.{
+        .root_source_file = b.path("src/db/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("db"), module_db) catch @panic("OOM");
+
     const module_testing = b.createModule(.{
         .root_source_file = b.path("src/testing/root.zig"),
         .target = target,
@@ -425,6 +432,16 @@ pub fn build(b: *std.Build) void {
     const tls_run_test_testing = b.step("test:testing", "Run the simulation testing primitives tests");
     tls_run_test_testing.dependOn(&run_test_testing.step);
     tls_run_test.dependOn(&run_test_testing.step);
+
+    const test_db = b.addTest(.{
+        .name = "db",
+        .root_module = module_db,
+        .filters = b.option([][]const u8, "db.filters", "db test filters") orelse &[_][]const u8{},
+    });
+    const run_test_db = b.addRunArtifact(test_db);
+    const tls_run_test_db = b.step("test:db", "Run the db test");
+    tls_run_test_db.dependOn(&run_test_db.step);
+    tls_run_test.dependOn(&run_test_db.step);
     // Spec test modules
     const module_int = b.createModule(.{
         .root_source_file = b.path("test/int/era/root.zig"),
@@ -549,6 +566,7 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("constants", module_constants);
     module_state_transition.addImport("hex", module_hex);
     module_state_transition.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_state_transition.addImport("db", module_db);
     // TODO: metrics dep not yet 0.16-compatible
     // module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
 

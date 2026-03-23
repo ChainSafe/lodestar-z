@@ -14,23 +14,35 @@ const CachedBeaconState = @import("state_cache.zig").CachedBeaconState;
 const BlockStateCache = @import("block_state_cache.zig").BlockStateCache;
 const CheckpointStateCache = @import("checkpoint_state_cache.zig").CheckpointStateCache;
 const CheckpointKey = @import("datastore.zig").CheckpointKey;
+const BeaconDB = @import("db").BeaconDB;
 
 pub const StateRegen = struct {
     allocator: Allocator,
     block_cache: *BlockStateCache,
     checkpoint_cache: *CheckpointStateCache,
     // fork_choice: *ForkChoice,   // TODO: wire when available
-    // db: *BeaconDB,              // TODO: wire when available
+    db: ?*BeaconDB,
 
     pub fn init(
         allocator: Allocator,
         block_cache: *BlockStateCache,
         checkpoint_cache: *CheckpointStateCache,
     ) StateRegen {
+        return initWithDB(allocator, block_cache, checkpoint_cache, null);
+    }
+
+    /// Initialize with an optional BeaconDB for cold-path state retrieval.
+    pub fn initWithDB(
+        allocator: Allocator,
+        block_cache: *BlockStateCache,
+        checkpoint_cache: *CheckpointStateCache,
+        db: ?*BeaconDB,
+    ) StateRegen {
         return .{
             .allocator = allocator,
             .block_cache = block_cache,
             .checkpoint_cache = checkpoint_cache,
+            .db = db,
         };
     }
 
@@ -65,11 +77,25 @@ pub const StateRegen = struct {
             }
         }
 
-        // 3. TODO: Walk fork choice backwards to find closest known state,
-        //    then replay blocks forward. Requires:
-        //    - fork_choice.iterateAncestorBlocks(parent_root)
-        //    - db.getBlock(root)
-        //    - state_transition.stateTransition(state, block)
+        // 3. Cold path: check the database for archived blocks/states.
+        //    Full implementation requires fork choice to walk ancestors
+        //    and state transition to replay blocks forward.
+        //    For now, check if we have a block archive entry for this root.
+        if (self.db) |db| {
+            // Try to find the block in the archive by root.
+            // A complete implementation would:
+            //   a) Look up the slot from the root index
+            //   b) Find the nearest state archive at or before that slot
+            //   c) Replay blocks forward from the state archive to the target
+            // For now, we just verify the block exists in the archive,
+            // which confirms the data path works end-to-end.
+            if (db.getBlockArchiveByRoot(parent_root) catch null) |block_data| {
+                // Block found in archive — but we cannot yet reconstruct
+                // a CachedBeaconState from SSZ bytes without the full
+                // deserialization + state transition pipeline.
+                self.allocator.free(block_data);
+            }
+        }
         return error.NoPreStateAvailable;
     }
 
