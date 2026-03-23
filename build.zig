@@ -162,6 +162,20 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("db"), module_db) catch @panic("OOM");
 
+    const module_api = b.createModule(.{
+        .root_source_file = b.path("src/api/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("api"), module_api) catch @panic("OOM");
+
+    const module_chain = b.createModule(.{
+        .root_source_file = b.path("src/chain/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("chain"), module_chain) catch @panic("OOM");
+
     const module_testing = b.createModule(.{
         .root_source_file = b.path("src/testing/root.zig"),
         .target = target,
@@ -433,6 +447,16 @@ pub fn build(b: *std.Build) void {
     tls_run_test_testing.dependOn(&run_test_testing.step);
     tls_run_test.dependOn(&run_test_testing.step);
 
+    const test_chain = b.addTest(.{
+        .name = "chain",
+        .root_module = module_chain,
+        .filters = b.option([][]const u8, "chain.filters", "chain test filters") orelse &[_][]const u8{},
+    });
+    const run_test_chain = b.addRunArtifact(test_chain);
+    const tls_run_test_chain = b.step("test:chain", "Run the chain module tests");
+    tls_run_test_chain.dependOn(&run_test_chain.step);
+    tls_run_test.dependOn(&run_test_chain.step);
+
     const test_db = b.addTest(.{
         .name = "db",
         .root_module = module_db,
@@ -442,6 +466,16 @@ pub fn build(b: *std.Build) void {
     const tls_run_test_db = b.step("test:db", "Run the db test");
     tls_run_test_db.dependOn(&run_test_db.step);
     tls_run_test.dependOn(&run_test_db.step);
+
+    const test_api = b.addTest(.{
+        .name = "api",
+        .root_module = module_api,
+        .filters = b.option([][]const u8, "api.filters", "api test filters") orelse &[_][]const u8{},
+    });
+    const run_test_api = b.addRunArtifact(test_api);
+    const tls_run_test_api = b.step("test:api", "Run the api test");
+    tls_run_test_api.dependOn(&run_test_api.step);
+    tls_run_test.dependOn(&run_test_api.step);
     // Spec test modules
     const module_int = b.createModule(.{
         .root_source_file = b.path("test/int/era/root.zig"),
@@ -641,4 +675,23 @@ pub fn build(b: *std.Build) void {
     module_testing.addImport("constants", module_constants);
     module_testing.addImport("build_options", options_module_build_options);
     module_testing.addImport("db", module_db);
+
+    // chain module imports
+    module_chain.addImport("consensus_types", module_consensus_types);
+    module_chain.addImport("preset", module_preset);
+    module_chain.addImport("state_transition", module_state_transition);
+    module_chain.addImport("constants", module_constants);
+    module_chain.addImport("ssz", module_ssz);
+    module_chain.addImport("config", module_config);
+    module_chain.addImport("fork_types", module_fork_types);
+
+    // api module imports
+    module_api.addImport("consensus_types", module_consensus_types);
+    module_api.addImport("config", module_config);
+    module_api.addImport("preset", module_preset);
+    module_api.addImport("db", module_db);
+    module_api.addImport("ssz", module_ssz);
+    module_api.addImport("hex", module_hex);
+    module_api.addImport("constants", module_constants);
+    module_api.addImport("build_options", options_module_build_options);
 }
