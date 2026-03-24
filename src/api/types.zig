@@ -423,3 +423,10 @@ test "ContentType.fromAcceptHeader" {
     try std.testing.expectEqual(ContentType.json, ContentType.fromAcceptHeader("application/json"));
     try std.testing.expectEqual(ContentType.ssz, ContentType.fromAcceptHeader("application/octet-stream"));
 }
+
+pub const PeerCount = struct {
+    disconnected: u64,
+    connecting: u64,
+    connected: u64,
+    disconnecting: u64,
+};

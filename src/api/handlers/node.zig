@@ -126,3 +126,28 @@ test "getPeers returns empty list" {
     const resp = getPeers(&tc.ctx);
     try std.testing.expectEqual(@as(usize, 0), resp.data.len);
 }
+
+/// GET /eth/v1/node/peer_count
+///
+/// Returns aggregate counts of peers in each connection state.
+///
+/// Note: Peer tracking is not yet implemented; all counts are zero.
+/// Replace the stub once a real PeerManager is wired into ApiContext.
+pub fn getPeerCount(_: *ApiContext) types.ApiResponse(types.PeerCount) {
+    return .{
+        .data = .{
+            .disconnected = 0,
+            .connecting = 0,
+            .connected = 0,
+            .disconnecting = 0,
+        },
+    };
+}
+
+test "getPeerCount returns zero counts (stub)" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const resp = getPeerCount(&tc.ctx);
+    try std.testing.expectEqual(@as(u64, 0), resp.data.connected);
+    try std.testing.expectEqual(@as(u64, 0), resp.data.disconnected);
+}

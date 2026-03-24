@@ -246,3 +246,10 @@ comptime {
     _ = sim_network_partition_test;
     _ = sim_fault_injection_test;
 }
+
+// ── Node integration tests ────────────────────────────────────────────
+pub const node_integration_test = @import("node_integration_test.zig");
+
+comptime {
+    _ = node_integration_test;
+}

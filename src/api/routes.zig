@@ -113,6 +113,50 @@ pub const routes = [_]Route{
         .supports_ssz = true,
     },
 
+
+    // -- Validator --
+    .{
+        .method = .GET,
+        .path = "/eth/v1/validator/duties/proposer/{epoch}",
+        .operation_id = "getProposerDuties",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/duties/attester/{epoch}",
+        .operation_id = "getAttesterDuties",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/duties/sync/{epoch}",
+        .operation_id = "getSyncDuties",
+    },
+
+    // -- Debug --
+    .{
+        .method = .GET,
+        .path = "/eth/v2/debug/beacon/states/{state_id}",
+        .operation_id = "getDebugState",
+        .supports_ssz = true,
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v2/debug/beacon/heads",
+        .operation_id = "getDebugHeads",
+    },
+
+    // -- Events --
+    .{
+        .method = .GET,
+        .path = "/eth/v1/events",
+        .operation_id = "getEvents",
+    },
+
+    // -- Node (additional) --
+    .{
+        .method = .GET,
+        .path = "/eth/v1/node/peer_count",
+        .operation_id = "getPeerCount",
+    },
     // -- Config --
     .{
         .method = .GET,
@@ -317,5 +361,5 @@ test "findRoute wrong method" {
 
 test "route count" {
     // Verify we defined all expected routes
-    try std.testing.expectEqual(@as(usize, 16), routes.len);
+    try std.testing.expectEqual(@as(usize, 23), routes.len);
 }

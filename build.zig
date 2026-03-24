@@ -748,6 +748,8 @@ pub fn build(b: *std.Build) void {
     module_testing.addImport("build_options", options_module_build_options);
     module_testing.addImport("db", module_db);
     module_testing.addImport("node", module_node);
+    module_testing.addImport("networking", module_networking);
+    module_testing.addImport("api", module_api);
 
     // chain module imports
     module_chain.addImport("consensus_types", module_consensus_types);

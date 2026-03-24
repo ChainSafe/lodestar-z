@@ -274,6 +274,77 @@ pub const HttpServer = struct {
             };
         }
 
+
+        // Debug endpoints.
+        if (std.mem.eql(u8, op, "getDebugState")) {
+            const state_id_str = match.getParam("state_id") orelse return error.InvalidStateId;
+            const state_id = try types.StateId.parse(state_id_str);
+            _ = try handlers.debug.getState(ctx, state_id);
+            const body = try alloc.dupe(u8, "{}");
+            return .{ .status = 200, .body = body };
+        }
+        if (std.mem.eql(u8, op, "getDebugHeads")) {
+            const heads = try handlers.debug.getHeads(ctx);
+            defer alloc.free(heads);
+            var buf = std.ArrayListUnmanaged(u8).empty;
+            errdefer buf.deinit(alloc);
+            try buf.appendSlice(alloc, "{\"data\":[");
+            for (heads, 0..) |h, i| {
+                if (i > 0) try buf.appendSlice(alloc, ",");
+                const entry = try std.fmt.allocPrint(alloc, "{{\"slot\":{d},\"root\":\"0x{s}\"}}", .{
+                    h.slot,
+                    std.fmt.bytesToHex(h.root, .lower),
+                });
+                defer alloc.free(entry);
+                try buf.appendSlice(alloc, entry);
+            }
+            try buf.appendSlice(alloc, "]}");
+            return .{ .status = 200, .body = try buf.toOwnedSlice(alloc) };
+        }
+
+        // Events endpoint.
+        if (std.mem.eql(u8, op, "getEvents")) {
+            handlers.events.getEvents(ctx, match.getParam("topics") orelse "") catch |err| {
+                return err;
+            };
+            const body = try alloc.dupe(u8, "{}");
+            return .{ .status = 200, .body = body };
+        }
+
+        // Validator endpoints.
+        if (std.mem.eql(u8, op, "getProposerDuties")) {
+            const epoch_str = match.getParam("epoch") orelse return error.InvalidBlockId;
+            const epoch = std.fmt.parseInt(u64, epoch_str, 10) catch return error.InvalidBlockId;
+            const duties = try handlers.validator.getProposerDuties(ctx, epoch);
+            defer alloc.free(duties);
+            var buf = std.ArrayListUnmanaged(u8).empty;
+            errdefer buf.deinit(alloc);
+            try buf.appendSlice(alloc, "{\"dependent_root\":\"0x" ++ "00" ** 32 ++ "\",\"execution_optimistic\":false,\"data\":[");
+            for (duties, 0..) |d, i| {
+                if (i > 0) try buf.appendSlice(alloc, ",");
+                const entry = try std.fmt.allocPrint(alloc,
+                    "{{\"pubkey\":\"0x{s}\",\"validator_index\":\"{d}\",\"slot\":\"{d}\"}}",
+                    .{ std.fmt.bytesToHex(d.pubkey, .lower), d.validator_index, d.slot });
+                defer alloc.free(entry);
+                try buf.appendSlice(alloc, entry);
+            }
+            try buf.appendSlice(alloc, "]}");
+            return .{ .status = 200, .body = try buf.toOwnedSlice(alloc) };
+        }
+        if (std.mem.eql(u8, op, "getAttesterDuties")) {
+            return error.NotImplemented;
+        }
+        if (std.mem.eql(u8, op, "getSyncDuties")) {
+            return error.NotImplemented;
+        }
+
+        // Node peer count.
+        if (std.mem.eql(u8, op, "getPeerCount")) {
+            const resp = handlers.node.getPeerCount(ctx);
+            const body = try response_mod.encodeJsonResponse(alloc, types.PeerCount, resp);
+            return .{ .status = 200, .body = body };
+        }
+
         // Config endpoints.
         if (std.mem.eql(u8, op, "getSpec")) {
             const resp = handlers.config.getSpec(ctx);
@@ -335,7 +406,7 @@ pub const HttpServer = struct {
         };
 
         const result = self.dispatchHandler(match) catch |err| {
-            return apiErrorResponse(err);
+            return err;
         };
 
         return .{
