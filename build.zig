@@ -176,6 +176,13 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("api"), module_api) catch @panic("OOM");
 
+    const module_fork_choice = b.createModule(.{
+        .root_source_file = b.path("src/fork_choice/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("fork_choice"), module_fork_choice) catch @panic("OOM");
+
     const module_chain = b.createModule(.{
         .root_source_file = b.path("src/chain/root.zig"),
         .target = target,
@@ -809,6 +816,13 @@ pub fn build(b: *std.Build) void {
     module_node.addImport("bls", module_bls);
     module_node.addImport("hex", module_hex);
     module_node.addImport("build_options", options_module_build_options);
+    module_node.addImport("fork_choice", module_fork_choice);
+
+    // fork_choice module imports
+    module_fork_choice.addImport("consensus_types", module_consensus_types);
+    module_fork_choice.addImport("constants", module_constants);
+    module_fork_choice.addImport("preset", module_preset);
+    module_fork_choice.addImport("state_transition", module_state_transition);
 
     // === discv5 integration test (manual, requires network) ===
     const discv5_integration_exe = b.addExecutable(.{
