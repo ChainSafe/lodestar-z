@@ -856,6 +856,7 @@ pub fn build(b: *std.Build) void {
     module_node.addImport("multiaddr", multiaddr_dep2.module("multiaddr"));
     module_node.addImport("zig-libp2p", dep_eth_p2p_z.module("zig-libp2p"));
     module_node.addImport("ssl", boringssl_dep.module("ssl"));
+    module_node.addImport("sync", module_sync);
 
     // fork_choice module imports
     module_fork_choice.addImport("consensus_types", module_consensus_types);

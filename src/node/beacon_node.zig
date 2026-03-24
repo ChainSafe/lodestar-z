@@ -417,6 +417,16 @@ pub const BeaconNode = struct {
     // Owns the libp2p Switch, gossipsub service, and gossip adapter.
     p2p_service: ?P2pService = null,
 
+    // Passthrough gossip validator — owned by BeaconNode for the lifetime of p2p_service.
+    // Heap-allocated so its internal pointers remain stable even if BeaconNode moves.
+    p2p_validator: ?*PassthroughValidator = null,
+
+    // Req/resp context used by the P2P service (persistent, heap-allocated).
+    // Uses self.allocator as scratch; block bytes returned by callbacks are copied
+    // by the handler before the callback returns.
+    p2p_req_resp_ctx: ?*ReqRespContext = null,
+    p2p_request_ctx: ?*RequestContext = null,
+
     // Sync controller — wires P2P events into the sync pipeline.
     // Optional: nil until initialized (e.g. when running without P2P).
     sync_controller: ?*SyncController = null,
@@ -640,6 +650,19 @@ pub const BeaconNode = struct {
                 lmdb_store.deinit();
                 allocator.destroy(lmdb_store);
             },
+        }
+
+        // P2P validator (heap-allocated to keep pointers stable; p2p_service
+        // must be stopped before deinit is called since it takes Io).
+        if (self.p2p_validator) |v| {
+            v.deinit();
+            allocator.destroy(v);
+        }
+        if (self.p2p_req_resp_ctx) |ctx| {
+            allocator.destroy(ctx);
+        }
+        if (self.p2p_request_ctx) |ctx| {
+            allocator.destroy(ctx);
         }
 
         allocator.destroy(self);
@@ -876,9 +899,18 @@ pub const BeaconNode = struct {
         const listen_multiaddr = try Multiaddr.fromString(self.allocator, ma_str);
         defer listen_multiaddr.deinit();
 
-        // Build req/resp context pointing at this node.
-        const req_resp_ctx = ReqRespContext{
-            .ptr = @ptrCast(self),
+        // Build a persistent RequestContext (heap-allocated, stable for P2P lifetime).
+        // Uses self.allocator as scratch so returned block slices outlive callbacks;
+        // they are copied into response chunks by the handler before use.
+        const p2p_req_ctx = try self.allocator.create(RequestContext);
+        errdefer self.allocator.destroy(p2p_req_ctx);
+        p2p_req_ctx.* = .{ .node = self, .scratch = self.allocator };
+        self.p2p_request_ctx = p2p_req_ctx;
+
+        const req_resp_ctx = try self.allocator.create(ReqRespContext);
+        errdefer self.allocator.destroy(req_resp_ctx);
+        req_resp_ctx.* = ReqRespContext{
+            .ptr = @ptrCast(p2p_req_ctx),
             .getStatus = &reqRespGetStatus,
             .getMetadata = &reqRespGetMetadata,
             .getPingSequence = &reqRespGetPingSequence,
@@ -890,11 +922,15 @@ pub const BeaconNode = struct {
             .onGoodbye = &reqRespOnGoodbye,
             .onPeerStatus = &reqRespOnPeerStatus,
         };
+        self.p2p_req_resp_ctx = req_resp_ctx;
 
-        // Passthrough gossip validator (accepts all messages).
-        var validator = PassthroughValidator.init(self.allocator);
-        defer validator.deinit();
+        // Passthrough gossip validator — heap-allocated so its internal pointers
+        // remain stable for the lifetime of p2p_service.
+        const validator = try self.allocator.create(PassthroughValidator);
+        errdefer self.allocator.destroy(validator);
+        validator.* = PassthroughValidator.init(self.allocator);
         validator.fixupPointers();
+        self.p2p_validator = validator;
 
         const fork_digest = self.config.forkDigestAtSlot(
             self.head_tracker.head_slot,
@@ -903,7 +939,7 @@ pub const BeaconNode = struct {
 
         var svc = try P2pService.init(self.allocator, P2pConfig{
             .fork_digest = fork_digest,
-            .req_resp_context = &req_resp_ctx,
+            .req_resp_context = req_resp_ctx,
             .validator = &validator.ctx,
         });
         try svc.start(io, listen_multiaddr);
