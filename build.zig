@@ -766,6 +766,33 @@ pub fn build(b: *std.Build) void {
     module_api.addImport("constants", module_constants);
     module_api.addImport("build_options", options_module_build_options);
 
+
+    // === discv5 module ===
+    const secp256k1_dep = dep_eth_p2p_z.builder.dependency("secp256k1", .{
+        .optimize = optimize,
+        .target = target,
+    });
+    const secp256k1_lib = secp256k1_dep.artifact("libsecp");
+
+    const module_discv5 = b.createModule(.{
+        .root_source_file = b.path("src/discv5/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    module_discv5.linkLibrary(secp256k1_lib);
+    module_discv5.addIncludePath(secp256k1_dep.builder.dependency("libsecp256k1", .{}).path("include"));
+    b.modules.put(b.dupe("discv5"), module_discv5) catch @panic("OOM");
+
+    const test_discv5 = b.addTest(.{
+        .name = "discv5",
+        .root_module = module_discv5,
+        .filters = b.option([][]const u8, "discv5.filters", "discv5 test filters") orelse &[_][]const u8{},
+    });
+    const run_test_discv5 = b.addRunArtifact(test_discv5);
+    const tls_run_test_discv5 = b.step("test:discv5", "Run discv5 tests");
+    tls_run_test_discv5.dependOn(&run_test_discv5.step);
+    tls_run_test.dependOn(&run_test_discv5.step);
+
     // node module imports
     module_node.addImport("consensus_types", module_consensus_types);
     module_node.addImport("preset", module_preset);
@@ -783,3 +810,5 @@ pub fn build(b: *std.Build) void {
     module_node.addImport("hex", module_hex);
     module_node.addImport("build_options", options_module_build_options);
 }
+
+// NOTE: discv5 module is appended below — this comment is a sentinel
