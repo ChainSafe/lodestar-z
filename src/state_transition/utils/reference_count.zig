@@ -5,9 +5,8 @@ const Allocator = std.mem.Allocator;
 /// T should be `*Something`, not `*const Something` due to deinit()
 pub fn ReferenceCount(comptime T: type) type {
     return struct {
-        // TODO: switch to std.atomic
         allocator: Allocator,
-        _ref_count: usize,
+        _ref_count: std.atomic.Value(usize),
         instance: T,
 
         pub fn init(allocator: Allocator, instance: T) !*@This() {
@@ -15,7 +14,7 @@ pub fn ReferenceCount(comptime T: type) type {
             errdefer allocator.destroy(ptr);
             ptr.* = .{
                 .allocator = allocator,
-                ._ref_count = 1,
+                ._ref_count = std.atomic.Value(usize).init(1),
                 .instance = instance,
             };
             return ptr;
@@ -36,13 +35,16 @@ pub fn ReferenceCount(comptime T: type) type {
         }
 
         pub fn acquire(self: *@This()) *@This() {
-            self._ref_count += 1;
+            _ = self._ref_count.fetchAdd(1, .monotonic);
             return self;
         }
 
         pub fn release(self: *@This()) void {
-            self._ref_count -= 1;
-            if (self._ref_count == 0) {
+            // Use acq_rel to ensure all prior accesses are visible before
+            // a potential deinit, and that the final decrement observes
+            // all preceding releases from other threads.
+            const prev = self._ref_count.fetchSub(1, .acq_rel);
+            if (prev == 1) {
                 self.deinit();
             }
         }
