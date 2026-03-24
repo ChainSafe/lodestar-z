@@ -801,7 +801,29 @@ pub fn build(b: *std.Build) void {
     tls_run_test_discv5.dependOn(&run_test_discv5.step);
     tls_run_test.dependOn(&run_test_discv5.step);
 
-    // node module imports
+    // === Beacon node executable ===
+    const module_node_main = b.createModule(.{
+        .root_source_file = b.path("src/node/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    module_node_main.addImport("node", module_node);
+    module_node_main.addImport("config", module_config);
+
+    const exe_node = b.addExecutable(.{
+        .name = "lodestar-z",
+        .root_module = module_node_main,
+    });
+    const install_exe_node = b.addInstallArtifact(exe_node, .{});
+    const tls_install_exe_node = b.step("build-exe:lodestar-z", "Install the lodestar-z beacon node executable");
+    tls_install_exe_node.dependOn(&install_exe_node.step);
+    b.getInstallStep().dependOn(&install_exe_node.step);
+    const run_exe_node = b.addRunArtifact(exe_node);
+    if (b.args) |args| run_exe_node.addArgs(args);
+    const tls_run_exe_node = b.step("run", "Run the lodestar-z beacon node");
+    tls_run_exe_node.dependOn(&run_exe_node.step);
+
+        // node module imports
     module_node.addImport("consensus_types", module_consensus_types);
     module_node.addImport("preset", module_preset);
     module_node.addImport("config", module_config);
