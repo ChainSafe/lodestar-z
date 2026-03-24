@@ -384,6 +384,8 @@ pub const RangeSyncManager = struct {
 
     /// Sliding window of active batches (max MAX_WINDOW_SIZE).
     batches: [MAX_WINDOW_SIZE]Batch,
+    /// Number of active batches in the window.
+    batch_count: u8,
     /// Monotonically increasing batch identifier.
     next_batch_id: u32,
     /// Next slot to create a new batch for.
@@ -405,6 +407,7 @@ pub const RangeSyncManager = struct {
             .target_slot = current_slot,
             .batch_size = DEFAULT_BATCH_SIZE,
             .batches = undefined,
+            .batch_count = 0,
             .next_batch_id = 0,
             .next_dispatch_slot = current_slot + 1,
         };
@@ -464,7 +467,7 @@ pub const RangeSyncManager = struct {
     /// Periodic tick: dispatches new batches into the window, returns current status.
     pub fn tick(self: *RangeSyncManager) !sync_types.SyncStatus {
         // Re-dispatch failed batches.
-        for (self.batches[0..]) |*batch| {
+        for (self.batches[0..self.batch_count]) |*batch| {
             if (batch.status == .failed) {
                 const peer = self.peer_manager.getSyncTarget() orelse continue;
                 batch.peer = peer;
@@ -474,7 +477,7 @@ pub const RangeSyncManager = struct {
         }
 
         // Fill window with new batches.
-        while (self.batches.len < MAX_WINDOW_SIZE and
+        while (self.batch_count < MAX_WINDOW_SIZE and
             self.next_dispatch_slot <= self.target_slot)
         {
             const peer = self.peer_manager.getSyncTarget() orelse break;
@@ -494,13 +497,14 @@ pub const RangeSyncManager = struct {
                 .retry_count = 0,
                 .blocks_imported = 0,
             };
-            self.batches.appendAssumeCapacity(batch);
+            self.batches[self.batch_count] = batch;
+            self.batch_count += 1;
             self.next_dispatch_slot += count;
 
             self.requester.request(id, batch.start_slot, count, peer.peer_id);
         }
 
-        const is_synced = self.current_slot >= self.target_slot and self.batches.len == 0;
+        const is_synced = self.current_slot >= self.target_slot and self.batch_count == 0;
         const sync_distance = if (self.target_slot > self.current_slot)
             self.target_slot - self.current_slot
         else
@@ -516,13 +520,13 @@ pub const RangeSyncManager = struct {
 
     /// Whether sync has reached the target.
     pub fn isSynced(self: *const RangeSyncManager) bool {
-        return self.current_slot >= self.target_slot and self.batches.len == 0;
+        return self.current_slot >= self.target_slot and self.batch_count == 0;
     }
 
     // ── Internal helpers ────────────────────────────────────────────
 
     fn findBatch(self: *RangeSyncManager, batch_id: u32) ?usize {
-        for (self.batches[0..], 0..) |b, i| {
+        for (self.batches[0..self.batch_count], 0..) |b, i| {
             if (b.id == batch_id) return i;
         }
         return null;
@@ -531,8 +535,8 @@ pub const RangeSyncManager = struct {
     /// Remove completed/skipped batches from the front of the window,
     /// advancing current_slot accordingly.
     fn drainCompleted(self: *RangeSyncManager) void {
-        while (self.batches.len > 0) {
-            const front = self.batches[0..][0];
+        while (self.batch_count > 0) {
+            const front = self.batches[0];
             if (front.status != .completed and front.status != .skipped) break;
 
             // Advance current_slot to the end of this batch.
@@ -541,17 +545,12 @@ pub const RangeSyncManager = struct {
                 self.current_slot = batch_end;
             }
 
-            // Remove from front by shifting.
-            const n = self.batches.len;
-            for (1..n) |i| {
-                self.batches[i - 1] = self.batches[i];
-            }
-            // Shift batches left by 1
+            // Shift remaining batches left by 1.
             var j: usize = 0;
-            while (j < MAX_WINDOW_SIZE - 1) : (j += 1) {
+            while (j + 1 < self.batch_count) : (j += 1) {
                 self.batches[j] = self.batches[j + 1];
             }
-            self.batches[MAX_WINDOW_SIZE - 1] = std.mem.zeroes(Batch);
+            self.batch_count -= 1;
         }
     }
 };
@@ -564,8 +563,8 @@ const StatusMessage = @import("networking").messages.StatusMessage;
 /// Test harness: records dispatched requests and lets the test inject responses.
 const TestHarness = struct {
     allocator: Allocator,
-    imported_slots: std.ArrayList(u64),
-    dispatched_batches: std.ArrayList(DispatchedBatch),
+    imported_slots: std.ArrayListUnmanaged(u64),
+    dispatched_batches: std.ArrayListUnmanaged(DispatchedBatch),
     import_should_fail: bool = false,
 
     const DispatchedBatch = struct { id: u32, start_slot: u64, count: u64 };
@@ -631,174 +630,174 @@ const TestHarness = struct {
     }
 };
 
-// test "SKIP_016_MIGRATION RangeSyncManager: sequential batches are dispatched and imported" {
-//     const allocator = std.testing.allocator;
-//     var pm = PeerManager.init(allocator);
-//     defer pm.deinit();
-//     try pm.updatePeerStatus("p1", .{
-//         .fork_digest = .{ 0, 0, 0, 0 },
-//         .finalized_root = [_]u8{0} ** 32,
-//         .finalized_epoch = 0,
-//         .head_root = [_]u8{0} ** 32,
-//         .head_slot = 200,
-//     });
-// 
-//     var h = TestHarness.init(allocator);
-//     defer h.deinit();
-// 
-//     var mgr = RangeSyncManager.init(allocator, h.importer(), h.requester(), &pm, 0);
-//     mgr.batch_size = 64;
-//     mgr.start(128);
-// 
-//     // tick() should dispatch exactly 2 batches (64 + 64 = 128 slots).
-//     _ = try mgr.tick();
-//     try std.testing.expectEqual(@as(usize, 2), h.dispatched_batches.items.len);
-//     try std.testing.expectEqual(@as(u64, 1), h.dispatched_batches.items[0].start_slot);
-//     try std.testing.expectEqual(@as(u64, 64), h.dispatched_batches.items[0].count);
-//     try std.testing.expectEqual(@as(u64, 65), h.dispatched_batches.items[1].start_slot);
-//     try std.testing.expectEqual(@as(u64, 64), h.dispatched_batches.items[1].count);
-// 
-//     // Deliver both batches.
-//     const b0_id = h.dispatched_batches.items[0].id;
-//     const b1_id = h.dispatched_batches.items[1].id;
-//     {
-//         var blocks = std.ArrayListUnmanaged(BatchBlock).empty;
-//         defer blocks.deinit(allocator);
-//         for (1..65) |s| {
-//             const bytes = try allocator.alloc(u8, 8);
-//             std.mem.writeInt(u64, bytes[0..8], s, .little);
-//             try blocks.append(allocator, .{ .slot = s, .block_bytes = bytes });
-//         }
-//         defer for (blocks.items) |b| allocator.free(b.block_bytes);
-//         try mgr.onBatchResponse(b0_id, blocks.items);
-//     }
-//     {
-//         var blocks = std.ArrayListUnmanaged(BatchBlock).empty;
-//         defer blocks.deinit(allocator);
-//         for (65..129) |s| {
-//             const bytes = try allocator.alloc(u8, 8);
-//             std.mem.writeInt(u64, bytes[0..8], s, .little);
-//             try blocks.append(allocator, .{ .slot = s, .block_bytes = bytes });
-//         }
-//         defer for (blocks.items) |b| allocator.free(b.block_bytes);
-//         try mgr.onBatchResponse(b1_id, blocks.items);
-//     }
-// 
-//     // Should be synced now.
-//     try std.testing.expect(mgr.isSynced());
-//     try std.testing.expectEqual(@as(u64, 128), mgr.current_slot);
-// 
-//     // All 128 slots imported.
-//     try std.testing.expectEqual(@as(usize, 128), h.imported_slots.items.len);
-//     try std.testing.expectEqual(@as(u64, 1), h.imported_slots.items[0]);
-//     try std.testing.expectEqual(@as(u64, 128), h.imported_slots.items[127]);
-// }
+test "RangeSyncManager: sequential batches are dispatched and imported" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator);
+    defer pm.deinit();
+    try pm.updatePeerStatus("p1", .{
+        .fork_digest = .{ 0, 0, 0, 0 },
+        .finalized_root = [_]u8{0} ** 32,
+        .finalized_epoch = 0,
+        .head_root = [_]u8{0} ** 32,
+        .head_slot = 200,
+    });
 
-// test "SKIP_016_MIGRATION RangeSyncManager: batch retry on error, succeeds on retry" {
-//     const allocator = std.testing.allocator;
-//     var pm = PeerManager.init(allocator);
-//     defer pm.deinit();
-//     try pm.updatePeerStatus("p1", .{
-//         .fork_digest = .{ 0, 0, 0, 0 },
-//         .finalized_root = [_]u8{0} ** 32,
-//         .finalized_epoch = 0,
-//         .head_root = [_]u8{0} ** 32,
-//         .head_slot = 64,
-//     });
-// 
-//     var h = TestHarness.init(allocator);
-//     defer h.deinit();
-// 
-//     var mgr = RangeSyncManager.init(allocator, h.importer(), h.requester(), &pm, 0);
-//     mgr.batch_size = 64;
-//     mgr.start(64);
-// 
-//     _ = try mgr.tick();
-//     try std.testing.expectEqual(@as(usize, 1), h.dispatched_batches.items.len);
-// 
-//     // Simulate error on first attempt.
-//     const batch_id = h.dispatched_batches.items[0].id;
-//     mgr.onBatchError(batch_id);
-//     try std.testing.expectEqual(@as(u8, 1), mgr.batches[0].retry_count);
-//     try std.testing.expect(!mgr.isSynced());
-// 
-//     // tick() re-dispatches failed batch.
-//     _ = try mgr.tick();
-//     // The re-dispatched batch should appear as a second dispatch record.
-//     try std.testing.expectEqual(@as(usize, 2), h.dispatched_batches.items.len);
-// 
-//     // Deliver success on retry.
-//     const retry_id = h.dispatched_batches.items[1].id;
-//     var blocks = std.ArrayListUnmanaged(BatchBlock).empty;
-//     defer blocks.deinit(allocator);
-//     for (1..65) |s| {
-//         const bytes = try allocator.alloc(u8, 8);
-//         std.mem.writeInt(u64, bytes[0..8], s, .little);
-//         try blocks.append(allocator, .{ .slot = s, .block_bytes = bytes });
-//     }
-//     defer for (blocks.items) |b| allocator.free(b.block_bytes);
-//     try mgr.onBatchResponse(retry_id, blocks.items);
-// 
-//     try std.testing.expect(mgr.isSynced());
-// }
+    var h = TestHarness.init(allocator);
+    defer h.deinit();
 
-// test "SKIP_016_MIGRATION RangeSyncManager: batch skipped after MAX_BATCH_RETRIES" {
-//     const allocator = std.testing.allocator;
-//     var pm = PeerManager.init(allocator);
-//     defer pm.deinit();
-//     try pm.updatePeerStatus("p1", .{
-//         .fork_digest = .{ 0, 0, 0, 0 },
-//         .finalized_root = [_]u8{0} ** 32,
-//         .finalized_epoch = 0,
-//         .head_root = [_]u8{0} ** 32,
-//         .head_slot = 64,
-//     });
-// 
-//     var h = TestHarness.init(allocator);
-//     defer h.deinit();
-// 
-//     var mgr = RangeSyncManager.init(allocator, h.importer(), h.requester(), &pm, 0);
-//     mgr.batch_size = 64;
-//     mgr.start(64);
-//     _ = try mgr.tick();
-// 
-//     const batch_id = h.dispatched_batches.items[0].id;
-// 
-//     // Exhaust retries.
-//     var i: u8 = 0;
-//     while (i < MAX_BATCH_RETRIES) : (i += 1) {
-//         mgr.onBatchError(batch_id);
-//         if (i + 1 < MAX_BATCH_RETRIES) {
-//             _ = try mgr.tick(); // re-dispatch
-//         }
-//     }
-// 
-//     // After MAX_BATCH_RETRIES, batch is skipped and window drains.
-//     try std.testing.expectEqual(@as(usize, 0), mgr.batches.len);
-//     // Sync is "complete" (skipped forward past target).
-//     try std.testing.expect(mgr.isSynced());
-// }
+    var mgr = RangeSyncManager.init(allocator, h.importer(), h.requester(), &pm, 0);
+    mgr.batch_size = 64;
+    mgr.start(128);
 
-// test "SKIP_016_MIGRATION RangeSyncManager: tick returns synced status when current_slot >= target" {
-//     const allocator = std.testing.allocator;
-//     var pm = PeerManager.init(allocator);
-//     defer pm.deinit();
-//     try pm.updatePeerStatus("p1", .{
-//         .fork_digest = .{ 0, 0, 0, 0 },
-//         .finalized_root = [_]u8{0} ** 32,
-//         .finalized_epoch = 0,
-//         .head_root = [_]u8{0} ** 32,
-//         .head_slot = 50,
-//     });
-// 
-//     var h = TestHarness.init(allocator);
-//     defer h.deinit();
-// 
-//     // Start already at or past target.
-//     var mgr = RangeSyncManager.init(allocator, h.importer(), h.requester(), &pm, 100);
-//     mgr.start(50); // target < current_slot
-// 
-//     const status = try mgr.tick();
-//     try std.testing.expectEqual(sync_types.SyncState.synced, status.state);
-//     try std.testing.expectEqual(@as(u64, 0), status.sync_distance);
-// }
+    // tick() should dispatch exactly 2 batches (64 + 64 = 128 slots).
+    _ = try mgr.tick();
+    try std.testing.expectEqual(@as(usize, 2), h.dispatched_batches.items.len);
+    try std.testing.expectEqual(@as(u64, 1), h.dispatched_batches.items[0].start_slot);
+    try std.testing.expectEqual(@as(u64, 64), h.dispatched_batches.items[0].count);
+    try std.testing.expectEqual(@as(u64, 65), h.dispatched_batches.items[1].start_slot);
+    try std.testing.expectEqual(@as(u64, 64), h.dispatched_batches.items[1].count);
+
+    // Deliver both batches.
+    const b0_id = h.dispatched_batches.items[0].id;
+    const b1_id = h.dispatched_batches.items[1].id;
+    {
+        var blocks = std.ArrayListUnmanaged(BatchBlock).empty;
+        defer blocks.deinit(allocator);
+        for (1..65) |s| {
+            const bytes = try allocator.alloc(u8, 8);
+            std.mem.writeInt(u64, bytes[0..8], s, .little);
+            try blocks.append(allocator, .{ .slot = s, .block_bytes = bytes });
+        }
+        defer for (blocks.items) |b| allocator.free(b.block_bytes);
+        try mgr.onBatchResponse(b0_id, blocks.items);
+    }
+    {
+        var blocks = std.ArrayListUnmanaged(BatchBlock).empty;
+        defer blocks.deinit(allocator);
+        for (65..129) |s| {
+            const bytes = try allocator.alloc(u8, 8);
+            std.mem.writeInt(u64, bytes[0..8], s, .little);
+            try blocks.append(allocator, .{ .slot = s, .block_bytes = bytes });
+        }
+        defer for (blocks.items) |b| allocator.free(b.block_bytes);
+        try mgr.onBatchResponse(b1_id, blocks.items);
+    }
+
+    // Should be synced now.
+    try std.testing.expect(mgr.isSynced());
+    try std.testing.expectEqual(@as(u64, 128), mgr.current_slot);
+
+    // All 128 slots imported.
+    try std.testing.expectEqual(@as(usize, 128), h.imported_slots.items.len);
+    try std.testing.expectEqual(@as(u64, 1), h.imported_slots.items[0]);
+    try std.testing.expectEqual(@as(u64, 128), h.imported_slots.items[127]);
+}
+
+test "RangeSyncManager: batch retry on error, succeeds on retry" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator);
+    defer pm.deinit();
+    try pm.updatePeerStatus("p1", .{
+        .fork_digest = .{ 0, 0, 0, 0 },
+        .finalized_root = [_]u8{0} ** 32,
+        .finalized_epoch = 0,
+        .head_root = [_]u8{0} ** 32,
+        .head_slot = 64,
+    });
+
+    var h = TestHarness.init(allocator);
+    defer h.deinit();
+
+    var mgr = RangeSyncManager.init(allocator, h.importer(), h.requester(), &pm, 0);
+    mgr.batch_size = 64;
+    mgr.start(64);
+
+    _ = try mgr.tick();
+    try std.testing.expectEqual(@as(usize, 1), h.dispatched_batches.items.len);
+
+    // Simulate error on first attempt.
+    const batch_id = h.dispatched_batches.items[0].id;
+    mgr.onBatchError(batch_id);
+    try std.testing.expectEqual(@as(u8, 1), mgr.batches[0].retry_count);
+    try std.testing.expect(!mgr.isSynced());
+
+    // tick() re-dispatches failed batch.
+    _ = try mgr.tick();
+    // The re-dispatched batch should appear as a second dispatch record.
+    try std.testing.expectEqual(@as(usize, 2), h.dispatched_batches.items.len);
+
+    // Deliver success on retry.
+    const retry_id = h.dispatched_batches.items[1].id;
+    var blocks = std.ArrayListUnmanaged(BatchBlock).empty;
+    defer blocks.deinit(allocator);
+    for (1..65) |s| {
+        const bytes = try allocator.alloc(u8, 8);
+        std.mem.writeInt(u64, bytes[0..8], s, .little);
+        try blocks.append(allocator, .{ .slot = s, .block_bytes = bytes });
+    }
+    defer for (blocks.items) |b| allocator.free(b.block_bytes);
+    try mgr.onBatchResponse(retry_id, blocks.items);
+
+    try std.testing.expect(mgr.isSynced());
+}
+
+test "RangeSyncManager: batch skipped after MAX_BATCH_RETRIES" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator);
+    defer pm.deinit();
+    try pm.updatePeerStatus("p1", .{
+        .fork_digest = .{ 0, 0, 0, 0 },
+        .finalized_root = [_]u8{0} ** 32,
+        .finalized_epoch = 0,
+        .head_root = [_]u8{0} ** 32,
+        .head_slot = 64,
+    });
+
+    var h = TestHarness.init(allocator);
+    defer h.deinit();
+
+    var mgr = RangeSyncManager.init(allocator, h.importer(), h.requester(), &pm, 0);
+    mgr.batch_size = 64;
+    mgr.start(64);
+    _ = try mgr.tick();
+
+    const batch_id = h.dispatched_batches.items[0].id;
+
+    // Exhaust retries.
+    var i: u8 = 0;
+    while (i < MAX_BATCH_RETRIES) : (i += 1) {
+        mgr.onBatchError(batch_id);
+        if (i + 1 < MAX_BATCH_RETRIES) {
+            _ = try mgr.tick(); // re-dispatch
+        }
+    }
+
+    // After MAX_BATCH_RETRIES, batch is skipped and window drains.
+    try std.testing.expectEqual(@as(u8, 0), mgr.batch_count);
+    // Sync is "complete" (skipped forward past target).
+    try std.testing.expect(mgr.isSynced());
+}
+
+test "RangeSyncManager: tick returns synced status when current_slot >= target" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator);
+    defer pm.deinit();
+    try pm.updatePeerStatus("p1", .{
+        .fork_digest = .{ 0, 0, 0, 0 },
+        .finalized_root = [_]u8{0} ** 32,
+        .finalized_epoch = 0,
+        .head_root = [_]u8{0} ** 32,
+        .head_slot = 50,
+    });
+
+    var h = TestHarness.init(allocator);
+    defer h.deinit();
+
+    // Start already at or past target.
+    var mgr = RangeSyncManager.init(allocator, h.importer(), h.requester(), &pm, 100);
+    mgr.start(50); // target < current_slot
+
+    const status = try mgr.tick();
+    try std.testing.expectEqual(sync_types.SyncState.synced, status.state);
+    try std.testing.expectEqual(@as(u64, 0), status.sync_distance);
+}

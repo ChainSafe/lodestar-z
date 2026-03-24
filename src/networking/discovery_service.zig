@@ -41,6 +41,7 @@ pub const DiscoveryService = struct {
             .protocol = try Protocol.init(allocator, .{
                 .local_node_id = config.local_node_id,
                 .local_secret_key = [_]u8{0} ** 32,
+                .listen_addr = .{ .ip = [4]u8{ 0, 0, 0, 0 }, .port = config.listen_port },
             }),
         };
     }
@@ -69,7 +70,12 @@ pub const DiscoveryService = struct {
 
             if (parsed.pubkey) |pk| {
                 const node_id = discv5.enr.nodeIdFromCompressedPubkey(&pk);
-                self.protocol.routing_table.insert(node_id);
+                self.protocol.routing_table.insert(.{
+                    .node_id = node_id,
+                    .addr = [_]u8{0} ** 6,
+                    .last_seen = 0,
+                    .status = .connected,
+                });
             }
         }
     }

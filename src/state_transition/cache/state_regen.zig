@@ -15,6 +15,9 @@ const BlockStateCache = @import("block_state_cache.zig").BlockStateCache;
 const CheckpointStateCache = @import("checkpoint_state_cache.zig").CheckpointStateCache;
 const CheckpointKey = @import("datastore.zig").CheckpointKey;
 const BeaconDB = @import("db").BeaconDB;
+const BeaconConfig = @import("config").BeaconConfig;
+const PersistentMerkleTreeNode = @import("persistent_merkle_tree").Node;
+const deserializeState = @import("../utils/state_deserialize.zig").deserializeState;
 
 pub const StateRegen = struct {
     allocator: Allocator,
@@ -22,13 +25,19 @@ pub const StateRegen = struct {
     checkpoint_cache: *CheckpointStateCache,
     // fork_choice: *ForkChoice,   // TODO: wire when available
     db: ?*BeaconDB,
+    /// Persistent Merkle tree node pool — shared across all states.
+    /// Optional: deserialization from DB is skipped when null.
+    pool: ?*PersistentMerkleTreeNode.Pool,
+    /// Beacon chain config — required for fork detection during deserialization.
+    /// Optional: deserialization from DB is skipped when null.
+    config: ?*const BeaconConfig,
 
     pub fn init(
         allocator: Allocator,
         block_cache: *BlockStateCache,
         checkpoint_cache: *CheckpointStateCache,
     ) StateRegen {
-        return initWithDB(allocator, block_cache, checkpoint_cache, null);
+        return initWithDB(allocator, block_cache, checkpoint_cache, null, null, null);
     }
 
     /// Initialize with an optional BeaconDB for cold-path state retrieval.
@@ -37,12 +46,16 @@ pub const StateRegen = struct {
         block_cache: *BlockStateCache,
         checkpoint_cache: *CheckpointStateCache,
         db: ?*BeaconDB,
+        pool: ?*PersistentMerkleTreeNode.Pool,
+        config: ?*const BeaconConfig,
     ) StateRegen {
         return .{
             .allocator = allocator,
             .block_cache = block_cache,
             .checkpoint_cache = checkpoint_cache,
             .db = db,
+            .pool = pool,
+            .config = config,
         };
     }
 
@@ -89,13 +102,20 @@ pub const StateRegen = struct {
             while (search_epoch > 0) : (search_epoch -= 1) {
                 const cp_slot = computeStartSlotAtEpoch(search_epoch);
                 if (try db.getStateArchive(cp_slot)) |state_bytes| {
-                    // Free bytes after use — deserialization is a TODO.
-                    self.allocator.free(state_bytes);
-                    // TODO: deserialize state_bytes into CachedBeaconState,
-                    // then replay blocks from cp_slot to block_slot.
-                    // Requires: fork detection, SSZ deserialization, STFN loop.
-                    // Infrastructure (archive write/read) is wired; the
-                    // deserialization step is deferred.
+                    defer self.allocator.free(state_bytes);
+                    if (self.pool != null and self.config != null) {
+                        // Deserialize the archived state.
+                        // TODO: replay blocks forward from cp_slot to block_slot once
+                        // the STFN loop is available. For now, return the archived
+                        // checkpoint state directly (correct only when cp_slot == block_slot - 1).
+                        const cached_state = try deserializeState(
+                            self.allocator,
+                            self.pool.?,
+                            self.config.?,
+                            state_bytes,
+                        );
+                        return cached_state;
+                    }
                     break;
                 }
             }
@@ -126,13 +146,16 @@ pub const StateRegen = struct {
 
         // 3. Try DB archived state
         if (self.db) |db| {
+            if (self.pool == null or self.config == null) return null;
             const bytes = (try db.getStateArchiveByRoot(state_root)) orelse return null;
-            // Free bytes — deserialization is a TODO.
-            self.allocator.free(bytes);
-            // TODO: deserialize bytes into CachedBeaconState.
-            // Requires: fork detection from slot bytes, AnyBeaconState.deserialize,
-            // then CachedBeaconState.createCachedBeaconState.
-            return null;
+            defer self.allocator.free(bytes);
+            const cached_state = try deserializeState(
+                self.allocator,
+                self.pool.?,
+                self.config.?,
+                bytes,
+            );
+            return cached_state;
         }
 
         return null;

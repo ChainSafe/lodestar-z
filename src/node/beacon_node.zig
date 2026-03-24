@@ -471,7 +471,7 @@ pub const BeaconNode = struct {
 
         // StateRegen
         const regen = try allocator.create(StateRegen);
-        regen.* = StateRegen.initWithDB(allocator, block_cache, cp_cache, db);
+        regen.* = StateRegen.initWithDB(allocator, block_cache, cp_cache, db, null, null);
 
         // HeadTracker
         const head_tracker = try allocator.create(HeadTracker);

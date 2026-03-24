@@ -94,7 +94,7 @@ const PipelineHarness = struct {
 
         // Set up regen.
         const regen = try allocator.create(StateRegen);
-        regen.* = StateRegen.initWithDB(allocator, block_cache, cp_cache, db);
+        regen.* = StateRegen.initWithDB(allocator, block_cache, cp_cache, db, null, null);
 
         // Put the genesis state into block_cache. block_cache owns it after this.
         const state_root = try regen.onNewBlock(test_state.cached_state, true);

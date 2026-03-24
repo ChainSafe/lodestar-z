@@ -97,6 +97,8 @@ pub const bls = @import("utils/bls.zig");
 pub const load_state = @import("./utils/load_state.zig");
 pub const load_cached_state = @import("./utils/load_cached_state.zig");
 pub const loadCachedBeaconState = load_cached_state.loadCachedBeaconState;
+pub const state_deserialize = @import("./utils/state_deserialize.zig");
+pub const deserializeState = state_deserialize.deserializeState;
 
 // State caching layer
 pub const BlockStateCache = @import("./cache/block_state_cache.zig").BlockStateCache;
