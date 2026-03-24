@@ -9,7 +9,78 @@ LOGS_DIR="${FUZZ_DIR}/logs"
 
 SSZ_TARGETS=(ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists)
 BLS_TARGETS=(bls_public_key bls_signature bls_aggregate_pk bls_aggregate_sig)
-TARGETS=("${SSZ_TARGETS[@]}" "${BLS_TARGETS[@]}")
+ALL_TARGETS=("${SSZ_TARGETS[@]}" "${BLS_TARGETS[@]}")
+
+usage() {
+    echo "Usage: $0 [targets...]"
+    echo ""
+    echo "Groups:  all, ssz, bls"
+    echo "Targets: ${ALL_TARGETS[*]}"
+    echo ""
+    echo "Examples:"
+    echo "  $0                    # fuzz all targets"
+    echo "  $0 ssz                # fuzz all SSZ targets"
+    echo "  $0 bls                # fuzz all BLS targets"
+    echo "  $0 ssz bls_signature  # mix groups and individual targets"
+    echo ""
+    echo "Environment:"
+    echo "  ROUND_DURATION=3600   # seconds per round (default: 3600)"
+    exit 0
+}
+
+# Resolve group names and individual targets from arguments
+resolve_targets() {
+    local resolved=()
+    for arg in "$@"; do
+        case "$arg" in
+            -h|--help) usage ;;
+            all)       resolved+=("${ALL_TARGETS[@]}") ;;
+            ssz)       resolved+=("${SSZ_TARGETS[@]}") ;;
+            bls)       resolved+=("${BLS_TARGETS[@]}") ;;
+            *)
+                # Validate that the target actually exists
+                local valid=false
+                for t in "${ALL_TARGETS[@]}"; do
+                    if [ "$arg" = "$t" ]; then
+                        valid=true
+                        break
+                    fi
+                done
+                if ! $valid; then
+                    echo "Error: unknown target '${arg}'" >&2
+                    echo "Valid targets: ${ALL_TARGETS[*]}" >&2
+                    echo "Valid groups: all, ssz, bls" >&2
+                    exit 1
+                fi
+                resolved+=("$arg")
+                ;;
+        esac
+    done
+    # Deduplicate while preserving order
+    local seen=()
+    TARGETS=()
+    for t in "${resolved[@]}"; do
+        local dup=false
+        for s in "${seen[@]+"${seen[@]}"}"; do
+            if [ "$t" = "$s" ]; then
+                dup=true
+                break
+            fi
+        done
+        if ! $dup; then
+            TARGETS+=("$t")
+            seen+=("$t")
+        fi
+    done
+}
+
+if [ $# -eq 0 ]; then
+    TARGETS=("${ALL_TARGETS[@]}")
+else
+    resolve_targets "$@"
+fi
+
+echo "Targets: ${TARGETS[*]}"
 
 # Duration per round in seconds. Override with: ROUND_DURATION=7200 ./fuzz-loop.sh
 ROUND_DURATION=${ROUND_DURATION:-3600}
@@ -18,7 +89,7 @@ mkdir -p "$LOGS_DIR"
 
 run_round() {
     local round=$1
-    echo "[Round ${round}] Fuzzing all targets for ${ROUND_DURATION}s..."
+    echo "[Round ${round}] Fuzzing ${#TARGETS[@]} target(s) for ${ROUND_DURATION}s..."
 
     local pids=()
     for target in "${TARGETS[@]}"; do
