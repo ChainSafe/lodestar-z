@@ -38,6 +38,7 @@ const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const db_mod = @import("db");
 const BeaconDB = db_mod.BeaconDB;
 const MemoryKVStore = db_mod.MemoryKVStore;
+const LmdbKVStore = db_mod.LmdbKVStore;
 const chain_mod = @import("chain");
 const OpPool = chain_mod.OpPool;
 const SeenCache = chain_mod.SeenCache;
@@ -343,13 +344,21 @@ pub const BeaconNode = struct {
     // Checkpoint state datastore (memory-backed)
     cp_datastore: *MemoryCPStateDatastore,
 
-    // KV store (kept for cleanup)
-    kv_store: *MemoryKVStore,
+    // KV backend (kept for cleanup — BeaconDB holds the vtable)
+    kv_backend: KVBackend,
 
     // API context
     api_context: *ApiContext,
     api_head_tracker: *api_mod.context.HeadTracker,
     api_sync_status: *api_mod.context.SyncStatus,
+
+    // HTTP server for the Beacon REST API (lazy-initialized via startApi).
+    http_server: ?api_mod.HttpServer = null,
+
+    pub const KVBackend = union(enum) {
+        memory: *MemoryKVStore,
+        lmdb: *LmdbKVStore,
+    };
 
     /// Create a new BeaconNode with all components wired together.
     ///
@@ -358,11 +367,36 @@ pub const BeaconNode = struct {
     /// are heap-allocated and owned by the node.
     pub fn init(allocator: Allocator, beacon_config: *const BeaconConfig, opts: NodeOptions) !*BeaconNode {
         // KV store → BeaconDB
-        const kv_store = try allocator.create(MemoryKVStore);
-        kv_store.* = MemoryKVStore.init(allocator);
+        // Use LMDB if data_dir is provided; fall back to MemoryKVStore for tests.
+        var kv_backend: KVBackend = undefined;
+        var kv_iface: db_mod.KVStore = undefined;
+
+        if (opts.data_dir.len > 0) {
+            // Build null-terminated path for LMDB.
+            // The data directory must already exist.
+            const db_path = try std.fs.path.join(allocator, &.{ opts.data_dir, "chain.lmdb" });
+            defer allocator.free(db_path);
+            const z_path = try allocator.dupeZ(u8, db_path);
+            defer allocator.free(z_path);
+
+            const lmdb_store = try allocator.create(LmdbKVStore);
+            lmdb_store.* = LmdbKVStore.open(allocator, z_path, .{
+                .map_size = 256 * 1024 * 1024 * 1024, // 256 GB
+            }) catch |err| {
+                allocator.destroy(lmdb_store);
+                return err;
+            };
+            kv_backend = .{ .lmdb = lmdb_store };
+            kv_iface = lmdb_store.kvStore();
+        } else {
+            const mem_store = try allocator.create(MemoryKVStore);
+            mem_store.* = MemoryKVStore.init(allocator);
+            kv_backend = .{ .memory = mem_store };
+            kv_iface = mem_store.kvStore();
+        }
 
         const db = try allocator.create(BeaconDB);
-        db.* = BeaconDB.init(allocator, kv_store.kvStore());
+        db.* = BeaconDB.init(allocator, kv_iface);
 
         // State caches
         const block_cache = try allocator.create(BlockStateCache);
@@ -464,7 +498,7 @@ pub const BeaconNode = struct {
             .block_importer = block_importer,
             .clock = null,
             .cp_datastore = cp_datastore,
-            .kv_store = kv_store,
+            .kv_backend = kv_backend,
             .api_context = api_ctx,
             .api_head_tracker = api_head,
             .api_sync_status = api_sync,
@@ -509,7 +543,13 @@ pub const BeaconNode = struct {
         self.db.close();
         allocator.destroy(self.db);
 
-        allocator.destroy(self.kv_store);
+        switch (self.kv_backend) {
+            .memory => |mem| allocator.destroy(mem),
+            .lmdb => |lmdb_store| {
+                lmdb_store.deinit();
+                allocator.destroy(lmdb_store);
+            },
+        }
 
         allocator.destroy(self);
     }
@@ -561,6 +601,15 @@ pub const BeaconNode = struct {
         }
 
         return result;
+    }
+
+    /// Start the Beacon REST API HTTP server (blocking).
+    ///
+    /// Listens on the configured address:port and dispatches requests
+    /// to the Beacon API handlers.
+    pub fn startApi(self: *BeaconNode, io: std.Io, address: []const u8, port: u16) !void {
+        self.http_server = api_mod.HttpServer.init(self.allocator, self.api_context, address, port);
+        try self.http_server.?.serve(io);
     }
 
     /// Get the current head info.
