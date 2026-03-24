@@ -194,7 +194,7 @@ pub const Builder = struct {
 
         // Content = RLP([seq, "id", "v4", "secp256k1", pubkey, ...])
         // The content to sign is: "enr-record-prefix" + RLP content (without sig)
-        // Actually per EIP-778: sig = sign("enr:" || RLP(seq, k, v, ...))
+        // Per EIP-778: sig = sign(keccak256(RLP([seq, k, v, ...])))
         const pubkey = try secp.pubkeyFromSecret(&self.secret_key);
 
         const content_list_start = try content_writer.beginList();
@@ -219,15 +219,10 @@ pub const Builder = struct {
         try content_writer.finishList(content_list_start);
         const content_rlp = content_writer.bytes();
 
-        // Sign: sign("enr:" || content_rlp)
-        const prefix = "enr:";
-        var to_sign = try self.alloc.alloc(u8, prefix.len + content_rlp.len);
-        defer self.alloc.free(to_sign);
-        @memcpy(to_sign[0..prefix.len], prefix);
-        @memcpy(to_sign[prefix.len..], content_rlp);
-
+        // Sign: sign(keccak256(RLP([seq, k, v, ...])))
+        // Per EIP-778: the signing input is the RLP-encoded content (no "enr:" prefix).
         var hash: [32]u8 = undefined;
-        Keccak256.hash(to_sign, &hash, .{});
+        Keccak256.hash(content_rlp, &hash, .{});
         const sig = try secp.sign(&hash, &self.secret_key);
 
         // Build full ENR: RLP([sig, seq, k, v, ...])

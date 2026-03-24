@@ -501,10 +501,7 @@ pub fn main() !void {
         };
         defer alloc.free(hs.challenge_data);
 
-        std.debug.print("  Received WHOAREYOU (enr-seq={d}, challenge_data_len={d})\n", .{hs.enr_seq, hs.challenge_data.len});
-    std.debug.print("  challenge_data[0..8]: ", .{});
-    for (hs.challenge_data[0..@min(8, hs.challenge_data.len)]) |b| std.debug.print("{x:0>2}", .{b});
-    std.debug.print("\n", .{});
+        std.debug.print("  Received WHOAREYOU (enr-seq={d})\n", .{hs.enr_seq});
 
         // Step 3: Send handshake PING
         var hs_nonce: [12]u8 = undefined;
@@ -516,21 +513,11 @@ pub fn main() !void {
         };
         std.debug.print("  Sent handshake PING\n", .{});
 
-        // Step 4: Wait for PONG (could also receive another WHOAREYOU if handshake failed)
+        // Step 4: Wait for PONG
         const r2 = udpRecv(sock, &recv_buf) catch |err| {
             std.debug.print("  Waiting for PONG: {s}\n", .{@errorName(err)});
             continue;
         };
-        std.debug.print("  Got {d} bytes response\n", .{r2.n});
-        // Check flag byte (after masking_iv=16 + static_header decode)
-        {
-            var dbg_parsed = packet.decode(alloc, recv_buf[0..r2.n], &local_node_id) catch |err| {
-                std.debug.print("  Could not decode response: {s}\n", .{@errorName(err)});
-                continue;
-            };
-            defer dbg_parsed.deinit();
-            std.debug.print("  Response flag: {d} (0=msg,1=whoareyou,2=handshake)\n", .{dbg_parsed.static_header.flag});
-        }
 
         var resp_parsed = packet.decode(alloc, recv_buf[0..r2.n], &local_node_id) catch |err| {
             std.debug.print("  Failed to decode response: {s}\n", .{@errorName(err)});
@@ -610,6 +597,7 @@ pub fn main() !void {
                     if (nodes_pt.len == 0 or nodes_pt[0] != messages.MSG_NODES) break;
 
                     // Parse NODES: type(1) | RLP([req-id, total, [enr...]])
+                    // Each ENR in the list is an RLP *list* (not bytes), use skipItem
                     var r = rlp.Reader.init(nodes_pt[1..]);
                     var list = r.readList() catch break;
                     _ = list.readBytes() catch break; // req-id
@@ -619,7 +607,7 @@ pub fn main() !void {
                     var enr_list = list.readList() catch break;
                     var enr_count: usize = 0;
                     while (!enr_list.atEnd()) {
-                        _ = enr_list.readBytes() catch break;
+                        enr_list.skipItem() catch break;
                         enr_count += 1;
                     }
                     total_nodes += enr_count;
