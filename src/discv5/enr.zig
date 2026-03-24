@@ -199,17 +199,17 @@ pub const Builder = struct {
 
         const content_list_start = try content_writer.beginList();
         try content_writer.writeUint64(self.seq);
-        // id = "v4"
+        // Keys MUST be sorted alphabetically per EIP-778: id, ip, secp256k1, udp
         try content_writer.writeBytes("id");
         try content_writer.writeBytes("v4");
-        // secp256k1 pubkey
-        try content_writer.writeBytes("secp256k1");
-        try content_writer.writeBytes(&pubkey);
-        // ip
+        // ip (comes before secp256k1 alphabetically)
         if (self.ip) |ip| {
             try content_writer.writeBytes("ip");
             try content_writer.writeBytes(&ip);
         }
+        // secp256k1 pubkey
+        try content_writer.writeBytes("secp256k1");
+        try content_writer.writeBytes(&pubkey);
         // udp
         if (self.udp) |udp| {
             try content_writer.writeBytes("udp");
@@ -232,14 +232,16 @@ pub const Builder = struct {
         const list_start = try full_writer.beginList();
         try full_writer.writeBytes(&sig);
         try full_writer.writeUint64(self.seq);
+        // Keys MUST be sorted alphabetically per EIP-778: id, ip, secp256k1, udp
         try full_writer.writeBytes("id");
         try full_writer.writeBytes("v4");
-        try full_writer.writeBytes("secp256k1");
-        try full_writer.writeBytes(&pubkey);
+        // ip (comes before secp256k1 alphabetically)
         if (self.ip) |ip| {
             try full_writer.writeBytes("ip");
             try full_writer.writeBytes(&ip);
         }
+        try full_writer.writeBytes("secp256k1");
+        try full_writer.writeBytes(&pubkey);
         if (self.udp) |udp| {
             try full_writer.writeBytes("udp");
             const port_bytes = [2]u8{ @as(u8, @intCast(udp >> 8)), @as(u8, @intCast(udp & 0xff)) };
@@ -262,4 +264,32 @@ test "ENR nodeIdFromCompressedPubkey" {
     // Expected from test vectors: node-a-id = 0xaaaa8419e9f49d0083561b48287df592939a8d19947d8c0ef88f2a4856a69fbb
     const expected = hex.hexToBytesComptime(32, "aaaa8419e9f49d0083561b48287df592939a8d19947d8c0ef88f2a4856a69fbb");
     try std.testing.expectEqualSlices(u8, &expected, &node_id);
+}
+
+test "ENR Builder: key-value pairs sorted alphabetically (EIP-778)" {
+    // Regression test: ENR keys must be sorted alphabetically per EIP-778.
+    // Correct order: id, ip, secp256k1, udp
+    // Previous bug: id, secp256k1, ip, udp — produced an invalid signature.
+    //
+    // Test vector from https://github.com/ethereum/devp2p/blob/master/enr.md:
+    //   private key: b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291
+    //   seq: 1, ip: 127.0.0.1, udp: 30303
+    //   expected node-id: a448f24c6d18e575453db13171562b71999873db5b286df957af199ec94617f7
+    const hex_mod = @import("hex.zig");
+    const alloc = std.testing.allocator;
+
+    const secret_key = hex_mod.hexToBytesComptime(32, "b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291");
+    var builder = Builder.init(alloc, secret_key, 1);
+    builder.ip = [4]u8{ 127, 0, 0, 1 };
+    builder.udp = 30303;
+    const enr_bytes = try builder.encode();
+    defer alloc.free(enr_bytes);
+
+    // Re-parse and check the node ID is the expected one (proves the pubkey is embedded correctly)
+    var parsed = try decode(alloc, enr_bytes);
+    defer parsed.deinit();
+
+    const expected_node_id = hex_mod.hexToBytesComptime(32, "a448f24c6d18e575453db13171562b71999873db5b286df957af199ec94617f7");
+    const node_id = parsed.nodeId() orelse return error.NoNodeId;
+    try std.testing.expectEqualSlices(u8, &expected_node_id, &node_id);
 }
