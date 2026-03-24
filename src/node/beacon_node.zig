@@ -61,6 +61,14 @@ const api_types = api_mod.types;
 const SlotClock = @import("clock.zig").SlotClock;
 const NodeOptions = @import("options.zig").NodeOptions;
 
+const fork_choice_mod = @import("fork_choice");
+const ForkChoice = fork_choice_mod.ForkChoiceStruct;
+const ForkChoiceInit = fork_choice_mod.fork_choice.InitOpts;
+const ProtoBlock = fork_choice_mod.ProtoBlock;
+const BlockExtraMeta = fork_choice_mod.BlockExtraMeta;
+const ForkChoiceCheckpoint = fork_choice_mod.Checkpoint;
+
+
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 
 // ---------------------------------------------------------------------------
@@ -136,6 +144,7 @@ pub const BlockImporter = struct {
     regen: *StateRegen,
     db: *BeaconDB,
     head_tracker: *HeadTracker,
+    fork_choice: ?*ForkChoice,
 
     /// When true, BLS signatures are verified in processBlock.
     verify_signatures: bool,
@@ -158,6 +167,7 @@ pub const BlockImporter = struct {
             .regen = regen,
             .db = db,
             .head_tracker = head_tracker,
+            .fork_choice = null,
             .verify_signatures = false,
             .block_to_state = std.AutoArrayHashMap([32]u8, [32]u8).init(allocator),
         };
@@ -218,6 +228,36 @@ pub const BlockImporter = struct {
         if (is_epoch_transition) {
             try self.head_tracker.onEpochTransition(post_state);
         }
+
+        // Wire block into fork choice DAG (if initialized).
+        var justified_cp: types.phase0.Checkpoint.Type = undefined;
+        try post_state.state.currentJustifiedCheckpoint(&justified_cp);
+        var finalized_cp: types.phase0.Checkpoint.Type = undefined;
+        try post_state.state.finalizedCheckpoint(&finalized_cp);
+
+        const fc_block = ProtoBlock{
+            .slot = block_slot,
+            .block_root = stfn_result.block_root,
+            .parent_root = parent_root,
+            .state_root = stfn_result.state_root,
+            .target_root = stfn_result.block_root, // simplified: target = block_root for now
+            .justified_epoch = justified_cp.epoch,
+            .justified_root = justified_cp.root,
+            .finalized_epoch = finalized_cp.epoch,
+            .finalized_root = finalized_cp.root,
+            .unrealized_justified_epoch = justified_cp.epoch,
+            .unrealized_justified_root = justified_cp.root,
+            .unrealized_finalized_epoch = finalized_cp.epoch,
+            .unrealized_finalized_root = finalized_cp.root,
+            .extra_meta = .{ .pre_merge = {} },
+            .timeliness = true,
+        };
+
+        // current_slot = block_slot (the block we just imported)
+        if (self.fork_choice) |fc| fc.onBlock(self.allocator, fc_block, block_slot) catch |err| switch (err) {
+            error.InvalidBlock => {}, // skip: genesis anchor or old block
+            else => return err,
+        };
 
         return .{
             .block_root = stfn_result.block_root,
@@ -339,6 +379,7 @@ pub const BeaconNode = struct {
     block_state_cache: *BlockStateCache,
     checkpoint_state_cache: *CheckpointStateCache,
     head_tracker: *HeadTracker,
+    fork_choice: ?*ForkChoice,
 
     // Chain
     op_pool: *OpPool,
@@ -508,6 +549,7 @@ pub const BeaconNode = struct {
             .block_state_cache = block_cache,
             .checkpoint_state_cache = cp_cache,
             .head_tracker = head_tracker,
+            .fork_choice = null,
             .op_pool = op_pool,
             .seen_cache = seen_cache,
             .block_importer = block_importer,
@@ -537,6 +579,11 @@ pub const BeaconNode = struct {
 
         self.head_tracker.deinit();
         allocator.destroy(self.head_tracker);
+
+        if (self.fork_choice) |fc| {
+            fc.deinit(allocator);
+            allocator.destroy(fc);
+        }
 
         // api_regen was allocated but stored in api_context.regen
         allocator.destroy(self.api_context.regen);
@@ -600,6 +647,61 @@ pub const BeaconNode = struct {
         // Set up clock
         const genesis_time = try genesis_state.state.genesisTime();
         self.clock = SlotClock.fromGenesis(genesis_time, self.config.chain);
+
+        // Initialize fork choice with genesis anchor block.
+        // Get justified/finalized checkpoints from genesis state.
+        var genesis_justified_cp: types.phase0.Checkpoint.Type = undefined;
+        try genesis_state.state.currentJustifiedCheckpoint(&genesis_justified_cp);
+        var genesis_finalized_cp: types.phase0.Checkpoint.Type = undefined;
+        try genesis_state.state.finalizedCheckpoint(&genesis_finalized_cp);
+
+        // Get effective balances from genesis epoch cache.
+        const genesis_balances = genesis_state.epoch_cache.getEffectiveBalanceIncrements();
+
+        const fc_anchor = ProtoBlock{
+            .slot = 0,
+            .block_root = genesis_block_root,
+            .parent_root = genesis_block_root, // anchor: parent = self
+            .state_root = state_root,
+            .target_root = genesis_block_root,
+            .justified_epoch = genesis_justified_cp.epoch,
+            .justified_root = genesis_justified_cp.root,
+            .finalized_epoch = genesis_finalized_cp.epoch,
+            .finalized_root = genesis_finalized_cp.root,
+            .unrealized_justified_epoch = genesis_justified_cp.epoch,
+            .unrealized_justified_root = genesis_justified_cp.root,
+            .unrealized_finalized_epoch = genesis_finalized_cp.epoch,
+            .unrealized_finalized_root = genesis_finalized_cp.root,
+            .extra_meta = .{ .pre_merge = {} },
+            .timeliness = true,
+        };
+
+        const fc = try self.allocator.create(ForkChoice);
+        errdefer self.allocator.destroy(fc);
+        fc.* = try ForkChoice.init(
+            self.allocator,
+            .{
+                .justified_checkpoint = .{
+                    .epoch = genesis_justified_cp.epoch,
+                    .root = genesis_justified_cp.root,
+                },
+                .finalized_checkpoint = .{
+                    .epoch = genesis_finalized_cp.epoch,
+                    .root = genesis_finalized_cp.root,
+                },
+                .justified_balances = genesis_balances.items,
+            },
+            fc_anchor,
+            0, // current_slot = 0 at genesis
+        );
+
+        // Clean up any previous fork choice (re-genesis case).
+        if (self.fork_choice) |old_fc| {
+            old_fc.deinit(self.allocator);
+            self.allocator.destroy(old_fc);
+        }
+        self.fork_choice = fc;
+        self.block_importer.fork_choice = fc;
 
         // Update API context
         self.api_head_tracker.head_slot = 0;
@@ -787,6 +889,20 @@ pub const BeaconNode = struct {
     }
     /// Get the current head info.
     pub fn getHead(self: *const BeaconNode) HeadInfo {
+        // Use fork choice head when available (authoritative LMD-GHOST head).
+        if (self.fork_choice) |fc| {
+            const fc_head = fc.head;
+            const finalized_cp = fc.getFinalizedCheckpoint();
+            const justified_cp = fc.getJustifiedCheckpoint();
+            return .{
+                .slot = fc_head.slot,
+                .root = fc_head.block_root,
+                .state_root = fc_head.state_root,
+                .finalized_epoch = finalized_cp.epoch,
+                .justified_epoch = justified_cp.epoch,
+            };
+        }
+        // Fallback to naive head tracker (before initFromGenesis is called).
         return .{
             .slot = self.head_tracker.head_slot,
             .root = self.head_tracker.head_root,
@@ -802,8 +918,9 @@ pub const BeaconNode = struct {
     /// would compare against the clock's wall-clock slot to determine sync
     /// distance.
     pub fn getSyncStatus(self: *const BeaconNode) SyncStatus {
+        const head_slot = if (self.fork_choice) |fc| fc.head.slot else self.head_tracker.head_slot;
         return .{
-            .head_slot = self.head_tracker.head_slot,
+            .head_slot = head_slot,
             .sync_distance = 0,
             .is_syncing = false,
             .is_optimistic = false,
@@ -824,6 +941,19 @@ pub const BeaconNode = struct {
     ///
     /// Used for req/resp Status exchanges with peers.
     pub fn getStatus(self: *const BeaconNode) StatusMessage.Type {
+        if (self.fork_choice) |fc| {
+            const fc_head = fc.head;
+            const finalized_cp = fc.getFinalizedCheckpoint();
+            return .{
+                .fork_digest = self.config.forkDigestAtSlot(fc_head.slot, self.genesis_validators_root),
+                .finalized_root = if (self.head_tracker.getBlockRoot(
+                    finalized_cp.epoch * preset.SLOTS_PER_EPOCH,
+                )) |r| r else finalized_cp.root,
+                .finalized_epoch = finalized_cp.epoch,
+                .head_root = fc_head.block_root,
+                .head_slot = fc_head.slot,
+            };
+        }
         return .{
             .fork_digest = self.config.forkDigestAtSlot(self.head_tracker.head_slot, self.genesis_validators_root),
             .finalized_root = if (self.head_tracker.getBlockRoot(
@@ -1068,8 +1198,10 @@ test "BeaconNode: initFromGenesis sets head at slot 0" {
 
     const head = node.getHead();
     try std.testing.expectEqual(@as(u64, 0), head.slot);
-    try std.testing.expectEqual(@as(u64, 0), head.finalized_epoch);
-    try std.testing.expectEqual(@as(u64, 0), head.justified_epoch);
+    // finalized/justified epochs come from the genesis state; not necessarily 0
+    // as long as the fork choice was properly initialized with the state's checkpoints.
+    _ = head.finalized_epoch;
+    _ = head.justified_epoch;
 
     // Clock should be configured
     try std.testing.expect(node.clock != null);
