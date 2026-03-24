@@ -32,7 +32,13 @@ pub fn loadConfigFromYaml(
     yaml_bytes: []const u8,
     base: *const ChainConfig,
 ) !ChainConfig {
-    var doc = Yaml{ .source = yaml_bytes };
+    // Pre-filter YAML to remove lines with complex values (e.g. BLOB_SCHEDULE).
+    // The spec config format is flat key: scalar, but some fields like BLOB_SCHEDULE
+    // contain array-of-object values that our YAML parser cannot handle.
+    // Since we don't parse these fields anyway, we simply drop them.
+    const filtered_bytes = try filterComplexYamlValues(arena, yaml_bytes);
+
+    var doc = Yaml{ .source = filtered_bytes };
     try doc.load(arena);
     defer doc.deinit(arena);
 
@@ -240,6 +246,39 @@ pub fn loadConfigFromYaml(
     }
 
     return result;
+}
+
+
+// ---------------------------------------------------------------------------
+// YAML pre-filtering
+// ---------------------------------------------------------------------------
+
+/// Remove lines from YAML bytes where the value (after the first ':') starts
+/// with '[' — these are complex list/object values our parser cannot handle.
+/// Returns a newly-allocated slice with the offending lines removed.
+fn filterComplexYamlValues(alloc: Allocator, yaml_bytes: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var lines = std.mem.splitScalar(u8, yaml_bytes, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        // Check if the value part (after first ':') starts with '[' after trimming.
+        const skip = blk: {
+            if (std.mem.indexOfScalar(u8, line, ':')) |colon_idx| {
+                const after_colon = line[colon_idx + 1 ..];
+                var val_start: usize = 0;
+                while (val_start < after_colon.len and (after_colon[val_start] == ' ' or after_colon[val_start] == '\t')) {
+                    val_start += 1;
+                }
+                if (val_start < after_colon.len and after_colon[val_start] == '[') break :blk true;
+            }
+            break :blk false;
+        };
+        if (skip) continue;
+        if (!first) try out.append(alloc, '\n');
+        try out.appendSlice(alloc, line);
+        first = false;
+    }
+    return out.items;
 }
 
 // ---------------------------------------------------------------------------

@@ -30,8 +30,7 @@
         // .metrics = .{ .url = "..." },
         // .httpz = .{ .url = "..." },
         .metrics = .{
-            .url = "/home/cayman/metrics-zig-upgrade",
-            .hash = "metrics-0.0.0-W7G4eGIrLQgzwS8Q0FxBvS-sJdvQ3F7YSSe90in5BavA",
+            .path = "../metrics-zig-upgrade",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },

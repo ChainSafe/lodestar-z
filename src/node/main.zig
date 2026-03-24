@@ -13,6 +13,7 @@
 //!   --p2p-port <port>             P2P listen port (default: 9000)
 //!   --checkpoint-state <file>     Bootstrap from checkpoint state SSZ file
 //!   --checkpoint-block <file>     Bootstrap from checkpoint block SSZ file
+//!   --bootnodes <enr,...>         Comma-separated list of bootnode ENRs
 //!   --verify-signatures           Enable BLS signature verification (default: disabled)
 //!   --help                        Print this help and exit
 
@@ -47,6 +48,7 @@ const Args = struct {
     checkpoint_state: ?[]const u8 = null,
     checkpoint_block: ?[]const u8 = null,
     config: ?[]const u8 = null,
+    bootnodes_raw: ?[]const u8 = null,
     verify_signatures: bool = false,
     help: bool = false,
 };
@@ -125,6 +127,11 @@ fn parseArgs(process_args: std.process.Args) Args {
         } else if (std.mem.eql(u8, arg, "--config")) {
             result.config = it.next() orelse {
                 std.log.err("--config requires a file path", .{});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "--bootnodes")) {
+            result.bootnodes_raw = it.next() orelse {
+                std.log.err("--bootnodes requires a comma-separated ENR list", .{});
                 std.process.exit(1);
             };
         } else if (std.mem.eql(u8, arg, "--verify-signatures")) {
@@ -302,9 +309,22 @@ pub fn main(init: std.process.Init) !void {
     var pool = try Node.Pool.init(allocator, 2_000_000);
     defer pool.deinit();
 
+    // Parse bootnodes: split comma-separated ENR string into individual entries.
+    const bootnodes: []const []const u8 = if (args.bootnodes_raw) |raw| blk: {
+        var list: std.ArrayList([]const u8) = .empty;
+        var it2 = std.mem.splitScalar(u8, raw, ',');
+        while (it2.next()) |enr| {
+            const trimmed = std.mem.trim(u8, enr, " \t");
+            if (trimmed.len > 0) try list.append(allocator, trimmed);
+        }
+        break :blk try list.toOwnedSlice(allocator);
+    } else &.{};
+    defer if (bootnodes.len > 0) allocator.free(bootnodes);
+
     // Create the BeaconNode with LMDB (or in-memory if no data-dir).
     const node = try BeaconNode.init(allocator, beacon_config, .{
         .data_dir = args.data_dir,
+        .bootnodes = bootnodes,
         .verify_signatures = args.verify_signatures,
     });
     defer node.deinit();
@@ -329,6 +349,12 @@ pub fn main(init: std.process.Init) !void {
         // genesis_state is intentionally not freed — it's owned by the node for its lifetime.
 
         try node.initFromGenesis(genesis_state);
+        // Update the custom BeaconConfig's genesis_validators_root from the loaded state.
+        // When using --config, BeaconConfig was initialized with zeros; the real root
+        // comes from the checkpoint state.
+        if (args.config != null) {
+            custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
+        }
         std.log.info("Initialized from checkpoint state at slot {d}", .{genesis_state.state.slot() catch 0});
     } else if (args.network == .minimal) {
         // --network minimal: generate a synthetic genesis state with 64 validators.
@@ -345,6 +371,9 @@ pub fn main(init: std.process.Init) !void {
         // genesis_state ownership transferred to node; not freed here.
 
         try node.initFromGenesis(genesis_state);
+        if (args.config != null) {
+            custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
+        }
         std.log.info("Initialized from minimal genesis state", .{});
     } else {
         std.log.err("Please provide --checkpoint-state <file> or use --network minimal", .{});

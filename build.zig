@@ -860,6 +860,7 @@ pub fn build(b: *std.Build) void {
     module_node.addImport("ssl", boringssl_dep.module("ssl"));
     module_node.addImport("sync", module_sync);
     module_node.addImport("snappy", dep_snappy.module("snappy"));
+    module_node.addImport("discv5", module_discv5);
 
     // fork_choice module imports
     module_fork_choice.addImport("consensus_types", module_consensus_types);

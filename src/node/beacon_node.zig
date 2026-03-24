@@ -45,6 +45,7 @@ const SeenCache = chain_mod.SeenCache;
 const produceBlockBody = chain_mod.produceBlockBody;
 const ProducedBlockBody = chain_mod.ProducedBlockBody;
 const networking = @import("networking");
+const discv5 = @import("discv5");
 const ReqRespContext = networking.ReqRespContext;
 const ResponseChunk = networking.ResponseChunk;
 const Method = networking.Method;
@@ -440,6 +441,9 @@ pub const BeaconNode = struct {
     // Genesis validators root — set by initFromGenesis, used for fork digest computation.
     genesis_validators_root: [32]u8 = [_]u8{0} ** 32,
 
+    // Bootnode ENRs — provided via --bootnodes CLI flag, used to dial initial peers.
+    bootnodes: []const []const u8 = &.{},
+
     pub const KVBackend = union(enum) {
         memory: *MemoryKVStore,
         lmdb: *LmdbKVStore,
@@ -594,6 +598,7 @@ pub const BeaconNode = struct {
         node.* = .{
             .allocator = allocator,
             .config = beacon_config,
+            .bootnodes = opts.bootnodes,
             .db = db,
             .state_regen = regen,
             .block_state_cache = block_cache,
@@ -971,8 +976,55 @@ pub const BeaconNode = struct {
         });
         try svc.start(io, listen_multiaddr);
         self.p2p_service = svc;
+
+        // Dial bootnodes: decode ENR → extract IP/port → build multiaddr → dial.
+        if (self.bootnodes.len > 0) {
+            std.log.info("Dialing {d} bootnode(s)...", .{self.bootnodes.len});
+            for (self.bootnodes) |enr_str| {
+                self.dialBootnodeEnr(io, &svc, enr_str) catch |err| {
+                    std.log.warn("Failed to dial bootnode: {}", .{err});
+                };
+            }
+        }
     }
-    /// Get the current head info.
+    /// Decode an ENR string and dial the peer via QUIC multiaddr.
+    fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, enr_str: []const u8) !void {
+        // Strip "enr:" prefix if present.
+        var s: []const u8 = enr_str;
+        if (std.mem.startsWith(u8, s, "enr:")) s = s[4..];
+
+        // Base64url decode.
+        const decoded_len = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(s) catch return error.InvalidEnr;
+        const raw = try self.allocator.alloc(u8, decoded_len);
+        defer self.allocator.free(raw);
+        std.base64.url_safe_no_pad.Decoder.decode(raw, s) catch return error.InvalidEnr;
+
+        // RLP decode the ENR to extract IP + UDP port.
+        var enr = try discv5.enr.decode(self.allocator, raw);
+        defer enr.deinit();
+
+        const ip = enr.ip orelse return error.NoIpInEnr;
+        const udp_port = enr.udp orelse return error.NoUdpPortInEnr;
+
+        // Build QUIC multiaddr: /ip4/{ip}/udp/{port}/quic-v1
+        var ma_buf: [64]u8 = undefined;
+        const ma_str = try std.fmt.bufPrint(&ma_buf, "/ip4/{d}.{d}.{d}.{d}/udp/{d}/quic-v1", .{
+            ip[0], ip[1], ip[2], ip[3], udp_port,
+        });
+
+        std.log.info("Dialing bootnode at {s}", .{ma_str});
+
+        const peer_addr = try Multiaddr.fromString(self.allocator, ma_str);
+        defer peer_addr.deinit();
+
+        const peer_id = svc.dial(io, peer_addr) catch |err| {
+            std.log.warn("Bootnode dial failed: {}", .{err});
+            return err;
+        };
+        std.log.info("Connected to bootnode, peer_id: {s}", .{peer_id});
+    }
+
+        /// Get the current head info.
     pub fn getHead(self: *const BeaconNode) HeadInfo {
         // Use fork choice head when available (authoritative LMD-GHOST head).
         if (self.fork_choice) |fc| {
