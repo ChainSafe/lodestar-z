@@ -21,7 +21,8 @@
             .hash = "zig_yaml-0.1.0-C1161pOKAgAhsmZ2SAjaQ2cIzaccoi5dn4x6UmsN0eC_",
         },
         .eth_p2p_z = .{
-            .path = "../lodekeeper-z/eth-p2p-z",
+            .url = "git+https://github.com/lodekeeper-z/eth-p2p-z?ref=chore/zig-master#b000ee1197768bda9d0a0eb4e67dc4cb4b146ef0",
+            .hash = "libp2p-0.1.0-Sj0LiKZgBwDEMPvSA5htx3kaJIO-1f_YAeF9zbWGU9Y9",
         },
         // TODO: re-enable when 0.16-compatible
         // .zapi = .{ .url = "git+https://github.com/lodekeeper-z/zapi#chore/zig-master" },
