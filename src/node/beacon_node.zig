@@ -406,6 +406,7 @@ pub const BeaconNode = struct {
     api_head_tracker: *api_mod.context.HeadTracker,
     api_sync_status: *api_mod.context.SyncStatus,
     block_import_ctx: *BlockImportCallbackCtx,
+    head_state_cb_ctx: *HeadStateCallbackCtx,
 
     // Prometheus metrics (real or noop depending on --metrics flag).
     // Optional pointer so BeaconNode doesn't own the metrics instance —
@@ -554,6 +555,12 @@ pub const BeaconNode = struct {
             .beacon_config = beacon_config,
         };
 
+        const head_state_cb_ctx = try allocator.create(HeadStateCallbackCtx);
+        head_state_cb_ctx.* = .{
+            .block_state_cache = block_cache,
+            .head_tracker = head_tracker,
+        };
+
         const api_ctx = try allocator.create(ApiContext);
         api_ctx.* = .{
             .head_tracker = api_head,
@@ -577,6 +584,10 @@ pub const BeaconNode = struct {
                 .ptr = @ptrCast(block_import_ctx),
                 .importFn = &importBlockCallback,
             },
+            .head_state = .{
+                .ptr = @ptrCast(head_state_cb_ctx),
+                .getHeadStateFn = &getHeadStateCallback,
+            },
         };
 
         const node = try allocator.create(BeaconNode);
@@ -599,6 +610,7 @@ pub const BeaconNode = struct {
             .api_head_tracker = api_head,
             .api_sync_status = api_sync,
             .block_import_ctx = block_import_ctx,
+            .head_state_cb_ctx = head_state_cb_ctx,
         };
 
         return node;
@@ -631,6 +643,7 @@ pub const BeaconNode = struct {
         allocator.destroy(self.api_head_tracker);
         allocator.destroy(self.api_sync_status);
         allocator.destroy(self.block_import_ctx);
+        allocator.destroy(self.head_state_cb_ctx);
 
         allocator.destroy(self.state_regen);
 
@@ -775,9 +788,14 @@ pub const BeaconNode = struct {
         self: *BeaconNode,
         signed_block: *const types.electra.SignedBeaconBlock.Type,
     ) !ImportResult {
-        const t0 = std.time.nanoTimestamp();
+        var ts0: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts0);
+        const t0_ns: u64 = @intCast(ts0.sec * 1_000_000_000 + ts0.nsec);
         const result = try self.block_importer.importBlock(signed_block);
-        const elapsed_s: f64 = @as(f64, @floatFromInt(std.time.nanoTimestamp() - t0)) / 1e9;
+        var ts1: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts1);
+        const t1_ns: u64 = @intCast(ts1.sec * 1_000_000_000 + ts1.nsec);
+        const elapsed_s: f64 = @as(f64, @floatFromInt(t1_ns - t0_ns)) / 1e9;
 
         // Update metrics.
         if (self.metrics) |m| {
@@ -1232,6 +1250,28 @@ pub const BlockImportCallbackCtx = struct {
     importer: *BlockImporter,
     beacon_config: *const BeaconConfig,
 };
+
+// ---------------------------------------------------------------------------
+// HeadStateCallbackCtx + getHeadStateCallback
+// — glue between ApiContext.HeadStateCallback and BlockStateCache
+// ---------------------------------------------------------------------------
+
+/// Wraps the block_state_cache and head_tracker so the API layer can
+/// retrieve the current head CachedBeaconState without a direct dep on
+/// the full BeaconNode type.
+pub const HeadStateCallbackCtx = struct {
+    block_state_cache: *BlockStateCache,
+    head_tracker: *HeadTracker,
+};
+
+/// API-layer head state callback.
+///
+/// Returns the CachedBeaconState for the current head state root, or null
+/// if the state is not in the cache.
+fn getHeadStateCallback(ptr: *anyopaque) ?*CachedBeaconState {
+    const ctx: *HeadStateCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.block_state_cache.get(ctx.head_tracker.head_state_root);
+}
 
 /// API-layer block import callback.
 ///

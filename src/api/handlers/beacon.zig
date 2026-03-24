@@ -100,12 +100,12 @@ pub fn getValidators(
 
     const epoch = (try state.state.slot()) / preset.SLOTS_PER_EPOCH;
 
-    var result = std.ArrayList(types.ValidatorData).init(ctx.allocator);
-    errdefer result.deinit();
+    var result = std.ArrayList(types.ValidatorData).empty;
+    errdefer result.deinit(ctx.allocator);
 
     for (validators, 0..) |v, i| {
         const balance = if (i < balances.len) balances[i] else 0;
-        try result.append(.{
+        try result.append(ctx.allocator, .{
             .index = @intCast(i),
             .balance = balance,
             .status = types.ValidatorStatus.fromValidator(&v, epoch),
@@ -123,7 +123,7 @@ pub fn getValidators(
     }
 
     return .{
-        .data = try result.toOwnedSlice(),
+        .data = try result.toOwnedSlice(ctx.allocator),
     };
 }
 

@@ -1,0 +1,8 @@
+.zig-cache/
+.git/
+*.o
+*.a
+afl-out/
+test/fuzz/afl-out/
+test/fuzz/logs/
+vendor/lmdb/*.o
