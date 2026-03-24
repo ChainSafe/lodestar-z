@@ -134,6 +134,9 @@ pub const BlockImporter = struct {
     db: *BeaconDB,
     head_tracker: *HeadTracker,
 
+    /// When true, BLS signatures are verified in processBlock.
+    verify_signatures: bool,
+
     /// Maps block root → state root for state lookup in block cache.
     block_to_state: std.AutoArrayHashMap([32]u8, [32]u8),
 
@@ -152,6 +155,7 @@ pub const BlockImporter = struct {
             .regen = regen,
             .db = db,
             .head_tracker = head_tracker,
+            .verify_signatures = false,
             .block_to_state = std.AutoArrayHashMap([32]u8, [32]u8).init(allocator),
         };
     }
@@ -263,7 +267,7 @@ pub const BlockImporter = struct {
                                 .execution_payload_status = .valid,
                                 .data_availability_status = .available,
                             },
-                            .{ .verify_signature = false },
+                            .{ .verify_signature = self.verify_signatures },
                         );
                     },
                 }
@@ -355,6 +359,9 @@ pub const BeaconNode = struct {
     // HTTP server for the Beacon REST API (lazy-initialized via startApi).
     http_server: ?api_mod.HttpServer = null,
 
+    // Genesis validators root — set by initFromGenesis, used for fork digest computation.
+    genesis_validators_root: [32]u8 = [_]u8{0} ** 32,
+
     pub const KVBackend = union(enum) {
         memory: *MemoryKVStore,
         lmdb: *LmdbKVStore,
@@ -438,6 +445,7 @@ pub const BeaconNode = struct {
             db,
             head_tracker,
         );
+        block_importer.verify_signatures = opts.verify_signatures;
 
         // API stubs
         const api_head = try allocator.create(api_mod.context.HeadTracker);
@@ -562,16 +570,25 @@ pub const BeaconNode = struct {
     /// Loads the genesis state into caches, sets up the head tracker at slot 0,
     /// and configures the clock from the genesis time.
     pub fn initFromGenesis(self: *BeaconNode, genesis_state: *CachedBeaconState) !void {
-        const genesis_root = (try genesis_state.state.hashTreeRoot()).*;
+        // The genesis block root is the hash of the latest block header stored
+        // in the genesis state. This matches what BlockGenerator computes as
+        // parent_root when building the first block (from state.latestBlockHeader()).
+        var genesis_header = try genesis_state.state.latestBlockHeader();
+        const genesis_block_root = (try genesis_header.hashTreeRoot()).*;
 
         // Cache the genesis state
         const state_root = try self.state_regen.onNewBlock(genesis_state, true);
 
-        // Register genesis root mapping for block importer
-        try self.block_importer.registerGenesisRoot(genesis_root, state_root);
+        // Register genesis block_root → state_root mapping for block importer.
+        // Incoming blocks reference parent_root = genesis_block_root, so the
+        // importer needs to resolve that to find the pre-state.
+        try self.block_importer.registerGenesisRoot(genesis_block_root, state_root);
 
         // Set head at slot 0
-        try self.head_tracker.onBlock(genesis_root, 0, state_root);
+        try self.head_tracker.onBlock(genesis_block_root, 0, state_root);
+
+        // Capture genesis validators root for fork digest computation
+        self.genesis_validators_root = (try genesis_state.state.genesisValidatorsRoot()).*;
 
         // Set up clock
         const genesis_time = try genesis_state.state.genesisTime();
@@ -579,7 +596,7 @@ pub const BeaconNode = struct {
 
         // Update API context
         self.api_head_tracker.head_slot = 0;
-        self.api_head_tracker.head_root = genesis_root;
+        self.api_head_tracker.head_root = genesis_block_root;
         self.api_head_tracker.head_state_root = state_root;
     }
 
@@ -606,6 +623,15 @@ pub const BeaconNode = struct {
         return result;
     }
 
+
+    /// Store a blob sidecar received via gossip or req/resp.
+    ///
+    /// Blob sidecars arrive separately from blocks (via GossipSub or BlobSidecarsByRoot).
+    /// All sidecars for a given block root are stored together as raw bytes, keyed by root.
+    /// Callers that have disaggregated sidecar data should aggregate before calling this.
+    pub fn importBlobSidecar(self: *BeaconNode, root: [32]u8, data: []const u8) !void {
+        try self.db.putBlobSidecars(root, data);
+    }
 
     /// Advance the head state by one empty slot (no block).
     ///
@@ -701,7 +727,7 @@ pub const BeaconNode = struct {
     /// Used for req/resp Status exchanges with peers.
     pub fn getStatus(self: *const BeaconNode) StatusMessage.Type {
         return .{
-            .fork_digest = [_]u8{0} ** 4, // TODO: compute from config + genesis validators root
+            .fork_digest = self.config.forkDigestAtSlot(self.head_tracker.head_slot, self.genesis_validators_root),
             .finalized_root = if (self.head_tracker.getBlockRoot(
                 self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH,
             )) |r| r else [_]u8{0} ** 32,
@@ -774,7 +800,7 @@ fn reqRespGetStatus(ptr: *anyopaque) StatusMessage.Type {
     const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
     return .{
-        .fork_digest = [_]u8{0} ** 4, // TODO: compute from config + genesis_validators_root
+        .fork_digest = node.config.forkDigestAtSlot(node.head_tracker.head_slot, node.genesis_validators_root),
         .finalized_root = node.head_tracker.getBlockRoot(
             node.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH,
         ) orelse [_]u8{0} ** 32,
@@ -839,23 +865,48 @@ fn reqRespGetBlocksByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const
 }
 
 fn reqRespGetBlobByRoot(ptr: *anyopaque, root: [32]u8, index: u64) ?[]const u8 {
-    _ = ptr;
-    _ = root;
-    _ = index;
-    return null; // No blob storage yet.
+    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+
+    // TODO: Per-index lookup requires deserializing the stored blob sidecar list.
+    // For now, return the full sidecars blob only when index == 0.
+    if (index != 0) return null;
+
+    const maybe_bytes = node.db.getBlobSidecars(root) catch return null;
+    const bytes = maybe_bytes orelse return null;
+    defer node.allocator.free(bytes);
+
+    const copy = ctx.scratch.alloc(u8, bytes.len) catch return null;
+    @memcpy(copy, bytes);
+    return copy;
 }
 
 fn reqRespGetBlobsByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8 {
-    _ = ptr;
-    _ = start_slot;
-    _ = count;
-    return &.{}; // No blob storage yet.
+    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+
+    var results: std.ArrayList([]const u8) = .empty;
+    // No defer deinit — scratch arena owns the memory.
+
+    var slot: u64 = start_slot;
+    while (slot < start_slot + count) : (slot += 1) {
+        const root = node.head_tracker.getBlockRoot(slot) orelse continue;
+        const maybe_bytes = node.db.getBlobSidecars(root) catch continue;
+        const bytes = maybe_bytes orelse continue;
+        defer node.allocator.free(bytes);
+
+        const copy = ctx.scratch.alloc(u8, bytes.len) catch continue;
+        @memcpy(copy, bytes);
+        results.append(ctx.scratch, copy) catch continue;
+    }
+
+    return results.toOwnedSlice(ctx.scratch) catch &.{};
 }
 
 fn reqRespGetForkDigest(ptr: *anyopaque, slot: u64) [4]u8 {
-    _ = ptr;
-    _ = slot;
-    return [_]u8{0} ** 4; // TODO: compute from config + genesis_validators_root.
+    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+    return node.config.forkDigestAtSlot(slot, node.genesis_validators_root);
 }
 
 fn reqRespOnGoodbye(ptr: *anyopaque, reason: u64) void {
@@ -1265,4 +1316,112 @@ test "HeadTracker: basic tracking" {
     try tracker.onBlock(root_3, 3, [_]u8{0x33} ** 32);
     try std.testing.expectEqual(@as(u64, 3), tracker.head_slot);
     try std.testing.expectEqualSlices(u8, &root_3, &tracker.head_root);
+}
+
+test "BeaconNode: importBlobSidecar and onReqResp BlobSidecarsByRoot returns stored blob" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    const node = try BeaconNode.init(allocator, test_state.cached_state.config, .{});
+    defer node.deinit();
+
+    // Store a fake blob sidecar blob via importBlobSidecar.
+    const blob_root = [_]u8{0xBB} ** 32;
+    const fake_blob_bytes = [_]u8{0xDE, 0xAD, 0xBE, 0xEF} ** 8;
+    try node.importBlobSidecar(blob_root, &fake_blob_bytes);
+
+    // Build a BlobSidecarsByRoot request: [root, index=0] pair.
+    // The wire format for BlobSidecarsByRoot is a list of (root[32], index u64) pairs.
+    var request_bytes: [32 + 8]u8 = undefined;
+    @memcpy(request_bytes[0..32], &blob_root);
+    std.mem.writeInt(u64, request_bytes[32..40], 0, .little); // index = 0
+
+    const chunks = try node.onReqResp(.blob_sidecars_by_root, &request_bytes);
+    defer freeResponseChunks(allocator, chunks);
+
+    // Should return 1 chunk with the stored blob bytes.
+    try std.testing.expectEqual(@as(usize, 1), chunks.len);
+    try std.testing.expectEqual(networking.protocol.ResponseCode.success, chunks[0].result);
+    try std.testing.expectEqualSlices(u8, &fake_blob_bytes, chunks[0].ssz_payload);
+}
+
+test "BeaconNode: importBlobSidecar index != 0 returns null" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    const node = try BeaconNode.init(allocator, test_state.cached_state.config, .{});
+    defer node.deinit();
+
+    // Store blob sidecar data.
+    const blob_root = [_]u8{0xCC} ** 32;
+    const fake_blob_bytes = [_]u8{0x01, 0x02, 0x03} ** 10;
+    try node.importBlobSidecar(blob_root, &fake_blob_bytes);
+
+    // Request index = 1 — should return no chunks (null skipped by handleRequest).
+    var request_bytes: [32 + 8]u8 = undefined;
+    @memcpy(request_bytes[0..32], &blob_root);
+    std.mem.writeInt(u64, request_bytes[32..40], 1, .little); // index = 1
+
+    const chunks = try node.onReqResp(.blob_sidecars_by_root, &request_bytes);
+    defer freeResponseChunks(allocator, chunks);
+
+    // index != 0: not returned (TODO: per-index deserialisation).
+    try std.testing.expectEqual(@as(usize, 0), chunks.len);
+}
+
+test "BeaconNode: onReqResp BlobSidecarsByRange returns stored blobs" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    const node = try BeaconNode.init(allocator, test_state.cached_state.config, .{});
+    defer node.deinit();
+
+    // Register block roots for slots 5 and 6.
+    const root_5 = [_]u8{0x05} ** 32;
+    const root_6 = [_]u8{0x06} ** 32;
+    try node.head_tracker.onBlock(root_5, 5, [_]u8{0} ** 32);
+    try node.head_tracker.onBlock(root_6, 6, [_]u8{0} ** 32);
+
+    // Store blob sidecars for both blocks.
+    const blob_5 = [_]u8{0xA5} ** 16;
+    const blob_6 = [_]u8{0xA6} ** 16;
+    try node.importBlobSidecar(root_5, &blob_5);
+    try node.importBlobSidecar(root_6, &blob_6);
+
+    // Request range [5, 3): slots 5, 6, 7. Slot 7 has no blobs.
+    const request = networking.messages.BlobSidecarsByRangeRequest.Type{
+        .start_slot = 5,
+        .count = 3,
+    };
+    var buf: [networking.messages.BlobSidecarsByRangeRequest.fixed_size]u8 = undefined;
+    _ = networking.messages.BlobSidecarsByRangeRequest.serializeIntoBytes(&request, &buf);
+
+    const chunks = try node.onReqResp(.blob_sidecars_by_range, &buf);
+    defer freeResponseChunks(allocator, chunks);
+
+    // Slots 5 and 6 have blobs; slot 7 has no block root → skipped.
+    try std.testing.expectEqual(@as(usize, 2), chunks.len);
+    try std.testing.expectEqualSlices(u8, &blob_5, chunks[0].ssz_payload);
+    try std.testing.expectEqualSlices(u8, &blob_6, chunks[1].ssz_payload);
 }

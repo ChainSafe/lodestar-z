@@ -1,9 +1,9 @@
 //! Multi-node deterministic cluster simulation.
 //!
-//! Ties together N SimBeaconNode instances connected via SimNetwork with
-//! cluster-wide invariant checking.  Proves that identical blocks produce
-//! identical state roots across nodes, and that network faults cause
-//! graceful degradation — never safety violations.
+//! Ties together N SimNodeHarness instances (each wrapping a BeaconNode)
+//! connected via SimNetwork with cluster-wide invariant checking.
+//! Proves that identical blocks produce identical state roots across nodes,
+//! and that network faults cause graceful degradation — never safety violations.
 //!
 //! V1 simplifications:
 //!   - Single chain per node (no fork tracking).
@@ -22,11 +22,10 @@ const state_transition = @import("state_transition");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const Node = @import("persistent_merkle_tree").Node;
 
-const SimBeaconNode = @import("sim_beacon_node.zig").SimBeaconNode;
+const BeaconNode = @import("node").BeaconNode;
+const SimNodeHarness = @import("sim_node_harness.zig").SimNodeHarness;
 const sim_network = @import("sim_network.zig");
 const SimNetwork = sim_network.SimNetwork;
-const SimIo = @import("sim_io.zig").SimIo;
-const SlotClock = @import("sim_clock.zig").SlotClock;
 const ClusterInvariantChecker = @import("cluster_invariant_checker.zig").ClusterInvariantChecker;
 
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
@@ -69,8 +68,8 @@ pub const SimCluster = struct {
     net_prng: *std.Random.DefaultPrng,
     network: SimNetwork,
 
-    /// Array of simulated nodes.
-    nodes: []SimBeaconNode,
+    /// Array of simulated node harnesses.
+    nodes: []SimNodeHarness,
     num_nodes: u8,
 
     /// Global invariant checker (cross-node).
@@ -98,6 +97,9 @@ pub const SimCluster = struct {
     primary_index_pubkey_cache: *state_transition.Index2PubkeyCache,
     primary_epoch_transition_cache: *state_transition.EpochTransitionCache,
 
+    /// BeaconNode pointers (owned, one per harness).
+    beacon_nodes: []*BeaconNode,
+
     /// Node pool (must outlive states).
     pool: *Node.Pool,
 
@@ -110,8 +112,6 @@ pub const SimCluster = struct {
         net_prng.* = std.Random.DefaultPrng.init(config.seed +% 100);
 
         // Create a shared merkle tree pool.
-        // Pool size scales with node count: each node needs ~500k tree nodes
-        // for multi-epoch simulation with 64 validators (minimal preset).
         const pool_nodes_per_sim_node: u32 = 500_000;
         const pool = try allocator.create(Node.Pool);
         pool.* = try Node.Pool.init(allocator, pool_nodes_per_sim_node * @as(u32, config.num_nodes));
@@ -123,28 +123,36 @@ pub const SimCluster = struct {
             config.validator_count,
         );
 
-        const genesis_time = try primary.cached_state.state.genesisTime();
-        _ = genesis_time;
         const start_slot = try primary.cached_state.state.slot();
 
-        // Allocate arrays.
-        const nodes = try allocator.alloc(SimBeaconNode, config.num_nodes);
+        // Allocate node arrays.
+        const nodes = try allocator.alloc(SimNodeHarness, config.num_nodes);
+        errdefer allocator.free(nodes);
+        const beacon_nodes = try allocator.alloc(*BeaconNode, config.num_nodes);
+        errdefer allocator.free(beacon_nodes);
         const nodes_processed = try allocator.alloc(bool, config.num_nodes);
         @memset(nodes_processed, false);
 
-        // Node 0: gets the primary state directly.
+        // Node 0: initialize from primary genesis state.
         const seed_0 = cluster_prng.random().int(u64);
-        nodes[0] = try SimBeaconNode.init(allocator, primary.cached_state, seed_0);
+        const bn0 = try BeaconNode.init(allocator, primary.config, .{});
+        try bn0.initFromGenesis(primary.cached_state);
+        beacon_nodes[0] = bn0;
+        nodes[0] = SimNodeHarness.init(allocator, bn0, seed_0);
         nodes[0].participation_rate = config.participation_rate;
 
-        // Nodes 1..N: get clones of node 0's head state.
+        // Nodes 1..N: each gets a clone of the genesis state.
         for (1..config.num_nodes) |i| {
-            const cloned = try nodes[0].head_state.clone(
-                allocator,
-                .{ .transfer_cache = false },
-            );
+            // Get the genesis state from node 0's cache to clone it.
+            const genesis_state_0 = bn0.block_state_cache.get(bn0.head_tracker.head_state_root) orelse
+                return error.NoGenesisState;
+            const cloned = try genesis_state_0.clone(allocator, .{ .transfer_cache = false });
+
             const seed_i = cluster_prng.random().int(u64);
-            nodes[i] = try SimBeaconNode.init(allocator, cloned, seed_i);
+            const bn_i = try BeaconNode.init(allocator, primary.config, .{});
+            try bn_i.initFromGenesis(cloned);
+            beacon_nodes[i] = bn_i;
+            nodes[i] = SimNodeHarness.init(allocator, bn_i, seed_i);
             nodes[i].participation_rate = config.participation_rate;
         }
 
@@ -166,16 +174,16 @@ pub const SimCluster = struct {
             .primary_pubkey_map = primary.pubkey_index_map,
             .primary_index_pubkey_cache = primary.index_pubkey_cache,
             .primary_epoch_transition_cache = primary.epoch_transition_cache,
+            .beacon_nodes = beacon_nodes,
             .pool = pool,
         };
     }
 
     pub fn deinit(self: *SimCluster) void {
-        // Free each node's current head state and sim resources.
+        // Free each harness (checker etc.) then its BeaconNode.
         for (0..self.num_nodes) |i| {
-            self.nodes[i].head_state.deinit();
-            self.allocator.destroy(self.nodes[i].head_state);
             self.nodes[i].deinit();
+            self.beacon_nodes[i].deinit();
         }
 
         // Free primary TestCachedBeaconState ancillary resources.
@@ -192,6 +200,7 @@ pub const SimCluster = struct {
         self.network.deinit();
         self.allocator.destroy(self.net_prng);
         self.allocator.free(self.nodes);
+        self.allocator.free(self.beacon_nodes);
         self.allocator.free(self.nodes_processed);
 
         self.pool.deinit();
@@ -203,9 +212,6 @@ pub const SimCluster = struct {
     /// 1. Determine if proposer is offline (deterministic skip).
     /// 2. Each node processes the slot (block or skip).
     /// 3. Record state roots and check cluster invariants.
-    ///
-    /// Since all nodes start from identical state and process the same
-    /// operations, they must produce identical state roots.
     pub fn tick(self: *SimCluster) !TickResult {
         const target_slot = self.current_slot + 1;
         const proposer_node: u8 = @intCast(target_slot % self.num_nodes);
@@ -213,13 +219,11 @@ pub const SimCluster = struct {
         const target_epoch = computeEpochAtSlot(target_slot);
         const is_epoch_transition = target_epoch != current_epoch;
 
-        // Check if proposer is offline.
         const proposer_offline = self.shouldSkip();
 
         @memset(self.nodes_processed, false);
 
         if (proposer_offline) {
-            // All nodes process an empty slot (skip).
             for (0..self.num_nodes) |i| {
                 const result = try self.nodes[i].processSlot(true);
                 self.nodes_processed[i] = true;
@@ -248,9 +252,6 @@ pub const SimCluster = struct {
         }
 
         // ── Block production path ────────────────────────────────
-        // All nodes process the slot with a block.  Since every node has
-        // identical state, each generates an identical block
-        // (deterministic block generation from same state).
         var nodes_received: u8 = 0;
 
         for (0..self.num_nodes) |i| {
@@ -295,7 +296,6 @@ pub const SimCluster = struct {
         for (0..max_slots) |_| {
             _ = try self.tick();
 
-            // Check if any node has finalized past epoch 0.
             for (self.checker.node_finalized_epochs) |e| {
                 if (e > 0) return self.getRunResult();
             }
@@ -333,8 +333,6 @@ pub const SimCluster = struct {
     pub fn healAllPartitions(self: *SimCluster) void {
         self.network.healAll();
     }
-
-    // ── Internal helpers ─────────────────────────────────────────
 
     fn shouldSkip(self: *SimCluster) bool {
         if (self.proposer_offline_rate <= 0.0) return false;

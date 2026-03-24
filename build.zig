@@ -734,6 +734,7 @@ pub fn build(b: *std.Build) void {
     module_testing.addImport("constants", module_constants);
     module_testing.addImport("build_options", options_module_build_options);
     module_testing.addImport("db", module_db);
+    module_testing.addImport("node", module_node);
 
     // chain module imports
     module_chain.addImport("consensus_types", module_consensus_types);

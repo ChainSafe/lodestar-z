@@ -148,6 +148,12 @@ pub const BeaconDB = struct {
         return std.mem.readInt(u64, slot_bytes[0..8], .little);
     }
 
+    /// Retrieve a state archive by state root (via index). Caller owns returned slice.
+    pub fn getStateArchiveByRoot(self: *BeaconDB, state_root: [32]u8) !?[]const u8 {
+        const slot = try self.getStateArchiveSlotByRoot(state_root) orelse return null;
+        return self.getStateArchive(slot);
+    }
+
     // ---------------------------------------------------------------
     // Blob sidecar operations
     // ---------------------------------------------------------------

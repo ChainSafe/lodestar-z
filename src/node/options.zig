@@ -47,4 +47,9 @@ pub const NodeOptions = struct {
     // ── Caches ───────────────────────────────────────────────────
     max_block_states: u32 = 64,
     max_checkpoint_epochs: u32 = 3,
+
+    // ── Validation ───────────────────────────────────────────────
+    /// When true, BLS signatures are verified during block import.
+    /// Defaults to false for performance / test convenience.
+    verify_signatures: bool = false,
 };

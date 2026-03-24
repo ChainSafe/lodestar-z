@@ -20,7 +20,7 @@ const state_transition = @import("state_transition");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 
-const BeaconNode = @import("../node/beacon_node.zig").BeaconNode;
+const BeaconNode = @import("node").BeaconNode;
 const BlockGenerator = @import("block_generator.zig").BlockGenerator;
 const InvariantChecker = @import("invariant_checker.zig").InvariantChecker;
 const SimIo = @import("sim_io.zig").SimIo;
@@ -66,7 +66,16 @@ pub const SimNodeHarness = struct {
         node: *BeaconNode,
         seed: u64,
     ) SimNodeHarness {
-        const clk = node.clock orelse SlotClock{ .genesis_time_s = 0, .seconds_per_slot = 12 };
+        // Extract genesis_time_s and seconds_per_slot from the node's production
+        // clock (node.SlotClock) and construct a sim_clock.SlotClock from them.
+        // The two SlotClock types are structurally identical but distinct types
+        // in Zig's type system because they live in different modules.
+        const genesis_time_s: u64 = if (node.clock) |c| c.genesis_time_s else 0;
+        const seconds_per_slot: u64 = if (node.clock) |c| c.seconds_per_slot else 12;
+        const clk = SlotClock{
+            .genesis_time_s = genesis_time_s,
+            .seconds_per_slot = seconds_per_slot,
+        };
         return .{
             .allocator = allocator,
             .node = node,
@@ -74,8 +83,8 @@ pub const SimNodeHarness = struct {
             .checker = InvariantChecker.init(allocator),
             .sim_io = .{
                 .prng = std.Random.DefaultPrng.init(seed),
-                .monotonic_ns = clk.genesis_time_s * std.time.ns_per_s,
-                .realtime_ns = @as(i128, clk.genesis_time_s) * std.time.ns_per_s,
+                .monotonic_ns = genesis_time_s * std.time.ns_per_s,
+                .realtime_ns = @as(i128, genesis_time_s) * std.time.ns_per_s,
             },
             .clock = clk,
             .skip_prng = std.Random.DefaultPrng.init(seed +% 3),
