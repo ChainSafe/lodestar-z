@@ -74,6 +74,8 @@ const metrics_mod = @import("metrics.zig");
 pub const BeaconMetrics = metrics_mod.BeaconMetrics;
 
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
+const gossip_handler_mod = @import("gossip_handler.zig");
+pub const GossipHandler = gossip_handler_mod.GossipHandler;
 
 // ---------------------------------------------------------------------------
 // HeadTracker — re-implemented here to avoid circular dep on testing module.
@@ -431,6 +433,9 @@ pub const BeaconNode = struct {
     // Optional: nil until initialized (e.g. when running without P2P).
     sync_controller: ?*SyncController = null,
 
+    // GossipHandler — lazily initialized when P2P starts (owns its SeenSets).
+    gossip_handler: ?*GossipHandler = null,
+
     // Genesis validators root — set by initFromGenesis, used for fork digest computation.
     genesis_validators_root: [32]u8 = [_]u8{0} ** 32,
 
@@ -663,6 +668,10 @@ pub const BeaconNode = struct {
         }
         if (self.p2p_request_ctx) |ctx| {
             allocator.destroy(ctx);
+        }
+
+        if (self.gossip_handler) |gh| {
+            gh.deinit();
         }
 
         allocator.destroy(self);

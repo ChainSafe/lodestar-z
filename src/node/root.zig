@@ -37,3 +37,6 @@ pub const MetricsServer = metrics_server_mod.MetricsServer;
 test {
     testing.refAllDecls(@This());
 }
+
+pub const gossip_handler_mod = @import("gossip_handler.zig");
+pub const GossipHandler = gossip_handler_mod.GossipHandler;

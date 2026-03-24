@@ -7,6 +7,7 @@ const std = @import("std");
 const types = @import("../types.zig");
 const context = @import("../context.zig");
 const ApiContext = context.ApiContext;
+const CachedBeaconState = context.CachedBeaconState;
 const preset = @import("preset").preset;
 const fork_types = @import("fork_types");
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
@@ -77,19 +78,52 @@ pub const BlockResult = struct {
 /// Note: Full implementation requires state regeneration. Currently returns
 /// a stub until StateRegen is wired up.
 pub fn getValidators(
-    _: *ApiContext,
-    _: types.StateId,
+    ctx: *ApiContext,
+    state_id: types.StateId,
     _: types.ValidatorQuery,
 ) !types.ApiResponse([]const types.ValidatorData) {
-    // TODO: Implement once state regen is available.
-    // This will need to:
-    // 1. Resolve StateId to a slot/root
-    // 2. Regenerate or load the state (via ctx.regen.getStateAtSlot)
-    // 3. Iterate validators, apply filters
-    // 4. Return matching validators with balances and status
-    // State regen is not yet wired to the API context — returning empty stub.
+    // Only head state is available via the head_state callback for now.
+    switch (state_id) {
+        .head => {},
+        else => return error.StateNotAvailable,
+    }
+
+    const cb = ctx.head_state orelse return error.StateNotAvailable;
+    const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
+    const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+
+    // Read validators and balances from the state
+    const validators = try state.state.validatorsSlice(ctx.allocator);
+    defer ctx.allocator.free(validators);
+    const balances = try state.state.balancesSlice(ctx.allocator);
+    defer ctx.allocator.free(balances);
+
+    const epoch = (try state.state.slot()) / preset.SLOTS_PER_EPOCH;
+
+    var result = std.ArrayList(types.ValidatorData).init(ctx.allocator);
+    errdefer result.deinit();
+
+    for (validators, 0..) |v, i| {
+        const balance = if (i < balances.len) balances[i] else 0;
+        try result.append(.{
+            .index = @intCast(i),
+            .balance = balance,
+            .status = types.ValidatorStatus.fromValidator(&v, epoch),
+            .validator = .{
+                .pubkey = v.pubkey,
+                .withdrawal_credentials = v.withdrawal_credentials,
+                .effective_balance = v.effective_balance,
+                .slashed = v.slashed,
+                .activation_eligibility_epoch = v.activation_eligibility_epoch,
+                .activation_epoch = v.activation_epoch,
+                .exit_epoch = v.exit_epoch,
+                .withdrawable_epoch = v.withdrawable_epoch,
+            },
+        });
+    }
+
     return .{
-        .data = &[_]types.ValidatorData{},
+        .data = try result.toOwnedSlice(),
     };
 }
 
@@ -97,14 +131,60 @@ pub fn getValidators(
 ///
 /// Returns a single validator from the given state.
 pub fn getValidator(
-    _: *ApiContext,
-    _: types.StateId,
-    _: types.ValidatorId,
+    ctx: *ApiContext,
+    state_id: types.StateId,
+    validator_id: types.ValidatorId,
 ) !types.ApiResponse(types.ValidatorData) {
-    // TODO: Implement once state regen is available.
-    // State regen is not yet wired to the API context.
-    // See getValidators for the required implementation steps.
-    return error.StateNotAvailable;
+    // Only head state is available via the head_state callback for now.
+    switch (state_id) {
+        .head => {},
+        else => return error.StateNotAvailable,
+    }
+
+    const cb = ctx.head_state orelse return error.StateNotAvailable;
+    const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
+    const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+
+    const validators = try state.state.validatorsSlice(ctx.allocator);
+    defer ctx.allocator.free(validators);
+    const balances = try state.state.balancesSlice(ctx.allocator);
+    defer ctx.allocator.free(balances);
+
+    const epoch = (try state.state.slot()) / preset.SLOTS_PER_EPOCH;
+
+    // Resolve validator index from id
+    const index: u64 = switch (validator_id) {
+        .index => |idx| idx,
+        .pubkey => |pk| blk: {
+            for (validators, 0..) |v, i| {
+                if (std.mem.eql(u8, &v.pubkey, &pk)) break :blk @intCast(i);
+            }
+            return error.ValidatorNotFound;
+        },
+    };
+
+    if (index >= validators.len) return error.ValidatorNotFound;
+
+    const v = validators[index];
+    const balance = if (index < balances.len) balances[index] else 0;
+
+    return .{
+        .data = .{
+            .index = index,
+            .balance = balance,
+            .status = types.ValidatorStatus.fromValidator(&v, epoch),
+            .validator = .{
+                .pubkey = v.pubkey,
+                .withdrawal_credentials = v.withdrawal_credentials,
+                .effective_balance = v.effective_balance,
+                .slashed = v.slashed,
+                .activation_eligibility_epoch = v.activation_eligibility_epoch,
+                .activation_epoch = v.activation_epoch,
+                .exit_epoch = v.exit_epoch,
+                .withdrawable_epoch = v.withdrawable_epoch,
+            },
+        },
+    };
 }
 
 /// GET /eth/v1/beacon/states/{state_id}/root
@@ -522,7 +602,7 @@ test "getValidators with head state returns non-empty list" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 
-    var pool = Node.Pool.init(allocator);
+    var pool = try Node.Pool.init(allocator, 500_000);
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
@@ -562,7 +642,7 @@ test "getValidator with valid index returns data" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 
-    var pool = Node.Pool.init(allocator);
+    var pool = try Node.Pool.init(allocator, 500_000);
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
@@ -598,7 +678,7 @@ test "getValidator with out-of-range index returns ValidatorNotFound" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 
-    var pool = Node.Pool.init(allocator);
+    var pool = try Node.Pool.init(allocator, 500_000);
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);

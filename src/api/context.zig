@@ -11,6 +11,8 @@ const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
 const db_mod = @import("db");
 const BeaconDB = db_mod.BeaconDB;
+const state_transition = @import("state_transition");
+pub const CachedBeaconState = state_transition.CachedBeaconState;
 
 // ---------------------------------------------------------------------------
 // Stub types for components not yet implemented
@@ -60,6 +62,19 @@ pub const BlockImportCallback = struct {
 };
 
 // ---------------------------------------------------------------------------
+// Head state callback
+// ---------------------------------------------------------------------------
+
+/// Callback for accessing the current head CachedBeaconState.
+/// Uses a type-erased pointer so BeaconNode can wire itself in
+/// without exposing internal state to all API handlers directly.
+pub const HeadStateCallback = struct {
+    ptr: *anyopaque,
+    /// Returns the current head CachedBeaconState, or null if unavailable.
+    getHeadStateFn: *const fn (ptr: *anyopaque) ?*CachedBeaconState,
+};
+
+// ---------------------------------------------------------------------------
 // ApiContext
 // ---------------------------------------------------------------------------
 
@@ -90,4 +105,7 @@ pub const ApiContext = struct {
 
     /// Optional block import callback. Nil until wired by BeaconNode.init.
     block_import: ?BlockImportCallback = null,
+
+    /// Optional head state callback. Nil until wired by BeaconNode.init.
+    head_state: ?HeadStateCallback = null,
 };
