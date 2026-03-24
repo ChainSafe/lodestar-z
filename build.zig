@@ -809,6 +809,23 @@ pub fn build(b: *std.Build) void {
     module_node.addImport("bls", module_bls);
     module_node.addImport("hex", module_hex);
     module_node.addImport("build_options", options_module_build_options);
+
+    // === discv5 integration test (manual, requires network) ===
+    const discv5_integration_exe = b.addExecutable(.{
+        .name = "discv5-integration-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/discv5/integration_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    discv5_integration_exe.root_module.linkLibrary(secp256k1_lib);
+    discv5_integration_exe.root_module.addIncludePath(secp256k1_dep.builder.dependency("libsecp256k1", .{}).path("include"));
+    b.installArtifact(discv5_integration_exe);
+    const run_discv5_integration = b.addRunArtifact(discv5_integration_exe);
+    const tls_run_discv5_integration = b.step("run:discv5-integration-test", "Run discv5 mainnet bootnode integration test");
+    tls_run_discv5_integration.dependOn(&run_discv5_integration.step);
 }
 
 // NOTE: discv5 module is appended below — this comment is a sentinel
+
