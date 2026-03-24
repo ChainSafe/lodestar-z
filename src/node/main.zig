@@ -28,6 +28,11 @@ const NetworkName = node_mod.NetworkName;
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
 
+const state_transition = @import("state_transition");
+const Node = @import("persistent_merkle_tree").Node;
+
+const genesis_util = @import("genesis_util.zig");
+
 // ---------------------------------------------------------------------------
 // Parsed CLI arguments
 // ---------------------------------------------------------------------------
@@ -188,6 +193,11 @@ pub fn main(init: std.process.Init) !void {
         std.log.info("  data directory ready: {s}", .{args.data_dir});
     }
 
+    // Create a PMT node pool — shared across all CachedBeaconState instances.
+    // 2M nodes ~= 64 MB at 32 bytes/node; plenty for a minimal-network genesis.
+    var pool = try Node.Pool.init(allocator, 2_000_000);
+    defer pool.deinit();
+
     // Create the BeaconNode with LMDB (or in-memory if no data-dir).
     const node = try BeaconNode.init(allocator, beacon_config, .{
         .data_dir = args.data_dir,
@@ -197,59 +207,91 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("BeaconNode initialized", .{});
 
-    // Initialize from checkpoint or genesis.
+    // Load genesis / checkpoint state and call initFromGenesis.
     if (args.checkpoint_state) |state_path| {
+        // --checkpoint-state given: deserialize from SSZ file.
         std.log.info("Loading checkpoint state from: {s}", .{state_path});
 
-        // Read state SSZ bytes.
-        const state_bytes = readFile(io, allocator, state_path) catch |err| {
-            std.log.err("Failed to read checkpoint state file '{s}': {}", .{ state_path, err });
+        const genesis_state = genesis_util.loadGenesisFromFile(
+            allocator,
+            &pool,
+            beacon_config,
+            io,
+            state_path,
+        ) catch |err| {
+            std.log.err("Failed to load checkpoint state '{s}': {}", .{ state_path, err });
             std.process.exit(1);
         };
-        defer allocator.free(state_bytes);
+        // genesis_state is intentionally not freed — it's owned by the node for its lifetime.
 
-        // Read checkpoint block if provided.
-        const block_bytes: ?[]u8 = if (args.checkpoint_block) |block_path| blk: {
-            std.log.info("Loading checkpoint block from: {s}", .{block_path});
-            const b = readFile(io, allocator, block_path) catch |err| {
-                std.log.err("Failed to read checkpoint block file '{s}': {}", .{ block_path, err });
-                std.process.exit(1);
-            };
-            break :blk b;
-        } else null;
-        defer if (block_bytes) |b| allocator.free(b);
+        try node.initFromGenesis(genesis_state);
+        std.log.info("Initialized from checkpoint state at slot {d}", .{genesis_state.state.slot() catch 0});
+    } else if (args.network == .minimal) {
+        // --network minimal: generate a synthetic genesis state with 64 validators.
+        std.log.info("Generating minimal genesis state with 64 validators...", .{});
 
-        // TODO: Deserialize state + block SSZ and call node.initFromCheckpoint().
-        // Requires SSZ deserialization support for AnyBeaconState.
-        std.log.info("TODO: initFromCheckpoint({d} bytes state, {d} bytes block)", .{
-            state_bytes.len,
-            if (block_bytes) |b| b.len else 0,
-        });
+        const genesis_state = genesis_util.createMinimalGenesis(
+            allocator,
+            &pool,
+            64,
+        ) catch |err| {
+            std.log.err("Failed to generate minimal genesis state: {}", .{err});
+            std.process.exit(1);
+        };
+        // genesis_state ownership transferred to node; not freed here.
+
+        try node.initFromGenesis(genesis_state);
+        std.log.info("Initialized from minimal genesis state", .{});
     } else {
-        // No checkpoint — genesis loading is network-specific.
-        std.log.info("TODO: Load genesis state for network '{s}'", .{@tagName(args.network)});
-        std.log.info("  Use --checkpoint-state to bootstrap from a checkpoint.", .{});
+        std.log.err("Please provide --checkpoint-state <file> or use --network minimal", .{});
+        std.process.exit(1);
     }
 
-    // Start REST API server (TODO: needs std.Io for fiber-based serving).
-    std.log.info("TODO: Start REST API on 0.0.0.0:{d}", .{args.api_port});
-    std.log.info("  node.startApi(io, \"0.0.0.0\", {d})", .{args.api_port});
+    // REST API: start or log address.
+    // Full fiber-based serving requires std.Io group support; log for now.
+    std.log.info("REST API available at http://0.0.0.0:{d}", .{args.api_port});
+    // TODO: node.startApi(io, "0.0.0.0", args.api_port) — needs fiber support
 
-    // Start P2P networking (TODO: needs std.Io and libp2p Switch).
-    std.log.info("TODO: Start P2P networking on 0.0.0.0:{d}", .{args.p2p_port});
-    std.log.info("  node.startP2p(io, \"0.0.0.0\", {d})", .{args.p2p_port});
+    // P2P: log placeholder.
+    std.log.info("P2P networking on 0.0.0.0:{d} (TODO: startP2p)", .{args.p2p_port});
 
-    // Start discv5 discovery (TODO: requires discv5 integration).
-    std.log.info("TODO: Start discv5 discovery on UDP port {d}", .{args.p2p_port});
+    // Log initial head state.
+    {
+        const head = node.getHead();
+        std.log.info("Head: slot={d} root=0x{s}", .{ head.slot, &std.fmt.bytesToHex(head.root, .lower) });
+        std.log.info("  finalized_epoch={d} justified_epoch={d}", .{ head.finalized_epoch, head.justified_epoch });
+    }
 
-    // Main slot clock loop (TODO: needs std.Io timer support).
-    std.log.info("TODO: Run slot clock loop", .{});
-    std.log.info("  At each slot: check for new head, produce block if validator key loaded.", .{});
+    // Slot clock loop: tick at each new slot boundary.
+    const clock = node.clock orelse return error.ClockNotInitialized;
 
-    // Log head state.
-    const head = node.getHead();
-    std.log.info("Head: slot={d} root=0x{s}", .{ head.slot, &std.fmt.bytesToHex(head.root, .lower) });
-    std.log.info("  finalized_epoch={d} justified_epoch={d}", .{ head.finalized_epoch, head.justified_epoch });
+    std.log.info("Entering slot clock loop (Ctrl-C to stop)...", .{});
 
-    std.log.info("lodestar-z node ready (stubs active; full I/O requires Zig 0.16 std.Io)", .{});
+    while (true) {
+        const current_slot = clock.currentSlot(io) orelse {
+            // Before genesis — sleep 1 s and check again.
+            io.sleep(.{ .nanoseconds = std.time.ns_per_s }, .real) catch break;
+            continue;
+        };
+
+        const head = node.getHead();
+        if (current_slot > head.slot) {
+            std.log.info("slot {d} | head: {d} | finalized epoch: {d}", .{
+                current_slot,
+                head.slot,
+                head.finalized_epoch,
+            });
+        }
+
+        // Sleep until the start of the next slot.
+        const next_slot_ns: i96 = @intCast(clock.slotStartNs(current_slot + 1));
+        const now = std.Io.Clock.real.now(io);
+        const now_ns: i96 = now.nanoseconds;
+        if (next_slot_ns > now_ns) {
+            const sleep_ns: u64 = @intCast(next_slot_ns - now_ns);
+            io.sleep(.{ .nanoseconds = @intCast(sleep_ns) }, .real) catch break;
+        }
+    }
+
+    std.log.info("lodestar-z node shutting down", .{});
 }

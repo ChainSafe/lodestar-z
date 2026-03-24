@@ -809,6 +809,8 @@ pub fn build(b: *std.Build) void {
     });
     module_node_main.addImport("node", module_node);
     module_node_main.addImport("config", module_config);
+    module_node_main.addImport("state_transition", module_state_transition);
+    module_node_main.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
 
     const exe_node = b.addExecutable(.{
         .name = "lodestar-z",
