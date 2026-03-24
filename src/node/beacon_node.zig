@@ -618,6 +618,9 @@ pub const BeaconNode = struct {
         if (result.epoch_transition) {
             self.api_head_tracker.finalized_slot = self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH;
             self.api_head_tracker.justified_slot = self.head_tracker.justified_epoch * preset.SLOTS_PER_EPOCH;
+            // Archive the post-epoch state for cold-path recovery.
+            // Errors are non-fatal — the block is already imported.
+            self.archiveState(result.slot, result.state_root) catch {};
         }
 
         return result;
@@ -631,6 +634,25 @@ pub const BeaconNode = struct {
     /// Callers that have disaggregated sidecar data should aggregate before calling this.
     pub fn importBlobSidecar(self: *BeaconNode, root: [32]u8, data: []const u8) !void {
         try self.db.putBlobSidecars(root, data);
+    }
+
+    /// Archive the post-epoch state to the cold store.
+    ///
+    /// Called at epoch boundaries so that the cold path in StateRegen can
+    /// find a nearby anchor state and replay blocks forward from it.
+    ///
+    /// Serializes the CachedBeaconState's inner AnyBeaconState to SSZ bytes
+    /// and stores it via `BeaconDB.putStateArchive(slot, state_root, bytes)`.
+    pub fn archiveState(self: *BeaconNode, slot: u64, state_root: [32]u8) !void {
+        // Look up the live state from the block cache by its state root.
+        const cached = self.block_state_cache.get(state_root) orelse return;
+
+        // Serialize the inner AnyBeaconState to SSZ bytes.
+        const bytes = try cached.state.serialize(self.allocator);
+        defer self.allocator.free(bytes);
+
+        // Persist to the archive store keyed by (slot, state_root).
+        try self.db.putStateArchive(slot, state_root, bytes);
     }
 
     /// Advance the head state by one empty slot (no block).
@@ -1424,4 +1446,58 @@ test "BeaconNode: onReqResp BlobSidecarsByRange returns stored blobs" {
     try std.testing.expectEqual(@as(usize, 2), chunks.len);
     try std.testing.expectEqualSlices(u8, &blob_5, chunks[0].ssz_payload);
     try std.testing.expectEqualSlices(u8, &blob_6, chunks[1].ssz_payload);
+}
+
+test "BeaconNode: archiveState stores state bytes in DB and retrieves them" {
+    const TreeNode = @import("persistent_merkle_tree").Node;
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try TreeNode.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    const node = try BeaconNode.init(allocator, test_state.cached_state.config, .{});
+    defer node.deinit();
+
+    // Place a state in the block cache with a known state root.
+    const state = try test_state.cached_state.clone(allocator, .{});
+    const state_root = try node.state_regen.onNewBlock(state, true);
+
+    const slot: u64 = 32; // epoch 1 boundary
+
+    // archiveState should serialize and store it.
+    try node.archiveState(slot, state_root);
+
+    // Verify the archive holds bytes for this slot.
+    const retrieved = try node.db.getStateArchive(slot);
+    try std.testing.expect(retrieved != null);
+    if (retrieved) |bytes| {
+        allocator.free(bytes);
+    }
+}
+
+test "BeaconNode: archiveState is no-op for unknown state root" {
+    const TreeNode = @import("persistent_merkle_tree").Node;
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try TreeNode.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    const node = try BeaconNode.init(allocator, test_state.cached_state.config, .{});
+    defer node.deinit();
+
+    const missing_root = [_]u8{0xff} ** 32;
+    // Should not error — state not found in cache is silently skipped.
+    try node.archiveState(64, missing_root);
+
+    // Nothing stored.
+    const retrieved = try node.db.getStateArchive(64);
+    try std.testing.expectEqual(@as(?[]const u8, null), retrieved);
 }

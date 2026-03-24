@@ -77,23 +77,27 @@ pub const StateRegen = struct {
             }
         }
 
-        // 3. Cold path: check the database for archived blocks/states.
-        //    Full implementation requires fork choice to walk ancestors
-        //    and state transition to replay blocks forward.
-        //    For now, check if we have a block archive entry for this root.
+        // 3. Cold path: find closest archived state, replay blocks forward.
+        //
+        //    Walk backwards from the target epoch to find a persisted state
+        //    archive, then replay blocks forward to produce the pre-state.
+        //    State deserialization from SSZ bytes is a TODO — requires fork
+        //    detection + tree construction + CachedBeaconState init.
         if (self.db) |db| {
-            // Try to find the block in the archive by root.
-            // A complete implementation would:
-            //   a) Look up the slot from the root index
-            //   b) Find the nearest state archive at or before that slot
-            //   c) Replay blocks forward from the state archive to the target
-            // For now, we just verify the block exists in the archive,
-            // which confirms the data path works end-to-end.
-            if (db.getBlockArchiveByRoot(parent_root) catch null) |block_data| {
-                // Block found in archive — but we cannot yet reconstruct
-                // a CachedBeaconState from SSZ bytes without the full
-                // deserialization + state transition pipeline.
-                self.allocator.free(block_data);
+            const cold_target_epoch = computeEpochAtSlot(block_slot);
+            var search_epoch = cold_target_epoch;
+            while (search_epoch > 0) : (search_epoch -= 1) {
+                const cp_slot = computeStartSlotAtEpoch(search_epoch);
+                if (try db.getStateArchive(cp_slot)) |state_bytes| {
+                    // Free bytes after use — deserialization is a TODO.
+                    self.allocator.free(state_bytes);
+                    // TODO: deserialize state_bytes into CachedBeaconState,
+                    // then replay blocks from cp_slot to block_slot.
+                    // Requires: fork detection, SSZ deserialization, STFN loop.
+                    // Infrastructure (archive write/read) is wired; the
+                    // deserialization step is deferred.
+                    break;
+                }
             }
         }
         return error.NoPreStateAvailable;
@@ -102,6 +106,36 @@ pub const StateRegen = struct {
     /// Get a checkpoint state, potentially reloading from disk.
     pub fn getCheckpointState(self: *StateRegen, cp: CheckpointKey) !?*CachedBeaconState {
         return self.checkpoint_cache.getOrReload(cp);
+    }
+
+    /// Look up a state by its state root across all stores.
+    ///
+    /// Search order:
+    /// 1. Block state cache (hot path)
+    /// 2. DB state archive by root (cold path)
+    ///
+    /// State deserialization from archived bytes is a TODO — returns null
+    /// for DB hits until the full deserialization pipeline is wired.
+    pub fn getStateByRoot(self: *StateRegen, state_root: [32]u8) !?*CachedBeaconState {
+        // 1. Check block cache — O(1) lookup
+        if (self.block_cache.get(state_root)) |state| return state;
+
+        // 2. Check checkpoint cache.
+        // Checkpoint cache is keyed by (epoch, block_root), not state_root,
+        // so we cannot efficiently look up by state_root here. Skip for now.
+
+        // 3. Try DB archived state
+        if (self.db) |db| {
+            const bytes = (try db.getStateArchiveByRoot(state_root)) orelse return null;
+            // Free bytes — deserialization is a TODO.
+            self.allocator.free(bytes);
+            // TODO: deserialize bytes into CachedBeaconState.
+            // Requires: fork detection from slot bytes, AnyBeaconState.deserialize,
+            // then CachedBeaconState.createCachedBeaconState.
+            return null;
+        }
+
+        return null;
     }
 
     /// Called after processing a new block — cache the resulting state.
@@ -235,4 +269,101 @@ test "StateRegen: onFinalized prunes old states" {
     // Finalize at epoch 10 — should prune epoch 5
     try regen.onFinalized(10);
     try std.testing.expectEqual(@as(usize, 0), cp_cache.size());
+}
+
+test "StateRegen: getStateByRoot returns state from block cache" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const datastore_mod = @import("datastore.zig");
+    const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
+
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    var mem_store = MemoryCPStateDatastore.init(allocator);
+    defer mem_store.deinit();
+    const ds = mem_store.datastore();
+
+    var block_cache = BlockStateCache.init(allocator, 4);
+    defer block_cache.deinit();
+
+    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
+    defer cp_cache.deinit();
+
+    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
+
+    // Add a state to block cache
+    const state = try test_state.cached_state.clone(allocator, .{});
+    const state_root = try regen.onNewBlock(state, true);
+
+    // getStateByRoot should find it in block cache
+    const found = try regen.getStateByRoot(state_root);
+    try std.testing.expectEqual(state, found);
+}
+
+test "StateRegen: getStateByRoot returns null for unknown root" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const datastore_mod = @import("datastore.zig");
+    const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
+
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    var mem_store = MemoryCPStateDatastore.init(allocator);
+    defer mem_store.deinit();
+    const ds = mem_store.datastore();
+
+    var block_cache = BlockStateCache.init(allocator, 4);
+    defer block_cache.deinit();
+
+    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
+    defer cp_cache.deinit();
+
+    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
+
+    const unknown_root = [_]u8{0xaa} ** 32;
+    const found = try regen.getStateByRoot(unknown_root);
+    try std.testing.expectEqual(@as(?*CachedBeaconState, null), found);
+}
+
+test "StateRegen: getPreState returns error when nothing cached and no DB" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const datastore_mod = @import("datastore.zig");
+    const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
+
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    var mem_store = MemoryCPStateDatastore.init(allocator);
+    defer mem_store.deinit();
+    const ds = mem_store.datastore();
+
+    var block_cache = BlockStateCache.init(allocator, 4);
+    defer block_cache.deinit();
+
+    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
+    defer cp_cache.deinit();
+
+    // No DB wired
+    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
+
+    const unknown_root = [_]u8{0xbb} ** 32;
+    try std.testing.expectError(error.NoPreStateAvailable, regen.getPreState(unknown_root, 64));
 }
