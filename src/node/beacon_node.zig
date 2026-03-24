@@ -399,6 +399,7 @@ pub const BeaconNode = struct {
     api_context: *ApiContext,
     api_head_tracker: *api_mod.context.HeadTracker,
     api_sync_status: *api_mod.context.SyncStatus,
+    block_import_ctx: *BlockImportCallbackCtx,
 
     // HTTP server for the Beacon REST API (lazy-initialized via startApi).
     http_server: ?api_mod.HttpServer = null,
@@ -519,6 +520,12 @@ pub const BeaconNode = struct {
         const api_regen = try allocator.create(api_mod.context.StateRegen);
         api_regen.* = .{};
 
+        const block_import_ctx = try allocator.create(BlockImportCallbackCtx);
+        block_import_ctx.* = .{
+            .importer = block_importer,
+            .beacon_config = beacon_config,
+        };
+
         const api_ctx = try allocator.create(ApiContext);
         api_ctx.* = .{
             .head_tracker = api_head,
@@ -538,6 +545,10 @@ pub const BeaconNode = struct {
             .sync_status = api_sync,
             .beacon_config = beacon_config,
             .allocator = allocator,
+            .block_import = .{
+                .ptr = @ptrCast(block_import_ctx),
+                .importFn = &importBlockCallback,
+            },
         };
 
         const node = try allocator.create(BeaconNode);
@@ -559,6 +570,7 @@ pub const BeaconNode = struct {
             .api_context = api_ctx,
             .api_head_tracker = api_head,
             .api_sync_status = api_sync,
+            .block_import_ctx = block_import_ctx,
         };
 
         return node;
@@ -590,6 +602,7 @@ pub const BeaconNode = struct {
         allocator.destroy(self.api_context);
         allocator.destroy(self.api_head_tracker);
         allocator.destroy(self.api_sync_status);
+        allocator.destroy(self.block_import_ctx);
 
         allocator.destroy(self.state_regen);
 
@@ -1147,6 +1160,46 @@ fn reqRespOnPeerStatus(ptr: *anyopaque, status: StatusMessage.Type) void {
     _ = ptr;
     _ = status;
     // TODO: sync checking in future.
+}
+
+
+// ---------------------------------------------------------------------------
+// BlockImportCallbackCtx + importBlockCallback
+// — glue between ApiContext.BlockImportCallback and BlockImporter
+// ---------------------------------------------------------------------------
+
+/// Wraps a BlockImporter pointer together with the BeaconConfig needed to
+/// compute the active fork for SSZ deserialization. One instance per node,
+/// owned by BeaconNode alongside api_context.
+pub const BlockImportCallbackCtx = struct {
+    importer: *BlockImporter,
+    beacon_config: *const BeaconConfig,
+};
+
+/// API-layer block import callback.
+///
+/// Receives raw SSZ bytes from the submitBlock handler, deserializes them
+/// into the active-fork SignedBeaconBlock, and forwards to
+/// BlockImporter.importBlock. Supports electra and older forks via
+/// AnySignedBeaconBlock.
+fn importBlockCallback(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
+    const cb_ctx: *BlockImportCallbackCtx = @ptrCast(@alignCast(ptr));
+    const importer = cb_ctx.importer;
+    const allocator = importer.allocator;
+
+    // Infer fork from head slot.
+    const head_slot = importer.head_tracker.head_slot;
+    const fork_seq = cb_ctx.beacon_config.forkSeq(head_slot);
+
+    const any_signed = try AnySignedBeaconBlock.deserialize(allocator, .full, fork_seq, block_bytes);
+    defer any_signed.deinit(allocator);
+
+    // Dispatch to importBlock. BlockImporter accepts electra blocks;
+    // for pre-electra forks we fall through to UnsupportedFork (future work).
+    switch (any_signed) {
+        .full_electra => |blk| _ = try importer.importBlock(blk),
+        else => return error.UnsupportedFork,
+    }
 }
 
 // ---------------------------------------------------------------------------

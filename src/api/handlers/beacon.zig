@@ -237,23 +237,15 @@ pub fn getFinalityCheckpoints(ctx: *ApiContext, _: types.StateId) !types.ApiResp
 ///
 /// Submit a signed beacon block for propagation and import.
 ///
-/// Returns whether the block was accepted. The actual block processing
-/// pipeline is not yet implemented.
+/// Accepts raw SSZ bytes of a SignedBeaconBlock and forwards them to
+/// the block import pipeline registered on the ApiContext. Returns
+/// error.NotImplemented if no import callback is wired.
 pub fn submitBlock(
-    _: *ApiContext,
-    _: []const u8, // raw block bytes
+    ctx: *ApiContext,
+    block_bytes: []const u8,
 ) !void {
-    // TODO: Implement block import pipeline.
-    // ApiContext needs a block importer callback or reference, e.g.:
-    //   ctx.block_importer.importBlock(block_bytes)
-    // Steps required:
-    // 1. Determine fork from slot in the raw bytes
-    // 2. Deserialize into AnySignedBeaconBlock
-    // 3. Validate block (parent exists, correct slot, valid signature)
-    // 4. Import into fork choice via BlockImporter
-    // 5. Gossip to peers via P2P layer
-    // Adding a block_importer field to ApiContext is the prerequisite.
-    return error.NotImplemented;
+    const cb = ctx.block_import orelse return error.NotImplemented;
+    try cb.importFn(cb.ptr, block_bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -511,4 +503,63 @@ test "getValidators returns empty stub" {
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const resp = try getValidators(&tc.ctx, .head, .{});
     try std.testing.expectEqual(@as(usize, 0), resp.data.len);
+}
+
+test "submitBlock returns NotImplemented when block_import is null" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    // block_import defaults to null
+    const fake_bytes = [_]u8{0x01, 0x02, 0x03};
+    const result = submitBlock(&tc.ctx, &fake_bytes);
+    try std.testing.expectError(error.NotImplemented, result);
+}
+
+test "submitBlock invokes block_import callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    // Mock callback that records invocation
+    const MockImporter = struct {
+        called: bool = false,
+        received_len: usize = 0,
+
+        fn importBlock(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.called = true;
+            self.received_len = block_bytes.len;
+        }
+    };
+
+    var mock = MockImporter{};
+    tc.ctx.block_import = .{
+        .ptr = &mock,
+        .importFn = &MockImporter.importBlock,
+    };
+
+    const fake_bytes = [_]u8{0xDE, 0xAD, 0xBE, 0xEF} ** 4;
+    try submitBlock(&tc.ctx, &fake_bytes);
+
+    try std.testing.expect(mock.called);
+    try std.testing.expectEqual(fake_bytes.len, mock.received_len);
+}
+
+test "submitBlock propagates error from callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const FailImporter = struct {
+        fn importBlock(_: *anyopaque, _: []const u8) anyerror!void {
+            return error.BlockAlreadyKnown;
+        }
+    };
+
+    var dummy: u8 = 0;
+    tc.ctx.block_import = .{
+        .ptr = &dummy,
+        .importFn = &FailImporter.importBlock,
+    };
+
+    const fake_bytes = [_]u8{0x01};
+    const result = submitBlock(&tc.ctx, &fake_bytes);
+    try std.testing.expectError(error.BlockAlreadyKnown, result);
 }

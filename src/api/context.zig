@@ -48,6 +48,18 @@ pub const StateRegen = struct {
 };
 
 // ---------------------------------------------------------------------------
+// Block import callback
+// ---------------------------------------------------------------------------
+
+/// Callback for importing a signed beacon block from the API layer.
+/// The ptr field holds a type-erased pointer to the concrete importer;
+/// importFn receives raw SSZ bytes of the block and returns void or an error.
+pub const BlockImportCallback = struct {
+    ptr: *anyopaque,
+    importFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
+};
+
+// ---------------------------------------------------------------------------
 // ApiContext
 // ---------------------------------------------------------------------------
 
@@ -72,4 +84,7 @@ pub const ApiContext = struct {
 
     /// Allocator for dynamic responses.
     allocator: std.mem.Allocator,
+
+    /// Optional block import callback. Nil until wired by BeaconNode.init.
+    block_import: ?BlockImportCallback = null,
 };
