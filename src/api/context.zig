@@ -83,6 +83,9 @@ pub const ApiContext = struct {
     beacon_config: *const BeaconConfig,
 
     /// Allocator for dynamic responses.
+
+    /// Event bus for SSE beacon chain events.
+    event_bus: ?*@import("event_bus.zig").EventBus = null,
     allocator: std.mem.Allocator,
 
     /// Optional block import callback. Nil until wired by BeaconNode.init.

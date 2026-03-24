@@ -750,6 +750,7 @@ pub fn build(b: *std.Build) void {
     module_testing.addImport("node", module_node);
     module_testing.addImport("networking", module_networking);
     module_testing.addImport("api", module_api);
+    module_testing.addImport("chain", module_chain);
 
     // chain module imports
     module_chain.addImport("consensus_types", module_consensus_types);
@@ -774,6 +775,8 @@ pub fn build(b: *std.Build) void {
     module_api.addImport("hex", module_hex);
     module_api.addImport("constants", module_constants);
     module_api.addImport("build_options", options_module_build_options);
+    module_api.addImport("state_transition", module_state_transition);
+    module_api.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
 
 
     // === discv5 module ===

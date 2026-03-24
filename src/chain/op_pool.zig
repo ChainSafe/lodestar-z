@@ -184,17 +184,28 @@ pub const VoluntaryExitPool = struct {
     }
 
     /// Return up to `max` pending exits. Caller owns the returned slice.
+    ///
+    /// Sorted by validator_index for deterministic block ordering.
     pub fn getForBlock(self: *VoluntaryExitPool, allocator: Allocator, max: u32) ![]SignedVoluntaryExit.Type {
-        var result = std.ArrayListUnmanaged(SignedVoluntaryExit.Type).empty;
-        errdefer result.deinit(allocator);
+        var all = std.ArrayListUnmanaged(SignedVoluntaryExit.Type).empty;
+        defer all.deinit(allocator);
 
         var it = self.pool.iterator();
-        var n: u32 = 0;
         while (it.next()) |entry| {
-            if (n >= max) break;
-            try result.append(allocator, entry.value_ptr.*);
-            n += 1;
+            try all.append(allocator, entry.value_ptr.*);
         }
+
+        // Sort by validator_index for deterministic block production (DST requirement).
+        std.sort.pdq(SignedVoluntaryExit.Type, all.items, {}, struct {
+            pub fn lessThan(_: void, a: SignedVoluntaryExit.Type, b: SignedVoluntaryExit.Type) bool {
+                return a.message.validator_index < b.message.validator_index;
+            }
+        }.lessThan);
+
+        const take = @min(all.items.len, max);
+        var result = std.ArrayListUnmanaged(SignedVoluntaryExit.Type).empty;
+        errdefer result.deinit(allocator);
+        try result.appendSlice(allocator, all.items[0..take]);
         return result.toOwnedSlice(allocator);
     }
 
@@ -248,17 +259,28 @@ pub const ProposerSlashingPool = struct {
     }
 
     /// Return up to `max` pending slashings. Caller owns the returned slice.
+    ///
+    /// Sorted by proposer_index for deterministic block ordering.
     pub fn getForBlock(self: *ProposerSlashingPool, allocator: Allocator, max: u32) ![]ProposerSlashing.Type {
-        var result = std.ArrayListUnmanaged(ProposerSlashing.Type).empty;
-        errdefer result.deinit(allocator);
+        var all = std.ArrayListUnmanaged(ProposerSlashing.Type).empty;
+        defer all.deinit(allocator);
 
         var it = self.pool.iterator();
-        var n: u32 = 0;
         while (it.next()) |entry| {
-            if (n >= max) break;
-            try result.append(allocator, entry.value_ptr.*);
-            n += 1;
+            try all.append(allocator, entry.value_ptr.*);
         }
+
+        // Sort by proposer_index for deterministic block production (DST requirement).
+        std.sort.pdq(ProposerSlashing.Type, all.items, {}, struct {
+            pub fn lessThan(_: void, a: ProposerSlashing.Type, b: ProposerSlashing.Type) bool {
+                return a.signed_header_1.message.proposer_index < b.signed_header_1.message.proposer_index;
+            }
+        }.lessThan);
+
+        const take = @min(all.items.len, max);
+        var result = std.ArrayListUnmanaged(ProposerSlashing.Type).empty;
+        errdefer result.deinit(allocator);
+        try result.appendSlice(allocator, all.items[0..take]);
         return result.toOwnedSlice(allocator);
     }
 
@@ -319,16 +341,30 @@ pub const AttesterSlashingPool = struct {
 
     /// Return up to `max` pending attester slashings. Caller owns the
     /// returned slice.
+    ///
+    /// Sorted by hash-tree-root for deterministic block ordering.
     pub fn getForBlock(self: *AttesterSlashingPool, allocator: Allocator, max: u32) ![]Phase0AttesterSlashing {
-        var result = std.ArrayListUnmanaged(Phase0AttesterSlashing).empty;
-        errdefer result.deinit(allocator);
+        const Entry = struct { root: [32]u8, slashing: Phase0AttesterSlashing };
+        var all = std.ArrayListUnmanaged(Entry).empty;
+        defer all.deinit(allocator);
 
         var it = self.pool.iterator();
-        var n: u32 = 0;
         while (it.next()) |entry| {
-            if (n >= max) break;
-            try result.append(allocator, entry.value_ptr.*);
-            n += 1;
+            try all.append(allocator, .{ .root = entry.key_ptr.*, .slashing = entry.value_ptr.* });
+        }
+
+        // Sort by hash-tree-root (lexicographic) for deterministic block production (DST requirement).
+        std.sort.pdq(Entry, all.items, {}, struct {
+            pub fn lessThan(_: void, a: Entry, b: Entry) bool {
+                return std.mem.lessThan(u8, &a.root, &b.root);
+            }
+        }.lessThan);
+
+        const take = @min(all.items.len, max);
+        var result = std.ArrayListUnmanaged(Phase0AttesterSlashing).empty;
+        errdefer result.deinit(allocator);
+        for (all.items[0..take]) |e| {
+            try result.append(allocator, e.slashing);
         }
         return result.toOwnedSlice(allocator);
     }
@@ -366,17 +402,27 @@ pub const BlsChangePool = struct {
         try self.pool.put(change.message.validator_index, change);
     }
 
+    /// Sorted by validator_index for deterministic block ordering.
     pub fn getForBlock(self: *BlsChangePool, allocator: Allocator, max: u32) ![]SignedBLSToExecutionChange.Type {
-        var result = std.ArrayListUnmanaged(SignedBLSToExecutionChange.Type).empty;
-        errdefer result.deinit(allocator);
+        var all = std.ArrayListUnmanaged(SignedBLSToExecutionChange.Type).empty;
+        defer all.deinit(allocator);
 
         var it = self.pool.iterator();
-        var n: u32 = 0;
         while (it.next()) |entry| {
-            if (n >= max) break;
-            try result.append(allocator, entry.value_ptr.*);
-            n += 1;
+            try all.append(allocator, entry.value_ptr.*);
         }
+
+        // Sort by validator_index for deterministic block production (DST requirement).
+        std.sort.pdq(SignedBLSToExecutionChange.Type, all.items, {}, struct {
+            pub fn lessThan(_: void, a: SignedBLSToExecutionChange.Type, b: SignedBLSToExecutionChange.Type) bool {
+                return a.message.validator_index < b.message.validator_index;
+            }
+        }.lessThan);
+
+        const take = @min(all.items.len, max);
+        var result = std.ArrayListUnmanaged(SignedBLSToExecutionChange.Type).empty;
+        errdefer result.deinit(allocator);
+        try result.appendSlice(allocator, all.items[0..take]);
         return result.toOwnedSlice(allocator);
     }
 

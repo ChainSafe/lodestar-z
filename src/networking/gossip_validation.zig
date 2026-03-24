@@ -339,6 +339,7 @@ fn createMockContext(allocator: std.mem.Allocator) !struct {
             .seen_voluntary_exits = undefined,
             .seen_proposer_slashings = undefined,
             .seen_attester_slashings = undefined,
+            .ptr = @ptrFromInt(1),
             .getProposerIndex = &mockGetProposerIndex,
             .isKnownBlockRoot = &mockIsKnownBlockRoot,
             .isValidatorActive = &mockIsValidatorActive,

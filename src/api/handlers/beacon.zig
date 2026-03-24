@@ -498,11 +498,129 @@ test "getBlockHeader for head extracts real fields from DB block" {
     try std.testing.expectEqual([_]u8{0xef} ** 96, resp.data.header.signature);
 }
 
-test "getValidators returns empty stub" {
+test "getValidators without head state returns StateNotAvailable" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    // head_state is null in test context
+    const result = getValidators(&tc.ctx, .head, .{});
+    try std.testing.expectError(error.StateNotAvailable, result);
+}
+
+test "getValidators non-head returns StateNotAvailable" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const result = getValidators(&tc.ctx, .{ .slot = 10 }, .{});
+    try std.testing.expectError(error.StateNotAvailable, result);
+}
+
+test "getValidators with head state returns non-empty list" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const state_transition = @import("state_transition");
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+
+    var pool = Node.Pool.init(allocator);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
+    defer test_state.deinit();
+
+    // Wire head state callback
+    const HeadStateCb = struct {
+        cached: *state_transition.CachedBeaconState,
+
+        fn getState(ptr: *anyopaque) ?*state_transition.CachedBeaconState {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.cached;
+        }
+    };
+
+    var cb_ctx = HeadStateCb{ .cached = test_state.cached_state };
+    tc.ctx.head_state = .{
+        .ptr = &cb_ctx,
+        .getHeadStateFn = &HeadStateCb.getState,
+    };
+
     const resp = try getValidators(&tc.ctx, .head, .{});
-    try std.testing.expectEqual(@as(usize, 0), resp.data.len);
+    defer allocator.free(resp.data);
+
+    try std.testing.expectEqual(@as(usize, 4), resp.data.len);
+    // Each validator should have a valid index
+    try std.testing.expectEqual(@as(u64, 0), resp.data[0].index);
+    try std.testing.expectEqual(@as(u64, 3), resp.data[3].index);
+}
+
+test "getValidator with valid index returns data" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const state_transition = @import("state_transition");
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+
+    var pool = Node.Pool.init(allocator);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
+    defer test_state.deinit();
+
+    const HeadStateCb = struct {
+        cached: *state_transition.CachedBeaconState,
+
+        fn getState(ptr: *anyopaque) ?*state_transition.CachedBeaconState {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.cached;
+        }
+    };
+
+    var cb_ctx = HeadStateCb{ .cached = test_state.cached_state };
+    tc.ctx.head_state = .{
+        .ptr = &cb_ctx,
+        .getHeadStateFn = &HeadStateCb.getState,
+    };
+
+    const resp = try getValidator(&tc.ctx, .head, .{ .index = 2 });
+    try std.testing.expectEqual(@as(u64, 2), resp.data.index);
+    // Validator should be active (activation_epoch 0, exit_epoch max)
+    try std.testing.expectEqual(types.ValidatorStatus.active_ongoing, resp.data.status);
+}
+
+test "getValidator with out-of-range index returns ValidatorNotFound" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const state_transition = @import("state_transition");
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+
+    var pool = Node.Pool.init(allocator);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
+    defer test_state.deinit();
+
+    const HeadStateCb = struct {
+        cached: *state_transition.CachedBeaconState,
+
+        fn getState(ptr: *anyopaque) ?*state_transition.CachedBeaconState {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.cached;
+        }
+    };
+
+    var cb_ctx = HeadStateCb{ .cached = test_state.cached_state };
+    tc.ctx.head_state = .{
+        .ptr = &cb_ctx,
+        .getHeadStateFn = &HeadStateCb.getState,
+    };
+
+    const result = getValidator(&tc.ctx, .head, .{ .index = 99 });
+    try std.testing.expectError(error.ValidatorNotFound, result);
 }
 
 test "submitBlock returns NotImplemented when block_import is null" {

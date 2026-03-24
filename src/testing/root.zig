@@ -253,3 +253,10 @@ pub const node_integration_test = @import("node_integration_test.zig");
 comptime {
     _ = node_integration_test;
 }
+
+// ── DST nondeterminism audit ──────────────────────────────────────────
+pub const dst_audit = @import("dst_audit.zig");
+
+comptime {
+    _ = dst_audit;
+}

@@ -163,6 +163,72 @@ fn readFile(io: Io, allocator: Allocator, path: []const u8) ![]u8 {
 }
 
 // ---------------------------------------------------------------------------
+// Concurrent service tasks
+// ---------------------------------------------------------------------------
+
+/// Context passed to each concurrent service task.
+const RunContext = struct {
+    node: *BeaconNode,
+    api_port: u16,
+    p2p_port: u16,
+};
+
+/// Slot clock loop: ticks at each new slot boundary, logging head info.
+/// Runs as a concurrent task on the same Io instance.
+fn slotClockLoop(io: Io, node: *BeaconNode) !void {
+    const clock = node.clock orelse return error.ClockNotInitialized;
+
+    std.log.info("Entering slot clock loop...", .{});
+
+    while (true) {
+        const current_slot = clock.currentSlot(io) orelse {
+            // Before genesis — sleep 1 s and check again.
+            io.sleep(.{ .nanoseconds = std.time.ns_per_s }, .real) catch break;
+            continue;
+        };
+
+        const head = node.getHead();
+        if (current_slot > head.slot) {
+            std.log.info("slot {d} | head: {d} | finalized epoch: {d}", .{
+                current_slot,
+                head.slot,
+                head.finalized_epoch,
+            });
+        }
+
+        // Sleep until the start of the next slot.
+        const next_slot_ns: i96 = @intCast(clock.slotStartNs(current_slot + 1));
+        const now = std.Io.Clock.real.now(io);
+        const now_ns: i96 = now.nanoseconds;
+        if (next_slot_ns > now_ns) {
+            const sleep_ns: u64 = @intCast(next_slot_ns - now_ns);
+            io.sleep(.{ .nanoseconds = @intCast(sleep_ns) }, .real) catch break;
+        }
+    }
+}
+
+/// API server task: starts the HTTP server and blocks until it exits.
+fn runApiServer(io: Io, ctx: *RunContext) void {
+    ctx.node.startApi(io, "0.0.0.0", ctx.api_port) catch |err| {
+        std.log.err("API server failed: {}", .{err});
+    };
+}
+
+/// P2P networking task: starts the libp2p Switch and blocks until it exits.
+fn runP2p(io: Io, ctx: *RunContext) void {
+    ctx.node.startP2p(io, "0.0.0.0", ctx.p2p_port) catch |err| {
+        std.log.err("P2P networking failed: {}", .{err});
+    };
+}
+
+/// Slot clock task wrapper (returns void for Group.async compatibility).
+fn runSlotClock(io: Io, node: *BeaconNode) void {
+    slotClockLoop(io, node) catch |err| {
+        std.log.err("Slot clock failed: {}", .{err});
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -247,14 +313,6 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     }
 
-    // REST API: start or log address.
-    // Full fiber-based serving requires std.Io group support; log for now.
-    std.log.info("REST API available at http://0.0.0.0:{d}", .{args.api_port});
-    // TODO: node.startApi(io, "0.0.0.0", args.api_port) — needs fiber support
-
-    // P2P: log placeholder.
-    std.log.info("P2P networking on 0.0.0.0:{d} (TODO: startP2p)", .{args.p2p_port});
-
     // Log initial head state.
     {
         const head = node.getHead();
@@ -262,36 +320,26 @@ pub fn main(init: std.process.Init) !void {
         std.log.info("  finalized_epoch={d} justified_epoch={d}", .{ head.finalized_epoch, head.justified_epoch });
     }
 
-    // Slot clock loop: tick at each new slot boundary.
-    const clock = node.clock orelse return error.ClockNotInitialized;
+    // Build the run context shared by all concurrent service tasks.
+    var run_ctx = RunContext{
+        .node = node,
+        .api_port = args.api_port,
+        .p2p_port = args.p2p_port,
+    };
 
-    std.log.info("Entering slot clock loop (Ctrl-C to stop)...", .{});
+    std.log.info("Starting services concurrently via Io.Group...", .{});
+    std.log.info("  REST API: http://0.0.0.0:{d}", .{args.api_port});
+    std.log.info("  P2P:      /ip4/0.0.0.0/udp/{d}/quic-v1", .{args.p2p_port});
 
-    while (true) {
-        const current_slot = clock.currentSlot(io) orelse {
-            // Before genesis — sleep 1 s and check again.
-            io.sleep(.{ .nanoseconds = std.time.ns_per_s }, .real) catch break;
-            continue;
-        };
+    // Launch all three services as concurrent tasks on the same Io instance.
+    // Each task suspends on I/O (accept, sleep, recv) and the runtime multiplexes.
+    var group: Io.Group = .init;
+    group.async(io, runApiServer, .{ io, &run_ctx });
+    group.async(io, runP2p, .{ io, &run_ctx });
+    group.async(io, runSlotClock, .{ io, node });
 
-        const head = node.getHead();
-        if (current_slot > head.slot) {
-            std.log.info("slot {d} | head: {d} | finalized epoch: {d}", .{
-                current_slot,
-                head.slot,
-                head.finalized_epoch,
-            });
-        }
-
-        // Sleep until the start of the next slot.
-        const next_slot_ns: i96 = @intCast(clock.slotStartNs(current_slot + 1));
-        const now = std.Io.Clock.real.now(io);
-        const now_ns: i96 = now.nanoseconds;
-        if (next_slot_ns > now_ns) {
-            const sleep_ns: u64 = @intCast(next_slot_ns - now_ns);
-            io.sleep(.{ .nanoseconds = @intCast(sleep_ns) }, .real) catch break;
-        }
-    }
+    // Block until all tasks finish (i.e., forever — Ctrl-C kills the process).
+    group.await(io) catch {};
 
     std.log.info("lodestar-z node shutting down", .{});
 }

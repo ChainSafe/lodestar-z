@@ -286,6 +286,7 @@ fn testValidationContext(
         .seen_voluntary_exits = seen_exits,
         .seen_proposer_slashings = seen_proposer_slashings,
         .seen_attester_slashings = seen_attester_slashings,
+        .ptr = @ptrFromInt(1),
         .getProposerIndex = &testGetProposerIndex,
         .isKnownBlockRoot = &testIsKnownBlockRoot,
         .isValidatorActive = &testIsValidatorActive,
@@ -293,19 +294,19 @@ fn testValidationContext(
     };
 }
 
-fn testGetProposerIndex(_: u64) ?u32 {
+fn testGetProposerIndex(_: *anyopaque, _: u64) ?u32 {
     return 5;
 }
 
-fn testIsKnownBlockRoot(_: [32]u8) bool {
+fn testIsKnownBlockRoot(_: *anyopaque, _: [32]u8) bool {
     return true;
 }
 
-fn testIsValidatorActive(_: u64, _: u64) bool {
+fn testIsValidatorActive(_: *anyopaque, _: u64, _: u64) bool {
     return true;
 }
 
-fn testGetValidatorCount() u32 {
+fn testGetValidatorCount(_: *anyopaque) u32 {
     return 100;
 }
 

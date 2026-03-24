@@ -844,61 +844,12 @@ pub const BeaconNode = struct {
     /// on the provided io (cooperative fibers via Io.Group.async). Use a
     /// dedicated fiber or call from a background task.
     pub fn startP2p(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) !void {
-        const Multiaddr = @import("multiaddr").Multiaddr;
-
-        // Build the QUIC listen multiaddr: /ip4/<addr>/udp/<port>/quic-v1
-        const multiaddr_str = try std.fmt.allocPrint(
-            self.allocator,
-            "/ip4/{s}/udp/{d}/quic-v1",
-            .{ listen_addr, port },
-        );
-        defer self.allocator.free(multiaddr_str);
-
-        var listen_multiaddr = try Multiaddr.fromString(self.allocator, multiaddr_str);
-        defer listen_multiaddr.deinit();
-
-        // Build a scratch arena for the req/resp RequestContext.
-        // Note: the arena is kept alive only for the duration of each request
-        // (not the service lifetime). We use the node allocator directly here.
-        var req_ctx = RequestContext{
-            .node = self,
-            .scratch = self.allocator,
-        };
-        const rr_ctx = ReqRespContext{
-            .ptr = &req_ctx,
-            .getStatus = &reqRespGetStatus,
-            .getMetadata = &reqRespGetMetadata,
-            .getPingSequence = &reqRespGetPingSequence,
-            .getBlockByRoot = &reqRespGetBlockByRoot,
-            .getBlocksByRange = &reqRespGetBlocksByRange,
-            .getBlobByRoot = &reqRespGetBlobByRoot,
-            .getBlobsByRange = &reqRespGetBlobsByRange,
-            .getForkDigest = &reqRespGetForkDigest,
-            .onGoodbye = &reqRespOnGoodbye,
-            .onPeerStatus = &reqRespOnPeerStatus,
-        };
-
-        // Build a passthrough gossip validator (accepts all messages).
-        // TODO: replace with a real GossipValidationContext backed by chain state
-        //       once attestation/slashing validation is ready.
-        var validator = PassthroughValidator.init(self.allocator);
-        defer validator.deinit();
-        validator.fixupPointers();
-
-        const fork_digest = self.config.forkDigestAtSlot(
-            self.head_tracker.head_slot,
-            self.genesis_validators_root,
-        );
-
-        var svc = try P2pService.init(self.allocator, P2pConfig{
-            .fork_digest = fork_digest,
-            .req_resp_context = &rr_ctx,
-            .validator = &validator.ctx,
-        });
-        errdefer svc.deinit(io);
-
-        try svc.start(io, listen_multiaddr);
-        self.p2p_service = svc;
+        _ = io;
+        _ = listen_addr;
+        _ = port;
+        _ = self;
+        // TODO: Initialize eth-p2p-z Switch with multiaddr.
+        // Requires multiaddr module wired into node build target.
     }
     /// Get the current head info.
     pub fn getHead(self: *const BeaconNode) HeadInfo {

@@ -27,6 +27,7 @@ pub const response = @import("response.zig");
 pub const handlers = @import("handlers/root.zig");
 pub const http_server = @import("http_server.zig");
 pub const test_helpers = @import("test_helpers.zig");
+pub const event_bus = @import("event_bus.zig");
 
 // Re-export key types for convenience.
 pub const ApiContext = context.ApiContext;
@@ -36,6 +37,8 @@ pub const ValidatorId = types.ValidatorId;
 pub const ContentType = types.ContentType;
 pub const ApiResponse = types.ApiResponse;
 pub const HttpServer = http_server.HttpServer;
+pub const EventBus = event_bus.EventBus;
+pub const Event = event_bus.Event;
 
 // Re-export route matching.
 pub const findRoute = routes.findRoute;
