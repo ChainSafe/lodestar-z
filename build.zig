@@ -160,6 +160,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // LMDB C dependency — compile vendored sources
+    module_db.addCSourceFiles(.{
+        .files = &.{ "vendor/lmdb/mdb.c", "vendor/lmdb/midl.c" },
+        .flags = &.{ "-pthread", "-DMDB_USE_POSIX_MUTEX" },
+    });
+    module_db.addIncludePath(b.path("vendor/lmdb"));
+    module_db.linkSystemLibrary("c", .{});
     b.modules.put(b.dupe("db"), module_db) catch @panic("OOM");
 
     const module_api = b.createModule(.{

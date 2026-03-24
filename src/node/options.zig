@@ -28,7 +28,7 @@ pub const NodeOptions = struct {
     target_peers: u32 = 50,
 
     // ── Database ─────────────────────────────────────────────────
-    data_dir: []const u8 = "beacon-data",
+    data_dir: []const u8 = "",
 
     // ── Chain ────────────────────────────────────────────────────
     network: NetworkName = .mainnet,

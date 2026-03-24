@@ -544,7 +544,10 @@ pub const BeaconNode = struct {
         allocator.destroy(self.db);
 
         switch (self.kv_backend) {
-            .memory => |mem| allocator.destroy(mem),
+            .memory => |mem| {
+                mem.deinit();
+                allocator.destroy(mem);
+            },
             .lmdb => |lmdb_store| {
                 lmdb_store.deinit();
                 allocator.destroy(lmdb_store);
