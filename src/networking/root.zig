@@ -60,6 +60,13 @@ pub const p2p_service = @import("p2p_service.zig");
 pub const P2pService = p2p_service.P2pService;
 pub const P2pConfig = p2p_service.P2pConfig;
 
+// Discovery.
+pub const bootnodes = @import("bootnodes.zig");
+pub const discovery_service = @import("discovery_service.zig");
+pub const DiscoveryService = discovery_service.DiscoveryService;
+pub const DiscoveryConfig = discovery_service.DiscoveryConfig;
+pub const DiscoveredPeer = discovery_service.DiscoveredPeer;
+
 test {
     testing.refAllDecls(@This());
 }
