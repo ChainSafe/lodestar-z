@@ -669,77 +669,160 @@ pub const BeaconNode = struct {
     ///
     /// Dispatches to the appropriate handler based on method. Uses the node's
     /// database and state to service the request.
+    ///
+    /// Uses the EngineApi vtable pattern: a `RequestContext` wrapping `*BeaconNode`
+    /// and a scratch arena is passed as `ptr: *anyopaque` to each callback.
+    /// The scratch arena holds temporary allocations (block bytes from DB) that
+    /// are only needed until `handleRequest` copies them into response chunks.
     pub fn onReqResp(
         self: *BeaconNode,
         method: Method,
         request_bytes: []const u8,
     ) ![]const ResponseChunk {
-        // Build the ReqRespContext callbacks that close over our node state.
-        // For now, use simple function pointers that return stub data.
-        // A full implementation would capture `self` via a closure pattern.
+        // Scratch arena: freed after handleRequest returns.
+        // All DB-fetched byte slices live here; the handler copies them out.
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+
+        var req_ctx = RequestContext{
+            .node = self,
+            .scratch = scratch.allocator(),
+        };
+
         const ctx = ReqRespContext{
-            .getStatus = &getStatusStub,
-            .getMetadata = &getMetadataStub,
-            .getPingSequence = &getPingSequenceStub,
-            .getBlockByRoot = &getBlockByRootStub,
-            .getBlocksByRange = &getBlocksByRangeStub,
-            .getBlobByRoot = &getBlobByRootStub,
-            .getBlobsByRange = &getBlobsByRangeStub,
-            .getForkDigest = &getForkDigestStub,
-            .onGoodbye = &onGoodbyeStub,
-            .onPeerStatus = &onPeerStatusStub,
+            .ptr = &req_ctx,
+            .getStatus = &reqRespGetStatus,
+            .getMetadata = &reqRespGetMetadata,
+            .getPingSequence = &reqRespGetPingSequence,
+            .getBlockByRoot = &reqRespGetBlockByRoot,
+            .getBlocksByRange = &reqRespGetBlocksByRange,
+            .getBlobByRoot = &reqRespGetBlobByRoot,
+            .getBlobsByRange = &reqRespGetBlobsByRange,
+            .getForkDigest = &reqRespGetForkDigest,
+            .onGoodbye = &reqRespOnGoodbye,
+            .onPeerStatus = &reqRespOnPeerStatus,
         };
         return handleRequest(self.allocator, method, request_bytes, &ctx);
     }
-
-    // Stub callbacks for ReqRespContext. In a full implementation these
-    // would be replaced with proper closures over the node's state.
-    fn getStatusStub() StatusMessage.Type {
-        return .{
-            .fork_digest = [_]u8{0} ** 4,
-            .finalized_root = [_]u8{0} ** 32,
-            .finalized_epoch = 0,
-            .head_root = [_]u8{0} ** 32,
-            .head_slot = 0,
-        };
-    }
-
-    fn getMetadataStub() networking.messages.MetadataV2.Type {
-        return .{
-            .seq_number = 0,
-            .attnets = .{ .data = std.mem.zeroes([8]u8) },
-            .syncnets = .{ .data = std.mem.zeroes([1]u8) },
-        };
-    }
-
-    fn getPingSequenceStub() u64 {
-        return 0;
-    }
-
-    fn getBlockByRootStub(_: [32]u8) ?[]const u8 {
-        return null;
-    }
-
-    fn getBlocksByRangeStub(_: u64, _: u64) []const []const u8 {
-        return &.{};
-    }
-
-    fn getBlobByRootStub(_: [32]u8, _: u64) ?[]const u8 {
-        return null;
-    }
-
-    fn getBlobsByRangeStub(_: u64, _: u64) []const []const u8 {
-        return &.{};
-    }
-
-    fn getForkDigestStub(_: u64) [4]u8 {
-        return [_]u8{0} ** 4;
-    }
-
-    fn onGoodbyeStub(_: u64) void {}
-
-    fn onPeerStatusStub(_: StatusMessage.Type) void {}
 };
+
+// ---------------------------------------------------------------------------
+// RequestContext — wraps *BeaconNode + scratch arena for req/resp callbacks.
+//
+// Lives on the stack of BeaconNode.onReqResp(). Each callback receives this
+// as ptr: *anyopaque and casts it back to access the node and scratch allocator.
+// ---------------------------------------------------------------------------
+
+const RequestContext = struct {
+    node: *BeaconNode,
+    /// Scratch allocator for temporary DB-fetched bytes.
+    /// Freed by the arena after handleRequest returns.
+    scratch: Allocator,
+};
+
+// ---------------------------------------------------------------------------
+// Real ReqRespContext callbacks — cast ptr to *RequestContext, then read node.
+// ---------------------------------------------------------------------------
+
+fn reqRespGetStatus(ptr: *anyopaque) StatusMessage.Type {
+    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+    return .{
+        .fork_digest = [_]u8{0} ** 4, // TODO: compute from config + genesis_validators_root
+        .finalized_root = node.head_tracker.getBlockRoot(
+            node.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH,
+        ) orelse [_]u8{0} ** 32,
+        .finalized_epoch = node.head_tracker.finalized_epoch,
+        .head_root = node.head_tracker.head_root,
+        .head_slot = node.head_tracker.head_slot,
+    };
+}
+
+fn reqRespGetMetadata(ptr: *anyopaque) networking.messages.MetadataV2.Type {
+    _ = ptr;
+    return .{
+        .seq_number = 0,
+        .attnets = .{ .data = std.mem.zeroes([8]u8) },
+        .syncnets = .{ .data = std.mem.zeroes([1]u8) },
+    };
+}
+
+fn reqRespGetPingSequence(ptr: *anyopaque) u64 {
+    _ = ptr;
+    return 0;
+}
+
+/// Look up a block by root. Returns a scratch-backed copy of the SSZ bytes,
+/// or null if the block is not in the DB.
+fn reqRespGetBlockByRoot(ptr: *anyopaque, root: [32]u8) ?[]const u8 {
+    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+
+    // getBlock allocates with node.allocator; copy to scratch then free.
+    const maybe_bytes = node.db.getBlock(root) catch return null;
+    const bytes = maybe_bytes orelse return null;
+    defer node.allocator.free(bytes);
+
+    const copy = ctx.scratch.alloc(u8, bytes.len) catch return null;
+    @memcpy(copy, bytes);
+    return copy;
+}
+
+/// Returns blocks for a slot range. Each element is scratch-backed SSZ bytes.
+/// Iterates slots, looks up block roots from HeadTracker, then fetches from DB.
+fn reqRespGetBlocksByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8 {
+    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+
+    var results: std.ArrayList([]const u8) = .empty;
+    // No defer deinit — scratch arena owns the memory.
+
+    var slot: u64 = start_slot;
+    while (slot < start_slot + count) : (slot += 1) {
+        const root = node.head_tracker.getBlockRoot(slot) orelse continue;
+        const maybe_bytes = node.db.getBlock(root) catch continue;
+        const bytes = maybe_bytes orelse continue;
+        defer node.allocator.free(bytes);
+
+        const copy = ctx.scratch.alloc(u8, bytes.len) catch continue;
+        @memcpy(copy, bytes);
+        results.append(ctx.scratch, copy) catch continue;
+    }
+
+    return results.toOwnedSlice(ctx.scratch) catch &.{};
+}
+
+fn reqRespGetBlobByRoot(ptr: *anyopaque, root: [32]u8, index: u64) ?[]const u8 {
+    _ = ptr;
+    _ = root;
+    _ = index;
+    return null; // No blob storage yet.
+}
+
+fn reqRespGetBlobsByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8 {
+    _ = ptr;
+    _ = start_slot;
+    _ = count;
+    return &.{}; // No blob storage yet.
+}
+
+fn reqRespGetForkDigest(ptr: *anyopaque, slot: u64) [4]u8 {
+    _ = ptr;
+    _ = slot;
+    return [_]u8{0} ** 4; // TODO: compute from config + genesis_validators_root.
+}
+
+fn reqRespOnGoodbye(ptr: *anyopaque, reason: u64) void {
+    _ = ptr;
+    _ = reason;
+    // TODO: log in future.
+}
+
+fn reqRespOnPeerStatus(ptr: *anyopaque, status: StatusMessage.Type) void {
+    _ = ptr;
+    _ = status;
+    // TODO: sync checking in future.
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -957,6 +1040,168 @@ test "BeaconNode: onReqResp Status" {
     // Should get exactly one response chunk with success code
     try std.testing.expectEqual(@as(usize, 1), chunks.len);
     try std.testing.expectEqual(networking.protocol.ResponseCode.success, chunks[0].result);
+}
+
+test "BeaconNode: onReqResp Status returns real head slot and root" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    const node = try BeaconNode.init(allocator, test_state.cached_state.config, .{});
+    defer node.deinit();
+
+    // Directly advance the head tracker to simulate an imported block.
+    const expected_root = [_]u8{0xAB} ** 32;
+    const expected_slot: u64 = 42;
+    const state_root = [_]u8{0x11} ** 32;
+    try node.head_tracker.onBlock(expected_root, expected_slot, state_root);
+
+    // Build a dummy status request (peer's status — doesn't affect our response).
+    const peer_status = StatusMessage.Type{
+        .fork_digest = [_]u8{0} ** 4,
+        .finalized_root = [_]u8{0} ** 32,
+        .finalized_epoch = 0,
+        .head_root = [_]u8{0} ** 32,
+        .head_slot = 0,
+    };
+    var buf: [StatusMessage.fixed_size]u8 = undefined;
+    _ = StatusMessage.serializeIntoBytes(&peer_status, &buf);
+
+    const chunks = try node.onReqResp(.status, &buf);
+    defer freeResponseChunks(allocator, chunks);
+
+    try std.testing.expectEqual(@as(usize, 1), chunks.len);
+    try std.testing.expectEqual(networking.protocol.ResponseCode.success, chunks[0].result);
+
+    // Decode response and verify it reflects the real head state.
+    var resp: StatusMessage.Type = undefined;
+    try StatusMessage.deserializeFromBytes(chunks[0].ssz_payload, &resp);
+    try std.testing.expectEqual(expected_slot, resp.head_slot);
+    try std.testing.expectEqualSlices(u8, &expected_root, &resp.head_root);
+}
+
+test "BeaconNode: onReqResp BeaconBlocksByRoot returns stored block" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    const node = try BeaconNode.init(allocator, test_state.cached_state.config, .{});
+    defer node.deinit();
+
+    // Store a fake block in the DB.
+    const known_root = [_]u8{0xCC} ** 32;
+    const fake_block_bytes = [_]u8{0x01, 0x02, 0x03, 0x04} ** 8; // 32 bytes of fake SSZ
+    try node.db.putBlock(known_root, &fake_block_bytes);
+
+    // Also store a second block for extra coverage.
+    const known_root_2 = [_]u8{0xDD} ** 32;
+    const fake_block_bytes_2 = [_]u8{0x05, 0x06} ** 16;
+    try node.db.putBlock(known_root_2, &fake_block_bytes_2);
+
+    // Build request: 2 known roots + 1 unknown.
+    const unknown_root = [_]u8{0xFF} ** 32;
+    var request_bytes: [32 * 3]u8 = undefined;
+    @memcpy(request_bytes[0..32], &known_root);
+    @memcpy(request_bytes[32..64], &unknown_root);
+    @memcpy(request_bytes[64..96], &known_root_2);
+
+    const chunks = try node.onReqResp(.beacon_blocks_by_root, &request_bytes);
+    defer freeResponseChunks(allocator, chunks);
+
+    // Should return 2 chunks (unknown root silently skipped).
+    try std.testing.expectEqual(@as(usize, 2), chunks.len);
+    try std.testing.expectEqual(networking.protocol.ResponseCode.success, chunks[0].result);
+    try std.testing.expectEqual(networking.protocol.ResponseCode.success, chunks[1].result);
+
+    // Verify payloads match stored bytes.
+    try std.testing.expectEqualSlices(u8, &fake_block_bytes, chunks[0].ssz_payload);
+    try std.testing.expectEqualSlices(u8, &fake_block_bytes_2, chunks[1].ssz_payload);
+}
+
+test "BeaconNode: onReqResp Ping returns sequence 0" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    const node = try BeaconNode.init(allocator, test_state.cached_state.config, .{});
+    defer node.deinit();
+
+    // Send peer seq = 7.
+    const peer_seq: networking.messages.Ping.Type = 7;
+    var buf: [networking.messages.Ping.fixed_size]u8 = undefined;
+    _ = networking.messages.Ping.serializeIntoBytes(&peer_seq, &buf);
+
+    const chunks = try node.onReqResp(.ping, &buf);
+    defer freeResponseChunks(allocator, chunks);
+
+    try std.testing.expectEqual(@as(usize, 1), chunks.len);
+    try std.testing.expectEqual(networking.protocol.ResponseCode.success, chunks[0].result);
+
+    // Decode response sequence number — should be 0 (our current ping seq).
+    var resp_seq: networking.messages.Ping.Type = undefined;
+    try networking.messages.Ping.deserializeFromBytes(chunks[0].ssz_payload, &resp_seq);
+    try std.testing.expectEqual(@as(u64, 0), resp_seq);
+}
+
+test "BeaconNode: onReqResp BeaconBlocksByRange returns blocks for known slots" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    const node = try BeaconNode.init(allocator, test_state.cached_state.config, .{});
+    defer node.deinit();
+
+    // Simulate two imported blocks at slots 10 and 11.
+    const root_10 = [_]u8{0x10} ** 32;
+    const root_11 = [_]u8{0x11} ** 32;
+    const block_10 = [_]u8{0xAA} ** 20;
+    const block_11 = [_]u8{0xBB} ** 20;
+
+    try node.head_tracker.onBlock(root_10, 10, [_]u8{0} ** 32);
+    try node.head_tracker.onBlock(root_11, 11, [_]u8{0} ** 32);
+    try node.db.putBlock(root_10, &block_10);
+    try node.db.putBlock(root_11, &block_11);
+
+    // Request range [10, 3): slots 10, 11, 12. Slot 12 has no block.
+    const request = networking.messages.BeaconBlocksByRangeRequest.Type{
+        .start_slot = 10,
+        .count = 3,
+        .step = 1,
+    };
+    var buf: [networking.messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
+    _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &buf);
+
+    const chunks = try node.onReqResp(.beacon_blocks_by_range, &buf);
+    defer freeResponseChunks(allocator, chunks);
+
+    // Only slots 10 and 11 have blocks; slot 12 is skipped.
+    try std.testing.expectEqual(@as(usize, 2), chunks.len);
+    try std.testing.expectEqualSlices(u8, &block_10, chunks[0].ssz_payload);
+    try std.testing.expectEqualSlices(u8, &block_11, chunks[1].ssz_payload);
 }
 
 test "HeadTracker: basic tracking" {

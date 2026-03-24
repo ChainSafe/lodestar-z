@@ -169,7 +169,7 @@ pub const EthReqRespAdapter = struct {
 // ============================================================================
 
 /// Mock ReqRespContext for testing.
-fn testStatus() messages.StatusMessage.Type {
+fn testStatus(_: *anyopaque) messages.StatusMessage.Type {
     return .{
         .fork_digest = .{ 0x01, 0x02, 0x03, 0x04 },
         .finalized_root = std.mem.zeroes([32]u8),
@@ -179,7 +179,7 @@ fn testStatus() messages.StatusMessage.Type {
     };
 }
 
-fn testMetadata() messages.MetadataV2.Type {
+fn testMetadata(_: *anyopaque) messages.MetadataV2.Type {
     return .{
         .seq_number = 1,
         .attnets = .{ .data = std.mem.zeroes([8]u8) },
@@ -187,35 +187,37 @@ fn testMetadata() messages.MetadataV2.Type {
     };
 }
 
-fn testPingSeq() u64 {
+fn testPingSeq(_: *anyopaque) u64 {
     return 42;
 }
 
-fn testGetBlockByRoot(_: [32]u8) ?[]const u8 {
+fn testGetBlockByRoot(_: *anyopaque, _: [32]u8) ?[]const u8 {
     return null;
 }
 
-fn testGetBlocksByRange(_: u64, _: u64) []const []const u8 {
+fn testGetBlocksByRange(_: *anyopaque, _: u64, _: u64) []const []const u8 {
     return &.{};
 }
 
-fn testGetBlobByRoot(_: [32]u8, _: u64) ?[]const u8 {
+fn testGetBlobByRoot(_: *anyopaque, _: [32]u8, _: u64) ?[]const u8 {
     return null;
 }
 
-fn testGetBlobsByRange(_: u64, _: u64) []const []const u8 {
+fn testGetBlobsByRange(_: *anyopaque, _: u64, _: u64) []const []const u8 {
     return &.{};
 }
 
-fn testGetForkDigest(_: u64) [4]u8 {
+fn testGetForkDigest(_: *anyopaque, _: u64) [4]u8 {
     return .{ 0x01, 0x02, 0x03, 0x04 };
 }
 
-fn testOnGoodbye(_: u64) void {}
+fn testOnGoodbye(_: *anyopaque, _: u64) void {}
 
-fn testOnPeerStatus(_: messages.StatusMessage.Type) void {}
+fn testOnPeerStatus(_: *anyopaque, _: messages.StatusMessage.Type) void {}
 
+var _test_sentinel: u8 = 0;
 const test_context = ReqRespContext{
+    .ptr = &_test_sentinel,
     .getStatus = &testStatus,
     .getMetadata = &testMetadata,
     .getPingSequence = &testPingSeq,
@@ -234,7 +236,7 @@ test "EthReqRespAdapter: handle status request roundtrip" {
     var adapter = EthReqRespAdapter.init(allocator, &test_context);
 
     // Create a Status request.
-    const status = testStatus();
+    const status = testStatus(&_test_sentinel);
     var ssz_buf: [messages.StatusMessage.fixed_size]u8 = undefined;
     _ = messages.StatusMessage.serializeIntoBytes(&status, &ssz_buf);
 

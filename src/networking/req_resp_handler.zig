@@ -57,26 +57,28 @@ pub const HandlerError = error{
 /// The handler module never accesses beacon state directly — all data access goes
 /// through these callbacks.
 pub const ReqRespContext = struct {
+    /// Erased pointer to the concrete implementation (e.g. *BeaconNode or *MockContext).
+    ptr: *anyopaque,
     /// Returns our node's current status (chain head, finalized checkpoint).
-    getStatus: *const fn () StatusMessage.Type,
+    getStatus: *const fn (ptr: *anyopaque) StatusMessage.Type,
     /// Returns our node's metadata (sequence number, subnet subscriptions).
-    getMetadata: *const fn () MetadataV2.Type,
+    getMetadata: *const fn (ptr: *anyopaque) MetadataV2.Type,
     /// Returns our current ping sequence number.
-    getPingSequence: *const fn () u64,
+    getPingSequence: *const fn (ptr: *anyopaque) u64,
     /// Looks up a signed beacon block by its root. Returns SSZ bytes or null if unknown.
-    getBlockByRoot: *const fn (root: [32]u8) ?[]const u8,
+    getBlockByRoot: *const fn (ptr: *anyopaque, root: [32]u8) ?[]const u8,
     /// Returns signed beacon blocks for a contiguous slot range. Each element is SSZ bytes.
-    getBlocksByRange: *const fn (start_slot: u64, count: u64) []const []const u8,
+    getBlocksByRange: *const fn (ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8,
     /// Looks up a blob sidecar by block root and blob index. Returns SSZ bytes or null.
-    getBlobByRoot: *const fn (root: [32]u8, index: u64) ?[]const u8,
+    getBlobByRoot: *const fn (ptr: *anyopaque, root: [32]u8, index: u64) ?[]const u8,
     /// Returns blob sidecars for a contiguous slot range. Each element is SSZ bytes.
-    getBlobsByRange: *const fn (start_slot: u64, count: u64) []const []const u8,
+    getBlobsByRange: *const fn (ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8,
     /// Returns the fork digest (4 bytes) for the given slot.
-    getForkDigest: *const fn (slot: u64) [4]u8,
+    getForkDigest: *const fn (ptr: *anyopaque, slot: u64) [4]u8,
     /// Called when a peer sends Goodbye. The reason code indicates why they are disconnecting.
-    onGoodbye: *const fn (reason: u64) void,
+    onGoodbye: *const fn (ptr: *anyopaque, reason: u64) void,
     /// Called when a peer sends their Status. Used for sync checking.
-    onPeerStatus: *const fn (status: StatusMessage.Type) void,
+    onPeerStatus: *const fn (ptr: *anyopaque, status: StatusMessage.Type) void,
 };
 
 /// Top-level request dispatcher.
@@ -141,10 +143,10 @@ fn handleStatus(
     };
 
     // Notify context about the peer's status (for sync checking).
-    context.onPeerStatus(peer_status);
+    context.onPeerStatus(context.ptr, peer_status);
 
     // Serialize our status as the response.
-    const our_status = context.getStatus();
+    const our_status = context.getStatus(context.ptr);
     const payload = try allocator.alloc(u8, StatusMessage.fixed_size);
     _ = StatusMessage.serializeIntoBytes(&our_status, payload);
 
@@ -176,7 +178,7 @@ fn handleGoodbye(
         return makeErrorResponse(allocator, .invalid_request, "Malformed GoodbyeReason");
     };
 
-    context.onGoodbye(reason);
+    context.onGoodbye(context.ptr, reason);
 
     // Return empty response — Goodbye has no response body per spec.
     const chunks = try allocator.alloc(ResponseChunk, 0);
@@ -204,7 +206,7 @@ fn handlePing(
     };
 
     // Respond with our sequence number.
-    const our_seq = context.getPingSequence();
+    const our_seq = context.getPingSequence(context.ptr);
     const payload = try allocator.alloc(u8, Ping.fixed_size);
     _ = Ping.serializeIntoBytes(&our_seq, payload);
 
@@ -224,7 +226,7 @@ fn handleMetadata(
     allocator: Allocator,
     context: *const ReqRespContext,
 ) HandlerError![]const ResponseChunk {
-    const metadata = context.getMetadata();
+    const metadata = context.getMetadata(context.ptr);
     const payload = try allocator.alloc(u8, MetadataV2.fixed_size);
     _ = MetadataV2.serializeIntoBytes(&metadata, payload);
 
@@ -265,7 +267,7 @@ fn handleBeaconBlocksByRange(
     }
 
     // Look up blocks.
-    const blocks = context.getBlocksByRange(request.start_slot, request.count);
+    const blocks = context.getBlocksByRange(context.ptr, request.start_slot, request.count);
     if (blocks.len == 0) {
         return makeErrorResponse(allocator, .resource_unavailable, "No blocks available in requested range");
     }
@@ -280,7 +282,7 @@ fn handleBeaconBlocksByRange(
         const slot = request.start_slot + i;
         chunks[i] = .{
             .result = .success,
-            .context_bytes = context.getForkDigest(slot),
+            .context_bytes = context.getForkDigest(context.ptr, slot),
             .ssz_payload = payload,
         };
     }
@@ -311,7 +313,7 @@ fn handleBeaconBlocksByRoot(
 
     for (0..num_roots) |i| {
         const root: [32]u8 = request_bytes[i * 32 ..][0..32].*;
-        if (context.getBlockByRoot(root)) |block_ssz| {
+        if (context.getBlockByRoot(context.ptr, root)) |block_ssz| {
             const payload = try allocator.alloc(u8, block_ssz.len);
             @memcpy(payload, block_ssz);
 
@@ -321,7 +323,7 @@ fn handleBeaconBlocksByRoot(
             const slot = std.mem.readInt(u64, root[0..8], .little);
             try found.append(allocator, .{
                 .result = .success,
-                .context_bytes = context.getForkDigest(slot),
+                .context_bytes = context.getForkDigest(context.ptr, slot),
                 .ssz_payload = payload,
             });
         }
@@ -363,7 +365,7 @@ fn handleBlobSidecarsByRange(
     }
 
     // Look up blob sidecars.
-    const blobs = context.getBlobsByRange(request.start_slot, request.count);
+    const blobs = context.getBlobsByRange(context.ptr, request.start_slot, request.count);
     if (blobs.len == 0) {
         return makeErrorResponse(allocator, .resource_unavailable, "No blob sidecars available in requested range");
     }
@@ -379,7 +381,7 @@ fn handleBlobSidecarsByRange(
         const slot = request.start_slot + i;
         chunks[i] = .{
             .result = .success,
-            .context_bytes = context.getForkDigest(slot),
+            .context_bytes = context.getForkDigest(context.ptr, slot),
             .ssz_payload = payload,
         };
     }
@@ -413,14 +415,14 @@ fn handleBlobSidecarsByRoot(
         const root: [32]u8 = request_bytes[offset..][0..32].*;
         const index = std.mem.readInt(u64, request_bytes[offset + 32 ..][0..8], .little);
 
-        if (context.getBlobByRoot(root, index)) |blob_ssz| {
+        if (context.getBlobByRoot(context.ptr, root, index)) |blob_ssz| {
             const payload = try allocator.alloc(u8, blob_ssz.len);
             @memcpy(payload, blob_ssz);
 
             const slot = std.mem.readInt(u64, root[0..8], .little);
             try found.append(allocator, .{
                 .result = .success,
-                .context_bytes = context.getForkDigest(slot),
+                .context_bytes = context.getForkDigest(context.ptr, slot),
                 .ssz_payload = payload,
             });
         }
@@ -513,55 +515,57 @@ const MockContext = struct {
         goodbye_reason = null;
     }
 
-    fn getStatus() StatusMessage.Type {
+    fn getStatus(_: *anyopaque) StatusMessage.Type {
         return mock_status;
     }
 
-    fn getMetadata() MetadataV2.Type {
+    fn getMetadata(_: *anyopaque) MetadataV2.Type {
         return mock_metadata;
     }
 
-    fn getPingSequence() u64 {
+    fn getPingSequence(_: *anyopaque) u64 {
         return 99;
     }
 
-    fn getBlockByRoot(root: [32]u8) ?[]const u8 {
+    fn getBlockByRoot(_: *anyopaque, root: [32]u8) ?[]const u8 {
         if (std.mem.eql(u8, &root, &known_root_1)) return &mock_block_1;
         if (std.mem.eql(u8, &root, &known_root_2)) return &mock_block_2;
         return null;
     }
 
-    fn getBlocksByRange(_start_slot: u64, _count: u64) []const []const u8 {
+    fn getBlocksByRange(_: *anyopaque, _start_slot: u64, _count: u64) []const []const u8 {
         _ = _start_slot;
         _ = _count;
         return mock_blocks;
     }
 
-    fn getBlobByRoot(root: [32]u8, index: u64) ?[]const u8 {
+    fn getBlobByRoot(_: *anyopaque, root: [32]u8, index: u64) ?[]const u8 {
         if (std.mem.eql(u8, &root, &known_blob_root) and index == known_blob_index) return &mock_blob_1;
         return null;
     }
 
-    fn getBlobsByRange(_start_slot: u64, _count: u64) []const []const u8 {
+    fn getBlobsByRange(_: *anyopaque, _start_slot: u64, _count: u64) []const []const u8 {
         _ = _start_slot;
         _ = _count;
         return mock_blobs;
     }
 
-    fn getForkDigest(_slot: u64) [4]u8 {
+    fn getForkDigest(_: *anyopaque, _slot: u64) [4]u8 {
         _ = _slot;
         return mock_fork_digest;
     }
 
-    fn onGoodbye(reason: u64) void {
+    fn onGoodbye(_: *anyopaque, reason: u64) void {
         goodbye_reason = reason;
     }
 
-    fn onPeerStatus(status: StatusMessage.Type) void {
+    fn onPeerStatus(_: *anyopaque, status: StatusMessage.Type) void {
         status_received = status;
     }
 
+    var _sentinel: u8 = 0;
     const req_resp_context: ReqRespContext = .{
+        .ptr = &_sentinel,
         .getStatus = &getStatus,
         .getMetadata = &getMetadata,
         .getPingSequence = &getPingSequence,
