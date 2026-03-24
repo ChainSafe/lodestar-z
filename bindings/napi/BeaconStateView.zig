@@ -31,11 +31,12 @@ pub fn BeaconStateView_ctor(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value
     const cached_state = try allocator.create(CachedBeaconState);
     errdefer allocator.destroy(cached_state);
 
-    _ = try env.wrap(
+    try env.wrap(
         cb.this(),
         CachedBeaconState,
         cached_state,
         BeaconStateView_finalize,
+        null,
         null,
     );
 
