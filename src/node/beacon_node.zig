@@ -51,6 +51,9 @@ const Method = networking.Method;
 const handleRequest = networking.handleRequest;
 const freeResponseChunks = networking.freeResponseChunks;
 const StatusMessage = networking.messages.StatusMessage;
+const P2pService = networking.p2p_service.P2pService;
+const P2pConfig = networking.p2p_service.P2pConfig;
+const PassthroughValidator = networking.p2p_service.PassthroughValidator;
 const api_mod = @import("api");
 const ApiContext = api_mod.context.ApiContext;
 const api_types = api_mod.types;
@@ -358,6 +361,10 @@ pub const BeaconNode = struct {
 
     // HTTP server for the Beacon REST API (lazy-initialized via startApi).
     http_server: ?api_mod.HttpServer = null,
+
+    // P2P service (lazy-initialized via startP2p).
+    // Owns the libp2p Switch, gossipsub service, and gossip adapter.
+    p2p_service: ?P2pService = null,
 
     // Genesis validators root — set by initFromGenesis, used for fork digest computation.
     genesis_validators_root: [32]u8 = [_]u8{0} ** 32,
@@ -709,6 +716,75 @@ pub const BeaconNode = struct {
         try self.http_server.?.serve(io);
     }
 
+    /// Start the libp2p P2P networking service.
+    ///
+    /// Initialises the eth-p2p-z Switch (QUIC transport, all eth2 req/resp methods,
+    /// gossipsub), subscribes to all global eth2 gossip topics for the current fork
+    /// digest, and begins listening for inbound connections.
+    ///
+    /// The listen address is a QUIC multiaddr string, e.g.:
+    ///   "/ip4/0.0.0.0/udp/9000/quic-v1"
+    ///
+    /// This method blocks in the sense that the Switch runs its accept loop
+    /// on the provided io (cooperative fibers via Io.Group.async). Use a
+    /// dedicated fiber or call from a background task.
+    pub fn startP2p(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) !void {
+        const Multiaddr = @import("multiaddr").Multiaddr;
+
+        // Build the QUIC listen multiaddr: /ip4/<addr>/udp/<port>/quic-v1
+        const multiaddr_str = try std.fmt.allocPrint(
+            self.allocator,
+            "/ip4/{s}/udp/{d}/quic-v1",
+            .{ listen_addr, port },
+        );
+        defer self.allocator.free(multiaddr_str);
+
+        var listen_multiaddr = try Multiaddr.fromString(self.allocator, multiaddr_str);
+        defer listen_multiaddr.deinit();
+
+        // Build a scratch arena for the req/resp RequestContext.
+        // Note: the arena is kept alive only for the duration of each request
+        // (not the service lifetime). We use the node allocator directly here.
+        var req_ctx = RequestContext{
+            .node = self,
+            .scratch = self.allocator,
+        };
+        const rr_ctx = ReqRespContext{
+            .ptr = &req_ctx,
+            .getStatus = &reqRespGetStatus,
+            .getMetadata = &reqRespGetMetadata,
+            .getPingSequence = &reqRespGetPingSequence,
+            .getBlockByRoot = &reqRespGetBlockByRoot,
+            .getBlocksByRange = &reqRespGetBlocksByRange,
+            .getBlobByRoot = &reqRespGetBlobByRoot,
+            .getBlobsByRange = &reqRespGetBlobsByRange,
+            .getForkDigest = &reqRespGetForkDigest,
+            .onGoodbye = &reqRespOnGoodbye,
+            .onPeerStatus = &reqRespOnPeerStatus,
+        };
+
+        // Build a passthrough gossip validator (accepts all messages).
+        // TODO: replace with a real GossipValidationContext backed by chain state
+        //       once attestation/slashing validation is ready.
+        var validator = PassthroughValidator.init(self.allocator);
+        defer validator.deinit();
+        validator.fixupPointers();
+
+        const fork_digest = self.config.forkDigestAtSlot(
+            self.head_tracker.head_slot,
+            self.genesis_validators_root,
+        );
+
+        var svc = try P2pService.init(self.allocator, P2pConfig{
+            .fork_digest = fork_digest,
+            .req_resp_context = &rr_ctx,
+            .validator = &validator.ctx,
+        });
+        errdefer svc.deinit(io);
+
+        try svc.start(io, listen_multiaddr);
+        self.p2p_service = svc;
+    }
     /// Get the current head info.
     pub fn getHead(self: *const BeaconNode) HeadInfo {
         return .{

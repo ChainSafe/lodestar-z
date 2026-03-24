@@ -669,6 +669,12 @@ pub fn build(b: *std.Build) void {
     module_networking.addImport("preset", module_preset);
     module_networking.addImport("constants", module_constants);
     module_networking.addImport("zig-libp2p", dep_eth_p2p_z.module("zig-libp2p"));
+    // Add ssl (boringssl) module so networking can reference ssl.EVP_PKEY for host key.
+    const boringssl_dep = dep_eth_p2p_z.builder.dependency("boringssl", .{ .optimize = optimize, .target = target });
+    module_networking.addImport("ssl", boringssl_dep.module("ssl"));
+    // Add multiaddr module for P2pService listen/dial APIs.
+    const multiaddr_dep2 = dep_eth_p2p_z.builder.dependency("multiaddr", .{ .optimize = optimize, .target = target });
+    module_networking.addImport("multiaddr", multiaddr_dep2.module("multiaddr"));
 
     module_download_era_files.addImport("download_era_options", options_module_download_era_options);
 
