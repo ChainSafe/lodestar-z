@@ -54,11 +54,13 @@ const StatusMessage = networking.messages.StatusMessage;
 const P2pService = networking.p2p_service.P2pService;
 const P2pConfig = networking.p2p_service.P2pConfig;
 const PassthroughValidator = networking.p2p_service.PassthroughValidator;
+const Multiaddr = @import("multiaddr").Multiaddr;
 const api_mod = @import("api");
 const ApiContext = api_mod.context.ApiContext;
 const api_types = api_mod.types;
 
 const SlotClock = @import("clock.zig").SlotClock;
+const SyncController = @import("sync_controller.zig").SyncController;
 const NodeOptions = @import("options.zig").NodeOptions;
 
 const fork_choice_mod = @import("fork_choice");
@@ -68,6 +70,8 @@ const ProtoBlock = fork_choice_mod.ProtoBlock;
 const BlockExtraMeta = fork_choice_mod.BlockExtraMeta;
 const ForkChoiceCheckpoint = fork_choice_mod.Checkpoint;
 
+const metrics_mod = @import("metrics.zig");
+pub const BeaconMetrics = metrics_mod.BeaconMetrics;
 
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 
@@ -401,12 +405,21 @@ pub const BeaconNode = struct {
     api_sync_status: *api_mod.context.SyncStatus,
     block_import_ctx: *BlockImportCallbackCtx,
 
+    // Prometheus metrics (real or noop depending on --metrics flag).
+    // Optional pointer so BeaconNode doesn't own the metrics instance —
+    // it's allocated by main() and passed in.
+    metrics: ?*BeaconMetrics = null,
+
     // HTTP server for the Beacon REST API (lazy-initialized via startApi).
     http_server: ?api_mod.HttpServer = null,
 
     // P2P service (lazy-initialized via startP2p).
     // Owns the libp2p Switch, gossipsub service, and gossip adapter.
     p2p_service: ?P2pService = null,
+
+    // Sync controller — wires P2P events into the sync pipeline.
+    // Optional: nil until initialized (e.g. when running without P2P).
+    sync_controller: ?*SyncController = null,
 
     // Genesis validators root — set by initFromGenesis, used for fork digest computation.
     genesis_validators_root: [32]u8 = [_]u8{0} ** 32,
@@ -730,7 +743,20 @@ pub const BeaconNode = struct {
         self: *BeaconNode,
         signed_block: *const types.electra.SignedBeaconBlock.Type,
     ) !ImportResult {
+        const t0 = std.time.nanoTimestamp();
         const result = try self.block_importer.importBlock(signed_block);
+        const elapsed_s: f64 = @as(f64, @floatFromInt(std.time.nanoTimestamp() - t0)) / 1e9;
+
+        // Update metrics.
+        if (self.metrics) |m| {
+            m.blocks_imported_total.incr();
+            m.block_import_seconds.observe(elapsed_s);
+            m.head_slot.set(result.slot);
+            m.finalized_epoch.set(self.head_tracker.finalized_epoch);
+            m.justified_epoch.set(self.head_tracker.justified_epoch);
+            // Encode first 8 bytes of block root as u64 for change detection.
+            m.head_root.set(std.mem.readInt(u64, result.block_root[0..8], .big));
+        }
 
         // Update API context
         self.api_head_tracker.head_slot = result.slot;
@@ -844,12 +870,44 @@ pub const BeaconNode = struct {
     /// on the provided io (cooperative fibers via Io.Group.async). Use a
     /// dedicated fiber or call from a background task.
     pub fn startP2p(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) !void {
-        _ = io;
-        _ = listen_addr;
-        _ = port;
-        _ = self;
-        // TODO: Initialize eth-p2p-z Switch with multiaddr.
-        // Requires multiaddr module wired into node build target.
+        // Build QUIC multiaddr: /ip4/{addr}/udp/{port}/quic-v1
+        var ma_buf: [64]u8 = undefined;
+        const ma_str = try std.fmt.bufPrint(&ma_buf, "/ip4/{s}/udp/{d}/quic-v1", .{ listen_addr, port });
+        const listen_multiaddr = try Multiaddr.fromString(self.allocator, ma_str);
+        defer listen_multiaddr.deinit();
+
+        // Build req/resp context pointing at this node.
+        const req_resp_ctx = ReqRespContext{
+            .ptr = @ptrCast(self),
+            .getStatus = &reqRespGetStatus,
+            .getMetadata = &reqRespGetMetadata,
+            .getPingSequence = &reqRespGetPingSequence,
+            .getBlockByRoot = &reqRespGetBlockByRoot,
+            .getBlocksByRange = &reqRespGetBlocksByRange,
+            .getBlobByRoot = &reqRespGetBlobByRoot,
+            .getBlobsByRange = &reqRespGetBlobsByRange,
+            .getForkDigest = &reqRespGetForkDigest,
+            .onGoodbye = &reqRespOnGoodbye,
+            .onPeerStatus = &reqRespOnPeerStatus,
+        };
+
+        // Passthrough gossip validator (accepts all messages).
+        var validator = PassthroughValidator.init(self.allocator);
+        defer validator.deinit();
+        validator.fixupPointers();
+
+        const fork_digest = self.config.forkDigestAtSlot(
+            self.head_tracker.head_slot,
+            self.genesis_validators_root,
+        );
+
+        var svc = try P2pService.init(self.allocator, P2pConfig{
+            .fork_digest = fork_digest,
+            .req_resp_context = &req_resp_ctx,
+            .validator = &validator.ctx,
+        });
+        try svc.start(io, listen_multiaddr);
+        self.p2p_service = svc;
     }
     /// Get the current head info.
     pub fn getHead(self: *const BeaconNode) HeadInfo {
@@ -1108,9 +1166,12 @@ fn reqRespOnGoodbye(ptr: *anyopaque, reason: u64) void {
 }
 
 fn reqRespOnPeerStatus(ptr: *anyopaque, status: StatusMessage.Type) void {
-    _ = ptr;
-    _ = status;
-    // TODO: sync checking in future.
+    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
+    if (ctx.node.sync_controller) |sc| {
+        sc.onPeerConnected("unknown", status) catch |err| {
+            std.log.warn("SyncController.onPeerConnected failed: {}", .{err});
+        };
+    }
 }
 
 

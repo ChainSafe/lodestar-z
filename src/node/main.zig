@@ -32,6 +32,7 @@ const state_transition = @import("state_transition");
 const Node = @import("persistent_merkle_tree").Node;
 
 const genesis_util = @import("genesis_util.zig");
+const ShutdownHandler = @import("shutdown.zig").ShutdownHandler;
 
 // ---------------------------------------------------------------------------
 // Parsed CLI arguments
@@ -180,7 +181,7 @@ fn slotClockLoop(io: Io, node: *BeaconNode) !void {
 
     std.log.info("Entering slot clock loop...", .{});
 
-    while (true) {
+    while (!ShutdownHandler.shouldStop()) {
         const current_slot = clock.currentSlot(io) orelse {
             // Before genesis — sleep 1 s and check again.
             io.sleep(.{ .nanoseconds = std.time.ns_per_s }, .real) catch break;
@@ -194,6 +195,13 @@ fn slotClockLoop(io: Io, node: *BeaconNode) !void {
                 head.slot,
                 head.finalized_epoch,
             });
+        }
+
+        // Drive the sync state machine forward on each slot.
+        if (node.sync_controller) |sc| {
+            sc.tick() catch |err| {
+                std.log.warn("sync tick error: {}", .{err});
+            };
         }
 
         // Sleep until the start of the next slot.
@@ -246,6 +254,9 @@ pub fn main(init: std.process.Init) !void {
 
     // Load beacon configuration for the selected network.
     const beacon_config = loadBeaconConfig(args.network);
+
+    // Install signal handlers for graceful shutdown (SIGINT/SIGTERM).
+    ShutdownHandler.installSignalHandlers();
 
     std.log.info("lodestar-z starting", .{});
     std.log.info("  network:    {s}", .{@tagName(args.network)});
@@ -341,5 +352,7 @@ pub fn main(init: std.process.Init) !void {
     // Block until all tasks finish (i.e., forever — Ctrl-C kills the process).
     group.await(io) catch {};
 
-    std.log.info("lodestar-z node shutting down", .{});
+    std.log.info("Shutting down...", .{});
+    // node is deferred via `defer node.deinit()` above.
+    std.log.info("Goodbye.", .{});
 }

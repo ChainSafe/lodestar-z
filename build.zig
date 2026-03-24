@@ -56,6 +56,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const dep_metrics = b.dependency("metrics", .{
+        .optimize = optimize,
+        .target = target,
+    });
+
     const dep_yaml = b.dependency("yaml", .{
         .optimize = optimize,
         .target = target,
@@ -847,6 +852,10 @@ pub fn build(b: *std.Build) void {
     module_node.addImport("hex", module_hex);
     module_node.addImport("build_options", options_module_build_options);
     module_node.addImport("fork_choice", module_fork_choice);
+    module_node.addImport("metrics", dep_metrics.module("metrics"));
+    module_node.addImport("multiaddr", multiaddr_dep2.module("multiaddr"));
+    module_node.addImport("zig-libp2p", dep_eth_p2p_z.module("zig-libp2p"));
+    module_node.addImport("ssl", boringssl_dep.module("ssl"));
 
     // fork_choice module imports
     module_fork_choice.addImport("consensus_types", module_consensus_types);
