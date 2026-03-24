@@ -235,3 +235,14 @@ comptime {
     _ = block_import;
     _ = block_import_test;
 }
+
+// ── DST expansion: fork choice, network partition, fault injection ────
+pub const sim_forkchoice_test = @import("sim_forkchoice_test.zig");
+pub const sim_network_partition_test = @import("sim_network_partition_test.zig");
+pub const sim_fault_injection_test = @import("sim_fault_injection_test.zig");
+
+comptime {
+    _ = sim_forkchoice_test;
+    _ = sim_network_partition_test;
+    _ = sim_fault_injection_test;
+}
