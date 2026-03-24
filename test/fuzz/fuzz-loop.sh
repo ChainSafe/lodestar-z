@@ -7,7 +7,9 @@ CORPUS_DIR="${FUZZ_DIR}/corpus"
 AFL_OUT="${FUZZ_DIR}/afl-out"
 LOGS_DIR="${FUZZ_DIR}/logs"
 
-TARGETS=(bls_public_key bls_signature bls_aggregate_pk bls_aggregate_sig)
+SSZ_TARGETS=(ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists)
+BLS_TARGETS=(bls_public_key bls_signature bls_aggregate_pk bls_aggregate_sig)
+TARGETS=("${SSZ_TARGETS[@]}" "${BLS_TARGETS[@]}")
 
 # Duration per round in seconds. Override with: ROUND_DURATION=7200 ./fuzz-loop.sh
 ROUND_DURATION=${ROUND_DURATION:-3600}
