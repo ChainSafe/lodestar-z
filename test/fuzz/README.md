@@ -86,19 +86,26 @@ zig build run-bls_aggregate_pk
 zig build run-bls_aggregate_sig
 ```
 
-### Running all BLS targets in a loop
+### Running targets in a loop
 
-`fuzz-loop.sh` runs all four BLS fuzzers in parallel, minimizes the corpus
+`fuzz-loop.sh` runs fuzzers in parallel, [minimizes the corpus]()
 with `afl-cmin` after each round, and repeats indefinitely:
 
 ```sh
-./fuzz-loop.sh
-```
+./fuzz-loop.sh --help
+Usage: ./fuzz-loop.sh [targets...]
 
-Each round lasts 1 hour by default. Override with:
+Groups:  all, ssz, bls
+Targets: ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists bls_public_key bls_signature bls_aggregate_pk bls_aggregate_sig
 
-```sh
-ROUND_DURATION=7200 ./fuzz-loop.sh
+Examples:
+  ./fuzz-loop.sh                    # fuzz all targets
+  ./fuzz-loop.sh ssz                # fuzz all SSZ targets
+  ./fuzz-loop.sh bls                # fuzz all BLS targets
+  ./fuzz-loop.sh ssz bls_signature  # mix groups and individual targets
+
+Environment:
+  ROUND_DURATION=3600               # seconds per round (default: 3600)
 ```
 
 Logs are written to `logs/<target>.log`. Crashes are reported at the end of
