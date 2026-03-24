@@ -789,6 +789,7 @@ pub fn build(b: *std.Build) void {
     module_discv5.linkLibrary(secp256k1_lib);
     module_discv5.addIncludePath(secp256k1_dep.builder.dependency("libsecp256k1", .{}).path("include"));
     b.modules.put(b.dupe("discv5"), module_discv5) catch @panic("OOM");
+    module_networking.addImport("discv5", module_discv5);
 
     const test_discv5 = b.addTest(.{
         .name = "discv5",

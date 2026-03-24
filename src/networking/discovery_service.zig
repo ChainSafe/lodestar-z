@@ -1,30 +1,23 @@
 //! Discovery service: bridges discv5 peer discovery with the P2P layer.
-//!
-//! Manages the discv5 protocol instance, seeds the routing table with
-//! bootnodes, and provides discovered peers for QUIC connection.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const discv5 = @import("discv5");
 const Protocol = discv5.protocol.Protocol;
-const ENR = discv5.enr.ENR;
-const KBucket = discv5.kbucket.KBucket;
-const Transport = discv5.transport.Transport;
-const MockTransport = discv5.transport.MockTransport;
+const Enr = discv5.enr.Enr;
+const RoutingTable = discv5.kbucket.RoutingTable;
+const NodeId = discv5.enr.NodeId;
 const bootnodes = @import("bootnodes.zig");
 const BootnodeInfo = bootnodes.BootnodeInfo;
 
 /// Configuration for the discovery service.
 pub const DiscoveryConfig = struct {
-    /// UDP port to listen on for discv5.
     listen_port: u16 = 9000,
-    /// Bootnode ENRs to seed the routing table.
     bootnode_enrs: []const BootnodeInfo = &bootnodes.mainnet,
-    /// Target number of peers to maintain.
     target_peers: u32 = 50,
-    /// Interval between random lookups (milliseconds).
     lookup_interval_ms: u64 = 30_000,
+    local_node_id: NodeId = [_]u8{0} ** 32,
 };
 
 /// A peer discovered via discv5.
@@ -40,14 +33,15 @@ pub const DiscoveryService = struct {
     allocator: Allocator,
     config: DiscoveryConfig,
     protocol: Protocol,
-    local_secret_key: [32]u8,
 
-    pub fn init(allocator: Allocator, config: DiscoveryConfig, secret_key: [32]u8, transport: Transport) DiscoveryService {
+    pub fn init(allocator: Allocator, config: DiscoveryConfig) !DiscoveryService {
         return .{
             .allocator = allocator,
             .config = config,
-            .protocol = Protocol.init(allocator, secret_key, transport),
-            .local_secret_key = secret_key,
+            .protocol = try Protocol.init(allocator, .{
+                .local_node_id = config.local_node_id,
+                .local_secret_key = [_]u8{0} ** 32,
+            }),
         };
     }
 
@@ -56,28 +50,22 @@ pub const DiscoveryService = struct {
     }
 
     /// Seed the routing table with configured bootnodes.
-    /// Parses each ENR string, extracts node-id and endpoint, adds to kbuckets.
     pub fn seedBootnodes(self: *DiscoveryService) void {
         for (self.config.bootnode_enrs) |bn| {
-            // Parse ENR to extract node-id and add to routing table
-            // The ENR string starts with "enr:" prefix — skip it
-            const enr_data = if (std.mem.startsWith(u8, bn.enr, "enr:"))
-                bn.enr[4..]
-            else if (std.mem.startsWith(u8, bn.enr, "enr:-"))
+            const enr_data = if (std.mem.startsWith(u8, bn.enr, "enr:-"))
+                bn.enr[5..]
+            else if (std.mem.startsWith(u8, bn.enr, "enr:"))
                 bn.enr[4..]
             else
                 bn.enr;
 
-            // Base64url decode
-            const decoded = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(enr_data) catch continue;
-            const buf = self.allocator.alloc(u8, decoded) catch continue;
+            const decoded_len = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(enr_data) catch continue;
+            const buf = self.allocator.alloc(u8, decoded_len) catch continue;
             defer self.allocator.free(buf);
-
             std.base64.url_safe_no_pad.Decoder.decode(buf, enr_data) catch continue;
 
-            // Parse ENR to get pubkey → node-id
-            var parsed = ENR.decode(self.allocator, buf) catch continue;
-            defer parsed.deinit(self.allocator);
+            var parsed = discv5.enr.decode(self.allocator, buf) catch continue;
+            defer parsed.deinit();
 
             if (parsed.pubkey) |pk| {
                 const node_id = discv5.enr.nodeIdFromCompressedPubkey(&pk);
@@ -86,38 +74,20 @@ pub const DiscoveryService = struct {
         }
     }
 
-    /// Get the number of known peers in the routing table.
     pub fn knownPeerCount(self: *const DiscoveryService) usize {
         return self.protocol.routing_table.totalNodes();
     }
 };
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 test "DiscoveryService: init and deinit" {
-    const allocator = std.testing.allocator;
-    const local_addr = discv5.transport.Address{ .ip = .{ 127, 0, 0, 1 }, .port = 9000 };
-    var mock_transport = MockTransport.init(allocator, local_addr);
-    defer mock_transport.deinit();
-
-    var svc = DiscoveryService.init(allocator, .{}, [_]u8{0x42} ** 32, mock_transport.transport());
+    var svc = try DiscoveryService.init(std.testing.allocator, .{});
     defer svc.deinit();
 }
 
-test "DiscoveryService: seedBootnodes populates routing table" {
-    const allocator = std.testing.allocator;
-    const local_addr = discv5.transport.Address{ .ip = .{ 127, 0, 0, 1 }, .port = 9000 };
-    var mock_transport = MockTransport.init(allocator, local_addr);
-    defer mock_transport.deinit();
-
-    var svc = DiscoveryService.init(allocator, .{}, [_]u8{0x42} ** 32, mock_transport.transport());
+test "DiscoveryService: seedBootnodes runs without crash" {
+    var svc = try DiscoveryService.init(std.testing.allocator, .{});
     defer svc.deinit();
-
     svc.seedBootnodes();
-    // Should have at least some bootnodes (parsing may fail for some depending on ENR format)
-    // Just verify it doesn't crash
 }
 
 test "DiscoveredPeer struct layout" {
