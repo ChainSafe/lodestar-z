@@ -749,6 +749,7 @@ pub fn build(b: *std.Build) void {
     module_sync.addImport("networking", module_networking);
 
     // api module imports
+    module_api.addImport("fork_types", module_fork_types);
     module_api.addImport("consensus_types", module_consensus_types);
     module_api.addImport("config", module_config);
     module_api.addImport("preset", module_preset);

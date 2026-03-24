@@ -606,6 +606,52 @@ pub const BeaconNode = struct {
         return result;
     }
 
+
+    /// Advance the head state by one empty slot (no block).
+    ///
+    /// Used for testing skip slots. Advances the head state via processSlots,
+    /// stores the new state in the block_state_cache, and updates the head
+    /// tracker so the next importBlock can find its parent state.
+    ///
+    /// The head_tracker.head_root stays the same (last real block root),
+    /// but head_state_root advances to the new state.
+    pub fn advanceSlot(self: *BeaconNode, target_slot: u64) !void {
+        const head_state_root = self.head_tracker.head_state_root;
+        const pre_state = self.block_state_cache.get(head_state_root) orelse
+            return error.NoHeadState;
+
+        // Clone and advance.
+        const post_state = try pre_state.clone(self.allocator, .{ .transfer_cache = false });
+        errdefer {
+            post_state.deinit();
+            self.allocator.destroy(post_state);
+        }
+
+        try state_transition.processSlots(self.allocator, post_state, target_slot, .{});
+        try post_state.state.commit();
+
+        // Cache the new state as the head.
+        const new_state_root = try self.state_regen.onNewBlock(post_state, true);
+
+        // Update block_importer's block_root -> state_root mapping so the
+        // next block import can find this state as parent.
+        try self.block_importer.block_to_state.put(
+            self.head_tracker.head_root,
+            new_state_root,
+        );
+
+        // Update head tracker to reflect the new state_root.
+        self.head_tracker.head_state_root = new_state_root;
+        self.head_tracker.head_slot = target_slot;
+
+        // Persist slot->root for range queries.
+        try self.head_tracker.slot_roots.put(target_slot, self.head_tracker.head_root);
+
+        // Update API context.
+        self.api_head_tracker.head_slot = target_slot;
+        self.api_head_tracker.head_state_root = new_state_root;
+    }
+
     /// Start the Beacon REST API HTTP server (blocking).
     ///
     /// Listens on the configured address:port and dispatches requests

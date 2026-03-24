@@ -8,6 +8,8 @@ const types = @import("../types.zig");
 const context = @import("../context.zig");
 const ApiContext = context.ApiContext;
 const preset = @import("preset").preset;
+const fork_types = @import("fork_types");
+const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 
 /// GET /eth/v1/beacon/genesis
 ///
@@ -82,9 +84,10 @@ pub fn getValidators(
     // TODO: Implement once state regen is available.
     // This will need to:
     // 1. Resolve StateId to a slot/root
-    // 2. Regenerate or load the state
+    // 2. Regenerate or load the state (via ctx.regen.getStateAtSlot)
     // 3. Iterate validators, apply filters
     // 4. Return matching validators with balances and status
+    // State regen is not yet wired to the API context — returning empty stub.
     return .{
         .data = &[_]types.ValidatorData{},
     };
@@ -99,7 +102,9 @@ pub fn getValidator(
     _: types.ValidatorId,
 ) !types.ApiResponse(types.ValidatorData) {
     // TODO: Implement once state regen is available.
-    return error.NotImplemented;
+    // State regen is not yet wired to the API context.
+    // See getValidators for the required implementation steps.
+    return error.StateNotAvailable;
 }
 
 /// GET /eth/v1/beacon/states/{state_id}/root
@@ -132,9 +137,25 @@ pub fn getStateRoot(ctx: *ApiContext, state_id: types.StateId) !types.ApiRespons
                 .data = ctx.head_tracker.head_state_root,
             };
         },
-        .slot => {
-            // TODO: look up state root by slot from DB
-            return error.NotImplemented;
+        .slot => |slot| {
+            // Look up the block at this slot, deserialize it, and return the state_root.
+            const root = (try ctx.db.getBlockRootBySlot(slot)) orelse return error.SlotNotFound;
+
+            // Try hot store first, then archived
+            const block_bytes = (try ctx.db.getBlock(root)) orelse
+                (try ctx.db.getBlockArchiveByRoot(root)) orelse
+                return error.BlockNotFound;
+            defer ctx.allocator.free(block_bytes);
+
+            const fork_seq = ctx.beacon_config.forkSeq(slot);
+            const any_block = try AnySignedBeaconBlock.deserialize(ctx.allocator, .full, fork_seq, block_bytes);
+            defer any_block.deinit(ctx.allocator);
+
+            const state_root = any_block.beaconBlock().stateRoot().*;
+            return .{
+                .data = state_root,
+                .finalized = slot <= ctx.head_tracker.finalized_slot,
+            };
         },
         .root => |root| {
             // The state_id IS the root
@@ -188,10 +209,12 @@ pub fn getStateFork(ctx: *ApiContext, state_id: types.StateId) !types.ApiRespons
 ///
 /// Returns the finality checkpoints (previous justified, current justified, finalized).
 ///
-/// Note: Full implementation requires loading the beacon state. Currently returns
-/// data from the head tracker which only has finalized/justified slots (not full checkpoint data).
+/// Note: Full implementation requires loading the beacon state for each state_id.
+/// Currently returns data from the head tracker which only tracks the current head's
+/// finalized/justified data. Non-head state_ids fall back to head tracker data.
 pub fn getFinalityCheckpoints(ctx: *ApiContext, _: types.StateId) !types.ApiResponse(types.FinalityCheckpoints) {
-    // TODO: Load actual state for non-head state_ids
+    // TODO: Load actual state for non-head state_ids. This requires state regen to be
+    // wired into the API context so we can load the beacon state at any slot/root.
     return .{
         .data = .{
             .previous_justified = .{
@@ -220,11 +243,16 @@ pub fn submitBlock(
     _: *ApiContext,
     _: []const u8, // raw block bytes
 ) !void {
-    // TODO: Implement block import pipeline
-    // 1. Deserialize the signed block
-    // 2. Validate block (parent exists, correct slot, valid signature)
-    // 3. Import into fork choice
-    // 4. Gossip to peers
+    // TODO: Implement block import pipeline.
+    // ApiContext needs a block importer callback or reference, e.g.:
+    //   ctx.block_importer.importBlock(block_bytes)
+    // Steps required:
+    // 1. Determine fork from slot in the raw bytes
+    // 2. Deserialize into AnySignedBeaconBlock
+    // 3. Validate block (parent exists, correct slot, valid signature)
+    // 4. Import into fork choice via BlockImporter
+    // 5. Gossip to peers via P2P layer
+    // Adding a block_importer field to ApiContext is the prerequisite.
     return error.NotImplemented;
 }
 
@@ -269,12 +297,24 @@ fn resolveBlockSlotAndRoot(ctx: *ApiContext, block_id: types.BlockId) !SlotAndRo
             };
         },
         .root => |root| {
-            // We have the root, but need the slot. Check hot then cold.
-            // For now, return unknown slot since we'd need a root->slot index.
+            // We have the root; look up the block to get the real slot.
+            const block_bytes = (try ctx.db.getBlock(root)) orelse
+                (try ctx.db.getBlockArchiveByRoot(root)) orelse
+                return error.BlockNotFound;
+            defer ctx.allocator.free(block_bytes);
+
+            // Determine fork from head slot as a best approximation (we don't
+            // know the block's slot before deserializing it). For a proper
+            // implementation we'd store a root->slot index in the DB.
+            const fork_seq = ctx.beacon_config.forkSeq(ctx.head_tracker.head_slot);
+            const any_block = try AnySignedBeaconBlock.deserialize(ctx.allocator, .full, fork_seq, block_bytes);
+            defer any_block.deinit(ctx.allocator);
+
+            const block = any_block.beaconBlock();
             return .{
-                .slot = 0, // TODO: look up slot from root
+                .slot = block.slot(),
                 .root = root,
-                .finalized = false, // conservative
+                .finalized = block.slot() <= ctx.head_tracker.finalized_slot,
             };
         },
     }
@@ -289,8 +329,46 @@ const BlockHeaderResult = struct {
 fn resolveBlockHeader(ctx: *ApiContext, block_id: types.BlockId) !BlockHeaderResult {
     const slot_info = try resolveBlockSlotAndRoot(ctx, block_id);
 
-    // For a real implementation we'd deserialize the block from DB.
-    // For now, construct from head tracker data.
+    // Try to load and deserialize the block to get real header fields.
+    const block_bytes_opt = (try ctx.db.getBlock(slot_info.root)) orelse
+        try ctx.db.getBlockArchiveByRoot(slot_info.root);
+
+    if (block_bytes_opt) |block_bytes| {
+        defer ctx.allocator.free(block_bytes);
+
+        const fork_seq = ctx.beacon_config.forkSeq(slot_info.slot);
+        const any_signed = try AnySignedBeaconBlock.deserialize(ctx.allocator, .full, fork_seq, block_bytes);
+        defer any_signed.deinit(ctx.allocator);
+
+        const block = any_signed.beaconBlock();
+
+        // Compute body_root via hash_tree_root of the body
+        var body_root: [32]u8 = [_]u8{0} ** 32;
+        try block.beaconBlockBody().hashTreeRoot(ctx.allocator, &body_root);
+
+        const sig = any_signed.signature();
+
+        return .{
+            .header = .{
+                .root = slot_info.root,
+                .canonical = true,
+                .header = .{
+                    .message = .{
+                        .slot = block.slot(),
+                        .proposer_index = block.proposerIndex(),
+                        .parent_root = block.parentRoot().*,
+                        .state_root = block.stateRoot().*,
+                        .body_root = body_root,
+                    },
+                    .signature = sig.*,
+                },
+            },
+            .execution_optimistic = !slot_info.finalized,
+            .finalized = slot_info.finalized,
+        };
+    }
+
+    // Block not in DB — return what we know from the head tracker with zero fields.
     return .{
         .header = .{
             .root = slot_info.root,
@@ -298,12 +376,12 @@ fn resolveBlockHeader(ctx: *ApiContext, block_id: types.BlockId) !BlockHeaderRes
             .header = .{
                 .message = .{
                     .slot = slot_info.slot,
-                    .proposer_index = 0, // TODO: from block
-                    .parent_root = [_]u8{0} ** 32, // TODO: from block
-                    .state_root = [_]u8{0} ** 32, // TODO: from block
-                    .body_root = [_]u8{0} ** 32, // TODO: from block
+                    .proposer_index = 0,
+                    .parent_root = [_]u8{0} ** 32,
+                    .state_root = [_]u8{0} ** 32,
+                    .body_root = [_]u8{0} ** 32,
                 },
-                .signature = [_]u8{0} ** 96, // TODO: from signed block
+                .signature = [_]u8{0} ** 96,
             },
         },
         .execution_optimistic = !slot_info.finalized,
@@ -343,6 +421,38 @@ test "getStateRoot for head returns head state root" {
     try std.testing.expectEqual(tc.ctx.head_tracker.head_state_root, resp.data);
 }
 
+test "getStateRoot for slot returns state_root from block" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    // Build a minimal phase0 signed block with a known state_root and store it.
+    const ct = @import("consensus_types");
+
+    var signed_block = ct.phase0.SignedBeaconBlock.default_value;
+    signed_block.message.slot = 1;
+    signed_block.message.state_root = [_]u8{0xee} ** 32;
+
+    // Serialize the block
+    const block_size = ct.phase0.SignedBeaconBlock.serializedSize(&signed_block);
+    const block_bytes = try std.testing.allocator.alloc(u8, block_size);
+    defer std.testing.allocator.free(block_bytes);
+    _ = ct.phase0.SignedBeaconBlock.serializeIntoBytes(&signed_block, block_bytes);
+
+    // Compute block root (just use a fixed test root)
+    const block_root = [_]u8{0x11} ** 32;
+    try tc.db.putBlockArchive(1, block_root, block_bytes);
+
+    const resp = try getStateRoot(&tc.ctx, .{ .slot = 1 });
+    try std.testing.expectEqual([_]u8{0xee} ** 32, resp.data);
+}
+
+test "getStateRoot for slot returns SlotNotFound if no block" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const result = getStateRoot(&tc.ctx, .{ .slot = 999 });
+    try std.testing.expectError(error.SlotNotFound, result);
+}
+
 test "getStateFork returns genesis fork for slot 0" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
@@ -365,6 +475,35 @@ test "getBlockHeader for head returns header" {
     const resp = try getBlockHeader(&tc.ctx, .head);
     try std.testing.expectEqual(tc.ctx.head_tracker.head_slot, resp.data.header.message.slot);
     try std.testing.expect(resp.data.canonical);
+}
+
+test "getBlockHeader for head extracts real fields from DB block" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const ct = @import("consensus_types");
+
+    // Build a phase0 signed block with known fields
+    var signed_block = ct.phase0.SignedBeaconBlock.default_value;
+    signed_block.message.slot = tc.ctx.head_tracker.head_slot;
+    signed_block.message.proposer_index = 42;
+    signed_block.message.parent_root = [_]u8{0xab} ** 32;
+    signed_block.message.state_root = [_]u8{0xcd} ** 32;
+    signed_block.signature = [_]u8{0xef} ** 96;
+
+    const block_size = ct.phase0.SignedBeaconBlock.serializedSize(&signed_block);
+    const block_bytes = try std.testing.allocator.alloc(u8, block_size);
+    defer std.testing.allocator.free(block_bytes);
+    _ = ct.phase0.SignedBeaconBlock.serializeIntoBytes(&signed_block, block_bytes);
+
+    // Store under the head root
+    try tc.db.putBlock(tc.ctx.head_tracker.head_root, block_bytes);
+
+    const resp = try getBlockHeader(&tc.ctx, .head);
+    try std.testing.expectEqual(@as(u64, 42), resp.data.header.message.proposer_index);
+    try std.testing.expectEqual([_]u8{0xab} ** 32, resp.data.header.message.parent_root);
+    try std.testing.expectEqual([_]u8{0xcd} ** 32, resp.data.header.message.state_root);
+    try std.testing.expectEqual([_]u8{0xef} ** 96, resp.data.header.signature);
 }
 
 test "getValidators returns empty stub" {

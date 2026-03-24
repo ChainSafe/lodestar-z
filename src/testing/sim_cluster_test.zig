@@ -34,9 +34,9 @@ test "cluster: happy path — 4 nodes agree on state roots" {
     try testing.expectEqual(@as(u64, 0), result.state_divergences);
 
     // Verify all nodes have the same head state root.
-    const root_0 = (try cluster.nodes[0].head_state.state.hashTreeRoot()).*;
+    const root_0 = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
     for (1..4) |i| {
-        const root_i = (try cluster.nodes[i].head_state.state.hashTreeRoot()).*;
+        const root_i = (try (cluster.nodes[i].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
         try testing.expectEqualSlices(u8, &root_0, &root_i);
     }
 }
@@ -60,7 +60,7 @@ test "cluster: deterministic replay — same seed produces identical results" {
         _ = try cluster.run(num_slots);
 
         for (0..4) |i| {
-            final_roots[run][i] = (try cluster.nodes[i].head_state.state.hashTreeRoot()).*;
+            final_roots[run][i] = (try (cluster.nodes[i].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
         }
     }
 
@@ -96,8 +96,8 @@ test "cluster: two nodes agree on state roots" {
     try testing.expectEqual(@as(u64, 0), result.state_divergences);
 
     // Both nodes must have the same state root.
-    const root_0 = (try cluster.nodes[0].head_state.state.hashTreeRoot()).*;
-    const root_1 = (try cluster.nodes[1].head_state.state.hashTreeRoot()).*;
+    const root_0 = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
+    const root_1 = (try (cluster.nodes[1].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
     try testing.expectEqualSlices(u8, &root_0, &root_1);
 }
 
@@ -141,8 +141,8 @@ test "cluster: epoch transition — all nodes cross boundary together" {
     try testing.expect(tick_result.block_produced);
 
     // Both nodes should have identical post-epoch-transition state.
-    const root_0 = (try cluster.nodes[0].head_state.state.hashTreeRoot()).*;
-    const root_1 = (try cluster.nodes[1].head_state.state.hashTreeRoot()).*;
+    const root_0 = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
+    const root_1 = (try (cluster.nodes[1].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
     try testing.expectEqualSlices(u8, &root_0, &root_1);
 }
 
@@ -170,9 +170,9 @@ test "cluster: proposer offline — nodes agree even with skips" {
     try testing.expectEqual(@as(u64, 0), result.state_divergences);
 
     // All nodes must still agree.
-    const root_0 = (try cluster.nodes[0].head_state.state.hashTreeRoot()).*;
+    const root_0 = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
     for (1..4) |i| {
-        const root_i = (try cluster.nodes[i].head_state.state.hashTreeRoot()).*;
+        const root_i = (try (cluster.nodes[i].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
         try testing.expectEqualSlices(u8, &root_0, &root_i);
     }
 }
@@ -195,7 +195,7 @@ test "cluster: deterministic replay with offline proposers" {
         defer cluster.deinit();
 
         results[run] = try cluster.run(5);
-        final_roots[run] = (try cluster.nodes[0].head_state.state.hashTreeRoot()).*;
+        final_roots[run] = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
     }
 
     // Same seed → identical results.
@@ -251,9 +251,9 @@ test "cluster: finality progresses with 90% participation" {
     try testing.expect(result.finalized_epoch > 0);
 
     // All nodes must agree on state.
-    const root_0 = (try cluster.nodes[0].head_state.state.hashTreeRoot()).*;
+    const root_0 = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
     for (1..4) |i| {
-        const root_i = (try cluster.nodes[i].head_state.state.hashTreeRoot()).*;
+        const root_i = (try (cluster.nodes[i].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
         try testing.expectEqualSlices(u8, &root_0, &root_i);
     }
 }
@@ -281,9 +281,9 @@ test "cluster: low participation — finality stalls vs high participation" {
         low_finalized = result.finalized_epoch;
 
         // All nodes must agree.
-        const root_0 = (try cluster.nodes[0].head_state.state.hashTreeRoot()).*;
+        const root_0 = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
         for (1..4) |i| {
-            const root_i = (try cluster.nodes[i].head_state.state.hashTreeRoot()).*;
+            const root_i = (try (cluster.nodes[i].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
             try testing.expectEqualSlices(u8, &root_0, &root_i);
         }
     }
@@ -327,7 +327,7 @@ test "cluster: deterministic replay with attestations" {
         defer cluster.deinit();
 
         results[run] = try cluster.run(24);
-        final_roots[run] = (try cluster.nodes[0].head_state.state.hashTreeRoot()).*;
+        final_roots[run] = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
     }
 
     // Same seed → identical results.

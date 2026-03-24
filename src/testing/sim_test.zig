@@ -89,7 +89,7 @@ test "sim: deterministic replay — same seed produces identical state history" 
 
         try harness.sim.processSlots(num_slots, 0.0);
 
-        final_roots[run] = (try harness.sim.head_state.state.hashTreeRoot()).*;
+        final_roots[run] = (try (harness.sim.getHeadState() orelse unreachable).state.hashTreeRoot()).*;
 
         // Copy checker history for post-run comparison.
         try history_storage[run].appendSlice(allocator, harness.sim.checker.state_history.items);
@@ -195,7 +195,7 @@ test "sim: deterministic attestation replay — same seed same finality" {
 
         try harness.sim.processSlots(num_slots, 0.0);
 
-        final_roots[run] = (try harness.sim.head_state.state.hashTreeRoot()).*;
+        final_roots[run] = (try (harness.sim.getHeadState() orelse unreachable).state.hashTreeRoot()).*;
         finalized_epochs[run] = harness.sim.checker.finalized_epoch;
 
         // Copy checker history for post-run comparison.
