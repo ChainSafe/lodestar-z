@@ -11,7 +11,8 @@ pub export fn zig_fuzz_test(
     buf: [*]const u8,
     len: usize,
 ) callconv(.c) void {
-    if (len == 0 or len > PublicKey.SERIALIZE_SIZE) return;
+    if (len == 0) return;
+    if (len > PublicKey.SERIALIZE_SIZE) return;
     const input = buf[0..len];
 
     const pk = PublicKey.deserialize(input) catch |err| {
