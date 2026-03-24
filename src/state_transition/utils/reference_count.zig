@@ -35,7 +35,8 @@ pub fn ReferenceCount(comptime T: type) type {
         }
 
         pub fn acquire(self: *@This()) *@This() {
-            _ = self._ref_count.fetchAdd(1, .monotonic);
+            const old_val = self._ref_count.fetchAdd(1, .monotonic);
+            std.debug.assert(old_val < std.math.maxInt(usize));
             return self;
         }
 
@@ -43,6 +44,7 @@ pub fn ReferenceCount(comptime T: type) type {
             // Use acq_rel to ensure all prior accesses are visible before
             // a potential deinit, and that the final decrement observes
             // all preceding releases from other threads.
+            std.debug.assert(self._ref_count.load(.monotonic) > 0);
             const prev = self._ref_count.fetchSub(1, .acq_rel);
             if (prev == 1) {
                 self.deinit();
