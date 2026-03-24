@@ -624,6 +624,7 @@ pub fn build(b: *std.Build) void {
     module_config.addImport("consensus_types", module_consensus_types);
     module_config.addImport("hex", module_hex);
     module_config.addImport("constants", module_constants);
+    module_config.addImport("yaml", dep_yaml.module("yaml"));
 
     module_consensus_types.addImport("build_options", options_module_build_options);
     module_consensus_types.addImport("ssz", module_ssz);
@@ -821,6 +822,7 @@ pub fn build(b: *std.Build) void {
     module_node_main.addImport("config", module_config);
     module_node_main.addImport("state_transition", module_state_transition);
     module_node_main.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_node_main.addImport("yaml", dep_yaml.module("yaml"));
 
     const exe_node = b.addExecutable(.{
         .name = "lodestar-z",

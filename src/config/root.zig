@@ -24,3 +24,5 @@ test {
     testing.refAllDecls(sepolia);
     testing.refAllDecls(hoodi);
 }
+
+pub const config_loader = @import("./config_loader.zig");

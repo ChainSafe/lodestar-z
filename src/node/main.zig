@@ -27,6 +27,7 @@ const NetworkName = node_mod.NetworkName;
 
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
+const config_loader = config_mod.config_loader;
 
 const state_transition = @import("state_transition");
 const Node = @import("persistent_merkle_tree").Node;
@@ -45,6 +46,7 @@ const Args = struct {
     p2p_port: u16 = 9000,
     checkpoint_state: ?[]const u8 = null,
     checkpoint_block: ?[]const u8 = null,
+    config: ?[]const u8 = null,
     verify_signatures: bool = false,
     help: bool = false,
 };
@@ -118,6 +120,11 @@ fn parseArgs(process_args: std.process.Args) Args {
         } else if (std.mem.eql(u8, arg, "--checkpoint-block")) {
             result.checkpoint_block = it.next() orelse {
                 std.log.err("--checkpoint-block requires a file path", .{});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "--config")) {
+            result.config = it.next() orelse {
+                std.log.err("--config requires a file path", .{});
                 std.process.exit(1);
             };
         } else if (std.mem.eql(u8, arg, "--verify-signatures")) {
@@ -252,8 +259,28 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // Load beacon configuration for the selected network.
-    const beacon_config = loadBeaconConfig(args.network);
+    // Load beacon configuration for the selected network, or from a custom YAML file.
+    var custom_chain_config: config_mod.ChainConfig = undefined;
+    var custom_beacon_config: BeaconConfig = undefined;
+    const beacon_config: *const BeaconConfig = if (args.config) |config_path| blk: {
+        std.log.info("Loading custom network config from: {s}", .{config_path});
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        // Note: arena is intentionally not freed — chain config strings must outlive the node.
+        const config_arena = arena.allocator();
+        const config_bytes = readFile(io, allocator, config_path) catch |err| {
+            std.log.err("Failed to read config file '{s}': {}", .{ config_path, err });
+            std.process.exit(1);
+        };
+        defer allocator.free(config_bytes);
+        const base = loadBeaconConfig(args.network);
+        custom_chain_config = config_loader.loadConfigFromYaml(config_arena, config_bytes, &base.chain) catch |err| {
+            std.log.err("Failed to parse config YAML '{s}': {}", .{ config_path, err });
+            std.process.exit(1);
+        };
+        // Use zero genesis_validators_root; will be set from checkpoint state.
+        custom_beacon_config = BeaconConfig.init(custom_chain_config, [_]u8{0} ** 32);
+        break :blk &custom_beacon_config;
+    } else loadBeaconConfig(args.network);
 
     // Install signal handlers for graceful shutdown (SIGINT/SIGTERM).
     ShutdownHandler.installSignalHandlers();
