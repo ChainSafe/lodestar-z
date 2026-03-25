@@ -2,7 +2,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
-const EffectiveBalanceIncrements = @import("../cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
+const ebi = @import("../cache/effective_balance_increments.zig");
+const EffectiveBalanceIncrements = ebi.EffectiveBalanceIncrements;
 const BeaconState = @import("fork_types").BeaconState;
 const ValidatorIndex = @import("consensus_types").primitive.ValidatorIndex.Type;
 
@@ -30,25 +31,16 @@ pub fn getEffectiveBalanceIncrementsZeroInactive(allocator: Allocator, cached_st
     defer allocator.free(validators);
     const validator_count = validators.len;
     const effective_balance_increments = cached_state.epoch_cache.getEffectiveBalanceIncrements();
-    // Slice up to `validatorCount` since it won't be mutated, nor accessed beyond `validatorCount`
-    var effective_balance_increments_zero_inactive = try EffectiveBalanceIncrements.initCapacity(allocator, validator_count);
-    try effective_balance_increments_zero_inactive.appendSlice(effective_balance_increments.items[0..validator_count]);
 
-    var j: usize = 0;
-    for (validators, 0..) |validator, i| {
-        const slashed = validator.slashed;
-        if (j < active_indices.len and i == active_indices[j]) {
-            // active validator
-            j += 1;
-            if (slashed) {
-                // slashed validator
-                effective_balance_increments_zero_inactive.items[i] = 0;
-            }
-        } else {
-            // inactive validator
-            effective_balance_increments_zero_inactive.items[i] = 0;
-        }
-    }
+    var result = try EffectiveBalanceIncrements.initCapacity(allocator, validator_count);
+    try result.resize(validator_count);
 
-    return effective_balance_increments_zero_inactive;
+    ebi.getEffectiveBalanceIncrementsZeroInactive(
+        &effective_balance_increments,
+        active_indices,
+        validators,
+        result.items,
+    );
+
+    return result;
 }
