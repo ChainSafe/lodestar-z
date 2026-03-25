@@ -45,6 +45,7 @@ const SeenCache = chain_mod.SeenCache;
 const produceBlockBody = chain_mod.produceBlockBody;
 const ProducedBlockBody = chain_mod.ProducedBlockBody;
 const networking = @import("networking");
+const eth2_protocols = networking.eth2_protocols;
 const discv5 = @import("discv5");
 const ssl = @import("ssl");
 const ReqRespContext = networking.ReqRespContext;
@@ -1033,6 +1034,13 @@ pub const BeaconNode = struct {
             return err;
         };
         std.log.info("Connected to bootnode, peer_id: {s}", .{peer_id});
+
+        // Initiate eth2 Status exchange with the bootnode.
+        // This is the first thing eth2 clients do after connecting.
+        const StatusProtocol = networking.eth2_protocols.StatusProtocol;
+        svc.newStream(io, peer_id, StatusProtocol) catch |err| {
+            std.log.warn("Failed to open status stream to bootnode: {}", .{err});
+        };
     }
 
         /// Get the current head info.
