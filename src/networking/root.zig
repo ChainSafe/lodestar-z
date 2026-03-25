@@ -58,6 +58,7 @@ pub const EthReqRespAdapter = eth_reqresp.EthReqRespAdapter;
 pub const eth2_protocols = @import("eth2_protocols.zig");
 pub const p2p_service = @import("p2p_service.zig");
 pub const P2pService = p2p_service.P2pService;
+pub const QuicStream = p2p_service.QuicStream;
 pub const P2pConfig = p2p_service.P2pConfig;
 
 // Discovery.

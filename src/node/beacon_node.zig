@@ -1046,26 +1046,105 @@ pub const BeaconNode = struct {
         std.log.info("Connected to bootnode, peer_id: {s}", .{peer_id});
 
         // Initiate eth2 Status exchange with the bootnode.
-        // This is the first thing eth2 clients do after connecting.
-        // We must SSZ-encode our current Status (84 bytes) and send it as the
-        // request body — otherwise Lighthouse receives 0 bytes and drops the stream.
-        const StatusProtocol = networking.eth2_protocols.StatusProtocol;
-        var status_buf: [networking.messages.StatusMessage.fixed_size]u8 = undefined;
-        const our_status = self.getStatus();
-        _ = networking.messages.StatusMessage.serializeIntoBytes(&our_status, &status_buf);
-        std.log.info("Sending Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d} finalized_root={x:0>2}{x:0>2}{x:0>2}{x:0>2}... head_root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-            our_status.fork_digest[0], our_status.fork_digest[1],
-            our_status.fork_digest[2], our_status.fork_digest[3],
-            our_status.head_slot, our_status.finalized_epoch,
-            our_status.finalized_root[0], our_status.finalized_root[1],
-            our_status.finalized_root[2], our_status.finalized_root[3],
-            our_status.head_root[0], our_status.head_root[1],
-            our_status.head_root[2], our_status.head_root[3],
-        });
-        svc.newStream(io, peer_id, StatusProtocol, &status_buf) catch |err| {
-            std.log.warn("Failed to open status stream to bootnode: {}", .{err});
+        // Uses dialProtocol to get a raw stream, then does wire-level req/resp:
+        // write varint+snappy-encoded request, read varint+snappy-encoded response.
+        self.sendStatus(io, svc, peer_id) catch |err| {
+            std.log.warn("Status exchange failed: {}", .{err});
         };
     }
+
+        /// Perform a Status req/resp exchange with a connected peer.
+        ///
+        /// Opens a stream via dialProtocol, sends our wire-encoded Status request,
+        /// reads the wire-encoded response, decodes the peer's Status, and logs it.
+        /// Also notifies the sync controller of the peer's status.
+        fn sendStatus(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, peer_id: []const u8) !void {
+            const status_protocol_id = "/eth2/beacon_chain/req/status/1/ssz_snappy";
+            const req_resp_encoding = networking.req_resp_encoding;
+
+            // Open a negotiated stream for Status.
+            var stream = try svc.dialProtocol(io, peer_id, status_protocol_id);
+
+            // SSZ-encode our Status message.
+            var status_ssz: [networking.messages.StatusMessage.fixed_size]u8 = undefined;
+            const our_status = self.getStatus();
+            _ = networking.messages.StatusMessage.serializeIntoBytes(&our_status, &status_ssz);
+            std.log.info("Sending Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d}", .{
+                our_status.fork_digest[0], our_status.fork_digest[1],
+                our_status.fork_digest[2], our_status.fork_digest[3],
+                our_status.head_slot, our_status.finalized_epoch,
+            });
+
+            // Wire-encode: varint length prefix + snappy-compressed SSZ.
+            const wire_request = try req_resp_encoding.encodeRequest(self.allocator, &status_ssz);
+            defer self.allocator.free(wire_request);
+
+            // Write request to stream.
+            var written: usize = 0;
+            while (written < wire_request.len) {
+                written += stream.write(io, wire_request[written..]) catch |err| {
+                    std.log.warn("Status write error: {}", .{err});
+                    return err;
+                };
+            }
+
+            // Read response from stream.
+            // Status response is small: 1 (result) + varint + snappy(84 SSZ) ≈ ~100 bytes.
+            var resp_buf: [1024]u8 = undefined;
+            var resp_len: usize = 0;
+            while (resp_len < resp_buf.len) {
+                const n = stream.read(io, resp_buf[resp_len..]) catch |err| {
+                    // EOF or stream close — we have what we have.
+                    std.log.info("Status read completed ({d} bytes, end: {})", .{ resp_len, err });
+                    break;
+                };
+                if (n == 0) break;
+                resp_len += n;
+            }
+
+            if (resp_len == 0) {
+                std.log.warn("Status: peer sent empty response", .{});
+                return error.EmptyResponse;
+            }
+
+            // Decode the response chunk (no context bytes for Status).
+            const decoded = req_resp_encoding.decodeResponseChunk(
+                self.allocator,
+                resp_buf[0..resp_len],
+                false, // Status has no context bytes
+            ) catch |err| {
+                std.log.warn("Status response decode error: {} (raw {d} bytes)", .{ err, resp_len });
+                return err;
+            };
+            defer self.allocator.free(decoded.ssz_bytes);
+
+            if (decoded.result != .success) {
+                std.log.warn("Status response: error code {}", .{decoded.result});
+                return error.StatusRejected;
+            }
+
+            // Deserialize the peer's Status from SSZ.
+            var peer_status: networking.messages.StatusMessage.Type = undefined;
+            networking.messages.StatusMessage.deserializeFromBytes(decoded.ssz_bytes, &peer_status) catch |err| {
+                std.log.warn("Status SSZ deserialize error: {}", .{err});
+                return err;
+            };
+
+            std.log.info("Peer Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d} finalized_root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                peer_status.fork_digest[0], peer_status.fork_digest[1],
+                peer_status.fork_digest[2], peer_status.fork_digest[3],
+                peer_status.head_slot, peer_status.finalized_epoch,
+                peer_status.finalized_root[0], peer_status.finalized_root[1],
+                peer_status.finalized_root[2], peer_status.finalized_root[3],
+            });
+
+            // Notify sync controller of the peer's head.
+            if (self.sync_controller) |sc| {
+                sc.onPeerConnected(peer_id, peer_status) catch |err| {
+                    std.log.warn("SyncController.onPeerConnected failed: {}", .{err});
+                };
+            }
+        }
 
         /// Get the current head info.
     pub fn getHead(self: *const BeaconNode) HeadInfo {

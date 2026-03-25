@@ -43,6 +43,7 @@ const gossip_validation = @import("gossip_validation.zig");
 
 const EthGossipAdapter = eth_gossip.EthGossipAdapter;
 pub const GossipTopicType = eth_gossip.GossipTopicType;
+pub const QuicStream = quic_mod.Stream;
 const ReqRespContext = req_resp_handler.ReqRespContext;
 const GossipValidationContext = gossip_validation.GossipValidationContext;
 const SeenSet = gossip_validation.SeenSet;
@@ -257,6 +258,15 @@ pub const P2pService = struct {
         ssz_payload: ?[]const u8,
     ) !void {
         try self.network.newStreamWithPayload(io, peer_id, Protocol, ssz_payload);
+    }
+
+    /// Open a negotiated outbound stream for a given protocol ID.
+    ///
+    /// Returns the raw QUIC stream after multistream negotiation. The caller
+    /// owns the stream and is responsible for writing the request, reading
+    /// the response, and closing it.
+    pub fn dialProtocol(self: *Self, io: Io, peer_id: []const u8, protocol_id: []const u8) !quic_mod.Stream {
+        return self.network.dialProtocol(io, peer_id, protocol_id);
     }
 
     /// Publish a Snappy-compressed SSZ message to a gossip topic.
