@@ -38,6 +38,7 @@ pub const chain_config = ChainConfig{
 
     // Time parameters
     .SECONDS_PER_SLOT = 6,
+    .SLOT_DURATION_MS = 6000,
     .SECONDS_PER_ETH1_BLOCK = 14,
     .MIN_VALIDATOR_WITHDRAWABILITY_DELAY = 256,
     .SHARD_COMMITTEE_PERIOD = 64,
@@ -56,6 +57,8 @@ pub const chain_config = ChainConfig{
     .REORG_HEAD_WEIGHT_THRESHOLD = 20,
     .REORG_PARENT_WEIGHT_THRESHOLD = 160,
     .REORG_MAX_EPOCHS_SINCE_FINALIZATION = 2,
+    // 1667 basis points, ~17% of SLOT_DURATION_MS
+    .PROPOSER_REORG_CUTOFF_BPS = 1667,
 
     // Deposit contract
     .DEPOSIT_CHAIN_ID = 5,

@@ -231,6 +231,22 @@ pub fn getMaxRequestBlobSidecars(self: *const BeaconConfig, fork: ForkSeq) u64 {
     return if (fork.gte(.electra)) self.chain.MAX_REQUEST_BLOB_SIDECARS_ELECTRA else self.chain.MAX_REQUEST_BLOB_SIDECARS;
 }
 
+/// Convert basis points to milliseconds into the slot.
+///
+/// TS: `getSlotComponentDurationMs(basisPoints) = Math.round(basisPoints * SLOT_DURATION_MS / BASIS_POINTS)`
+pub fn getSlotComponentDurationMs(self: *const BeaconConfig, basis_points: u64) u64 {
+    // Integer rounding: (n + d/2) / d
+    return (basis_points * self.chain.SLOT_DURATION_MS + 5000) / 10000;
+}
+
+/// Return the proposer reorg cutoff in milliseconds for the given slot.
+///
+/// TS: `getProposerReorgCutoffMs(fork) = getSlotComponentDurationMs(PROPOSER_REORG_CUTOFF_BPS)`
+pub fn getProposerReorgCutoffMs(self: *const BeaconConfig, slot: Slot) u64 {
+    _ = self.forkSeq(slot);
+    return self.getSlotComponentDurationMs(self.chain.PROPOSER_REORG_CUTOFF_BPS);
+}
+
 /// Compute the signature domain for a message.
 ///
 /// - `state_slot` is the slot of the state used for verification.
