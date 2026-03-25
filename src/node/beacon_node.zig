@@ -979,20 +979,24 @@ pub const BeaconNode = struct {
         if (ssl.EVP_PKEY_keygen(pctx, &host_key) <= 0) return error.KeyGenFailed;
         // Note: host_key ownership is transferred to the engine; do not free here.
 
-        var svc = try P2pService.init(self.allocator, P2pConfig{
+        // Store into BeaconNode BEFORE calling start() — start() spawns
+        // background fibers that capture &self.p2p_service. If we used a
+        // stack variable, the fibers would hold dangling pointers after
+        // this function returns.
+        self.p2p_service = try P2pService.init(self.allocator, P2pConfig{
             .fork_digest = fork_digest,
             .req_resp_context = req_resp_ctx,
             .validator = &validator.ctx,
             .host_key = host_key,
         });
+        var svc = &self.p2p_service.?;
         try svc.start(io, listen_multiaddr);
-        self.p2p_service = svc;
 
         // Dial bootnodes: decode ENR → extract IP/port → build multiaddr → dial.
         if (self.bootnodes.len > 0) {
             std.log.info("Dialing {d} bootnode(s)...", .{self.bootnodes.len});
             for (self.bootnodes) |enr_str| {
-                self.dialBootnodeEnr(io, &svc, enr_str) catch |err| {
+                self.dialBootnodeEnr(io, svc, enr_str) catch |err| {
                     std.log.warn("Failed to dial bootnode: {}", .{err});
                 };
             }
