@@ -334,12 +334,11 @@ pub const BlockImporter = struct {
         try post_state.state.commit();
         const state_root = (try post_state.state.hashTreeRoot()).*;
 
-        // Compute block root from hash_tree_root(BeaconBlockHeader) using the
-        // block's own state_root to ensure root matches the network's expectation.
-        // This is equivalent to hash_tree_root(block.message) via the header shortcut.
-        const any_block = any_signed.beaconBlock();
+        // Compute block root directly from the electra BeaconBlock.
+        // hash_tree_root(BeaconBlock) = hash_tree_root(BeaconBlockHeader) where
+        // body_root = hash_tree_root(block.body).
         var body_root: [32]u8 = undefined;
-        try any_block.beaconBlockBody().hashTreeRoot(self.allocator, &body_root);
+        try types.electra.BeaconBlockBody.hashTreeRoot(self.allocator, &signed_block.message.body, &body_root);
         const header = types.phase0.BeaconBlockHeader.Type{
             .slot = block_slot,
             .proposer_index = signed_block.message.proposer_index,
