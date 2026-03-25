@@ -46,6 +46,7 @@ const produceBlockBody = chain_mod.produceBlockBody;
 const ProducedBlockBody = chain_mod.ProducedBlockBody;
 const networking = @import("networking");
 const discv5 = @import("discv5");
+const ssl = @import("ssl");
 const ReqRespContext = networking.ReqRespContext;
 const ResponseChunk = networking.ResponseChunk;
 const Method = networking.Method;
@@ -969,10 +970,19 @@ pub const BeaconNode = struct {
             self.genesis_validators_root,
         );
 
+        // Generate an Ed25519 host key for TLS certificate (libp2p identity).
+        const pctx = ssl.EVP_PKEY_CTX_new_id(ssl.EVP_PKEY_ED25519, null) orelse return error.KeyGenFailed;
+        defer ssl.EVP_PKEY_CTX_free(pctx);
+        if (ssl.EVP_PKEY_keygen_init(pctx) <= 0) return error.KeyGenFailed;
+        var host_key: ?*ssl.EVP_PKEY = null;
+        if (ssl.EVP_PKEY_keygen(pctx, &host_key) <= 0) return error.KeyGenFailed;
+        // Note: host_key ownership is transferred to the engine; do not free here.
+
         var svc = try P2pService.init(self.allocator, P2pConfig{
             .fork_digest = fork_digest,
             .req_resp_context = req_resp_ctx,
             .validator = &validator.ctx,
+            .host_key = host_key,
         });
         try svc.start(io, listen_multiaddr);
         self.p2p_service = svc;
@@ -1004,12 +1014,13 @@ pub const BeaconNode = struct {
         defer enr.deinit();
 
         const ip = enr.ip orelse return error.NoIpInEnr;
-        const udp_port = enr.udp orelse return error.NoUdpPortInEnr;
+        // Prefer QUIC port (libp2p transport) over UDP port (discv5 only).
+        const quic_port = enr.quic orelse enr.udp orelse return error.NoPortInEnr;
 
         // Build QUIC multiaddr: /ip4/{ip}/udp/{port}/quic-v1
         var ma_buf: [64]u8 = undefined;
         const ma_str = try std.fmt.bufPrint(&ma_buf, "/ip4/{d}.{d}.{d}.{d}/udp/{d}/quic-v1", .{
-            ip[0], ip[1], ip[2], ip[3], udp_port,
+            ip[0], ip[1], ip[2], ip[3], quic_port,
         });
 
         std.log.info("Dialing bootnode at {s}", .{ma_str});

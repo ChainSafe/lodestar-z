@@ -39,6 +39,8 @@ pub const Enr = struct {
     ip6: ?[16]u8,
     /// UDP6 port
     udp6: ?u16,
+    quic: ?u16,
+    quic6: ?u16,
     /// Raw RLP of the entire record (for signature verification and re-encoding)
     raw: []u8,
     alloc: Allocator,
@@ -112,6 +114,8 @@ pub fn decode(alloc: Allocator, data: []const u8) Error!Enr {
         .tcp = null,
         .ip6 = null,
         .udp6 = null,
+            .quic = null,
+            .quic6 = null,
         .raw = try alloc.dupe(u8, data),
         .alloc = alloc,
     };
@@ -157,6 +161,20 @@ pub fn decode(alloc: Allocator, data: []const u8) Error!Enr {
                 var port: u16 = 0;
                 for (val) |b| port = (port << 8) | b;
                 enr.udp6 = port;
+            }
+        } else if (std.mem.eql(u8, key, "quic")) {
+            const val = list.readBytes() catch return Error.InvalidEnr;
+            if (val.len > 0 and val.len <= 2) {
+                var port: u16 = 0;
+                for (val) |b| port = (port << 8) | b;
+                enr.quic = port;
+            }
+        } else if (std.mem.eql(u8, key, "quic6")) {
+            const val = list.readBytes() catch return Error.InvalidEnr;
+            if (val.len > 0 and val.len <= 2) {
+                var port: u16 = 0;
+                for (val) |b| port = (port << 8) | b;
+                enr.quic6 = port;
             }
         } else {
             // Skip unknown key value
