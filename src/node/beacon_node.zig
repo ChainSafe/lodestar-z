@@ -1081,16 +1081,28 @@ pub const BeaconNode = struct {
             return;
         };
 
-        // If peer is ahead, request blocks to sync
-        if (peer_status.head_slot > self.head_tracker.head_slot) {
+        // Sync loop: keep requesting blocks until caught up with peer
+        const target_slot = peer_status.head_slot;
+        while (self.head_tracker.head_slot < target_slot) {
             const start = self.head_tracker.head_slot + 1;
-            const count = @min(peer_status.head_slot - self.head_tracker.head_slot, 64); // max 64 per request
-            std.log.info("Peer is ahead (slot {d} vs our {d}), requesting {d} blocks", .{
-                peer_status.head_slot, self.head_tracker.head_slot, count,
+            const count = @min(target_slot - self.head_tracker.head_slot, 64);
+            std.log.info("Range sync: slots {d}..{d} (head={d}, target={d})", .{
+                start, start + count - 1, self.head_tracker.head_slot, target_slot,
             });
-            _ = self.requestBlocksByRange(io, svc, peer_id, start, count) catch |err| {
+            const imported = self.requestBlocksByRange(io, svc, peer_id, start, count) catch |err| {
                 std.log.warn("Range sync failed: {}", .{err});
+                break;
             };
+            if (imported == 0) {
+                std.log.info("Range sync: no blocks received, stopping", .{});
+                break;
+            }
+            std.log.info("Range sync: imported {d} blocks, head now at slot {d}", .{
+                imported, self.head_tracker.head_slot,
+            });
+        }
+        if (self.head_tracker.head_slot >= target_slot) {
+            std.log.info("Range sync complete: head at slot {d}", .{self.head_tracker.head_slot});
         }
     }
 
