@@ -19,7 +19,6 @@ pub fn effectiveBalanceIncrementsInit(allocator: Allocator, validator_count: usi
     return increments;
 }
 
-
 test "effectiveBalanceIncrementsInit basic allocation" {
     const allocator = std.testing.allocator;
     var increments = try effectiveBalanceIncrementsInit(allocator, 100);

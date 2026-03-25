@@ -115,7 +115,6 @@ pub fn syncPubkeysParallel(
     }
 }
 
-
 const testing = std.testing;
 const interop = @import("../test_utils/interop_pubkeys.zig");
 
