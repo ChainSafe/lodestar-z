@@ -206,8 +206,13 @@ pub const BlockImporter = struct {
         const target_epoch = computeEpochAtSlot(block_slot);
         const is_epoch_transition = target_epoch != prev_epoch;
 
-        const pre_state = self.getStateByBlockRoot(parent_root) orelse
+        const pre_state = self.getStateByBlockRoot(parent_root) orelse {
+            std.log.warn("NoPreStateAvailable: parent_root={x:0>2}{x:0>2}{x:0>2}{x:0>2}... block_to_state has {d} entries", .{
+                parent_root[0], parent_root[1], parent_root[2], parent_root[3],
+                self.block_to_state.count(),
+            });
             return error.NoPreStateAvailable;
+        };
 
         const stfn_result = try self.runStateTransition(pre_state, signed_block, block_slot);
         const post_state = stfn_result.post_state;
@@ -706,7 +711,16 @@ pub const BeaconNode = struct {
         // The genesis block root is the hash of the latest block header stored
         // in the genesis state. This matches what BlockGenerator computes as
         // parent_root when building the first block (from state.latestBlockHeader()).
+        // Compute the genesis state root first — needed for the genesis block root.
+        // The genesis state's latestBlockHeader has state_root=0x00..00 initially;
+        // per spec, the actual genesis block root uses the real state_root.
+        try genesis_state.state.commit();
+        const state_root_for_header = (try genesis_state.state.hashTreeRoot()).*;
+
         var genesis_header = try genesis_state.state.latestBlockHeader();
+        // Per spec: genesis block header has state_root=0 initially. Fill it in
+        // with the actual genesis state root before computing the block root.
+        try genesis_header.setValue("state_root", &state_root_for_header);
         const genesis_block_root = (try genesis_header.hashTreeRoot()).*;
 
         // Cache the genesis state
@@ -1292,6 +1306,35 @@ pub const BeaconNode = struct {
                         std.log.info("BlocksByRange: block {d} ({d} bytes, fork={x:0>2}{x:0>2}{x:0>2}{x:0>2})", .{
                             blocks_received + 1, decoded.ssz_bytes.len, ctx[0], ctx[1], ctx[2], ctx[3],
                         });
+                    }
+
+                    // Deserialize the SSZ block and import it.
+                    const fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
+                    const any_signed = AnySignedBeaconBlock.deserialize(
+                        self.allocator, .full, fork_seq, decoded.ssz_bytes,
+                    ) catch |err| {
+                        std.log.warn("BlocksByRange: SSZ deserialize error: {}", .{err});
+                        blocks_received += 1;
+                        break;
+                    };
+                    defer any_signed.deinit(self.allocator);
+
+                    switch (any_signed) {
+                        .full_electra => |blk| {
+                            const result = self.importBlock(blk) catch |err| {
+                                std.log.warn("BlocksByRange: import error at block {d}: {}", .{ blocks_received + 1, err });
+                                blocks_received += 1;
+                                break;
+                            };
+                            std.log.info("BlocksByRange: imported slot {d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                                result.slot,
+                                result.block_root[0], result.block_root[1],
+                                result.block_root[2], result.block_root[3],
+                            });
+                        },
+                        else => {
+                            std.log.warn("BlocksByRange: unsupported fork for block {d}", .{blocks_received + 1});
+                        },
                     }
 
                     blocks_received += 1;
