@@ -223,13 +223,17 @@ pub const P2pService = struct {
     }
 
     /// Open a new outbound stream for a protocol to a connected peer.
+    /// `ssz_payload` is passed as context to `handleOutbound`; use `null` for
+    /// zero-body requests (Metadata) and provide the serialized SSZ bytes for
+    /// protocols like Status that include a request body.
     pub fn newStream(
         self: *Self,
         io: Io,
         peer_id: []const u8,
         comptime Protocol: type,
+        ssz_payload: ?[]const u8,
     ) !void {
-        try self.network.newStream(io, peer_id, Protocol);
+        try self.network.newStreamWithPayload(io, peer_id, Protocol, ssz_payload);
     }
 
     /// Publish a Snappy-compressed SSZ message to a gossip topic.

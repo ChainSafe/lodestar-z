@@ -1037,8 +1037,13 @@ pub const BeaconNode = struct {
 
         // Initiate eth2 Status exchange with the bootnode.
         // This is the first thing eth2 clients do after connecting.
+        // We must SSZ-encode our current Status (84 bytes) and send it as the
+        // request body — otherwise Lighthouse receives 0 bytes and drops the stream.
         const StatusProtocol = networking.eth2_protocols.StatusProtocol;
-        svc.newStream(io, peer_id, StatusProtocol) catch |err| {
+        var status_buf: [networking.messages.StatusMessage.fixed_size]u8 = undefined;
+        const our_status = self.getStatus();
+        _ = networking.messages.StatusMessage.serializeIntoBytes(&our_status, &status_buf);
+        svc.newStream(io, peer_id, StatusProtocol, &status_buf) catch |err| {
             std.log.warn("Failed to open status stream to bootnode: {}", .{err});
         };
     }
