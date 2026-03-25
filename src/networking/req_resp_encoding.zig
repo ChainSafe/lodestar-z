@@ -195,18 +195,78 @@ pub fn decodeResponseChunk(
     offset += varint_result.bytes_consumed;
 
     // Decompress the Snappy-framed payload.
+    // We must calculate the exact number of wire bytes consumed by the snappy
+    // framing, since the input may contain data from subsequent response chunks.
     if (offset >= wire_bytes.len) {
         return DecodeError.InsufficientData;
     }
-    const decompressed = try snappy.uncompress(allocator, wire_bytes[offset..]);
+    const snappy_start = offset;
+    const snappy_data = wire_bytes[snappy_start..];
+
+    // Calculate snappy frame boundaries: identifier (10 bytes) + data chunks
+    // Each chunk: type(1) + length(3) + payload(length)
+    const snappy_consumed = calcSnappyFrameSize(snappy_data, varint_result.value) catch
+        return DecodeError.InsufficientData;
+
+    const decompressed = try snappy.uncompress(allocator, snappy_data[0..snappy_consumed]);
     const ssz_bytes = decompressed orelse return DecodeError.EmptyPayload;
 
     return .{
         .result = result_code,
         .context_bytes = context_bytes,
         .ssz_bytes = ssz_bytes,
-        .bytes_consumed = wire_bytes.len,
+        .bytes_consumed = snappy_start + snappy_consumed,
     };
+}
+
+/// Calculate the total size of snappy-framed data for one logical message.
+/// Walks the frame headers (identifier + data chunks) until enough uncompressed
+/// bytes have been accounted for.
+fn calcSnappyFrameSize(data: []const u8, expected_uncompressed: usize) !usize {
+    const IDENTIFIER_SIZE = 10; // ff 06 00 00 73 4e 61 50 70 59
+    if (data.len < IDENTIFIER_SIZE) return error.InsufficientData;
+
+    // Verify stream identifier
+    if (data[0] != 0xff or data[1] != 0x06 or data[2] != 0x00) {
+        return error.InsufficientData;
+    }
+
+    var pos: usize = IDENTIFIER_SIZE;
+    var uncompressed_so_far: usize = 0;
+
+    while (pos + 4 <= data.len and uncompressed_so_far < expected_uncompressed) {
+        const chunk_type = data[pos];
+        const frame_size: usize = @intCast(std.mem.readInt(u24, data[pos + 1 ..][0..3], .little));
+
+        if (pos + 4 + frame_size > data.len) {
+            return error.InsufficientData;
+        }
+
+        switch (chunk_type) {
+            0x00 => { // compressed
+                // frame = crc(4) + compressed_data
+                // We don't know exact uncompressed size without decompressing,
+                // but for a single-chunk message it should be the full expected size
+                uncompressed_so_far = expected_uncompressed;
+            },
+            0x01 => { // uncompressed
+                // frame = crc(4) + raw_data
+                if (frame_size >= 4) {
+                    uncompressed_so_far += frame_size - 4;
+                }
+            },
+            0xff => { // identifier (can repeat)
+                // skip
+            },
+            else => {
+                // skip (padding, etc.)
+            },
+        }
+
+        pos += 4 + frame_size;
+    }
+
+    return pos;
 }
 
 // === Tests ===

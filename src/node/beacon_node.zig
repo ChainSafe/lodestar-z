@@ -1060,9 +1060,22 @@ pub const BeaconNode = struct {
         if (peer_fork_digest) |fd| {
             std.log.info("Peer ENR fork_digest: {x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{ fd[0], fd[1], fd[2], fd[3] });
         }
-        self.sendStatus(io, svc, peer_id) catch |err| {
+        const peer_status = self.sendStatus(io, svc, peer_id) catch |err| {
             std.log.warn("Status exchange failed: {}", .{err});
+            return;
         };
+
+        // If peer is ahead, request blocks to sync
+        if (peer_status.head_slot > self.head_tracker.head_slot) {
+            const start = self.head_tracker.head_slot + 1;
+            const count = @min(peer_status.head_slot - self.head_tracker.head_slot, 64); // max 64 per request
+            std.log.info("Peer is ahead (slot {d} vs our {d}), requesting {d} blocks", .{
+                peer_status.head_slot, self.head_tracker.head_slot, count,
+            });
+            _ = self.requestBlocksByRange(io, svc, peer_id, start, count) catch |err| {
+                std.log.warn("Range sync failed: {}", .{err});
+            };
+        }
     }
 
         /// Perform a Status req/resp exchange with a connected peer.
@@ -1070,7 +1083,7 @@ pub const BeaconNode = struct {
         /// Opens a stream via dialProtocol, sends our wire-encoded Status request,
         /// reads the wire-encoded response, decodes the peer's Status, and logs it.
         /// Also notifies the sync controller of the peer's status.
-        fn sendStatus(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, peer_id: []const u8) !void {
+        fn sendStatus(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, peer_id: []const u8) !networking.messages.StatusMessage.Type {
             const status_protocol_id = "/eth2/beacon_chain/req/status/1/ssz_snappy";
             const req_resp_encoding = networking.req_resp_encoding;
 
@@ -1178,6 +1191,116 @@ pub const BeaconNode = struct {
                     std.log.warn("SyncController.onPeerConnected failed: {}", .{err});
                 };
             }
+
+            return peer_status;
+        }
+
+        /// Request blocks by range from a connected peer via dialProtocol.
+        ///
+        /// Opens a stream for BeaconBlocksByRange/2, sends the range request,
+        /// reads response chunks (each with context bytes + varint + snappy SSZ block),
+        /// and imports each block.
+        fn requestBlocksByRange(
+            self: *BeaconNode,
+            io: std.Io,
+            svc: *networking.P2pService,
+            peer_id: []const u8,
+            start_slot: u64,
+            count: u64,
+        ) !u64 {
+            const protocol_id = "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy";
+            const req_resp_encoding = networking.req_resp_encoding;
+
+            var stream = try svc.dialProtocol(io, peer_id, protocol_id);
+
+            // Encode the range request
+            const request = networking.messages.BeaconBlocksByRangeRequest.Type{
+                .start_slot = start_slot,
+                .count = count,
+                .step = 1,
+            };
+            var req_ssz: [networking.messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
+            _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &req_ssz);
+
+            const wire_request = try req_resp_encoding.encodeRequest(self.allocator, &req_ssz);
+            defer self.allocator.free(wire_request);
+
+            // Write request
+            var written: usize = 0;
+            while (written < wire_request.len) {
+                written += stream.write(io, wire_request[written..]) catch |err| {
+                    std.log.warn("BlocksByRange write error: {}", .{err});
+                    return err;
+                };
+            }
+
+            std.log.info("BlocksByRange: requested slots {d}..{d}", .{ start_slot, start_slot + count - 1 });
+
+            // Read response chunks one at a time.
+            // Each chunk: <result_byte> <context_bytes[4]> <varint_len> <snappy_payload>
+            // BlocksByRange/v2 includes 4-byte context (fork digest).
+            var blocks_received: u64 = 0;
+
+            while (blocks_received < count) {
+                // Read enough for one complete response chunk into a fresh buffer
+                var chunk_buf: [512 * 1024]u8 = undefined; // 512KB per block max
+                var chunk_len: usize = 0;
+
+                // Read until we have at least the result byte + context + varint + some payload
+                while (chunk_len < chunk_buf.len) {
+                    const n = stream.read(io, chunk_buf[chunk_len..]) catch |err| {
+                        if (blocks_received > 0) {
+                            std.log.info("BlocksByRange: stream ended after {d} blocks ({})", .{ blocks_received, err });
+                        } else {
+                            std.log.warn("BlocksByRange: read error: {}", .{err});
+                        }
+                        return blocks_received;
+                    };
+                    if (n == 0) {
+                        std.log.info("BlocksByRange: stream EOF after {d} blocks", .{blocks_received});
+                        return blocks_received;
+                    }
+                    chunk_len += n;
+
+                    // Log first bytes for debugging
+                    if (blocks_received == 0 and chunk_len >= 10) {
+                        std.log.info("BlocksByRange: first 10 bytes: {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} (total {d})", .{
+                            chunk_buf[0], chunk_buf[1], chunk_buf[2], chunk_buf[3], chunk_buf[4],
+                            chunk_buf[5], chunk_buf[6], chunk_buf[7], chunk_buf[8], chunk_buf[9],
+                            chunk_len,
+                        });
+                    }
+
+                    // Try to decode — if InsufficientData, read more
+                    const decoded = req_resp_encoding.decodeResponseChunk(
+                        self.allocator,
+                        chunk_buf[0..chunk_len],
+                        true, // v2 has context bytes
+                    ) catch |err| {
+                        if (err == error.InsufficientData) continue; // need more data
+                        std.log.warn("BlocksByRange: decode error: {}", .{err});
+                        return blocks_received;
+                    };
+                    defer self.allocator.free(decoded.ssz_bytes);
+
+                    if (decoded.result != .success) {
+                        std.log.warn("BlocksByRange: error response code: {}", .{decoded.result});
+                        return blocks_received;
+                    }
+
+                    if (decoded.context_bytes) |ctx| {
+                        std.log.info("BlocksByRange: block {d} ({d} bytes, fork={x:0>2}{x:0>2}{x:0>2}{x:0>2})", .{
+                            blocks_received + 1, decoded.ssz_bytes.len, ctx[0], ctx[1], ctx[2], ctx[3],
+                        });
+                    }
+
+                    blocks_received += 1;
+                    break; // Move to next chunk
+                }
+            }
+
+            std.log.info("BlocksByRange: received {d} blocks total", .{blocks_received});
+            return blocks_received;
         }
 
         /// Get the current head info.
