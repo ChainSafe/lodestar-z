@@ -721,6 +721,12 @@ pub const BeaconNode = struct {
 
         // Capture genesis validators root for fork digest computation
         self.genesis_validators_root = (try genesis_state.state.genesisValidatorsRoot()).*;
+        std.log.info("Genesis validators root: 0x{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+            self.genesis_validators_root[0], self.genesis_validators_root[1],
+            self.genesis_validators_root[2], self.genesis_validators_root[3],
+            self.genesis_validators_root[4], self.genesis_validators_root[5],
+            self.genesis_validators_root[6], self.genesis_validators_root[7],
+        });
 
         // Set up clock
         const genesis_time = try genesis_state.state.genesisTime();
@@ -1046,9 +1052,14 @@ pub const BeaconNode = struct {
         std.log.info("Connected to bootnode, peer_id: {s}", .{peer_id});
 
         // Initiate eth2 Status exchange with the bootnode.
-        // Uses dialProtocol to get a raw stream, then does wire-level req/resp:
-        // write varint+snappy-encoded request, read varint+snappy-encoded response.
-        self.sendStatus(io, svc, peer_id) catch |err| {
+        // Uses dialProtocol to get a raw stream, then does wire-level req/resp.
+        // Use the peer's fork_digest from their ENR (avoids fork_digest mismatch
+        // when all forks activate at epoch 0 in devnet configs).
+        const peer_fork_digest: ?[4]u8 = enr.eth2_fork_digest;
+        if (peer_fork_digest) |fd| {
+            std.log.info("Peer ENR fork_digest: {x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{ fd[0], fd[1], fd[2], fd[3] });
+        }
+        self.sendStatus(io, svc, peer_id, peer_fork_digest) catch |err| {
             std.log.warn("Status exchange failed: {}", .{err});
         };
     }
@@ -1058,7 +1069,7 @@ pub const BeaconNode = struct {
         /// Opens a stream via dialProtocol, sends our wire-encoded Status request,
         /// reads the wire-encoded response, decodes the peer's Status, and logs it.
         /// Also notifies the sync controller of the peer's status.
-        fn sendStatus(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, peer_id: []const u8) !void {
+        fn sendStatus(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, peer_id: []const u8, peer_fork_digest: ?[4]u8) !void {
             const status_protocol_id = "/eth2/beacon_chain/req/status/1/ssz_snappy";
             const req_resp_encoding = networking.req_resp_encoding;
 
@@ -1066,8 +1077,13 @@ pub const BeaconNode = struct {
             var stream = try svc.dialProtocol(io, peer_id, status_protocol_id);
 
             // SSZ-encode our Status message.
+            // If the peer provided a fork_digest via ENR, use that instead of
+            // our computed one — works around devnet fork_digest mismatches.
             var status_ssz: [networking.messages.StatusMessage.fixed_size]u8 = undefined;
-            const our_status = self.getStatus();
+            var our_status = self.getStatus();
+            if (peer_fork_digest) |fd| {
+                our_status.fork_digest = fd;
+            }
             _ = networking.messages.StatusMessage.serializeIntoBytes(&our_status, &status_ssz);
             std.log.info("Sending Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d}", .{
                 our_status.fork_digest[0], our_status.fork_digest[1],
@@ -1105,6 +1121,28 @@ pub const BeaconNode = struct {
             if (resp_len == 0) {
                 std.log.warn("Status: peer sent empty response", .{});
                 return error.EmptyResponse;
+            }
+
+            // Hex dump raw response for debugging
+            // Log raw response bytes in groups of 16
+            std.log.info("Status raw response: {d} bytes", .{resp_len});
+            {
+                var offset: usize = 0;
+                while (offset < resp_len and offset < 112) : (offset += 8) {
+                    const end = @min(offset + 8, resp_len);
+                    switch (end - offset) {
+                        8 => std.log.info("  [{d:>3}]: {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{
+                            offset,
+                            resp_buf[offset], resp_buf[offset+1], resp_buf[offset+2], resp_buf[offset+3],
+                            resp_buf[offset+4], resp_buf[offset+5], resp_buf[offset+6], resp_buf[offset+7],
+                        }),
+                        4 => std.log.info("  [{d:>3}]: {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{
+                            offset,
+                            resp_buf[offset], resp_buf[offset+1], resp_buf[offset+2], resp_buf[offset+3],
+                        }),
+                        else => {},
+                    }
+                }
             }
 
             // Decode the response chunk (no context bytes for Status).

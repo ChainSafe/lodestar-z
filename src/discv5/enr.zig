@@ -41,6 +41,8 @@ pub const Enr = struct {
     udp6: ?u16,
     quic: ?u16,
     quic6: ?u16,
+    /// Fork digest from eth2 ENR field (first 4 bytes of ENRForkID SSZ)
+    eth2_fork_digest: ?[4]u8,
     /// Raw RLP of the entire record (for signature verification and re-encoding)
     raw: []u8,
     alloc: Allocator,
@@ -115,6 +117,7 @@ pub fn decode(alloc: Allocator, data: []const u8) Error!Enr {
         .ip6 = null,
         .udp6 = null,
             .quic = null,
+            .eth2_fork_digest = null,
             .quic6 = null,
         .raw = try alloc.dupe(u8, data),
         .alloc = alloc,
@@ -175,6 +178,12 @@ pub fn decode(alloc: Allocator, data: []const u8) Error!Enr {
                 var port: u16 = 0;
                 for (val) |b| port = (port << 8) | b;
                 enr.quic6 = port;
+            }
+        } else if (std.mem.eql(u8, key, "eth2")) {
+            const val = list.readBytes() catch return Error.InvalidEnr;
+            // ENRForkID SSZ: fork_digest(4) + next_fork_version(4) + next_fork_epoch(8) = 16 bytes
+            if (val.len >= 4) {
+                enr.eth2_fork_digest = val[0..4].*;
             }
         } else {
             // Skip unknown key value
