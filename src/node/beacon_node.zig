@@ -334,6 +334,9 @@ pub const BlockImporter = struct {
         try post_state.state.commit();
         const state_root = (try post_state.state.hashTreeRoot()).*;
 
+        // Compute block root from hash_tree_root(BeaconBlockHeader) using the
+        // block's own state_root to ensure root matches the network's expectation.
+        // This is equivalent to hash_tree_root(block.message) via the header shortcut.
         const any_block = any_signed.beaconBlock();
         var body_root: [32]u8 = undefined;
         try any_block.beaconBlockBody().hashTreeRoot(self.allocator, &body_root);
@@ -341,7 +344,7 @@ pub const BlockImporter = struct {
             .slot = block_slot,
             .proposer_index = signed_block.message.proposer_index,
             .parent_root = signed_block.message.parent_root,
-            .state_root = state_root,
+            .state_root = signed_block.message.state_root,
             .body_root = body_root,
         };
         var block_root: [32]u8 = undefined;
@@ -1250,95 +1253,82 @@ pub const BeaconNode = struct {
 
             std.log.info("BlocksByRange: requested slots {d}..{d}", .{ start_slot, start_slot + count - 1 });
 
-            // Read response chunks one at a time.
-            // Each chunk: <result_byte> <context_bytes[4]> <varint_len> <snappy_payload>
-            // BlocksByRange/v2 includes 4-byte context (fork digest).
+            // Read response chunks from the stream using an accumulation buffer.
+            // Multiple response chunks may arrive in a single read.
             var blocks_received: u64 = 0;
+            var buf: [1024 * 1024]u8 = undefined;
+            var buf_len: usize = 0;
 
             while (blocks_received < count) {
-                // Read enough for one complete response chunk into a fresh buffer
-                var chunk_buf: [512 * 1024]u8 = undefined; // 512KB per block max
-                var chunk_len: usize = 0;
+                // Read more data from the stream
+                const n = stream.read(io, buf[buf_len..]) catch |err| {
+                    std.log.info("BlocksByRange: stream ended after {d} blocks ({})", .{ blocks_received, err });
+                    break;
+                };
+                if (n == 0) break;
+                buf_len += n;
 
-                // Read until we have at least the result byte + context + varint + some payload
-                while (chunk_len < chunk_buf.len) {
-                    const n = stream.read(io, chunk_buf[chunk_len..]) catch |err| {
-                        if (blocks_received > 0) {
-                            std.log.info("BlocksByRange: stream ended after {d} blocks ({})", .{ blocks_received, err });
-                        } else {
-                            std.log.warn("BlocksByRange: read error: {}", .{err});
-                        }
-                        return blocks_received;
-                    };
-                    if (n == 0) {
-                        std.log.info("BlocksByRange: stream EOF after {d} blocks", .{blocks_received});
-                        return blocks_received;
-                    }
-                    chunk_len += n;
-
-                    // Log first bytes for debugging
-                    if (blocks_received == 0 and chunk_len >= 10) {
-                        std.log.info("BlocksByRange: first 10 bytes: {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} (total {d})", .{
-                            chunk_buf[0], chunk_buf[1], chunk_buf[2], chunk_buf[3], chunk_buf[4],
-                            chunk_buf[5], chunk_buf[6], chunk_buf[7], chunk_buf[8], chunk_buf[9],
-                            chunk_len,
-                        });
-                    }
-
-                    // Try to decode — if InsufficientData, read more
+                // Process as many complete response chunks as possible
+                while (buf_len > 0 and blocks_received < count) {
                     const decoded = req_resp_encoding.decodeResponseChunk(
                         self.allocator,
-                        chunk_buf[0..chunk_len],
-                        true, // v2 has context bytes
+                        buf[0..buf_len],
+                        true,
                     ) catch |err| {
-                        if (err == error.InsufficientData) continue; // need more data
+                        if (err == error.InsufficientData) break;
                         std.log.warn("BlocksByRange: decode error: {}", .{err});
                         return blocks_received;
                     };
-                    defer self.allocator.free(decoded.ssz_bytes);
 
                     if (decoded.result != .success) {
-                        std.log.warn("BlocksByRange: error response code: {}", .{decoded.result});
+                        self.allocator.free(decoded.ssz_bytes);
+                        std.log.warn("BlocksByRange: error response: {}", .{decoded.result});
                         return blocks_received;
                     }
 
-                    if (decoded.context_bytes) |ctx| {
-                        std.log.info("BlocksByRange: block {d} ({d} bytes, fork={x:0>2}{x:0>2}{x:0>2}{x:0>2})", .{
-                            blocks_received + 1, decoded.ssz_bytes.len, ctx[0], ctx[1], ctx[2], ctx[3],
-                        });
-                    }
-
-                    // Deserialize the SSZ block and import it.
-                    const fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
-                    const any_signed = AnySignedBeaconBlock.deserialize(
-                        self.allocator, .full, fork_seq, decoded.ssz_bytes,
-                    ) catch |err| {
-                        std.log.warn("BlocksByRange: SSZ deserialize error: {}", .{err});
-                        blocks_received += 1;
-                        break;
-                    };
-                    defer any_signed.deinit(self.allocator);
-
-                    switch (any_signed) {
-                        .full_electra => |blk| {
-                            const result = self.importBlock(blk) catch |err| {
-                                std.log.warn("BlocksByRange: import error at block {d}: {}", .{ blocks_received + 1, err });
-                                blocks_received += 1;
-                                break;
-                            };
-                            std.log.info("BlocksByRange: imported slot {d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                                result.slot,
-                                result.block_root[0], result.block_root[1],
-                                result.block_root[2], result.block_root[3],
+                    // Import block
+                    {
+                        defer self.allocator.free(decoded.ssz_bytes);
+                        if (decoded.context_bytes) |ctx| {
+                            std.log.info("BlocksByRange: block {d} ({d} bytes, fork={x:0>2}{x:0>2}{x:0>2}{x:0>2})", .{
+                                blocks_received + 1, decoded.ssz_bytes.len, ctx[0], ctx[1], ctx[2], ctx[3],
                             });
-                        },
-                        else => {
-                            std.log.warn("BlocksByRange: unsupported fork for block {d}", .{blocks_received + 1});
-                        },
+                        }
+                        const fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
+                        const any_signed = AnySignedBeaconBlock.deserialize(
+                            self.allocator, .full, fork_seq, decoded.ssz_bytes,
+                        ) catch |err| {
+                            std.log.warn("BlocksByRange: deserialize error: {}", .{err});
+                            blocks_received += 1;
+                            continue;
+                        };
+                        defer any_signed.deinit(self.allocator);
+                        switch (any_signed) {
+                            .full_electra => |blk| {
+                                const result = self.importBlock(blk) catch |err| {
+                                    std.log.warn("BlocksByRange: import error at block {d}: {}", .{ blocks_received + 1, err });
+                                    blocks_received += 1;
+                                    continue;
+                                };
+                                std.log.info("BlocksByRange: imported slot {d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                                    result.slot,
+                                    result.block_root[0], result.block_root[1],
+                                    result.block_root[2], result.block_root[3],
+                                });
+                            },
+                            else => {},
+                        }
                     }
-
                     blocks_received += 1;
-                    break; // Move to next chunk
+
+                    // Advance buffer past consumed bytes
+                    const consumed = decoded.bytes_consumed;
+                    if (consumed < buf_len) {
+                        std.mem.copyForwards(u8, buf[0 .. buf_len - consumed], buf[consumed..buf_len]);
+                        buf_len -= consumed;
+                    } else {
+                        buf_len = 0;
+                    }
                 }
             }
 

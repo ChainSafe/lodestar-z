@@ -57,7 +57,11 @@ pub fn processExecutionPayload(
     // def compute_timestamp_at_slot(state: BeaconState, slot: Slot) -> uint64:
     //   slots_since_genesis = slot - GENESIS_SLOT
     //   return uint64(state.genesis_time + slots_since_genesis * SECONDS_PER_SLOT)
-    if (timestamp != (try state.genesisTime()) + (try state.slot()) * beacon_config.chain.SECONDS_PER_SLOT) {
+    const expected_timestamp = (try state.genesisTime()) + (try state.slot()) * beacon_config.chain.SECONDS_PER_SLOT;
+    if (timestamp != expected_timestamp) {
+        std.log.warn("InvalidExecutionPayloadTimestamp: got={d} expected={d} genesis_time={d} slot={d} secs_per_slot={d}", .{
+            timestamp, expected_timestamp, try state.genesisTime(), try state.slot(), beacon_config.chain.SECONDS_PER_SLOT,
+        });
         return error.InvalidExecutionPayloadTimestamp;
     }
 
