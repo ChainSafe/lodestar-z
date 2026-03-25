@@ -1,3 +1,4 @@
+const std = @import("std");
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
@@ -113,4 +114,105 @@ pub fn slashValidator(
             epoch_cache.current_target_unslashed_balance_increments -= slashed_effective_balance_increments;
         }
     }
+}
+
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Node = @import("persistent_merkle_tree").Node;
+
+test "slashValidator - basic sanity" {
+    const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
+    defer test_state.deinit();
+
+    var slashings_cache = try SlashingsCache.initEmpty(std.testing.allocator);
+    defer slashings_cache.deinit();
+    // Initialize cache for the state's latest block slot
+    {
+        var lbh = try test_state.cached_state.state.castToFork(.electra).latestBlockHeader();
+        const slot = try lbh.get("slot");
+        slashings_cache.updateLatestBlockSlot(slot);
+    }
+
+    try slashValidator(
+        .electra,
+        test_state.cached_state.config,
+        test_state.cached_state.epoch_cache,
+        test_state.cached_state.state.castToFork(.electra),
+        &slashings_cache,
+        42,
+        null,
+    );
+}
+
+test "slashValidator - validator marked as slashed" {
+    const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
+    defer test_state.deinit();
+
+    var slashings_cache = try SlashingsCache.initEmpty(std.testing.allocator);
+    defer slashings_cache.deinit();
+    // Initialize cache for the state's latest block slot
+    {
+        var lbh = try test_state.cached_state.state.castToFork(.electra).latestBlockHeader();
+        const slot = try lbh.get("slot");
+        slashings_cache.updateLatestBlockSlot(slot);
+    }
+    const slashed_index: u64 = 100;
+
+    // Verify not slashed before
+    var validators_before = try test_state.cached_state.state.castToFork(.electra).validators();
+    const was_slashed = try (try validators_before.get(@intCast(slashed_index))).get("slashed");
+    try std.testing.expect(!was_slashed);
+
+    try slashValidator(
+        .electra,
+        test_state.cached_state.config,
+        test_state.cached_state.epoch_cache,
+        test_state.cached_state.state.castToFork(.electra),
+        &slashings_cache,
+        slashed_index,
+        null,
+    );
+
+    // Verify slashed after
+    var validators_after = try test_state.cached_state.state.castToFork(.electra).validators();
+    const is_slashed = try (try validators_after.get(@intCast(slashed_index))).get("slashed");
+    try std.testing.expect(is_slashed);
+}
+
+test "slashValidator - with explicit whistleblower" {
+    const allocator = std.testing.allocator;
+    const pool_size = 10_000 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
+    defer test_state.deinit();
+
+    var slashings_cache = try SlashingsCache.initEmpty(std.testing.allocator);
+    defer slashings_cache.deinit();
+    // Initialize cache for the state's latest block slot
+    {
+        var lbh = try test_state.cached_state.state.castToFork(.electra).latestBlockHeader();
+        const slot = try lbh.get("slot");
+        slashings_cache.updateLatestBlockSlot(slot);
+    }
+
+    try slashValidator(
+        .electra,
+        test_state.cached_state.config,
+        test_state.cached_state.epoch_cache,
+        test_state.cached_state.state.castToFork(.electra),
+        &slashings_cache,
+        42,
+        200, // explicit whistleblower
+    );
 }
