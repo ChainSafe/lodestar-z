@@ -443,6 +443,10 @@ pub const BeaconNode = struct {
     // Genesis validators root — set by initFromGenesis, used for fork digest computation.
     genesis_validators_root: [32]u8 = [_]u8{0} ** 32,
 
+    // Active fork digest — may be overridden by peer ENR when our computed
+    // fork_digest doesn't match the network (e.g., devnets with all forks at epoch 0).
+    active_fork_digest: ?[4]u8 = null,
+
     // Bootnode ENRs — provided via --bootnodes CLI flag, used to dial initial peers.
     bootnodes: []const []const u8 = &.{},
 
@@ -1058,6 +1062,7 @@ pub const BeaconNode = struct {
         const peer_fork_digest: ?[4]u8 = enr.eth2_fork_digest;
         if (peer_fork_digest) |fd| {
             std.log.info("Peer ENR fork_digest: {x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{ fd[0], fd[1], fd[2], fd[3] });
+            self.active_fork_digest = fd;
         }
         self.sendStatus(io, svc, peer_id, peer_fork_digest) catch |err| {
             std.log.warn("Status exchange failed: {}", .{err});
@@ -1242,7 +1247,8 @@ pub const BeaconNode = struct {
             const fc_head = fc.head;
             const finalized_cp = fc.getFinalizedCheckpoint();
             return .{
-                .fork_digest = self.config.forkDigestAtSlot(fc_head.slot, self.genesis_validators_root),
+                .fork_digest = self.active_fork_digest orelse
+                    self.config.forkDigestAtSlot(fc_head.slot, self.genesis_validators_root),
                 .finalized_root = if (finalized_cp.epoch == 0)
                     [_]u8{0} ** 32
                 else if (self.head_tracker.getBlockRoot(
@@ -1254,7 +1260,8 @@ pub const BeaconNode = struct {
             };
         }
         return .{
-            .fork_digest = self.config.forkDigestAtSlot(self.head_tracker.head_slot, self.genesis_validators_root),
+            .fork_digest = self.active_fork_digest orelse
+                self.config.forkDigestAtSlot(self.head_tracker.head_slot, self.genesis_validators_root),
             .finalized_root = if (self.head_tracker.finalized_epoch == 0)
                 [_]u8{0} ** 32
             else if (self.head_tracker.getBlockRoot(
@@ -1329,7 +1336,8 @@ fn reqRespGetStatus(ptr: *anyopaque) StatusMessage.Type {
     const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
     return .{
-        .fork_digest = node.config.forkDigestAtSlot(node.head_tracker.head_slot, node.genesis_validators_root),
+        .fork_digest = node.active_fork_digest orelse
+            node.config.forkDigestAtSlot(node.head_tracker.head_slot, node.genesis_validators_root),
         .finalized_root = node.head_tracker.getBlockRoot(
             node.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH,
         ) orelse [_]u8{0} ** 32,
