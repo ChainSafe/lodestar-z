@@ -24,7 +24,6 @@ const decreaseBalance = balance_utils.decreaseBalance;
 
 pub fn processSyncAggregate(
     comptime fork: ForkSeq,
-    allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
@@ -50,8 +49,8 @@ pub fn processSyncAggregate(
             const root_signed = try getBlockRootAtSlot(fork, state, previous_slot);
             const domain = try config.getDomain(epoch_cache.epoch, c.DOMAIN_SYNC_COMMITTEE, previous_slot);
 
-            const pubkeys = try allocator.alloc(bls.PublicKey, participant_indices.len);
-            defer allocator.free(pubkeys);
+            var pubkeys_buf: [preset.SYNC_COMMITTEE_SIZE]bls.PublicKey = undefined;
+            const pubkeys = pubkeys_buf[0..participant_indices.len];
             for (0..participant_indices.len) |i| {
                 pubkeys[i] = epoch_cache.index_to_pubkey.items[participant_indices[i]];
             }
@@ -209,7 +208,6 @@ test "process sync aggregate - sanity" {
 
     const res = processSyncAggregate(
         .electra,
-        allocator,
         config,
         epoch_cache,
         fork_state,
@@ -222,7 +220,6 @@ test "process sync aggregate - sanity" {
     try sync_aggregate.sync_committee_bits.set(1, true);
     try processSyncAggregate(
         .electra,
-        allocator,
         config,
         epoch_cache,
         fork_state,

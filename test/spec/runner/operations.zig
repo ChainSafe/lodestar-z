@@ -240,7 +240,6 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     const epoch_cache = cached_state.epoch_cache;
                     try state_transition.processSyncAggregate(
                         fork,
-                        allocator,
                         config,
                         epoch_cache,
                         state,
