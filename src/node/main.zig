@@ -198,7 +198,7 @@ fn slotClockLoop(io: Io, node: *BeaconNode) !void {
     while (!ShutdownHandler.shouldStop()) {
         const current_slot = clock.currentSlot(io) orelse {
             // Before genesis — sleep 1 s and check again.
-            io.sleep(.{ .nanoseconds = std.time.ns_per_s }, .real) catch break;
+            io.sleep(.{ .nanoseconds = std.time.ns_per_s }, .real) catch return;
             continue;
         };
 
@@ -224,7 +224,7 @@ fn slotClockLoop(io: Io, node: *BeaconNode) !void {
         const now_ns: i96 = now.nanoseconds;
         if (next_slot_ns > now_ns) {
             const sleep_ns: u64 = @intCast(next_slot_ns - now_ns);
-            io.sleep(.{ .nanoseconds = @intCast(sleep_ns) }, .real) catch break;
+            io.sleep(.{ .nanoseconds = @intCast(sleep_ns) }, .real) catch return;
         }
     }
 }
@@ -354,6 +354,39 @@ pub fn main(init: std.process.Init) !void {
         // comes from the checkpoint state.
         if (args.config != null) {
             custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
+        }
+        // Verify genesis state_root matches expected + roundtrip test
+        {
+            try genesis_state.state.commit();
+            const sr = (try genesis_state.state.hashTreeRoot()).*;
+            std.log.info("Genesis state_root: 0x{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                sr[0], sr[1], sr[2], sr[3], sr[4], sr[5], sr[6], sr[7],
+            });
+            // Roundtrip: re-serialize and compare byte count
+            const reserialized = genesis_state.state.serialize(allocator) catch |err| {
+                std.log.warn("Roundtrip serialize failed: {}", .{err});
+                return;
+            };
+            defer allocator.free(reserialized);
+            // Read original file for comparison
+            const orig = readFile(io, allocator, state_path) catch return;
+            defer allocator.free(orig);
+            std.log.info("Roundtrip: original={d} bytes, reserialized={d} bytes", .{orig.len, reserialized.len});
+            if (orig.len == reserialized.len) {
+                var diffs: usize = 0;
+                var first_diff: ?usize = null;
+                for (orig, reserialized, 0..) |a, b, i| {
+                    if (a != b) {
+                        diffs += 1;
+                        if (first_diff == null) first_diff = i;
+                    }
+                }
+                if (diffs == 0) {
+                    std.log.info("Roundtrip: PERFECT match - all bytes identical", .{});
+                } else {
+                    std.log.warn("Roundtrip: {d} byte differences, first at offset {d}", .{diffs, first_diff.?});
+                }
+            }
         }
         std.log.info("Initialized from checkpoint state at slot {d}", .{genesis_state.state.slot() catch 0});
     } else if (args.network == .minimal) {

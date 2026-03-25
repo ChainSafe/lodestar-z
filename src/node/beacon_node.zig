@@ -301,6 +301,16 @@ pub const BlockImporter = struct {
 
         try state_transition.processSlots(self.allocator, post_state, block_slot, .{});
 
+        // Log pre-block state root (after slot processing)
+        {
+            try post_state.state.commit();
+            const pre_block_root = (try post_state.state.hashTreeRoot()).*;
+            std.log.info("Pre-block state_root (after processSlots to {d}): {x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                block_slot,
+                pre_block_root[0], pre_block_root[1], pre_block_root[2], pre_block_root[3],
+            });
+        }
+
         const any_signed = AnySignedBeaconBlock{ .full_electra = @constCast(signed_block) };
         const block = any_signed.beaconBlock();
 
@@ -333,6 +343,23 @@ pub const BlockImporter = struct {
 
         try post_state.state.commit();
         const state_root = (try post_state.state.hashTreeRoot()).*;
+
+        // Compare our state_root with the block's expected state_root
+        if (!std.mem.eql(u8, &state_root, &signed_block.message.state_root)) {
+            std.log.warn("STFN state_root mismatch at slot {d}:", .{block_slot});
+            std.log.warn("  ours:   {x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                state_root[0], state_root[1], state_root[2], state_root[3],
+                state_root[4], state_root[5], state_root[6], state_root[7],
+            });
+            std.log.warn("  block's: {x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                signed_block.message.state_root[0], signed_block.message.state_root[1],
+                signed_block.message.state_root[2], signed_block.message.state_root[3],
+                signed_block.message.state_root[4], signed_block.message.state_root[5],
+                signed_block.message.state_root[6], signed_block.message.state_root[7],
+            });
+        } else {
+            std.log.info("STFN state_root MATCHES at slot {d}", .{block_slot});
+        }
 
         // Compute block root directly from the electra BeaconBlock.
         // hash_tree_root(BeaconBlock) = hash_tree_root(BeaconBlockHeader) where
@@ -720,10 +747,22 @@ pub const BeaconNode = struct {
         const state_root_for_header = (try genesis_state.state.hashTreeRoot()).*;
 
         var genesis_header = try genesis_state.state.latestBlockHeader();
-        // Per spec: genesis block header has state_root=0 initially. Fill it in
-        // with the actual genesis state root before computing the block root.
-        try genesis_header.setValue("state_root", &state_root_for_header);
-        const genesis_block_root = (try genesis_header.hashTreeRoot()).*;
+        // Per spec: genesis block header has state_root=0 initially.
+        // Compute the genesis block root with the real state_root filled in,
+        // but do NOT mutate the live tree — read fields into a plain struct.
+        const header_slot = try genesis_header.get("slot");
+        const header_proposer = try genesis_header.get("proposer_index");
+        const header_parent = (try genesis_header.getFieldRoot("parent_root")).*;
+        const header_body = (try genesis_header.getFieldRoot("body_root")).*;
+        const genesis_header_val = types.phase0.BeaconBlockHeader.Type{
+            .slot = header_slot,
+            .proposer_index = header_proposer,
+            .parent_root = header_parent,
+            .state_root = state_root_for_header,
+            .body_root = header_body,
+        };
+        var genesis_block_root: [32]u8 = undefined;
+        try types.phase0.BeaconBlockHeader.hashTreeRoot(&genesis_header_val, &genesis_block_root);
 
         // Cache the genesis state
         const state_root = try self.state_regen.onNewBlock(genesis_state, true);
