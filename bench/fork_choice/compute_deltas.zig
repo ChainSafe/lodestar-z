@@ -21,8 +21,16 @@ const ComputeDeltasBench = struct {
     new_balances: []u16,
     equivocating: *EquivocatingIndices,
     deltas_cache: *DeltasCache,
+    /// Snapshot of initial current_indices for reset before each iteration.
+    /// computeDeltas mutates current_indices (sets current = next after processing),
+    /// so without reset, subsequent iterations hit the unchanged fast path (no-op).
+    /// This matches TS beforeEach which resets both arrays every iteration.
+    initial_current_indices: []const VoteIndex,
 
     pub fn run(self: ComputeDeltasBench, allocator: std.mem.Allocator) void {
+        // Reset current_indices to initial state (matching TS beforeEach).
+        @memcpy(self.current_indices, self.initial_current_indices);
+
         const result = computeDeltas(
             allocator,
             self.deltas_cache,
@@ -74,6 +82,10 @@ fn setupBench(
         new_balances[i] = 32;
     }
 
+    // Snapshot of initial current_indices for per-iteration reset.
+    const initial_current_indices = try allocator.alloc(VoteIndex, num_validators);
+    @memcpy(initial_current_indices, current_indices);
+
     return .{
         .num_proto_nodes = num_proto_nodes,
         .current_indices = current_indices,
@@ -82,6 +94,7 @@ fn setupBench(
         .new_balances = new_balances,
         .equivocating = equivocating,
         .deltas_cache = deltas_cache,
+        .initial_current_indices = initial_current_indices,
     };
 }
 
