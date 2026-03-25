@@ -161,6 +161,14 @@ fn makeProtocolHandler(
                 log.warn("{s} handleOutbound write error: {}", .{ id, err });
                 return err;
             };
+
+            // Read response from peer (for request-response protocols).
+            const response_wire = readAllFromStream(self.allocator, io, stream, max_request_wire_bytes) catch |err| {
+                log.warn("{s} handleOutbound read response error: {}", .{ id, err });
+                return;
+            };
+            defer self.allocator.free(response_wire);
+            log.info("{s} handleOutbound: received {d} byte response", .{ id, response_wire.len });
         }
 
         // Store method for diagnostics.
