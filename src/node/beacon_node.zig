@@ -1009,10 +1009,16 @@ pub const BeaconNode = struct {
         if (std.mem.startsWith(u8, s, "enr:")) s = s[4..];
 
         // Base64url decode.
-        const decoded_len = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(s) catch return error.InvalidEnr;
+        const decoded_len = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(s) catch |e| {
+            std.log.err("ENR base64 calcSize failed: {} for input[0..@min(s.len,20)]={s}", .{ e, s[0..@min(s.len, 20)] });
+            return error.InvalidEnr;
+        };
         const raw = try self.allocator.alloc(u8, decoded_len);
         defer self.allocator.free(raw);
-        std.base64.url_safe_no_pad.Decoder.decode(raw, s) catch return error.InvalidEnr;
+        std.base64.url_safe_no_pad.Decoder.decode(raw, s) catch |e| {
+            std.log.err("ENR base64 decode failed: {}", .{e});
+            return error.InvalidEnr;
+        };
 
         // RLP decode the ENR to extract IP + UDP port.
         var enr = try discv5.enr.decode(self.allocator, raw);
@@ -1047,6 +1053,15 @@ pub const BeaconNode = struct {
         var status_buf: [networking.messages.StatusMessage.fixed_size]u8 = undefined;
         const our_status = self.getStatus();
         _ = networking.messages.StatusMessage.serializeIntoBytes(&our_status, &status_buf);
+        std.log.info("Sending Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d} finalized_root={x:0>2}{x:0>2}{x:0>2}{x:0>2}... head_root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+            our_status.fork_digest[0], our_status.fork_digest[1],
+            our_status.fork_digest[2], our_status.fork_digest[3],
+            our_status.head_slot, our_status.finalized_epoch,
+            our_status.finalized_root[0], our_status.finalized_root[1],
+            our_status.finalized_root[2], our_status.finalized_root[3],
+            our_status.head_root[0], our_status.head_root[1],
+            our_status.head_root[2], our_status.head_root[3],
+        });
         svc.newStream(io, peer_id, StatusProtocol, &status_buf) catch |err| {
             std.log.warn("Failed to open status stream to bootnode: {}", .{err});
         };
@@ -1111,7 +1126,9 @@ pub const BeaconNode = struct {
             const finalized_cp = fc.getFinalizedCheckpoint();
             return .{
                 .fork_digest = self.config.forkDigestAtSlot(fc_head.slot, self.genesis_validators_root),
-                .finalized_root = if (self.head_tracker.getBlockRoot(
+                .finalized_root = if (finalized_cp.epoch == 0)
+                    [_]u8{0} ** 32
+                else if (self.head_tracker.getBlockRoot(
                     finalized_cp.epoch * preset.SLOTS_PER_EPOCH,
                 )) |r| r else finalized_cp.root,
                 .finalized_epoch = finalized_cp.epoch,
@@ -1121,7 +1138,9 @@ pub const BeaconNode = struct {
         }
         return .{
             .fork_digest = self.config.forkDigestAtSlot(self.head_tracker.head_slot, self.genesis_validators_root),
-            .finalized_root = if (self.head_tracker.getBlockRoot(
+            .finalized_root = if (self.head_tracker.finalized_epoch == 0)
+                [_]u8{0} ** 32
+            else if (self.head_tracker.getBlockRoot(
                 self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH,
             )) |r| r else [_]u8{0} ** 32,
             .finalized_epoch = self.head_tracker.finalized_epoch,

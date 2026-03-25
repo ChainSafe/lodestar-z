@@ -8,6 +8,7 @@
 //! (wire encoding, framing) is handled by `req_resp_encoding.zig`.
 
 const std = @import("std");
+const log = std.log.scoped(.req_resp);
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const protocol = @import("protocol.zig");
@@ -178,6 +179,7 @@ fn handleGoodbye(
         return makeErrorResponse(allocator, .invalid_request, "Malformed GoodbyeReason");
     };
 
+    log.info("Goodbye received: reason={d}", .{reason});
     context.onGoodbye(context.ptr, reason);
 
     // Return empty response — Goodbye has no response body per spec.

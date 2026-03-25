@@ -198,8 +198,20 @@ pub const P2pService = struct {
                 IdentifyHandler{
                     .allocator = allocator,
                     .config = .{
-                        .protocol_version = "ipfs/0.1.0",
+                        .protocol_version = "eth2/1.0.0",
                         .agent_version = "lodestar-z/0.0.1",
+                        .supported_protocols = &.{
+                            "/eth2/beacon_chain/req/status/1/ssz_snappy",
+                            "/eth2/beacon_chain/req/goodbye/1/ssz_snappy",
+                            "/eth2/beacon_chain/req/ping/1/ssz_snappy",
+                            "/eth2/beacon_chain/req/metadata/2/ssz_snappy",
+                            "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy",
+                            "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy",
+                            "/eth2/beacon_chain/req/blob_sidecars_by_range/1/ssz_snappy",
+                            "/eth2/beacon_chain/req/blob_sidecars_by_root/1/ssz_snappy",
+                            "/meshsub/1.2.0",
+                            "/ipfs/id/1.0.0",
+                        },
                     },
                     .peer_results = std.StringHashMap(identify_mod.IdentifyResult).init(allocator),
                 },

@@ -268,7 +268,11 @@ pub fn computeForkDigest(fork_version: [4]u8, genesis_validators_root: [32]u8) [
 
 /// Return the fork digest for the active fork at `slot`.
 pub fn forkDigestAtSlot(self: *const BeaconConfig, slot: u64, genesis_validators_root: [32]u8) [4]u8 {
-    const version = self.forkInfo(slot).version;
+    const fi = self.forkInfo(slot);
+    const version = fi.version;
+    std.log.info("forkDigestAtSlot: slot={d} fork_seq={d} version={x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
+        slot, @intFromEnum(fi.fork_seq), version[0], version[1], version[2], version[3],
+    });
     return computeForkDigest(version, genesis_validators_root);
 }
 
