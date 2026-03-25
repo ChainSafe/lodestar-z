@@ -3,6 +3,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const hashOne = @import("hashing").hashOne;
+const hashBatch = @import("hashing").hash;
 const getZeroHash = @import("hashing").getZeroHash;
 const max_depth = @import("hashing").max_depth;
 const Depth = @import("hashing").Depth;
@@ -411,6 +412,95 @@ pub const Id = enum(u32) {
             state.setBranchComputed();
         }
         return hash;
+    }
+
+    /// Returns the root hash using batch hashing for better performance.
+    ///
+    /// Collects dirty branches via BFS, then hashes them bottom-up in batches
+    /// using SIMD-accelerated `hashBatch`. Produces identical results to `getRoot`
+    /// but is ~2x faster on large trees with many dirty nodes.
+    pub fn batchGetRoot(node_id: Id, pool: *Pool, depth: Depth, allocator: Allocator) Error!*const [32]u8 {
+        const states = pool.nodes.items(.state);
+        const hashes = pool.nodes.items(.hash);
+
+        // Fast path: root is already computed (or is a leaf/zero node).
+        if (!states[@intFromEnum(node_id)].isBranchLazy()) {
+            return &hashes[@intFromEnum(node_id)];
+        }
+
+        // Fast path: depth 0 means the node is a leaf, just return its hash.
+        if (depth == 0) {
+            return &hashes[@intFromEnum(node_id)];
+        }
+
+        const lefts = pool.nodes.items(.left);
+        const rights = pool.nodes.items(.right);
+
+        // Collect dirty branch nodes per level via BFS.
+        // levels[i] holds dirty node IDs at depth i (0 = root level).
+        var levels: [max_depth]std.ArrayListUnmanaged(Id) = undefined;
+        for (0..depth) |i| {
+            levels[i] = .empty;
+        }
+        defer for (0..depth) |i| {
+            levels[i].deinit(allocator);
+        };
+
+        // BFS: seed with root
+        try levels[0].append(allocator, node_id);
+
+        // BFS: expand dirty branches level by level
+        for (0..depth - 1) |level| {
+            for (levels[level].items) |id| {
+                const left_id = lefts[@intFromEnum(id)];
+                const right_id = rights[@intFromEnum(id)];
+                if (states[@intFromEnum(left_id)].isBranchLazy()) {
+                    try levels[level + 1].append(allocator, left_id);
+                }
+                if (states[@intFromEnum(right_id)].isBranchLazy()) {
+                    try levels[level + 1].append(allocator, right_id);
+                }
+            }
+        }
+
+        // Bottom-up batch hash: process from deepest level to root.
+        var pairs = std.ArrayListUnmanaged([32]u8).empty;
+        defer pairs.deinit(allocator);
+        var outs = std.ArrayListUnmanaged([32]u8).empty;
+        defer outs.deinit(allocator);
+
+        var level_i: usize = depth - 1;
+        while (true) : (level_i -= 1) {
+            const dirty_nodes = levels[level_i].items;
+            if (dirty_nodes.len == 0) {
+                if (level_i == 0) break;
+                continue;
+            }
+
+            // Build input pairs: [left_hash, right_hash] for each dirty node.
+            pairs.clearRetainingCapacity();
+            try pairs.ensureTotalCapacity(allocator, dirty_nodes.len * 2);
+            for (dirty_nodes) |id| {
+                pairs.appendAssumeCapacity(hashes[@intFromEnum(lefts[@intFromEnum(id)])]);
+                pairs.appendAssumeCapacity(hashes[@intFromEnum(rights[@intFromEnum(id)])]);
+            }
+
+            // Batch hash
+            outs.clearRetainingCapacity();
+            try outs.ensureTotalCapacity(allocator, dirty_nodes.len);
+            outs.items.len = dirty_nodes.len;
+            hashBatch(outs.items, pairs.items) catch unreachable;
+
+            // Write results back
+            for (dirty_nodes, 0..) |id, i| {
+                hashes[@intFromEnum(id)] = outs.items[i];
+                states[@intFromEnum(id)].setBranchComputed();
+            }
+
+            if (level_i == 0) break;
+        }
+
+        return &hashes[@intFromEnum(node_id)];
     }
 
     pub fn getLeft(node_id: Id, pool: *Pool) Error!Id {
