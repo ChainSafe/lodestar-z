@@ -32,6 +32,8 @@ const GossipsubHandler = gossipsub_mod.Handler;
 const GossipsubService = gossipsub_mod.Service;
 const GossipsubConfig = gossipsub_mod.Config;
 const swarm_mod = libp2p.swarm;
+const identify_mod = libp2p.identify;
+const IdentifyHandler = identify_mod.Handler;
 const Multiaddr = @import("multiaddr").Multiaddr;
 
 const eth2_protocols = @import("eth2_protocols.zig");
@@ -70,6 +72,7 @@ pub const Eth2Switch = swarm_mod.Switch(.{
         BlobSidecarsByRangeProtocol,
         BlobSidecarsByRootProtocol,
         GossipsubHandler,
+        IdentifyHandler,
     },
 });
 
@@ -192,6 +195,14 @@ pub const P2pService = struct {
                 BlobSidecarsByRangeProtocol.init(allocator, config.req_resp_context),
                 BlobSidecarsByRootProtocol.init(allocator, config.req_resp_context),
                 GossipsubHandler{ .svc = gossipsub },
+                IdentifyHandler{
+                    .allocator = allocator,
+                    .config = .{
+                        .protocol_version = "ipfs/0.1.0",
+                        .agent_version = "lodestar-z/0.0.1",
+                    },
+                    .peer_results = std.StringHashMap(identify_mod.IdentifyResult).init(allocator),
+                },
             },
         );
 
