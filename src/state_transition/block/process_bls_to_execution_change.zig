@@ -65,3 +65,135 @@ pub fn isValidBlsToExecutionChange(
         }
     }
 }
+
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const interopPubkeysCached = @import("../test_utils/interop_pubkeys.zig").interopPubkeysCached;
+const Node = @import("persistent_merkle_tree").Node;
+const BLSPubkey = types.primitive.BLSPubkey.Type;
+
+/// Helper to set up a valid BLS-to-execution-change scenario for validator 0.
+/// Returns the signed message and sets the validator's withdrawal_credentials to match.
+fn setupValidBlsToExecutionChange(state: anytype) !SignedBLSToExecutionChange {
+    // Get validator 0's interop pubkey
+    var pubkeys: [1]BLSPubkey = undefined;
+    try interopPubkeysCached(1, &pubkeys);
+
+    // Hash the pubkey and set byte 0 to BLS_WITHDRAWAL_PREFIX
+    var expected_credentials: Root = undefined;
+    Sha256.hash(&pubkeys[0], &expected_credentials, .{});
+    expected_credentials[0] = c.BLS_WITHDRAWAL_PREFIX;
+
+    // Set validator 0's withdrawal_credentials to match
+    var validators = try state.validators();
+    var validator = try validators.get(0);
+    try validator.setValue("withdrawal_credentials", &expected_credentials);
+
+    const signed_msg: SignedBLSToExecutionChange = .{
+        .message = .{
+            .validator_index = 0,
+            .from_bls_pubkey = pubkeys[0],
+            .to_execution_address = [_]u8{0xab} ** 20,
+        },
+        .signature = [_]u8{0} ** 96,
+    };
+    return signed_msg;
+}
+
+test "bls to execution change - valid" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    const state = test_state.cached_state.state.castToFork(.electra);
+    const signed_msg = try setupValidBlsToExecutionChange(state);
+
+    // Should succeed with verify_signature=false
+    try isValidBlsToExecutionChange(.electra, test_state.config, state, &signed_msg, false);
+}
+
+test "bls to execution change - invalid validator index" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    const state = test_state.cached_state.state.castToFork(.electra);
+
+    const signed_msg: SignedBLSToExecutionChange = .{
+        .message = .{
+            .validator_index = 9999, // out of bounds
+            .from_bls_pubkey = [_]u8{0} ** 48,
+            .to_execution_address = [_]u8{0} ** 20,
+        },
+        .signature = [_]u8{0} ** 96,
+    };
+
+    try std.testing.expectError(
+        error.InvalidBlsToExecutionChange,
+        isValidBlsToExecutionChange(.electra, test_state.config, state, &signed_msg, false),
+    );
+}
+
+test "bls to execution change - invalid withdrawal credentials prefix" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    const state = test_state.cached_state.state.castToFork(.electra);
+
+    // Set validator 0's withdrawal_credentials prefix to ETH1 (not BLS)
+    var bad_credentials: Root = [_]u8{0} ** 32;
+    bad_credentials[0] = c.ETH1_ADDRESS_WITHDRAWAL_PREFIX;
+    var validators = try state.validators();
+    var validator = try validators.get(0);
+    try validator.setValue("withdrawal_credentials", &bad_credentials);
+
+    const signed_msg: SignedBLSToExecutionChange = .{
+        .message = .{
+            .validator_index = 0,
+            .from_bls_pubkey = [_]u8{0} ** 48,
+            .to_execution_address = [_]u8{0} ** 20,
+        },
+        .signature = [_]u8{0} ** 96,
+    };
+
+    try std.testing.expectError(
+        error.InvalidWithdrawalCredentialsPrefix,
+        isValidBlsToExecutionChange(.electra, test_state.config, state, &signed_msg, false),
+    );
+}
+
+test "bls to execution change - mismatched credentials" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    const state = test_state.cached_state.state.castToFork(.electra);
+
+    // Validator 0 has withdrawal_credentials = all zeros (first byte 0x00 = BLS_WITHDRAWAL_PREFIX)
+    // but the hash of from_bls_pubkey won't match the rest of the zeros
+    const signed_msg: SignedBLSToExecutionChange = .{
+        .message = .{
+            .validator_index = 0,
+            .from_bls_pubkey = [_]u8{0xff} ** 48, // hash won't match all-zero credentials
+            .to_execution_address = [_]u8{0} ** 20,
+        },
+        .signature = [_]u8{0} ** 96,
+    };
+
+    try std.testing.expectError(
+        error.InvalidWithdrawalCredentials,
+        isValidBlsToExecutionChange(.electra, test_state.config, state, &signed_msg, false),
+    );
+}
