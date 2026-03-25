@@ -126,7 +126,7 @@ pub fn BitVector(comptime _length: comptime_int) type {
         /// Allocates and returns an `ArrayList` of indices where the bit at the index of `self` is set to `true`.
         ///
         /// Caller must call `deinit` on the returned list
-        pub fn intersectValues(
+        pub fn intersectValuesAlloc(
             self: *const @This(),
             comptime T: type,
             allocator: std.mem.Allocator,
@@ -147,6 +147,31 @@ pub fn BitVector(comptime _length: comptime_int) type {
                 }
             }
             return indices;
+        }
+
+        /// Returns a slice into `out` of values where the corresponding bit is set to `true`.
+        pub fn intersectValues(
+            self: *const @This(),
+            comptime T: type,
+            values: *const [length]T,
+            out: *[length]T,
+        ) []T {
+            var i: usize = 0;
+            for (0..byte_len) |i_byte| {
+                var b = self.data[i_byte];
+                // Kernighan's algorithm to count the set bits instead of going through 0..8 for every byte
+                while (b != 0) {
+                    const lsb: usize = @as(u8, @ctz(b)); // Get the index of least significant bit
+                    const bit_index = i_byte * 8 + lsb;
+                    out[i] = values[bit_index];
+                    i += 1;
+                    // The `b - 1` flips the bits starting from `lsb` index
+                    // And `&` will reset the last bit at `lsb` index
+                    b &= b - 1;
+                }
+            }
+
+            return out[0..i];
         }
     };
 }
@@ -382,7 +407,7 @@ test "BitVectorType - intersectValues" {
         var values: [16]u8 = undefined;
         for (0..tc.bit_len) |i| values[i] = @intCast(i);
 
-        var actual = try b.intersectValues(u8, allocator, &values);
+        var actual = try b.intersectValuesAlloc(u8, allocator, &values);
         defer actual.deinit();
         try std.testing.expectEqualSlices(u8, tc.expected, actual.items);
     }
