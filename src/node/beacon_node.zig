@@ -1107,6 +1107,17 @@ pub const BeaconNode = struct {
         };
         std.log.info("Connected to bootnode, peer_id: {s}", .{peer_id});
 
+        // Brief yield to let Lighthouse's inbound streams (identify, gossipsub)
+        // settle before we open our outbound Status stream. Avoids lsquic
+        // connection refcount assertion when streams are opened concurrently.
+        {
+            const delay: std.Io.Timeout = .{ .duration = .{
+                .raw = std.Io.Duration.fromMilliseconds(500),
+                .clock = .awake,
+            } };
+            delay.sleep(io) catch {};
+        }
+
         // Initiate eth2 Status exchange with the bootnode.
         // Uses dialProtocol to get a raw stream, then does wire-level req/resp.
         // Use the peer's fork_digest from their ENR (avoids fork_digest mismatch
@@ -1143,6 +1154,12 @@ pub const BeaconNode = struct {
         if (self.head_tracker.head_slot >= target_slot) {
             std.log.info("Range sync complete: head at slot {d}", .{self.head_tracker.head_slot});
         }
+
+        // After sync, poll gossipsub for new blocks
+        std.log.info("Starting gossip block import loop...", .{});
+        self.gossipBlockLoop(io, svc) catch |err| {
+            std.log.warn("Gossip block loop ended: {}", .{err});
+        };
     }
 
         /// Perform a Status req/resp exchange with a connected peer.
@@ -1260,6 +1277,84 @@ pub const BeaconNode = struct {
             }
 
             return peer_status;
+        }
+
+        /// Poll gossipsub for beacon_block messages and import them.
+        ///
+        /// Runs after range sync to stay at the head of the chain.
+        /// Polls the gossipsub service for events, extracts beacon_block
+        /// messages, decompresses the SSZ, and imports via the STFN pipeline.
+        fn gossipBlockLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) !void {
+            _ = svc;
+            const gossipsub = self.p2p_service.?.gossipsub;
+            const gossip_decoding = networking.gossip_decoding;
+
+            while (true) {
+                // Poll gossipsub for raw events
+                const events = gossipsub.drainEvents() catch |err| {
+                    std.log.warn("Gossip drain error: {}", .{err});
+                    const t: std.Io.Timeout = .{ .duration = .{
+                        .raw = std.Io.Duration.fromMilliseconds(1000),
+                        .clock = .awake,
+                    } };
+                    t.sleep(io) catch return;
+                    continue;
+                };
+                defer self.allocator.free(events);
+
+                if (events.len == 0) {
+                    const t: std.Io.Timeout = .{ .duration = .{
+                        .raw = std.Io.Duration.fromMilliseconds(500),
+                        .clock = .awake,
+                    } };
+                    t.sleep(io) catch return;
+                    continue;
+                }
+
+                for (events) |event| {
+                    switch (event) {
+                        .message => |msg| {
+                            // Check if beacon_block topic
+                            if (std.mem.indexOf(u8, msg.topic, "beacon_block") == null) continue;
+
+                            // Decompress snappy → raw SSZ
+                            const ssz_bytes = gossip_decoding.decompressGossipPayload(
+                                self.allocator, msg.data,
+                            ) catch {
+                                std.log.warn("Gossip: failed to decompress block", .{});
+                                continue;
+                            };
+                            defer self.allocator.free(ssz_bytes);
+
+                            // Deserialize and import
+                            const fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
+                            const any_signed = AnySignedBeaconBlock.deserialize(
+                                self.allocator, .full, fork_seq, ssz_bytes,
+                            ) catch |err| {
+                                std.log.warn("Gossip: block deserialize error: {}", .{err});
+                                continue;
+                            };
+                            defer any_signed.deinit(self.allocator);
+
+                            switch (any_signed) {
+                                .full_electra => |blk| {
+                                    const result = self.importBlock(blk) catch |err| {
+                                        std.log.warn("Gossip: block import error: {}", .{err});
+                                        continue;
+                                    };
+                                    std.log.info("Gossip: imported block slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                                        result.slot,
+                                        result.block_root[0], result.block_root[1],
+                                        result.block_root[2], result.block_root[3],
+                                    });
+                                },
+                                else => {},
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }
         }
 
         /// Request blocks by range from a connected peer via dialProtocol.
