@@ -80,7 +80,10 @@ const BlockExtraMeta = fork_choice_mod.BlockExtraMeta;
 const ForkChoiceCheckpoint = fork_choice_mod.Checkpoint;
 
 const execution_mod = @import("execution");
+const EngineApi = execution_mod.EngineApi;
+const ExecutionPayloadStatus = execution_mod.ExecutionPayloadStatus;
 const ForkchoiceStateV1 = execution_mod.ForkchoiceStateV1;
+const MockEngine = execution_mod.MockEngine;
 
 const metrics_mod = @import("metrics.zig");
 pub const BeaconMetrics = metrics_mod.BeaconMetrics;
@@ -101,6 +104,10 @@ pub const BlockImporter = struct {
     db: *BeaconDB,
     head_tracker: *HeadTracker,
     fork_choice: ?*ForkChoice,
+
+    /// Engine API client for EL communication.
+    /// When null, execution payload verification is skipped (pre-merge).
+    engine_api: ?EngineApi = null,
 
     /// When true, BLS signatures are verified in processBlock.
     verify_signatures: bool,
@@ -206,6 +213,13 @@ pub const BlockImporter = struct {
         const stfn_result = try self.runStateTransition(pre_state, signed_block, block_slot);
         const post_state = stfn_result.post_state;
 
+        // Stage 2b: Verify execution payload via Engine API.
+        const execution_status = try self.verifyExecutionPayload(signed_block, stfn_result.block_root);
+        if (execution_status == .invalid or execution_status == .invalid_block_hash) {
+            std.log.err("Block at slot {d} has INVALID execution payload, rejecting", .{block_slot});
+            return error.InvalidExecutionPayload;
+        }
+
         // Stage 3: Cache post-state + persist block.
         _ = try self.regen.onNewBlock(post_state, true);
         try self.block_to_state.put(stfn_result.block_root, stfn_result.state_root);
@@ -240,6 +254,23 @@ pub const BlockImporter = struct {
         var finalized_cp: types.phase0.Checkpoint.Type = undefined;
         try post_state.state.finalizedCheckpoint(&finalized_cp);
 
+        // Build execution metadata for fork choice.
+        const extra_meta: BlockExtraMeta = switch (execution_status) {
+            .valid, .syncing, .accepted => .{
+                .post_merge = BlockExtraMeta.PostMergeMeta.init(
+                    signed_block.message.body.execution_payload.block_hash,
+                    signed_block.message.body.execution_payload.block_number,
+                    switch (execution_status) {
+                        .valid => .valid,
+                        .syncing, .accepted => .syncing,
+                        else => unreachable,
+                    },
+                    .available, // TODO: wire data availability checks
+                ),
+            },
+            else => .{ .pre_merge = {} },
+        };
+
         const fc_block = ProtoBlock{
             .slot = block_slot,
             .block_root = stfn_result.block_root,
@@ -254,7 +285,7 @@ pub const BlockImporter = struct {
             .unrealized_justified_root = justified_cp.root,
             .unrealized_finalized_epoch = finalized_cp.epoch,
             .unrealized_finalized_root = finalized_cp.root,
-            .extra_meta = .{ .pre_merge = {} },
+            .extra_meta = extra_meta,
             .timeliness = true,
         };
 
@@ -268,7 +299,69 @@ pub const BlockImporter = struct {
             .state_root = stfn_result.state_root,
             .slot = block_slot,
             .epoch_transition = is_epoch_transition,
+            .execution_optimistic = execution_status == .syncing or execution_status == .accepted,
         };
+    }
+
+    /// Verify the block's execution payload via the Engine API.
+    ///
+    /// Calls engine_newPayloadV3 with the execution payload from the block.
+    /// Returns the EL's verdict: valid, invalid, syncing, etc.
+    /// When no Engine API is configured, returns .valid (mock/pre-merge).
+    fn verifyExecutionPayload(
+        self: *BlockImporter,
+        signed_block: *const types.electra.SignedBeaconBlock.Type,
+        block_root: [32]u8,
+    ) !ExecutionPayloadStatus {
+        const engine = self.engine_api orelse return .valid;
+
+        const payload = &signed_block.message.body.execution_payload;
+
+        // Build the Engine API payload from the SSZ block body payload.
+        // Note: extra_data and transactions are ArrayListUnmanaged in SSZ types
+        // but []const in Engine API types — use .items to get the slice.
+        const engine_payload = execution_mod.ExecutionPayloadV3{
+            .parent_hash = payload.parent_hash,
+            .fee_recipient = payload.fee_recipient,
+            .state_root = payload.state_root,
+            .receipts_root = payload.receipts_root,
+            .logs_bloom = payload.logs_bloom,
+            .prev_randao = payload.prev_randao,
+            .block_number = payload.block_number,
+            .gas_limit = payload.gas_limit,
+            .gas_used = payload.gas_used,
+            .timestamp = payload.timestamp,
+            .extra_data = payload.extra_data.items,
+            .base_fee_per_gas = payload.base_fee_per_gas,
+            .block_hash = payload.block_hash,
+            // Transactions: ArrayListUnmanaged(ArrayListUnmanaged(u8)) -> skip for now.
+            // Mock engine only checks block_hash. TODO: convert for HTTP engine.
+            .transactions = &.{},
+            // Withdrawals: same memory layout as engine_api_types.Withdrawal.
+            .withdrawals = if (payload.withdrawals.items.len > 0)
+                @as([]const execution_mod.engine_api_types.Withdrawal, @ptrCast(payload.withdrawals.items))
+            else
+                &.{},
+            .blob_gas_used = payload.blob_gas_used,
+            .excess_blob_gas = payload.excess_blob_gas,
+        };
+
+        const parent_beacon_root = signed_block.message.parent_root;
+
+        // TODO: compute versioned hashes from blob_kzg_commitments.
+        const result = engine.newPayload(engine_payload, &.{}, parent_beacon_root) catch |err| {
+            std.log.warn("Engine API newPayload failed for root={s}...: {}", .{
+                &std.fmt.bytesToHex(block_root[0..4], .lower), err,
+            });
+            // On EL communication failure, accept optimistically.
+            return .syncing;
+        };
+
+        std.log.info("Engine API newPayload slot {d}: status={s}", .{
+            signed_block.message.slot, @tagName(result.status),
+        });
+
+        return result.status;
     }
 
     const StfnResult = struct {
@@ -396,11 +489,13 @@ pub const BeaconNode = struct {
     head_tracker: *HeadTracker,
     fork_choice: ?*ForkChoice,
 
-    // Chain
+    // Chain coordinator (delegates to all chain components)
+    chain: *Chain,
+
+    // Chain components (owned by BeaconNode, pointers held by chain)
     op_pool: *OpPool,
     seen_cache: *SeenCache,
     block_importer: *BlockImporter,
-    chain: *Chain,
 
     // Clock
     clock: ?SlotClock,
@@ -450,6 +545,10 @@ pub const BeaconNode = struct {
     // Unknown block sync — queues blocks whose parent is not yet known.
     // Initialized eagerly in init(); used by the gossip block import path.
     unknown_block_sync: UnknownBlockSync,
+
+    // Execution Layer engine (Engine API client or mock).
+    mock_engine: ?*MockEngine = null,
+    engine_api: ?EngineApi = null,
 
     // Genesis validators root — set by initFromGenesis, used for fork digest computation.
     genesis_validators_root: [32]u8 = [_]u8{0} ** 32,
@@ -623,6 +722,12 @@ pub const BeaconNode = struct {
             },
         };
 
+        // Initialize execution engine (mock by default).
+        // TODO: Initialize HttpEngine when opts.execution_urls is non-empty.
+        const mock_engine_ptr = try allocator.create(MockEngine);
+        mock_engine_ptr.* = MockEngine.init(allocator);
+        const engine = mock_engine_ptr.engine();
+
         const node = try allocator.create(BeaconNode);
         node.* = .{
             .allocator = allocator,
@@ -639,6 +744,8 @@ pub const BeaconNode = struct {
             .block_importer = block_importer,
             .chain = chain_struct,
             .clock = null,
+            .mock_engine = mock_engine_ptr,
+            .engine_api = engine,
             .cp_datastore = cp_datastore,
             .kv_backend = kv_backend,
             .api_context = api_ctx,
@@ -670,6 +777,11 @@ pub const BeaconNode = struct {
 
         self.head_tracker.deinit();
         allocator.destroy(self.head_tracker);
+
+        if (self.mock_engine) |me| {
+            me.deinit();
+            allocator.destroy(me);
+        }
 
         if (self.fork_choice) |fc| {
             fc.deinit(allocator);
@@ -769,8 +881,6 @@ pub const BeaconNode = struct {
         // Incoming blocks reference parent_root = genesis_block_root, so the
         // importer needs to resolve that to find the pre-state.
         try self.block_importer.registerGenesisRoot(genesis_block_root, state_root);
-
-        // Register genesis root with Chain coordinator too.
         try self.chain.registerGenesisRoot(genesis_block_root, state_root);
 
         // Set head at slot 0
@@ -778,6 +888,7 @@ pub const BeaconNode = struct {
 
         // Capture genesis validators root for fork digest computation
         self.genesis_validators_root = (try genesis_state.state.genesisValidatorsRoot()).*;
+        self.chain.genesis_validators_root = self.genesis_validators_root;
         std.log.info("Genesis validators root: 0x{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
             self.genesis_validators_root[0], self.genesis_validators_root[1],
             self.genesis_validators_root[2], self.genesis_validators_root[3],
@@ -864,6 +975,12 @@ pub const BeaconNode = struct {
         _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts0);
         const t0_ns: u64 = @intCast(ts0.sec * 1_000_000_000 + ts0.nsec);
         const result = try self.block_importer.importBlock(signed_block);
+
+        // Notify EL of fork choice update after each block import.
+        self.notifyForkchoiceUpdate(result.block_root) catch |err| {
+            std.log.warn("forkchoiceUpdated failed: {}", .{err});
+        };
+
         var ts1: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts1);
         const t1_ns: u64 = @intCast(ts1.sec * 1_000_000_000 + ts1.nsec);

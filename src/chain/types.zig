@@ -59,6 +59,8 @@ pub const ImportResult = struct {
     slot: Slot,
     /// Whether this block crossed an epoch boundary.
     epoch_transition: bool,
+    /// Whether the block was imported with optimistic execution status.
+    execution_optimistic: bool = false,
 };
 
 // ---------------------------------------------------------------------------
@@ -117,6 +119,8 @@ pub const HeadEvent = struct {
     block_root: Root,
     state_root: Root,
     epoch_transition: bool,
+    /// Whether the block was imported with optimistic execution status.
+    execution_optimistic: bool = false,
 };
 
 pub const BlockEvent = struct {
