@@ -99,9 +99,6 @@ pub const EpochCache = struct {
 
     next_shuffling: *EpochShufflingRc,
 
-    // TODO: not needed, maybe just get from the next shuffling?
-    // next_active_indices
-
     // EpochCache does not take ownership of EffectiveBalanceIncrements, it is shared across EpochCache instances
     effective_balance_increments: *EffectiveBalanceIncrementsRc,
 
@@ -653,11 +650,6 @@ pub const EpochCache = struct {
         return self.proposers[slot % preset.SLOTS_PER_EPOCH];
     }
 
-    // TODO: getBeaconProposers - can access directly?
-
-    // TODO: getBeaconProposersNextEpoch - may not needed post-fulu
-
-    // TODO: do we need getBeaconCommittees? in validateAttestationElectra we do a for loop over committee_indices and call getBeaconProposer() instead
 
     /// consumer takes ownership of the returned indexed attestation
     /// hence it needs to deinit attesting_indices inside
@@ -782,7 +774,6 @@ pub const EpochCache = struct {
         self.index_to_pubkey.items[index] = pk;
     }
 
-    // TODO: getBeaconCommittee
     pub fn getShufflingAtSlotOrNull(self: *const EpochCache, slot: Slot) ?*const EpochShuffling {
         const epoch = computeEpochAtSlot(slot);
         return self.getShufflingAtEpochOrNull(epoch);
