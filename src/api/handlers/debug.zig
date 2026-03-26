@@ -10,6 +10,8 @@ const std = @import("std");
 const types = @import("../types.zig");
 const context = @import("../context.zig");
 const ApiContext = context.ApiContext;
+const CachedBeaconState = context.CachedBeaconState;
+const preset = @import("preset").preset;
 
 /// A beacon chain head: the pair (slot, root) of a chain tip visible to
 /// fork-choice.
@@ -22,19 +24,47 @@ pub const HeadInfo = struct {
 ///
 /// Returns raw SSZ bytes for the beacon state at the given state identifier.
 ///
-/// Note: Full implementation requires state regeneration (StateRegen) to
-/// be wired into the ApiContext.  Until then we return StateNotAvailable
-/// for all identifiers other than a synthetic head stub.
+/// Supports the following state_ids:
+/// - `head` — returns SSZ of the current head state from the HeadStateCallback
+/// - `finalized` — looks up the finalized state from the DB archive
+/// - `genesis` — returns the genesis state (slot 0) from the DB archive
+/// - slot number — returns the archived state at that slot
+/// - hex root — looks up state by state_root in the DB archive
 pub fn getState(ctx: *ApiContext, state_id: types.StateId) ![]const u8 {
-    _ = ctx;
-    _ = state_id;
-    // TODO: Implement once state regen is wired into ApiContext.
-    // Steps:
-    //   1. Resolve state_id to a (slot, root) pair using head_tracker / db.
-    //   2. Call ctx.regen.getStateAtSlot(slot) to obtain the BeaconState.
-    //   3. SSZ-serialize the state and return the bytes.
-    // state regen is not yet wired to the API context.
-    return error.StateNotAvailable;
+    switch (state_id) {
+        .head => {
+            // Try to get the head state's raw SSZ via the DB.
+            // The head state root is known from the head tracker.
+            const state_root = ctx.head_tracker.head_state_root;
+            if (try ctx.db.getStateArchiveByRoot(state_root)) |data| {
+                return data;
+            }
+            // Head state might not be archived yet — not available.
+            return error.StateNotAvailable;
+        },
+        .finalized => {
+            // Look up the finalized slot's state from the archive.
+            const finalized_slot = ctx.head_tracker.finalized_slot;
+            return (try ctx.db.getStateArchive(finalized_slot)) orelse error.StateNotAvailable;
+        },
+        .genesis => {
+            // Genesis state is at slot 0.
+            return (try ctx.db.getStateArchive(0)) orelse error.StateNotAvailable;
+        },
+        .justified => {
+            // Look up the justified slot's state from the archive.
+            const justified_slot = ctx.head_tracker.justified_slot;
+            return (try ctx.db.getStateArchive(justified_slot)) orelse error.StateNotAvailable;
+        },
+        .slot => |slot| {
+            // Direct slot lookup in the archive.
+            return (try ctx.db.getStateArchive(slot)) orelse error.StateNotAvailable;
+        },
+        .root => |root| {
+            // Look up by state root.
+            return (try ctx.db.getStateArchiveByRoot(root)) orelse error.StateNotAvailable;
+        },
+    }
 }
 
 /// GET /eth/v2/debug/beacon/heads
@@ -61,11 +91,58 @@ pub fn getHeads(ctx: *ApiContext) ![]const HeadInfo {
 
 const test_helpers = @import("../test_helpers.zig");
 
-test "getState returns StateNotAvailable (stub)" {
+test "getState head returns StateNotAvailable when not archived" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const result = getState(&tc.ctx, .head);
     try std.testing.expectError(error.StateNotAvailable, result);
+}
+
+test "getState finalized returns StateNotAvailable when not in DB" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const result = getState(&tc.ctx, .finalized);
+    try std.testing.expectError(error.StateNotAvailable, result);
+}
+
+test "getState genesis returns StateNotAvailable when not in DB" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const result = getState(&tc.ctx, .genesis);
+    try std.testing.expectError(error.StateNotAvailable, result);
+}
+
+test "getState slot returns StateNotAvailable for unknown slot" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const result = getState(&tc.ctx, .{ .slot = 42 });
+    try std.testing.expectError(error.StateNotAvailable, result);
+}
+
+test "getState slot returns data from DB archive" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    // Store a fake state archive at slot 42.
+    const fake_state = [_]u8{0xDE, 0xAD, 0xBE, 0xEF};
+    try tc.db.putStateArchive(42, [_]u8{0x11} ** 32, &fake_state);
+
+    const data = try getState(&tc.ctx, .{ .slot = 42 });
+    defer tc.ctx.allocator.free(data);
+    try std.testing.expectEqualSlices(u8, &fake_state, data);
+}
+
+test "getState root returns data from DB archive" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const fake_state = [_]u8{0xCA, 0xFE};
+    const state_root = [_]u8{0x22} ** 32;
+    try tc.db.putStateArchive(100, state_root, &fake_state);
+
+    const data = try getState(&tc.ctx, .{ .root = state_root });
+    defer tc.ctx.allocator.free(data);
+    try std.testing.expectEqualSlices(u8, &fake_state, data);
 }
 
 test "getHeads returns single head entry" {

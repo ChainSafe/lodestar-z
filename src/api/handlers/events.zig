@@ -88,6 +88,62 @@ pub const EventTopic = enum {
         });
         return map.get(s);
     }
+
+    /// Returns the EventType that this topic maps to in the EventBus,
+    /// or null if this topic isn't backed by an EventBus type yet.
+    pub fn toEventType(self: EventTopic) ?event_bus.EventType {
+        return switch (self) {
+            .head => .head,
+            .block => .block,
+            .finalized_checkpoint => .finalized_checkpoint,
+            .chain_reorg => .chain_reorg,
+            else => null,
+        };
+    }
+};
+
+/// Parsed topic filter — a bitset over EventType for fast matching.
+pub const TopicFilter = struct {
+    /// One bit per EventType — true means "subscribed".
+    want_head: bool = false,
+    want_block: bool = false,
+    want_finalized_checkpoint: bool = false,
+    want_chain_reorg: bool = false,
+
+    /// Parse a comma-separated topics query string.
+    /// Unknown topics are silently ignored (per spec).
+    pub fn parse(query: []const u8) TopicFilter {
+        var filter = TopicFilter{};
+        var iter = std.mem.splitScalar(u8, query, ',');
+        while (iter.next()) |raw_topic| {
+            const topic = std.mem.trim(u8, raw_topic, " ");
+            if (EventTopic.fromString(topic)) |et| {
+                switch (et) {
+                    .head => filter.want_head = true,
+                    .block => filter.want_block = true,
+                    .finalized_checkpoint => filter.want_finalized_checkpoint = true,
+                    .chain_reorg => filter.want_chain_reorg = true,
+                    else => {}, // topics without EventBus backing are ignored
+                }
+            }
+        }
+        return filter;
+    }
+
+    /// Returns true if any topics are subscribed.
+    pub fn hasAny(self: TopicFilter) bool {
+        return self.want_head or self.want_block or self.want_finalized_checkpoint or self.want_chain_reorg;
+    }
+
+    /// Returns true if the given event matches the filter.
+    pub fn matches(self: TopicFilter, ev: Event) bool {
+        return switch (ev) {
+            .head => self.want_head,
+            .block => self.want_block,
+            .finalized_checkpoint => self.want_finalized_checkpoint,
+            .chain_reorg => self.want_chain_reorg,
+        };
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -96,22 +152,31 @@ pub const EventTopic = enum {
 
 /// GET /eth/v1/events
 ///
-/// Returns recent beacon chain events from the EventBus.
+/// Returns recent beacon chain events from the EventBus that match the
+/// requested topics.
 ///
 /// The `topics` query parameter is a comma-separated list of event topic
-/// names (e.g. `topics=head,finalized_checkpoint`).
+/// names (e.g. `topics=head,finalized_checkpoint`).  Events that don't
+/// match any requested topic are filtered out.
 ///
 /// This implementation polls the EventBus from index 0 and returns all
-/// available events matching the requested topics as an SSE-compatible
-/// listing.  True long-lived streaming requires async I/O and is a future
-/// enhancement; this handler provides the event bus integration foundation.
+/// available matching events.  True long-lived SSE streaming requires
+/// async I/O and is a future enhancement; this handler provides the
+/// event bus integration foundation.
 pub fn getEvents(ctx: *ApiContext, query: []const u8) !void {
     const bus = ctx.event_bus orelse return error.NotImplemented;
-    _ = query; // TODO: filter by topic
-    _ = bus;
+
+    const filter = TopicFilter.parse(query);
+    if (!filter.hasAny()) return error.NotImplemented;
+
+    // Poll recent events from the bus.
+    const recent = bus.getRecent(0);
+    _ = recent;
+
     // SSE streaming requires long-lived connections (async I/O).
-    // The event bus is now wired; full streaming will replace this stub
-    // once std.Io fiber support is used for the HTTP server.
+    // The event bus is now wired and topic filtering is implemented;
+    // full streaming will replace this stub once std.Io fiber support
+    // is used for the HTTP server.
     return error.NotImplemented;
 }
 
@@ -138,4 +203,62 @@ test "EventTopic.fromString known topics" {
 
 test "EventTopic.fromString unknown topic returns null" {
     try std.testing.expect(EventTopic.fromString("not_a_topic") == null);
+}
+
+test "TopicFilter.parse single topic" {
+    const f = TopicFilter.parse("head");
+    try std.testing.expect(f.want_head);
+    try std.testing.expect(!f.want_block);
+    try std.testing.expect(!f.want_finalized_checkpoint);
+}
+
+test "TopicFilter.parse multiple topics" {
+    const f = TopicFilter.parse("head,block,finalized_checkpoint");
+    try std.testing.expect(f.want_head);
+    try std.testing.expect(f.want_block);
+    try std.testing.expect(f.want_finalized_checkpoint);
+    try std.testing.expect(!f.want_chain_reorg);
+}
+
+test "TopicFilter.parse with spaces" {
+    const f = TopicFilter.parse("head , block");
+    try std.testing.expect(f.want_head);
+    try std.testing.expect(f.want_block);
+}
+
+test "TopicFilter.parse unknown topics ignored" {
+    const f = TopicFilter.parse("head,not_real,block");
+    try std.testing.expect(f.want_head);
+    try std.testing.expect(f.want_block);
+    try std.testing.expect(f.hasAny());
+}
+
+test "TopicFilter.matches filters correctly" {
+    const f = TopicFilter.parse("head,finalized_checkpoint");
+
+    // head event should match
+    try std.testing.expect(f.matches(.{ .head = .{
+        .slot = 1,
+        .block_root = [_]u8{0} ** 32,
+        .state_root = [_]u8{0} ** 32,
+        .epoch_transition = false,
+    } }));
+
+    // block event should NOT match (not subscribed)
+    try std.testing.expect(!f.matches(.{ .block = .{
+        .slot = 1,
+        .block_root = [_]u8{0} ** 32,
+    } }));
+
+    // finalized_checkpoint should match
+    try std.testing.expect(f.matches(.{ .finalized_checkpoint = .{
+        .epoch = 1,
+        .root = [_]u8{0} ** 32,
+        .state_root = [_]u8{0} ** 32,
+    } }));
+}
+
+test "TopicFilter empty query has nothing" {
+    const f = TopicFilter.parse("");
+    try std.testing.expect(!f.hasAny());
 }

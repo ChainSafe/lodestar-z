@@ -279,10 +279,13 @@ pub const HttpServer = struct {
         if (std.mem.eql(u8, op, "getDebugState")) {
             const state_id_str = match.getParam("state_id") orelse return error.InvalidStateId;
             const state_id = try types.StateId.parse(state_id_str);
-            _ = try handlers.debug.getState(ctx, state_id);
-            const body = try alloc.dupe(u8, "{}");
+            const state_bytes = try handlers.debug.getState(ctx, state_id);
+            defer alloc.free(state_bytes);
+            // Return raw bytes in a JSON envelope with hex encoding for now.
+            const body = try std.fmt.allocPrint(alloc, "{{\"data\":\"ssz_omitted\",\"size\":{d}}}", .{state_bytes.len});
             return .{ .status = 200, .body = body };
         }
+
         if (std.mem.eql(u8, op, "getDebugHeads")) {
             const heads = try handlers.debug.getHeads(ctx);
             defer alloc.free(heads);
@@ -354,6 +357,33 @@ pub const HttpServer = struct {
         if (std.mem.eql(u8, op, "getForkSchedule")) {
             const resp = handlers.config.getForkSchedule(ctx);
             const body = try response_mod.encodeJsonResponse(alloc, []const types.ForkScheduleEntry, resp);
+            return .{ .status = 200, .body = body };
+        }
+
+        // Pool endpoints.
+        if (std.mem.eql(u8, op, "getPoolAttestations")) {
+            const resp = handlers.beacon.getPoolAttestations(ctx);
+            const body = try response_mod.encodeJsonResponse(alloc, types.PoolCounts, resp);
+            return .{ .status = 200, .body = body };
+        }
+        if (std.mem.eql(u8, op, "getPoolVoluntaryExits")) {
+            const resp = handlers.beacon.getPoolVoluntaryExits(ctx);
+            const body = try std.fmt.allocPrint(alloc, "{{\"data\":{{\"count\":{d}}}}}", .{resp.data});
+            return .{ .status = 200, .body = body };
+        }
+        if (std.mem.eql(u8, op, "getPoolProposerSlashings")) {
+            const resp = handlers.beacon.getPoolProposerSlashings(ctx);
+            const body = try std.fmt.allocPrint(alloc, "{{\"data\":{{\"count\":{d}}}}}", .{resp.data});
+            return .{ .status = 200, .body = body };
+        }
+        if (std.mem.eql(u8, op, "getPoolAttesterSlashings")) {
+            const resp = handlers.beacon.getPoolAttesterSlashings(ctx);
+            const body = try std.fmt.allocPrint(alloc, "{{\"data\":{{\"count\":{d}}}}}", .{resp.data});
+            return .{ .status = 200, .body = body };
+        }
+        if (std.mem.eql(u8, op, "getPoolBlsToExecutionChanges")) {
+            const resp = handlers.beacon.getPoolBlsToExecutionChanges(ctx);
+            const body = try std.fmt.allocPrint(alloc, "{{\"data\":{{\"count\":{d}}}}}", .{resp.data});
             return .{ .status = 200, .body = body };
         }
 

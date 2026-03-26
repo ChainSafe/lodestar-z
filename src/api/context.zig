@@ -75,6 +75,48 @@ pub const HeadStateCallback = struct {
 };
 
 // ---------------------------------------------------------------------------
+// Peer DB callback — type-erased access to the networking PeerDB
+// ---------------------------------------------------------------------------
+
+/// Info about a single peer, returned from the peer DB callback.
+/// Matches the shape needed by the `/eth/v1/node/peers` response.
+pub const PeerEntry = struct {
+    peer_id: []const u8,
+    state: types.PeerState,
+    direction: types.PeerDirection,
+    agent: ?[]const u8,
+};
+
+/// Aggregate peer counts by connection state.
+pub const PeerCounts = struct {
+    connected: u64,
+    disconnected: u64,
+    connecting: u64,
+    disconnecting: u64,
+};
+
+/// Type-erased callback for accessing the PeerDB.
+/// BeaconNode wires this so the API can query peers without importing networking.
+pub const PeerDBCallback = struct {
+    ptr: *anyopaque,
+    /// Returns the list of connected peers. Caller owns the returned slice.
+    getConnectedPeersFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]PeerEntry,
+    /// Returns aggregate peer counts.
+    getPeerCountsFn: *const fn (ptr: *anyopaque) PeerCounts,
+};
+
+// ---------------------------------------------------------------------------
+// Operation pool callback — type-erased access to the op pools
+// ---------------------------------------------------------------------------
+
+/// Type-erased callback for querying operation pools.
+pub const OpPoolCallback = struct {
+    ptr: *anyopaque,
+    /// Returns the number of items in each pool: [attestation_groups, voluntary_exits, proposer_slashings, attester_slashings, bls_changes].
+    getPoolCountsFn: *const fn (ptr: *anyopaque) [5]usize,
+};
+
+// ---------------------------------------------------------------------------
 // ApiContext
 // ---------------------------------------------------------------------------
 
@@ -108,4 +150,10 @@ pub const ApiContext = struct {
 
     /// Optional head state callback. Nil until wired by BeaconNode.init.
     head_state: ?HeadStateCallback = null,
+
+    /// Optional peer DB callback. Nil until wired by BeaconNode.init.
+    peer_db: ?PeerDBCallback = null,
+
+    /// Optional operation pool callback. Nil until wired by BeaconNode.init.
+    op_pool: ?OpPoolCallback = null,
 };

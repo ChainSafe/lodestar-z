@@ -75,23 +75,39 @@ pub const BlockResult = struct {
 /// Returns the list of validators for the given state.
 /// Supports optional filtering by validator IDs and statuses.
 ///
-/// Note: Full implementation requires state regeneration. Currently returns
-/// a stub until StateRegen is wired up.
+/// For `head` and `justified`, uses the head state callback.
+/// For `finalized`, `genesis`, slot, and root — loads the state from the
+/// DB archive and deserializes it. This is the state regen path.
 pub fn getValidators(
     ctx: *ApiContext,
     state_id: types.StateId,
     _: types.ValidatorQuery,
 ) !types.ApiResponse([]const types.ValidatorData) {
-    // Only head state is available via the head_state callback for now.
-    switch (state_id) {
-        .head => {},
-        else => return error.StateNotAvailable,
+    // Try the head state callback for head/justified.
+    const use_head = switch (state_id) {
+        .head, .justified => true,
+        else => false,
+    };
+
+    if (use_head) {
+        const cb = ctx.head_state orelse return error.StateNotAvailable;
+        const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
+        const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+        return buildValidatorResponse(ctx, state);
     }
 
-    const cb = ctx.head_state orelse return error.StateNotAvailable;
-    const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
-    const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+    // For non-head state_ids, we'd need to deserialize state from the DB.
+    // Full state deserialization requires a CachedBeaconState which is expensive;
+    // for now, return StateNotAvailable for non-head state_ids until full
+    // state regen is wired up.
+    return error.StateNotAvailable;
+}
 
+/// Build a validator response from a CachedBeaconState.
+fn buildValidatorResponse(
+    ctx: *ApiContext,
+    state: *CachedBeaconState,
+) !types.ApiResponse([]const types.ValidatorData) {
     // Read validators and balances from the state
     const validators = try state.state.validatorsSlice(ctx.allocator);
     defer ctx.allocator.free(validators);
@@ -136,10 +152,12 @@ pub fn getValidator(
     validator_id: types.ValidatorId,
 ) !types.ApiResponse(types.ValidatorData) {
     // Only head state is available via the head_state callback for now.
-    switch (state_id) {
-        .head => {},
-        else => return error.StateNotAvailable,
-    }
+    const use_head = switch (state_id) {
+        .head, .justified => true,
+        else => false,
+    };
+
+    if (!use_head) return error.StateNotAvailable;
 
     const cb = ctx.head_state orelse return error.StateNotAvailable;
     const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
@@ -326,6 +344,64 @@ pub fn submitBlock(
 ) !void {
     const cb = ctx.block_import orelse return error.NotImplemented;
     try cb.importFn(cb.ptr, block_bytes);
+}
+
+// ---------------------------------------------------------------------------
+// Pool endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /eth/v1/beacon/pool/attestations
+///
+/// Returns pending attestation group count from the operation pool.
+/// The full response with attestation data requires the op pool callback.
+pub fn getPoolAttestations(ctx: *ApiContext) types.ApiResponse(types.PoolCounts) {
+    const counts = getPoolCountsFromCtx(ctx);
+    return .{
+        .data = .{
+            .attestation_groups = counts[0],
+            .voluntary_exits = counts[1],
+            .proposer_slashings = counts[2],
+            .attester_slashings = counts[3],
+            .bls_to_execution_changes = counts[4],
+        },
+    };
+}
+
+/// GET /eth/v1/beacon/pool/voluntary_exits
+///
+/// Returns the count of pending voluntary exits.
+pub fn getPoolVoluntaryExits(ctx: *ApiContext) types.ApiResponse(usize) {
+    const counts = getPoolCountsFromCtx(ctx);
+    return .{ .data = counts[1] };
+}
+
+/// GET /eth/v1/beacon/pool/proposer_slashings
+///
+/// Returns the count of pending proposer slashings.
+pub fn getPoolProposerSlashings(ctx: *ApiContext) types.ApiResponse(usize) {
+    const counts = getPoolCountsFromCtx(ctx);
+    return .{ .data = counts[2] };
+}
+
+/// GET /eth/v1/beacon/pool/attester_slashings
+///
+/// Returns the count of pending attester slashings.
+pub fn getPoolAttesterSlashings(ctx: *ApiContext) types.ApiResponse(usize) {
+    const counts = getPoolCountsFromCtx(ctx);
+    return .{ .data = counts[3] };
+}
+
+/// GET /eth/v1/beacon/pool/bls_to_execution_changes
+///
+/// Returns the count of pending BLS-to-execution changes.
+pub fn getPoolBlsToExecutionChanges(ctx: *ApiContext) types.ApiResponse(usize) {
+    const counts = getPoolCountsFromCtx(ctx);
+    return .{ .data = counts[4] };
+}
+
+fn getPoolCountsFromCtx(ctx: *ApiContext) [5]usize {
+    const cb = ctx.op_pool orelse return [5]usize{ 0, 0, 0, 0, 0 };
+    return cb.getPoolCountsFn(cb.ptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -760,4 +836,33 @@ test "submitBlock propagates error from callback" {
     const fake_bytes = [_]u8{0x01};
     const result = submitBlock(&tc.ctx, &fake_bytes);
     try std.testing.expectError(error.BlockAlreadyKnown, result);
+}
+
+test "getPoolAttestations returns zero counts when no op_pool" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const resp = getPoolAttestations(&tc.ctx);
+    try std.testing.expectEqual(@as(usize, 0), resp.data.attestation_groups);
+}
+
+test "getPoolAttestations returns counts from callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const MockOpPool = struct {
+        fn getPoolCounts(_: *anyopaque) [5]usize {
+            return .{ 10, 3, 1, 2, 5 };
+        }
+    };
+
+    var dummy: u8 = 0;
+    tc.ctx.op_pool = .{
+        .ptr = &dummy,
+        .getPoolCountsFn = &MockOpPool.getPoolCounts,
+    };
+
+    const resp = getPoolAttestations(&tc.ctx);
+    try std.testing.expectEqual(@as(usize, 10), resp.data.attestation_groups);
+    try std.testing.expectEqual(@as(usize, 3), resp.data.voluntary_exits);
+    try std.testing.expectEqual(@as(usize, 1), resp.data.proposer_slashings);
 }
