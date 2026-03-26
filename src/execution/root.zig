@@ -20,6 +20,7 @@ pub const HttpEngine = http_engine.HttpEngine;
 pub const Transport = http_engine.Transport;
 pub const Header = http_engine.Header;
 pub const MockTransport = http_engine.MockTransport;
+pub const PosixHttpTransport = http_engine.PosixHttpTransport;
 
 pub const ExecutionPayloadStatus = engine_api_types.ExecutionPayloadStatus;
 pub const PayloadStatusV1 = engine_api_types.PayloadStatusV1;

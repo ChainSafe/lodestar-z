@@ -84,6 +84,8 @@ const EngineApi = execution_mod.EngineApi;
 const ExecutionPayloadStatus = execution_mod.ExecutionPayloadStatus;
 const ForkchoiceStateV1 = execution_mod.ForkchoiceStateV1;
 const MockEngine = execution_mod.MockEngine;
+const HttpEngine = execution_mod.HttpEngine;
+const PosixHttpTransport = execution_mod.PosixHttpTransport;
 
 const metrics_mod = @import("metrics.zig");
 pub const BeaconMetrics = metrics_mod.BeaconMetrics;
@@ -477,6 +479,52 @@ pub const HeadInfo = struct {
 // BeaconNode
 // ---------------------------------------------------------------------------
 
+
+/// Load a JWT secret from a hex-encoded file.
+///
+/// The file must contain a 0x-prefixed (or bare) hex string of exactly
+/// 32 bytes (64 hex chars). Whitespace and newlines are stripped.
+/// This matches the format used by Geth, Nethermind, Besu, etc.
+fn loadJwtSecret(allocator: Allocator, file_path: []const u8) ![32]u8 {
+    // Use Linux syscalls directly — std.Io requires an Io context we don't have at init time.
+    const linux = std.os.linux;
+    const path_z = try allocator.dupeZ(u8, file_path);
+    defer allocator.free(path_z);
+
+    const open_rc = linux.openat(linux.AT.FDCWD, path_z, .{}, 0);
+    const open_errno = linux.errno(open_rc);
+    if (open_errno != .SUCCESS) return error.JwtFileNotFound;
+    const fd: i32 = @intCast(open_rc);
+    defer _ = linux.close(fd);
+
+    var buf: [1024]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const rc = linux.read(fd, buf[total..].ptr, buf.len - total);
+        const errno = linux.errno(rc);
+        if (errno != .SUCCESS) return error.JwtFileReadError;
+        const n: usize = @intCast(rc);
+        if (n == 0) break;
+        total += n;
+    }
+    const file_content = buf[0..total];
+
+    // Strip whitespace and newlines.
+    const trimmed = std.mem.trim(u8, file_content, " \t\n\r");
+
+    // Strip optional "0x" prefix.
+    const hex_str = if (trimmed.len >= 2 and trimmed[0] == '0' and trimmed[1] == 'x')
+        trimmed[2..]
+    else
+        trimmed;
+
+    if (hex_str.len != 64) return error.InvalidJwtSecretLength;
+
+    var secret: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&secret, hex_str) catch return error.InvalidJwtSecretHex;
+    return secret;
+}
+
 pub const BeaconNode = struct {
     allocator: Allocator,
     config: *const BeaconConfig,
@@ -548,6 +596,8 @@ pub const BeaconNode = struct {
 
     // Execution Layer engine (Engine API client or mock).
     mock_engine: ?*MockEngine = null,
+    http_engine: ?*HttpEngine = null,
+    posix_transport: ?*PosixHttpTransport = null,
     engine_api: ?EngineApi = null,
 
     // Genesis validators root — set by initFromGenesis, used for fork digest computation.
@@ -722,11 +772,47 @@ pub const BeaconNode = struct {
             },
         };
 
-        // Initialize execution engine (mock by default).
-        // TODO: Initialize HttpEngine when opts.execution_urls is non-empty.
-        const mock_engine_ptr = try allocator.create(MockEngine);
-        mock_engine_ptr.* = MockEngine.init(allocator);
-        const engine = mock_engine_ptr.engine();
+        // Initialize execution engine.
+        // Use HttpEngine when an execution URL is provided; fall back to MockEngine.
+        var mock_engine_ptr: ?*MockEngine = null;
+        var http_engine_ptr: ?*HttpEngine = null;
+        var posix_transport_ptr: ?*PosixHttpTransport = null;
+        var engine: ?EngineApi = null;
+
+        if (opts.execution_urls.len > 0) {
+            // Load JWT secret from file if configured.
+            var jwt_secret: ?[32]u8 = null;
+            if (opts.jwt_secret_path) |jwt_path| {
+                jwt_secret = loadJwtSecret(allocator, jwt_path) catch |err| {
+                    std.log.err("Failed to load JWT secret from '{s}': {}", .{ jwt_path, err });
+                    return err;
+                };
+                std.log.info("Loaded JWT secret from {s}", .{jwt_path});
+            }
+
+            // Create production HTTP transport and HttpEngine.
+            const transport = try allocator.create(PosixHttpTransport);
+            transport.* = PosixHttpTransport.init(allocator);
+            posix_transport_ptr = transport;
+
+            const http_eng = try allocator.create(HttpEngine);
+            http_eng.* = HttpEngine.init(
+                allocator,
+                opts.execution_urls[0],
+                jwt_secret,
+                transport.transport(),
+            );
+            http_engine_ptr = http_eng;
+            engine = http_eng.engine();
+            std.log.info("Execution engine: HttpEngine -> {s}", .{opts.execution_urls[0]});
+        } else {
+            // No execution URL — use mock engine (tests / pre-merge).
+            const mock = try allocator.create(MockEngine);
+            mock.* = MockEngine.init(allocator);
+            mock_engine_ptr = mock;
+            engine = mock.engine();
+            std.log.info("Execution engine: MockEngine (no --execution-url)", .{});
+        }
 
         const node = try allocator.create(BeaconNode);
         node.* = .{
@@ -745,6 +831,8 @@ pub const BeaconNode = struct {
             .chain = chain_struct,
             .clock = null,
             .mock_engine = mock_engine_ptr,
+            .http_engine = http_engine_ptr,
+            .posix_transport = posix_transport_ptr,
             .engine_api = engine,
             .cp_datastore = cp_datastore,
             .kv_backend = kv_backend,
@@ -755,6 +843,9 @@ pub const BeaconNode = struct {
             .head_state_cb_ctx = head_state_cb_ctx,
             .unknown_block_sync = UnknownBlockSync.init(allocator),
         };
+
+        // Wire engine API into block importer for execution payload verification.
+        block_importer.engine_api = engine;
 
         return node;
     }
@@ -781,6 +872,16 @@ pub const BeaconNode = struct {
         if (self.mock_engine) |me| {
             me.deinit();
             allocator.destroy(me);
+        }
+
+        if (self.http_engine) |he| {
+            he.deinit();
+            allocator.destroy(he);
+        }
+
+        if (self.posix_transport) |pt| {
+            pt.deinit();
+            allocator.destroy(pt);
         }
 
         if (self.fork_choice) |fc| {
@@ -1802,9 +1903,47 @@ pub const BeaconNode = struct {
     /// with the current head, safe (justified), and finalized block hashes.
     /// Errors are non-fatal — the block is already imported.
     fn notifyForkchoiceUpdate(self: *BeaconNode, new_head_root: [32]u8) !void {
-        // TODO: Re-enable when execution module is wired.
-        _ = self;
-        _ = new_head_root;
+        const engine = self.engine_api orelse return;
+        const fc = self.fork_choice orelse return;
+
+        // Head block hash: from the imported block's execution payload.
+        const head_node = fc.getBlock(new_head_root);
+        const head_block_hash = if (head_node) |node|
+            node.extra_meta.executionPayloadBlockHash() orelse return
+        else
+            return;
+
+        // Safe block hash: from the justified checkpoint's block.
+        const justified_cp = fc.getJustifiedCheckpoint();
+        const safe_block_hash = if (fc.getBlock(justified_cp.root)) |node|
+            node.extra_meta.executionPayloadBlockHash() orelse std.mem.zeroes([32]u8)
+        else
+            std.mem.zeroes([32]u8);
+
+        // Finalized block hash: from the finalized checkpoint's block.
+        const finalized_cp = fc.getFinalizedCheckpoint();
+        const finalized_block_hash = if (fc.getBlock(finalized_cp.root)) |node|
+            node.extra_meta.executionPayloadBlockHash() orelse std.mem.zeroes([32]u8)
+        else
+            std.mem.zeroes([32]u8);
+
+        const fcu_state = ForkchoiceStateV1{
+            .head_block_hash = head_block_hash,
+            .safe_block_hash = safe_block_hash,
+            .finalized_block_hash = finalized_block_hash,
+        };
+
+        const result = engine.forkchoiceUpdated(fcu_state, null) catch |err| {
+            std.log.warn("engine_forkchoiceUpdatedV3 failed: {}", .{err});
+            return;
+        };
+
+        std.log.info("forkchoiceUpdated: status={s} head={s}... safe={s}... finalized={s}...", .{
+            @tagName(result.payload_status.status),
+            &std.fmt.bytesToHex(head_block_hash[0..4], .lower),
+            &std.fmt.bytesToHex(safe_block_hash[0..4], .lower),
+            &std.fmt.bytesToHex(finalized_block_hash[0..4], .lower),
+        });
     }
 
     /// Get the current head info.

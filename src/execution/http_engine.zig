@@ -1083,3 +1083,278 @@ fn makeTestPayload(block_hash: [32]u8) ExecutionPayloadV3 {
         .excess_blob_gas = 0,
     };
 }
+
+// ── PosixHttpTransport ────────────────────────────────────────────────────────
+
+/// Production HTTP transport using blocking Linux syscalls.
+///
+/// Implements the Transport interface for real EL communication. Opens a new
+/// TCP connection for each request (no connection pooling). This is acceptable
+/// for Engine API usage where requests are infrequent (once per slot, ~12s).
+///
+/// Not thread-safe: must be called from a single fiber/thread at a time.
+pub const PosixHttpTransport = struct {
+    allocator: Allocator,
+
+    const linux = std.os.linux;
+
+    pub fn init(allocator: Allocator) PosixHttpTransport {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(_: *PosixHttpTransport) void {}
+
+    pub fn transport(self: *PosixHttpTransport) Transport {
+        return .{
+            .ptr = @ptrCast(self),
+            .sendFn = @ptrCast(&PosixHttpTransport.send),
+        };
+    }
+
+    fn send(
+        self: *PosixHttpTransport,
+        url: []const u8,
+        headers: []const Header,
+        body: []const u8,
+    ) anyerror![]const u8 {
+        // Parse URL to extract host, port, and path.
+        const parsed = try parseUrl(url);
+
+        // Resolve host to IP address using getaddrinfo (libc).
+        const host_z = try self.allocator.dupeZ(u8, parsed.host);
+        defer self.allocator.free(host_z);
+        const port_str = try std.fmt.allocPrint(self.allocator, "{d}", .{parsed.port});
+        defer self.allocator.free(port_str);
+        const port_z = try self.allocator.dupeZ(u8, port_str);
+        defer self.allocator.free(port_z);
+
+        var hints: std.c.addrinfo = .{
+            .flags = .{},
+            .family = @intCast(linux.AF.INET),
+            .socktype = @intCast(linux.SOCK.STREAM),
+            .protocol = 0,
+            .addrlen = 0,
+            .addr = null,
+            .canonname = null,
+            .next = null,
+        };
+        var ai_result: ?*std.c.addrinfo = null;
+        const gai_rc = std.c.getaddrinfo(host_z.ptr, port_z.ptr, &hints, &ai_result);
+        if (@intFromEnum(gai_rc) != 0) return error.DnsResolutionFailed;
+        defer std.c.freeaddrinfo(ai_result.?);
+
+        const ai = ai_result orelse return error.DnsResolutionFailed;
+
+        // Open TCP socket via Linux syscall.
+        const sock_rc = linux.socket(
+            @intCast(ai.family),
+            linux.SOCK.STREAM | linux.SOCK.CLOEXEC,
+            0,
+        );
+        const sockfd: i32 = if (linux.errno(sock_rc) != .SUCCESS) return error.SocketFailed else @intCast(sock_rc);
+        errdefer _ = linux.close(sockfd);
+
+        // Connect.
+        const conn_rc = linux.connect(sockfd, @ptrCast(ai.addr.?), ai.addrlen);
+        if (linux.errno(conn_rc) != .SUCCESS) return error.ConnectFailed;
+
+        // Build HTTP/1.1 request.
+        const request_line = try std.fmt.allocPrint(
+            self.allocator,
+            "POST {s} HTTP/1.1\r\n",
+            .{parsed.path},
+        );
+        defer self.allocator.free(request_line);
+
+        const host_header = try std.fmt.allocPrint(
+            self.allocator,
+            "Host: {s}:{d}\r\n",
+            .{ parsed.host, parsed.port },
+        );
+        defer self.allocator.free(host_header);
+
+        const content_length_header = try std.fmt.allocPrint(
+            self.allocator,
+            "Content-Length: {d}\r\n",
+            .{body.len},
+        );
+        defer self.allocator.free(content_length_header);
+
+        // Send request line.
+        try sendAll(sockfd, request_line);
+        // Send host header.
+        try sendAll(sockfd, host_header);
+        // Send content-length.
+        try sendAll(sockfd, content_length_header);
+        // Send custom headers (Content-Type, Authorization, etc.).
+        for (headers) |h| {
+            const header_line = try std.fmt.allocPrint(
+                self.allocator,
+                "{s}: {s}\r\n",
+                .{ h.name, h.value },
+            );
+            defer self.allocator.free(header_line);
+            try sendAll(sockfd, header_line);
+        }
+        // End headers.
+        try sendAll(sockfd, "\r\n");
+        // Send body.
+        if (body.len > 0) {
+            try sendAll(sockfd, body);
+        }
+
+        // Read response.
+        var resp_buf: std.ArrayList(u8) = .empty;
+        defer resp_buf.deinit(self.allocator);
+
+        var read_buf: [8192]u8 = undefined;
+        while (true) {
+            const rc = linux.read(sockfd, &read_buf, read_buf.len);
+            const errno = linux.errno(rc);
+            if (errno != .SUCCESS) break;
+            const n: usize = @intCast(rc);
+            if (n == 0) break;
+            try resp_buf.appendSlice(self.allocator, read_buf[0..n]);
+
+            // Check if we've received the full response.
+            if (findResponseBody(resp_buf.items)) |bi| {
+                if (bi.content_length) |cl| {
+                    if (resp_buf.items.len >= bi.header_end + cl) break;
+                }
+                if (bi.chunked) {
+                    if (std.mem.indexOf(u8, resp_buf.items[bi.header_end..], "0\r\n\r\n") != null) break;
+                }
+            }
+        }
+        _ = linux.close(sockfd);
+
+        // Extract response body from HTTP response.
+        const body_info = findResponseBody(resp_buf.items) orelse return error.MalformedHttpResponse;
+        const resp_body_start = body_info.header_end;
+
+        if (body_info.chunked) {
+            return try decodeChunked(self.allocator, resp_buf.items[resp_body_start..]);
+        }
+
+        const resp_body_end = if (body_info.content_length) |cl|
+            @min(resp_body_start + cl, resp_buf.items.len)
+        else
+            resp_buf.items.len;
+
+        return try self.allocator.dupe(u8, resp_buf.items[resp_body_start..resp_body_end]);
+    }
+
+    const UrlParts = struct {
+        host: []const u8,
+        port: u16,
+        path: []const u8,
+    };
+
+    fn parseUrl(url: []const u8) !UrlParts {
+        // Strip scheme.
+        var rest: []const u8 = url;
+        if (std.mem.startsWith(u8, rest, "http://")) {
+            rest = rest[7..];
+        } else if (std.mem.startsWith(u8, rest, "https://")) {
+            rest = rest[8..];
+        } else {
+            return error.UnsupportedScheme;
+        }
+
+        // Split host:port from path.
+        const path_start = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+        const host_port = rest[0..path_start];
+        const path = if (path_start < rest.len) rest[path_start..] else "/";
+
+        // Split host and port.
+        if (std.mem.indexOfScalar(u8, host_port, ':')) |colon| {
+            const port_str = host_port[colon + 1 ..];
+            return .{
+                .host = host_port[0..colon],
+                .port = std.fmt.parseInt(u16, port_str, 10) catch 8551,
+                .path = path,
+            };
+        }
+
+        return .{
+            .host = host_port,
+            .port = if (std.mem.startsWith(u8, url, "https://")) @as(u16, 443) else 80,
+            .path = path,
+        };
+    }
+
+    const BodyInfo = struct {
+        header_end: usize,
+        content_length: ?usize,
+        chunked: bool,
+    };
+
+    fn findResponseBody(data: []const u8) ?BodyInfo {
+        const header_sep = std.mem.indexOf(u8, data, "\r\n\r\n") orelse return null;
+        const header_end = header_sep + 4;
+        const headers_str = data[0..header_sep];
+
+        // Parse Content-Length.
+        var content_length: ?usize = null;
+        var chunked = false;
+
+        var line_iter = std.mem.splitSequence(u8, headers_str, "\r\n");
+        while (line_iter.next()) |line| {
+            if (asciiStartsWithIgnoreCase(line, "content-length:")) {
+                const val = std.mem.trim(u8, line["content-length:".len..], " ");
+                content_length = std.fmt.parseInt(usize, val, 10) catch null;
+            }
+            if (asciiStartsWithIgnoreCase(line, "transfer-encoding:")) {
+                const val = std.mem.trim(u8, line["transfer-encoding:".len..], " ");
+                if (std.mem.indexOf(u8, val, "chunked") != null) chunked = true;
+            }
+        }
+
+        return .{
+            .header_end = header_end,
+            .content_length = content_length,
+            .chunked = chunked,
+        };
+    }
+
+    fn asciiStartsWithIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+        if (haystack.len < needle.len) return false;
+        for (haystack[0..needle.len], needle) |h, n| {
+            if (std.ascii.toLower(h) != std.ascii.toLower(n)) return false;
+        }
+        return true;
+    }
+
+    fn decodeChunked(allocator: Allocator, data: []const u8) ![]const u8 {
+        var result: std.ArrayList(u8) = .empty;
+        errdefer result.deinit(allocator);
+        var pos: usize = 0;
+
+        while (pos < data.len) {
+            // Find end of chunk size line.
+            const line_end = std.mem.indexOf(u8, data[pos..], "\r\n") orelse break;
+            const size_str = std.mem.trim(u8, data[pos .. pos + line_end], " ");
+            const chunk_size = std.fmt.parseInt(usize, size_str, 16) catch break;
+            if (chunk_size == 0) break;
+
+            pos += line_end + 2; // Skip past "\r\n"
+            if (pos + chunk_size > data.len) break;
+            try result.appendSlice(allocator, data[pos .. pos + chunk_size]);
+            pos += chunk_size + 2; // Skip chunk data + trailing "\r\n"
+        }
+
+        return try result.toOwnedSlice(allocator);
+    }
+
+    fn sendAll(fd: i32, data: []const u8) !void {
+        var sent: usize = 0;
+        while (sent < data.len) {
+            const rc = linux.write(fd, data[sent..].ptr, data.len - sent);
+            const errno = linux.errno(rc);
+            if (errno != .SUCCESS) return error.WriteFailed;
+            const n: usize = @intCast(rc);
+            if (n == 0) return error.ConnectionClosed;
+            sent += n;
+        }
+    }
+};
