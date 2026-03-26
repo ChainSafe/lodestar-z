@@ -1163,27 +1163,20 @@ pub const BeaconNode = struct {
             std.log.info("Range sync complete: head at slot {d}", .{self.head_tracker.head_slot});
         }
 
-        // Start gossipsub heartbeat — run inline every 700ms between sync iterations.
-        // (A proper implementation would use a background fiber, but for the speedrun
-        // we tick the heartbeat in the sync loop below.)
+        // Start gossipsub heartbeat on a background fiber (runs every 700ms).
+        var p2p_svc = &self.p2p_service.?;
+        p2p_svc.startHeartbeat(io);
+        std.log.info("Gossipsub heartbeat started (700ms interval)", .{});
 
         // Keep syncing: periodically request new blocks via range sync
         std.log.info("Starting sync maintenance loop...", .{});
         while (true) {
-            // Sleep ~6 seconds, ticking gossipsub heartbeat every 700ms
-            {
-                var ticks: u32 = 0;
-                while (ticks < 8) : (ticks += 1) { // 8 * 700ms ≈ 5.6s
-                    const hb_sleep: std.Io.Timeout = .{ .duration = .{
-                        .raw = std.Io.Duration.fromMilliseconds(700),
-                        .clock = .awake,
-                    } };
-                    hb_sleep.sleep(io) catch break;
-                    if (self.p2p_service) |p2p| {
-                        p2p.gossipsub.heartbeat() catch {};
-                    }
-                }
-            }
+            // Sleep one slot period before next sync check
+            const slot_sleep: std.Io.Timeout = .{ .duration = .{
+                .raw = std.Io.Duration.fromNanoseconds(@as(i96, 6) * std.time.ns_per_s),
+                .clock = .awake,
+            } };
+            slot_sleep.sleep(io) catch break;
 
             // Re-request Status to check peer's head
             const status = self.sendStatus(io, svc, peer_id) catch |err| {

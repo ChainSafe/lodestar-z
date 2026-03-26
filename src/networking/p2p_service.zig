@@ -292,6 +292,22 @@ pub const P2pService = struct {
         self.gossipsub.deinit();
     }
 
+    /// Spawn a background fiber for the gossipsub heartbeat timer.
+    pub fn startHeartbeat(self: *Self, io: Io) void {
+        self.network.background.async(io, heartbeatLoop, .{ self.gossipsub, io });
+    }
+
+    fn heartbeatLoop(gs: *GossipsubService, io: Io) void {
+        while (true) {
+            const t: Io.Timeout = .{ .duration = .{
+                .raw = Io.Duration.fromMilliseconds(700),
+                .clock = .awake,
+            } };
+            t.sleep(io) catch return;
+            gs.heartbeat() catch {};
+        }
+    }
+
     /// Return the bound server listen address.
     pub fn listenAddr(self: *const Self) ?std.Io.net.IpAddress {
         return self.network.listenAddrs();
