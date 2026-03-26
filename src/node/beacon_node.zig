@@ -49,6 +49,10 @@ const HeadTracker = chain_mod.HeadTracker;
 const ImportResult = chain_mod.ImportResult;
 const ImportError = chain_mod.ImportError;
 const networking = @import("networking");
+const DiscoveryService = networking.DiscoveryService;
+const DiscoveryConfig = networking.DiscoveryConfig;
+const ConnectionManager = networking.ConnectionManager;
+const ConnectionManagerConfig = networking.ConnectionManagerConfig;
 const eth2_protocols = networking.eth2_protocols;
 const discv5 = @import("discv5");
 const ssl = @import("ssl");
@@ -678,6 +682,12 @@ pub const BeaconNode = struct {
     // HTTP server for the Beacon REST API (lazy-initialized via startApi).
     http_server: ?api_mod.HttpServer = null,
 
+    // Discovery service (lazy-initialized via startP2p).
+    discovery_service: ?*DiscoveryService = null,
+
+    // Connection manager — tracks peer connections and enforces limits.
+    connection_manager: ?*ConnectionManager = null,
+
     // P2P service (lazy-initialized via startP2p).
     // Owns the libp2p Switch, gossipsub service, and gossip adapter.
     p2p_service: ?P2pService = null,
@@ -1033,6 +1043,18 @@ pub const BeaconNode = struct {
                 lmdb_store.deinit();
                 allocator.destroy(lmdb_store);
             },
+        }
+
+        // Discovery service cleanup.
+        if (self.discovery_service) |ds| {
+            ds.deinit();
+            allocator.destroy(ds);
+        }
+
+        // Connection manager cleanup.
+        if (self.connection_manager) |cm| {
+            cm.deinit();
+            allocator.destroy(cm);
         }
 
         // P2P validator (heap-allocated to keep pointers stable; p2p_service
@@ -1429,6 +1451,16 @@ pub const BeaconNode = struct {
         var svc = &self.p2p_service.?;
         try svc.start(io, listen_multiaddr);
 
+        // Initialize discovery service.
+        self.initDiscoveryService() catch |err| {
+            std.log.warn("Failed to initialize discovery service: {}", .{err});
+        };
+
+        // Initialize connection manager.
+        self.initConnectionManager() catch |err| {
+            std.log.warn("Failed to initialize connection manager: {}", .{err});
+        };
+
         // Initialize GossipHandler for attestation/aggregate processing.
         self.initGossipHandler();
 
@@ -1561,6 +1593,14 @@ pub const BeaconNode = struct {
             } };
             slot_sleep.sleep(io) catch break;
 
+            // Run discovery tick — find new peers if below target.
+            if (self.discovery_service) |ds| {
+                if (self.connection_manager) |cm| {
+                    ds.setConnectedPeers(cm.connectedCount());
+                }
+                ds.discoverPeers();
+            }
+
             // Poll gossipsub for all gossip messages (blocks, attestations, aggregates).
             if (self.p2p_service) |p2p| {
                 self.processGossipEvents(p2p);
@@ -1580,6 +1620,55 @@ pub const BeaconNode = struct {
             // Update API sync status from the sync service.
             self.updateApiSyncStatus();
         }
+    }
+
+    /// Initialize the discovery service.
+    fn initDiscoveryService(self: *BeaconNode) !void {
+        const allocator = self.allocator;
+
+        // Generate a secp256k1 secret key for discv5 identity.
+        // Uses deterministic seed for now — in production, persist to data_dir.
+        // TODO: use proper random or load from disk.
+        var secret_key: [32]u8 = undefined;
+        {
+            var prng = std.Random.DefaultPrng.init(0xd15c0055eed);
+            prng.random().bytes(&secret_key);
+        }
+
+        const fork_digest = self.config.forkDigestAtSlot(
+            self.head_tracker.head_slot,
+            self.genesis_validators_root,
+        );
+
+        const ds = try allocator.create(DiscoveryService);
+        errdefer allocator.destroy(ds);
+        ds.* = try DiscoveryService.init(allocator, .{
+            .listen_port = 9000, // TODO: wire from NodeOptions.discovery_port
+            .secret_key = secret_key,
+            .local_ip = [4]u8{ 0, 0, 0, 0 },
+            .p2p_port = 9000, // TODO: wire from actual listen port
+            .fork_digest = fork_digest,
+            .target_peers = 50, // TODO: wire from NodeOptions.target_peers
+            .cli_bootnodes = self.bootnodes,
+        });
+
+        // Seed the routing table with bootnodes.
+        ds.seedBootnodes();
+        self.discovery_service = ds;
+
+        std.log.info("Discovery service initialized (known_peers={d})", .{ds.knownPeerCount()});
+    }
+
+    /// Initialize the connection manager.
+    fn initConnectionManager(self: *BeaconNode) !void {
+        const allocator = self.allocator;
+        const cm = try allocator.create(ConnectionManager);
+        errdefer allocator.destroy(cm);
+        cm.* = ConnectionManager.init(allocator, .{
+            .target_peers = 50, // TODO: wire from NodeOptions.target_peers
+        });
+        self.connection_manager = cm;
+        std.log.info("Connection manager initialized (target_peers={d})", .{cm.config.target_peers});
     }
 
     /// Initialize the sync pipeline (PeerManager, SyncService, SyncController).
