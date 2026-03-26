@@ -85,6 +85,31 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 const Node = @import("persistent_merkle_tree").Node;
 const ProposerSlashing = types.phase0.ProposerSlashing.Type;
 
+const TestEnvironment = struct {
+    allocator: std.mem.Allocator,
+    pool: Node.Pool,
+    test_state: TestCachedBeaconState,
+
+    const num_validators = 256;
+    const pool_size = num_validators * 5;
+
+    fn init(allocator: std.mem.Allocator) !*TestEnvironment {
+        const self = try allocator.create(TestEnvironment);
+        errdefer allocator.destroy(self);
+        self.allocator = allocator;
+        self.pool = try Node.Pool.init(allocator, pool_size);
+        errdefer self.pool.deinit();
+        self.test_state = try TestCachedBeaconState.init(allocator, &self.pool, num_validators);
+        return self;
+    }
+
+    fn deinit(self: *TestEnvironment) void {
+        self.test_state.deinit();
+        self.pool.deinit();
+        self.allocator.destroy(self);
+    }
+};
+
 fn makeValidProposerSlashing(proposer_index: u64, slot: u64) ProposerSlashing {
     var slashing = types.phase0.ProposerSlashing.default_value;
     slashing.signed_header_1.message.slot = slot;
@@ -97,34 +122,24 @@ fn makeValidProposerSlashing(proposer_index: u64, slot: u64) ProposerSlashing {
 }
 
 test "assertValidProposerSlashing - valid proposer slashing" {
-    const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
-    defer test_state.deinit();
+    const env = try TestEnvironment.init(std.testing.allocator);
+    defer env.deinit();
 
     const slashing = makeValidProposerSlashing(0, 0);
 
     try assertValidProposerSlashing(
         .electra,
-        test_state.config,
-        test_state.cached_state.epoch_cache,
-        test_state.cached_state.state.castToFork(.electra),
+        env.test_state.config,
+        env.test_state.cached_state.epoch_cache,
+        env.test_state.cached_state.state.castToFork(.electra),
         &slashing,
         false,
     );
 }
 
 test "assertValidProposerSlashing - InvalidProposerSlashingSlotMismatch" {
-    const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
-    defer test_state.deinit();
+    const env = try TestEnvironment.init(std.testing.allocator);
+    defer env.deinit();
 
     var slashing = makeValidProposerSlashing(0, 0);
     slashing.signed_header_2.message.slot = 1;
@@ -133,9 +148,9 @@ test "assertValidProposerSlashing - InvalidProposerSlashingSlotMismatch" {
         error.InvalidProposerSlashingSlotMismatch,
         assertValidProposerSlashing(
             .electra,
-            test_state.config,
-            test_state.cached_state.epoch_cache,
-            test_state.cached_state.state.castToFork(.electra),
+            env.test_state.config,
+            env.test_state.cached_state.epoch_cache,
+            env.test_state.cached_state.state.castToFork(.electra),
             &slashing,
             false,
         ),
@@ -143,13 +158,8 @@ test "assertValidProposerSlashing - InvalidProposerSlashingSlotMismatch" {
 }
 
 test "assertValidProposerSlashing - InvalidProposerSlashingProposerIndexMismatch" {
-    const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
-    defer test_state.deinit();
+    const env = try TestEnvironment.init(std.testing.allocator);
+    defer env.deinit();
 
     var slashing = makeValidProposerSlashing(0, 0);
     slashing.signed_header_2.message.proposer_index = 1;
@@ -158,9 +168,9 @@ test "assertValidProposerSlashing - InvalidProposerSlashingProposerIndexMismatch
         error.InvalidProposerSlashingProposerIndexMismatch,
         assertValidProposerSlashing(
             .electra,
-            test_state.config,
-            test_state.cached_state.epoch_cache,
-            test_state.cached_state.state.castToFork(.electra),
+            env.test_state.config,
+            env.test_state.cached_state.epoch_cache,
+            env.test_state.cached_state.state.castToFork(.electra),
             &slashing,
             false,
         ),
@@ -168,13 +178,8 @@ test "assertValidProposerSlashing - InvalidProposerSlashingProposerIndexMismatch
 }
 
 test "assertValidProposerSlashing - InvalidProposerSlashingProposerIndexOutOfRange" {
-    const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
-    defer test_state.deinit();
+    const env = try TestEnvironment.init(std.testing.allocator);
+    defer env.deinit();
 
     const slashing = makeValidProposerSlashing(999, 0);
 
@@ -182,9 +187,9 @@ test "assertValidProposerSlashing - InvalidProposerSlashingProposerIndexOutOfRan
         error.InvalidProposerSlashingProposerIndexOutOfRange,
         assertValidProposerSlashing(
             .electra,
-            test_state.config,
-            test_state.cached_state.epoch_cache,
-            test_state.cached_state.state.castToFork(.electra),
+            env.test_state.config,
+            env.test_state.cached_state.epoch_cache,
+            env.test_state.cached_state.state.castToFork(.electra),
             &slashing,
             false,
         ),
@@ -192,13 +197,8 @@ test "assertValidProposerSlashing - InvalidProposerSlashingProposerIndexOutOfRan
 }
 
 test "assertValidProposerSlashing - InvalidProposerSlashingHeadersEqual" {
-    const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
-    defer test_state.deinit();
+    const env = try TestEnvironment.init(std.testing.allocator);
+    defer env.deinit();
 
     var slashing = makeValidProposerSlashing(0, 0);
     // Make headers identical
@@ -208,9 +208,9 @@ test "assertValidProposerSlashing - InvalidProposerSlashingHeadersEqual" {
         error.InvalidProposerSlashingHeadersEqual,
         assertValidProposerSlashing(
             .electra,
-            test_state.config,
-            test_state.cached_state.epoch_cache,
-            test_state.cached_state.state.castToFork(.electra),
+            env.test_state.config,
+            env.test_state.cached_state.epoch_cache,
+            env.test_state.cached_state.state.castToFork(.electra),
             &slashing,
             false,
         ),
@@ -218,16 +218,11 @@ test "assertValidProposerSlashing - InvalidProposerSlashingHeadersEqual" {
 }
 
 test "assertValidProposerSlashing - InvalidProposerSlashingProposerNotSlashable" {
-    const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
-    defer test_state.deinit();
+    const env = try TestEnvironment.init(std.testing.allocator);
+    defer env.deinit();
 
     // Mark validator 0 as already slashed
-    var validators_view = try test_state.cached_state.state.castToFork(.electra).validators();
+    var validators_view = try env.test_state.cached_state.state.castToFork(.electra).validators();
     var validator_view = try validators_view.get(0);
     try validator_view.set("slashed", true);
 
@@ -237,9 +232,9 @@ test "assertValidProposerSlashing - InvalidProposerSlashingProposerNotSlashable"
         error.InvalidProposerSlashingProposerNotSlashable,
         assertValidProposerSlashing(
             .electra,
-            test_state.config,
-            test_state.cached_state.epoch_cache,
-            test_state.cached_state.state.castToFork(.electra),
+            env.test_state.config,
+            env.test_state.cached_state.epoch_cache,
+            env.test_state.cached_state.state.castToFork(.electra),
             &slashing,
             false,
         ),
