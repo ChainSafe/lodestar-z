@@ -20,6 +20,11 @@ pub const WorkQueues = work_queues.WorkQueues;
 pub const QueueConfig = work_queues.QueueConfig;
 pub const SyncState = work_queues.SyncState;
 
+pub const processor = @import("processor.zig");
+pub const BeaconProcessor = processor.BeaconProcessor;
+pub const ProcessorMetrics = processor.ProcessorMetrics;
+pub const HandlerFn = processor.HandlerFn;
+
 test {
     testing.refAllDecls(@This());
 }
