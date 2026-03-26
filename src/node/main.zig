@@ -769,6 +769,23 @@ fn runBeacon(
     var pool = try Node.Pool.init(allocator, 200_000);
     defer pool.deinit();
 
+    // Parse direct peers
+    const direct_peers: []const []const u8 = if (opts.direct_peers) |raw| blk: {
+        var list: std.ArrayList([]const u8) = .empty;
+        var it = std.mem.splitScalar(u8, raw, ',');
+        while (it.next()) |addr| {
+            const trimmed = std.mem.trim(u8, addr, " \t");
+            if (trimmed.len > 0) try list.append(allocator, trimmed);
+        }
+        break :blk try list.toOwnedSlice(allocator);
+    } else &.{};
+    defer if (direct_peers.len > 0) allocator.free(direct_peers);
+
+    // Parse discovery port (defaults to p2p_port)
+    const discovery_port: ?u16 = if (opts.discovery_port) |port_str| blk: {
+        break :blk std.fmt.parseInt(u16, port_str, 10) catch null;
+    } else null;
+
     // Build NodeOptions from parsed CLI args.
     const node_opts = NodeOptions{
         .data_dir = opts.data_dir,
@@ -780,6 +797,10 @@ fn runBeacon(
         .jwt_secret_path = opts.jwt_secret,
         .target_peers = opts.target_peers,
         .network = network,
+        .enable_discv5 = true, // TODO: wire --no-discv5 flag
+        .discovery_port = discovery_port,
+        .direct_peers = direct_peers,
+        .enable_mdns = opts.mdns, // TODO: implement mDNS
     };
 
     // Create the BeaconNode.
