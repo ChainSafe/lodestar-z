@@ -55,4 +55,29 @@ pub fn createAggregateSignatureSetFromComponents(pubkeys: []const PublicKey, sig
     };
 }
 
+
+const BatchVerifier = bls.BatchVerifier;
+
+/// Verify a single signature set, or add it to the batch verifier if provided.
+/// When `batch` is non-null, the set is queued for batch verification and this
+/// function returns true (deferred verification).
+pub fn verifySingleSignatureSetOrDefer(set: *const SingleSignatureSet, batch: ?*BatchVerifier) !bool {
+    if (batch) |bv| {
+        bv.addSingle(set.pubkey, set.signing_root, set.signature) catch return error.BatchVerifierFull;
+        return true; // Deferred — will be verified in batch
+    }
+    return verifySingleSignatureSet(set);
+}
+
+/// Verify an aggregated signature set, or add it to the batch verifier if provided.
+/// When `batch` is non-null, the set is queued for batch verification and this
+/// function returns true (deferred verification).
+pub fn verifyAggregatedSignatureSetOrDefer(set: *const AggregatedSignatureSet, batch: ?*BatchVerifier) !bool {
+    if (batch) |bv| {
+        bv.addAggregate(set.pubkeys, set.signing_root, set.signature) catch return error.BatchVerifierFull;
+        return true; // Deferred — will be verified in batch
+    }
+    return verifyAggregatedSignatureSet(set);
+}
+
 // TODO: unit tests

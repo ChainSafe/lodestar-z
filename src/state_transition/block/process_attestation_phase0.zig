@@ -7,6 +7,7 @@ const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const isValidIndexedAttestation = @import("./is_valid_indexed_attestation.zig").isValidIndexedAttestation;
+const BatchVerifier = @import("bls").BatchVerifier;
 const ForkTypes = @import("fork_types").ForkTypes;
 const BeaconState = @import("fork_types").BeaconState;
 const Slot = types.primitive.Slot.Type;
@@ -19,6 +20,7 @@ pub fn processAttestationPhase0(
     state: *BeaconState(.phase0),
     attestation: *const ForkTypes(.phase0).Attestation.Type,
     verify_signature: bool,
+    batch_verifier: ?*BatchVerifier,
 ) !void {
     const slot = try state.slot();
     const validators_count = try state.validatorsCount();
@@ -61,6 +63,7 @@ pub fn processAttestationPhase0(
         validators_count,
         &indexed_attestation,
         verify_signature,
+        batch_verifier,
     )) {
         return error.InvalidAttestationInvalidIndexedAttestation;
     }

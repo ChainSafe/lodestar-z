@@ -7,6 +7,8 @@ const preset = @import("preset").preset;
 const ForkTypes = @import("fork_types").ForkTypes;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const verifyAggregatedSignatureSet = @import("../utils/signature_sets.zig").verifyAggregatedSignatureSet;
+const verifyAggregatedSignatureSetOrDefer = @import("../utils/signature_sets.zig").verifyAggregatedSignatureSetOrDefer;
+const BatchVerifier = @import("bls").BatchVerifier;
 const getIndexedAttestationSignatureSet = @import("../signature_sets/indexed_attestation.zig").getIndexedAttestationSignatureSet;
 
 pub fn isValidIndexedAttestation(
@@ -17,6 +19,7 @@ pub fn isValidIndexedAttestation(
     validators_count: usize,
     indexed_attestation: *const ForkTypes(fork).IndexedAttestation.Type,
     verify_signature: bool,
+    batch_verifier: ?*BatchVerifier,
 ) !bool {
     if (!(try isValidIndexedAttestationIndices(fork, validators_count, indexed_attestation.attesting_indices.items))) {
         return false;
@@ -31,7 +34,7 @@ pub fn isValidIndexedAttestation(
             indexed_attestation,
         );
         defer allocator.free(signature_set.pubkeys);
-        return try verifyAggregatedSignatureSet(&signature_set);
+        return try verifyAggregatedSignatureSetOrDefer(&signature_set, batch_verifier);
     } else {
         return true;
     }

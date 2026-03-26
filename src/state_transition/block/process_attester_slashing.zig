@@ -13,6 +13,7 @@ const findAttesterSlashableIndices = @import("../utils/attestation.zig").findAtt
 const isValidIndexedAttestation = @import("./is_valid_indexed_attestation.zig").isValidIndexedAttestation;
 const isSlashableValidator = @import("../utils/validator.zig").isSlashableValidator;
 const slashValidator = @import("./slash_validator.zig").slashValidator;
+const BatchVerifier = @import("bls").BatchVerifier;
 
 /// AS is the AttesterSlashing type
 /// - for phase0 it is `types.phase0.AttesterSlashing.Type`
@@ -27,6 +28,7 @@ pub fn processAttesterSlashing(
     current_epoch: u64,
     attester_slashing: *const ForkTypes(fork).AttesterSlashing.Type,
     verify_signature: bool,
+    batch_verifier: ?*BatchVerifier,
 ) !void {
     try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
     try assertValidAttesterSlashing(
@@ -37,6 +39,7 @@ pub fn processAttesterSlashing(
         try state.validatorsCount(),
         attester_slashing,
         verify_signature,
+        batch_verifier,
     );
 
     var intersecting_indices = try std.array_list.AlignedManaged(types.primitive.ValidatorIndex.Type, null).initCapacity(
@@ -78,6 +81,7 @@ pub fn assertValidAttesterSlashing(
     validators_count: usize,
     attester_slashing: *const ForkTypes(fork).AttesterSlashing.Type,
     verify_signatures: bool,
+    batch_verifier: ?*BatchVerifier,
 ) !void {
     const attestations = &.{ attester_slashing.attestation_1, attester_slashing.attestation_2 };
     if (!isSlashableAttestationData(&attestations[0].data, &attestations[1].data)) {
@@ -92,6 +96,7 @@ pub fn assertValidAttesterSlashing(
         validators_count,
         &attestations[0],
         verify_signatures,
+        batch_verifier,
     )) {
         return error.InvalidAttesterSlashingAttestationInvalid;
     }
@@ -103,6 +108,7 @@ pub fn assertValidAttesterSlashing(
         validators_count,
         &attestations[1],
         verify_signatures,
+        batch_verifier,
     )) {
         return error.InvalidAttesterSlashingAttestationInvalid;
     }

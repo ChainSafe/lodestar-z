@@ -24,6 +24,7 @@ const fork_types = @import("fork_types");
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
 const state_transition = @import("state_transition");
+const BatchVerifier = @import("bls").BatchVerifier;
 const CachedBeaconState = state_transition.CachedBeaconState;
 const BlockStateCache = state_transition.BlockStateCache;
 const CheckpointStateCache = state_transition.CheckpointStateCache;
@@ -550,6 +551,13 @@ pub const Chain = struct {
                         if (comptime bt == .blinded and f.lt(.bellatrix)) {
                             return error.InvalidBlockTypeForFork;
                         }
+                        // Use batch verification when signatures are enabled for ~3-10x speedup.
+                        // Collect all signature sets during processBlock, then verify in one shot.
+                        var batch = BatchVerifier.init(null);
+                        const opts = state_transition.ProcessBlockOpts{
+                            .verify_signature = self.verify_signatures,
+                            .batch_verifier = if (self.verify_signatures) &batch else null,
+                        };
                         try state_transition.processBlock(
                             f,
                             self.allocator,
@@ -563,8 +571,13 @@ pub const Chain = struct {
                                 .execution_payload_status = .valid,
                                 .data_availability_status = .available,
                             },
-                            .{ .verify_signature = self.verify_signatures },
+                            opts,
                         );
+                        // Batch-verify all collected signatures
+                        if (self.verify_signatures and batch.len() > 0) {
+                            const valid = batch.verifyAll() catch false;
+                            if (!valid) return error.InvalidBatchSignature;
+                        }
                     },
                 }
             },

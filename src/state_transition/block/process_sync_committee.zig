@@ -15,6 +15,8 @@ const c = @import("constants");
 const bls = @import("bls");
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const verifyAggregatedSignatureSet = @import("../utils/signature_sets.zig").verifyAggregatedSignatureSet;
+const verifyAggregatedSignatureSetOrDefer = @import("../utils/signature_sets.zig").verifyAggregatedSignatureSetOrDefer;
+const BatchVerifier = @import("bls").BatchVerifier;
 const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconProposer;
 const balance_utils = @import("../utils/balance.zig");
 const getBlockRootAtSlot = @import("../utils/block_root.zig").getBlockRootAtSlot;
@@ -30,6 +32,7 @@ pub fn processSyncAggregate(
     state: *BeaconState(fork),
     sync_aggregate: *const SyncAggregate,
     verify_signatures: bool,
+    batch_verifier: ?*BatchVerifier,
 ) !void {
     const committee_indices = @as(*const [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex, @ptrCast(epoch_cache.current_sync_committee_indexed.get().getValidatorIndices()));
     const sync_committee_bits = sync_aggregate.sync_committee_bits;
@@ -65,7 +68,7 @@ pub fn processSyncAggregate(
                 .signature = signature,
             };
 
-            if (!try verifyAggregatedSignatureSet(&signature_set)) {
+            if (!try verifyAggregatedSignatureSetOrDefer(&signature_set, batch_verifier)) {
                 return error.SyncCommitteeSignatureInvalid;
             }
         } else {
@@ -214,6 +217,7 @@ test "process sync aggregate - sanity" {
         fork_state,
         &sync_aggregate,
         true,
+        null,
     );
     try std.testing.expect(res == error.SyncCommitteeSignatureInvalid);
 
@@ -227,5 +231,6 @@ test "process sync aggregate - sanity" {
         fork_state,
         &sync_aggregate,
         true,
+        null,
     );
 }

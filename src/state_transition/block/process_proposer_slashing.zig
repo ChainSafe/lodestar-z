@@ -10,6 +10,8 @@ const types = @import("consensus_types");
 const isSlashableValidator = @import("../utils/validator.zig").isSlashableValidator;
 const getProposerSlashingSignatureSets = @import("../signature_sets/proposer_slashings.zig").getProposerSlashingSignatureSets;
 const verifySignature = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
+const verifySingleSignatureSetOrDefer = @import("../utils/signature_sets.zig").verifySingleSignatureSetOrDefer;
+const BatchVerifier = @import("bls").BatchVerifier;
 const slashValidator = @import("./slash_validator.zig").slashValidator;
 
 pub fn processProposerSlashing(
@@ -21,9 +23,10 @@ pub fn processProposerSlashing(
     slashings_cache: *SlashingsCache,
     proposer_slashing: *const ForkTypes(fork).ProposerSlashing.Type,
     verify_signatures: bool,
+    batch_verifier: ?*BatchVerifier,
 ) !void {
     try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
-    try assertValidProposerSlashing(fork, config, epoch_cache, state, proposer_slashing, verify_signatures);
+    try assertValidProposerSlashing(fork, config, epoch_cache, state, proposer_slashing, verify_signatures, batch_verifier);
     const proposer_index = proposer_slashing.signed_header_1.message.proposer_index;
     try slashValidator(fork, config, epoch_cache, state, slashings_cache, proposer_index, null);
 }
@@ -35,6 +38,7 @@ pub fn assertValidProposerSlashing(
     state: *BeaconState(fork),
     proposer_slashing: *const ForkTypes(fork).ProposerSlashing.Type,
     verify_signature: bool,
+    batch_verifier: ?*BatchVerifier,
 ) !void {
     const header_1 = proposer_slashing.signed_header_1.message;
     const header_2 = proposer_slashing.signed_header_2.message;
@@ -75,7 +79,9 @@ pub fn assertValidProposerSlashing(
             epoch_cache,
             proposer_slashing,
         );
-        if (!try verifySignature(&signature_sets[0]) or !try verifySignature(&signature_sets[1])) {
+        if (!try verifySingleSignatureSetOrDefer(&signature_sets[0], batch_verifier) or
+            !try verifySingleSignatureSetOrDefer(&signature_sets[1], batch_verifier))
+        {
             return error.InvalidProposerSlashingSignature;
         }
     }
