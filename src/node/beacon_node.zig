@@ -2299,14 +2299,17 @@ pub const BeaconNode = struct {
             }
         }
 
-        /// Initialize the GossipHandler for attestation/aggregate validation.
+        /// Initialize the GossipHandler for attestation/aggregate/operation validation.
         fn initGossipHandler(self: *BeaconNode) void {
             if (self.gossip_handler != null) return;
+
+            // Set module-level node pointer for ptr-free vtable callbacks.
+            gossip_node = self;
 
             self.gossip_handler = GossipHandler.create(
                 self.allocator,
                 @ptrCast(self),
-                &stubImportBlockFromGossip,
+                &gossipImportBlockFromGossip,
                 &gossipGetProposerIndex,
                 &gossipIsKnownBlockRoot,
                 &gossipGetValidatorCount,
@@ -2315,9 +2318,13 @@ pub const BeaconNode = struct {
                 return;
             };
 
-            // Wire the attestation import callback.
+            // Wire all import callbacks.
             if (self.gossip_handler) |gh| {
                 gh.importAttestationFn = &gossipImportAttestation;
+                gh.importVoluntaryExitFn = &gossipImportVoluntaryExit;
+                gh.importProposerSlashingFn = &gossipImportProposerSlashing;
+                gh.importAttesterSlashingFn = &gossipImportAttesterSlashing;
+                gh.importBlsChangeFn = &gossipImportBlsChange;
             }
         }
 
@@ -2851,33 +2858,79 @@ pub const BeaconNode = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Gossip callback stubs — wired into GossipHandler as function pointers.
+// Gossip callbacks — wired into GossipHandler as function pointers.
 // These bridge the type-erased *anyopaque back to *BeaconNode.
+//
+// For ptr-free vtable functions (getProposerIndex, isKnownBlockRoot,
+// getValidatorCount), we use a module-level node pointer set during
+// initGossipHandler. This is safe because there is exactly one
+// BeaconNode instance per process.
 // ---------------------------------------------------------------------------
 
-fn stubImportBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
-    _ = ptr;
-    _ = block_bytes;
-    // Block import is handled directly in handleGossipBlock, not through GossipHandler.
+/// Module-level BeaconNode pointer for ptr-free gossip callbacks.
+/// Set once in initGossipHandler, read by the static vtable functions below.
+var gossip_node: ?*BeaconNode = null;
+
+fn gossipImportBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    // Decompress is already done by GossipHandler; block_bytes are raw SSZ.
+    const raw_fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
+    const fork_seq = if (@intFromEnum(raw_fork_seq) > @intFromEnum(config_mod.ForkSeq.electra))
+        config_mod.ForkSeq.electra
+    else
+        raw_fork_seq;
+    const any_signed = AnySignedBeaconBlock.deserialize(
+        node.allocator, .full, fork_seq, block_bytes,
+    ) catch |err| {
+        std.log.warn("Gossip block import deserialize: {}", .{err});
+        return err;
+    };
+    defer any_signed.deinit(node.allocator);
+
+    switch (any_signed) {
+        .full_electra => |blk| {
+            const result = node.importBlock(blk) catch |err| {
+                if (err == error.UnknownParentBlock) {
+                    node.queueOrphanBlock(blk, block_bytes);
+                } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
+                    std.log.warn("Gossip block import: {}", .{err});
+                }
+                return err;
+            };
+            node.processPendingChildren(result.block_root);
+            std.log.info("GOSSIP BLOCK IMPORTED (via handler) slot={d}", .{result.slot});
+        },
+        else => {},
+    }
 }
 
 fn gossipGetProposerIndex(slot: u64) ?u32 {
-    _ = slot;
-    // TODO: Wire to epoch cache once available.
-    return null;
+    const node = gossip_node orelse return null;
+    const head_state_root = node.head_tracker.head_state_root;
+    const cached = node.block_state_cache.get(head_state_root) orelse return null;
+    const proposer = cached.getBeaconProposer(slot) catch return null;
+    return @intCast(proposer);
 }
 
 fn gossipIsKnownBlockRoot(root: [32]u8) bool {
-    // Without access to node here (static fn), return true to avoid false IGNORE.
-    // Real implementation would check fork choice store.
-    _ = root;
-    return true;
+    const node = gossip_node orelse return true;
+    // Check head tracker slot→root map (bounded, ~SLOTS_PER_EPOCH entries).
+    var it = node.head_tracker.slot_roots.iterator();
+    while (it.next()) |entry| {
+        if (std.mem.eql(u8, entry.value_ptr, &root)) return true;
+    }
+    // Also check fork choice if available.
+    if (node.chain.fork_choice) |fc| {
+        return fc.hasBlock(root);
+    }
+    return false;
 }
 
 fn gossipGetValidatorCount() u32 {
-    // TODO: Wire to epoch cache once available.
-    // Return a large value so validator index bounds checks pass.
-    return 1_000_000;
+    const node = gossip_node orelse return 0;
+    const head_state_root = node.head_tracker.head_state_root;
+    const cached = node.block_state_cache.get(head_state_root) orelse return 0;
+    return @intCast(cached.epoch_cache.index_to_pubkey.items.len);
 }
 
 /// Import a validated attestation into fork choice and op pool.
@@ -2891,6 +2944,8 @@ fn gossipImportAttestation(
     target_epoch: u64,
     validator_index: u64,
     beacon_block_root: [32]u8,
+    source_epoch: u64,
+    source_root: [32]u8,
 ) anyerror!void {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
 
@@ -2901,7 +2956,7 @@ fn gossipImportAttestation(
             .slot = attestation_slot,
             .index = committee_index,
             .beacon_block_root = beacon_block_root,
-            .source = .{ .epoch = 0, .root = [_]u8{0} ** 32 }, // TODO: fill from state
+            .source = .{ .epoch = source_epoch, .root = source_root },
             .target = .{ .epoch = target_epoch, .root = target_root },
         },
         .signature = [_]u8{0} ** 96,
@@ -2915,6 +2970,52 @@ fn gossipImportAttestation(
         validator_index,
         att,
     );
+}
+
+/// Import a validated voluntary exit into the op pool.
+fn gossipImportVoluntaryExit(ptr: *anyopaque, validator_index: u64, epoch: u64) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const exit = types.phase0.SignedVoluntaryExit.Type{
+        .message = .{
+            .epoch = epoch,
+            .validator_index = validator_index,
+        },
+        .signature = [_]u8{0} ** 96,
+    };
+    try node.chain.op_pool.voluntary_exit_pool.add(exit);
+}
+
+/// Import a validated proposer slashing into the op pool.
+///
+/// We only have the proposer index from the decoded gossip message.
+/// The full slashing was already validated at Phase 1 (same slot, different body roots).
+/// For block packing, the full slashing is needed — for now we store a minimal
+/// stub.  A future improvement should pass raw SSZ to reconstruct the full object.
+fn gossipImportProposerSlashing(ptr: *anyopaque, proposer_index: u64) anyerror!void {
+    _ = ptr;
+    // TODO: Pass full ProposerSlashing from decoded gossip to add to pool.
+    // The decoded message only has extracted fields, not the full SSZ struct.
+    // For now, log acceptance — the slashing was validated at gossip layer.
+    std.log.info("Proposer slashing accepted for proposer {d} (pool insert deferred)", .{proposer_index});
+}
+
+/// Import a validated attester slashing from raw SSZ bytes into the op pool.
+fn gossipImportAttesterSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    var slashing: types.phase0.AttesterSlashing.Type = undefined;
+    types.phase0.AttesterSlashing.deserializeFromBytes(node.allocator, ssz_bytes, &slashing) catch |err| {
+        std.log.warn("Attester slashing SSZ decode failed: {}", .{err});
+        return err;
+    };
+    try node.chain.op_pool.attester_slashing_pool.add(slashing);
+}
+
+/// Import a validated BLS-to-execution change into the op pool.
+fn gossipImportBlsChange(ptr: *anyopaque, validator_index: u64) anyerror!void {
+    _ = ptr;
+    // TODO: Pass full SignedBLSToExecutionChange from decoded gossip to add to pool.
+    // For now, log acceptance — the change was validated at gossip layer.
+    std.log.info("BLS change accepted for validator {d} (pool insert deferred)", .{validator_index});
 }
 
 // ---------------------------------------------------------------------------

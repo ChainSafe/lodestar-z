@@ -18,6 +18,8 @@ const gossip_topics = @import("gossip_topics.zig");
 
 const GossipTopicType = gossip_topics.GossipTopicType;
 const Allocator = std.mem.Allocator;
+const capella = consensus_types.capella;
+
 
 /// Errors that can occur during gossip message decoding.
 pub const DecodeError = snappy.UncompressError || error{
@@ -61,6 +63,19 @@ pub const DecodedProposerSlashing = struct {
     header_2_body_root: [32]u8,
 };
 
+/// Result of decoding an attester_slashing gossip message.
+pub const DecodedAttesterSlashing = struct {
+    /// Whether attestation_1.data and attestation_2.data are slashable
+    /// (double vote or surround vote).  Computed at decode time so the
+    /// caller doesn't need to re-parse the variable-length container.
+    is_slashable: bool,
+};
+
+/// Result of decoding a bls_to_execution_change gossip message.
+pub const DecodedBlsChange = struct {
+    validator_index: u64,
+};
+
 /// Result of decoding a beacon_attestation (SingleAttestation) gossip message.
 /// In Electra, individual gossip attestations use SingleAttestation format
 /// (one validator per message, no aggregation bits).
@@ -71,6 +86,8 @@ pub const DecodedAttestation = struct {
     target_epoch: u64,
     target_root: [32]u8,
     beacon_block_root: [32]u8,
+    source_epoch: u64,
+    source_root: [32]u8,
 };
 
 /// Count the number of set bits in a BitList's underlying data.
@@ -100,8 +117,8 @@ pub const DecodedGossipMessage = union(GossipTopicType) {
     beacon_attestation: DecodedAttestation,
     voluntary_exit: DecodedVoluntaryExit,
     proposer_slashing: DecodedProposerSlashing,
-    attester_slashing: void,
-    bls_to_execution_change: void,
+    attester_slashing: DecodedAttesterSlashing,
+    bls_to_execution_change: DecodedBlsChange,
     blob_sidecar: void,
     sync_committee_contribution_and_proof: void,
     sync_committee: void,
@@ -200,11 +217,32 @@ pub fn decodeFromSszBytes(
                 .target_epoch = att.data.target.epoch,
                 .target_root = att.data.target.root,
                 .beacon_block_root = att.data.beacon_block_root,
+                .source_epoch = att.data.source.epoch,
+                .source_root = att.data.source.root,
             } };
         },
-        // Stub types — these will be fleshed out in future spikes.
-        .attester_slashing,
-        .bls_to_execution_change,
+        .attester_slashing => {
+            var slashing: phase0.AttesterSlashing.Type = undefined;
+            phase0.AttesterSlashing.deserializeFromBytes(allocator, ssz_bytes, &slashing) catch
+                return error.SszDeserializationFailed;
+            // Inline slashable check (double vote or surround vote).
+            const d1 = &slashing.attestation_1.data;
+            const d2 = &slashing.attestation_2.data;
+            const is_double_vote = !phase0.AttestationData.equals(d1, d2) and d1.target.epoch == d2.target.epoch;
+            const is_surround_vote = d1.source.epoch < d2.source.epoch and d2.target.epoch < d1.target.epoch;
+            const is_slashable = is_double_vote or is_surround_vote;
+            return .{ .attester_slashing = .{
+                .is_slashable = is_slashable,
+            } };
+        },
+        .bls_to_execution_change => {
+            var signed_change: capella.SignedBLSToExecutionChange.Type = undefined;
+            capella.SignedBLSToExecutionChange.deserializeFromBytes(ssz_bytes, &signed_change) catch
+                return error.SszDeserializationFailed;
+            return .{ .bls_to_execution_change = .{
+                .validator_index = signed_change.message.validator_index,
+            } };
+        },
         .blob_sidecar,
         .sync_committee_contribution_and_proof,
         .sync_committee,
@@ -278,8 +316,25 @@ test "decode proposer_slashing from SSZ bytes" {
 
 test "decode unsupported topic type" {
     const dummy = [_]u8{ 0, 1, 2, 3 };
-    const result = decodeFromSszBytes(testing.allocator, .attester_slashing, &dummy);
+    const result = decodeFromSszBytes(testing.allocator, .data_column_sidecar, &dummy);
     try testing.expectError(error.UnsupportedTopicType, result);
+}
+
+test "decode attester_slashing bad SSZ" {
+    const dummy = [_]u8{ 0, 1, 2, 3 };
+    const result = decodeFromSszBytes(testing.allocator, .attester_slashing, &dummy);
+    try testing.expectError(error.SszDeserializationFailed, result);
+}
+
+test "decode bls_to_execution_change from SSZ bytes" {
+    var change: capella.SignedBLSToExecutionChange.Type = capella.SignedBLSToExecutionChange.default_value;
+    change.message.validator_index = 42;
+
+    var ssz_buf: [capella.SignedBLSToExecutionChange.fixed_size]u8 = undefined;
+    _ = capella.SignedBLSToExecutionChange.serializeIntoBytes(&change, &ssz_buf);
+
+    const decoded = try decodeFromSszBytes(testing.allocator, .bls_to_execution_change, &ssz_buf);
+    try testing.expectEqual(@as(u64, 42), decoded.bls_to_execution_change.validator_index);
 }
 
 test "decode beacon_attestation (SingleAttestation) from SSZ bytes" {
