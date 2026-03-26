@@ -68,4 +68,107 @@ pub fn RootCache(comptime fork: ForkSeq) type {
         }
     };
 }
-// TODO: unit tests
+
+
+const testing = std.testing;
+const Node = @import("persistent_merkle_tree").Node;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
+test "RootCache - init captures checkpoints from state" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    var env = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer env.deinit();
+
+    const fork_state = try env.cached_state.state.tryCastToFork(.electra);
+    const root_cache = try RootCache(.electra).init(allocator, fork_state);
+    defer root_cache.deinit();
+
+    // Verify checkpoints were captured from state
+    var expected_current: types.phase0.Checkpoint.Type = undefined;
+    var expected_previous: types.phase0.Checkpoint.Type = undefined;
+    try env.cached_state.state.currentJustifiedCheckpoint(&expected_current);
+    try env.cached_state.state.previousJustifiedCheckpoint(&expected_previous);
+
+    try testing.expectEqual(expected_current.epoch, root_cache.current_justified_checkpoint.epoch);
+    try testing.expectEqual(expected_current.root, root_cache.current_justified_checkpoint.root);
+    try testing.expectEqual(expected_previous.epoch, root_cache.previous_justified_checkpoint.epoch);
+    try testing.expectEqual(expected_previous.root, root_cache.previous_justified_checkpoint.root);
+}
+
+test "RootCache - getBlockRootAtSlot returns and caches root" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    var env = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer env.deinit();
+
+    const fork_state = try env.cached_state.state.tryCastToFork(.electra);
+    const state_slot = try env.cached_state.state.slot();
+    const root_cache = try RootCache(.electra).init(allocator, fork_state);
+    defer root_cache.deinit();
+
+    // Query a valid slot (must be < state_slot and within SLOTS_PER_HISTORICAL_ROOT)
+    const query_slot = state_slot - 2;
+    const root1 = try root_cache.getBlockRootAtSlot(query_slot);
+    const root2 = try root_cache.getBlockRootAtSlot(query_slot);
+
+    // Same pointer — second call returns cached value
+    try testing.expectEqual(root1, root2);
+}
+
+test "RootCache - getBlockRoot returns root for epoch" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    var env = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer env.deinit();
+
+    const fork_state = try env.cached_state.state.tryCastToFork(.electra);
+    const state_slot = try env.cached_state.state.slot();
+    const current_epoch = @divFloor(state_slot, @as(Slot, @import("preset").preset.SLOTS_PER_EPOCH));
+
+    // Query a previous epoch whose start slot is within range
+    const query_epoch = if (current_epoch > 1) current_epoch - 1 else 0;
+    const root_cache = try RootCache(.electra).init(allocator, fork_state);
+    defer root_cache.deinit();
+
+    const root1 = try root_cache.getBlockRoot(query_epoch);
+    const root2 = try root_cache.getBlockRoot(query_epoch);
+
+    // Same pointer — cached
+    try testing.expectEqual(root1, root2);
+
+    // Root should not be all zeros (block_roots are initialized to 0x0101...01 in test state)
+    const zero_root: [32]u8 = [_]u8{0} ** 32;
+    try testing.expect(!std.mem.eql(u8, root1, &zero_root));
+}
+
+test "RootCache - different slots return independently cached entries" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 512);
+    defer pool.deinit();
+
+    var env = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer env.deinit();
+
+    const fork_state = try env.cached_state.state.tryCastToFork(.electra);
+    const state_slot = try env.cached_state.state.slot();
+    const root_cache = try RootCache(.electra).init(allocator, fork_state);
+    defer root_cache.deinit();
+
+    const slot_a = state_slot - 2;
+    const slot_b = state_slot - 3;
+
+    const root_a = try root_cache.getBlockRootAtSlot(slot_a);
+    const root_b = try root_cache.getBlockRootAtSlot(slot_b);
+
+    // Verify both are cached — subsequent calls return same pointers
+    try testing.expectEqual(root_a, try root_cache.getBlockRootAtSlot(slot_a));
+    try testing.expectEqual(root_b, try root_cache.getBlockRootAtSlot(slot_b));
+}
