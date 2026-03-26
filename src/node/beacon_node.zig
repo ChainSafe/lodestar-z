@@ -85,7 +85,7 @@ const ExecutionPayloadStatus = execution_mod.ExecutionPayloadStatus;
 const ForkchoiceStateV1 = execution_mod.ForkchoiceStateV1;
 const MockEngine = execution_mod.MockEngine;
 const HttpEngine = execution_mod.HttpEngine;
-const PosixHttpTransport = execution_mod.PosixHttpTransport;
+const IoHttpTransport = execution_mod.IoHttpTransport;
 
 const metrics_mod = @import("metrics.zig");
 pub const BeaconMetrics = metrics_mod.BeaconMetrics;
@@ -485,28 +485,22 @@ pub const HeadInfo = struct {
 /// The file must contain a 0x-prefixed (or bare) hex string of exactly
 /// 32 bytes (64 hex chars). Whitespace and newlines are stripped.
 /// This matches the format used by Geth, Nethermind, Besu, etc.
-fn loadJwtSecret(allocator: Allocator, file_path: []const u8) ![32]u8 {
-    // Use Linux syscalls directly — std.Io requires an Io context we don't have at init time.
-    const linux = std.os.linux;
-    const path_z = try allocator.dupeZ(u8, file_path);
-    defer allocator.free(path_z);
+/// Load a JWT secret from a hex-encoded file using std.Io.
+///
+/// The file must contain a 0x-prefixed (or bare) hex string of exactly
+/// 32 bytes (64 hex chars). Whitespace and newlines are stripped.
+/// This matches the format used by Geth, Nethermind, Besu, etc.
+fn loadJwtSecret(_: Allocator, io: std.Io, file_path: []const u8) ![32]u8 {
+    const file = std.Io.Dir.cwd().openFile(io, file_path, .{}) catch
+        return error.JwtFileNotFound;
+    defer file.close(io);
 
-    const open_rc = linux.openat(linux.AT.FDCWD, path_z, .{}, 0);
-    const open_errno = linux.errno(open_rc);
-    if (open_errno != .SUCCESS) return error.JwtFileNotFound;
-    const fd: i32 = @intCast(open_rc);
-    defer _ = linux.close(fd);
+    const stat = file.stat(io) catch return error.JwtFileReadError;
+    if (stat.size > 1024) return error.JwtFileReadError;
 
     var buf: [1024]u8 = undefined;
-    var total: usize = 0;
-    while (total < buf.len) {
-        const rc = linux.read(fd, buf[total..].ptr, buf.len - total);
-        const errno = linux.errno(rc);
-        if (errno != .SUCCESS) return error.JwtFileReadError;
-        const n: usize = @intCast(rc);
-        if (n == 0) break;
-        total += n;
-    }
+    const total = file.readPositionalAll(io, buf[0..@intCast(stat.size)], 0) catch
+        return error.JwtFileReadError;
     const file_content = buf[0..total];
 
     // Strip whitespace and newlines.
@@ -597,8 +591,15 @@ pub const BeaconNode = struct {
     // Execution Layer engine (Engine API client or mock).
     mock_engine: ?*MockEngine = null,
     http_engine: ?*HttpEngine = null,
-    posix_transport: ?*PosixHttpTransport = null,
+    io_transport: ?*IoHttpTransport = null,
     engine_api: ?EngineApi = null,
+
+    /// I/O context — set when the event loop starts (before services launch).
+    /// Required for std.http.Client, timing, and other I/O operations.
+    io: ?std.Io = null,
+
+    /// JWT secret file path — loaded lazily in setIo() when Io becomes available.
+    jwt_secret_path: ?[]const u8 = null,
 
     // Genesis validators root — set by initFromGenesis, used for fork digest computation.
     genesis_validators_root: [32]u8 = [_]u8{0} ** 32,
@@ -776,30 +777,21 @@ pub const BeaconNode = struct {
         // Use HttpEngine when an execution URL is provided; fall back to MockEngine.
         var mock_engine_ptr: ?*MockEngine = null;
         var http_engine_ptr: ?*HttpEngine = null;
-        var posix_transport_ptr: ?*PosixHttpTransport = null;
+        var io_transport_ptr: ?*IoHttpTransport = null;
         var engine: ?EngineApi = null;
 
         if (opts.execution_urls.len > 0) {
-            // Load JWT secret from file if configured.
-            var jwt_secret: ?[32]u8 = null;
-            if (opts.jwt_secret_path) |jwt_path| {
-                jwt_secret = loadJwtSecret(allocator, jwt_path) catch |err| {
-                    std.log.err("Failed to load JWT secret from '{s}': {}", .{ jwt_path, err });
-                    return err;
-                };
-                std.log.info("Loaded JWT secret from {s}", .{jwt_path});
-            }
-
-            // Create production HTTP transport and HttpEngine.
-            const transport = try allocator.create(PosixHttpTransport);
-            transport.* = PosixHttpTransport.init(allocator);
-            posix_transport_ptr = transport;
+            // JWT secret will be loaded lazily in setIo() when Io becomes available.
+            // Create production HTTP transport and HttpEngine (jwt_secret=null for now).
+            const transport = try allocator.create(IoHttpTransport);
+            transport.* = IoHttpTransport.init(allocator);
+            io_transport_ptr = transport;
 
             const http_eng = try allocator.create(HttpEngine);
             http_eng.* = HttpEngine.init(
                 allocator,
                 opts.execution_urls[0],
-                jwt_secret,
+                null, // JWT loaded in setIo()
                 transport.transport(),
             );
             http_engine_ptr = http_eng;
@@ -832,7 +824,8 @@ pub const BeaconNode = struct {
             .clock = null,
             .mock_engine = mock_engine_ptr,
             .http_engine = http_engine_ptr,
-            .posix_transport = posix_transport_ptr,
+            .io_transport = io_transport_ptr,
+            .jwt_secret_path = if (opts.execution_urls.len > 0) opts.jwt_secret_path else null,
             .engine_api = engine,
             .cp_datastore = cp_datastore,
             .kv_backend = kv_backend,
@@ -879,7 +872,7 @@ pub const BeaconNode = struct {
             allocator.destroy(he);
         }
 
-        if (self.posix_transport) |pt| {
+        if (self.io_transport) |pt| {
             pt.deinit();
             allocator.destroy(pt);
         }
@@ -941,6 +934,26 @@ pub const BeaconNode = struct {
 
         self.unknown_block_sync.deinit();
         allocator.destroy(self);
+    }
+
+    /// Set the I/O context for the node and all sub-components.
+    /// Must be called before services start (importBlock, EL communication).
+    pub fn setIo(self: *BeaconNode, io: std.Io) void {
+        self.io = io;
+        if (self.http_engine) |he| he.setIo(io);
+        if (self.io_transport) |t| t.setIo(io);
+
+        // Load JWT secret now that Io is available.
+        if (self.jwt_secret_path) |jwt_path| {
+            if (self.http_engine) |he| {
+                const secret = loadJwtSecret(self.allocator, io, jwt_path) catch |err| {
+                    std.log.err("Failed to load JWT secret from '{s}': {}", .{ jwt_path, err });
+                    return;
+                };
+                he.jwt_secret = secret;
+                std.log.info("Loaded JWT secret from {s}", .{jwt_path});
+            }
+        }
     }
 
     /// Initialize from a genesis state.
@@ -1072,9 +1085,7 @@ pub const BeaconNode = struct {
         self: *BeaconNode,
         signed_block: *const types.electra.SignedBeaconBlock.Type,
     ) !ImportResult {
-        var ts0: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts0);
-        const t0_ns: u64 = @intCast(ts0.sec * 1_000_000_000 + ts0.nsec);
+        const t0 = if (self.io) |io| std.Io.Clock.awake.now(io) else null;
         const result = try self.block_importer.importBlock(signed_block);
 
         // Notify EL of fork choice update after each block import.
@@ -1082,10 +1093,10 @@ pub const BeaconNode = struct {
             std.log.warn("forkchoiceUpdated failed: {}", .{err});
         };
 
-        var ts1: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts1);
-        const t1_ns: u64 = @intCast(ts1.sec * 1_000_000_000 + ts1.nsec);
-        const elapsed_s: f64 = @as(f64, @floatFromInt(t1_ns - t0_ns)) / 1e9;
+        const elapsed_s: f64 = if (t0) |start| blk: {
+            const t1 = std.Io.Clock.awake.now(self.io.?);
+            break :blk @as(f64, @floatFromInt(t1.nanoseconds - start.nanoseconds)) / 1e9;
+        } else 0.0;
 
         // Update metrics.
         if (self.metrics) |m| {

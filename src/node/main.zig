@@ -431,6 +431,10 @@ pub fn main(init: std.process.Init) !void {
         .p2p_port = args.p2p_port,
     };
 
+    // Wire the Io context into the node before launching services.
+    // This enables std.http.Client for EL communication and Io-based timing.
+    node.setIo(io);
+
     std.log.info("Starting services concurrently via Io.Group...", .{});
     std.log.info("  REST API: http://0.0.0.0:{d}", .{args.api_port});
     std.log.info("  P2P:      /ip4/0.0.0.0/udp/{d}/quic-v1", .{args.p2p_port});
