@@ -27,6 +27,16 @@ pub const NodeOptions = struct {
     bootnodes: []const []const u8 = &.{},
     target_peers: u32 = 50,
 
+    // ── Discovery ────────────────────────────────────────────────
+    /// Enable discv5 peer discovery (default: true).
+    enable_discv5: bool = true,
+    /// UDP port for discv5 (default: same as p2p port, set via --discovery-port).
+    discovery_port: ?u16 = null,
+    /// Direct peers to always connect to (multiaddr strings from --direct-peers).
+    direct_peers: []const []const u8 = &.{},
+    /// Enable mDNS local discovery.
+    enable_mdns: bool = false,
+
     // ── Database ─────────────────────────────────────────────────
     data_dir: []const u8 = "",
 

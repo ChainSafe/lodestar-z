@@ -95,3 +95,8 @@ pub const ScoreState = peer_info.ScoreState;
 pub const BanDuration = peer_info.BanDuration;
 pub const GoodbyeReason = peer_info.GoodbyeReason;
 pub const ClientKind = peer_info.ClientKind;
+
+// Connection management (discovery).
+pub const connection_manager = @import("connection_manager.zig");
+pub const ConnectionManager = connection_manager.ConnectionManager;
+pub const ConnectionManagerConfig = connection_manager.ConnectionManagerConfig;
