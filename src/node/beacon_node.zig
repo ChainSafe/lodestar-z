@@ -74,6 +74,8 @@ const api_types = api_mod.types;
 const SlotClock = @import("clock.zig").SlotClock;
 const SyncController = @import("sync_controller.zig").SyncController;
 const NodeOptions = @import("options.zig").NodeOptions;
+const identity_mod = @import("identity.zig");
+const NodeIdentity = identity_mod.NodeIdentity;
 const sync_mod = @import("sync");
 const UnknownBlockSync = sync_mod.UnknownBlockSync;
 const SyncService = sync_mod.SyncService;
@@ -777,6 +779,12 @@ pub const BeaconNode = struct {
     /// JWT secret file path — loaded lazily in setIo() when Io becomes available.
     jwt_secret_path: ?[]const u8 = null,
 
+    // Data directory path — needed for identity persistence and other disk ops.
+    data_dir: []const u8 = "",
+
+    // Node identity — secp256k1 keypair loaded/generated in setIo().
+    node_identity: ?NodeIdentity = null,
+
     // Genesis validators root — set by initFromGenesis, used for fork digest computation.
     genesis_validators_root: [32]u8 = [_]u8{0} ** 32,
 
@@ -1002,6 +1010,7 @@ pub const BeaconNode = struct {
             .http_engine = http_engine_ptr,
             .io_transport = io_transport_ptr,
             .jwt_secret_path = if (opts.execution_urls.len > 0) opts.jwt_secret_path else null,
+            .data_dir = opts.data_dir,
             .engine_api = engine,
             .cp_datastore = cp_datastore,
             .kv_backend = kv_backend,
@@ -1151,6 +1160,14 @@ pub const BeaconNode = struct {
         if (self.io_transport) |t| t.setIo(io);
 
         // Load JWT secret now that Io is available.
+        // Load or create node identity now that Io is available.
+        if (self.node_identity == null) {
+            self.node_identity = identity_mod.loadOrCreateIdentity(io, self.data_dir) catch |err| blk: {
+                std.log.err("Failed to load node identity: {}", .{err});
+                break :blk null;
+            };
+        }
+
         if (self.jwt_secret_path) |jwt_path| {
             if (self.http_engine) |he| {
                 const secret = loadJwtSecret(self.allocator, io, jwt_path) catch |err| {
@@ -1866,14 +1883,11 @@ pub const BeaconNode = struct {
     fn initDiscoveryService(self: *BeaconNode) !void {
         const allocator = self.allocator;
 
-        // Generate a secp256k1 secret key for discv5 identity.
-        // Uses deterministic seed for now — in production, persist to data_dir.
-        // TODO: use proper random or load from disk.
-        var secret_key: [32]u8 = undefined;
-        {
-            var prng = std.Random.DefaultPrng.init(0xd15c0055eed);
-            prng.random().bytes(&secret_key);
-        }
+        // Use the persistent node identity (loaded/generated in setIo).
+        const secret_key = if (self.node_identity) |id| id.secret_key else {
+            std.log.err("Cannot init discovery: node identity not loaded (setIo not called?)", .{});
+            return error.NoNodeIdentity;
+        };
 
         const fork_digest = self.config.forkDigestAtSlot(
             self.head_tracker.head_slot,

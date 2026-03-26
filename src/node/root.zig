@@ -12,6 +12,8 @@ const testing = std.testing;
 pub const beacon_node = @import("beacon_node.zig");
 pub const clock = @import("clock.zig");
 pub const options = @import("options.zig");
+pub const identity = @import("identity.zig");
+pub const NodeIdentity = identity.NodeIdentity;
 
 pub const BeaconNode = beacon_node.BeaconNode;
 pub const HeadTracker = beacon_node.HeadTracker;
