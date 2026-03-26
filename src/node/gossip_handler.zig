@@ -1,10 +1,11 @@
-//! GossipHandler: routes incoming gossip messages through validate → decode → import.
+//! GossipHandler: two-phase gossip message processing.
 //!
 //! When a gossip message arrives via GossipSub, this module:
-//! 1. Snappy-decompresses the payload
-//! 2. SSZ-deserializes based on topic type
-//! 3. Runs lightweight gossip validation (slot bounds, dedup, proposer checks)
-//! 4. Dispatches to the appropriate pipeline (import for blocks, fork choice for attestations)
+//! 1. Snappy-decompresses + SSZ-decodes the payload
+//! 2. Runs fast Phase 1 validation (slot bounds, dedup, proposer checks — < 1 ms)
+//!    → returns ACCEPT / REJECT / IGNORE to gossipsub
+//! 3. On ACCEPT, queues a Phase 2 work item for full processing
+//!    (STFN, signature verification, DA checks, fork choice update)
 //!
 //! The handler is type-erased to avoid circular dependencies between the `node`
 //! and `networking` packages — the node pointer and import function are passed
@@ -19,11 +20,14 @@ const testing = std.testing;
 const networking = @import("networking");
 const GossipTopicType = networking.GossipTopicType;
 const gossip_decoding = networking.gossip_decoding;
-const gossip_validation = networking.gossip_validation;
-const ValidationResult = networking.ValidationResult;
-const GossipValidationContext = networking.GossipValidationContext;
 const decodeGossipMessage = networking.decodeGossipMessage;
 const DecodedGossipMessage = networking.DecodedGossipMessage;
+
+const chain = @import("chain");
+const SeenCache = chain.SeenCache;
+const chain_gossip = chain.gossip_validation;
+const GossipAction = chain_gossip.GossipAction;
+const ChainState = chain_gossip.ChainState;
 
 /// Error set for gossip processing failures.
 pub const GossipHandlerError = error{
@@ -35,12 +39,15 @@ pub const GossipHandlerError = error{
     DecodeFailed,
 };
 
-/// Handles incoming gossip messages and routes them to the right pipeline.
+/// Handles incoming gossip messages with two-phase validation.
+///
+/// **Phase 1** (fast, < 1 ms): decode + lightweight checks → ACCEPT/REJECT/IGNORE.
+/// **Phase 2** (slow, queued): full STFN, signature verification, fork choice.
 ///
 /// Lifecycle:
-/// 1. `init` — allocate and wire
-/// 2. `onGossipMessage` (or specific `onBeaconBlock` / `onAttestation`)
-/// 3. `deinit` — release validation SeenSets
+/// 1. `create` — allocate and wire callbacks
+/// 2. `onGossipMessage` (or topic-specific methods)
+/// 3. `deinit` — release SeenCache and struct
 pub const GossipHandler = struct {
     allocator: Allocator,
 
@@ -51,12 +58,8 @@ pub const GossipHandler = struct {
     /// Receives raw SSZ bytes (decompressed, not Snappy-wrapped).
     importBlockFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
 
-    /// Gossip validation SeenSets (owned).
-    seen_blocks: gossip_validation.SeenSet,
-    seen_aggregators: gossip_validation.SeenSet,
-    seen_exits: gossip_validation.SeenSet,
-    seen_proposer_slashings: gossip_validation.SeenSet,
-    seen_attester_slashings: gossip_validation.SeenSet,
+    /// Gossip dedup caches (owned). Used by Phase 1 fast validation.
+    seen_cache: SeenCache,
 
     /// Slot/epoch state for validation — caller must keep this current.
     current_slot: u64,
@@ -64,23 +67,17 @@ pub const GossipHandler = struct {
     finalized_slot: u64,
 
     /// Vtable for state queries (proposer schedule, known roots, etc.).
-    /// Wired from gossip_callbacks or a test stub.
     getProposerIndex: *const fn (slot: u64) ?u32,
     isKnownBlockRoot: *const fn (root: [32]u8) bool,
-    isValidatorActive: *const fn (validator_index: u64, epoch: u64) bool,
     getValidatorCount: *const fn () u32,
 
-    /// Allocate a GossipHandler on the heap and initialise owned SeenSets.
-    ///
-    /// The caller must call `deinit` to free both the SeenSets and the struct
-    /// itself.
+    /// Allocate a GossipHandler on the heap and initialise owned SeenCache.
     pub fn create(
         allocator: Allocator,
         node: *anyopaque,
         importBlockFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
         getProposerIndex: *const fn (slot: u64) ?u32,
         isKnownBlockRoot: *const fn (root: [32]u8) bool,
-        isValidatorActive: *const fn (validator_index: u64, epoch: u64) bool,
         getValidatorCount: *const fn () u32,
     ) !*GossipHandler {
         const self = try allocator.create(GossipHandler);
@@ -88,28 +85,19 @@ pub const GossipHandler = struct {
             .allocator = allocator,
             .node = node,
             .importBlockFn = importBlockFn,
-            .seen_blocks = gossip_validation.SeenSet.init(allocator),
-            .seen_aggregators = gossip_validation.SeenSet.init(allocator),
-            .seen_exits = gossip_validation.SeenSet.init(allocator),
-            .seen_proposer_slashings = gossip_validation.SeenSet.init(allocator),
-            .seen_attester_slashings = gossip_validation.SeenSet.init(allocator),
+            .seen_cache = SeenCache.init(allocator),
             .current_slot = 0,
             .current_epoch = 0,
             .finalized_slot = 0,
             .getProposerIndex = getProposerIndex,
             .isKnownBlockRoot = isKnownBlockRoot,
-            .isValidatorActive = isValidatorActive,
             .getValidatorCount = getValidatorCount,
         };
         return self;
     }
 
     pub fn deinit(self: *GossipHandler) void {
-        self.seen_blocks.deinit();
-        self.seen_aggregators.deinit();
-        self.seen_exits.deinit();
-        self.seen_proposer_slashings.deinit();
-        self.seen_attester_slashings.deinit();
+        self.seen_cache.deinit();
         self.allocator.destroy(self);
     }
 
@@ -121,63 +109,62 @@ pub const GossipHandler = struct {
         self.finalized_slot = finalized_slot;
     }
 
-    /// Build a temporary GossipValidationContext pointing at our SeenSets.
-    fn makeCtx(self: *GossipHandler) GossipValidationContext {
+    /// Build a ChainState snapshot for fast Phase 1 validation.
+    fn makeChainState(self: *GossipHandler) ChainState {
         return .{
             .current_slot = self.current_slot,
             .current_epoch = self.current_epoch,
             .finalized_slot = self.finalized_slot,
-            .seen_block_roots = &self.seen_blocks,
-            .seen_aggregators = &self.seen_aggregators,
-            .seen_voluntary_exits = &self.seen_exits,
-            .seen_proposer_slashings = &self.seen_proposer_slashings,
-            .seen_attester_slashings = &self.seen_attester_slashings,
+            .seen_cache = &self.seen_cache,
             .getProposerIndex = self.getProposerIndex,
             .isKnownBlockRoot = self.isKnownBlockRoot,
-            .isValidatorActive = self.isValidatorActive,
             .getValidatorCount = self.getValidatorCount,
         };
+    }
+
+    /// Map a GossipAction to an error (or success for accept).
+    fn checkAction(action: GossipAction) GossipHandlerError!void {
+        switch (action) {
+            .accept => {},
+            .ignore => return GossipHandlerError.ValidationIgnored,
+            .reject => return GossipHandlerError.ValidationRejected,
+        }
     }
 
     /// Called when a gossip message arrives on the beacon_block topic.
     ///
     /// Pipeline:
-    /// 1. Snappy decompress
-    /// 2. SSZ deserialize → extract slot/proposer/parent_root
-    /// 3. Gossip validation (slot bounds, dedup, proposer check)
-    /// 4. importBlockFn (full STFN + chain import)
+    /// 1. Snappy decompress + SSZ decode → extract slot/proposer/parent_root
+    /// 2. Phase 1: fast validation (< 1 ms)
+    /// 3. Phase 2: queue full import as a work item
     pub fn onBeaconBlock(self: *GossipHandler, message_data: []const u8) !void {
-        // 1+2. Decompress + decode.
+        // Phase 1a: Decompress + decode.
         const decoded = decodeGossipMessage(self.allocator, .beacon_block, message_data) catch
             return GossipHandlerError.DecodeFailed;
         const blk = decoded.beacon_block;
 
-        // Compute a synthetic block root from slot + proposer for dedup purposes.
-        // Full block root hashing is expensive; we use a cheap key here.
-        // The actual HTR dedup happens inside importBlock if needed.
+        // Compute a cheap synthetic block root for dedup.
+        // Full HTR is expensive; use (slot, proposer, parent_root prefix) as key.
         var block_root: [32]u8 = std.mem.zeroes([32]u8);
         std.mem.writeInt(u64, block_root[0..8], blk.slot, .little);
         std.mem.writeInt(u64, block_root[8..16], blk.proposer_index, .little);
-        // Mix in parent_root to distinguish equivocating blocks at the same slot.
         @memcpy(block_root[16..32], blk.parent_root[0..16]);
 
-        // 3. Gossip validation.
-        var ctx = self.makeCtx();
-        const result = gossip_validation.validateBeaconBlock(
+        // Phase 1b: Fast validation.
+        var chain_state = self.makeChainState();
+        const action = chain_gossip.validateGossipBlock(
             blk.slot,
             blk.proposer_index,
             blk.parent_root,
             block_root,
-            &ctx,
+            &chain_state,
         );
-        switch (result) {
-            .accept => {},
-            .ignore => return GossipHandlerError.ValidationIgnored,
-            .reject => return GossipHandlerError.ValidationRejected,
-        }
+        try checkAction(action);
 
-        // 4. Decompress again to get raw SSZ for importBlockFn.
-        //    (decodeGossipMessage decompresses internally but doesn't expose bytes.)
+        // Phase 2: Full import (STFN + fork choice).
+        // TODO: Replace direct call with WorkItem queue push.
+        // The block should be enqueued as a WorkItem{ .gossip_block = ssz_bytes }
+        // for the processor thread pool. For now, call import directly.
         const snappy = @import("networking").gossip_decoding;
         const ssz_bytes = snappy.decompressGossipPayload(self.allocator, message_data) catch
             return GossipHandlerError.DecodeFailed;
@@ -189,15 +176,15 @@ pub const GossipHandler = struct {
     /// Called when a gossip attestation arrives.
     ///
     /// Pipeline:
-    /// 1. Snappy decompress
-    /// 2. SSZ deserialize (stub — attestation decode not yet implemented)
-    /// 3. Validate epoch/committee
-    /// 4. Add to attestation pool / fork choice
+    /// 1. Decode attestation fields
+    /// 2. Phase 1: fast validation
+    /// 3. Phase 2: queue for fork choice integration
     pub fn onAttestation(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
         // Attestation decoding is not yet supported by gossip_decoding.zig.
-        // The beacon_attestation topic returns UnsupportedTopicType from decodeGossipMessage.
-        // This stub acknowledges receipt without panicking, so the message pipeline
-        // doesn't break when attestations arrive. Full implementation tracked separately.
+        // When it is, the pipeline will be:
+        //   1. Decode attestation → extract slot, committee_index, target
+        //   2. Phase 1: validateGossipAttestation(slot, committee, target_epoch, target_root, chain_state)
+        //   3. Phase 2: Queue WorkItem{ .gossip_attestation = ... } for fork choice
         _ = self;
         _ = subnet_id;
         _ = message_data;
@@ -209,10 +196,10 @@ pub const GossipHandler = struct {
         switch (topic) {
             .beacon_block => try self.onBeaconBlock(data),
             .beacon_attestation => try self.onAttestation(0, data),
-            .voluntary_exit => {}, // TODO: add to op pool
-            .proposer_slashing => {}, // TODO: add to op pool
-            .attester_slashing => {}, // TODO: add to op pool
-            .bls_to_execution_change => {}, // TODO: add to op pool
+            .voluntary_exit => {}, // TODO: Phase 1 validate + queue WorkItem
+            .proposer_slashing => {}, // TODO: Phase 1 validate + queue WorkItem
+            .attester_slashing => {}, // TODO: Phase 1 validate + queue WorkItem
+            .bls_to_execution_change => {}, // TODO: Phase 1 validate + queue WorkItem
             else => {},
         }
     }
@@ -224,7 +211,6 @@ pub const GossipHandler = struct {
 
 const consensus_types = @import("consensus_types");
 const phase0 = consensus_types.phase0;
-const snappy_frame = @import("networking").gossip_decoding;
 
 // --- Test stubs ---
 
@@ -242,10 +228,6 @@ fn stubIsKnownBlockRoot(_: [32]u8) bool {
     return true; // all parents known
 }
 
-fn stubIsValidatorActive(_: u64, _: u64) bool {
-    return true;
-}
-
 fn stubGetValidatorCount() u32 {
     return 1000;
 }
@@ -258,7 +240,6 @@ fn makeTestHandler(allocator: Allocator) !*GossipHandler {
         &stubImportBlock,
         &stubGetProposerIndex,
         &stubIsKnownBlockRoot,
-        &stubIsValidatorActive,
         &stubGetValidatorCount,
     );
 }
@@ -283,9 +264,7 @@ test "GossipHandler: onBeaconBlock imports valid block" {
     const handler = try makeTestHandler(alloc);
     defer handler.deinit();
 
-    // Set clock so slot 10 is valid (proposer index = 10 % 100 = 10).
     handler.updateClock(10, 0, 0);
-
     g_imported_count = 0;
 
     const compressed = try makeSnappyBlock(alloc, 10, 10);
@@ -306,14 +285,12 @@ test "GossipHandler: onBeaconBlock ignores duplicate block" {
     const compressed = try makeSnappyBlock(alloc, 10, 10);
     defer alloc.free(compressed);
 
-    // First: accepted and imported.
     try handler.onBeaconBlock(compressed);
     try testing.expectEqual(@as(u32, 1), g_imported_count);
 
-    // Second: ignored (already in seen_blocks).
     const result = handler.onBeaconBlock(compressed);
     try testing.expectError(GossipHandlerError.ValidationIgnored, result);
-    try testing.expectEqual(@as(u32, 1), g_imported_count); // no second import
+    try testing.expectEqual(@as(u32, 1), g_imported_count);
 }
 
 test "GossipHandler: onBeaconBlock ignores future slot" {
@@ -321,7 +298,6 @@ test "GossipHandler: onBeaconBlock ignores future slot" {
     const handler = try makeTestHandler(alloc);
     defer handler.deinit();
 
-    // current_slot = 5, block slot = 10 → too far in the future.
     handler.updateClock(5, 0, 0);
 
     const compressed = try makeSnappyBlock(alloc, 10, 10);
@@ -336,7 +312,6 @@ test "GossipHandler: onBeaconBlock ignores finalized block" {
     const handler = try makeTestHandler(alloc);
     defer handler.deinit();
 
-    // finalized_slot = 20, block slot = 10 → already finalized.
     handler.updateClock(30, 0, 20);
 
     const compressed = try makeSnappyBlock(alloc, 10, 10);
@@ -351,7 +326,6 @@ test "GossipHandler: onAttestation is a no-op stub" {
     const handler = try makeTestHandler(alloc);
     defer handler.deinit();
 
-    // Attestation decoding not yet supported — should return without error.
     try handler.onAttestation(0, &[_]u8{ 0, 1, 2, 3 });
 }
 
@@ -376,7 +350,6 @@ test "GossipHandler: onGossipMessage no-ops for unsupported topics" {
     defer handler.deinit();
 
     const dummy = [_]u8{ 0, 1, 2, 3 };
-    // These should all return without error.
     try handler.onGossipMessage(.voluntary_exit, &dummy);
     try handler.onGossipMessage(.proposer_slashing, &dummy);
     try handler.onGossipMessage(.attester_slashing, &dummy);
