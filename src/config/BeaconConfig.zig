@@ -207,6 +207,20 @@ pub fn forkVersion(self: *const BeaconConfig, slot: Slot) *const [4]u8 {
 /// Fulu introduced Blob Parameter Only (BPO) hard forks [EIP-7892] to adjust the max blobs per block,
 /// so the max blobs per block from that fork onwards differ depending on which epoch the hard forks happen.
 ///
+/// Return the active blob parameters (epoch + max_blobs_per_block) for the given epoch.
+/// Used for fork digest masking in Fulu and later forks.
+pub fn getBlobParameters(self: *const BeaconConfig, epoch: Epoch) ?struct { epoch: u64, max_blobs_per_block: u64 } {
+    if (self.chain.BLOB_SCHEDULE.len == 0) return null;
+    // Iterate in reverse to find the latest schedule entry at or before this epoch
+    for (0..self.chain.BLOB_SCHEDULE.len) |i| {
+        const schedule = self.chain.BLOB_SCHEDULE[self.chain.BLOB_SCHEDULE.len - i - 1];
+        if (epoch >= schedule.EPOCH) {
+            return .{ .epoch = schedule.EPOCH, .max_blobs_per_block = schedule.MAX_BLOBS_PER_BLOCK };
+        }
+    }
+    return null;
+}
+
 /// Reference: https://eips.ethereum.org/EIPS/eip-7892
 pub fn getMaxBlobsPerBlock(self: *const BeaconConfig, epoch: Epoch) u64 {
     const fork = self.forkInfoAtEpoch(epoch).fork_seq;
@@ -267,13 +281,36 @@ pub fn computeForkDigest(fork_version: [4]u8, genesis_validators_root: [32]u8) [
 }
 
 /// Return the fork digest for the active fork at `slot`.
+///
+/// For Fulu and later forks, the base fork digest is XOR-masked with
+/// SHA256(blob_epoch || max_blobs_per_block)[:4] per the blob schedule.
+/// This matches Lighthouse's compute_fork_digest behavior.
 pub fn forkDigestAtSlot(self: *const BeaconConfig, slot: u64, genesis_validators_root: [32]u8) [4]u8 {
     const fi = self.forkInfo(slot);
     const version = fi.version;
-    std.log.info("forkDigestAtSlot: slot={d} fork_seq={d} version={x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
+    var base_digest = computeForkDigest(version, genesis_validators_root);
+
+    // Apply blob schedule masking for Fulu and later forks
+    const epoch = @divFloor(slot, preset.SLOTS_PER_EPOCH);
+    if (@intFromEnum(fi.fork_seq) >= @intFromEnum(ForkSeq.fulu)) {
+        if (self.getBlobParameters(epoch)) |bp| {
+            var blob_input: [16]u8 = undefined;
+            std.mem.writeInt(u64, blob_input[0..8], bp.epoch, .little);
+            std.mem.writeInt(u64, blob_input[8..16], bp.max_blobs_per_block, .little);
+            var blob_hash: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(&blob_input, &blob_hash, .{});
+            base_digest[0] ^= blob_hash[0];
+            base_digest[1] ^= blob_hash[1];
+            base_digest[2] ^= blob_hash[2];
+            base_digest[3] ^= blob_hash[3];
+        }
+    }
+
+    std.log.info("forkDigestAtSlot: slot={d} fork_seq={d} version={x:0>2}{x:0>2}{x:0>2}{x:0>2} digest={x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
         slot, @intFromEnum(fi.fork_seq), version[0], version[1], version[2], version[3],
+        base_digest[0], base_digest[1], base_digest[2], base_digest[3],
     });
-    return computeForkDigest(version, genesis_validators_root);
+    return base_digest;
 }
 
 fn computeDomain(domain_type: DomainType, fork_version: Version, genesis_validators_root: Root, out: *[32]u8) void {

@@ -36,7 +36,7 @@ pub fn createMinimalGenesis(
 ) !*CachedBeaconState {
     // TestCachedBeaconState.init creates a fully-initialised CachedBeaconState
     // with pubkey caches and epoch cache populated.
-    var test_state = try TestCachedBeaconState.init(allocator, pool, validator_count);
+    const test_state = try TestCachedBeaconState.init(allocator, pool, validator_count);
 
     // Extract the CachedBeaconState pointer.  We intentionally do NOT call
     // test_state.deinit() so that the heap objects it owns (BeaconConfig,

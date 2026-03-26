@@ -48,6 +48,52 @@ pub fn loadConfigFromYaml(
 
     var result = base.*;
 
+    // Parse BLOB_SCHEDULE from raw YAML before the complex-value filter strips it.
+    // Format:  BLOB_SCHEDULE:\n  - EPOCH: <n>\n    MAX_BLOBS_PER_BLOCK: <n>
+    {
+        var blob_entries: std.ArrayList(ChainConfig.BlobScheduleEntry) = .empty;
+        var line_iter = std.mem.splitSequence(u8, yaml_bytes, "\n");
+        var in_blob_schedule = false;
+        var current_epoch: ?u64 = null;
+        while (line_iter.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (std.mem.startsWith(u8, trimmed, "BLOB_SCHEDULE:")) {
+                in_blob_schedule = true;
+                continue;
+            }
+            if (in_blob_schedule) {
+                if (trimmed.len == 0 or (!std.mem.startsWith(u8, trimmed, "-") and !std.mem.startsWith(u8, trimmed, "EPOCH") and !std.mem.startsWith(u8, trimmed, "MAX_BLOBS"))) {
+                    // End of BLOB_SCHEDULE section
+                    in_blob_schedule = false;
+                    continue;
+                }
+                // Parse "- EPOCH: <n>" or "EPOCH: <n>"
+                if (std.mem.indexOf(u8, trimmed, "EPOCH:")) |pos| {
+                    if (std.mem.indexOf(u8, trimmed, "MAX_BLOBS") == null) {
+                        const val_str = std.mem.trim(u8, trimmed[pos + 6 ..], " \t\r\'\"");
+                        current_epoch = std.fmt.parseInt(u64, val_str, 10) catch null;
+                    }
+                }
+                // Parse "MAX_BLOBS_PER_BLOCK: <n>"
+                if (std.mem.indexOf(u8, trimmed, "MAX_BLOBS_PER_BLOCK:")) |pos| {
+                    const val_str = std.mem.trim(u8, trimmed[pos + 20 ..], " \t\r\'\"");
+                    const max_blobs = std.fmt.parseInt(u64, val_str, 10) catch continue;
+                    if (current_epoch) |ep| {
+                        try blob_entries.append(arena, .{ .EPOCH = ep, .MAX_BLOBS_PER_BLOCK = max_blobs });
+                        current_epoch = null;
+                    }
+                }
+            }
+        }
+        if (blob_entries.items.len > 0) {
+            result.BLOB_SCHEDULE = try blob_entries.toOwnedSlice(arena);
+            std.log.info("Parsed BLOB_SCHEDULE: {d} entries", .{result.BLOB_SCHEDULE.len});
+            for (result.BLOB_SCHEDULE) |entry| {
+                std.log.info("  BLOB_SCHEDULE entry: epoch={d} max_blobs={d}", .{entry.EPOCH, entry.MAX_BLOBS_PER_BLOCK});
+            }
+        }
+    }
+
     // Helper: get scalar string from map, or null if absent.
     // We'll inline the field lookups directly.
 

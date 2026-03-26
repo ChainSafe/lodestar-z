@@ -1224,6 +1224,18 @@ pub const BeaconNode = struct {
                                         result.block_root[2], result.block_root[3],
                                     });
                                 },
+                                .full_fulu => |blk| {
+                                    const electra_blk: *const types.electra.SignedBeaconBlock.Type = @ptrCast(blk);
+                                    const result = self.importBlock(electra_blk) catch |err| {
+                                        std.log.warn("Gossip block import (fulu): {}", .{err});
+                                        continue;
+                                    };
+                                    std.log.info("GOSSIP BLOCK IMPORTED (fulu) slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                                        result.slot,
+                                        result.block_root[0], result.block_root[1],
+                                        result.block_root[2], result.block_root[3],
+                                    });
+                                },
                                 else => {},
                             }
                         },
@@ -1431,7 +1443,21 @@ pub const BeaconNode = struct {
                                         result.block_root[2], result.block_root[3],
                                     });
                                 },
-                                else => {},
+                                .full_fulu => |blk| {
+                                    const electra_blk: *const types.electra.SignedBeaconBlock.Type = @ptrCast(blk);
+                                    const result = self.importBlock(electra_blk) catch |err| {
+                                        std.log.warn("Gossip: block import error (fulu): {}", .{err});
+                                        continue;
+                                    };
+                                    std.log.info("Gossip: imported block slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                                        result.slot,
+                                        result.block_root[0], result.block_root[1],
+                                        result.block_root[2], result.block_root[3],
+                                    });
+                                },
+                                else => {
+                                    std.log.warn("Gossip: unsupported block fork, skipping", .{});
+                                },
                             }
                         },
                         else => {},
@@ -1544,7 +1570,24 @@ pub const BeaconNode = struct {
                                     result.block_root[2], result.block_root[3],
                                 });
                             },
-                            else => {},
+                            .full_fulu => |blk| {
+                                // Fulu and Electra SignedBeaconBlock are structurally identical;
+                                // cast so importBlock (which takes electra type) accepts it.
+                                const electra_blk: *const types.electra.SignedBeaconBlock.Type = @ptrCast(blk);
+                                const result = self.importBlock(electra_blk) catch |err| {
+                                    std.log.warn("BlocksByRange: import error at block {d}: {}", .{ blocks_received + 1, err });
+                                    blocks_received += 1;
+                                    continue;
+                                };
+                                std.log.info("BlocksByRange: imported slot {d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                                    result.slot,
+                                    result.block_root[0], result.block_root[1],
+                                    result.block_root[2], result.block_root[3],
+                                });
+                            },
+                            else => {
+                                std.log.warn("BlocksByRange: unsupported block fork variant, skipping", .{});
+                            },
                         }
                     }
                     blocks_received += 1;
@@ -1879,6 +1922,10 @@ fn importBlockCallback(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
     // for pre-electra forks we fall through to UnsupportedFork (future work).
     switch (any_signed) {
         .full_electra => |blk| _ = try importer.importBlock(blk),
+        .full_fulu => |blk| {
+            const electra_blk: *const types.electra.SignedBeaconBlock.Type = @ptrCast(blk);
+            _ = try importer.importBlock(electra_blk);
+        },
         else => return error.UnsupportedFork,
     }
 }

@@ -42,7 +42,7 @@ pub fn loadCachedBeaconState(
     seed_validators_bytes: ?[]const u8,
 ) !*CachedBeaconState {
     // 1. Load the state tree, sharing unchanged nodes with seed
-    var result = try loadState(
+    const result = try loadState(
         allocator,
         pool,
         seed_cached_state.state,
