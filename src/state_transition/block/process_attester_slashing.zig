@@ -122,12 +122,9 @@ const TestEnvironment = struct {
     test_state: TestCachedBeaconState,
     slashings_cache: SlashingsCache,
 
-    const num_validators = 256;
-    const pool_size = num_validators * 5;
+    fn init(self: *TestEnvironment, allocator: Allocator, num_validators: u32) !void {
+        const pool_size = num_validators * 5;
 
-    fn init(allocator: Allocator) !*TestEnvironment {
-        const self = try allocator.create(TestEnvironment);
-        errdefer allocator.destroy(self);
         self.allocator = allocator;
         self.pool = try Node.Pool.init(allocator, pool_size);
         errdefer self.pool.deinit();
@@ -140,14 +137,12 @@ const TestEnvironment = struct {
             const slot = try lbh.get("slot");
             self.slashings_cache.updateLatestBlockSlot(slot);
         }
-        return self;
     }
 
     fn deinit(self: *TestEnvironment) void {
         self.slashings_cache.deinit();
         self.test_state.deinit();
         self.pool.deinit();
-        self.allocator.destroy(self);
     }
 };
 
@@ -200,7 +195,8 @@ fn freeSlashing(allocator: Allocator, slashing: *types.phase0.AttesterSlashing.T
 
 test "assertValidAttesterSlashing - double vote sanity" {
     const allocator = testing.allocator;
-    const env = try TestEnvironment.init(allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(allocator, 256);
     defer env.deinit();
 
     const indices = &[_]ValidatorIndex{ 1, 2, 3 };
@@ -221,7 +217,8 @@ test "assertValidAttesterSlashing - double vote sanity" {
 
 test "assertValidAttesterSlashing - not slashable (same data)" {
     const allocator = testing.allocator;
-    const env = try TestEnvironment.init(allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(allocator, 256);
     defer env.deinit();
 
     const indices = &[_]ValidatorIndex{ 1, 2, 3 };
@@ -247,7 +244,8 @@ test "assertValidAttesterSlashing - not slashable (same data)" {
 
 test "assertValidAttesterSlashing - empty attesting indices" {
     const allocator = testing.allocator;
-    const env = try TestEnvironment.init(allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(allocator, 256);
     defer env.deinit();
 
     var slashing = try makeDoubleVoteSlashing(allocator, &[_]ValidatorIndex{});
@@ -270,7 +268,8 @@ test "assertValidAttesterSlashing - empty attesting indices" {
 
 test "assertValidAttesterSlashing - unsorted indices" {
     const allocator = testing.allocator;
-    const env = try TestEnvironment.init(allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(allocator, 256);
     defer env.deinit();
 
     // Indices must be sorted ascending
@@ -294,7 +293,8 @@ test "assertValidAttesterSlashing - unsorted indices" {
 
 test "processAttesterSlashing - slashes intersecting validators" {
     const allocator = testing.allocator;
-    const env = try TestEnvironment.init(allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(allocator, 256);
     defer env.deinit();
 
     const state = env.test_state.cached_state.state.castToFork(.electra);
@@ -336,7 +336,8 @@ test "processAttesterSlashing - slashes intersecting validators" {
 
 test "processAttesterSlashing - already slashed validator returns error" {
     const allocator = testing.allocator;
-    const env = try TestEnvironment.init(allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(allocator, 256);
     defer env.deinit();
 
     const state = env.test_state.cached_state.state.castToFork(.electra);
