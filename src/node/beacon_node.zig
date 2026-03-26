@@ -781,6 +781,9 @@ pub const BeaconNode = struct {
     genesis_validators_root: [32]u8 = [_]u8{0} ** 32,
 
 
+    // Node configuration options — stored for lazy-initialized components.
+    node_options: NodeOptions = .{},
+
     // Bootnode ENRs — provided via --bootnodes CLI flag, used to dial initial peers.
     bootnodes: []const []const u8 = &.{},
 
@@ -956,7 +959,14 @@ pub const BeaconNode = struct {
         var io_transport_ptr: ?*IoHttpTransport = null;
         var engine: ?EngineApi = null;
 
-        if (opts.execution_urls.len > 0) {
+        if (opts.engine_mock) {
+            // Explicit --engine-mock flag — always use MockEngine.
+            const mock = try allocator.create(MockEngine);
+            mock.* = MockEngine.init(allocator);
+            mock_engine_ptr = mock;
+            engine = mock.engine();
+            std.log.info("Execution engine: MockEngine (--engine-mock)", .{});
+        } else if (opts.execution_urls.len > 0) {
             // JWT secret will be loaded lazily in setIo() when Io becomes available.
             // Create production HTTP transport and HttpEngine (jwt_secret=null for now).
             const transport = try allocator.create(IoHttpTransport);
@@ -987,6 +997,7 @@ pub const BeaconNode = struct {
             .allocator = allocator,
             .config = beacon_config,
             .bootnodes = opts.bootnodes,
+            .node_options = opts,
             .db = db,
             .state_regen = regen,
             .block_state_cache = block_cache,
@@ -1863,6 +1874,25 @@ pub const BeaconNode = struct {
     }
 
     /// Initialize the discovery service.
+
+/// Parse a dotted-decimal IPv4 string ("1.2.3.4") into [4]u8.
+fn parseIp4(s: []const u8) ?[4]u8 {
+    var result: [4]u8 = undefined;
+    var octet_idx: usize = 0;
+    var start: usize = 0;
+    for (s, 0..) |c, i| {
+        if (c == '.') {
+            if (octet_idx >= 3) return null;
+            result[octet_idx] = std.fmt.parseInt(u8, s[start..i], 10) catch return null;
+            octet_idx += 1;
+            start = i + 1;
+        }
+    }
+    if (octet_idx != 3) return null;
+    result[3] = std.fmt.parseInt(u8, s[start..], 10) catch return null;
+    return result;
+}
+
     fn initDiscoveryService(self: *BeaconNode) !void {
         const allocator = self.allocator;
 
@@ -1882,13 +1912,19 @@ pub const BeaconNode = struct {
 
         const ds = try allocator.create(DiscoveryService);
         errdefer allocator.destroy(ds);
+        // Resolve discovery port: explicit --discovery-port, or fall back to p2p_port.
+        const disc_port = self.node_options.discovery_port orelse self.node_options.p2p_port;
+
+        // Parse p2p_host string ("0.0.0.0") into [4]u8 for the discovery service.
+        const local_ip = parseIp4(self.node_options.p2p_host) orelse [4]u8{ 0, 0, 0, 0 };
+
         ds.* = try DiscoveryService.init(allocator, .{
-            .listen_port = 9000, // TODO: wire from NodeOptions.discovery_port
+            .listen_port = disc_port,
             .secret_key = secret_key,
-            .local_ip = [4]u8{ 0, 0, 0, 0 },
-            .p2p_port = 9000, // TODO: wire from actual listen port
+            .local_ip = local_ip,
+            .p2p_port = self.node_options.p2p_port,
             .fork_digest = fork_digest,
-            .target_peers = 50, // TODO: wire from NodeOptions.target_peers
+            .target_peers = self.node_options.target_peers,
             .cli_bootnodes = self.bootnodes,
         });
 
@@ -1905,7 +1941,7 @@ pub const BeaconNode = struct {
         const cm = try allocator.create(ConnectionManager);
         errdefer allocator.destroy(cm);
         cm.* = ConnectionManager.init(allocator, .{
-            .target_peers = 50, // TODO: wire from NodeOptions.target_peers
+            .target_peers = self.node_options.target_peers,
         });
         self.connection_manager = cm;
         std.log.info("Connection manager initialized (target_peers={d})", .{cm.config.target_peers});
