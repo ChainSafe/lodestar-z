@@ -154,6 +154,30 @@ pub const BeaconDB = struct {
         return self.getStateArchive(slot);
     }
 
+    /// Find the latest (highest slot) state archive in the DB.
+    /// Scans all keys with the state archive bucket prefix, decodes the
+    /// slot from each key, and returns the highest one found.
+    /// Returns null if no state archives exist (fresh DB).
+    pub fn getLatestStateArchiveSlot(self: *BeaconDB) !?u64 {
+        const prefix = buckets.bucketPrefix(.all_forks_state_archive);
+        const keys = try self.kv.keysWithPrefix(&prefix);
+        defer {
+            for (keys) |k| self.allocator.free(k);
+            self.allocator.free(keys);
+        }
+
+        var max_slot: ?u64 = null;
+        for (keys) |key| {
+            // Key format: [1-byte bucket] ++ [8-byte slot LE]
+            if (key.len != 9) continue;
+            const slot = std.mem.readInt(u64, key[1..9], .little);
+            if (max_slot == null or slot > max_slot.?) {
+                max_slot = slot;
+            }
+        }
+        return max_slot;
+    }
+
     // ---------------------------------------------------------------
     // Blob sidecar operations
     // ---------------------------------------------------------------

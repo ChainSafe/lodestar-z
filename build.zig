@@ -848,6 +848,8 @@ pub fn build(b: *std.Build) void {
     module_node_main.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_node_main.addImport("yaml", dep_yaml.module("yaml"));
     module_node_main.addImport("zig_cli", dep_zig_cli.module("zig-cli"));
+    module_node_main.addImport("sync", module_sync);
+    module_node_main.addImport("preset", module_preset);
 
     const exe_node = b.addExecutable(.{
         .name = "lodestar-z",

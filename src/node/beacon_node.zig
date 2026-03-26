@@ -1234,6 +1234,144 @@ pub const BeaconNode = struct {
         self.api_head_tracker.head_state_root = state_root;
     }
 
+    /// Initialize the beacon node from a checkpoint state at an arbitrary slot.
+    ///
+    /// Similar to initFromGenesis(), but seeds the fork choice at the
+    /// checkpoint's slot rather than slot 0. Used for:
+    /// - Checkpoint sync from URL (--checkpoint-sync-url)
+    /// - Checkpoint sync from file (--checkpoint-state)
+    /// - Resume from DB (loading persisted state from previous run)
+    ///
+    /// The checkpoint state must be a finalized state — its latest_block_header
+    /// defines the anchor block root for fork choice.
+    pub fn initFromCheckpoint(self: *BeaconNode, checkpoint_state: *CachedBeaconState) !void {
+        // Compute the checkpoint state root.
+        try checkpoint_state.state.commit();
+        const state_root = (try checkpoint_state.state.hashTreeRoot()).*;
+
+        // Extract the latest block header from the checkpoint state.
+        // Fill in the state_root to compute the correct block root.
+        var cp_header = try checkpoint_state.state.latestBlockHeader();
+        const header_slot = try cp_header.get("slot");
+        const header_proposer = try cp_header.get("proposer_index");
+        const header_parent = (try cp_header.getFieldRoot("parent_root")).*;
+        const header_body = (try cp_header.getFieldRoot("body_root")).*;
+
+        // The header's state_root may be zero (as per spec for the slot's
+        // latest block header). Fill it in with the computed state_root.
+        var header_state_root = (try cp_header.getFieldRoot("state_root")).*;
+        if (std.mem.eql(u8, &header_state_root, &([_]u8{0} ** 32))) {
+            header_state_root = state_root;
+        }
+
+        const cp_header_val = types.phase0.BeaconBlockHeader.Type{
+            .slot = header_slot,
+            .proposer_index = header_proposer,
+            .parent_root = header_parent,
+            .state_root = header_state_root,
+            .body_root = header_body,
+        };
+        var anchor_block_root: [32]u8 = undefined;
+        try types.phase0.BeaconBlockHeader.hashTreeRoot(&cp_header_val, &anchor_block_root);
+
+        // The slot of the state — this is where we're anchoring.
+        const cp_slot = try checkpoint_state.state.slot();
+
+        std.log.info("Checkpoint anchor: slot={d} block_root=0x{s}...", .{
+            cp_slot,
+            &std.fmt.bytesToHex(anchor_block_root[0..8], .lower),
+        });
+
+        // Cache the checkpoint state.
+        const cached_state_root = try self.state_regen.onNewBlock(checkpoint_state, true);
+
+        // Register block_root → state_root mapping.
+        try self.block_importer.registerGenesisRoot(anchor_block_root, cached_state_root);
+        try self.chain.registerGenesisRoot(anchor_block_root, cached_state_root);
+
+        // Set head at the checkpoint slot.
+        try self.head_tracker.onBlock(anchor_block_root, cp_slot, cached_state_root);
+
+        // Capture genesis validators root for fork digest computation.
+        self.genesis_validators_root = (try checkpoint_state.state.genesisValidatorsRoot()).*;
+        self.chain.genesis_validators_root = self.genesis_validators_root;
+        std.log.info("Genesis validators root: 0x{s}...", .{
+            &std.fmt.bytesToHex(self.genesis_validators_root[0..8], .lower),
+        });
+
+        // Set up clock from genesis_time.
+        const genesis_time = try checkpoint_state.state.genesisTime();
+        self.clock = SlotClock.fromGenesis(genesis_time, self.config.chain);
+
+        // Initialize fork choice with checkpoint as anchor.
+        var justified_cp: types.phase0.Checkpoint.Type = undefined;
+        try checkpoint_state.state.currentJustifiedCheckpoint(&justified_cp);
+        var finalized_cp: types.phase0.Checkpoint.Type = undefined;
+        try checkpoint_state.state.finalizedCheckpoint(&finalized_cp);
+
+        const balances = checkpoint_state.epoch_cache.getEffectiveBalanceIncrements();
+
+        const fc_anchor = ProtoBlock{
+            .slot = cp_slot,
+            .block_root = anchor_block_root,
+            .parent_root = anchor_block_root, // anchor: parent = self
+            .state_root = cached_state_root,
+            .target_root = anchor_block_root,
+            .justified_epoch = justified_cp.epoch,
+            .justified_root = justified_cp.root,
+            .finalized_epoch = finalized_cp.epoch,
+            .finalized_root = finalized_cp.root,
+            .unrealized_justified_epoch = justified_cp.epoch,
+            .unrealized_justified_root = justified_cp.root,
+            .unrealized_finalized_epoch = finalized_cp.epoch,
+            .unrealized_finalized_root = finalized_cp.root,
+            .extra_meta = .{ .pre_merge = {} },
+            .timeliness = true,
+        };
+
+        const fc = try self.allocator.create(ForkChoice);
+        errdefer self.allocator.destroy(fc);
+        fc.* = try ForkChoice.init(
+            self.allocator,
+            .{
+                .justified_checkpoint = .{
+                    .epoch = justified_cp.epoch,
+                    .root = justified_cp.root,
+                },
+                .finalized_checkpoint = .{
+                    .epoch = finalized_cp.epoch,
+                    .root = finalized_cp.root,
+                },
+                .justified_balances = balances.items,
+            },
+            fc_anchor,
+            cp_slot,
+        );
+
+        // Clean up any previous fork choice.
+        if (self.fork_choice) |old_fc| {
+            old_fc.deinit(self.allocator);
+            self.allocator.destroy(old_fc);
+        }
+        self.fork_choice = fc;
+        self.block_importer.fork_choice = fc;
+        self.chain.fork_choice = fc;
+        self.chain.genesis_validators_root = self.genesis_validators_root;
+
+        // Update API context.
+        self.api_head_tracker.head_slot = cp_slot;
+        self.api_head_tracker.head_root = anchor_block_root;
+        self.api_head_tracker.head_state_root = cached_state_root;
+        self.api_head_tracker.finalized_slot = finalized_cp.epoch * preset.SLOTS_PER_EPOCH;
+        self.api_head_tracker.justified_slot = justified_cp.epoch * preset.SLOTS_PER_EPOCH;
+
+        std.log.info("Initialized from checkpoint: slot={d} finalized_epoch={d} justified_epoch={d}", .{
+            cp_slot,
+            finalized_cp.epoch,
+            justified_cp.epoch,
+        });
+    }
+
     /// Import a signed beacon block through the full pipeline.
     ///
     /// Decodes the block, runs STFN, caches the post-state, persists to DB,
