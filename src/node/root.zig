@@ -40,3 +40,10 @@ test {
 
 pub const gossip_handler_mod = @import("gossip_handler.zig");
 pub const GossipHandler = gossip_handler_mod.GossipHandler;
+
+// Processor module re-exports for convenience.
+pub const processor_mod = @import("processor");
+pub const BeaconProcessor = processor_mod.BeaconProcessor;
+pub const WorkItem = processor_mod.WorkItem;
+pub const WorkType = processor_mod.WorkType;
+pub const QueueConfig = processor_mod.QueueConfig;
