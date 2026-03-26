@@ -68,6 +68,8 @@ const api_types = api_mod.types;
 const SlotClock = @import("clock.zig").SlotClock;
 const SyncController = @import("sync_controller.zig").SyncController;
 const NodeOptions = @import("options.zig").NodeOptions;
+const sync_mod = @import("sync");
+const UnknownBlockSync = sync_mod.UnknownBlockSync;
 
 const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
@@ -440,6 +442,10 @@ pub const BeaconNode = struct {
     // GossipHandler — lazily initialized when P2P starts (owns its SeenSets).
     gossip_handler: ?*GossipHandler = null,
 
+    // Unknown block sync — queues blocks whose parent is not yet known.
+    // Initialized eagerly in init(); used by the gossip block import path.
+    unknown_block_sync: UnknownBlockSync,
+
     // Genesis validators root — set by initFromGenesis, used for fork digest computation.
     genesis_validators_root: [32]u8 = [_]u8{0} ** 32,
 
@@ -619,6 +625,7 @@ pub const BeaconNode = struct {
             .api_sync_status = api_sync,
             .block_import_ctx = block_import_ctx,
             .head_state_cb_ctx = head_state_cb_ctx,
+            .unknown_block_sync = UnknownBlockSync.init(allocator),
         };
 
         return node;
@@ -695,6 +702,7 @@ pub const BeaconNode = struct {
             gh.deinit();
         }
 
+        self.unknown_block_sync.deinit();
         allocator.destroy(self);
     }
 
@@ -1186,9 +1194,16 @@ pub const BeaconNode = struct {
                             switch (any_signed) {
                                 .full_electra => |blk| {
                                     const result = self.importBlock(blk) catch |err| {
-                                        std.log.warn("Gossip block import: {}", .{err});
+                                        if (err == error.UnknownParentBlock) {
+                                            // Queue the orphan block for unknown block sync.
+                                            self.queueOrphanBlock(blk, ssz_bytes);
+                                        } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
+                                            std.log.warn("Gossip block import: {}", .{err});
+                                        }
                                         continue;
                                     };
+                                    // Check if any pending orphans can now be imported.
+                                    self.processPendingChildren(result.block_root);
                                     std.log.info("GOSSIP BLOCK IMPORTED slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
                                         result.slot,
                                         result.block_root[0], result.block_root[1],
@@ -1553,7 +1568,89 @@ pub const BeaconNode = struct {
             return blocks_received;
         }
 
-        /// Get the current head info.
+        /// Queue an orphan block whose parent is not yet known.
+    ///
+    /// Computes the block root and stores the raw SSZ bytes in the
+    /// UnknownBlockSync pending set. The parent will be fetched via
+    /// BeaconBlocksByRoot during the next sync cycle.
+    fn queueOrphanBlock(
+        self: *BeaconNode,
+        blk: *const types.electra.SignedBeaconBlock.Type,
+        ssz_bytes: []const u8,
+    ) void {
+        // Compute the block root for dedup.
+        var body_root: [32]u8 = undefined;
+        types.electra.BeaconBlockBody.hashTreeRoot(
+            self.allocator, &blk.message.body, &body_root,
+        ) catch return;
+        const hdr = types.phase0.BeaconBlockHeader.Type{
+            .slot = blk.message.slot,
+            .proposer_index = blk.message.proposer_index,
+            .parent_root = blk.message.parent_root,
+            .state_root = blk.message.state_root,
+            .body_root = body_root,
+        };
+        var block_root: [32]u8 = undefined;
+        types.phase0.BeaconBlockHeader.hashTreeRoot(&hdr, &block_root) catch return;
+
+        const added = self.unknown_block_sync.addPendingBlock(
+            block_root,
+            blk.message.parent_root,
+            blk.message.slot,
+            ssz_bytes,
+        ) catch return;
+
+        if (added) {
+            std.log.info("Queued orphan block slot={d} parent={s}... ({d} pending)", .{
+                blk.message.slot,
+                &std.fmt.bytesToHex(blk.message.parent_root[0..4], .lower),
+                self.unknown_block_sync.pendingCount(),
+            });
+        }
+    }
+
+    /// After a block is successfully imported, check if any orphan children
+    /// were waiting on it and try to import them.
+    fn processPendingChildren(self: *BeaconNode, parent_root: [32]u8) void {
+        const children = self.unknown_block_sync.onParentImported(parent_root) catch return;
+        defer self.allocator.free(children);
+
+        for (children) |child| {
+            defer self.allocator.free(child.block_bytes);
+
+            // Deserialize and import.
+            const raw_fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
+            const fork_seq = if (@intFromEnum(raw_fork_seq) > @intFromEnum(config_mod.ForkSeq.electra))
+                config_mod.ForkSeq.electra
+            else
+                raw_fork_seq;
+            const any_signed = AnySignedBeaconBlock.deserialize(
+                self.allocator, .full, fork_seq, child.block_bytes,
+            ) catch |err| {
+                std.log.warn("Failed to deserialize pending child: {}", .{err});
+                continue;
+            };
+            defer any_signed.deinit(self.allocator);
+
+            switch (any_signed) {
+                .full_electra => |blk| {
+                    const result = self.importBlock(blk) catch |err| {
+                        std.log.warn("Failed to import pending child slot={d}: {}", .{ child.slot, err });
+                        continue;
+                    };
+                    std.log.info("Imported pending child slot={d} root={s}...", .{
+                        result.slot,
+                        &std.fmt.bytesToHex(result.block_root[0..4], .lower),
+                    });
+                    // Recursively check for more children.
+                    self.processPendingChildren(result.block_root);
+                },
+                else => {},
+            }
+        }
+    }
+
+    /// Get the current head info.
     pub fn getHead(self: *const BeaconNode) HeadInfo {
         // Use fork choice head when available (authoritative LMD-GHOST head).
         if (self.fork_choice) |fc| {

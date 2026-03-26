@@ -18,6 +18,7 @@ pub const peer_manager = @import("peer_manager.zig");
 pub const range_sync = @import("range_sync.zig");
 pub const checkpoint_sync = @import("checkpoint_sync.zig");
 pub const sync_service = @import("sync_service.zig");
+pub const unknown_block_sync = @import("unknown_block_sync.zig");
 
 // Re-export key types for convenience.
 pub const SyncState = sync_types.SyncState;
@@ -43,6 +44,9 @@ pub const CheckpointSyncError = checkpoint_sync.CheckpointSyncError;
 
 pub const SyncService = sync_service.SyncService;
 pub const SyncMode = sync_service.SyncMode;
+
+pub const UnknownBlockSync = unknown_block_sync.UnknownBlockSync;
+pub const PendingBlock = unknown_block_sync.PendingBlock;
 
 test {
     testing.refAllDecls(@This());
