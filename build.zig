@@ -209,6 +209,13 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("node"), module_node) catch @panic("OOM");
 
+
+    const module_processor = b.createModule(.{
+        .root_source_file = b.path("src/processor/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("processor"), module_processor) catch @panic("OOM");
     const module_execution = b.createModule(.{
         .root_source_file = b.path("src/execution/root.zig"),
         .target = target,
@@ -547,6 +554,16 @@ pub fn build(b: *std.Build) void {
     tls_run_test_node.dependOn(&run_test_node.step);
     tls_run_test.dependOn(&run_test_node.step);
 
+    const test_processor = b.addTest(.{
+        .name = "processor",
+        .root_module = module_processor,
+        .filters = b.option([][]const u8, "processor.filters", "processor test filters") orelse &[_][]const u8{},
+    });
+    const run_test_processor = b.addRunArtifact(test_processor);
+    const tls_run_test_processor = b.step("test:processor", "Run the processor tests");
+    tls_run_test_processor.dependOn(&run_test_processor.step);
+    tls_run_test.dependOn(&run_test_processor.step);
+
     // Spec test modules
     const module_int = b.createModule(.{
         .root_source_file = b.path("test/int/era/root.zig"),
@@ -861,6 +878,13 @@ pub fn build(b: *std.Build) void {
     module_node.addImport("sync", module_sync);
     module_node.addImport("snappy", dep_snappy.module("snappy"));
     module_node.addImport("discv5", module_discv5);
+    module_node.addImport("processor", module_processor);
+
+    module_processor.addImport("consensus_types", module_consensus_types);
+    module_processor.addImport("fork_types", module_fork_types);
+    module_processor.addImport("config", module_config);
+    module_processor.addImport("preset", module_preset);
+    module_processor.addImport("constants", module_constants);
 
     // fork_choice module imports
     module_fork_choice.addImport("consensus_types", module_consensus_types);
