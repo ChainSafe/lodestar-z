@@ -1170,33 +1170,25 @@ pub const BeaconNode = struct {
 
         // Keep syncing: periodically request new blocks via range sync
         std.log.info("Starting sync maintenance loop...", .{});
+        // Keep requesting blocks every slot. Don't re-send Status (rate limited).
+        // Just request BlocksByRange from head+1 with a small count — if peer
+        // has no new blocks, we'll get 0 back and sleep.
         while (true) {
-            // Sleep one slot period before next sync check
             const slot_sleep: std.Io.Timeout = .{ .duration = .{
                 .raw = std.Io.Duration.fromNanoseconds(@as(i96, 6) * std.time.ns_per_s),
                 .clock = .awake,
             } };
             slot_sleep.sleep(io) catch break;
 
-            // Re-request Status to check peer's head
-            const status = self.sendStatus(io, svc, peer_id) catch |err| {
-                std.log.warn("Status refresh failed: {} — peer likely disconnected", .{err});
+            const start = self.head_tracker.head_slot + 1;
+            const imported = self.requestBlocksByRange(io, svc, peer_id, start, 16) catch |err| {
+                std.log.warn("Catch-up sync failed: {} — peer may have disconnected", .{err});
                 break;
             };
-
-            // If peer is ahead, request blocks
-            if (status.head_slot > self.head_tracker.head_slot) {
-                const start = self.head_tracker.head_slot + 1;
-                const count = @min(status.head_slot - self.head_tracker.head_slot, 64);
-                const imported = self.requestBlocksByRange(io, svc, peer_id, start, count) catch |err| {
-                    std.log.warn("Catch-up sync failed: {}", .{err});
-                    continue;
-                };
-                if (imported > 0) {
-                    std.log.info("Catch-up: imported {d} blocks, head now at slot {d}", .{
-                        imported, self.head_tracker.head_slot,
-                    });
-                }
+            if (imported > 0) {
+                std.log.info("Catch-up: imported {d} blocks, head now at slot {d}", .{
+                    imported, self.head_tracker.head_slot,
+                });
             }
         }
     }
