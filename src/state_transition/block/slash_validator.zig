@@ -125,12 +125,9 @@ const TestEnvironment = struct {
     test_state: TestCachedBeaconState,
     slashings_cache: SlashingsCache,
 
-    const num_validators = 10_000;
-    const pool_size = num_validators * 5;
+    fn init(self: *TestEnvironment, allocator: std.mem.Allocator, num_validators: u32) !void {
+        const pool_size = num_validators * 5;
 
-    fn init(allocator: std.mem.Allocator) !*TestEnvironment {
-        const self = try allocator.create(TestEnvironment);
-        errdefer allocator.destroy(self);
         self.allocator = allocator;
         self.pool = try Node.Pool.init(allocator, pool_size);
         errdefer self.pool.deinit();
@@ -144,19 +141,18 @@ const TestEnvironment = struct {
             const slot = try lbh.get("slot");
             self.slashings_cache.updateLatestBlockSlot(slot);
         }
-        return self;
     }
 
     fn deinit(self: *TestEnvironment) void {
         self.slashings_cache.deinit();
         self.test_state.deinit();
         self.pool.deinit();
-        self.allocator.destroy(self);
     }
 };
 
 test "slashValidator - basic sanity" {
-    const env = try TestEnvironment.init(std.testing.allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 10_000);
     defer env.deinit();
 
     try slashValidator(
@@ -171,7 +167,8 @@ test "slashValidator - basic sanity" {
 }
 
 test "slashValidator - validator marked as slashed" {
-    const env = try TestEnvironment.init(std.testing.allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 10_000);
     defer env.deinit();
 
     const slashed_index: u64 = 100;
@@ -198,7 +195,8 @@ test "slashValidator - validator marked as slashed" {
 }
 
 test "slashValidator - with explicit whistleblower" {
-    const env = try TestEnvironment.init(std.testing.allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 10_000);
     defer env.deinit();
 
     try slashValidator(
