@@ -68,7 +68,21 @@ pub const GossipHandler = struct {
         target_epoch: u64,
         validator_index: u64,
         beacon_block_root: [32]u8,
+        source_epoch: u64,
+        source_root: [32]u8,
     ) anyerror!void,
+
+    /// Called to import a validated voluntary exit into the op pool.
+    importVoluntaryExitFn: ?*const fn (ptr: *anyopaque, validator_index: u64, epoch: u64) anyerror!void,
+
+    /// Called to import a validated proposer slashing into the op pool.
+    importProposerSlashingFn: ?*const fn (ptr: *anyopaque, proposer_index: u64) anyerror!void,
+
+    /// Called to import raw attester slashing SSZ bytes into the op pool.
+    importAttesterSlashingFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
+
+    /// Called to import a validated BLS-to-execution change into the op pool.
+    importBlsChangeFn: ?*const fn (ptr: *anyopaque, validator_index: u64) anyerror!void,
 
     /// Gossip dedup caches (owned). Used by Phase 1 fast validation.
     seen_cache: SeenCache,
@@ -98,6 +112,10 @@ pub const GossipHandler = struct {
             .node = node,
             .importBlockFn = importBlockFn,
             .importAttestationFn = null,
+            .importVoluntaryExitFn = null,
+            .importProposerSlashingFn = null,
+            .importAttesterSlashingFn = null,
+            .importBlsChangeFn = null,
             .seen_cache = SeenCache.init(allocator),
             .current_slot = 0,
             .current_epoch = 0,
@@ -222,6 +240,8 @@ pub const GossipHandler = struct {
                 att.target_epoch,
                 att.attester_index,
                 att.beacon_block_root,
+                att.source_epoch,
+                att.source_root,
             ) catch |err| {
                 std.log.warn("Attestation import failed for slot {d}: {}", .{ att.slot, err });
             };
@@ -263,6 +283,126 @@ pub const GossipHandler = struct {
         });
     }
 
+    /// Called when a voluntary_exit gossip message arrives.
+    ///
+    /// Pipeline:
+    /// 1. Snappy decompress + SSZ decode → extract validator index and exit epoch
+    /// 2. Phase 1: basic bounds check (validator index within set)
+    /// 3. Phase 2: import to op pool
+    pub fn onVoluntaryExit(self: *GossipHandler, message_data: []const u8) !void {
+        const decoded = decodeGossipMessage(self.allocator, .voluntary_exit, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        const exit = decoded.voluntary_exit;
+
+        // Phase 1: basic validation — validator index must be within known set.
+        const vc = self.getValidatorCount();
+        if (exit.validator_index >= vc) return GossipHandlerError.ValidationRejected;
+
+        // Phase 1: exit epoch must be <= current epoch (can't exit in the future).
+        if (exit.exit_epoch > self.current_epoch) return GossipHandlerError.ValidationIgnored;
+
+        // Phase 2: import to op pool.
+        if (self.importVoluntaryExitFn) |importFn| {
+            importFn(self.node, exit.validator_index, exit.exit_epoch) catch |err| {
+                std.log.warn("Voluntary exit import failed for validator {d}: {}", .{ exit.validator_index, err });
+            };
+        }
+
+        std.log.info("Accepted voluntary_exit: validator={d} epoch={d}", .{
+            exit.validator_index, exit.exit_epoch,
+        });
+    }
+
+    /// Called when a proposer_slashing gossip message arrives.
+    ///
+    /// Pipeline:
+    /// 1. Snappy decompress + SSZ decode → extract proposer index, header slots/body roots
+    /// 2. Phase 1: headers must have same slot but different body roots (different blocks)
+    /// 3. Phase 2: import to op pool
+    pub fn onProposerSlashing(self: *GossipHandler, message_data: []const u8) !void {
+        const decoded = decodeGossipMessage(self.allocator, .proposer_slashing, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        const ps = decoded.proposer_slashing;
+
+        // Phase 1: proposer must be within known validator set.
+        const vc = self.getValidatorCount();
+        if (ps.proposer_index >= vc) return GossipHandlerError.ValidationRejected;
+
+        // Phase 1: headers must have the same slot (same proposer slot).
+        if (ps.header_1_slot != ps.header_2_slot) return GossipHandlerError.ValidationRejected;
+
+        // Phase 1: body roots must differ (different blocks for same slot = slashable).
+        if (std.mem.eql(u8, &ps.header_1_body_root, &ps.header_2_body_root))
+            return GossipHandlerError.ValidationRejected;
+
+        // Phase 2: import to op pool.
+        if (self.importProposerSlashingFn) |importFn| {
+            importFn(self.node, ps.proposer_index) catch |err| {
+                std.log.warn("Proposer slashing import failed for proposer {d}: {}", .{ ps.proposer_index, err });
+            };
+        }
+
+        std.log.info("Accepted proposer_slashing: proposer={d} slot={d}", .{
+            ps.proposer_index, ps.header_1_slot,
+        });
+    }
+
+    /// Called when an attester_slashing gossip message arrives.
+    ///
+    /// Pipeline:
+    /// 1. Snappy decompress + SSZ decode → check slashable attestation data
+    /// 2. Phase 1: attestation data must be slashable (double vote or surround vote)
+    /// 3. Phase 2: import raw SSZ to op pool (full deserialization happens at pool layer)
+    pub fn onAttesterSlashing(self: *GossipHandler, message_data: []const u8) !void {
+        const decoded = decodeGossipMessage(self.allocator, .attester_slashing, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        const as = decoded.attester_slashing;
+
+        // Phase 1: attestation data must be slashable.
+        if (!as.is_slashable) return GossipHandlerError.ValidationRejected;
+
+        // Phase 2: import raw SSZ bytes.
+        // Decompress to get the raw SSZ for the pool.
+        if (self.importAttesterSlashingFn) |importFn| {
+            const snappy = @import("networking").gossip_decoding;
+            const ssz_bytes = snappy.decompressGossipPayload(self.allocator, message_data) catch
+                return GossipHandlerError.DecodeFailed;
+            defer self.allocator.free(ssz_bytes);
+            importFn(self.node, ssz_bytes) catch |err| {
+                std.log.warn("Attester slashing import failed: {}", .{err});
+            };
+        }
+
+        std.log.info("Accepted attester_slashing", .{});
+    }
+
+    /// Called when a bls_to_execution_change gossip message arrives.
+    ///
+    /// Pipeline:
+    /// 1. Snappy decompress + SSZ decode → extract validator index
+    /// 2. Phase 1: validator index must be within known set
+    /// 3. Phase 2: import to op pool
+    pub fn onBlsToExecutionChange(self: *GossipHandler, message_data: []const u8) !void {
+        const decoded = decodeGossipMessage(self.allocator, .bls_to_execution_change, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        const change = decoded.bls_to_execution_change;
+
+        // Phase 1: validator index must be within known set.
+        const vc = self.getValidatorCount();
+        if (change.validator_index >= vc) return GossipHandlerError.ValidationRejected;
+
+        // Phase 2: import to op pool.
+        if (self.importBlsChangeFn) |importFn| {
+            importFn(self.node, change.validator_index) catch |err| {
+                std.log.warn("BLS change import failed for validator {d}: {}", .{ change.validator_index, err });
+            };
+        }
+
+        std.log.info("Accepted bls_to_execution_change: validator={d}", .{
+            change.validator_index,
+        });
+    }
+
     /// Route a gossip message by topic type.
     pub fn onGossipMessage(self: *GossipHandler, topic: GossipTopicType, data: []const u8) !void {
         self.onGossipMessageWithSubnet(topic, null, data) catch |err| {
@@ -279,10 +419,10 @@ pub const GossipHandler = struct {
             .beacon_block => try self.onBeaconBlock(data),
             .beacon_attestation => try self.onAttestation(@as(u64, subnet_id orelse 0), data),
             .beacon_aggregate_and_proof => try self.onAggregateAndProof(data),
-            .voluntary_exit => {}, // TODO: Phase 1 validate + queue WorkItem
-            .proposer_slashing => {}, // TODO: Phase 1 validate + queue WorkItem
-            .attester_slashing => {}, // TODO: Phase 1 validate + queue WorkItem
-            .bls_to_execution_change => {}, // TODO: Phase 1 validate + queue WorkItem
+            .voluntary_exit => try self.onVoluntaryExit(data),
+            .proposer_slashing => try self.onProposerSlashing(data),
+            .attester_slashing => try self.onAttesterSlashing(data),
+            .bls_to_execution_change => try self.onBlsToExecutionChange(data),
             .data_column_sidecar => {}, // Handled directly in BeaconNode.processGossipEventsFromSlice
             else => {},
         }
