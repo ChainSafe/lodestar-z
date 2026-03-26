@@ -40,7 +40,7 @@ const Node = @import("persistent_merkle_tree").Node;
 const genesis_util = @import("genesis_util.zig");
 const sync_mod = @import("sync");
 const checkpoint_sync = sync_mod.checkpoint_sync;
-const ShutdownHandler = @import("shutdown.zig").ShutdownHandler;
+const ShutdownHandler = node_mod.ShutdownHandler;
 
 // ============================================================================
 // Version
@@ -510,12 +510,66 @@ const app_spec = cli.app(.{
         .bootnode = cli.command(.{
             .description = "Run a standalone discv5 bootnode",
             .options = .{
+                .listen_address = cli.option([]const u8, .{
+                    .long = "listenAddress",
+                    .description = "IPv4 address to listen for discv5 connections",
+                    .env = "LODESTAR_Z_BOOTNODE_LISTEN_ADDRESS",
+                }, "0.0.0.0"),
                 .bn_port = cli.option(u16, .{
                     .long = "port",
                     .description = "UDP port for bootnode discv5",
                     .env = "LODESTAR_Z_BOOTNODE_PORT",
                 }, 9000),
-                // TODO: implement standalone bootnode
+                .listen_address6 = cli.option(?[]const u8, .{
+                    .long = "listenAddress6",
+                    .description = "IPv6 address to listen for discv5 connections",
+                    .env = "LODESTAR_Z_BOOTNODE_LISTEN_ADDRESS6",
+                }, null),
+                .port6 = cli.option(?u16, .{
+                    .long = "port6",
+                    .description = "IPv6 UDP port for bootnode discv5",
+                    .env = "LODESTAR_Z_BOOTNODE_PORT6",
+                }, null),
+                .bootnodes = cli.option(?[]const u8, .{
+                    .long = "bootnodes",
+                    .description = "Comma-separated list of bootnode ENRs",
+                    .env = "LODESTAR_Z_BOOTNODE_BOOTNODES",
+                }, null),
+                .bootnodes_file = cli.option(?[]const u8, .{
+                    .long = "bootnodesFile",
+                    .description = "File path with bootnode ENRs (one per line)",
+                    .env = "LODESTAR_Z_BOOTNODE_BOOTNODES_FILE",
+                }, null),
+                .enr_ip = cli.option(?[]const u8, .{
+                    .long = "enr.ip",
+                    .description = "Override ENR IP entry",
+                    .env = "LODESTAR_Z_BOOTNODE_ENR_IP",
+                }, null),
+                .enr_ip6 = cli.option(?[]const u8, .{
+                    .long = "enr.ip6",
+                    .description = "Override ENR IPv6 entry",
+                    .env = "LODESTAR_Z_BOOTNODE_ENR_IP6",
+                }, null),
+                .enr_udp = cli.option(?u16, .{
+                    .long = "enr.udp",
+                    .description = "Override ENR UDP port entry",
+                    .env = "LODESTAR_Z_BOOTNODE_ENR_UDP",
+                }, null),
+                .enr_udp6 = cli.option(?u16, .{
+                    .long = "enr.udp6",
+                    .description = "Override ENR IPv6 UDP port entry",
+                    .env = "LODESTAR_Z_BOOTNODE_ENR_UDP6",
+                }, null),
+                .persist_network_identity = cli.option(bool, .{
+                    .long = "persistNetworkIdentity",
+                    .description = "Persist peer-id and ENR across restarts",
+                    .env = "LODESTAR_Z_BOOTNODE_PERSIST_IDENTITY",
+                }, true),
+                .nat = cli.option(bool, .{
+                    .long = "nat",
+                    .description = "Allow ENR configuration of non-local addresses",
+                    .env = "LODESTAR_Z_BOOTNODE_NAT",
+                }, false),
             },
         }),
     },
@@ -1064,8 +1118,22 @@ pub fn main(init: std.process.Init) !void {
             // TODO: implement dev mode
         },
         .bootnode => |opts| {
-            std.log.info("Bootnode not yet implemented. Would listen on port {d}.", .{opts.bn_port});
-            // TODO: implement standalone bootnode
+            try node_mod.bootnode.run(io, allocator, .{
+                .listen_address = opts.listen_address,
+                .port = opts.bn_port,
+                .listen_address6 = opts.listen_address6,
+                .port6 = opts.port6,
+                .bootnodes = opts.bootnodes,
+                .bootnodes_file = opts.bootnodes_file,
+                .enr_ip = opts.enr_ip,
+                .enr_ip6 = opts.enr_ip6,
+                .enr_udp = opts.enr_udp,
+                .enr_udp6 = opts.enr_udp6,
+                .persist_network_identity = opts.persist_network_identity,
+                .nat = opts.nat,
+                .data_dir = opts.data_dir,
+                .network = @tagName(opts.network),
+            });
         },
     }
 
