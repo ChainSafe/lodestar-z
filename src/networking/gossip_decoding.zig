@@ -13,6 +13,7 @@ const testing = std.testing;
 const snappy = @import("snappy").frame;
 const consensus_types = @import("consensus_types");
 const phase0 = consensus_types.phase0;
+const electra = consensus_types.electra;
 const gossip_topics = @import("gossip_topics.zig");
 
 const GossipTopicType = gossip_topics.GossipTopicType;
@@ -60,6 +61,18 @@ pub const DecodedProposerSlashing = struct {
     header_2_body_root: [32]u8,
 };
 
+/// Result of decoding a beacon_attestation (SingleAttestation) gossip message.
+/// In Electra, individual gossip attestations use SingleAttestation format
+/// (one validator per message, no aggregation bits).
+pub const DecodedAttestation = struct {
+    committee_index: u64,
+    attester_index: u64,
+    slot: u64,
+    target_epoch: u64,
+    target_root: [32]u8,
+    beacon_block_root: [32]u8,
+};
+
 /// Count the number of set bits in a BitList's underlying data.
 ///
 /// The BitList stores bits packed in bytes. This counts the total number
@@ -84,7 +97,7 @@ pub const DecodedGossipMessage = union(GossipTopicType) {
     // Fields match GossipTopicType enum declaration order.
     beacon_block: DecodedBeaconBlock,
     beacon_aggregate_and_proof: DecodedAggregateAndProof,
-    beacon_attestation: void,
+    beacon_attestation: DecodedAttestation,
     voluntary_exit: DecodedVoluntaryExit,
     proposer_slashing: DecodedProposerSlashing,
     attester_slashing: void,
@@ -175,8 +188,20 @@ pub fn decodeFromSszBytes(
                 .header_2_body_root = slashing.signed_header_2.message.body_root,
             } };
         },
+        .beacon_attestation => {
+            var att: electra.SingleAttestation.Type = undefined;
+            electra.SingleAttestation.deserializeFromBytes(ssz_bytes, &att) catch
+                return error.SszDeserializationFailed;
+            return .{ .beacon_attestation = .{
+                .committee_index = att.committee_index,
+                .attester_index = att.attester_index,
+                .slot = att.data.slot,
+                .target_epoch = att.data.target.epoch,
+                .target_root = att.data.target.root,
+                .beacon_block_root = att.data.beacon_block_root,
+            } };
+        },
         // Stub types — these will be fleshed out in future spikes.
-        .beacon_attestation,
         .attester_slashing,
         .bls_to_execution_change,
         .blob_sidecar,
