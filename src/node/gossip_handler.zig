@@ -58,6 +58,18 @@ pub const GossipHandler = struct {
     /// Receives raw SSZ bytes (decompressed, not Snappy-wrapped).
     importBlockFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
 
+    /// Called to import a validated attestation into fork choice + pool.
+    /// Null until wired by BeaconNode (attestation import is optional during early bringup).
+    importAttestationFn: ?*const fn (
+        ptr: *anyopaque,
+        attestation_slot: u64,
+        committee_index: u64,
+        target_root: [32]u8,
+        target_epoch: u64,
+        validator_index: u64,
+        beacon_block_root: [32]u8,
+    ) anyerror!void,
+
     /// Gossip dedup caches (owned). Used by Phase 1 fast validation.
     seen_cache: SeenCache,
 
@@ -85,6 +97,7 @@ pub const GossipHandler = struct {
             .allocator = allocator,
             .node = node,
             .importBlockFn = importBlockFn,
+            .importAttestationFn = null,
             .seen_cache = SeenCache.init(allocator),
             .current_slot = 0,
             .current_epoch = 0,
@@ -173,29 +186,99 @@ pub const GossipHandler = struct {
         try self.importBlockFn(self.node, ssz_bytes);
     }
 
-    /// Called when a gossip attestation arrives.
+    /// Called when a gossip attestation arrives on a `beacon_attestation_{subnet}` topic.
     ///
     /// Pipeline:
-    /// 1. Decode attestation fields
-    /// 2. Phase 1: fast validation
-    /// 3. Phase 2: queue for fork choice integration
+    /// 1. Snappy decompress + SSZ decode → extract slot/committee/target/attester
+    /// 2. Phase 1: fast validation (< 1 ms) — slot range, committee bounds, dedup
+    /// 3. Phase 2: import to fork choice + attestation pool
     pub fn onAttestation(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
-        // Attestation decoding is not yet supported by gossip_decoding.zig.
-        // When it is, the pipeline will be:
-        //   1. Decode attestation → extract slot, committee_index, target
-        //   2. Phase 1: validateGossipAttestation(slot, committee, target_epoch, target_root, chain_state)
-        //   3. Phase 2: Queue WorkItem{ .gossip_attestation = ... } for fork choice
-        _ = self;
         _ = subnet_id;
-        _ = message_data;
-        // TODO: implement once gossip_decoding supports beacon_attestation
+
+        // Phase 1a: Decompress + decode.
+        const decoded = decodeGossipMessage(self.allocator, .beacon_attestation, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        const att = decoded.beacon_attestation;
+
+        // Phase 1b: Fast validation.
+        var chain_state = self.makeChainState();
+        const action = chain_gossip.validateGossipAttestation(
+            att.slot,
+            att.committee_index,
+            att.target_epoch,
+            att.target_root,
+            &chain_state,
+        );
+        try checkAction(action);
+
+        // Phase 2: Import to fork choice + attestation pool.
+        // TODO: Replace direct call with WorkItem queue push.
+        if (self.importAttestationFn) |importFn| {
+            importFn(
+                self.node,
+                att.slot,
+                att.committee_index,
+                att.target_root,
+                att.target_epoch,
+                att.attester_index,
+                att.beacon_block_root,
+            ) catch |err| {
+                std.log.warn("Attestation import failed for slot {d}: {}", .{ att.slot, err });
+            };
+        }
+    }
+
+    /// Called when a gossip aggregate arrives on the `beacon_aggregate_and_proof` topic.
+    ///
+    /// Pipeline:
+    /// 1. Snappy decompress + SSZ decode → extract aggregator/attestation fields
+    /// 2. Phase 1: fast validation (aggregator bounds, slot range, dedup)
+    /// 3. Phase 2: import to fork choice + attestation pool
+    pub fn onAggregateAndProof(self: *GossipHandler, message_data: []const u8) !void {
+        // Phase 1a: Decompress + decode.
+        const decoded = decodeGossipMessage(self.allocator, .beacon_aggregate_and_proof, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        const agg = decoded.beacon_aggregate_and_proof;
+
+        // Phase 1b: Fast validation.
+        var chain_state = self.makeChainState();
+        const action = chain_gossip.validateGossipAggregate(
+            agg.aggregator_index,
+            agg.attestation_slot,
+            agg.attestation_target_epoch,
+            agg.aggregation_bits_count,
+            &chain_state,
+        );
+        try checkAction(action);
+
+        // Phase 2: log acceptance.
+        // TODO: Full import — extract attestation from aggregate, convert to
+        // phase0.Attestation, call importAttestationFn. For now, we validate
+        // and accept for gossipsub scoring but skip pool insertion since we
+        // don't have the full Attestation struct from the decoded fields.
+        std.log.info("Accepted aggregate: aggregator={d} slot={d} target_epoch={d}", .{
+            agg.aggregator_index,
+            agg.attestation_slot,
+            agg.attestation_target_epoch,
+        });
     }
 
     /// Route a gossip message by topic type.
     pub fn onGossipMessage(self: *GossipHandler, topic: GossipTopicType, data: []const u8) !void {
+        self.onGossipMessageWithSubnet(topic, null, data) catch |err| {
+            switch (err) {
+                GossipHandlerError.ValidationIgnored => {},
+                else => return err,
+            }
+        };
+    }
+
+    /// Route a gossip message by topic type, with optional subnet_id for subnet-indexed topics.
+    pub fn onGossipMessageWithSubnet(self: *GossipHandler, topic: GossipTopicType, subnet_id: ?u8, data: []const u8) !void {
         switch (topic) {
             .beacon_block => try self.onBeaconBlock(data),
-            .beacon_attestation => try self.onAttestation(0, data),
+            .beacon_attestation => try self.onAttestation(@as(u64, subnet_id orelse 0), data),
+            .beacon_aggregate_and_proof => try self.onAggregateAndProof(data),
             .voluntary_exit => {}, // TODO: Phase 1 validate + queue WorkItem
             .proposer_slashing => {}, // TODO: Phase 1 validate + queue WorkItem
             .attester_slashing => {}, // TODO: Phase 1 validate + queue WorkItem
@@ -321,12 +404,55 @@ test "GossipHandler: onBeaconBlock ignores finalized block" {
     try testing.expectError(GossipHandlerError.ValidationIgnored, result);
 }
 
-test "GossipHandler: onAttestation is a no-op stub" {
+test "GossipHandler: onAttestation decodes and validates" {
     const alloc = testing.allocator;
+    const snappy = @import("snappy").frame;
     const handler = try makeTestHandler(alloc);
     defer handler.deinit();
 
-    try handler.onAttestation(0, &[_]u8{ 0, 1, 2, 3 });
+    handler.updateClock(100, 3, 64);
+
+    // Create a valid SingleAttestation, serialize, compress.
+    var att: consensus_types.electra.SingleAttestation.Type = consensus_types.electra.SingleAttestation.default_value;
+    att.committee_index = 0;
+    att.attester_index = 5;
+    att.data.slot = 96;
+    att.data.target.epoch = 3;
+    att.data.target.root = [_]u8{0xAA} ** 32; // known root (mock returns true)
+    att.data.beacon_block_root = [_]u8{0xBB} ** 32;
+
+    var ssz_buf: [consensus_types.electra.SingleAttestation.fixed_size]u8 = undefined;
+    _ = consensus_types.electra.SingleAttestation.serializeIntoBytes(&att, &ssz_buf);
+
+    const compressed = try snappy.compress(alloc, &ssz_buf);
+    defer alloc.free(compressed);
+
+    // Should pass validation (epoch 3 is current).
+    try handler.onAttestation(0, compressed);
+}
+
+test "GossipHandler: onAttestation rejects stale epoch" {
+    const alloc = testing.allocator;
+    const snappy = @import("snappy").frame;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(100, 3, 64);
+
+    // Attestation from epoch 0 — outside current/previous window.
+    var att: consensus_types.electra.SingleAttestation.Type = consensus_types.electra.SingleAttestation.default_value;
+    att.data.slot = 5;
+    att.data.target.epoch = 0;
+    att.data.target.root = [_]u8{0xAA} ** 32;
+
+    var ssz_buf: [consensus_types.electra.SingleAttestation.fixed_size]u8 = undefined;
+    _ = consensus_types.electra.SingleAttestation.serializeIntoBytes(&att, &ssz_buf);
+
+    const compressed = try snappy.compress(alloc, &ssz_buf);
+    defer alloc.free(compressed);
+
+    const result = handler.onAttestation(0, compressed);
+    try testing.expectError(GossipHandlerError.ValidationIgnored, result);
 }
 
 test "GossipHandler: onGossipMessage routes beacon_block" {
@@ -355,4 +481,34 @@ test "GossipHandler: onGossipMessage no-ops for unsupported topics" {
     try handler.onGossipMessage(.attester_slashing, &dummy);
     try handler.onGossipMessage(.bls_to_execution_change, &dummy);
     try handler.onGossipMessage(.blob_sidecar, &dummy);
+}
+
+test "GossipHandler: onAggregateAndProof validates and accepts" {
+    const alloc = testing.allocator;
+    const snappy = @import("snappy").frame;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(100, 3, 64);
+
+    // Create a valid SignedAggregateAndProof.
+    var signed_agg: phase0.SignedAggregateAndProof.Type = phase0.SignedAggregateAndProof.default_value;
+    signed_agg.message.aggregator_index = 5;
+    signed_agg.message.aggregate.data.slot = 96;
+    signed_agg.message.aggregate.data.target.epoch = 3;
+    // Need at least 1 set bit for aggregation_bits.
+    // Default aggregation_bits is empty — allocate a single byte with bit 0 set.
+    try signed_agg.message.aggregate.aggregation_bits.data.append(alloc, 0x01);
+    signed_agg.message.aggregate.aggregation_bits.bit_len = 1;
+    defer signed_agg.message.aggregate.aggregation_bits.data.deinit(alloc);
+
+    const ssz_size = phase0.SignedAggregateAndProof.serializedSize(&signed_agg);
+    const ssz_buf = try alloc.alloc(u8, ssz_size);
+    defer alloc.free(ssz_buf);
+    _ = phase0.SignedAggregateAndProof.serializeIntoBytes(&signed_agg, ssz_buf);
+
+    const compressed = try snappy.compress(alloc, ssz_buf);
+    defer alloc.free(compressed);
+
+    try handler.onAggregateAndProof(compressed);
 }

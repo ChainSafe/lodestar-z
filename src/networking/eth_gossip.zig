@@ -15,7 +15,7 @@ const gossip_topics = @import("gossip_topics.zig");
 const gossip_validation = @import("gossip_validation.zig");
 const gossip_decoding = @import("gossip_decoding.zig");
 
-const GossipTopicType = gossip_topics.GossipTopicType;
+pub const GossipTopicType = gossip_topics.GossipTopicType;
 const GossipTopic = gossip_topics.GossipTopic;
 const ValidationResult = gossip_validation.ValidationResult;
 const GossipValidationContext = gossip_validation.GossipValidationContext;
