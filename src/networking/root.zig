@@ -78,3 +78,9 @@ pub const PeerScorer = peer_scoring.PeerScorer;
 pub const gossip_context = @import("gossip_context.zig");
 pub const NodeGossipContext = gossip_context.NodeGossipContext;
 pub const GossipCallbacks = gossip_context.GossipCallbacks;
+
+pub const connection_manager = @import("connection_manager.zig");
+pub const ConnectionManager = connection_manager.ConnectionManager;
+pub const ConnectionManagerConfig = connection_manager.ConnectionManagerConfig;
+pub const ConnectionState = connection_manager.ConnectionState;
+pub const ConnectionDirection = connection_manager.ConnectionDirection;
