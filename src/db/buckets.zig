@@ -78,6 +78,8 @@ pub const Bucket = enum(u8) {
     fulu_data_column_sidecars = 57,
     /// Slot -> DataColumnSidecars (archive)
     fulu_data_column_sidecars_archive = 58,
+    /// Root(32) ++ ColumnIndex(8 LE) -> single DataColumnSidecar (hot, per-column)
+    fulu_data_column_sidecar = 61,
 
     // ---- ePBS (Gloas) ----
 

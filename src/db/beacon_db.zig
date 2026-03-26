@@ -226,6 +226,48 @@ pub const BeaconDB = struct {
     }
 
     // ---------------------------------------------------------------
+    // Data column sidecar per-column operations (PeerDAS / Fulu)
+    // ---------------------------------------------------------------
+
+    /// Build a key for a single data column: bucket ++ root(32) ++ column_index(8 LE).
+    fn dataColumnKey(self: *BeaconDB, root: [32]u8, column_index: u64) ![]u8 {
+        const key = try self.allocator.alloc(u8, 1 + 32 + 8);
+        key[0] = @intFromEnum(buckets.Bucket.fulu_data_column_sidecar);
+        @memcpy(key[1..33], &root);
+        @memcpy(key[33..41], &std.mem.toBytes(column_index));
+        return key;
+    }
+
+    /// Store a single data column sidecar by (root, column_index).
+    pub fn putDataColumn(self: *BeaconDB, root: [32]u8, column_index: u64, data: []const u8) !void {
+        const key = try self.dataColumnKey(root, column_index);
+        defer self.allocator.free(key);
+        try self.kv.put(key, data);
+    }
+
+    /// Retrieve a single data column sidecar by (root, column_index). Caller owns returned slice.
+    pub fn getDataColumn(self: *BeaconDB, root: [32]u8, column_index: u64) !?[]const u8 {
+        const key = try self.dataColumnKey(root, column_index);
+        defer self.allocator.free(key);
+        return self.kv.get(key);
+    }
+
+    /// Delete a single data column sidecar by (root, column_index).
+    pub fn deleteDataColumn(self: *BeaconDB, root: [32]u8, column_index: u64) !void {
+        const key = try self.dataColumnKey(root, column_index);
+        defer self.allocator.free(key);
+        try self.kv.delete(key);
+    }
+
+    /// Delete all per-column data column sidecars for a block root.
+    /// Iterates through all possible column indices (0..NUMBER_OF_COLUMNS).
+    pub fn deleteDataColumnSidecars(self: *BeaconDB, root: [32]u8) !void {
+        const key = try buckets.bucketRootKey(self.allocator, .fulu_data_column_sidecars, root);
+        defer self.allocator.free(key);
+        try self.kv.delete(key);
+    }
+
+    // ---------------------------------------------------------------
     // Fork choice persistence
     // ---------------------------------------------------------------
 

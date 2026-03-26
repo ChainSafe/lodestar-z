@@ -24,6 +24,9 @@ pub const MAX_ATTESTATION_SUBNET_ID = constants.ATTESTATION_SUBNET_COUNT;
 /// Maximum subnet index for sync committee subnets.
 pub const MAX_SYNC_COMMITTEE_SUBNET_ID = constants.SYNC_COMMITTEE_SUBNET_COUNT;
 
+/// Maximum subnet index for data column sidecars (128 on mainnet).
+pub const MAX_DATA_COLUMN_SIDECAR_SUBNET_ID = 128;
+
 /// Maximum subnet index for blob sidecars (currently 6 on mainnet).
 /// This must match MAX_BLOBS_PER_BLOCK from the preset/config.
 pub const MAX_BLOB_SIDECAR_SUBNET_ID = 6;
@@ -40,6 +43,7 @@ pub const GossipTopicType = enum {
     blob_sidecar,
     sync_committee_contribution_and_proof,
     sync_committee,
+    data_column_sidecar,
 
     /// Returns the canonical topic name string for non-subnet-indexed topics.
     /// For subnet-indexed topics, use `subnetTopicName` instead.
@@ -55,13 +59,14 @@ pub const GossipTopicType = enum {
             .blob_sidecar => "blob_sidecar",
             .sync_committee_contribution_and_proof => "sync_committee_contribution_and_proof",
             .sync_committee => "sync_committee",
+            .data_column_sidecar => "data_column_sidecar",
         };
     }
 
     /// Whether this topic type uses a subnet index suffix.
     pub fn isSubnetIndexed(self: GossipTopicType) bool {
         return switch (self) {
-            .beacon_attestation, .sync_committee, .blob_sidecar => true,
+            .beacon_attestation, .sync_committee, .blob_sidecar, .data_column_sidecar => true,
             else => false,
         };
     }
@@ -165,6 +170,7 @@ fn parseTopicName(name: []const u8, fork_digest: [4]u8) ParseError!GossipTopic {
         .{ .prefix = "beacon_attestation_", .topic_type = .beacon_attestation, .max_subnet = MAX_ATTESTATION_SUBNET_ID },
         .{ .prefix = "sync_committee_", .topic_type = .sync_committee, .max_subnet = MAX_SYNC_COMMITTEE_SUBNET_ID },
         .{ .prefix = "blob_sidecar_", .topic_type = .blob_sidecar, .max_subnet = MAX_BLOB_SIDECAR_SUBNET_ID },
+        .{ .prefix = "data_column_sidecar_", .topic_type = .data_column_sidecar, .max_subnet = MAX_DATA_COLUMN_SIDECAR_SUBNET_ID },
     };
 
     for (subnet_topics) |entry| {

@@ -34,6 +34,9 @@ pub const max_request_blocks: u64 = 1024;
 /// Maximum blob sidecars per BlobSidecarsByRange / BlobSidecarsByRoot request.
 pub const max_request_blob_sidecars: u64 = 768;
 
+/// Maximum data column sidecars per DataColumnSidecarsByRange / Root request.
+pub const max_request_data_column_sidecars: u64 = 16384;
+
 /// A single response chunk returned by a handler.
 ///
 /// The encoding layer (req_resp_encoding.zig) is responsible for wire-encoding these
@@ -74,6 +77,10 @@ pub const ReqRespContext = struct {
     getBlobByRoot: *const fn (ptr: *anyopaque, root: [32]u8, index: u64) ?[]const u8,
     /// Returns blob sidecars for a contiguous slot range. Each element is SSZ bytes.
     getBlobsByRange: *const fn (ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8,
+    /// Looks up a data column sidecar by block root and column index. Returns SSZ bytes or null.
+    getDataColumnByRoot: ?*const fn (ptr: *anyopaque, root: [32]u8, index: u64) ?[]const u8 = null,
+    /// Returns data column sidecars for a contiguous slot range. Each element is SSZ bytes.
+    getDataColumnsByRange: ?*const fn (ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8 = null,
     /// Returns the fork digest (4 bytes) for the given slot.
     getForkDigest: *const fn (ptr: *anyopaque, slot: u64) [4]u8,
     /// Called when a peer sends Goodbye. The reason code indicates why they are disconnecting.
@@ -113,6 +120,8 @@ pub fn handleRequest(
         .beacon_blocks_by_root => handleBeaconBlocksByRoot(allocator, request_bytes, context),
         .blob_sidecars_by_range => handleBlobSidecarsByRange(allocator, request_bytes, context),
         .blob_sidecars_by_root => handleBlobSidecarsByRoot(allocator, request_bytes, context),
+        .data_column_sidecars_by_root => handleDataColumnSidecarsByRoot(allocator, request_bytes, context),
+        .data_column_sidecars_by_range => handleDataColumnSidecarsByRange(allocator, request_bytes, context),
         .light_client_bootstrap,
         .light_client_updates_by_range,
         .light_client_finality_update,
@@ -436,6 +445,104 @@ fn handleBlobSidecarsByRoot(
         return chunks;
     }
     return try found.toOwnedSlice(allocator);
+}
+
+/// Handle a DataColumnSidecarsByRoot request.
+///
+/// Looks up each requested (root, column_index) pair and returns matching sidecars.
+/// Unknown identifiers are silently skipped.
+fn handleDataColumnSidecarsByRoot(
+    allocator: Allocator,
+    request_bytes: []const u8,
+    context: *const ReqRespContext,
+) HandlerError![]const ResponseChunk {
+    const getDataColumn = context.getDataColumnByRoot orelse
+        return makeErrorResponse(allocator, .server_error, "DataColumnSidecarsByRoot not supported");
+
+    // DataColumnIdentifier is (root: [32]u8, index: u64) = 40 bytes each.
+    const id_size = 40;
+    if (request_bytes.len == 0 or request_bytes.len % id_size != 0) {
+        return makeErrorResponse(allocator, .invalid_request, "Invalid DataColumnSidecarsByRootRequest size");
+    }
+
+    const num_ids = request_bytes.len / id_size;
+    if (num_ids > max_request_data_column_sidecars) {
+        return makeErrorResponse(allocator, .invalid_request, "Too many data column identifiers requested");
+    }
+
+    var found: std.ArrayList(ResponseChunk) = .empty;
+
+    for (0..num_ids) |i| {
+        const offset = i * id_size;
+        const root: [32]u8 = request_bytes[offset..][0..32].*;
+        const index = std.mem.readInt(u64, request_bytes[offset + 32 ..][0..8], .little);
+
+        if (getDataColumn(context.ptr, root, index)) |sidecar_ssz| {
+            const payload = try allocator.alloc(u8, sidecar_ssz.len);
+            @memcpy(payload, sidecar_ssz);
+
+            const slot = std.mem.readInt(u64, root[0..8], .little);
+            try found.append(allocator, .{
+                .result = .success,
+                .context_bytes = context.getForkDigest(context.ptr, slot),
+                .ssz_payload = payload,
+            });
+        }
+    }
+
+    if (found.items.len == 0) {
+        found.deinit(allocator);
+        const chunks = try allocator.alloc(ResponseChunk, 0);
+        return chunks;
+    }
+    return try found.toOwnedSlice(allocator);
+}
+
+/// Handle a DataColumnSidecarsByRange request.
+///
+/// Returns data column sidecar chunks for the requested slot range with context bytes.
+fn handleDataColumnSidecarsByRange(
+    allocator: Allocator,
+    request_bytes: []const u8,
+    context: *const ReqRespContext,
+) HandlerError![]const ResponseChunk {
+    const getDataColumns = context.getDataColumnsByRange orelse
+        return makeErrorResponse(allocator, .server_error, "DataColumnSidecarsByRange not supported");
+
+    // DataColumnSidecarsByRangeRequest has variable size due to columns list.
+    // Minimum: start_slot(8) + count(8) = 16 bytes.
+    if (request_bytes.len < 16) {
+        return makeErrorResponse(allocator, .invalid_request, "Invalid DataColumnSidecarsByRangeRequest size");
+    }
+
+    const start_slot = std.mem.readInt(u64, request_bytes[0..8], .little);
+    const count = std.mem.readInt(u64, request_bytes[8..16], .little);
+
+    if (count == 0) {
+        return makeErrorResponse(allocator, .invalid_request, "Count must be greater than zero");
+    }
+    if (count > max_request_blocks) {
+        return makeErrorResponse(allocator, .invalid_request, "Count exceeds MAX_REQUEST_BLOCKS");
+    }
+
+    const data_columns = getDataColumns(context.ptr, start_slot, count);
+    if (data_columns.len == 0) {
+        return makeErrorResponse(allocator, .resource_unavailable, "No data column sidecars available in requested range");
+    }
+
+    const chunks = try allocator.alloc(ResponseChunk, data_columns.len);
+    for (data_columns, 0..) |dc_ssz, i| {
+        const payload = try allocator.alloc(u8, dc_ssz.len);
+        @memcpy(payload, dc_ssz);
+
+        const slot = start_slot + i;
+        chunks[i] = .{
+            .result = .success,
+            .context_bytes = context.getForkDigest(context.ptr, slot),
+            .ssz_payload = payload,
+        };
+    }
+    return chunks;
 }
 
 // === Helpers ===
