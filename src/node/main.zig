@@ -286,6 +286,10 @@ pub fn main(init: std.process.Init) !void {
         };
         // Use zero genesis_validators_root; will be set from checkpoint state.
         custom_beacon_config = BeaconConfig.init(custom_chain_config, [_]u8{0} ** 32);
+        std.log.info("Custom config loaded: SECONDS_PER_SLOT={d} CONFIG_NAME={s}", .{
+            custom_chain_config.SECONDS_PER_SLOT,
+            custom_chain_config.CONFIG_NAME,
+        });
         break :blk &custom_beacon_config;
     } else loadBeaconConfig(args.network);
 
