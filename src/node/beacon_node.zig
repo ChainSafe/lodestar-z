@@ -40,6 +40,7 @@ const BeaconDB = db_mod.BeaconDB;
 const MemoryKVStore = db_mod.MemoryKVStore;
 const LmdbKVStore = db_mod.LmdbKVStore;
 const chain_mod = @import("chain");
+const Chain = chain_mod.Chain;
 const OpPool = chain_mod.OpPool;
 const SeenCache = chain_mod.SeenCache;
 const produceBlockBody = chain_mod.produceBlockBody;
@@ -399,6 +400,7 @@ pub const BeaconNode = struct {
     op_pool: *OpPool,
     seen_cache: *SeenCache,
     block_importer: *BlockImporter,
+    chain: *Chain,
 
     // Clock
     clock: ?SlotClock,
@@ -541,6 +543,21 @@ pub const BeaconNode = struct {
         );
         block_importer.verify_signatures = opts.verify_signatures;
 
+        // Chain coordinator — wraps all chain components behind a single interface.
+        const chain_struct = try allocator.create(Chain);
+        chain_struct.* = Chain.init(
+            allocator,
+            beacon_config,
+            block_cache,
+            cp_cache,
+            regen,
+            db,
+            op_pool,
+            seen_cache,
+            head_tracker,
+        );
+        chain_struct.verify_signatures = opts.verify_signatures;
+
         // API stubs
         const api_head = try allocator.create(api_mod.context.HeadTracker);
         api_head.* = .{
@@ -620,6 +637,7 @@ pub const BeaconNode = struct {
             .op_pool = op_pool,
             .seen_cache = seen_cache,
             .block_importer = block_importer,
+            .chain = chain_struct,
             .clock = null,
             .cp_datastore = cp_datastore,
             .kv_backend = kv_backend,
@@ -637,6 +655,9 @@ pub const BeaconNode = struct {
     /// Clean up all owned resources.
     pub fn deinit(self: *BeaconNode) void {
         const allocator = self.allocator;
+
+        self.chain.deinit();
+        allocator.destroy(self.chain);
 
         self.block_importer.deinit();
         allocator.destroy(self.block_importer);
@@ -749,6 +770,9 @@ pub const BeaconNode = struct {
         // importer needs to resolve that to find the pre-state.
         try self.block_importer.registerGenesisRoot(genesis_block_root, state_root);
 
+        // Register genesis root with Chain coordinator too.
+        try self.chain.registerGenesisRoot(genesis_block_root, state_root);
+
         // Set head at slot 0
         try self.head_tracker.onBlock(genesis_block_root, 0, state_root);
 
@@ -819,6 +843,8 @@ pub const BeaconNode = struct {
         }
         self.fork_choice = fc;
         self.block_importer.fork_choice = fc;
+        self.chain.fork_choice = fc;
+        self.chain.genesis_validators_root = self.genesis_validators_root;
 
         // Update API context
         self.api_head_tracker.head_slot = 0;

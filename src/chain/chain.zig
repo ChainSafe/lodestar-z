@@ -289,15 +289,42 @@ pub const Chain = struct {
     // Attestation import (stub — to be implemented)
     // -----------------------------------------------------------------------
 
-    /// Import an attestation: validate → FC weight → pool.
+    /// Import a validated attestation: apply to fork choice and insert into op pool.
     ///
-    /// Stub — full implementation requires signature verification and
-    /// committee validation.
-    pub fn importAttestation(self: *Chain) !void {
-        _ = self;
-        // TODO: validate committee, slot range, signature
-        // TODO: fc.onAttestation()
-        // TODO: op_pool.insertAttestation()
+    /// Callers must have already run gossip validation (committee bounds,
+    /// slot range, target root known). This function applies the
+    /// attestation weight to fork choice and stores it for block packing.
+    ///
+    /// Signature verification is NOT done here — it is the caller's
+    /// responsibility (gossip validation or API layer).
+    pub fn importAttestation(
+        self: *Chain,
+        attestation_slot: u64,
+        committee_index: u64,
+        target_root: [32]u8,
+        target_epoch: u64,
+        validator_index: u64,
+        attestation: consensus_types.phase0.Attestation.Type,
+    ) !void {
+        _ = committee_index;
+
+        // Apply vote weight to fork choice.
+        if (self.fork_choice) |fc| {
+            fc.onAttestation(
+                self.allocator,
+                @intCast(validator_index),
+                target_root,
+                target_epoch,
+            ) catch |err| {
+                std.log.warn("FC onAttestation failed for validator {d} slot {d}: {}", .{
+                    validator_index, attestation_slot, err,
+                });
+                // Non-fatal — still insert into pool for block packing.
+            };
+        }
+
+        // Insert into attestation pool for block production.
+        try self.op_pool.attestation_pool.add(attestation);
     }
 
     // -----------------------------------------------------------------------
@@ -327,19 +354,46 @@ pub const Chain = struct {
 
     /// Called when a new finalized checkpoint is detected.
     ///
-    /// Archives finalized states, prunes caches, and emits SSE events.
-    /// Stub — full implementation requires archive store and DB migration.
+    /// Prunes caches to free memory from pre-finalization data,
+    /// prunes the fork choice DAG, and emits SSE finalized_checkpoint event.
     pub fn onFinalized(self: *Chain, finalized_epoch: u64, finalized_root: [32]u8) void {
-        _ = finalized_root;
-        _ = finalized_epoch;
-        _ = self;
+        std.log.info("onFinalized: epoch={d} root={s}...", .{
+            finalized_epoch,
+            &std.fmt.bytesToHex(finalized_root[0..4], .lower),
+        });
 
-        // TODO: Archive finalized blocks to cold store
-        // TODO: blockStateCache.prune(finalizedEpoch)
-        // TODO: checkpointStateCache.prune(finalizedEpoch)
-        // TODO: forkChoice.prune()
-        // TODO: seenCache.prune(finalizedEpoch)
-        // TODO: Emit SSE finalized_checkpoint event
+        // Prune block state cache — evict states older than finalized epoch.
+        self.block_state_cache.pruneBeforeEpoch(finalized_epoch);
+
+        // Prune checkpoint state cache — remove checkpoints below finalized epoch.
+        self.checkpoint_state_cache.pruneFinalized(finalized_epoch) catch |err| {
+            std.log.warn("onFinalized: checkpoint cache prune failed: {}", .{err});
+        };
+
+        // Prune fork choice DAG — remove nodes below finalized root.
+        if (self.fork_choice) |fc| {
+            _ = fc.prune(self.allocator, finalized_root) catch |err| {
+                std.log.warn("onFinalized: fork choice prune failed: {}", .{err});
+            };
+        }
+
+        // Prune seen cache — remove entries older than 2 epochs before finalization.
+        const prune_slot = if (finalized_epoch > 2)
+            (finalized_epoch - 2) * preset.SLOTS_PER_EPOCH
+        else
+            0;
+        self.seen_cache.pruneBlocks(prune_slot);
+
+        // Emit SSE finalized_checkpoint event.
+        if (self.event_callback) |cb| {
+            // Look up the state root for the finalized block.
+            const state_root = self.block_to_state.get(finalized_root) orelse [_]u8{0} ** 32;
+            cb.emit(.{ .finalized_checkpoint = .{
+                .epoch = finalized_epoch,
+                .root = finalized_root,
+                .state_root = state_root,
+            } });
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -783,6 +783,9 @@ pub fn build(b: *std.Build) void {
     module_chain.addImport("ssz", module_ssz);
     module_chain.addImport("config", module_config);
     module_chain.addImport("fork_types", module_fork_types);
+    module_chain.addImport("db", module_db);
+    module_chain.addImport("fork_choice", module_fork_choice);
+    module_chain.addImport("networking", module_networking);
 
     // sync module imports
     module_sync.addImport("db", module_db);

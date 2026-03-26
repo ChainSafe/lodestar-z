@@ -22,7 +22,6 @@ pub const EventCallback = chain_types.EventCallback;
 pub const SseEvent = chain_types.SseEvent;
 
 // Existing re-exports (kept for backward compatibility)
-pub const BlockImporter = block_import.BlockImporter;
 pub const HeadTracker = block_import.HeadTracker;
 pub const ImportResult = chain_types.ImportResult;
 pub const ImportError = block_import.ImportError;
