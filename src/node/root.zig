@@ -49,3 +49,8 @@ pub const BeaconProcessor = processor_mod.BeaconProcessor;
 pub const WorkItem = processor_mod.WorkItem;
 pub const WorkType = processor_mod.WorkType;
 pub const QueueConfig = processor_mod.QueueConfig;
+
+pub const bootnode = @import("bootnode.zig");
+
+pub const shutdown = @import("shutdown.zig");
+pub const ShutdownHandler = shutdown.ShutdownHandler;
