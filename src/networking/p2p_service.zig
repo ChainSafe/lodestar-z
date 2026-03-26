@@ -82,16 +82,16 @@ pub const Eth2Switch = swarm_mod.Switch(.{
 // Used when no real validator is provided. Accepts all messages.
 // TODO: remove once BeaconNode wires a real GossipValidationContext.
 
-fn stubGetProposerIndex(_: u64) ?u32 {
+fn stubGetProposerIndex(_: *anyopaque, _: u64) ?u32 {
     return null;
 }
-fn stubIsKnownBlockRoot(_: [32]u8) bool {
+fn stubIsKnownBlockRoot(_: *anyopaque, _: [32]u8) bool {
     return true;
 }
-fn stubIsValidatorActive(_: u64, _: u64) bool {
+fn stubIsValidatorActive(_: *anyopaque, _: u64, _: u64) bool {
     return true;
 }
-fn stubGetValidatorCount() u32 {
+fn stubGetValidatorCount(_: *anyopaque) u32 {
     return 0;
 }
 
@@ -129,6 +129,7 @@ pub const PassthroughValidator = struct {
     /// Fix up self-referential ctx pointers after the struct is in its final location.
     pub fn fixupPointers(self: *PassthroughValidator) void {
         self.ctx = .{
+            .ptr = @ptrFromInt(1),
             .current_slot = 0,
             .current_epoch = 0,
             .finalized_slot = 0,

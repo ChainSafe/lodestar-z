@@ -72,6 +72,9 @@ test {
     testing.refAllDecls(@This());
 }
 
+pub const peer_scoring = @import("peer_scoring.zig");
+pub const PeerScorer = peer_scoring.PeerScorer;
+
 pub const gossip_context = @import("gossip_context.zig");
 pub const NodeGossipContext = gossip_context.NodeGossipContext;
 pub const GossipCallbacks = gossip_context.GossipCallbacks;

@@ -27,6 +27,9 @@ const GossipsubService = libp2p.gossipsub.Service;
 const GossipsubConfig = libp2p.gossipsub.Config;
 const GossipsubEvent = libp2p.gossipsub.config.Event;
 
+const peer_scoring = @import("peer_scoring.zig");
+const PeerScorer = peer_scoring.PeerScorer;
+
 const log = std.log.scoped(.eth_gossip);
 
 /// All global (non-subnet-indexed) topic types that every Ethereum node subscribes to.
@@ -53,6 +56,8 @@ pub const EthGossipAdapter = struct {
     gossipsub: *GossipsubService,
     validator: *GossipValidationContext,
     fork_digest: [4]u8,
+    /// Optional peer scorer for tracking validation outcomes.
+    peer_scorer: ?*PeerScorer,
     /// Tracks which topics we have subscribed to (for cleanup).
     subscribed_topics: std.ArrayListUnmanaged([]const u8),
 
@@ -67,8 +72,14 @@ pub const EthGossipAdapter = struct {
             .gossipsub = gossipsub,
             .validator = validator,
             .fork_digest = fork_digest,
+            .peer_scorer = null,
             .subscribed_topics = .empty,
         };
+    }
+
+    /// Attach a peer scorer for tracking validation outcomes.
+    pub fn setPeerScorer(self: *Self, scorer: *PeerScorer) void {
+        self.peer_scorer = scorer;
     }
 
     pub fn deinit(self: *Self) void {
@@ -151,13 +162,30 @@ pub const EthGossipAdapter = struct {
         parsed_topic: GossipTopic,
         decoded: DecodedGossipMessage,
     ) ValidationResult {
-        _ = parsed_topic; // subnet_id used for attestation/sync committee validation (future)
+        const result = self.dispatchValidation(parsed_topic, decoded);
 
+        // Update peer scoring if a scorer is wired.
+        if (self.peer_scorer) |scorer| {
+            scorer.recordValidation(result);
+        }
+
+        return result;
+    }
+
+    /// Dispatch to the appropriate per-topic validation function.
+    fn dispatchValidation(
+        self: *Self,
+        parsed_topic: GossipTopic,
+        decoded: DecodedGossipMessage,
+    ) ValidationResult {
         switch (decoded) {
             .beacon_block => |block| {
-                // For the spike, use a zero block_root. In production, the
-                // hash_tree_root of the BeaconBlock would be computed here.
-                const block_root = std.mem.zeroes([32]u8);
+                // Compute a cheap synthetic block root for dedup.
+                // Full HTR is expensive; use (slot, proposer, parent_root prefix) as key.
+                var block_root: [32]u8 = std.mem.zeroes([32]u8);
+                std.mem.writeInt(u64, block_root[0..8], block.slot, .little);
+                std.mem.writeInt(u64, block_root[8..16], block.proposer_index, .little);
+                @memcpy(block_root[16..32], block.parent_root[0..16]);
                 return gossip_validation.validateBeaconBlock(
                     block.slot,
                     block.proposer_index,
@@ -172,6 +200,16 @@ pub const EthGossipAdapter = struct {
                     agg.attestation_slot,
                     agg.attestation_target_epoch,
                     agg.aggregation_bits_count,
+                    self.validator,
+                );
+            },
+            .beacon_attestation => |att| {
+                _ = parsed_topic; // subnet_id validated at topic level
+                return gossip_validation.validateAttestation(
+                    att.slot,
+                    att.committee_index,
+                    att.target_epoch,
+                    att.target_root,
                     self.validator,
                 );
             },
@@ -192,8 +230,12 @@ pub const EthGossipAdapter = struct {
                     self.validator,
                 );
             },
-            // Topics not yet supported for validation.
-            else => return .accept,
+            // attester_slashing: decoding not yet implemented, accept for now.
+            .attester_slashing => return .accept,
+            // bls_to_execution_change: decoding not yet implemented, accept for now.
+            .bls_to_execution_change => return .accept,
+            // Other topics (blob_sidecar, sync_committee, etc.) — not yet validated.
+            else => return .ignore,
         }
     }
 
