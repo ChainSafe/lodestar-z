@@ -78,3 +78,20 @@ pub const PeerScorer = peer_scoring.PeerScorer;
 pub const gossip_context = @import("gossip_context.zig");
 pub const NodeGossipContext = gossip_context.NodeGossipContext;
 pub const GossipCallbacks = gossip_context.GossipCallbacks;
+
+// Peer management (v2).
+pub const peer_info = @import("peer_info.zig");
+pub const peer_db = @import("peer_db.zig");
+pub const peer_manager = @import("peer_manager.zig");
+pub const PeerInfo = peer_info.PeerInfo;
+pub const PeerDB = peer_db.PeerDB;
+pub const PeerManager = peer_manager.PeerManager;
+pub const PeerManagerConfig = peer_manager.PeerManagerConfig;
+pub const PeerAction = peer_info.PeerAction;
+pub const ConnectionDirection = peer_info.ConnectionDirection;
+pub const ConnectionState = peer_info.ConnectionState;
+pub const SyncInfo = peer_info.SyncInfo;
+pub const ScoreState = peer_info.ScoreState;
+pub const BanDuration = peer_info.BanDuration;
+pub const GoodbyeReason = peer_info.GoodbyeReason;
+pub const ClientKind = peer_info.ClientKind;
