@@ -20,6 +20,10 @@
             .url = "git+https://github.com/lodekeeper-z/zig-yaml#37bcbed3fbfe38ace6ada1020ebb4ea09747574c",
             .hash = "zig_yaml-0.1.0-C1161pOKAgAhsmZ2SAjaQ2cIzaccoi5dn4x6UmsN0eC_",
         },
+        .zig_cli = .{
+            .url = "git+https://codeberg.org/lodekeeper-z/zig-cli#8e4bc249278270ed1a76b58e3a867a350cb9f09f",
+            .hash = "zig_cli-0.1.0-0yK2aE0tAQDP5xZ7_pYsMPhZ86gvKvM0d_QTyzWAajAy",
+        },
         .eth_p2p_z = .{
             .path = "../eth-p2p-z-tls-fix",
         },

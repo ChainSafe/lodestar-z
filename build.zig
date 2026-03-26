@@ -66,6 +66,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const dep_zig_cli = b.dependency("zig_cli", .{
+        .target = target,
+    });
+
     // === Modules ===
     const module_constants = b.createModule(.{
         .root_source_file = b.path("src/constants/root.zig"),
@@ -843,6 +847,7 @@ pub fn build(b: *std.Build) void {
     module_node_main.addImport("state_transition", module_state_transition);
     module_node_main.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_node_main.addImport("yaml", dep_yaml.module("yaml"));
+    module_node_main.addImport("zig_cli", dep_zig_cli.module("zig-cli"));
 
     const exe_node = b.addExecutable(.{
         .name = "lodestar-z",
