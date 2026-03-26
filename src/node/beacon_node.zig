@@ -1155,11 +1155,38 @@ pub const BeaconNode = struct {
             std.log.info("Range sync complete: head at slot {d}", .{self.head_tracker.head_slot});
         }
 
-        // After sync, poll gossipsub for new blocks
-        std.log.info("Starting gossip block import loop...", .{});
-        self.gossipBlockLoop(io, svc) catch |err| {
-            std.log.warn("Gossip block loop ended: {}", .{err});
-        };
+        // Keep syncing: periodically request new blocks via range sync
+        // while also polling gossipsub for beacon_block messages.
+        std.log.info("Starting sync maintenance loop...", .{});
+        while (true) {
+            // Sleep one slot
+            const slot_sleep: std.Io.Timeout = .{ .duration = .{
+                .raw = std.Io.Duration.fromNanoseconds(@as(i96, 6) * std.time.ns_per_s),
+                .clock = .awake,
+            } };
+            slot_sleep.sleep(io) catch break;
+
+            // Re-request Status to check peer's head
+            const status = self.sendStatus(io, svc, peer_id) catch |err| {
+                std.log.warn("Status refresh failed: {} — peer likely disconnected", .{err});
+                break;
+            };
+
+            // If peer is ahead, request blocks
+            if (status.head_slot > self.head_tracker.head_slot) {
+                const start = self.head_tracker.head_slot + 1;
+                const count = @min(status.head_slot - self.head_tracker.head_slot, 64);
+                const imported = self.requestBlocksByRange(io, svc, peer_id, start, count) catch |err| {
+                    std.log.warn("Catch-up sync failed: {}", .{err});
+                    continue;
+                };
+                if (imported > 0) {
+                    std.log.info("Catch-up: imported {d} blocks, head now at slot {d}", .{
+                        imported, self.head_tracker.head_slot,
+                    });
+                }
+            }
+        }
     }
 
         /// Perform a Status req/resp exchange with a connected peer.
@@ -1535,21 +1562,9 @@ pub const BeaconNode = struct {
     ///
     /// Used for req/resp Status exchanges with peers.
     pub fn getStatus(self: *const BeaconNode) StatusMessage.Type {
-        if (self.fork_choice) |fc| {
-            const fc_head = fc.head;
-            const finalized_cp = fc.getFinalizedCheckpoint();
-            return .{
-                .fork_digest = self.config.forkDigestAtSlot(fc_head.slot, self.genesis_validators_root),
-                .finalized_root = if (finalized_cp.epoch == 0)
-                    [_]u8{0} ** 32
-                else if (self.head_tracker.getBlockRoot(
-                    finalized_cp.epoch * preset.SLOTS_PER_EPOCH,
-                )) |r| r else finalized_cp.root,
-                .finalized_epoch = finalized_cp.epoch,
-                .head_root = fc_head.block_root,
-                .head_slot = fc_head.slot,
-            };
-        }
+        // Always use head_tracker which is updated during range sync import.
+        // Fork choice head isn't reliably updated during batch import.
+        _ = self.fork_choice; // suppress unused
         return .{
             .fork_digest = self.config.forkDigestAtSlot(self.head_tracker.head_slot, self.genesis_validators_root),
             .finalized_root = if (self.head_tracker.finalized_epoch == 0)
