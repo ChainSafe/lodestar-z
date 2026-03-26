@@ -68,3 +68,131 @@ pub fn initiateValidatorExit(
         try std.math.add(u64, try validator.get("exit_epoch"), config.chain.MIN_VALIDATOR_WITHDRAWABILITY_DELAY),
     );
 }
+
+// ─── Tests ───────────────────────────────────────────────────────────
+
+const std_testing = std.testing;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Node = @import("persistent_merkle_tree").Node;
+const preset = @import("preset").preset;
+
+test "initiateValidatorExit - no-op if already exited" {
+    const allocator = std_testing.allocator;
+    const num_validators = 256;
+    const pool_size = num_validators * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, num_validators);
+    defer test_state.deinit();
+
+    const state = test_state.cached_state.state.castToFork(.electra);
+    const epoch_cache = test_state.cached_state.epoch_cache;
+
+    // Set validator 0's exit_epoch to something other than FAR_FUTURE_EPOCH
+    var validators = try state.validators();
+    var validator = try validators.get(0);
+    try validator.set("exit_epoch", 10);
+    try validator.set("withdrawable_epoch", 10 + test_state.config.chain.MIN_VALIDATOR_WITHDRAWABILITY_DELAY);
+
+    // Call initiateValidatorExit — should be a no-op
+    try initiateValidatorExit(.electra, test_state.config, epoch_cache, state, validator);
+
+    // exit_epoch should remain unchanged
+    try std_testing.expectEqual(@as(u64, 10), try validator.get("exit_epoch"));
+}
+
+test "initiateValidatorExit - sets exit and withdrawable epochs" {
+    const allocator = std_testing.allocator;
+    const num_validators = 256;
+    const pool_size = num_validators * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, num_validators);
+    defer test_state.deinit();
+
+    const state = test_state.cached_state.state.castToFork(.electra);
+    const epoch_cache = test_state.cached_state.epoch_cache;
+
+    var validators = try state.validators();
+    var validator = try validators.get(0);
+
+    // Validator should start with FAR_FUTURE_EPOCH
+    try std_testing.expectEqual(FAR_FUTURE_EPOCH, try validator.get("exit_epoch"));
+
+    try initiateValidatorExit(.electra, test_state.config, epoch_cache, state, validator);
+
+    const exit_epoch = try validator.get("exit_epoch");
+    try std_testing.expect(exit_epoch != FAR_FUTURE_EPOCH);
+    try std_testing.expectEqual(
+        exit_epoch + test_state.config.chain.MIN_VALIDATOR_WITHDRAWABILITY_DELAY,
+        try validator.get("withdrawable_epoch"),
+    );
+}
+
+test "initiateValidatorExit - multiple exits" {
+    const allocator = std_testing.allocator;
+    const num_validators = 256;
+    const pool_size = num_validators * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, num_validators);
+    defer test_state.deinit();
+
+    const state = test_state.cached_state.state.castToFork(.electra);
+    const epoch_cache = test_state.cached_state.epoch_cache;
+
+    var validators = try state.validators();
+
+    // Exit multiple validators and verify each gets a valid exit epoch
+    var v0 = try validators.get(0);
+    var v1 = try validators.get(1);
+    var v2 = try validators.get(2);
+
+    try initiateValidatorExit(.electra, test_state.config, epoch_cache, state, v0);
+    try initiateValidatorExit(.electra, test_state.config, epoch_cache, state, v1);
+    try initiateValidatorExit(.electra, test_state.config, epoch_cache, state, v2);
+
+    const exit0 = try v0.get("exit_epoch");
+    const exit1 = try v1.get("exit_epoch");
+    const exit2 = try v2.get("exit_epoch");
+
+    // All should have valid exit epochs
+    try std_testing.expect(exit0 != FAR_FUTURE_EPOCH);
+    try std_testing.expect(exit1 != FAR_FUTURE_EPOCH);
+    try std_testing.expect(exit2 != FAR_FUTURE_EPOCH);
+
+    // All should have valid withdrawable epochs
+    const delay = test_state.config.chain.MIN_VALIDATOR_WITHDRAWABILITY_DELAY;
+    try std_testing.expectEqual(exit0 + delay, try v0.get("withdrawable_epoch"));
+    try std_testing.expectEqual(exit1 + delay, try v1.get("withdrawable_epoch"));
+    try std_testing.expectEqual(exit2 + delay, try v2.get("withdrawable_epoch"));
+}
+
+test "initiateValidatorExit - second call is no-op" {
+    const allocator = std_testing.allocator;
+    const num_validators = 256;
+    const pool_size = num_validators * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, num_validators);
+    defer test_state.deinit();
+
+    const state = test_state.cached_state.state.castToFork(.electra);
+    const epoch_cache = test_state.cached_state.epoch_cache;
+
+    var validators = try state.validators();
+    var validator = try validators.get(0);
+
+    // First call — should set exit epoch
+    try initiateValidatorExit(.electra, test_state.config, epoch_cache, state, validator);
+    const exit_epoch = try validator.get("exit_epoch");
+    try std_testing.expect(exit_epoch != FAR_FUTURE_EPOCH);
+
+    // Second call — should be a no-op
+    try initiateValidatorExit(.electra, test_state.config, epoch_cache, state, validator);
+    try std_testing.expectEqual(exit_epoch, try validator.get("exit_epoch"));
+}
