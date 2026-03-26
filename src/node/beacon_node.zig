@@ -1650,6 +1650,57 @@ pub const BeaconNode = struct {
         }
     }
 
+    /// Notify the execution layer of the current fork choice state.
+    ///
+    /// Called after each block import. Sends engine_forkchoiceUpdatedV3
+    /// with the current head, safe (justified), and finalized block hashes.
+    /// Errors are non-fatal — the block is already imported.
+    fn notifyForkchoiceUpdate(self: *BeaconNode, new_head_root: [32]u8) !void {
+        const engine = self.engine_api orelse return;
+        const fc = self.fork_choice orelse return;
+
+        // Get the head block's execution payload block hash.
+        const head_node = fc.getBlock(new_head_root) orelse return;
+        const head_block_hash = head_node.extra_meta.executionPayloadBlockHash() orelse {
+            // Pre-merge block — don't send forkchoiceUpdated.
+            return;
+        };
+
+        // Don't send forkchoiceUpdated with a zero block hash (pre-TTD).
+        const zero_hash = [_]u8{0} ** 32;
+        if (std.mem.eql(u8, &head_block_hash, &zero_hash)) return;
+
+        // Safe block hash = justified checkpoint's execution payload hash.
+        const justified_cp = fc.getJustifiedCheckpoint();
+        const safe_block_hash = if (fc.getBlock(justified_cp.root)) |jnode|
+            jnode.extra_meta.executionPayloadBlockHash() orelse zero_hash
+        else
+            zero_hash;
+
+        // Finalized block hash = finalized checkpoint's execution payload hash.
+        const finalized_cp = fc.getFinalizedCheckpoint();
+        const finalized_block_hash = if (fc.getBlock(finalized_cp.root)) |fnode|
+            fnode.extra_meta.executionPayloadBlockHash() orelse zero_hash
+        else
+            zero_hash;
+
+        const fcu_state = ForkchoiceStateV1{
+            .head_block_hash = head_block_hash,
+            .safe_block_hash = safe_block_hash,
+            .finalized_block_hash = finalized_block_hash,
+        };
+
+        const fcu_result = engine.forkchoiceUpdated(fcu_state, null) catch |err| {
+            std.log.warn("Engine API forkchoiceUpdated failed: {}", .{err});
+            return;
+        };
+
+        std.log.info("forkchoiceUpdated: head={s}... status={s}", .{
+            &std.fmt.bytesToHex(head_block_hash[0..4], .lower),
+            @tagName(fcu_result.payload_status.status),
+        });
+    }
+
     /// Get the current head info.
     pub fn getHead(self: *const BeaconNode) HeadInfo {
         // Use fork choice head when available (authoritative LMD-GHOST head).
