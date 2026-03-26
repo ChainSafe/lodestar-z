@@ -69,7 +69,6 @@ pub fn RootCache(comptime fork: ForkSeq) type {
     };
 }
 
-
 const testing = std.testing;
 const Node = @import("persistent_merkle_tree").Node;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
