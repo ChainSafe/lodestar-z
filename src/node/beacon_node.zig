@@ -71,6 +71,12 @@ const SyncController = @import("sync_controller.zig").SyncController;
 const NodeOptions = @import("options.zig").NodeOptions;
 const sync_mod = @import("sync");
 const UnknownBlockSync = sync_mod.UnknownBlockSync;
+const SyncService = sync_mod.SyncService;
+const SyncMode = sync_mod.SyncMode;
+const PeerManager = sync_mod.PeerManager;
+const BatchRequestCallback = sync_mod.BatchRequestCallback;
+const BlockImporterCallback = sync_mod.BlockImporterCallback;
+const BatchBlock = sync_mod.BatchBlock;
 
 const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
@@ -519,6 +525,115 @@ fn loadJwtSecret(_: Allocator, io: std.Io, file_path: []const u8) ![32]u8 {
     return secret;
 }
 
+// ---------------------------------------------------------------------------
+// SyncCallbackCtx — bridges sync pipeline callbacks to the P2P transport.
+//
+// The sync state machine (RangeSyncManager) fires callbacks synchronously,
+// but P2P operations require cooperative I/O. This context queues batch
+// requests for the main loop to drain via actual network calls.
+// ---------------------------------------------------------------------------
+
+pub const PendingBatchRequest = struct {
+    batch_id: u32,
+    start_slot: u64,
+    count: u64,
+    peer_id_buf: [128]u8,
+    peer_id_len: u8,
+
+    pub fn peerId(self: *const PendingBatchRequest) []const u8 {
+        return self.peer_id_buf[0..self.peer_id_len];
+    }
+};
+
+pub const SyncCallbackCtx = struct {
+    node: *BeaconNode,
+
+    /// Pending batch requests queued by the sync state machine.
+    /// Drained by processSyncBatches() in the main loop.
+    pending_requests: [32]PendingBatchRequest = undefined,
+    pending_count: u8 = 0,
+
+    /// Create a BlockImporterCallback that imports blocks through the node.
+    pub fn importerCallback(self: *SyncCallbackCtx) BlockImporterCallback {
+        return .{
+            .ptr = @ptrCast(self),
+            .importFn = &syncImportBlock,
+        };
+    }
+
+    /// Create a BatchRequestCallback that queues requests for later P2P dispatch.
+    pub fn requesterCallback(self: *SyncCallbackCtx) BatchRequestCallback {
+        return .{
+            .ptr = @ptrCast(self),
+            .requestFn = &syncRequestBatch,
+        };
+    }
+
+    fn syncImportBlock(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        const node = ctx.node;
+        const allocator = node.allocator;
+
+        // Determine the active fork for deserialization.
+        const raw_fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
+        const fork_seq = if (@intFromEnum(raw_fork_seq) > @intFromEnum(config_mod.ForkSeq.electra))
+            config_mod.ForkSeq.electra
+        else
+            raw_fork_seq;
+
+        const any_signed = AnySignedBeaconBlock.deserialize(
+            allocator, .full, fork_seq, block_bytes,
+        ) catch |err| {
+            std.log.warn("SyncCallbackCtx: block deserialize error: {}", .{err});
+            return err;
+        };
+        defer any_signed.deinit(allocator);
+
+        switch (any_signed) {
+            .full_electra => |blk| {
+                const result = node.importBlock(blk) catch |err| {
+                    if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
+                        std.log.warn("SyncCallbackCtx: import error: {}", .{err});
+                    }
+                    return err;
+                };
+                std.log.info("SyncCallbackCtx: imported slot={d}", .{result.slot});
+            },
+            else => {
+                std.log.warn("SyncCallbackCtx: unsupported block fork", .{});
+                return error.UnsupportedFork;
+            },
+        }
+    }
+
+    fn syncRequestBatch(
+        ptr: *anyopaque,
+        batch_id: u32,
+        start_slot: u64,
+        count: u64,
+        peer_id: []const u8,
+    ) void {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        if (ctx.pending_count >= 32) {
+            std.log.warn("SyncCallbackCtx: pending request queue full, dropping batch {d}", .{batch_id});
+            return;
+        }
+        var req = PendingBatchRequest{
+            .batch_id = batch_id,
+            .start_slot = start_slot,
+            .count = count,
+            .peer_id_buf = undefined,
+            .peer_id_len = @intCast(@min(peer_id.len, 128)),
+        };
+        @memcpy(req.peer_id_buf[0..req.peer_id_len], peer_id[0..req.peer_id_len]);
+        ctx.pending_requests[ctx.pending_count] = req;
+        ctx.pending_count += 1;
+        std.log.debug("SyncCallbackCtx: queued batch {d} slots {d}..{d} for peer {s}", .{
+            batch_id, start_slot, start_slot + count - 1, peer_id,
+        });
+    }
+};
+
 pub const BeaconNode = struct {
     allocator: Allocator,
     config: *const BeaconConfig,
@@ -580,6 +695,11 @@ pub const BeaconNode = struct {
     // Sync controller — wires P2P events into the sync pipeline.
     // Optional: nil until initialized (e.g. when running without P2P).
     sync_controller: ?*SyncController = null,
+
+    // Sync subsystem components (lazily initialized when P2P starts).
+    sync_peer_manager: ?*PeerManager = null,
+    sync_service_inst: ?*SyncService = null,
+    sync_callback_ctx: ?*SyncCallbackCtx = null,
 
     // GossipHandler — lazily initialized when P2P starts (owns its SeenSets).
     gossip_handler: ?*GossipHandler = null,
@@ -930,6 +1050,21 @@ pub const BeaconNode = struct {
 
         if (self.gossip_handler) |gh| {
             gh.deinit();
+        }
+
+        // Sync pipeline cleanup.
+        if (self.sync_controller) |sc| {
+            allocator.destroy(sc);
+        }
+        if (self.sync_service_inst) |svc| {
+            allocator.destroy(svc);
+        }
+        if (self.sync_callback_ctx) |ctx| {
+            allocator.destroy(ctx);
+        }
+        if (self.sync_peer_manager) |pm| {
+            pm.deinit();
+            allocator.destroy(pm);
         }
 
         self.unknown_block_sync.deinit();
@@ -1297,6 +1432,11 @@ pub const BeaconNode = struct {
         // Initialize GossipHandler for attestation/aggregate processing.
         self.initGossipHandler();
 
+        // Initialize the sync pipeline before dialing any peers.
+        self.initSyncPipeline() catch |err| {
+            std.log.warn("Failed to initialize sync pipeline: {}", .{err});
+        };
+
         // Dial bootnodes: decode ENR → extract IP/port → build multiaddr → dial.
         if (self.bootnodes.len > 0) {
             std.log.info("Dialing {d} bootnode(s)...", .{self.bootnodes.len});
@@ -1374,29 +1514,17 @@ pub const BeaconNode = struct {
             return;
         };
 
-        // Sync loop: keep requesting blocks until caught up with peer
-        const target_slot = peer_status.head_slot;
-        while (self.head_tracker.head_slot < target_slot) {
-            const start = self.head_tracker.head_slot + 1;
-            const count = @min(target_slot - self.head_tracker.head_slot, 64);
-            std.log.info("Range sync: slots {d}..{d} (head={d}, target={d})", .{
-                start, start + count - 1, self.head_tracker.head_slot, target_slot,
-            });
-            const imported = self.requestBlocksByRange(io, svc, peer_id, start, count) catch |err| {
-                std.log.warn("Range sync failed: {}", .{err});
-                break;
+        // Notify sync controller of the new peer — this triggers the sync
+        // state machine to evaluate whether range sync should start.
+        if (self.sync_controller) |sc| {
+            sc.onPeerConnected(peer_id, peer_status) catch |err| {
+                std.log.warn("SyncController.onPeerConnected failed: {}", .{err});
             };
-            if (imported == 0) {
-                std.log.info("Range sync: no blocks received, stopping", .{});
-                break;
-            }
-            std.log.info("Range sync: imported {d} blocks, head now at slot {d}", .{
-                imported, self.head_tracker.head_slot,
-            });
         }
-        if (self.head_tracker.head_slot >= target_slot) {
-            std.log.info("Range sync complete: head at slot {d}", .{self.head_tracker.head_slot});
-        }
+
+        // Process any pending sync batch requests that were queued by the
+        // sync controller during onPeerConnected evaluation.
+        self.processSyncBatches(io, svc);
 
         // Open outbound gossipsub stream to send our subscriptions to the peer.
         // This triggers handleOutbound which stores the stream for writing
@@ -1424,11 +1552,8 @@ pub const BeaconNode = struct {
         p2p_svc.startHeartbeat(io);
         std.log.info("Gossipsub heartbeat started (700ms interval)", .{});
 
-        // Keep syncing: periodically request new blocks via range sync
-        std.log.info("Starting sync maintenance loop...", .{});
-        // Keep requesting blocks every slot. Don't re-send Status (rate limited).
-        // Just request BlocksByRange from head+1 with a small count — if peer
-        // has no new blocks, we'll get 0 back and sleep.
+        // Main sync + gossip loop: tick the sync state machine and poll gossip.
+        std.log.info("Starting sync-driven maintenance loop...", .{});
         while (true) {
             const slot_sleep: std.Io.Timeout = .{ .duration = .{
                 .raw = std.Io.Duration.fromNanoseconds(@as(i96, 6) * std.time.ns_per_s),
@@ -1441,16 +1566,280 @@ pub const BeaconNode = struct {
                 self.processGossipEvents(p2p);
             }
 
-            const start = self.head_tracker.head_slot + 1;
-            const imported = self.requestBlocksByRange(io, svc, peer_id, start, 16) catch |err| {
-                std.log.warn("Catch-up sync failed: {} — peer may have disconnected", .{err});
+            // Tick the sync service state machine — evaluates mode, dispatches
+            // new batches, re-dispatches failed ones.
+            if (self.sync_controller) |sc| {
+                sc.tick() catch |err| {
+                    std.log.warn("SyncController.tick failed: {}", .{err});
+                };
+            }
+
+            // Drain any batch requests queued by the sync tick.
+            self.processSyncBatches(io, svc);
+
+            // Update API sync status from the sync service.
+            self.updateApiSyncStatus();
+        }
+    }
+
+    /// Initialize the sync pipeline (PeerManager, SyncService, SyncController).
+    ///
+    /// Called once from startP2p() after the P2P service is ready. Creates
+    /// heap-allocated sync components and wires them into the BeaconNode.
+    pub fn initSyncPipeline(self: *BeaconNode) !void {
+        const allocator = self.allocator;
+
+        // PeerManager tracks connected peers and their chain views.
+        const pm = try allocator.create(PeerManager);
+        pm.* = PeerManager.init(allocator);
+        self.sync_peer_manager = pm;
+
+        // SyncCallbackCtx bridges sync callbacks to the P2P transport.
+        const cb_ctx = try allocator.create(SyncCallbackCtx);
+        cb_ctx.* = .{ .node = self };
+        self.sync_callback_ctx = cb_ctx;
+
+        // SyncService: top-level sync coordinator with range sync.
+        const svc = try allocator.create(SyncService);
+        svc.* = SyncService.init(
+            allocator,
+            cb_ctx.importerCallback(),
+            cb_ctx.requesterCallback(),
+            pm,
+            self.head_tracker.head_slot,
+        );
+        self.sync_service_inst = svc;
+
+        // SyncController: glue between P2P events and sync pipeline.
+        const sc = try allocator.create(SyncController);
+        sc.* = SyncController.init(allocator, self, svc, pm);
+        self.sync_controller = sc;
+
+        std.log.info("Sync pipeline initialized (head_slot={d})", .{self.head_tracker.head_slot});
+    }
+
+    /// Process pending batch requests from the sync state machine.
+    ///
+    /// Drains the SyncCallbackCtx pending request queue, executing each
+    /// batch request via P2P (requestBlocksByRange) and feeding the
+    /// results back to the sync controller.
+    fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
+        const cb_ctx = self.sync_callback_ctx orelse return;
+        const sc = self.sync_controller orelse return;
+
+        while (cb_ctx.pending_count > 0) {
+            // Pop the first pending request.
+            const req = cb_ctx.pending_requests[0];
+            cb_ctx.pending_count -= 1;
+            // Shift remaining requests left.
+            var j: u8 = 0;
+            while (j < cb_ctx.pending_count) : (j += 1) {
+                cb_ctx.pending_requests[j] = cb_ctx.pending_requests[j + 1];
+            }
+
+            const peer_id = req.peerId();
+            std.log.info("Processing sync batch {d}: slots {d}..{d} from peer {s}", .{
+                req.batch_id, req.start_slot, req.start_slot + req.count - 1, peer_id,
+            });
+
+            // Fetch raw blocks via P2P.
+            const blocks = self.fetchRawBlocksByRange(io, svc, peer_id, req.start_slot, req.count) catch |err| {
+                std.log.warn("Batch {d} fetch failed: {}", .{ req.batch_id, err });
+                sc.onBatchError(req.batch_id);
+                continue;
+            };
+            defer {
+                for (blocks) |blk| {
+                    self.allocator.free(blk.block_bytes);
+                }
+                self.allocator.free(blocks);
+            }
+
+            if (blocks.len == 0) {
+                std.log.warn("Batch {d}: empty response from peer", .{req.batch_id});
+                sc.onBatchError(req.batch_id);
+                continue;
+            }
+
+            // Feed blocks to the sync controller which imports them
+            // via the BlockImporterCallback.
+            sc.onBlocksReceived(req.batch_id, blocks) catch |err| {
+                std.log.warn("Batch {d} import failed: {}", .{ req.batch_id, err });
+                sc.onBatchError(req.batch_id);
+                continue;
+            };
+
+            std.log.info("Batch {d}: delivered {d} blocks to sync pipeline", .{
+                req.batch_id, blocks.len,
+            });
+        }
+    }
+
+    /// Fetch raw blocks by range from a peer, returning BatchBlock slices.
+    ///
+    /// Unlike requestBlocksByRange() which imports inline, this returns
+    /// raw SSZ bytes for the sync pipeline to process via callbacks.
+    fn fetchRawBlocksByRange(
+        self: *BeaconNode,
+        io: std.Io,
+        svc: *networking.P2pService,
+        peer_id: []const u8,
+        start_slot: u64,
+        count: u64,
+    ) ![]BatchBlock {
+        const protocol_id = "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy";
+        const req_resp_encoding = networking.req_resp_encoding;
+
+        var stream = try svc.dialProtocol(io, peer_id, protocol_id);
+
+        // Encode the range request.
+        const request = networking.messages.BeaconBlocksByRangeRequest.Type{
+            .start_slot = start_slot,
+            .count = count,
+            .step = 1,
+        };
+        var req_ssz: [networking.messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
+        _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &req_ssz);
+
+        const wire_request = try req_resp_encoding.encodeRequest(self.allocator, &req_ssz);
+        defer self.allocator.free(wire_request);
+
+        // Write request.
+        var written: usize = 0;
+        while (written < wire_request.len) {
+            written += stream.write(io, wire_request[written..]) catch |err| {
+                std.log.warn("fetchRawBlocksByRange write error: {}", .{err});
+                return err;
+            };
+        }
+
+        // Read response chunks into BatchBlock array.
+        var result: std.ArrayList(BatchBlock) = .empty;
+        errdefer {
+            for (result.items) |blk| self.allocator.free(blk.block_bytes);
+            result.deinit(self.allocator);
+        }
+
+        var buf: [1024 * 1024]u8 = undefined;
+        var buf_len: usize = 0;
+        var blocks_received: u64 = 0;
+
+        while (blocks_received < count) {
+            const n = stream.read(io, buf[buf_len..]) catch |err| {
+                std.log.info("fetchRawBlocksByRange: stream ended after {d} blocks ({})", .{ blocks_received, err });
                 break;
             };
-            if (imported > 0) {
-                std.log.info("Catch-up: imported {d} blocks, head now at slot {d}", .{
-                    imported, self.head_tracker.head_slot,
+            if (n == 0) break;
+            buf_len += n;
+
+            while (buf_len > 0 and blocks_received < count) {
+                const decoded = req_resp_encoding.decodeResponseChunk(
+                    self.allocator,
+                    buf[0..buf_len],
+                    true,
+                ) catch |err| {
+                    if (err == error.InsufficientData) break;
+                    std.log.warn("fetchRawBlocksByRange: decode error: {}", .{err});
+                    return result.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+                };
+
+                if (decoded.result != .success) {
+                    self.allocator.free(decoded.ssz_bytes);
+                    break;
+                }
+
+                // Infer slot from the SSZ bytes if possible (first 8 bytes of message = slot).
+                // For BatchBlock we store raw SSZ + slot.
+                // Slot is at offset 8 of the SignedBeaconBlock message (after signature).
+                const slot = if (decoded.ssz_bytes.len >= 104)
+                    std.mem.readInt(u64, decoded.ssz_bytes[96..104], .little)
+                else
+                    start_slot + blocks_received;
+
+                try result.append(self.allocator, .{
+                    .slot = slot,
+                    .block_bytes = decoded.ssz_bytes, // caller owns
                 });
+                blocks_received += 1;
+
+                const consumed = decoded.bytes_consumed;
+                if (consumed < buf_len) {
+                    std.mem.copyForwards(u8, buf[0 .. buf_len - consumed], buf[consumed..buf_len]);
+                    buf_len -= consumed;
+                } else {
+                    buf_len = 0;
+                }
             }
+        }
+
+        return result.toOwnedSlice(self.allocator);
+    }
+
+    /// Poll gossipsub for beacon_block messages and import them.
+    ///
+    /// Extracted from the inline loop to be callable from the sync-driven
+    /// maintenance loop.
+    fn pollGossipBlocks(self: *BeaconNode) void {
+        if (self.p2p_service) |p2p| {
+            const gossip_decoding = networking.gossip_decoding;
+            const events = p2p.gossipsub.drainEvents() catch return;
+            defer self.allocator.free(events);
+            for (events) |event| {
+                switch (event) {
+                    .message => |msg| {
+                        if (std.mem.indexOf(u8, msg.topic, "beacon_block") == null) continue;
+                        const ssz_bytes = gossip_decoding.decompressGossipPayload(
+                            self.allocator, msg.data,
+                        ) catch continue;
+                        defer self.allocator.free(ssz_bytes);
+
+                        const raw_fork_seq2 = self.config.forkSeq(self.head_tracker.head_slot);
+                        const fork_seq = if (@intFromEnum(raw_fork_seq2) > @intFromEnum(config_mod.ForkSeq.electra))
+                            config_mod.ForkSeq.electra
+                        else
+                            raw_fork_seq2;
+                        const any_signed = AnySignedBeaconBlock.deserialize(
+                            self.allocator, .full, fork_seq, ssz_bytes,
+                        ) catch |err| {
+                            std.log.warn("Gossip block deserialize: {}", .{err});
+                            continue;
+                        };
+                        defer any_signed.deinit(self.allocator);
+
+                        switch (any_signed) {
+                            .full_electra => |blk| {
+                                const result = self.importBlock(blk) catch |err| {
+                                    if (err == error.UnknownParentBlock) {
+                                        self.queueOrphanBlock(blk, ssz_bytes);
+                                    } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
+                                        std.log.warn("Gossip block import: {}", .{err});
+                                    }
+                                    continue;
+                                };
+                                self.processPendingChildren(result.block_root);
+                                std.log.info("GOSSIP BLOCK IMPORTED slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                                    result.slot,
+                                    result.block_root[0], result.block_root[1],
+                                    result.block_root[2], result.block_root[3],
+                                });
+                            },
+                            else => {},
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+
+    /// Update the API sync status from the sync service state machine.
+    fn updateApiSyncStatus(self: *BeaconNode) void {
+        if (self.sync_service_inst) |svc| {
+            const status = svc.getSyncStatus();
+            self.api_sync_status.head_slot = status.head_slot;
+            self.api_sync_status.sync_distance = status.sync_distance;
+            self.api_sync_status.is_syncing = status.state == .syncing;
+            self.api_sync_status.is_optimistic = status.is_optimistic;
         }
     }
 
@@ -2024,6 +2413,18 @@ pub const BeaconNode = struct {
     /// would compare against the clock's wall-clock slot to determine sync
     /// distance.
     pub fn getSyncStatus(self: *const BeaconNode) SyncStatus {
+        // Use the sync service state machine when available.
+        if (self.sync_service_inst) |svc| {
+            const ss = svc.getSyncStatus();
+            return .{
+                .head_slot = ss.head_slot,
+                .sync_distance = ss.sync_distance,
+                .is_syncing = ss.state == .syncing,
+                .is_optimistic = ss.is_optimistic,
+                .el_offline = false,
+            };
+        }
+        // Fallback: no sync service (e.g. tests without P2P).
         const head_slot = if (self.fork_choice) |fc| fc.head.slot else self.head_tracker.head_slot;
         return .{
             .head_slot = head_slot,
