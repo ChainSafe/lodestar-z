@@ -113,6 +113,33 @@ pub const routes = [_]Route{
         .supports_ssz = true,
     },
 
+    // -- Pool --
+    .{
+        .method = .GET,
+        .path = "/eth/v1/beacon/pool/attestations",
+        .operation_id = "getPoolAttestations",
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/beacon/pool/voluntary_exits",
+        .operation_id = "getPoolVoluntaryExits",
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/beacon/pool/proposer_slashings",
+        .operation_id = "getPoolProposerSlashings",
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/beacon/pool/attester_slashings",
+        .operation_id = "getPoolAttesterSlashings",
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/beacon/pool/bls_to_execution_changes",
+        .operation_id = "getPoolBlsToExecutionChanges",
+    },
+
 
     // -- Validator --
     .{
@@ -361,5 +388,5 @@ test "findRoute wrong method" {
 
 test "route count" {
     // Verify we defined all expected routes
-    try std.testing.expectEqual(@as(usize, 23), routes.len);
+    try std.testing.expectEqual(@as(usize, 28), routes.len);
 }

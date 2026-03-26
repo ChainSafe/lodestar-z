@@ -430,3 +430,16 @@ pub const PeerCount = struct {
     connected: u64,
     disconnecting: u64,
 };
+
+// ---------------------------------------------------------------------------
+// Pool endpoint types
+// ---------------------------------------------------------------------------
+
+/// Aggregate counts of pending operations across all pools.
+pub const PoolCounts = struct {
+    attestation_groups: usize,
+    voluntary_exits: usize,
+    proposer_slashings: usize,
+    attester_slashings: usize,
+    bls_to_execution_changes: usize,
+};
