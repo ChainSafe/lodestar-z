@@ -15,6 +15,12 @@ const Slot = types.primitive.Slot.Type;
 const Epoch = types.primitive.Epoch.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 
+/// Key for data column sidecar deduplication: (block_root, column_index).
+pub const DataColumnKey = struct {
+    block_root: [32]u8,
+    column_index: u64,
+};
+
 /// Caches for messages already seen on the gossip network.
 ///
 /// Used to short-circuit gossip validation: if a message has been seen,
@@ -41,6 +47,10 @@ pub const SeenCache = struct {
     /// Seen BLS-to-execution changes, keyed by validator index.
     seen_bls_changes: std.AutoHashMap(ValidatorIndex, void),
 
+    /// Seen data column sidecars, keyed by (block_root, column_index).
+    /// Used for PeerDAS / Fulu deduplication.
+    seen_data_columns: std.AutoHashMap(DataColumnKey, void),
+
     pub fn init(allocator: Allocator) SeenCache {
         return .{
             .allocator = allocator,
@@ -50,6 +60,7 @@ pub const SeenCache = struct {
             .seen_proposer_slashings = std.AutoHashMap(ValidatorIndex, void).init(allocator),
             .seen_attester_slashings = std.AutoHashMap([32]u8, void).init(allocator),
             .seen_bls_changes = std.AutoHashMap(ValidatorIndex, void).init(allocator),
+            .seen_data_columns = std.AutoHashMap(DataColumnKey, void).init(allocator),
         };
     }
 
@@ -60,6 +71,7 @@ pub const SeenCache = struct {
         self.seen_proposer_slashings.deinit();
         self.seen_attester_slashings.deinit();
         self.seen_bls_changes.deinit();
+        self.seen_data_columns.deinit();
     }
 
     // -- Blocks ---------------------------------------------------------------
@@ -146,6 +158,37 @@ pub const SeenCache = struct {
         try self.seen_bls_changes.put(validator_index, {});
     }
 
+    // -- Data columns (PeerDAS / Fulu) ----------------------------------------
+
+    pub fn hasSeenDataColumn(self: *const SeenCache, block_root: [32]u8, column_index: u64) bool {
+        return self.seen_data_columns.contains(.{ .block_root = block_root, .column_index = column_index });
+    }
+
+    pub fn markDataColumnSeen(self: *SeenCache, block_root: [32]u8, column_index: u64) !void {
+        try self.seen_data_columns.put(.{ .block_root = block_root, .column_index = column_index }, {});
+    }
+
+    /// Prune data column entries for a given block root (e.g. when finalized).
+    pub fn pruneDataColumns(self: *SeenCache, block_root: [32]u8) void {
+        // Remove all column entries for this block root.
+        // Since AutoHashMap doesn't support prefix deletion, we iterate.
+        var to_remove_buf: [256]DataColumnKey = undefined;
+        var to_remove_len: usize = 0;
+
+        var it = self.seen_data_columns.iterator();
+        while (it.next()) |entry| {
+            if (std.mem.eql(u8, &entry.key_ptr.block_root, &block_root)) {
+                if (to_remove_len < to_remove_buf.len) {
+                    to_remove_buf[to_remove_len] = entry.key_ptr.*;
+                    to_remove_len += 1;
+                }
+            }
+        }
+        for (to_remove_buf[0..to_remove_len]) |key| {
+            _ = self.seen_data_columns.remove(key);
+        }
+    }
+
     // -- Bulk prune -----------------------------------------------------------
 
     /// Clear all aggregator entries (call at epoch boundaries).
@@ -161,6 +204,7 @@ pub const SeenCache = struct {
         self.seen_proposer_slashings.clearRetainingCapacity();
         self.seen_attester_slashings.clearRetainingCapacity();
         self.seen_bls_changes.clearRetainingCapacity();
+        self.seen_data_columns.clearRetainingCapacity();
     }
 };
 
@@ -253,4 +297,40 @@ test "SeenCache: reset clears all" {
     try std.testing.expect(!cache.hasSeenBlock([_]u8{1} ** 32));
     try std.testing.expect(!cache.hasSeenExit(5));
     try std.testing.expect(!cache.hasSeenProposerSlashing(9));
+}
+
+test "SeenCache: data column dedup" {
+    const allocator = std.testing.allocator;
+    var cache = SeenCache.init(allocator);
+    defer cache.deinit();
+
+    const root = [_]u8{0xAB} ** 32;
+    try std.testing.expect(!cache.hasSeenDataColumn(root, 0));
+    try std.testing.expect(!cache.hasSeenDataColumn(root, 1));
+
+    try cache.markDataColumnSeen(root, 0);
+    try std.testing.expect(cache.hasSeenDataColumn(root, 0));
+    try std.testing.expect(!cache.hasSeenDataColumn(root, 1));
+
+    // Different root, same index → not seen.
+    const root2 = [_]u8{0xCD} ** 32;
+    try std.testing.expect(!cache.hasSeenDataColumn(root2, 0));
+}
+
+test "SeenCache: prune data columns by root" {
+    const allocator = std.testing.allocator;
+    var cache = SeenCache.init(allocator);
+    defer cache.deinit();
+
+    const root1 = [_]u8{0x01} ** 32;
+    const root2 = [_]u8{0x02} ** 32;
+
+    try cache.markDataColumnSeen(root1, 0);
+    try cache.markDataColumnSeen(root1, 5);
+    try cache.markDataColumnSeen(root2, 3);
+
+    cache.pruneDataColumns(root1);
+    try std.testing.expect(!cache.hasSeenDataColumn(root1, 0));
+    try std.testing.expect(!cache.hasSeenDataColumn(root1, 5));
+    try std.testing.expect(cache.hasSeenDataColumn(root2, 3));
 }
