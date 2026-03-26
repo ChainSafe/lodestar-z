@@ -347,9 +347,8 @@ fn fetchBeaconEndpoint(
     }) catch return FetchError.ConnectionFailed;
     defer req.deinit();
 
-    // Send the request (no body for GET).
-    req.transfer_encoding = .{ .content_length = 0 };
-    req.sendBodyComplete("") catch return FetchError.RequestFailed;
+    // Send the request (GET has no body).
+    req.sendBodiless() catch return FetchError.RequestFailed;
 
     // Receive response head.
     var redirect_buf: [2048]u8 = undefined;
