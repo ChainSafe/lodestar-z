@@ -34,9 +34,12 @@ const BeaconConfig = config_mod.BeaconConfig;
 const config_loader = config_mod.config_loader;
 
 const state_transition = @import("state_transition");
+const preset = @import("preset").preset;
 const Node = @import("persistent_merkle_tree").Node;
 
 const genesis_util = @import("genesis_util.zig");
+const sync_mod = @import("sync");
+const checkpoint_sync = sync_mod.checkpoint_sync;
 const ShutdownHandler = @import("shutdown.zig").ShutdownHandler;
 
 // ============================================================================
@@ -788,65 +791,148 @@ fn runBeacon(
 
     std.log.info("BeaconNode initialized", .{});
 
-    // Load genesis / checkpoint state.
-    if (opts.checkpoint_state) |state_path| {
+    // ================================================================
+    // State initialization — priority order (matches TS Lodestar):
+    //   1. --checkpoint-sync-url  → fetch finalized state from URL
+    //   2. --checkpoint-state     → load from SSZ file
+    //   3. DB has persisted state → resume from previous run
+    //   4. --network minimal      → generate minimal genesis
+    //   5. Fail with helpful error
+    //
+    // --force-checkpoint-sync skips case 3 (forces re-sync from URL/file).
+    // --weak-subjectivity-checkpoint validates the chosen state.
+    // ================================================================
+
+    // Wire Io early — needed for HTTP checkpoint sync.
+    node.setIo(io);
+
+    const force_checkpoint = opts.force_checkpoint_sync;
+
+    // Case 1: Checkpoint sync from URL.
+    if (opts.checkpoint_sync_url) |sync_url| {
+        std.log.info("Checkpoint sync from URL: {s}", .{sync_url});
+
+        // Fetch finalized state.
+        const fetched = checkpoint_sync.fetchFinalizedState(allocator, io, sync_url) catch |err| {
+            std.log.err("Failed to fetch checkpoint state from '{s}': {}", .{ sync_url, err });
+            std.log.err("  Suggestions:", .{});
+            std.log.err("    - Verify the URL is a beacon API endpoint", .{});
+            std.log.err("    - Try: curl -s {s}/eth/v1/node/version", .{sync_url});
+            std.log.err("    - Use --checkpoint-state <file> as alternative", .{});
+            std.process.exit(1);
+        };
+        defer allocator.free(fetched.state_bytes);
+
+        std.log.info("Deserializing checkpoint state ({d} bytes, fork={s})...", .{
+            fetched.state_bytes.len, fetched.fork_name,
+        });
+
+        const cp_state = state_transition.deserializeState(
+            allocator, &pool, beacon_config, fetched.state_bytes,
+        ) catch |err| {
+            std.log.err("Failed to deserialize checkpoint state: {}", .{err});
+            std.log.err("  This may indicate a fork mismatch — check that the", .{});
+            std.log.err("  remote node and this node are on the same network.", .{});
+            std.process.exit(1);
+        };
+
+        // Validate weak subjectivity checkpoint if provided.
+        if (opts.weak_subjectivity_checkpoint) |ws_str| {
+            const ws = checkpoint_sync.parseWeakSubjectivityCheckpoint(ws_str) catch |err| {
+                std.log.err("Invalid --weak-subjectivity-checkpoint '{s}': {}", .{ ws_str, err });
+                std.process.exit(1);
+            };
+            const cp_slot = cp_state.state.slot() catch 0;
+            checkpoint_sync.validateWeakSubjectivityCheckpoint(
+                ws, cp_slot, @as(u64, preset.SLOTS_PER_EPOCH),
+            ) catch {
+                std.log.err("Weak subjectivity violation! The checkpoint state does not", .{});
+                std.log.err("  match the expected root:epoch. Refusing to sync.", .{});
+                std.log.err("  Expected: {s}", .{ws_str});
+                std.process.exit(1);
+            };
+            std.log.info("Weak subjectivity checkpoint validated (epoch {d})", .{ws.epoch});
+        }
+
+        try node.initFromCheckpoint(cp_state);
+        if (opts.params_file != null) {
+            custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
+        }
+        std.log.info("Initialized from checkpoint sync URL at slot {d}", .{cp_state.state.slot() catch 0});
+
+    // Case 2: Checkpoint state from file.
+    } else if (opts.checkpoint_state) |state_path| {
         std.log.info("Loading checkpoint state from: {s}", .{state_path});
 
-        const genesis_state = genesis_util.loadGenesisFromFile(
-            allocator,
-            &pool,
-            beacon_config,
-            io,
-            state_path,
+        const cp_state = genesis_util.loadGenesisFromFile(
+            allocator, &pool, beacon_config, io, state_path,
         ) catch |err| {
             std.log.err("Failed to load checkpoint state '{s}': {}", .{ state_path, err });
             std.process.exit(1);
         };
 
-        try node.initFromGenesis(genesis_state);
+        // Validate weak subjectivity checkpoint if provided.
+        if (opts.weak_subjectivity_checkpoint) |ws_str| {
+            const ws = checkpoint_sync.parseWeakSubjectivityCheckpoint(ws_str) catch |err| {
+                std.log.err("Invalid --weak-subjectivity-checkpoint '{s}': {}", .{ ws_str, err });
+                std.process.exit(1);
+            };
+            const cp_slot = cp_state.state.slot() catch 0;
+            checkpoint_sync.validateWeakSubjectivityCheckpoint(
+                ws, cp_slot, @as(u64, preset.SLOTS_PER_EPOCH),
+            ) catch {
+                std.log.err("Weak subjectivity violation! Refusing to sync.", .{});
+                std.process.exit(1);
+            };
+            std.log.info("Weak subjectivity checkpoint validated (epoch {d})", .{ws.epoch});
+        }
+
+        const cp_slot = cp_state.state.slot() catch 0;
+        if (cp_slot == 0) {
+            // Genesis state — use initFromGenesis.
+            try node.initFromGenesis(cp_state);
+        } else {
+            // Non-genesis checkpoint — use initFromCheckpoint.
+            try node.initFromCheckpoint(cp_state);
+        }
         if (opts.params_file != null) {
             custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
         }
+        std.log.info("Initialized from checkpoint file at slot {d}", .{cp_slot});
 
-        // Verify genesis state_root
-        {
-            try genesis_state.state.commit();
-            const sr = (try genesis_state.state.hashTreeRoot()).*;
-            std.log.info("Genesis state_root: 0x{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                sr[0], sr[1], sr[2], sr[3], sr[4], sr[5], sr[6], sr[7],
-            });
-            const reserialized = genesis_state.state.serialize(allocator) catch |err| {
-                std.log.warn("Roundtrip serialize failed: {}", .{err});
-                return;
-            };
-            defer allocator.free(reserialized);
-            const orig = readFile(io, allocator, state_path) catch return;
-            defer allocator.free(orig);
-            std.log.info("Roundtrip: original={d} bytes, reserialized={d} bytes", .{ orig.len, reserialized.len });
-            if (orig.len == reserialized.len) {
-                var diffs: usize = 0;
-                var first_diff: ?usize = null;
-                for (orig, reserialized, 0..) |a, b, i| {
-                    if (a != b) {
-                        diffs += 1;
-                        if (first_diff == null) first_diff = i;
-                    }
-                }
-                if (diffs == 0) {
-                    std.log.info("Roundtrip: PERFECT match - all bytes identical", .{});
-                } else {
-                    std.log.warn("Roundtrip: {d} byte differences, first at offset {d}", .{ diffs, first_diff.? });
-                }
-            }
+    // Case 3: Resume from DB (unless --force-checkpoint-sync).
+    } else if (if (!force_checkpoint) node.db.getLatestStateArchiveSlot() catch null else null) |db_slot| {
+        std.log.info("Found persisted state in DB at slot {d}, resuming...", .{db_slot});
+
+        const state_bytes = node.db.getStateArchive(db_slot) catch |err| {
+            std.log.err("Failed to read state from DB at slot {d}: {}", .{ db_slot, err });
+            std.process.exit(1);
+        } orelse {
+            std.log.err("State archive at slot {d} unexpectedly empty", .{db_slot});
+            std.process.exit(1);
+        };
+        defer allocator.free(state_bytes);
+
+        const db_state = state_transition.deserializeState(
+            allocator, &pool, beacon_config, state_bytes,
+        ) catch |err| {
+            std.log.err("Failed to deserialize DB state at slot {d}: {}", .{ db_slot, err });
+            std.log.err("  The database may be corrupted. Try --force-checkpoint-sync", .{});
+            std.process.exit(1);
+        };
+
+        try node.initFromCheckpoint(db_state);
+        if (opts.params_file != null) {
+            custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
         }
-        std.log.info("Initialized from checkpoint state at slot {d}", .{genesis_state.state.slot() catch 0});
+        std.log.info("Resumed from DB state at slot {d}", .{db_slot});
+
+    // Case 4: Minimal genesis (development).
     } else if (network == .minimal) {
         std.log.info("Generating minimal genesis state with 64 validators...", .{});
 
         const genesis_state = genesis_util.createMinimalGenesis(
-            allocator,
-            &pool,
-            64,
+            allocator, &pool, 64,
         ) catch |err| {
             std.log.err("Failed to generate minimal genesis state: {}", .{err});
             std.process.exit(1);
@@ -857,8 +943,15 @@ fn runBeacon(
             custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
         }
         std.log.info("Initialized from minimal genesis state", .{});
+
+    // Case 5: No state source — fail with helpful error.
     } else {
-        std.log.err("Please provide --checkpoint-state <file> or use --network minimal", .{});
+        std.log.err("No beacon state available. Provide one of:", .{});
+        std.log.err("  --checkpoint-sync-url <URL>  Sync from a beacon API endpoint", .{});
+        std.log.err("  --checkpoint-state <FILE>    Load from an SSZ state file", .{});
+        std.log.err("  --network minimal            Generate a test genesis state", .{});
+        std.log.err("", .{});
+        std.log.err("Or ensure --data-dir points to a directory with prior chain data.", .{});
         std.process.exit(1);
     }
 
@@ -878,9 +971,7 @@ fn runBeacon(
         .p2p_host = opts.p2p_host,
     };
 
-    // Wire the Io context into the node before launching services.
-    // This enables std.http.Client for EL communication and Io-based timing.
-    node.setIo(io);
+    // Io was already wired in the state initialization section above.
 
     std.log.info("Starting services concurrently...", .{});
     std.log.info("  REST API: http://{s}:{d}", .{ opts.api_address, opts.api_port });
