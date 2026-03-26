@@ -105,6 +105,7 @@ pub const DecodedGossipMessage = union(GossipTopicType) {
     blob_sidecar: void,
     sync_committee_contribution_and_proof: void,
     sync_committee: void,
+    data_column_sidecar: void,
 };
 
 /// Decompress a Snappy-framed gossip payload.
@@ -207,6 +208,7 @@ pub fn decodeFromSszBytes(
         .blob_sidecar,
         .sync_committee_contribution_and_proof,
         .sync_committee,
+        .data_column_sidecar,
         => return error.UnsupportedTopicType,
     }
 }
