@@ -1163,8 +1163,17 @@ pub const BeaconNode = struct {
             std.log.info("Range sync complete: head at slot {d}", .{self.head_tracker.head_slot});
         }
 
-        // Start gossipsub heartbeat on a background fiber (runs every 700ms).
+        // Open outbound gossipsub stream to send our subscriptions to the peer.
+        // This triggers handleOutbound which stores the stream for writing
+        // and sends our topic subscription announcements.
         var p2p_svc = &self.p2p_service.?;
+        const GossipsubHandler = @import("zig-libp2p").gossipsub.Handler;
+        svc.newStream(io, peer_id, GossipsubHandler, null) catch |err| {
+            std.log.warn("Failed to open outbound gossipsub stream: {}", .{err});
+        };
+        std.log.info("Opened outbound gossipsub stream to peer", .{});
+
+        // Start gossipsub heartbeat on a background fiber (runs every 700ms).
         p2p_svc.startHeartbeat(io);
         std.log.info("Gossipsub heartbeat started (700ms interval)", .{});
 
@@ -1179,6 +1188,49 @@ pub const BeaconNode = struct {
                 .clock = .awake,
             } };
             slot_sleep.sleep(io) catch break;
+
+            // Poll gossipsub for beacon_block messages
+            if (self.p2p_service) |p2p| {
+                const gossip_decoding = networking.gossip_decoding;
+                const events = p2p.gossipsub.drainEvents() catch &.{};
+                defer self.allocator.free(events);
+                for (events) |event| {
+                    switch (event) {
+                        .message => |msg| {
+                            if (std.mem.indexOf(u8, msg.topic, "beacon_block") == null) continue;
+                            const ssz_bytes = gossip_decoding.decompressGossipPayload(
+                                self.allocator, msg.data,
+                            ) catch continue;
+                            defer self.allocator.free(ssz_bytes);
+
+                            const fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
+                            const any_signed = AnySignedBeaconBlock.deserialize(
+                                self.allocator, .full, fork_seq, ssz_bytes,
+                            ) catch |err| {
+                                std.log.warn("Gossip block deserialize: {}", .{err});
+                                continue;
+                            };
+                            defer any_signed.deinit(self.allocator);
+
+                            switch (any_signed) {
+                                .full_electra => |blk| {
+                                    const result = self.importBlock(blk) catch |err| {
+                                        std.log.warn("Gossip block import: {}", .{err});
+                                        continue;
+                                    };
+                                    std.log.info("GOSSIP BLOCK IMPORTED slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                                        result.slot,
+                                        result.block_root[0], result.block_root[1],
+                                        result.block_root[2], result.block_root[3],
+                                    });
+                                },
+                                else => {},
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }
 
             const start = self.head_tracker.head_slot + 1;
             const imported = self.requestBlocksByRange(io, svc, peer_id, start, 16) catch |err| {
