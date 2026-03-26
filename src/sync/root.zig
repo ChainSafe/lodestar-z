@@ -51,3 +51,7 @@ pub const PendingBlock = unknown_block_sync.PendingBlock;
 test {
     testing.refAllDecls(@This());
 }
+
+// Re-export access to the underlying networking peer manager for advanced use.
+pub const NetworkPeerManager = @import("networking").peer_manager.PeerManager;
+pub const NetworkPeerManagerConfig = @import("networking").PeerManagerConfig;
