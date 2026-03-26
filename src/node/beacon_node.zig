@@ -1050,6 +1050,14 @@ pub const BeaconNode = struct {
             .req_resp_context = req_resp_ctx,
             .validator = &validator.ctx,
             .host_key = host_key,
+            .gossipsub_config = .{
+                // Match Lodestar TS gossipsub params
+                .mesh_degree = 8,
+                .mesh_degree_lo = 6,
+                .mesh_degree_hi = 12,
+                .mesh_degree_lazy = 6,
+                .heartbeat_interval_ms = 700,
+            },
         });
         var svc = &self.p2p_service.?;
         try svc.start(io, listen_multiaddr);
@@ -1155,16 +1163,27 @@ pub const BeaconNode = struct {
             std.log.info("Range sync complete: head at slot {d}", .{self.head_tracker.head_slot});
         }
 
+        // Start gossipsub heartbeat — run inline every 700ms between sync iterations.
+        // (A proper implementation would use a background fiber, but for the speedrun
+        // we tick the heartbeat in the sync loop below.)
+
         // Keep syncing: periodically request new blocks via range sync
-        // while also polling gossipsub for beacon_block messages.
         std.log.info("Starting sync maintenance loop...", .{});
         while (true) {
-            // Sleep one slot
-            const slot_sleep: std.Io.Timeout = .{ .duration = .{
-                .raw = std.Io.Duration.fromNanoseconds(@as(i96, 6) * std.time.ns_per_s),
-                .clock = .awake,
-            } };
-            slot_sleep.sleep(io) catch break;
+            // Sleep ~6 seconds, ticking gossipsub heartbeat every 700ms
+            {
+                var ticks: u32 = 0;
+                while (ticks < 8) : (ticks += 1) { // 8 * 700ms ≈ 5.6s
+                    const hb_sleep: std.Io.Timeout = .{ .duration = .{
+                        .raw = std.Io.Duration.fromMilliseconds(700),
+                        .clock = .awake,
+                    } };
+                    hb_sleep.sleep(io) catch break;
+                    if (self.p2p_service) |p2p| {
+                        p2p.gossipsub.heartbeat() catch {};
+                    }
+                }
+            }
 
             // Re-request Status to check peer's head
             const status = self.sendStatus(io, svc, peer_id) catch |err| {
