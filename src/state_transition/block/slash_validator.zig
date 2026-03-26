@@ -119,99 +119,94 @@ pub fn slashValidator(
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const Node = @import("persistent_merkle_tree").Node;
 
-test "slashValidator - basic sanity" {
-    const allocator = std.testing.allocator;
-    const pool_size = 10_000 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
+const TestEnvironment = struct {
+    allocator: std.mem.Allocator,
+    pool: Node.Pool,
+    test_state: TestCachedBeaconState,
+    slashings_cache: SlashingsCache,
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
-    defer test_state.deinit();
+    const num_validators = 10_000;
+    const pool_size = num_validators * 5;
 
-    var slashings_cache = try SlashingsCache.initEmpty(std.testing.allocator);
-    defer slashings_cache.deinit();
-    // Initialize cache for the state's latest block slot
-    {
-        var lbh = try test_state.cached_state.state.castToFork(.electra).latestBlockHeader();
-        const slot = try lbh.get("slot");
-        slashings_cache.updateLatestBlockSlot(slot);
+    fn init(allocator: std.mem.Allocator) !*TestEnvironment {
+        const self = try allocator.create(TestEnvironment);
+        errdefer allocator.destroy(self);
+        self.allocator = allocator;
+        self.pool = try Node.Pool.init(allocator, pool_size);
+        errdefer self.pool.deinit();
+        self.test_state = try TestCachedBeaconState.init(allocator, &self.pool, num_validators);
+        errdefer self.test_state.deinit();
+        self.slashings_cache = try SlashingsCache.initEmpty(allocator);
+        errdefer self.slashings_cache.deinit();
+        // Initialize cache for the state's latest block slot
+        {
+            var lbh = try self.test_state.cached_state.state.castToFork(.electra).latestBlockHeader();
+            const slot = try lbh.get("slot");
+            self.slashings_cache.updateLatestBlockSlot(slot);
+        }
+        return self;
     }
+
+    fn deinit(self: *TestEnvironment) void {
+        self.slashings_cache.deinit();
+        self.test_state.deinit();
+        self.pool.deinit();
+        self.allocator.destroy(self);
+    }
+};
+
+test "slashValidator - basic sanity" {
+    const env = try TestEnvironment.init(std.testing.allocator);
+    defer env.deinit();
 
     try slashValidator(
         .electra,
-        test_state.cached_state.config,
-        test_state.cached_state.epoch_cache,
-        test_state.cached_state.state.castToFork(.electra),
-        &slashings_cache,
+        env.test_state.cached_state.config,
+        env.test_state.cached_state.epoch_cache,
+        env.test_state.cached_state.state.castToFork(.electra),
+        &env.slashings_cache,
         42,
         null,
     );
 }
 
 test "slashValidator - validator marked as slashed" {
-    const allocator = std.testing.allocator;
-    const pool_size = 10_000 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
+    const env = try TestEnvironment.init(std.testing.allocator);
+    defer env.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
-    defer test_state.deinit();
-
-    var slashings_cache = try SlashingsCache.initEmpty(std.testing.allocator);
-    defer slashings_cache.deinit();
-    // Initialize cache for the state's latest block slot
-    {
-        var lbh = try test_state.cached_state.state.castToFork(.electra).latestBlockHeader();
-        const slot = try lbh.get("slot");
-        slashings_cache.updateLatestBlockSlot(slot);
-    }
     const slashed_index: u64 = 100;
 
     // Verify not slashed before
-    var validators_before = try test_state.cached_state.state.castToFork(.electra).validators();
+    var validators_before = try env.test_state.cached_state.state.castToFork(.electra).validators();
     const was_slashed = try (try validators_before.get(@intCast(slashed_index))).get("slashed");
     try std.testing.expect(!was_slashed);
 
     try slashValidator(
         .electra,
-        test_state.cached_state.config,
-        test_state.cached_state.epoch_cache,
-        test_state.cached_state.state.castToFork(.electra),
-        &slashings_cache,
+        env.test_state.cached_state.config,
+        env.test_state.cached_state.epoch_cache,
+        env.test_state.cached_state.state.castToFork(.electra),
+        &env.slashings_cache,
         slashed_index,
         null,
     );
 
     // Verify slashed after
-    var validators_after = try test_state.cached_state.state.castToFork(.electra).validators();
+    var validators_after = try env.test_state.cached_state.state.castToFork(.electra).validators();
     const is_slashed = try (try validators_after.get(@intCast(slashed_index))).get("slashed");
     try std.testing.expect(is_slashed);
 }
 
 test "slashValidator - with explicit whistleblower" {
-    const allocator = std.testing.allocator;
-    const pool_size = 10_000 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
-    defer test_state.deinit();
-
-    var slashings_cache = try SlashingsCache.initEmpty(std.testing.allocator);
-    defer slashings_cache.deinit();
-    // Initialize cache for the state's latest block slot
-    {
-        var lbh = try test_state.cached_state.state.castToFork(.electra).latestBlockHeader();
-        const slot = try lbh.get("slot");
-        slashings_cache.updateLatestBlockSlot(slot);
-    }
+    const env = try TestEnvironment.init(std.testing.allocator);
+    defer env.deinit();
 
     try slashValidator(
         .electra,
-        test_state.cached_state.config,
-        test_state.cached_state.epoch_cache,
-        test_state.cached_state.state.castToFork(.electra),
-        &slashings_cache,
+        env.test_state.cached_state.config,
+        env.test_state.cached_state.epoch_cache,
+        env.test_state.cached_state.state.castToFork(.electra),
+        &env.slashings_cache,
         42,
         200, // explicit whistleblower
     );
