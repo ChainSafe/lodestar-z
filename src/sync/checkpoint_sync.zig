@@ -362,12 +362,17 @@ fn fetchBeaconEndpoint(
     }
 
     // Extract Eth-Consensus-Version header for fork detection.
+    // IMPORTANT: response.reader() invalidates head string pointers,
+    // so we must copy the fork name before reading the body.
+    var fork_name_buf: [32]u8 = undefined;
     var fork_name: []const u8 = "unknown";
     {
         var it = response.head.iterateHeaders();
         while (it.next()) |hdr| {
             if (std.ascii.eqlIgnoreCase(hdr.name, "Eth-Consensus-Version")) {
-                fork_name = hdr.value;
+                const len = @min(hdr.value.len, fork_name_buf.len);
+                @memcpy(fork_name_buf[0..len], hdr.value[0..len]);
+                fork_name = fork_name_buf[0..len];
                 break;
             }
         }
