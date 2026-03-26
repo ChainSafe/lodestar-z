@@ -362,10 +362,12 @@ pub const AnyBeaconBlock = union(enum) {
                 @ptrCast(self.full_electra)
             else
                 @ptrCast(self.blinded_electra),
+            // Fulu is structurally identical to Electra — use electra fields
+            // when block was deserialized as electra (e.g., capped fork_seq).
             .fulu => if (block_type == .full)
-                @ptrCast(self.full_fulu)
+                @ptrCast(self.full_electra)
             else
-                @ptrCast(self.blinded_fulu),
+                @ptrCast(self.blinded_electra),
         };
     }
 
@@ -480,10 +482,12 @@ pub const AnyBeaconBlockBody = union(enum) {
                 @ptrCast(self.full_electra)
             else
                 @ptrCast(self.blinded_electra),
+            // Fulu is structurally identical to Electra — use electra fields
+            // when block was deserialized as electra (e.g., capped fork_seq).
             .fulu => if (block_type == .full)
-                @ptrCast(self.full_fulu)
+                @ptrCast(self.full_electra)
             else
-                @ptrCast(self.blinded_fulu),
+                @ptrCast(self.blinded_electra),
         };
     }
 

@@ -306,7 +306,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Create a PMT node pool — shared across all CachedBeaconState instances.
     // 2M nodes ~= 64 MB at 32 bytes/node; plenty for a minimal-network genesis.
-    var pool = try Node.Pool.init(allocator, 2_000_000);
+    var pool = try Node.Pool.init(allocator, 200_000);
     defer pool.deinit();
 
     // Parse bootnodes: split comma-separated ENR string into individual entries.
