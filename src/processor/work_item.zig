@@ -26,7 +26,7 @@ pub const max_aggregate_batch_size: u32 = 64;
 /// Opaque peer identifier. TODO: Replace with real PeerId from networking.
 pub const PeerId = u64;
 
-/// Opaque gossip message identifier. TODO: Replace with real MessageId from gossipsub.
+/// Opaque gossip message identifier. TODO: Replace with real MessageId.
 pub const MessageId = u64;
 
 /// Phase within a slot, used by the clock fiber.
@@ -39,21 +39,18 @@ pub const SlotPhase = enum(u8) {
     aggregate_deadline,
 };
 
-/// Placeholder for BlobSidecar. TODO: Replace with real type from fork_types.
-pub const BlobSidecar = struct {
-    index: u64,
-    blob: [131072]u8, // 4096 field elements * 32 bytes
-};
+/// Opaque handle for blob sidecar data. TODO: Replace with real type.
+pub const BlobSidecarHandle = *anyopaque;
 
-/// Placeholder for DataColumnSidecar. TODO: Replace with real type from fork_types.
-pub const DataColumnSidecar = struct {
-    index: u64,
-};
+/// Opaque handle for data column sidecar. TODO: Replace with real type.
+pub const DataColumnHandle = *anyopaque;
 
-/// Placeholder for execution payload envelope (Gloas). TODO: Replace with real type.
-pub const ExecutionPayloadEnvelope = struct {
-    slot: u64,
-};
+/// Opaque handle for execution payload envelope. TODO: Replace with real type.
+pub const ExecutionPayloadHandle = *anyopaque;
+
+/// Opaque handle for serialised gossip message bytes.
+/// Points to a buffer managed by the gossip layer.
+pub const GossipDataHandle = *anyopaque;
 
 // ---------------------------------------------------------------------------
 // Work payload structs — one per logical work type.
@@ -64,14 +61,14 @@ pub const GossipBlockWork = struct {
     peer_id: PeerId,
     message_id: MessageId,
     block: AnySignedBeaconBlock,
-    seen_timestamp_ns: i64, // monotonic ns
+    seen_timestamp_ns: i64,
 };
 
 /// Gossip-received blob sidecar.
 pub const GossipBlobWork = struct {
     peer_id: PeerId,
     message_id: MessageId,
-    blob: *BlobSidecar,
+    blob: BlobSidecarHandle,
     seen_timestamp_ns: i64,
 };
 
@@ -79,7 +76,7 @@ pub const GossipBlobWork = struct {
 pub const GossipColumnWork = struct {
     peer_id: PeerId,
     message_id: MessageId,
-    column: *DataColumnSidecar,
+    column: DataColumnHandle,
     seen_timestamp_ns: i64,
 };
 
@@ -87,7 +84,7 @@ pub const GossipColumnWork = struct {
 pub const GossipPayloadWork = struct {
     peer_id: PeerId,
     message_id: MessageId,
-    payload: *ExecutionPayloadEnvelope,
+    payload: ExecutionPayloadHandle,
     seen_timestamp_ns: i64,
 };
 
@@ -107,17 +104,14 @@ pub const ColumnReconstructionWork = struct {
 pub const AttestationWork = struct {
     peer_id: PeerId,
     message_id: MessageId,
-    /// Raw attestation bytes — deserialized lazily during processing.
-    /// TODO: Replace with concrete SingleAttestation once gossip decoding settles.
-    attestation_data: [512]u8,
-    attestation_len: u32,
+    data: GossipDataHandle,
     subnet_id: u8,
     seen_timestamp_ns: i64,
 };
 
 /// Batch of unaggregated attestations for BLS batch verification.
 pub const AttestationBatchWork = struct {
-    items: [max_attestation_batch_size]AttestationWork,
+    items: [*]AttestationWork,
     count: u32,
 };
 
@@ -125,24 +119,20 @@ pub const AttestationBatchWork = struct {
 pub const AggregateWork = struct {
     peer_id: PeerId,
     message_id: MessageId,
-    /// Raw aggregate bytes. TODO: Replace with SignedAggregateAndProof.
-    aggregate_data: [8192]u8,
-    aggregate_len: u32,
+    data: GossipDataHandle,
     seen_timestamp_ns: i64,
 };
 
 /// Batch of aggregated attestations for BLS batch verification.
 pub const AggregateBatchWork = struct {
-    items: [max_aggregate_batch_size]AggregateWork,
+    items: [*]AggregateWork,
     count: u32,
 };
 
 /// Attestation or aggregate awaiting an unknown block.
 pub const ReprocessWork = struct {
     block_root: Root,
-    /// Serialized work item bytes, re-submitted when block arrives.
-    data: [512]u8,
-    data_len: u32,
+    data: GossipDataHandle,
     seen_timestamp_ns: i64,
 };
 
@@ -168,9 +158,7 @@ pub const SyncContributionWork = struct {
 pub const PoolObjectWork = struct {
     peer_id: PeerId,
     message_id: MessageId,
-    /// Raw SSZ bytes of the pool object.
-    data: [8192]u8,
-    data_len: u32,
+    data: GossipDataHandle,
     seen_timestamp_ns: i64,
 };
 
@@ -192,21 +180,20 @@ pub const RpcBlockWork = struct {
 
 /// Blob received via RPC.
 pub const RpcBlobWork = struct {
-    blob: *BlobSidecar,
+    blob: BlobSidecarHandle,
     block_root: Root,
     seen_timestamp_ns: i64,
 };
 
 /// Data column received via RPC.
 pub const RpcColumnWork = struct {
-    column: *DataColumnSidecar,
+    column: DataColumnHandle,
     block_root: Root,
     seen_timestamp_ns: i64,
 };
 
 /// Range sync chain segment (batch of blocks).
 pub const ChainSegmentWork = struct {
-    /// Pointer to array of blocks in the segment.
     blocks: [*]AnySignedBeaconBlock,
     block_count: u32,
     seen_timestamp_ns: i64,
@@ -261,13 +248,13 @@ pub const LightClientWork = struct {
 
 /// Work type tag. Ordinal encodes strict priority: 0 is highest.
 pub const WorkType = enum(u8) {
-    // ── Sync (highest priority) ──
+    // -- Sync (highest priority) --
     chain_segment = 0,
     rpc_block = 1,
     rpc_blob = 2,
     rpc_custody_column = 3,
 
-    // ── Gossip: blocks + DA ──
+    // -- Gossip: blocks + DA --
     delayed_block = 4,
     gossip_block = 5,
     gossip_execution_payload = 6,
@@ -275,31 +262,31 @@ pub const WorkType = enum(u8) {
     gossip_data_column = 8,
     column_reconstruction = 9,
 
-    // ── API high priority ──
+    // -- API high priority --
     api_request_p0 = 10,
 
-    // ── Attestations (batch-formed) ──
+    // -- Attestations (batch-formed) --
     aggregate = 11,
     attestation = 12,
     aggregate_batch = 13,
     attestation_batch = 14,
 
-    // ── Gloas: payload attestation ──
+    // -- Gloas: payload attestation --
     gossip_payload_attestation = 15,
 
-    // ── Sync committee ──
+    // -- Sync committee --
     sync_contribution = 16,
     sync_message = 17,
 
-    // ── Reprocessing ──
+    // -- Reprocessing --
     unknown_block_aggregate = 18,
     unknown_block_attestation = 19,
 
-    // ── Gloas ──
+    // -- Gloas --
     gossip_execution_payload_bid = 20,
     gossip_proposer_preferences = 21,
 
-    // ── Peer serving ──
+    // -- Peer serving --
     status = 22,
     blocks_by_range = 23,
     blocks_by_root = 24,
@@ -308,23 +295,23 @@ pub const WorkType = enum(u8) {
     columns_by_range = 27,
     columns_by_root = 28,
 
-    // ── Pool objects ──
+    // -- Pool objects --
     gossip_attester_slashing = 29,
     gossip_proposer_slashing = 30,
     gossip_voluntary_exit = 31,
     gossip_bls_to_exec = 32,
 
-    // ── Low priority ──
+    // -- Low priority --
     api_request_p1 = 33,
     backfill_segment = 34,
 
-    // ── Light client ──
+    // -- Light client --
     lc_bootstrap = 35,
     lc_finality_update = 36,
     lc_optimistic_update = 37,
     lc_updates_by_range = 38,
 
-    // ── Internal ──
+    // -- Internal --
     slot_tick = 39,
     reprocess = 40,
 
@@ -359,13 +346,13 @@ pub const WorkType = enum(u8) {
 
 /// Every unit of work entering the BeaconProcessor.
 pub const WorkItem = union(WorkType) {
-    // ── Sync ──
+    // -- Sync --
     chain_segment: ChainSegmentWork,
     rpc_block: RpcBlockWork,
     rpc_blob: RpcBlobWork,
     rpc_custody_column: RpcColumnWork,
 
-    // ── Gossip: blocks + DA ──
+    // -- Gossip: blocks + DA --
     delayed_block: DelayedBlockWork,
     gossip_block: GossipBlockWork,
     gossip_execution_payload: GossipPayloadWork,
@@ -373,31 +360,31 @@ pub const WorkItem = union(WorkType) {
     gossip_data_column: GossipColumnWork,
     column_reconstruction: ColumnReconstructionWork,
 
-    // ── API high priority ──
+    // -- API high priority --
     api_request_p0: ApiWork,
 
-    // ── Attestations ──
+    // -- Attestations --
     aggregate: AggregateWork,
     attestation: AttestationWork,
     aggregate_batch: AggregateBatchWork,
     attestation_batch: AttestationBatchWork,
 
-    // ── Gloas ──
+    // -- Gloas --
     gossip_payload_attestation: GloasWork,
 
-    // ── Sync committee ──
+    // -- Sync committee --
     sync_contribution: SyncContributionWork,
     sync_message: SyncMessageWork,
 
-    // ── Reprocessing ──
+    // -- Reprocessing --
     unknown_block_aggregate: ReprocessWork,
     unknown_block_attestation: ReprocessWork,
 
-    // ── Gloas ──
+    // -- Gloas --
     gossip_execution_payload_bid: GloasWork,
     gossip_proposer_preferences: GloasWork,
 
-    // ── Peer serving ──
+    // -- Peer serving --
     status: ReqRespWork,
     blocks_by_range: ReqRespWork,
     blocks_by_root: ReqRespWork,
@@ -406,23 +393,23 @@ pub const WorkItem = union(WorkType) {
     columns_by_range: ReqRespWork,
     columns_by_root: ReqRespWork,
 
-    // ── Pool objects ──
+    // -- Pool objects --
     gossip_attester_slashing: PoolObjectWork,
     gossip_proposer_slashing: PoolObjectWork,
     gossip_voluntary_exit: PoolObjectWork,
     gossip_bls_to_exec: PoolObjectWork,
 
-    // ── Low priority ──
+    // -- Low priority --
     api_request_p1: ApiWork,
     backfill_segment: BackfillWork,
 
-    // ── Light client ──
+    // -- Light client --
     lc_bootstrap: LightClientWork,
     lc_finality_update: LightClientWork,
     lc_optimistic_update: LightClientWork,
     lc_updates_by_range: LightClientWork,
 
-    // ── Internal ──
+    // -- Internal --
     slot_tick: SlotTickWork,
     reprocess: ReprocessMessage,
 
@@ -442,7 +429,6 @@ pub const WorkItem = union(WorkType) {
 // ---------------------------------------------------------------------------
 
 test "WorkType: priority ordering" {
-    // Chain segment must be highest priority.
     const chain = @intFromEnum(WorkType.chain_segment);
     const gossip = @intFromEnum(WorkType.gossip_block);
     const attest = @intFromEnum(WorkType.attestation);

@@ -11,6 +11,15 @@ pub const work_item = @import("work_item.zig");
 pub const WorkItem = work_item.WorkItem;
 pub const WorkType = work_item.WorkType;
 
+pub const queues = @import("queues.zig");
+pub const FifoQueue = queues.FifoQueue;
+pub const LifoQueue = queues.LifoQueue;
+
+pub const work_queues = @import("work_queues.zig");
+pub const WorkQueues = work_queues.WorkQueues;
+pub const QueueConfig = work_queues.QueueConfig;
+pub const SyncState = work_queues.SyncState;
+
 test {
     testing.refAllDecls(@This());
 }
