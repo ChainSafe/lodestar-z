@@ -36,6 +36,7 @@ pub const ChainGossipState = gossip_validation.ChainState;
 pub const validateGossipBlock = gossip_validation.validateGossipBlock;
 pub const validateGossipAttestation = gossip_validation.validateGossipAttestation;
 pub const validateGossipAggregate = gossip_validation.validateGossipAggregate;
+pub const validateGossipDataColumnSidecar = gossip_validation.validateGossipDataColumnSidecar;
 pub const ProducedBlockBody = produce_block.ProducedBlockBody;
 
 test {

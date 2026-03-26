@@ -283,6 +283,7 @@ pub const GossipHandler = struct {
             .proposer_slashing => {}, // TODO: Phase 1 validate + queue WorkItem
             .attester_slashing => {}, // TODO: Phase 1 validate + queue WorkItem
             .bls_to_execution_change => {}, // TODO: Phase 1 validate + queue WorkItem
+            .data_column_sidecar => {}, // Handled directly in BeaconNode.processGossipEventsFromSlice
             else => {},
         }
     }

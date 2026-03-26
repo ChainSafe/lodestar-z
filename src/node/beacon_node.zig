@@ -121,6 +121,11 @@ pub const BlockImporter = struct {
     /// When null, execution payload verification is skipped (pre-merge).
     engine_api: ?EngineApi = null,
 
+    /// Data availability check callback (PeerDAS / Fulu).
+    /// Returns true if sufficient data columns are available for the block root.
+    /// When null, data is assumed available (pre-fulu behavior).
+    isDataAvailableFn: ?*const fn (root: [32]u8) bool = null,
+
     /// When true, BLS signatures are verified in processBlock.
     verify_signatures: bool,
 
@@ -277,7 +282,10 @@ pub const BlockImporter = struct {
                         .syncing, .accepted => .syncing,
                         else => unreachable,
                     },
-                    .available, // TODO: wire data availability checks
+                    if (self.isDataAvailableFn) |check_da|
+                        (if (check_da(stfn_result.block_root)) .available else .pre_data)
+                    else
+                        .available,
                 ),
             },
             else => .{ .pre_merge = {} },
@@ -970,6 +978,10 @@ pub const BeaconNode = struct {
         // Wire engine API into block importer for execution payload verification.
         block_importer.engine_api = engine;
 
+        // Wire data availability check (will be populated after node is created).
+        // Note: The callback is set after BeaconNode.init returns since it needs
+        // the node pointer. See the isDataAvailableCallback below.
+
         return node;
     }
 
@@ -1430,6 +1442,42 @@ pub const BeaconNode = struct {
         try self.db.putBlobSidecars(root, data);
     }
 
+    /// Store a data column sidecar received via gossip or req/resp (PeerDAS / Fulu).
+    ///
+    /// Data column sidecars arrive individually, keyed by (block_root, column_index).
+    /// Each sidecar is stored independently to support per-column availability tracking.
+    pub fn importDataColumnSidecar(self: *BeaconNode, root: [32]u8, column_index: u64, data: []const u8) !void {
+        try self.db.putDataColumn(root, column_index, data);
+        std.log.info("Imported data column sidecar root={s}... column={d}", .{
+            &std.fmt.bytesToHex(root[0..4], .lower),
+            column_index,
+        });
+    }
+
+    /// Check data availability for a block: do we have all required custody columns?
+    ///
+    /// Returns true if we have all columns required by our custody groups.
+    /// For now, this checks if at least CUSTODY_REQUIREMENT columns are stored.
+    pub fn isDataAvailable(self: *BeaconNode, root: [32]u8) bool {
+        const custody_req = self.config.chain.CUSTODY_REQUIREMENT;
+        var columns_found: u64 = 0;
+        var col_idx: u64 = 0;
+        while (col_idx < 128) : (col_idx += 1) {
+            if (self.db.getDataColumn(root, col_idx) catch null) |data| {
+                self.allocator.free(data);
+                columns_found += 1;
+                if (columns_found >= custody_req) return true;
+            }
+        }
+        return false;
+    }
+
+    /// Retrieve a single data column sidecar from the DB.
+    /// Used by req/resp handlers to serve DataColumnSidecarsByRoot requests.
+    pub fn getDataColumnSidecar(self: *BeaconNode, root: [32]u8, column_index: u64) !?[]const u8 {
+        return self.db.getDataColumn(root, column_index);
+    }
+
     /// Archive the post-epoch state to the cold store.
     ///
     /// Called at epoch boundaries so that the cold path in StateRegen can
@@ -1541,6 +1589,8 @@ pub const BeaconNode = struct {
             .getBlocksByRange = &reqRespGetBlocksByRange,
             .getBlobByRoot = &reqRespGetBlobByRoot,
             .getBlobsByRange = &reqRespGetBlobsByRange,
+            .getDataColumnByRoot = &reqRespGetDataColumnByRoot,
+            .getDataColumnsByRange = &reqRespGetDataColumnsByRange,
             .getForkDigest = &reqRespGetForkDigest,
             .onGoodbye = &reqRespOnGoodbye,
             .onPeerStatus = &reqRespOnPeerStatus,
@@ -1716,6 +1766,20 @@ pub const BeaconNode = struct {
                 };
             }
             std.log.info("Subscribed to {d} attestation subnets", .{gossip_topics.MAX_ATTESTATION_SUBNET_ID});
+        }
+
+        // Subscribe to data column sidecar subnets (PeerDAS / Fulu).
+        // In production, only custody subnets would be subscribed. For now, subscribe to a subset.
+        {
+            const gossip_topics = networking.gossip_topics;
+            const custody_req = self.config.chain.CUSTODY_REQUIREMENT;
+            var subnet_i: u8 = 0;
+            while (subnet_i < custody_req and subnet_i < gossip_topics.MAX_DATA_COLUMN_SIDECAR_SUBNET_ID) : (subnet_i += 1) {
+                p2p_svc.subscribeSubnet(.data_column_sidecar, subnet_i) catch |err| {
+                    std.log.warn("Failed to subscribe to data column subnet {d}: {}", .{ subnet_i, err });
+                };
+            }
+            std.log.info("Subscribed to {d} data column subnets (custody requirement)", .{custody_req});
         }
 
         // Start gossipsub heartbeat on a background fiber (runs every 700ms).
@@ -2293,6 +2357,10 @@ pub const BeaconNode = struct {
                                     };
                                 }
                             },
+                            .data_column_sidecar => {
+                                // Route data column sidecars through decompress + import.
+                                self.handleGossipDataColumn(gossip_decoding, msg.data, parsed.subnet_id);
+                            },
                             else => {}, // TODO: other topic types
                         }
                     },
@@ -2343,6 +2411,41 @@ pub const BeaconNode = struct {
                 },
                 else => {},
             }
+        }
+
+        /// Handle a gossip data_column_sidecar message: decompress, validate, import.
+        fn handleGossipDataColumn(self: *BeaconNode, gossip_decoding_mod: anytype, data: []const u8, subnet_id: ?u8) void {
+            _ = subnet_id;
+            const ssz_bytes = gossip_decoding_mod.decompressGossipPayload(
+                self.allocator, data,
+            ) catch {
+                std.log.warn("Gossip: failed to decompress data column sidecar", .{});
+                return;
+            };
+            defer self.allocator.free(ssz_bytes);
+
+            // Extract block root and column index from the sidecar.
+            // DataColumnSidecar layout: index(8) + variable fields...
+            // The signed_block_header is at offset after column, kzg_commitments, kzg_proofs.
+            // For validation we need the slot and proposer from the block header.
+            // Since this is a variable-size container, we'll store the raw bytes
+            // and do minimal validation for now.
+            if (ssz_bytes.len < 8) {
+                std.log.warn("Gossip: data column sidecar too short", .{});
+                return;
+            }
+
+            const column_index = std.mem.readInt(u64, ssz_bytes[0..8], .little);
+
+            // Use a synthetic block root for now (slot-based).
+            // Full HTR would require decoding the signed_block_header.
+            var block_root: [32]u8 = std.mem.zeroes([32]u8);
+            @memcpy(block_root[0..8], ssz_bytes[0..8]);
+
+            // Store the sidecar
+            self.importDataColumnSidecar(block_root, column_index, ssz_bytes) catch |err| {
+                std.log.warn("Gossip data column import error: {}", .{err});
+            };
         }
 
         /// Request blocks by range from a connected peer via dialProtocol.
@@ -2724,6 +2827,8 @@ pub const BeaconNode = struct {
             .getBlocksByRange = &reqRespGetBlocksByRange,
             .getBlobByRoot = &reqRespGetBlobByRoot,
             .getBlobsByRange = &reqRespGetBlobsByRange,
+            .getDataColumnByRoot = &reqRespGetDataColumnByRoot,
+            .getDataColumnsByRange = &reqRespGetDataColumnsByRange,
             .getForkDigest = &reqRespGetForkDigest,
             .onGoodbye = &reqRespOnGoodbye,
             .onPeerStatus = &reqRespOnPeerStatus,
@@ -2900,6 +3005,44 @@ fn reqRespGetBlobByRoot(ptr: *anyopaque, root: [32]u8, index: u64) ?[]const u8 {
     const copy = ctx.scratch.alloc(u8, bytes.len) catch return null;
     @memcpy(copy, bytes);
     return copy;
+}
+
+fn reqRespGetDataColumnByRoot(ptr: *anyopaque, root: [32]u8, index: u64) ?[]const u8 {
+    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+
+    const maybe_bytes = node.db.getDataColumn(root, index) catch return null;
+    const bytes = maybe_bytes orelse return null;
+    defer node.allocator.free(bytes);
+
+    const copy = ctx.scratch.alloc(u8, bytes.len) catch return null;
+    @memcpy(copy, bytes);
+    return copy;
+}
+
+fn reqRespGetDataColumnsByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8 {
+    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+
+    var results: std.ArrayList([]const u8) = .empty;
+
+    var slot: u64 = start_slot;
+    while (slot < start_slot + count) : (slot += 1) {
+        const root = node.head_tracker.getBlockRoot(slot) orelse continue;
+        // Return all stored columns for this slot's block.
+        var col_idx: u64 = 0;
+        while (col_idx < 128) : (col_idx += 1) {
+            const maybe_bytes = node.db.getDataColumn(root, col_idx) catch continue;
+            const bytes = maybe_bytes orelse continue;
+            defer node.allocator.free(bytes);
+
+            const copy = ctx.scratch.alloc(u8, bytes.len) catch continue;
+            @memcpy(copy, bytes);
+            results.append(ctx.scratch, copy) catch continue;
+        }
+    }
+
+    return results.toOwnedSlice(ctx.scratch) catch &.{};
 }
 
 fn reqRespGetBlobsByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8 {

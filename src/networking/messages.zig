@@ -82,6 +82,21 @@ pub const BlobSidecarsByRootRequest = ssz.FixedListType(
     preset.MAX_REQUEST_BLOB_SIDECARS,
 );
 
+// === Fulu / PeerDAS messages ===
+
+/// DataColumnSidecarsByRangeRequest requests data column sidecars for a slot range.
+pub const DataColumnSidecarsByRangeRequest = ssz.FixedContainerType(struct {
+    start_slot: p.Slot,
+    count: p.Uint64,
+    columns: ssz.FixedListType(p.Uint64, 128),
+});
+
+/// DataColumnIdentifier identifies a specific data column sidecar by block root + column index.
+pub const DataColumnIdentifier = ssz.FixedContainerType(struct {
+    block_root: p.Root,
+    index: p.Uint64,
+});
+
 // === Tests ===
 
 test "StatusMessage fixed size" {

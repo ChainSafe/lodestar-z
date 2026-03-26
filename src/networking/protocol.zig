@@ -66,6 +66,8 @@ pub const Method = enum {
     light_client_updates_by_range,
     light_client_finality_update,
     light_client_optimistic_update,
+    data_column_sidecars_by_root,
+    data_column_sidecars_by_range,
 
     /// Returns the method name as used in protocol ID strings.
     pub fn name(self: Method) []const u8 {
@@ -82,6 +84,8 @@ pub const Method = enum {
             .light_client_updates_by_range => "light_client_updates_by_range",
             .light_client_finality_update => "light_client_finality_update",
             .light_client_optimistic_update => "light_client_optimistic_update",
+            .data_column_sidecars_by_root => "data_column_sidecars_by_root",
+            .data_column_sidecars_by_range => "data_column_sidecars_by_range",
         };
     }
 
@@ -90,6 +94,8 @@ pub const Method = enum {
         return switch (self) {
             .beacon_blocks_by_range => 2,
             .beacon_blocks_by_root => 2,
+            .data_column_sidecars_by_root => 1,
+            .data_column_sidecars_by_range => 1,
             else => 1,
         };
     }
@@ -104,6 +110,8 @@ pub const Method = enum {
             .beacon_blocks_by_root,
             .blob_sidecars_by_range,
             .blob_sidecars_by_root,
+            .data_column_sidecars_by_root,
+            .data_column_sidecars_by_range,
             .light_client_bootstrap,
             .light_client_updates_by_range,
             .light_client_finality_update,
@@ -124,7 +132,11 @@ pub const Method = enum {
             .beacon_blocks_by_root,
             .blob_sidecars_by_range,
             .blob_sidecars_by_root,
+            .data_column_sidecars_by_root,
+            .data_column_sidecars_by_range,
             .light_client_updates_by_range,
+            .data_column_sidecars_by_root,
+            .data_column_sidecars_by_range,
             => true,
             .status,
             .goodbye,
