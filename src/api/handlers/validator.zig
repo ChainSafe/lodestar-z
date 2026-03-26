@@ -9,7 +9,10 @@ const std = @import("std");
 const types = @import("../types.zig");
 const context = @import("../context.zig");
 const ApiContext = context.ApiContext;
+const CachedBeaconState = context.CachedBeaconState;
 const preset = @import("preset").preset;
+const state_transition = @import("state_transition");
+const EpochCache = state_transition.EpochCache;
 
 // ---------------------------------------------------------------------------
 // Duty types
@@ -52,25 +55,45 @@ pub const SyncDuty = struct {
 ///
 /// Returns the proposer duties for every slot in the given epoch.
 ///
-/// Note: A complete implementation requires access to the EpochCache built
-/// from the head state (or the state at the start of the requested epoch).
-/// The EpochCache is not yet wired into ApiContext; this handler returns a
-/// stub array of SLOTS_PER_EPOCH entries with zero pubkeys and a proposer
-/// index of 0 for every slot.  Replace once EpochCache access is available.
+/// Uses the EpochCache from the head CachedBeaconState to look up real
+/// proposer assignments and validator pubkeys. Falls back to a zeroed
+/// stub if the head state is unavailable.
 pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) ![]ProposerDuty {
-    // TODO: Wire up real EpochCache lookup.
-    // Steps:
-    //   1. Compute epoch_start_slot = epoch * SLOTS_PER_EPOCH.
-    //   2. Load (or regen) the state at epoch_start_slot via ctx.regen.
-    //   3. Read the epoch_cache.proposers[] array (one entry per slot).
-    //   4. Fetch validator pubkeys from the state's validator list.
-    //   5. Build and return the ProposerDuty array.
     const slots_per_epoch = preset.SLOTS_PER_EPOCH;
     const epoch_start = epoch * slots_per_epoch;
 
     const duties = try ctx.allocator.alloc(ProposerDuty, slots_per_epoch);
     errdefer ctx.allocator.free(duties);
 
+    // Try to get real data from the head state's epoch cache.
+    const head_state: ?*CachedBeaconState = blk: {
+        const cb = ctx.head_state orelse break :blk null;
+        break :blk cb.getHeadStateFn(cb.ptr);
+    };
+
+    if (head_state) |state| {
+        const epoch_cache = state.epoch_cache;
+        // Check if this epoch cache covers the requested epoch.
+        // The epoch cache has proposers for its current epoch.
+        if (epoch_cache.epoch == epoch) {
+            // Read proposers from the epoch cache and resolve pubkeys from the state.
+            const validators = try state.state.validatorsSlice(ctx.allocator);
+            defer ctx.allocator.free(validators);
+
+            for (duties, 0..) |*duty, i| {
+                const proposer_index = epoch_cache.proposers[i];
+                const pubkey = if (proposer_index < validators.len) validators[proposer_index].pubkey else [_]u8{0} ** 48;
+                duty.* = .{
+                    .pubkey = pubkey,
+                    .validator_index = proposer_index,
+                    .slot = epoch_start + i,
+                };
+            }
+            return duties;
+        }
+    }
+
+    // Fallback: return stub duties with zeroed pubkeys.
     for (duties, 0..) |*duty, i| {
         duty.* = .{
             .pubkey = [_]u8{0} ** 48,
@@ -82,32 +105,109 @@ pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) ![]ProposerDuty {
     return duties;
 }
 
-/// GET /eth/v1/validator/duties/attester/{epoch}
+/// POST /eth/v1/validator/duties/attester/{epoch}
 ///
 /// Returns attester duties for the requested validators in the given epoch.
 ///
-/// Note: Stub — returns NotImplemented until EpochCache is wired.
+/// Uses the EpochCache shuffling to compute committee assignments.
 pub fn getAttesterDuties(
-    _: *ApiContext,
-    _: u64,
-    _: []const u64,
+    ctx: *ApiContext,
+    epoch: u64,
+    validator_indices: []const u64,
 ) ![]AttesterDuty {
-    // TODO: Implement once EpochCache and validator index lookup are available.
-    return error.NotImplemented;
+    const cb = ctx.head_state orelse return error.NotImplemented;
+    const state = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
+    const epoch_cache = state.epoch_cache;
+
+    // We can serve duties for the current or next epoch.
+    const shuffling = epoch_cache.getShufflingAtEpochOrNull(epoch) orelse return error.NotImplemented;
+
+    const validators = try state.state.validatorsSlice(ctx.allocator);
+    defer ctx.allocator.free(validators);
+
+    const committees_per_slot = shuffling.committees_per_slot;
+    const epoch_start = epoch * preset.SLOTS_PER_EPOCH;
+
+    var result = std.ArrayListUnmanaged(AttesterDuty).empty;
+    errdefer result.deinit(ctx.allocator);
+
+    // For each requested validator, find which slot/committee they belong to.
+    for (validator_indices) |vi| {
+        // Walk all committees in the epoch to find this validator.
+        for (0..preset.SLOTS_PER_EPOCH) |slot_offset| {
+            const slot = epoch_start + slot_offset;
+            for (0..committees_per_slot) |committee_idx| {
+                const committee = try epoch_cache.getBeaconCommittee(@intCast(slot), @intCast(committee_idx));
+                for (committee, 0..) |member, pos| {
+                    if (member == vi) {
+                        const pubkey = if (vi < validators.len) validators[vi].pubkey else [_]u8{0} ** 48;
+                        try result.append(ctx.allocator, .{
+                            .pubkey = pubkey,
+                            .validator_index = vi,
+                            .committee_index = @intCast(committee_idx),
+                            .committee_length = @intCast(committee.len),
+                            .committees_at_slot = @intCast(committees_per_slot),
+                            .validator_committee_index = @intCast(pos),
+                            .slot = slot,
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    return result.toOwnedSlice(ctx.allocator);
 }
 
 /// POST /eth/v1/validator/duties/sync/{epoch}
 ///
 /// Returns sync committee duties for the requested validators in the given epoch.
 ///
-/// Note: Stub — returns NotImplemented until SyncCommittee state access is wired.
+/// Uses the sync committee cache from the epoch cache.
 pub fn getSyncDuties(
-    _: *ApiContext,
-    _: u64,
-    _: []const u64,
+    ctx: *ApiContext,
+    epoch: u64,
+    validator_indices: []const u64,
 ) ![]SyncDuty {
-    // TODO: Implement once sync committee state queries are available.
-    return error.NotImplemented;
+    const cb = ctx.head_state orelse return error.NotImplemented;
+    const state = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
+    const epoch_cache = state.epoch_cache;
+
+    // Get the indexed sync committee for this epoch.
+    const sync_committee = epoch_cache.getIndexedSyncCommitteeAtEpoch(epoch) catch return error.NotImplemented;
+    const sync_indices = sync_committee.getValidatorIndices();
+
+    const validators = try state.state.validatorsSlice(ctx.allocator);
+    defer ctx.allocator.free(validators);
+
+    var result = std.ArrayListUnmanaged(SyncDuty).empty;
+    errdefer result.deinit(ctx.allocator);
+
+    for (validator_indices) |vi| {
+        // Collect all positions where this validator appears in the sync committee.
+        var positions = std.ArrayListUnmanaged(u64).empty;
+        errdefer positions.deinit(ctx.allocator);
+
+        for (sync_indices, 0..) |member, pos| {
+            if (member == vi) {
+                try positions.append(ctx.allocator, @intCast(pos));
+            }
+        }
+
+        if (positions.items.len > 0) {
+            const pubkey = if (vi < validators.len) validators[vi].pubkey else [_]u8{0} ** 48;
+            try result.append(ctx.allocator, .{
+                .pubkey = pubkey,
+                .validator_index = vi,
+                .validator_sync_committee_indices = try positions.toOwnedSlice(ctx.allocator),
+            });
+        } else {
+            positions.deinit(ctx.allocator);
+        }
+    }
+
+    return result.toOwnedSlice(ctx.allocator);
 }
 
 // ---------------------------------------------------------------------------
@@ -151,14 +251,14 @@ test "getProposerDuties assigns correct slots for epoch 3" {
     try std.testing.expectEqual(expected_start + preset.SLOTS_PER_EPOCH - 1, duties[duties.len - 1].slot);
 }
 
-test "getAttesterDuties returns NotImplemented" {
+test "getAttesterDuties returns NotImplemented without head state" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const result = getAttesterDuties(&tc.ctx, 0, &[_]u64{});
     try std.testing.expectError(error.NotImplemented, result);
 }
 
-test "getSyncDuties returns NotImplemented" {
+test "getSyncDuties returns NotImplemented without head state" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const result = getSyncDuties(&tc.ctx, 0, &[_]u64{});
