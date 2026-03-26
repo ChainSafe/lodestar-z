@@ -7,6 +7,9 @@ const Root = types.primitive.Root.Type;
 const SignedBLSToExecutionChange = types.capella.SignedBLSToExecutionChange.Type;
 const c = @import("constants");
 const verifyBlsToExecutionChangeSignature = @import("../signature_sets/bls_to_execution_change.zig").verifyBlsToExecutionChangeSignature;
+const getBlsToExecutionChangeSignatureSet = @import("../signature_sets/bls_to_execution_change.zig").getBlsToExecutionChangeSignatureSet;
+const verifySingleSignatureSetOrDefer = @import("../utils/signature_sets.zig").verifySingleSignatureSetOrDefer;
+const BatchVerifier = @import("bls").BatchVerifier;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub fn processBlsToExecutionChange(
@@ -14,10 +17,11 @@ pub fn processBlsToExecutionChange(
     config: *const BeaconConfig,
     state: *BeaconState(fork),
     signed_bls_to_execution_change: *const SignedBLSToExecutionChange,
+    batch_verifier: ?*BatchVerifier,
 ) !void {
     const address_change = signed_bls_to_execution_change.message;
 
-    try isValidBlsToExecutionChange(fork, config, state, signed_bls_to_execution_change, true);
+    try isValidBlsToExecutionChange(fork, config, state, signed_bls_to_execution_change, true, batch_verifier);
 
     var new_withdrawal_credentials: Root = [_]u8{0} ** 32;
     const validator_index = address_change.validator_index;
@@ -36,6 +40,7 @@ pub fn isValidBlsToExecutionChange(
     state: *BeaconState(fork),
     signed_bls_to_execution_change: *const SignedBLSToExecutionChange,
     verify_signature: bool,
+    batch_verifier: ?*BatchVerifier,
 ) !void {
     const address_change = signed_bls_to_execution_change.message;
     const validator_index = address_change.validator_index;
@@ -60,8 +65,15 @@ pub fn isValidBlsToExecutionChange(
     }
 
     if (verify_signature) {
-        if (!try verifyBlsToExecutionChangeSignature(config, signed_bls_to_execution_change)) {
-            return error.InvalidBlsToExecutionChangeSignature;
+        if (batch_verifier != null) {
+            const sig_set = try getBlsToExecutionChangeSignatureSet(config, signed_bls_to_execution_change);
+            if (!try verifySingleSignatureSetOrDefer(&sig_set, batch_verifier)) {
+                return error.InvalidBlsToExecutionChangeSignature;
+            }
+        } else {
+            if (!try verifyBlsToExecutionChangeSignature(config, signed_bls_to_execution_change)) {
+                return error.InvalidBlsToExecutionChangeSignature;
+            }
         }
     }
 }

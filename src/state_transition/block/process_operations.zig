@@ -20,6 +20,7 @@ const processProposerSlashing = @import("./process_proposer_slashing.zig").proce
 const processVoluntaryExit = @import("./process_voluntary_exit.zig").processVoluntaryExit;
 const processWithdrawalRequest = @import("./process_withdrawal_request.zig").processWithdrawalRequest;
 const Node = @import("persistent_merkle_tree").Node;
+const BatchVerifier = @import("bls").BatchVerifier;
 const ProcessBlockOpts = @import("./process_block.zig").ProcessBlockOpts;
 
 pub fn processOperations(
@@ -42,7 +43,7 @@ pub fn processOperations(
     const current_epoch = epoch_cache.epoch;
 
     for (body.inner.proposer_slashings.items) |*proposer_slashing| {
-        try processProposerSlashing(fork, allocator, config, epoch_cache, state, slashings_cache, proposer_slashing, opts.verify_signature);
+        try processProposerSlashing(fork, allocator, config, epoch_cache, state, slashings_cache, proposer_slashing, opts.verify_signature, opts.batch_verifier);
     }
 
     for (body.inner.attester_slashings.items) |*attester_slashing| {
@@ -56,22 +57,23 @@ pub fn processOperations(
             current_epoch,
             attester_slashing,
             opts.verify_signature,
+            opts.batch_verifier,
         );
     }
 
-    try processAttestations(fork, allocator, config, epoch_cache, state, slashings_cache, body.inner.attestations.items, opts.verify_signature);
+    try processAttestations(fork, allocator, config, epoch_cache, state, slashings_cache, body.inner.attestations.items, opts.verify_signature, opts.batch_verifier);
 
     for (body.inner.deposits.items) |*deposit| {
         try processDeposit(fork, allocator, config, epoch_cache, state, deposit);
     }
 
     for (body.inner.voluntary_exits.items) |*voluntary_exit| {
-        try processVoluntaryExit(fork, config, epoch_cache, state, voluntary_exit, opts.verify_signature);
+        try processVoluntaryExit(fork, config, epoch_cache, state, voluntary_exit, opts.verify_signature, opts.batch_verifier);
     }
 
     if (comptime fork.gte(.capella)) {
         for (body.inner.bls_to_execution_changes.items) |*bls_to_execution_change| {
-            try processBlsToExecutionChange(fork, config, state, bls_to_execution_change);
+            try processBlsToExecutionChange(fork, config, state, bls_to_execution_change, opts.batch_verifier);
         }
     }
 

@@ -14,6 +14,8 @@ const RootCache = @import("../cache/root_cache.zig").RootCache;
 const validateAttestation = @import("./process_attestation_phase0.zig").validateAttestation;
 const getAttestationWithIndicesSignatureSet = @import("../signature_sets/indexed_attestation.zig").getAttestationWithIndicesSignatureSet;
 const verifyAggregatedSignatureSet = @import("../utils/signature_sets.zig").verifyAggregatedSignatureSet;
+const verifyAggregatedSignatureSetOrDefer = @import("../utils/signature_sets.zig").verifyAggregatedSignatureSetOrDefer;
+const BatchVerifier = @import("bls").BatchVerifier;
 const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconProposer;
 const Checkpoint = types.phase0.Checkpoint.Type;
 const isTimelyTarget = @import("./process_attestation_phase0.zig").isTimelyTarget;
@@ -39,6 +41,7 @@ pub fn processAttestationsAltair(
     slashings_cache: *const SlashingsCache,
     attestations: []const ForkTypes(fork).Attestation.Type,
     verify_signature: bool,
+    batch_verifier: ?*BatchVerifier,
 ) !void {
     const effective_balance_increments = epoch_cache.effective_balance_increments.get().items;
     const state_slot = try state.slot();
@@ -74,7 +77,7 @@ pub fn processAttestationsAltair(
                 attesting_indices.items,
             );
             defer allocator.free(sig_set.pubkeys);
-            if (!try verifyAggregatedSignatureSet(&sig_set)) {
+            if (!try verifyAggregatedSignatureSetOrDefer(&sig_set, batch_verifier)) {
                 return error.InvalidSignature;
             }
         }

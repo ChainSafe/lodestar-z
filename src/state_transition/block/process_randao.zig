@@ -7,6 +7,8 @@ const BlockType = @import("fork_types").BlockType;
 const BeaconBlockBody = @import("fork_types").BeaconBlockBody;
 const getRandaoMix = @import("../utils/seed.zig").getRandaoMix;
 const verifyRandaoSignature = @import("../signature_sets/randao.zig").verifyRandaoSignature;
+const randaoRevealSignatureSet = @import("../signature_sets/randao.zig").randaoRevealSignatureSet;
+const BatchVerifier = @import("bls").BatchVerifier;
 const Node = @import("persistent_merkle_tree").Node;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
@@ -19,20 +21,33 @@ pub fn processRandao(
     body: *const BeaconBlockBody(block_type, fork),
     proposer_idx: u64,
     verify_signature: bool,
+    batch_verifier: ?*BatchVerifier,
 ) !void {
     const epoch = epoch_cache.epoch;
     const randao_reveal = body.randaoReveal();
 
     // verify RANDAO reveal
     if (verify_signature) {
-        if (!try verifyRandaoSignature(
-            beacon_config,
-            epoch_cache,
-            randao_reveal,
-            try state.slot(),
-            proposer_idx,
-        )) {
-            return error.InvalidRandaoSignature;
+        if (batch_verifier) |bv| {
+            // Defer to batch verifier
+            const sig_set = try randaoRevealSignatureSet(
+                beacon_config,
+                epoch_cache,
+                randao_reveal,
+                try state.slot(),
+                proposer_idx,
+            );
+            bv.addSingle(sig_set.pubkey, sig_set.signing_root, sig_set.signature) catch return error.BatchVerifierFull;
+        } else {
+            if (!try verifyRandaoSignature(
+                beacon_config,
+                epoch_cache,
+                randao_reveal,
+                try state.slot(),
+                proposer_idx,
+            )) {
+                return error.InvalidRandaoSignature;
+            }
         }
     }
 
@@ -93,5 +108,6 @@ test "process randao - sanity" {
         &fork_body,
         beacon_block.proposerIndex(),
         false,
+        null,
     );
 }

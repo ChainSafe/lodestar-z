@@ -64,6 +64,7 @@ pub const processOperations = @import("./block/process_operations.zig").processO
 pub const processSyncAggregate = @import("./block/process_sync_committee.zig").processSyncAggregate;
 pub const processBlobKzgCommitments = @import("./block/process_blob_kzg_commitments.zig").processBlobKzgCommitments;
 pub const processBlock = @import("./block/process_block.zig").processBlock;
+pub const ProcessBlockOpts = @import("./block/process_block.zig").ProcessBlockOpts;
 pub const processAttestations = @import("./block/process_attestations.zig").processAttestations;
 pub const processAttesterSlashing = @import("./block/process_attester_slashing.zig").processAttesterSlashing;
 pub const processDeposit = @import("./block/process_deposit.zig").processDeposit;

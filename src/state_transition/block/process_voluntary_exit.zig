@@ -8,6 +8,9 @@ const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit.Type;
 const getPendingBalanceToWithdraw = @import("../utils/validator.zig").getPendingBalanceToWithdraw;
 const isActiveValidatorView = @import("../utils/validator.zig").isActiveValidatorView;
 const verifyVoluntaryExitSignature = @import("../signature_sets/voluntary_exits.zig").verifyVoluntaryExitSignature;
+const getVoluntaryExitSignatureSet = @import("../signature_sets/voluntary_exits.zig").getVoluntaryExitSignatureSet;
+const verifySingleSignatureSetOrDefer = @import("../utils/signature_sets.zig").verifySingleSignatureSetOrDefer;
+const BatchVerifier = @import("bls").BatchVerifier;
 const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateValidatorExit;
 
 const FAR_FUTURE_EPOCH = c.FAR_FUTURE_EPOCH;
@@ -19,8 +22,9 @@ pub fn processVoluntaryExit(
     state: *BeaconState(fork),
     signed_voluntary_exit: *const SignedVoluntaryExit,
     verify_signature: bool,
+    batch_verifier: ?*BatchVerifier,
 ) !void {
-    if (!try isValidVoluntaryExit(fork, config, epoch_cache, state, signed_voluntary_exit, verify_signature)) {
+    if (!try isValidVoluntaryExit(fork, config, epoch_cache, state, signed_voluntary_exit, verify_signature, batch_verifier)) {
         return error.InvalidVoluntaryExit;
     }
 
@@ -36,8 +40,9 @@ pub fn isValidVoluntaryExit(
     state: *BeaconState(fork),
     signed_voluntary_exit: *const SignedVoluntaryExit,
     verify_signature: bool,
+    batch_verifier: ?*BatchVerifier,
 ) !bool {
-    return try getVoluntaryExitValidity(fork, config, epoch_cache, state, signed_voluntary_exit, verify_signature) == .valid;
+    return try getVoluntaryExitValidity(fork, config, epoch_cache, state, signed_voluntary_exit, verify_signature, batch_verifier) == .valid;
 }
 
 pub const VoluntaryExitValidity = enum {
@@ -57,6 +62,7 @@ pub fn getVoluntaryExitValidity(
     state: *BeaconState(fork),
     signed_voluntary_exit: *const SignedVoluntaryExit,
     verify_signature: bool,
+    batch_verifier: ?*BatchVerifier,
 ) !VoluntaryExitValidity {
     const voluntary_exit = signed_voluntary_exit.message;
 
@@ -100,8 +106,15 @@ pub fn getVoluntaryExitValidity(
 
     // verify signature
     if (verify_signature) {
-        if (!try verifyVoluntaryExitSignature(config, epoch_cache, signed_voluntary_exit)) {
-            return .invalid_signature;
+        if (batch_verifier != null) {
+            const sig_set = try getVoluntaryExitSignatureSet(config, epoch_cache, signed_voluntary_exit);
+            if (!try verifySingleSignatureSetOrDefer(&sig_set, batch_verifier)) {
+                return .invalid_signature;
+            }
+        } else {
+            if (!try verifyVoluntaryExitSignature(config, epoch_cache, signed_voluntary_exit)) {
+                return .invalid_signature;
+            }
         }
     }
 
