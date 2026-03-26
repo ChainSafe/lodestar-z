@@ -76,23 +76,19 @@ const TestEnvironment = struct {
     pool: Node.Pool,
     test_state: TestCachedBeaconState,
 
-    const num_validators = 256;
-    const pool_size = num_validators * 5;
+    fn init(self: *TestEnvironment, allocator: std.mem.Allocator, num_validators: u32) !void {
+        const pool_size = num_validators * 5;
 
-    fn init(allocator: std.mem.Allocator) !*TestEnvironment {
-        const self = try allocator.create(TestEnvironment);
-        errdefer allocator.destroy(self);
         self.allocator = allocator;
         self.pool = try Node.Pool.init(allocator, pool_size);
         errdefer self.pool.deinit();
+
         self.test_state = try TestCachedBeaconState.init(allocator, &self.pool, num_validators);
-        return self;
     }
 
     fn deinit(self: *TestEnvironment) void {
         self.test_state.deinit();
         self.pool.deinit();
-        self.allocator.destroy(self);
     }
 };
 
@@ -125,7 +121,8 @@ fn setupValidBlsToExecutionChange(state: anytype) !SignedBLSToExecutionChange {
 }
 
 test "bls to execution change - valid" {
-    const env = try TestEnvironment.init(std.testing.allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
     defer env.deinit();
 
     const state = env.test_state.cached_state.state.castToFork(.electra);
@@ -136,7 +133,8 @@ test "bls to execution change - valid" {
 }
 
 test "bls to execution change - invalid validator index" {
-    const env = try TestEnvironment.init(std.testing.allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
     defer env.deinit();
 
     const state = env.test_state.cached_state.state.castToFork(.electra);
@@ -157,7 +155,8 @@ test "bls to execution change - invalid validator index" {
 }
 
 test "bls to execution change - invalid withdrawal credentials prefix" {
-    const env = try TestEnvironment.init(std.testing.allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
     defer env.deinit();
 
     const state = env.test_state.cached_state.state.castToFork(.electra);
@@ -185,7 +184,8 @@ test "bls to execution change - invalid withdrawal credentials prefix" {
 }
 
 test "bls to execution change - mismatched credentials" {
-    const env = try TestEnvironment.init(std.testing.allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
     defer env.deinit();
 
     const state = env.test_state.cached_state.state.castToFork(.electra);
