@@ -135,9 +135,13 @@ declare class BeaconStateView {
   currentJustifiedCheckpoint: Checkpoint;
   finalizedCheckpoint: Checkpoint;
   getBlockRoot(slot: number): Uint8Array;
+  getBlockRootAtEpoch(epoch: number): Uint8Array;
+  getStateRootAtSlot(slot: number): Uint8Array;
   getRandaoMix(epoch: number): Uint8Array;
   previousEpochParticipation: number[];
   currentEpochParticipation: number[];
+  getPreviousEpochParticipation(index: number): number;
+  getCurrentEpochParticipation(index: number): number;
   latestExecutionPayloadHeader: ExecutionPayloadHeader;
   historicalSummaries: HistoricalSummary[];
   pendingDeposits: Uint8Array;
@@ -149,7 +153,10 @@ declare class BeaconStateView {
   proposerLookahead: Uint32Array;
   // executionPayloadAvailability: boolean[];
 
-  // getShufflingAtEpoch(epoch: number): EpochShuffling;
+  getShufflingAtEpoch(epoch: number): {epoch: number; activeIndices: number[]; committeesPerSlot: number} | null;
+  getPreviousShuffling(): {epoch: number; activeIndices: number[]; committeesPerSlot: number};
+  getCurrentShuffling(): {epoch: number; activeIndices: number[]; committeesPerSlot: number};
+  getNextShuffling(): {epoch: number; activeIndices: number[]; committeesPerSlot: number};
   previousDecisionRoot: Uint8Array;
   currentDecisionRoot: Uint8Array;
   nextDecisionRoot: Uint8Array;
@@ -164,6 +171,7 @@ declare class BeaconStateView {
   currentSyncCommitteeIndexed: SyncCommitteeCache;
   syncProposerReward: number;
   getIndexedSyncCommitteeAtEpoch(epoch: number): SyncCommitteeCache;
+  getIndexedSyncCommittee(slot: number): SyncCommitteeCache;
 
   effectiveBalanceIncrements: Uint16Array;
   getEffectiveBalanceIncrementsZeroInactive(): Uint16Array;
@@ -173,6 +181,8 @@ declare class BeaconStateView {
   getValidatorStatus(index: number): ValidatorStatus;
   validatorCount: number;
   activeValidatorCount: number;
+  getAllValidators(): Validator[];
+  getAllBalances(): bigint[];
 
   isExecutionStateType: boolean;
   isMergeTransitionComplete: boolean;

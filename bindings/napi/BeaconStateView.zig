@@ -512,7 +512,17 @@ pub fn BeaconStateView_getIndexedSyncCommittee(env: napi.Env, cb: napi.CallbackI
     return obj;
 }
 
-// pub fn BeaconStateView_getShufflingAtEpoch
+/// Get the epoch shuffling for a given epoch.
+/// Accepts: epoch (number)
+/// Returns: object with epoch, activeIndices, committeesPerSlot — or null if epoch not cached.
+pub fn BeaconStateView_getShufflingAtEpoch(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const epoch: u64 = @intCast(try cb.arg(0).getValueInt64());
+    const shuffling = cached_state.epoch_cache.getShufflingAtEpochOrNull(epoch) orelse {
+        return env.getNull();
+    };
+    return epochShufflingToNapiValue(env, shuffling);
+}
 
 /// Get the previous decision root for the state.
 pub fn BeaconStateView_previousDecisionRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
@@ -1194,7 +1204,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             getter(BeaconStateView_proposerLookahead),
             // getter(BeaconStateView_executionPayloadAvailability),
 
-            // method(1, BeaconStateView_getShufflingAtEpoch),
+            method(1, BeaconStateView_getShufflingAtEpoch),
             method(0, BeaconStateView_getPreviousShuffling),
             method(0, BeaconStateView_getCurrentShuffling),
             method(0, BeaconStateView_getNextShuffling),
