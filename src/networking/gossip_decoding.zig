@@ -276,8 +276,46 @@ test "decode proposer_slashing from SSZ bytes" {
 
 test "decode unsupported topic type" {
     const dummy = [_]u8{ 0, 1, 2, 3 };
-    const result = decodeFromSszBytes(testing.allocator, .beacon_attestation, &dummy);
+    const result = decodeFromSszBytes(testing.allocator, .attester_slashing, &dummy);
     try testing.expectError(error.UnsupportedTopicType, result);
+}
+
+test "decode beacon_attestation (SingleAttestation) from SSZ bytes" {
+    var att: electra.SingleAttestation.Type = electra.SingleAttestation.default_value;
+    att.committee_index = 3;
+    att.attester_index = 42;
+    att.data.slot = 100;
+    att.data.target.epoch = 3;
+    att.data.target.root = [_]u8{0xBB} ** 32;
+    att.data.beacon_block_root = [_]u8{0xCC} ** 32;
+
+    var ssz_buf: [electra.SingleAttestation.fixed_size]u8 = undefined;
+    _ = electra.SingleAttestation.serializeIntoBytes(&att, &ssz_buf);
+
+    const decoded = try decodeFromSszBytes(testing.allocator, .beacon_attestation, &ssz_buf);
+    try testing.expectEqual(@as(u64, 3), decoded.beacon_attestation.committee_index);
+    try testing.expectEqual(@as(u64, 42), decoded.beacon_attestation.attester_index);
+    try testing.expectEqual(@as(u64, 100), decoded.beacon_attestation.slot);
+    try testing.expectEqual(@as(u64, 3), decoded.beacon_attestation.target_epoch);
+    try testing.expectEqualSlices(u8, &([_]u8{0xBB} ** 32), &decoded.beacon_attestation.target_root);
+    try testing.expectEqualSlices(u8, &([_]u8{0xCC} ** 32), &decoded.beacon_attestation.beacon_block_root);
+}
+
+test "decode beacon_aggregate_and_proof from SSZ bytes" {
+    var signed_agg: phase0.SignedAggregateAndProof.Type = phase0.SignedAggregateAndProof.default_value;
+    signed_agg.message.aggregator_index = 7;
+    signed_agg.message.aggregate.data.slot = 96;
+    signed_agg.message.aggregate.data.target.epoch = 3;
+
+    const ssz_size = phase0.SignedAggregateAndProof.serializedSize(&signed_agg);
+    const ssz_buf = try testing.allocator.alloc(u8, ssz_size);
+    defer testing.allocator.free(ssz_buf);
+    _ = phase0.SignedAggregateAndProof.serializeIntoBytes(&signed_agg, ssz_buf);
+
+    const decoded = try decodeFromSszBytes(testing.allocator, .beacon_aggregate_and_proof, ssz_buf);
+    try testing.expectEqual(@as(u64, 7), decoded.beacon_aggregate_and_proof.aggregator_index);
+    try testing.expectEqual(@as(u64, 96), decoded.beacon_aggregate_and_proof.attestation_slot);
+    try testing.expectEqual(@as(u64, 3), decoded.beacon_aggregate_and_proof.attestation_target_epoch);
 }
 
 test "decode invalid SSZ data returns error" {

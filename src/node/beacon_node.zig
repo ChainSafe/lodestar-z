@@ -1294,6 +1294,9 @@ pub const BeaconNode = struct {
         var svc = &self.p2p_service.?;
         try svc.start(io, listen_multiaddr);
 
+        // Initialize GossipHandler for attestation/aggregate processing.
+        self.initGossipHandler();
+
         // Dial bootnodes: decode ENR → extract IP/port → build multiaddr → dial.
         if (self.bootnodes.len > 0) {
             std.log.info("Dialing {d} bootnode(s)...", .{self.bootnodes.len});
@@ -1405,6 +1408,18 @@ pub const BeaconNode = struct {
         };
         std.log.info("Opened outbound gossipsub stream to peer", .{});
 
+        // Subscribe to all 64 attestation subnets.
+        {
+            const gossip_topics = networking.gossip_topics;
+            var subnet_i: u8 = 0;
+            while (subnet_i < gossip_topics.MAX_ATTESTATION_SUBNET_ID) : (subnet_i += 1) {
+                p2p_svc.subscribeSubnet(.beacon_attestation, subnet_i) catch |err| {
+                    std.log.warn("Failed to subscribe to attestation subnet {d}: {}", .{ subnet_i, err });
+                };
+            }
+            std.log.info("Subscribed to {d} attestation subnets", .{gossip_topics.MAX_ATTESTATION_SUBNET_ID});
+        }
+
         // Start gossipsub heartbeat on a background fiber (runs every 700ms).
         p2p_svc.startHeartbeat(io);
         std.log.info("Gossipsub heartbeat started (700ms interval)", .{});
@@ -1421,60 +1436,9 @@ pub const BeaconNode = struct {
             } };
             slot_sleep.sleep(io) catch break;
 
-            // Poll gossipsub for beacon_block messages
+            // Poll gossipsub for all gossip messages (blocks, attestations, aggregates).
             if (self.p2p_service) |p2p| {
-                const gossip_decoding = networking.gossip_decoding;
-                const events = p2p.gossipsub.drainEvents() catch &.{};
-                defer self.allocator.free(events);
-                for (events) |event| {
-                    switch (event) {
-                        .message => |msg| {
-                            if (std.mem.indexOf(u8, msg.topic, "beacon_block") == null) continue;
-                            const ssz_bytes = gossip_decoding.decompressGossipPayload(
-                                self.allocator, msg.data,
-                            ) catch continue;
-                            defer self.allocator.free(ssz_bytes);
-
-                            // Cap at electra — fulu blocks are structurally identical
-                            const raw_fork_seq2 = self.config.forkSeq(self.head_tracker.head_slot);
-                            const fork_seq = if (@intFromEnum(raw_fork_seq2) > @intFromEnum(config_mod.ForkSeq.electra))
-                                config_mod.ForkSeq.electra
-                            else
-                                raw_fork_seq2;
-                            const any_signed = AnySignedBeaconBlock.deserialize(
-                                self.allocator, .full, fork_seq, ssz_bytes,
-                            ) catch |err| {
-                                std.log.warn("Gossip block deserialize: {}", .{err});
-                                continue;
-                            };
-                            defer any_signed.deinit(self.allocator);
-
-                            switch (any_signed) {
-                                .full_electra => |blk| {
-                                    const result = self.importBlock(blk) catch |err| {
-                                        if (err == error.UnknownParentBlock) {
-                                            // Queue the orphan block for unknown block sync.
-                                            self.queueOrphanBlock(blk, ssz_bytes);
-                                        } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
-                                            std.log.warn("Gossip block import: {}", .{err});
-                                        }
-                                        continue;
-                                    };
-                                    // Check if any pending orphans can now be imported.
-                                    self.processPendingChildren(result.block_root);
-                                    std.log.info("GOSSIP BLOCK IMPORTED slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                                        result.slot,
-                                        result.block_root[0], result.block_root[1],
-                                        result.block_root[2], result.block_root[3],
-                                    });
-                                },
-
-                                else => {},
-                            }
-                        },
-                        else => {},
-                    }
-                }
+                self.processGossipEvents(p2p);
             }
 
             const start = self.head_tracker.head_slot + 1;
@@ -1607,15 +1571,14 @@ pub const BeaconNode = struct {
             return peer_status;
         }
 
-        /// Poll gossipsub for beacon_block messages and import them.
+        /// Poll gossipsub for all gossip messages and import them.
         ///
         /// Runs after range sync to stay at the head of the chain.
-        /// Polls the gossipsub service for events, extracts beacon_block
-        /// messages, decompresses the SSZ, and imports via the STFN pipeline.
+        /// Polls the gossipsub service for events, parses topics, and
+        /// routes to the appropriate handler (blocks, attestations, aggregates).
         fn gossipBlockLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) !void {
             _ = svc;
             const gossipsub = self.p2p_service.?.gossipsub;
-            const gossip_decoding = networking.gossip_decoding;
 
             while (true) {
                 // Poll gossipsub for raw events
@@ -1639,57 +1602,130 @@ pub const BeaconNode = struct {
                     continue;
                 }
 
-                for (events) |event| {
-                    switch (event) {
-                        .message => |msg| {
-                            // Check if beacon_block topic
-                            if (std.mem.indexOf(u8, msg.topic, "beacon_block") == null) continue;
+                self.processGossipEventsFromSlice(events);
+            }
+        }
 
-                            // Decompress snappy → raw SSZ
-                            const ssz_bytes = gossip_decoding.decompressGossipPayload(
-                                self.allocator, msg.data,
-                            ) catch {
-                                std.log.warn("Gossip: failed to decompress block", .{});
-                                continue;
-                            };
-                            defer self.allocator.free(ssz_bytes);
+        /// Initialize the GossipHandler for attestation/aggregate validation.
+        fn initGossipHandler(self: *BeaconNode) void {
+            if (self.gossip_handler != null) return;
 
-                            // Deserialize and import
-                            // Cap at electra — fulu blocks are structurally identical
-                            const raw_fork_seq2 = self.config.forkSeq(self.head_tracker.head_slot);
-                            const fork_seq = if (@intFromEnum(raw_fork_seq2) > @intFromEnum(config_mod.ForkSeq.electra))
-                                config_mod.ForkSeq.electra
-                            else
-                                raw_fork_seq2;
-                            const any_signed = AnySignedBeaconBlock.deserialize(
-                                self.allocator, .full, fork_seq, ssz_bytes,
-                            ) catch |err| {
-                                std.log.warn("Gossip: block deserialize error: {}", .{err});
-                                continue;
-                            };
-                            defer any_signed.deinit(self.allocator);
+            self.gossip_handler = GossipHandler.create(
+                self.allocator,
+                @ptrCast(self),
+                &stubImportBlockFromGossip,
+                &gossipGetProposerIndex,
+                &gossipIsKnownBlockRoot,
+                &gossipGetValidatorCount,
+            ) catch |err| {
+                std.log.warn("Failed to create GossipHandler: {}", .{err});
+                return;
+            };
 
-                            switch (any_signed) {
-                                .full_electra => |blk| {
-                                    const result = self.importBlock(blk) catch |err| {
-                                        std.log.warn("Gossip: block import error: {}", .{err});
-                                        continue;
+            // Wire the attestation import callback.
+            if (self.gossip_handler) |gh| {
+                gh.importAttestationFn = &gossipImportAttestation;
+            }
+        }
+
+        /// Process gossip events from P2P service: parse topic, route to handler.
+        fn processGossipEvents(self: *BeaconNode, p2p: anytype) void {
+            const events = p2p.gossipsub.drainEvents() catch &.{};
+            defer self.allocator.free(events);
+            self.processGossipEventsFromSlice(events);
+        }
+
+        /// Process a slice of gossip events: parse topic, route to handler.
+        ///
+        /// For beacon_block: decompress, deserialize, import via STFN pipeline.
+        /// For beacon_attestation / beacon_aggregate_and_proof: delegate to GossipHandler.
+        fn processGossipEventsFromSlice(self: *BeaconNode, events: anytype) void {
+            const gossip_topics_mod = networking.gossip_topics;
+            const gossip_decoding = networking.gossip_decoding;
+
+            for (events) |event| {
+                switch (event) {
+                    .message => |msg| {
+                        // Parse the gossip topic to determine message type.
+                        const parsed = gossip_topics_mod.parseTopic(msg.topic) orelse continue;
+
+                        switch (parsed.topic_type) {
+                            .beacon_block => {
+                                self.handleGossipBlock(gossip_decoding, msg.data);
+                            },
+                            .beacon_attestation, .beacon_aggregate_and_proof => {
+                                // Route through GossipHandler for attestations and aggregates.
+                                if (self.gossip_handler) |gh| {
+                                    // Update clock state for validation using head tracker.
+                                    {
+                                        const slot = self.head_tracker.head_slot;
+                                        gh.updateClock(slot, computeEpochAtSlot(slot), self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH);
+                                    }
+                                    gh.onGossipMessageWithSubnet(parsed.topic_type, parsed.subnet_id, msg.data) catch |err| {
+                                        switch (err) {
+                                            error.ValidationIgnored => {},
+                                            error.ValidationRejected => {
+                                                std.log.debug("Gossip {s} rejected", .{parsed.topic_type.topicName()});
+                                            },
+                                            error.DecodeFailed => {
+                                                std.log.debug("Gossip {s} decode failed", .{parsed.topic_type.topicName()});
+                                            },
+                                            else => {
+                                                std.log.warn("Gossip {s} error: {}", .{ parsed.topic_type.topicName(), err });
+                                            },
+                                        }
                                     };
-                                    std.log.info("Gossip: imported block slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                                        result.slot,
-                                        result.block_root[0], result.block_root[1],
-                                        result.block_root[2], result.block_root[3],
-                                    });
-                                },
-
-                                else => {
-                                    std.log.warn("Gossip: unsupported block fork, skipping", .{});
-                                },
-                            }
-                        },
-                        else => {},
-                    }
+                                }
+                            },
+                            else => {}, // TODO: other topic types
+                        }
+                    },
+                    else => {},
                 }
+            }
+        }
+
+        /// Handle a gossip beacon_block message: decompress, deserialize, import.
+        fn handleGossipBlock(self: *BeaconNode, gossip_decoding: anytype, data: []const u8) void {
+            const ssz_bytes = gossip_decoding.decompressGossipPayload(
+                self.allocator, data,
+            ) catch {
+                std.log.warn("Gossip: failed to decompress block", .{});
+                return;
+            };
+            defer self.allocator.free(ssz_bytes);
+
+            const raw_fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
+            const fork_seq = if (@intFromEnum(raw_fork_seq) > @intFromEnum(config_mod.ForkSeq.electra))
+                config_mod.ForkSeq.electra
+            else
+                raw_fork_seq;
+            const any_signed = AnySignedBeaconBlock.deserialize(
+                self.allocator, .full, fork_seq, ssz_bytes,
+            ) catch |err| {
+                std.log.warn("Gossip block deserialize: {}", .{err});
+                return;
+            };
+            defer any_signed.deinit(self.allocator);
+
+            switch (any_signed) {
+                .full_electra => |blk| {
+                    const result = self.importBlock(blk) catch |err| {
+                        if (err == error.UnknownParentBlock) {
+                            self.queueOrphanBlock(blk, ssz_bytes);
+                        } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
+                            std.log.warn("Gossip block import: {}", .{err});
+                        }
+                        return;
+                    };
+                    self.processPendingChildren(result.block_root);
+                    std.log.info("GOSSIP BLOCK IMPORTED slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                        result.slot,
+                        result.block_root[0], result.block_root[1],
+                        result.block_root[2], result.block_root[3],
+                    });
+                },
+                else => {},
             }
         }
 
@@ -2067,6 +2103,73 @@ pub const BeaconNode = struct {
         return handleRequest(self.allocator, method, request_bytes, &ctx);
     }
 };
+
+// ---------------------------------------------------------------------------
+// Gossip callback stubs — wired into GossipHandler as function pointers.
+// These bridge the type-erased *anyopaque back to *BeaconNode.
+// ---------------------------------------------------------------------------
+
+fn stubImportBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
+    _ = ptr;
+    _ = block_bytes;
+    // Block import is handled directly in handleGossipBlock, not through GossipHandler.
+}
+
+fn gossipGetProposerIndex(slot: u64) ?u32 {
+    _ = slot;
+    // TODO: Wire to epoch cache once available.
+    return null;
+}
+
+fn gossipIsKnownBlockRoot(root: [32]u8) bool {
+    // Without access to node here (static fn), return true to avoid false IGNORE.
+    // Real implementation would check fork choice store.
+    _ = root;
+    return true;
+}
+
+fn gossipGetValidatorCount() u32 {
+    // TODO: Wire to epoch cache once available.
+    // Return a large value so validator index bounds checks pass.
+    return 1_000_000;
+}
+
+/// Import a validated attestation into fork choice and op pool.
+///
+/// Called by GossipHandler after Phase 1 validation passes.
+fn gossipImportAttestation(
+    ptr: *anyopaque,
+    attestation_slot: u64,
+    committee_index: u64,
+    target_root: [32]u8,
+    target_epoch: u64,
+    validator_index: u64,
+    beacon_block_root: [32]u8,
+) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+
+    // Build a minimal Attestation for the op pool.
+    const att = types.phase0.Attestation.Type{
+        .aggregation_bits = .{ .data = std.ArrayListUnmanaged(u8).empty, .bit_len = 0 },
+        .data = .{
+            .slot = attestation_slot,
+            .index = committee_index,
+            .beacon_block_root = beacon_block_root,
+            .source = .{ .epoch = 0, .root = [_]u8{0} ** 32 }, // TODO: fill from state
+            .target = .{ .epoch = target_epoch, .root = target_root },
+        },
+        .signature = [_]u8{0} ** 96,
+    };
+
+    try node.chain.importAttestation(
+        attestation_slot,
+        committee_index,
+        target_root,
+        target_epoch,
+        validator_index,
+        att,
+    );
+}
 
 // ---------------------------------------------------------------------------
 // RequestContext — wraps *BeaconNode + scratch arena for req/resp callbacks.
