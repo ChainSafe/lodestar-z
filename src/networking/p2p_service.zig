@@ -236,6 +236,13 @@ pub const P2pService = struct {
 
     /// Start listening and subscribe to standard eth2 gossip topics.
     pub fn start(self: *Self, io: Io, listen_addr: Multiaddr) !void {
+        // Set initial time for gossipsub router (PRUNE backoff, scoring).
+        {
+            var ts: std.os.linux.timespec = undefined;
+            _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
+            const ms: u64 = @intCast(@as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), 1_000_000));
+            self.gossipsub.setTime(ms);
+        }
         try self.network.listen(io, listen_addr);
         try self.gossip_adapter.subscribeEthTopics();
         log.info("P2P service started", .{});
@@ -304,6 +311,15 @@ pub const P2pService = struct {
                 .clock = .awake,
             } };
             t.sleep(io) catch return;
+            // Update the gossipsub router's wall-clock time before each heartbeat.
+            // Without this, PRUNE backoff timers and other time-based logic
+            // see time_ms=0 and malfunction (backoff always expired, etc.).
+            {
+                var ts: std.os.linux.timespec = undefined;
+                _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
+                const ms: u64 = @intCast(@as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), 1_000_000));
+                gs.setTime(ms);
+            }
             gs.heartbeat() catch {};
         }
     }
