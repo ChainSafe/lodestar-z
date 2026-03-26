@@ -550,10 +550,10 @@ test "ByteListType - tree.deserializeFromBytes (96 bytes)" {
 
 test "ByteListType" {
     const test_cases = [_]TypeTestCase{
-        .{ .id = "empty", .serializedHex = "0x", .json = 
+        .{ .id = "empty", .serializedHex = "0x", .json =
         \\"0x"
         , .rootHex = "0xe8e527e84f666163a90ef900e013f56b0a4d020148b2224057b719f351b003a6" },
-        .{ .id = "4 bytes zero", .serializedHex = "0x00000000", .json = 
+        .{ .id = "4 bytes zero", .serializedHex = "0x00000000", .json =
         \\"0x00000000"
         , .rootHex = "0xa39babe565305429771fc596a639d6e05b2d0304297986cdd2ef388c1936885e" },
         .{

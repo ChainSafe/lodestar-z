@@ -650,7 +650,6 @@ pub const EpochCache = struct {
         return self.proposers[slot % preset.SLOTS_PER_EPOCH];
     }
 
-
     /// consumer takes ownership of the returned indexed attestation
     /// hence it needs to deinit attesting_indices inside
     pub fn computeIndexedAttestationPhase0(self: *const EpochCache, attestation: *const types.phase0.Attestation.Type, out: *types.phase0.IndexedAttestation.Type) !void {
