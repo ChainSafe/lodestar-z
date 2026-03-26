@@ -44,6 +44,9 @@ const OpPool = chain_mod.OpPool;
 const SeenCache = chain_mod.SeenCache;
 const produceBlockBody = chain_mod.produceBlockBody;
 const ProducedBlockBody = chain_mod.ProducedBlockBody;
+const HeadTracker = chain_mod.HeadTracker;
+const ImportResult = chain_mod.ImportResult;
+const ImportError = chain_mod.ImportError;
 const networking = @import("networking");
 const eth2_protocols = networking.eth2_protocols;
 const discv5 = @import("discv5");
@@ -80,71 +83,9 @@ const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const gossip_handler_mod = @import("gossip_handler.zig");
 pub const GossipHandler = gossip_handler_mod.GossipHandler;
 
-// ---------------------------------------------------------------------------
-// HeadTracker — re-implemented here to avoid circular dep on testing module.
-// Same logic as testing/head_tracker.zig but standalone.
-// ---------------------------------------------------------------------------
-
-pub const HeadTracker = struct {
-    head_root: [32]u8,
-    head_slot: u64,
-    finalized_epoch: u64,
-    justified_epoch: u64,
-    head_state_root: [32]u8,
-
-    slot_roots: std.AutoArrayHashMap(u64, [32]u8),
-    allocator: Allocator,
-
-    pub fn init(allocator: Allocator, genesis_root: [32]u8) HeadTracker {
-        return .{
-            .head_root = genesis_root,
-            .head_slot = 0,
-            .finalized_epoch = 0,
-            .justified_epoch = 0,
-            .head_state_root = [_]u8{0} ** 32,
-            .slot_roots = std.AutoArrayHashMap(u64, [32]u8).init(allocator),
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: *HeadTracker) void {
-        self.slot_roots.deinit();
-    }
-
-    pub fn onBlock(self: *HeadTracker, block_root: [32]u8, slot: u64, state_root: [32]u8) !void {
-        try self.slot_roots.put(slot, block_root);
-        if (slot >= self.head_slot) {
-            self.head_root = block_root;
-            self.head_slot = slot;
-            self.head_state_root = state_root;
-        }
-    }
-
-    pub fn onEpochTransition(self: *HeadTracker, state: *CachedBeaconState) !void {
-        var finalized_cp: types.phase0.Checkpoint.Type = undefined;
-        try state.state.finalizedCheckpoint(&finalized_cp);
-        self.finalized_epoch = finalized_cp.epoch;
-
-        var justified_cp: types.phase0.Checkpoint.Type = undefined;
-        try state.state.currentJustifiedCheckpoint(&justified_cp);
-        self.justified_epoch = justified_cp.epoch;
-    }
-
-    pub fn getBlockRoot(self: *const HeadTracker, slot: u64) ?[32]u8 {
-        return self.slot_roots.get(slot);
-    }
-};
-
-// ---------------------------------------------------------------------------
-// BlockImporter — adapted from testing/block_import.zig for BeaconNode use.
-// ---------------------------------------------------------------------------
-
-pub const ImportResult = struct {
-    block_root: [32]u8,
-    state_root: [32]u8,
-    slot: u64,
-    epoch_transition: bool,
-};
+// HeadTracker, ImportResult, ImportError are in chain_mod (src/chain/block_import.zig).
+// BlockImporter lives here because it depends on db, fork_choice, and state_transition
+// directly — extracting it would require either circular deps or vtable indirection.
 
 pub const BlockImporter = struct {
     allocator: Allocator,
@@ -195,6 +136,12 @@ pub const BlockImporter = struct {
         return self.block_cache.get(state_root);
     }
 
+    /// Full block import pipeline: sanity → STFN → fork choice → persist → head.
+    ///
+    /// Returns `error.UnknownParentBlock` when the parent root is not in
+    /// the chain — callers should catch this to trigger unknown block sync.
+    /// Returns `error.BlockAlreadyKnown` / `error.BlockAlreadyFinalized` /
+    /// `error.GenesisBlock` for other sanity failures.
     pub fn importBlock(
         self: *BlockImporter,
         signed_block: *const types.electra.SignedBeaconBlock.Type,
@@ -206,9 +153,45 @@ pub const BlockImporter = struct {
         const target_epoch = computeEpochAtSlot(block_slot);
         const is_epoch_transition = target_epoch != prev_epoch;
 
+        // Compute block root for sanity checks and persistence.
+        var body_root: [32]u8 = undefined;
+        try types.electra.BeaconBlockBody.hashTreeRoot(self.allocator, &signed_block.message.body, &body_root);
+        const header = types.phase0.BeaconBlockHeader.Type{
+            .slot = block_slot,
+            .proposer_index = signed_block.message.proposer_index,
+            .parent_root = parent_root,
+            .state_root = signed_block.message.state_root,
+            .body_root = body_root,
+        };
+        var block_root: [32]u8 = undefined;
+        try types.phase0.BeaconBlockHeader.hashTreeRoot(&header, &block_root);
+
+        // Stage 1: Sanity checks (cheap, before any state transition work).
+        chain_mod.block_import.verifySanity(
+            block_slot,
+            parent_root,
+            block_root,
+            self.head_tracker.finalized_epoch,
+            &self.block_to_state,
+        ) catch |err| {
+            switch (err) {
+                ImportError.UnknownParentBlock => {
+                    std.log.info("Unknown parent for slot {d} parent={s}...", .{
+                        block_slot, &std.fmt.bytesToHex(parent_root[0..4], .lower),
+                    });
+                },
+                ImportError.BlockAlreadyKnown, ImportError.BlockAlreadyFinalized => {},
+                else => {
+                    std.log.warn("Sanity check failed for slot {d}: {}", .{ block_slot, err });
+                },
+            }
+            return err;
+        };
+
+        // Stage 2: State transition.
         const pre_state = self.getStateByBlockRoot(parent_root) orelse {
-            std.log.warn("NoPreStateAvailable: parent_root={x:0>2}{x:0>2}{x:0>2}{x:0>2}... block_to_state has {d} entries", .{
-                parent_root[0], parent_root[1], parent_root[2], parent_root[3],
+            std.log.warn("NoPreStateAvailable: parent_root={s}... block_to_state has {d} entries", .{
+                &std.fmt.bytesToHex(parent_root[0..4], .lower),
                 self.block_to_state.count(),
             });
             return error.NoPreStateAvailable;
@@ -217,8 +200,8 @@ pub const BlockImporter = struct {
         const stfn_result = try self.runStateTransition(pre_state, signed_block, block_slot);
         const post_state = stfn_result.post_state;
 
+        // Stage 3: Cache post-state + persist block.
         _ = try self.regen.onNewBlock(post_state, true);
-
         try self.block_to_state.put(stfn_result.block_root, stfn_result.state_root);
 
         const any_signed = AnySignedBeaconBlock{ .full_electra = @constCast(signed_block) };
@@ -226,6 +209,7 @@ pub const BlockImporter = struct {
         defer self.allocator.free(block_bytes);
         try self.db.putBlock(stfn_result.block_root, block_bytes);
 
+        // Checkpoint caching at epoch boundaries.
         if (is_epoch_transition) {
             const cp_state = try post_state.clone(self.allocator, .{ .transfer_cache = false });
             errdefer {
@@ -238,12 +222,13 @@ pub const BlockImporter = struct {
             );
         }
 
+        // Stage 4: Head tracking + fork choice update.
         try self.head_tracker.onBlock(stfn_result.block_root, block_slot, stfn_result.state_root);
         if (is_epoch_transition) {
             try self.head_tracker.onEpochTransition(post_state);
         }
 
-        // Wire block into fork choice DAG (if initialized).
+        // Wire block into fork choice DAG.
         var justified_cp: types.phase0.Checkpoint.Type = undefined;
         try post_state.state.currentJustifiedCheckpoint(&justified_cp);
         var finalized_cp: types.phase0.Checkpoint.Type = undefined;
@@ -254,7 +239,7 @@ pub const BlockImporter = struct {
             .block_root = stfn_result.block_root,
             .parent_root = parent_root,
             .state_root = stfn_result.state_root,
-            .target_root = stfn_result.block_root, // simplified: target = block_root for now
+            .target_root = stfn_result.block_root,
             .justified_epoch = justified_cp.epoch,
             .justified_root = justified_cp.root,
             .finalized_epoch = finalized_cp.epoch,
@@ -267,9 +252,8 @@ pub const BlockImporter = struct {
             .timeliness = true,
         };
 
-        // current_slot = block_slot (the block we just imported)
         if (self.fork_choice) |fc| fc.onBlock(self.allocator, fc_block, block_slot) catch |err| switch (err) {
-            error.InvalidBlock => {}, // skip: genesis anchor or old block
+            error.InvalidBlock => {},
             else => return err,
         };
 
@@ -300,16 +284,6 @@ pub const BlockImporter = struct {
         }
 
         try state_transition.processSlots(self.allocator, post_state, block_slot, .{});
-
-        // Log pre-block state root (after slot processing)
-        {
-            try post_state.state.commit();
-            const pre_block_root = (try post_state.state.hashTreeRoot()).*;
-            std.log.info("Pre-block state_root (after processSlots to {d}): {x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                block_slot,
-                pre_block_root[0], pre_block_root[1], pre_block_root[2], pre_block_root[3],
-            });
-        }
 
         const any_signed = AnySignedBeaconBlock{ .full_electra = @constCast(signed_block) };
         const block = any_signed.beaconBlock();
@@ -344,42 +318,34 @@ pub const BlockImporter = struct {
         try post_state.state.commit();
         const state_root = (try post_state.state.hashTreeRoot()).*;
 
-        // Compare our state_root with the block's expected state_root
+        // Log state root comparison.
         if (!std.mem.eql(u8, &state_root, &signed_block.message.state_root)) {
-            std.log.warn("STFN state_root mismatch at slot {d}:", .{block_slot});
-            std.log.warn("  ours:   {x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                state_root[0], state_root[1], state_root[2], state_root[3],
-                state_root[4], state_root[5], state_root[6], state_root[7],
-            });
-            std.log.warn("  block's: {x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                signed_block.message.state_root[0], signed_block.message.state_root[1],
-                signed_block.message.state_root[2], signed_block.message.state_root[3],
-                signed_block.message.state_root[4], signed_block.message.state_root[5],
-                signed_block.message.state_root[6], signed_block.message.state_root[7],
+            std.log.warn("STFN state_root mismatch at slot {d}: ours={s}... block={s}...", .{
+                block_slot,
+                &std.fmt.bytesToHex(state_root[0..8], .lower),
+                &std.fmt.bytesToHex(signed_block.message.state_root[0..8], .lower),
             });
         } else {
             std.log.info("STFN state_root MATCHES at slot {d}", .{block_slot});
         }
 
-        // Compute block root directly from the electra BeaconBlock.
-        // hash_tree_root(BeaconBlock) = hash_tree_root(BeaconBlockHeader) where
-        // body_root = hash_tree_root(block.body).
-        var body_root: [32]u8 = undefined;
-        try types.electra.BeaconBlockBody.hashTreeRoot(self.allocator, &signed_block.message.body, &body_root);
-        const header = types.phase0.BeaconBlockHeader.Type{
+        // Compute block root from header.
+        var br_body_root: [32]u8 = undefined;
+        try types.electra.BeaconBlockBody.hashTreeRoot(self.allocator, &signed_block.message.body, &br_body_root);
+        const hdr = types.phase0.BeaconBlockHeader.Type{
             .slot = block_slot,
             .proposer_index = signed_block.message.proposer_index,
             .parent_root = signed_block.message.parent_root,
             .state_root = signed_block.message.state_root,
-            .body_root = body_root,
+            .body_root = br_body_root,
         };
-        var block_root: [32]u8 = undefined;
-        try types.phase0.BeaconBlockHeader.hashTreeRoot(&header, &block_root);
+        var computed_block_root: [32]u8 = undefined;
+        try types.phase0.BeaconBlockHeader.hashTreeRoot(&hdr, &computed_block_root);
 
         return .{
             .post_state = post_state,
             .state_root = state_root,
-            .block_root = block_root,
+            .block_root = computed_block_root,
         };
     }
 };
@@ -2290,23 +2256,6 @@ test "BeaconNode: onReqResp BeaconBlocksByRange returns blocks for known slots" 
     try std.testing.expectEqual(@as(usize, 2), chunks.len);
     try std.testing.expectEqualSlices(u8, &block_10, chunks[0].ssz_payload);
     try std.testing.expectEqualSlices(u8, &block_11, chunks[1].ssz_payload);
-}
-
-test "HeadTracker: basic tracking" {
-    var tracker = HeadTracker.init(std.testing.allocator, [_]u8{0x00} ** 32);
-    defer tracker.deinit();
-
-    try std.testing.expectEqual(@as(u64, 0), tracker.head_slot);
-
-    const root_1 = [_]u8{0x01} ** 32;
-    try tracker.onBlock(root_1, 1, [_]u8{0x11} ** 32);
-    try std.testing.expectEqual(@as(u64, 1), tracker.head_slot);
-    try std.testing.expectEqualSlices(u8, &root_1, &tracker.head_root);
-
-    const root_3 = [_]u8{0x03} ** 32;
-    try tracker.onBlock(root_3, 3, [_]u8{0x33} ** 32);
-    try std.testing.expectEqual(@as(u64, 3), tracker.head_slot);
-    try std.testing.expectEqualSlices(u8, &root_3, &tracker.head_root);
 }
 
 test "BeaconNode: importBlobSidecar and onReqResp BlobSidecarsByRoot returns stored blob" {
