@@ -1,8 +1,14 @@
-//! Peer sync status tracker.
+//! Sync-facing peer manager adapter.
 //!
-//! Maintains a map of connected peers and their chain view (from Status
-//! handshakes). Provides queries for the sync manager: best peers to
-//! request from, highest known slot, sync target selection.
+//! This is a thin wrapper that provides the sync subsystem's expected API
+//! on top of the comprehensive networking PeerManager. The sync module
+//! only cares about a subset of peer management: status tracking, best
+//! peer selection, and peer counts.
+//!
+//! The real peer management (connection state machine, scoring, banning,
+//! subnet tracking, heartbeat) lives in `src/networking/peer_manager.zig`.
+//! This adapter translates between the sync-specific types (PeerSyncInfo,
+//! StatusMessage) and the networking types (SyncInfo, PeerInfo).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -11,124 +17,125 @@ const StatusMessage = messages.StatusMessage;
 const sync_types = @import("sync_types.zig");
 const PeerSyncInfo = sync_types.PeerSyncInfo;
 
+const networking = @import("networking");
+const NetPeerManager = networking.peer_manager.PeerManager;
+const PeerManagerConfig = networking.PeerManagerConfig;
+const SyncInfo = networking.SyncInfo;
+
+/// Sync-facing peer manager.
+///
+/// Wraps the networking PeerManager to provide the API expected by
+/// SyncService and RangeSyncManager. Existing callers don't need to change.
 pub const PeerManager = struct {
     allocator: Allocator,
-    /// Keyed by peer_id (owned slices). Values hold their own owned peer_id copy.
-    peers: std.StringHashMap(PeerSyncInfo),
+    /// The underlying comprehensive peer manager.
+    inner: NetPeerManager,
 
     pub fn init(allocator: Allocator) PeerManager {
         return .{
             .allocator = allocator,
-            .peers = std.StringHashMap(PeerSyncInfo).init(allocator),
+            .inner = NetPeerManager.init(allocator, .{}),
+        };
+    }
+
+    /// Init with custom config (for testing or custom target-peers).
+    pub fn initWithConfig(allocator: Allocator, config: PeerManagerConfig) PeerManager {
+        return .{
+            .allocator = allocator,
+            .inner = NetPeerManager.init(allocator, config),
         };
     }
 
     pub fn deinit(self: *PeerManager) void {
-        // Free owned keys. The value peer_id aliases the key, so only free once.
-        var it = self.peers.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-        }
-        self.peers.deinit();
+        self.inner.deinit();
     }
 
     /// Update (or insert) peer status from a Status handshake message.
+    /// This is the primary entry point from the sync layer.
     pub fn updatePeerStatus(
         self: *PeerManager,
         peer_id: []const u8,
         status: StatusMessage.Type,
     ) !void {
-        const result = try self.peers.getOrPut(peer_id);
-
-        if (!result.found_existing) {
-            // New peer — allocate owned key, set it as both map key and value peer_id.
-            const owned_id = try self.allocator.dupe(u8, peer_id);
-            result.key_ptr.* = owned_id;
-            result.value_ptr.* = .{
-                .peer_id = owned_id,
-                .head_slot = status.head_slot,
-                .head_root = status.head_root,
-                .finalized_epoch = status.finalized_epoch,
-                .finalized_root = status.finalized_root,
-            };
-        } else {
-            // Existing peer — update value in place, key already owned.
-            result.value_ptr.head_slot = status.head_slot;
-            result.value_ptr.head_root = status.head_root;
-            result.value_ptr.finalized_epoch = status.finalized_epoch;
-            result.value_ptr.finalized_root = status.finalized_root;
-        }
+        // Ensure the peer exists in the DB. For sync purposes, we treat
+        // a Status message as confirmation of connectivity.
+        const now_ms = currentTimeMs();
+        _ = try self.inner.onPeerConnected(peer_id, .outbound, now_ms);
+        self.inner.updatePeerStatus(
+            peer_id,
+            status.head_slot,
+            status.head_root,
+            status.finalized_epoch,
+            status.finalized_root,
+        );
     }
 
-    /// Remove a disconnected peer. Frees the owned key.
+    /// Remove a disconnected peer.
     pub fn removePeer(self: *PeerManager, peer_id: []const u8) void {
-        if (self.peers.fetchRemove(peer_id)) |kv| {
-            self.allocator.free(kv.key);
-        }
+        self.inner.onPeerDisconnected(peer_id, currentTimeMs());
     }
 
     /// Return up to `count` peers with the highest head slot.
-    /// Caller owns the returned slice (but not the PeerSyncInfo contents — those
-    /// are still owned by the PeerManager).
+    /// Caller owns the returned slice.
     pub fn getBestPeers(self: *PeerManager, count: usize) ![]PeerSyncInfo {
-        const peer_count = self.peers.count();
-        if (peer_count == 0) return &[_]PeerSyncInfo{};
+        const connected = try self.inner.getBestPeers(@intCast(@min(count, std.math.maxInt(u32))));
+        defer self.allocator.free(connected);
 
-        // Collect all peers into a sortable slice.
-        var all = try self.allocator.alloc(PeerSyncInfo, peer_count);
-        defer self.allocator.free(all);
+        if (connected.len == 0) return &[_]PeerSyncInfo{};
 
-        var idx: usize = 0;
-        var it = self.peers.valueIterator();
-        while (it.next()) |v| {
-            all[idx] = v.*;
-            idx += 1;
+        const result = try self.allocator.alloc(PeerSyncInfo, connected.len);
+        for (connected, 0..) |cp, i| {
+            const si = cp.info.sync_info orelse continue;
+            result[i] = .{
+                .peer_id = cp.peer_id,
+                .head_slot = si.head_slot,
+                .head_root = si.head_root,
+                .finalized_epoch = si.finalized_epoch,
+                .finalized_root = si.finalized_root,
+            };
         }
-
-        // Sort descending by head_slot.
-        std.mem.sort(PeerSyncInfo, all[0..idx], {}, struct {
-            fn cmp(_: void, a: PeerSyncInfo, b_peer: PeerSyncInfo) bool {
-                return a.head_slot > b_peer.head_slot;
-            }
-        }.cmp);
-
-        const result_count = @min(count, idx);
-        const result = try self.allocator.alloc(PeerSyncInfo, result_count);
-        @memcpy(result, all[0..result_count]);
         return result;
     }
 
     /// Highest head_slot among all tracked peers.
     pub fn getHighestPeerSlot(self: *PeerManager) u64 {
-        var max_slot: u64 = 0;
-        var it = self.peers.valueIterator();
-        while (it.next()) |v| {
-            if (v.head_slot > max_slot) max_slot = v.head_slot;
-        }
-        return max_slot;
+        return self.inner.getHighestPeerSlot();
     }
 
     /// Select the best sync target: peer with the highest head slot.
     pub fn getSyncTarget(self: *PeerManager) ?PeerSyncInfo {
-        var best: ?PeerSyncInfo = null;
-        var it = self.peers.valueIterator();
-        while (it.next()) |v| {
-            if (best == null or v.head_slot > best.?.head_slot) {
-                best = v.*;
-            }
-        }
-        return best;
+        const target = self.inner.getSyncTarget() orelse return null;
+        return .{
+            .peer_id = target.peer_id,
+            .head_slot = target.sync_info.head_slot,
+            .head_root = target.sync_info.head_root,
+            .finalized_epoch = target.sync_info.finalized_epoch,
+            .finalized_root = target.sync_info.finalized_root,
+        };
     }
 
     /// Number of tracked peers.
     pub fn peerCount(self: *const PeerManager) usize {
-        return self.peers.count();
+        return @intCast(self.inner.peerCount());
+    }
+
+    /// Access the underlying networking PeerManager for advanced operations.
+    pub fn getNetworkPeerManager(self: *PeerManager) *NetPeerManager {
+        return &self.inner;
+    }
+
+    /// Get the current time in milliseconds (monotonic clock).
+    fn currentTimeMs() u64 {
+        var ts: std.os.linux.timespec = undefined;
+        const result = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
+        if (result != 0) return 0;
+        return @intCast(@as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), 1_000_000));
     }
 };
 
-// ── Tests ────────────────────────────────────────────────────────────
+// ── Tests ────────────────────────────────────────────────────────────────────
 
-test "PeerManager: add, update, and remove peers" {
+test "PeerManager adapter: add, update, and remove peers" {
     const allocator = std.testing.allocator;
     var pm = PeerManager.init(allocator);
     defer pm.deinit();
@@ -170,12 +177,11 @@ test "PeerManager: add, update, and remove peers" {
     try std.testing.expectEqual(@as(u64, 600), pm.getHighestPeerSlot());
 }
 
-test "PeerManager: getBestPeers returns sorted by head_slot descending" {
+test "PeerManager adapter: getBestPeers returns sorted" {
     const allocator = std.testing.allocator;
     var pm = PeerManager.init(allocator);
     defer pm.deinit();
 
-    // Add peers with varying slots.
     const slots = [_]u64{ 100, 300, 200 };
     const ids = [_][]const u8{ "p1", "p2", "p3" };
 
@@ -197,7 +203,7 @@ test "PeerManager: getBestPeers returns sorted by head_slot descending" {
     try std.testing.expectEqual(@as(u64, 200), best[1].head_slot);
 }
 
-test "PeerManager: getSyncTarget picks highest slot peer" {
+test "PeerManager adapter: getSyncTarget picks highest slot" {
     const allocator = std.testing.allocator;
     var pm = PeerManager.init(allocator);
     defer pm.deinit();
@@ -223,7 +229,7 @@ test "PeerManager: getSyncTarget picks highest slot peer" {
     try std.testing.expectEqual(@as(u64, 999), target.head_slot);
 }
 
-test "PeerManager: empty manager returns defaults" {
+test "PeerManager adapter: empty manager returns defaults" {
     const allocator = std.testing.allocator;
     var pm = PeerManager.init(allocator);
     defer pm.deinit();
