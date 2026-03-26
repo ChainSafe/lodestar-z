@@ -279,7 +279,7 @@ pub const BlockImporter = struct {
                         else => unreachable,
                     },
                     if (self.isDataAvailableFn) |check_da|
-                        (if (check_da(stfn_result.block_root)) .available else .not_available)
+                        (if (check_da(stfn_result.block_root)) .available else .pre_data)
                     else
                         .available,
                 ),
@@ -1596,6 +1596,20 @@ pub const BeaconNode = struct {
                 };
             }
             std.log.info("Subscribed to {d} attestation subnets", .{gossip_topics.MAX_ATTESTATION_SUBNET_ID});
+        }
+
+        // Subscribe to data column sidecar subnets (PeerDAS / Fulu).
+        // In production, only custody subnets would be subscribed. For now, subscribe to a subset.
+        {
+            const gossip_topics = networking.gossip_topics;
+            const custody_req = self.config.chain.CUSTODY_REQUIREMENT;
+            var subnet_i: u8 = 0;
+            while (subnet_i < custody_req and subnet_i < gossip_topics.MAX_DATA_COLUMN_SIDECAR_SUBNET_ID) : (subnet_i += 1) {
+                p2p_svc.subscribeSubnet(.data_column_sidecar, subnet_i) catch |err| {
+                    std.log.warn("Failed to subscribe to data column subnet {d}: {}", .{ subnet_i, err });
+                };
+            }
+            std.log.info("Subscribed to {d} data column subnets (custody requirement)", .{custody_req});
         }
 
         // Start gossipsub heartbeat on a background fiber (runs every 700ms).
