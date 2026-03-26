@@ -20,6 +20,7 @@ const testing = std.testing;
 
 const SeenCache = @import("seen_cache.zig").SeenCache;
 const preset = @import("preset").preset;
+const preset_root = @import("preset");
 
 /// Outcome of Phase 1 gossip validation.
 ///
@@ -401,5 +402,127 @@ test "gossip aggregate: reject mismatched target epoch" {
     const state = makeMockChainState(&cache);
     // Slot 96 = epoch 3, but target says 2.
     const result = validateGossipAggregate(5, 96, 2, 10, &state);
+    try testing.expectEqual(GossipAction.reject, result);
+}
+
+// ── Data column sidecar validation (PeerDAS / Fulu) ─────────────────────────
+
+/// Fast Phase 1 validation for a `DataColumnSidecar` on the
+/// `data_column_sidecar_{subnet_id}` topic.
+///
+/// Checks (spec reference: fulu/p2p-interface.md#data_column_sidecar_subnet_id):
+/// 1. [REJECT] Column index is less than NUMBER_OF_COLUMNS.
+/// 2. [IGNORE] Not from a future slot (with clock disparity tolerance).
+/// 3. [IGNORE] Slot is greater than the finalized slot.
+/// 4. [IGNORE] Not already seen — first column for this (root, index) pair.
+/// 5. [REJECT] Proposer index is within the known validator set.
+/// 6. [IGNORE] Parent block root is known in our fork choice.
+pub fn validateGossipDataColumnSidecar(
+    block_slot: u64,
+    proposer_index: u64,
+    column_index: u64,
+    parent_root: [32]u8,
+    block_root: [32]u8,
+    state: *const ChainState,
+) GossipAction {
+    // [REJECT] Column index must be < NUMBER_OF_COLUMNS.
+    if (column_index >= preset_root.NUMBER_OF_COLUMNS) return .reject;
+
+    // [IGNORE] Not from a future slot (tolerate current_slot + 1 for clock disparity).
+    if (block_slot > state.current_slot + MAX_FUTURE_SLOT_TOLERANCE) return .ignore;
+
+    // [IGNORE] Not already finalized.
+    if (block_slot <= state.finalized_slot) return .ignore;
+
+    // [IGNORE] Not a duplicate — first sidecar for this (block_root, column_index).
+    if (state.seen_cache.hasSeenDataColumn(block_root, column_index)) return .ignore;
+    state.seen_cache.markDataColumnSeen(block_root, column_index) catch return .ignore;
+
+    // [REJECT] Proposer index within validator set bounds.
+    const validator_count = state.getValidatorCount();
+    if (proposer_index >= validator_count) return .reject;
+
+    // [IGNORE] Parent root is known in our fork choice.
+    if (!state.isKnownBlockRoot(parent_root)) return .ignore;
+
+    return .accept;
+}
+
+// ── Data column sidecar tests ───────────────────────────────────────────────
+
+test "gossip data column: accept valid sidecar" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+
+    const state = makeMockChainState(&cache);
+    const parent = [_]u8{0xAA} ** 32;
+    const root = [_]u8{0xBB} ** 32;
+
+    const result = validateGossipDataColumnSidecar(100, 5, 0, parent, root, &state);
+    try testing.expectEqual(GossipAction.accept, result);
+}
+
+test "gossip data column: reject column index out of bounds" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+
+    const state = makeMockChainState(&cache);
+    const parent = [_]u8{0xAA} ** 32;
+    const root = [_]u8{0xBB} ** 32;
+
+    // NUMBER_OF_COLUMNS is 128 for mainnet; any index >= 128 should be rejected.
+    const result = validateGossipDataColumnSidecar(100, 5, preset_root.NUMBER_OF_COLUMNS, parent, root, &state);
+    try testing.expectEqual(GossipAction.reject, result);
+}
+
+test "gossip data column: ignore future slot" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+
+    const state = makeMockChainState(&cache);
+    const result = validateGossipDataColumnSidecar(102, 5, 0, [_]u8{0xAA} ** 32, [_]u8{0xBB} ** 32, &state);
+    try testing.expectEqual(GossipAction.ignore, result);
+}
+
+test "gossip data column: ignore finalized slot" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+
+    const state = makeMockChainState(&cache);
+    const result = validateGossipDataColumnSidecar(64, 5, 0, [_]u8{0xAA} ** 32, [_]u8{0xBB} ** 32, &state);
+    try testing.expectEqual(GossipAction.ignore, result);
+}
+
+test "gossip data column: ignore duplicate" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+
+    const state = makeMockChainState(&cache);
+    const parent = [_]u8{0xAA} ** 32;
+    const root = [_]u8{0xCC} ** 32;
+
+    const r1 = validateGossipDataColumnSidecar(100, 5, 3, parent, root, &state);
+    try testing.expectEqual(GossipAction.accept, r1);
+
+    const r2 = validateGossipDataColumnSidecar(100, 5, 3, parent, root, &state);
+    try testing.expectEqual(GossipAction.ignore, r2);
+}
+
+test "gossip data column: ignore unknown parent" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+
+    const state = makeMockChainState(&cache);
+    // Zero root is "unknown" in mock.
+    const result = validateGossipDataColumnSidecar(100, 5, 0, [_]u8{0} ** 32, [_]u8{0xDD} ** 32, &state);
+    try testing.expectEqual(GossipAction.ignore, result);
+}
+
+test "gossip data column: reject proposer out of bounds" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+
+    const state = makeMockChainState(&cache);
+    const result = validateGossipDataColumnSidecar(100, 1000, 0, [_]u8{0xAA} ** 32, [_]u8{0xEE} ** 32, &state);
     try testing.expectEqual(GossipAction.reject, result);
 }
