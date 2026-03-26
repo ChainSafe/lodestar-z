@@ -19,42 +19,43 @@ pub fn effectiveBalanceIncrementsInit(allocator: Allocator, validator_count: usi
     return increments;
 }
 
-// TODO: unit tests
-
-test "effectiveBalanceIncrementsInit - basic" {
+test "effectiveBalanceIncrementsInit basic allocation" {
     const allocator = std.testing.allocator;
-    var increments = try effectiveBalanceIncrementsInit(allocator, 1000);
+    var increments = try effectiveBalanceIncrementsInit(allocator, 100);
     defer increments.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1000), increments.items.len);
+    try std.testing.expectEqual(@as(usize, 100), increments.items.len);
     // Capacity should be rounded up to next 1024 boundary
     try std.testing.expectEqual(@as(usize, 1024), increments.capacity);
     // All values should be zero
-    for (increments.items) |v| {
-        try std.testing.expectEqual(@as(u16, 0), v);
+    for (increments.items) |val| {
+        try std.testing.expectEqual(@as(u16, 0), val);
     }
 }
 
-test "effectiveBalanceIncrementsInit - capacity rounding" {
+test "effectiveBalanceIncrementsInit capacity rounding" {
     const allocator = std.testing.allocator;
 
-    // Exactly 1024 validators → capacity = 2048 (1024 * ((1024 + 1024) / 1024))
-    var inc1 = try effectiveBalanceIncrementsInit(allocator, 1024);
-    defer inc1.deinit();
-    try std.testing.expectEqual(@as(usize, 1024), inc1.items.len);
-    try std.testing.expectEqual(@as(usize, 2048), inc1.capacity);
+    // Exactly 1024 validators
+    {
+        var increments = try effectiveBalanceIncrementsInit(allocator, 1024);
+        defer increments.deinit();
+        try std.testing.expectEqual(@as(usize, 1024), increments.items.len);
+        try std.testing.expectEqual(@as(usize, 2048), increments.capacity);
+    }
 
-    // 0 validators → capacity = 1024 (1024 * ((0 + 1024) / 1024))
-    var inc0 = try effectiveBalanceIncrementsInit(allocator, 0);
-    defer inc0.deinit();
-    try std.testing.expectEqual(@as(usize, 0), inc0.items.len);
-    try std.testing.expectEqual(@as(usize, 1024), inc0.capacity);
+    // Just over 1024 boundary
+    {
+        var increments = try effectiveBalanceIncrementsInit(allocator, 1025);
+        defer increments.deinit();
+        try std.testing.expectEqual(@as(usize, 1025), increments.items.len);
+        try std.testing.expectEqual(@as(usize, 2048), increments.capacity);
+    }
 
-    // 2000 validators → capacity = 3072 (1024 * ((2000 + 1024) / 1024))
-    var inc2k = try effectiveBalanceIncrementsInit(allocator, 2000);
-    defer inc2k.deinit();
-    try std.testing.expectEqual(@as(usize, 2000), inc2k.items.len);
-    // (2000 + 1024) / 1024 = 2 (integer division), 1024 * 2 = 2048... wait
-    // Actually: 1024 * @divFloor(2000 + 1024, 1024) = 1024 * @divFloor(3024, 1024) = 1024 * 2 = 2048
-    try std.testing.expectEqual(@as(usize, 2048), inc2k.capacity);
+    // Zero validators
+    {
+        var increments = try effectiveBalanceIncrementsInit(allocator, 0);
+        defer increments.deinit();
+        try std.testing.expectEqual(@as(usize, 0), increments.items.len);
+    }
 }

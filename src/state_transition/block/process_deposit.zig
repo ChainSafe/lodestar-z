@@ -171,7 +171,7 @@ pub fn addValidatorToRegistry(
     try validators.pushValue(&validator);
 
     const validator_index = (try validators.length()) - 1;
-    // TODO Electra: Review this
+    // In Electra, new validators start with amount=0 (actual deposit goes through pendingDeposits)
     // Updating here is better than updating at once on epoch transition
     // - Simplify genesis fn applyDeposits(): effectiveBalanceIncrements is populated immediately
     // - Keep related code together to reduce risk of breaking this cache

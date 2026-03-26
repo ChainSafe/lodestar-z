@@ -115,4 +115,112 @@ pub fn syncPubkeysParallel(
     }
 }
 
-// TODO: unit tests
+const testing = std.testing;
+const interop = @import("../test_utils/interop_pubkeys.zig");
+
+test "syncPubkeys populates both caches" {
+    const allocator = testing.allocator;
+    const count = 4;
+
+    var pubkeys: [count]types.primitive.BLSPubkey.Type = undefined;
+    try interop.interopPubkeysCached(count, &pubkeys);
+
+    var validators: [count]Validator = undefined;
+    for (0..count) |i| {
+        validators[i] = std.mem.zeroes(Validator);
+        validators[i].pubkey = pubkeys[i];
+    }
+
+    var pubkey_to_index = PubkeyIndexMap.init(allocator);
+    defer pubkey_to_index.deinit();
+    var index_to_pubkey = Index2PubkeyCache.init(allocator);
+    defer index_to_pubkey.deinit();
+
+    try syncPubkeys(&validators, &pubkey_to_index, &index_to_pubkey);
+
+    try testing.expectEqual(@as(usize, count), index_to_pubkey.items.len);
+    try testing.expectEqual(@as(u32, count), pubkey_to_index.count());
+
+    // Verify each pubkey maps to the correct index
+    for (0..count) |i| {
+        const idx = pubkey_to_index.get(pubkeys[i]).?;
+        try testing.expectEqual(@as(u64, i), idx);
+    }
+}
+
+test "syncPubkeys incremental sync adds only new validators" {
+    const allocator = testing.allocator;
+    const initial_count = 2;
+    const total_count = 4;
+
+    var pubkeys: [total_count]types.primitive.BLSPubkey.Type = undefined;
+    try interop.interopPubkeysCached(total_count, &pubkeys);
+
+    var validators: [total_count]Validator = undefined;
+    for (0..total_count) |i| {
+        validators[i] = std.mem.zeroes(Validator);
+        validators[i].pubkey = pubkeys[i];
+    }
+
+    var pubkey_to_index = PubkeyIndexMap.init(allocator);
+    defer pubkey_to_index.deinit();
+    var index_to_pubkey = Index2PubkeyCache.init(allocator);
+    defer index_to_pubkey.deinit();
+
+    // Initial sync with first 2 validators
+    try syncPubkeys(validators[0..initial_count], &pubkey_to_index, &index_to_pubkey);
+    try testing.expectEqual(@as(usize, initial_count), index_to_pubkey.items.len);
+
+    // Incremental sync with all 4 validators
+    try syncPubkeys(&validators, &pubkey_to_index, &index_to_pubkey);
+    try testing.expectEqual(@as(usize, total_count), index_to_pubkey.items.len);
+    try testing.expectEqual(@as(u32, total_count), pubkey_to_index.count());
+
+    // Verify all pubkeys are correctly mapped
+    for (0..total_count) |i| {
+        const idx = pubkey_to_index.get(pubkeys[i]).?;
+        try testing.expectEqual(@as(u64, i), idx);
+    }
+}
+
+test "syncPubkeys no-op when already synced" {
+    const allocator = testing.allocator;
+    const count = 2;
+
+    var pubkeys: [count]types.primitive.BLSPubkey.Type = undefined;
+    try interop.interopPubkeysCached(count, &pubkeys);
+
+    var validators: [count]Validator = undefined;
+    for (0..count) |i| {
+        validators[i] = std.mem.zeroes(Validator);
+        validators[i].pubkey = pubkeys[i];
+    }
+
+    var pubkey_to_index = PubkeyIndexMap.init(allocator);
+    defer pubkey_to_index.deinit();
+    var index_to_pubkey = Index2PubkeyCache.init(allocator);
+    defer index_to_pubkey.deinit();
+
+    try syncPubkeys(&validators, &pubkey_to_index, &index_to_pubkey);
+    // Second call should be no-op
+    try syncPubkeys(&validators, &pubkey_to_index, &index_to_pubkey);
+    try testing.expectEqual(@as(usize, count), index_to_pubkey.items.len);
+}
+
+test "syncPubkeys detects inconsistent cache" {
+    const allocator = testing.allocator;
+
+    var pubkey_to_index = PubkeyIndexMap.init(allocator);
+    defer pubkey_to_index.deinit();
+    var index_to_pubkey = Index2PubkeyCache.init(allocator);
+    defer index_to_pubkey.deinit();
+
+    // Manually desync: add to pubkey_to_index but not index_to_pubkey
+    const dummy_key = [_]u8{0} ** 48;
+    try pubkey_to_index.put(dummy_key, 0);
+
+    var validators: [1]Validator = undefined;
+    validators[0] = std.mem.zeroes(Validator);
+
+    try testing.expectError(error.InconsistentCache, syncPubkeys(&validators, &pubkey_to_index, &index_to_pubkey));
+}
