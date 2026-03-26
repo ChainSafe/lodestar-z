@@ -3143,18 +3143,15 @@ fn gossipImportVoluntaryExit(ptr: *anyopaque, validator_index: u64, epoch: u64) 
     try node.chain.op_pool.voluntary_exit_pool.add(exit);
 }
 
-/// Import a validated proposer slashing into the op pool.
-///
-/// We only have the proposer index from the decoded gossip message.
-/// The full slashing was already validated at Phase 1 (same slot, different body roots).
-/// For block packing, the full slashing is needed — for now we store a minimal
-/// stub.  A future improvement should pass raw SSZ to reconstruct the full object.
-fn gossipImportProposerSlashing(ptr: *anyopaque, proposer_index: u64) anyerror!void {
-    _ = ptr;
-    // TODO: Pass full ProposerSlashing from decoded gossip to add to pool.
-    // The decoded message only has extracted fields, not the full SSZ struct.
-    // For now, log acceptance — the slashing was validated at gossip layer.
-    std.log.info("Proposer slashing accepted for proposer {d} (pool insert deferred)", .{proposer_index});
+/// Import a validated proposer slashing from raw SSZ bytes into the op pool.
+fn gossipImportProposerSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    var slashing: types.phase0.ProposerSlashing.Type = undefined;
+    types.phase0.ProposerSlashing.deserializeFromBytes(ssz_bytes, &slashing) catch |err| {
+        std.log.warn("Proposer slashing SSZ decode failed: {}", .{err});
+        return err;
+    };
+    try node.chain.op_pool.proposer_slashing_pool.add(slashing);
 }
 
 /// Import a validated attester slashing from raw SSZ bytes into the op pool.
@@ -3168,12 +3165,15 @@ fn gossipImportAttesterSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror
     try node.chain.op_pool.attester_slashing_pool.add(slashing);
 }
 
-/// Import a validated BLS-to-execution change into the op pool.
-fn gossipImportBlsChange(ptr: *anyopaque, validator_index: u64) anyerror!void {
-    _ = ptr;
-    // TODO: Pass full SignedBLSToExecutionChange from decoded gossip to add to pool.
-    // For now, log acceptance — the change was validated at gossip layer.
-    std.log.info("BLS change accepted for validator {d} (pool insert deferred)", .{validator_index});
+/// Import a validated BLS-to-execution change from raw SSZ bytes into the op pool.
+fn gossipImportBlsChange(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    var change: types.capella.SignedBLSToExecutionChange.Type = undefined;
+    types.capella.SignedBLSToExecutionChange.deserializeFromBytes(ssz_bytes, &change) catch |err| {
+        std.log.warn("BLS change SSZ decode failed: {}", .{err});
+        return err;
+    };
+    try node.chain.op_pool.bls_change_pool.add(change);
 }
 
 // ---------------------------------------------------------------------------

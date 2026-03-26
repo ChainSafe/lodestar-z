@@ -75,14 +75,14 @@ pub const GossipHandler = struct {
     /// Called to import a validated voluntary exit into the op pool.
     importVoluntaryExitFn: ?*const fn (ptr: *anyopaque, validator_index: u64, epoch: u64) anyerror!void,
 
-    /// Called to import a validated proposer slashing into the op pool.
-    importProposerSlashingFn: ?*const fn (ptr: *anyopaque, proposer_index: u64) anyerror!void,
+    /// Called to import raw proposer slashing SSZ bytes into the op pool.
+    importProposerSlashingFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
 
     /// Called to import raw attester slashing SSZ bytes into the op pool.
     importAttesterSlashingFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
 
-    /// Called to import a validated BLS-to-execution change into the op pool.
-    importBlsChangeFn: ?*const fn (ptr: *anyopaque, validator_index: u64) anyerror!void,
+    /// Called to import raw BLS-to-execution change SSZ bytes into the op pool.
+    importBlsChangeFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
 
     /// Gossip dedup caches (owned). Used by Phase 1 fast validation.
     seen_cache: SeenCache,
@@ -335,9 +335,13 @@ pub const GossipHandler = struct {
         if (std.mem.eql(u8, &ps.header_1_body_root, &ps.header_2_body_root))
             return GossipHandlerError.ValidationRejected;
 
-        // Phase 2: import to op pool.
+        // Phase 2: import raw SSZ bytes to op pool.
+        // Decompress to get the raw SSZ for the pool (full struct needed for block packing).
         if (self.importProposerSlashingFn) |importFn| {
-            importFn(self.node, ps.proposer_index) catch |err| {
+            const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+                return GossipHandlerError.DecodeFailed;
+            defer self.allocator.free(ssz_bytes);
+            importFn(self.node, ssz_bytes) catch |err| {
                 std.log.warn("Proposer slashing import failed for proposer {d}: {}", .{ ps.proposer_index, err });
             };
         }
@@ -391,9 +395,13 @@ pub const GossipHandler = struct {
         const vc = self.getValidatorCount();
         if (change.validator_index >= vc) return GossipHandlerError.ValidationRejected;
 
-        // Phase 2: import to op pool.
+        // Phase 2: import raw SSZ bytes to op pool.
+        // Decompress to get the raw SSZ for the pool (full struct needed for block packing).
         if (self.importBlsChangeFn) |importFn| {
-            importFn(self.node, change.validator_index) catch |err| {
+            const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+                return GossipHandlerError.DecodeFailed;
+            defer self.allocator.free(ssz_bytes);
+            importFn(self.node, ssz_bytes) catch |err| {
                 std.log.warn("BLS change import failed for validator {d}: {}", .{ change.validator_index, err });
             };
         }
