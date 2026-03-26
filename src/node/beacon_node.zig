@@ -117,6 +117,11 @@ pub const BlockImporter = struct {
     /// When null, execution payload verification is skipped (pre-merge).
     engine_api: ?EngineApi = null,
 
+    /// Data availability check callback (PeerDAS / Fulu).
+    /// Returns true if sufficient data columns are available for the block root.
+    /// When null, data is assumed available (pre-fulu behavior).
+    isDataAvailableFn: ?*const fn (root: [32]u8) bool = null,
+
     /// When true, BLS signatures are verified in processBlock.
     verify_signatures: bool,
 
@@ -273,7 +278,10 @@ pub const BlockImporter = struct {
                         .syncing, .accepted => .syncing,
                         else => unreachable,
                     },
-                    .available, // TODO: wire data availability checks
+                    if (self.isDataAvailableFn) |check_da|
+                        (if (check_da(stfn_result.block_root)) .available else .not_available)
+                    else
+                        .available,
                 ),
             },
             else => .{ .pre_merge = {} },
@@ -959,6 +967,10 @@ pub const BeaconNode = struct {
 
         // Wire engine API into block importer for execution payload verification.
         block_importer.engine_api = engine;
+
+        // Wire data availability check (will be populated after node is created).
+        // Note: The callback is set after BeaconNode.init returns since it needs
+        // the node pointer. See the isDataAvailableCallback below.
 
         return node;
     }
