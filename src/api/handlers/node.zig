@@ -59,11 +59,60 @@ pub fn getHealth(ctx: *ApiContext) types.HealthStatus {
 
 /// GET /eth/v1/node/peers
 ///
-/// Returns the list of connected peers.
-/// Note: Peer tracking is not yet implemented; returns an empty list.
-pub fn getPeers(_: *ApiContext) types.ApiResponse([]const types.PeerInfo) {
-    return .{
+/// Returns the list of connected peers with their state, direction, and agent.
+/// Uses the PeerDBCallback if wired; returns empty list otherwise.
+pub fn getPeers(ctx: *ApiContext) types.ApiResponse([]const types.PeerInfo) {
+    const cb = ctx.peer_db orelse return .{
         .data = &[_]types.PeerInfo{},
+    };
+
+    const entries = cb.getConnectedPeersFn(cb.ptr, ctx.allocator) catch return .{
+        .data = &[_]types.PeerInfo{},
+    };
+    defer ctx.allocator.free(entries);
+
+    // Convert PeerEntry to PeerInfo for JSON response.
+    const infos = ctx.allocator.alloc(types.PeerInfo, entries.len) catch {
+        return .{ .data = &[_]types.PeerInfo{} };
+    };
+
+    for (entries, 0..) |entry, i| {
+        infos[i] = .{
+            .peer_id = entry.peer_id,
+            .enr = null,
+            .last_seen_p2p_address = "",
+            .state = entry.state,
+            .direction = entry.direction,
+        };
+    }
+
+    return .{
+        .data = infos,
+    };
+}
+
+/// GET /eth/v1/node/peer_count
+///
+/// Returns aggregate counts of peers in each connection state.
+/// Uses the PeerDBCallback if wired; returns zeros otherwise.
+pub fn getPeerCount(ctx: *ApiContext) types.ApiResponse(types.PeerCount) {
+    const cb = ctx.peer_db orelse return .{
+        .data = .{
+            .disconnected = 0,
+            .connecting = 0,
+            .connected = 0,
+            .disconnecting = 0,
+        },
+    };
+
+    const counts = cb.getPeerCountsFn(cb.ptr);
+    return .{
+        .data = .{
+            .disconnected = counts.disconnected,
+            .connecting = counts.connecting,
+            .connected = counts.connected,
+            .disconnecting = counts.disconnecting,
+        },
     };
 }
 
@@ -120,34 +169,96 @@ test "getHealth returns ready when synced" {
     try std.testing.expectEqual(types.HealthStatus.ready, getHealth(&tc.ctx));
 }
 
-test "getPeers returns empty list" {
+test "getPeers returns empty list when no peer_db" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const resp = getPeers(&tc.ctx);
     try std.testing.expectEqual(@as(usize, 0), resp.data.len);
 }
 
-/// GET /eth/v1/node/peer_count
-///
-/// Returns aggregate counts of peers in each connection state.
-///
-/// Note: Peer tracking is not yet implemented; all counts are zero.
-/// Replace the stub once a real PeerManager is wired into ApiContext.
-pub fn getPeerCount(_: *ApiContext) types.ApiResponse(types.PeerCount) {
-    return .{
-        .data = .{
-            .disconnected = 0,
-            .connecting = 0,
-            .connected = 0,
-            .disconnecting = 0,
-        },
-    };
-}
-
-test "getPeerCount returns zero counts (stub)" {
+test "getPeerCount returns zero counts when no peer_db" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const resp = getPeerCount(&tc.ctx);
     try std.testing.expectEqual(@as(u64, 0), resp.data.connected);
     try std.testing.expectEqual(@as(u64, 0), resp.data.disconnected);
+}
+
+test "getPeers returns peers from callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const MockPeerDB = struct {
+        fn getConnectedPeers(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]context.PeerEntry {
+            _ = ptr;
+            const entries = try allocator.alloc(context.PeerEntry, 2);
+            entries[0] = .{
+                .peer_id = "peer-1",
+                .state = .connected,
+                .direction = .inbound,
+                .agent = "Lighthouse/v4.5.0",
+            };
+            entries[1] = .{
+                .peer_id = "peer-2",
+                .state = .connected,
+                .direction = .outbound,
+                .agent = null,
+            };
+            return entries;
+        }
+
+        fn getPeerCounts(ptr: *anyopaque) context.PeerCounts {
+            _ = ptr;
+            return .{
+                .connected = 2,
+                .disconnected = 1,
+                .connecting = 0,
+                .disconnecting = 0,
+            };
+        }
+    };
+
+    var dummy: u8 = 0;
+    tc.ctx.peer_db = .{
+        .ptr = &dummy,
+        .getConnectedPeersFn = &MockPeerDB.getConnectedPeers,
+        .getPeerCountsFn = &MockPeerDB.getPeerCounts,
+    };
+
+    const resp = getPeers(&tc.ctx);
+    defer tc.ctx.allocator.free(resp.data);
+    try std.testing.expectEqual(@as(usize, 2), resp.data.len);
+    try std.testing.expectEqualStrings("peer-1", resp.data[0].peer_id);
+    try std.testing.expectEqual(types.PeerDirection.outbound, resp.data[1].direction);
+}
+
+test "getPeerCount returns real counts from callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const MockPeerDB = struct {
+        fn getConnectedPeers(_: *anyopaque, _: std.mem.Allocator) anyerror![]context.PeerEntry {
+            return &[_]context.PeerEntry{};
+        }
+        fn getPeerCounts(_: *anyopaque) context.PeerCounts {
+            return .{
+                .connected = 5,
+                .disconnected = 3,
+                .connecting = 1,
+                .disconnecting = 0,
+            };
+        }
+    };
+
+    var dummy: u8 = 0;
+    tc.ctx.peer_db = .{
+        .ptr = &dummy,
+        .getConnectedPeersFn = &MockPeerDB.getConnectedPeers,
+        .getPeerCountsFn = &MockPeerDB.getPeerCounts,
+    };
+
+    const resp = getPeerCount(&tc.ctx);
+    try std.testing.expectEqual(@as(u64, 5), resp.data.connected);
+    try std.testing.expectEqual(@as(u64, 3), resp.data.disconnected);
+    try std.testing.expectEqual(@as(u64, 1), resp.data.connecting);
 }
