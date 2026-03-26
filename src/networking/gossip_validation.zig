@@ -113,6 +113,9 @@ pub const GossipValidationContext = struct {
     /// Finalized slot (start slot of the finalized epoch).
     finalized_slot: u64,
 
+    /// Type-erased pointer for state callbacks (e.g., *BeaconNode).
+    ptr: *anyopaque,
+
     /// Set of already-seen block roots (for block dedup).
     seen_block_roots: *SeenSet,
     /// Set of already-seen aggregator keys (for aggregate dedup).
@@ -125,13 +128,13 @@ pub const GossipValidationContext = struct {
     seen_attester_slashings: *SeenSet,
 
     /// Returns the expected proposer index for a given slot, or null if unknown.
-    getProposerIndex: *const fn (slot: u64) ?u32,
+    getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
     /// Returns whether a block root is known (has been seen as a parent).
-    isKnownBlockRoot: *const fn (root: [32]u8) bool,
+    isKnownBlockRoot: *const fn (ptr: *anyopaque, root: [32]u8) bool,
     /// Returns whether a validator is active at the given epoch.
-    isValidatorActive: *const fn (validator_index: u64, epoch: u64) bool,
+    isValidatorActive: *const fn (ptr: *anyopaque, validator_index: u64, epoch: u64) bool,
     /// Returns the total validator count (for bounds checking).
-    getValidatorCount: *const fn () u32,
+    getValidatorCount: *const fn (ptr: *anyopaque) u32,
 };
 
 // ============================================================
@@ -164,11 +167,11 @@ pub fn validateBeaconBlock(
     if (!was_new) return .ignore;
 
     // [REJECT] The proposer_index is valid (within known validator set).
-    const validator_count = ctx.getValidatorCount();
+    const validator_count = ctx.getValidatorCount(ctx.ptr);
     if (proposer_index >= validator_count) return .reject;
 
     // [REJECT] The block is proposed by the expected proposer_index for the block's slot.
-    if (ctx.getProposerIndex(block_slot)) |expected_proposer| {
+    if (ctx.getProposerIndex(ctx.ptr, block_slot)) |expected_proposer| {
         if (proposer_index != expected_proposer) return .reject;
     } else {
         // If we can't determine the expected proposer, we can't validate.
@@ -177,7 +180,7 @@ pub fn validateBeaconBlock(
     }
 
     // [IGNORE] The block's parent has been seen.
-    if (!ctx.isKnownBlockRoot(parent_root)) return .ignore;
+    if (!ctx.isKnownBlockRoot(ctx.ptr, parent_root)) return .ignore;
 
     return .accept;
 }
@@ -193,7 +196,7 @@ pub fn validateAggregateAndProof(
     ctx: *GossipValidationContext,
 ) ValidationResult {
     // [REJECT] The aggregator_index is valid.
-    const validator_count = ctx.getValidatorCount();
+    const validator_count = ctx.getValidatorCount(ctx.ptr);
     if (aggregator_index >= validator_count) return .reject;
 
     // [REJECT] attestation.data.slot is within the last ATTESTATION_PROPAGATION_SLOT_RANGE slots.
@@ -229,7 +232,7 @@ pub fn validateVoluntaryExit(
     ctx: *GossipValidationContext,
 ) ValidationResult {
     // [REJECT] The validator_index is valid.
-    const validator_count = ctx.getValidatorCount();
+    const validator_count = ctx.getValidatorCount(ctx.ptr);
     if (validator_index >= validator_count) return .reject;
 
     // [IGNORE] The voluntary exit is the first valid exit for this validator.
@@ -238,7 +241,7 @@ pub fn validateVoluntaryExit(
     if (!was_new) return .ignore;
 
     // [REJECT] The validator is active at the current epoch.
-    if (!ctx.isValidatorActive(validator_index, ctx.current_epoch)) return .reject;
+    if (!ctx.isValidatorActive(ctx.ptr, validator_index, ctx.current_epoch)) return .reject;
 
     // [REJECT] The exit epoch is not in the future.
     // (The exit should be processable now or in the past.)
@@ -259,7 +262,7 @@ pub fn validateProposerSlashing(
     ctx: *GossipValidationContext,
 ) ValidationResult {
     // [REJECT] The proposer_index is valid.
-    const validator_count = ctx.getValidatorCount();
+    const validator_count = ctx.getValidatorCount(ctx.ptr);
     if (proposer_index >= validator_count) return .reject;
 
     // [IGNORE] The proposer slashing is the first one received for the proposer.
@@ -295,29 +298,81 @@ pub fn validateAttesterSlashing(
     return .accept;
 }
 
+
+/// Validate a single attestation received on a `beacon_attestation_{subnet}` topic.
+///
+/// Reference: consensus-specs/specs/phase0/p2p-interface.md#beacon_attestation_subnet_id
+pub fn validateAttestation(
+    attestation_slot: u64,
+    committee_index: u64,
+    target_epoch: u64,
+    target_root: [32]u8,
+    ctx: *GossipValidationContext,
+) ValidationResult {
+    const attestation_epoch = attestation_slot / preset.SLOTS_PER_EPOCH;
+
+    // [IGNORE] Attestation slot is within the propagation window (current or previous epoch).
+    const in_current = attestation_epoch == ctx.current_epoch;
+    const in_previous = ctx.current_epoch > 0 and attestation_epoch == ctx.current_epoch - 1;
+    if (!in_current and !in_previous) return .ignore;
+
+    // [REJECT] Attestation epoch must match the target epoch.
+    if (attestation_epoch != target_epoch) return .reject;
+
+    // [REJECT] Committee index must be within bounds.
+    if (committee_index >= preset.MAX_COMMITTEES_PER_SLOT) return .reject;
+
+    // [IGNORE] Target block root must be known.
+    if (!ctx.isKnownBlockRoot(ctx.ptr, target_root)) return .ignore;
+
+    return .accept;
+}
+
+/// Validate a `SignedBLSToExecutionChange` received on the `bls_to_execution_change` topic.
+///
+/// Reference: consensus-specs/specs/capella/p2p-interface.md#bls_to_execution_change
+pub fn validateBlsToExecutionChange(
+    validator_index: u64,
+    ctx: *GossipValidationContext,
+) ValidationResult {
+    // [REJECT] The validator_index is valid (within known validator set).
+    const validator_count = ctx.getValidatorCount(ctx.ptr);
+    if (validator_index >= validator_count) return .reject;
+
+    // [IGNORE] The BLS change is the first valid one for this validator.
+    // Use a domain-separated key (0x05) to avoid collision with voluntary exits (0x02).
+    var key: [32]u8 = std.mem.zeroes([32]u8);
+    std.mem.writeInt(u64, key[0..8], validator_index, .little);
+    key[16] = 0x05;
+    const was_new = ctx.seen_voluntary_exits.insert(key) catch return .ignore;
+    if (!was_new) return .ignore;
+
+    return .accept;
+}
+
 // ============================================================
 // Tests
 // ============================================================
 
 // --- Mock context helpers ---
 
-fn mockGetProposerIndex(slot: u64) ?u32 {
+fn mockGetProposerIndex(_: *anyopaque, slot: u64) ?u32 {
     // Slot 100 => proposer 5, everything else => proposer 0.
     if (slot == 100) return 5;
     return 0;
 }
 
-fn mockIsKnownBlockRoot(root: [32]u8) bool {
+fn mockIsKnownBlockRoot(_: *anyopaque, root: [32]u8) bool {
     // Treat the zero root as unknown, everything else as known.
     return !std.mem.eql(u8, &root, &([_]u8{0} ** 32));
 }
 
-fn mockIsValidatorActive(validator_index: u64, _: u64) bool {
+fn mockIsValidatorActive(_: *anyopaque, validator_index: u64, _: u64) bool {
     // Validator 999 is inactive, all others active.
     return validator_index != 999;
 }
 
-fn mockGetValidatorCount() u32 {
+fn mockGetValidatorCount(_: *anyopaque) u32 {
     return 1000;
 }
 
@@ -814,5 +869,156 @@ test "attester_slashing: ignore duplicate" {
     try testing.expectEqual(ValidationResult.accept, r1);
 
     const r2 = validateAttesterSlashing(&indices, &mock.ctx);
+    try testing.expectEqual(ValidationResult.ignore, r2);
+}
+
+test "attestation: accept valid attestation" {
+    var mock = try createMockContext(testing.allocator);
+    defer mock.seen_blocks.deinit();
+    defer mock.seen_aggs.deinit();
+    defer mock.seen_exits.deinit();
+    defer mock.seen_proposer.deinit();
+    defer mock.seen_attester.deinit();
+
+    mock.ctx.seen_block_roots = &mock.seen_blocks;
+    mock.ctx.seen_aggregators = &mock.seen_aggs;
+    mock.ctx.seen_voluntary_exits = &mock.seen_exits;
+    mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
+    mock.ctx.seen_attester_slashings = &mock.seen_attester;
+
+    // Slot 96 = epoch 3 (current), committee 0, target epoch 3, known root.
+    const result = validateAttestation(96, 0, 3, [_]u8{0xAA} ** 32, &mock.ctx);
+    try testing.expectEqual(ValidationResult.accept, result);
+}
+
+test "attestation: ignore stale epoch" {
+    var mock = try createMockContext(testing.allocator);
+    defer mock.seen_blocks.deinit();
+    defer mock.seen_aggs.deinit();
+    defer mock.seen_exits.deinit();
+    defer mock.seen_proposer.deinit();
+    defer mock.seen_attester.deinit();
+
+    mock.ctx.seen_block_roots = &mock.seen_blocks;
+    mock.ctx.seen_aggregators = &mock.seen_aggs;
+    mock.ctx.seen_voluntary_exits = &mock.seen_exits;
+    mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
+    mock.ctx.seen_attester_slashings = &mock.seen_attester;
+
+    // Slot 32 = epoch 1, current is 3. Not current (3) or previous (2).
+    const result = validateAttestation(32, 0, 1, [_]u8{0xAA} ** 32, &mock.ctx);
+    try testing.expectEqual(ValidationResult.ignore, result);
+}
+
+test "attestation: reject mismatched target epoch" {
+    var mock = try createMockContext(testing.allocator);
+    defer mock.seen_blocks.deinit();
+    defer mock.seen_aggs.deinit();
+    defer mock.seen_exits.deinit();
+    defer mock.seen_proposer.deinit();
+    defer mock.seen_attester.deinit();
+
+    mock.ctx.seen_block_roots = &mock.seen_blocks;
+    mock.ctx.seen_aggregators = &mock.seen_aggs;
+    mock.ctx.seen_voluntary_exits = &mock.seen_exits;
+    mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
+    mock.ctx.seen_attester_slashings = &mock.seen_attester;
+
+    // Slot 96 = epoch 3, but target says 2.
+    const result = validateAttestation(96, 0, 2, [_]u8{0xAA} ** 32, &mock.ctx);
+    try testing.expectEqual(ValidationResult.reject, result);
+}
+
+test "attestation: reject committee index out of bounds" {
+    var mock = try createMockContext(testing.allocator);
+    defer mock.seen_blocks.deinit();
+    defer mock.seen_aggs.deinit();
+    defer mock.seen_exits.deinit();
+    defer mock.seen_proposer.deinit();
+    defer mock.seen_attester.deinit();
+
+    mock.ctx.seen_block_roots = &mock.seen_blocks;
+    mock.ctx.seen_aggregators = &mock.seen_aggs;
+    mock.ctx.seen_voluntary_exits = &mock.seen_exits;
+    mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
+    mock.ctx.seen_attester_slashings = &mock.seen_attester;
+
+    const result = validateAttestation(96, preset.MAX_COMMITTEES_PER_SLOT, 3, [_]u8{0xAA} ** 32, &mock.ctx);
+    try testing.expectEqual(ValidationResult.reject, result);
+}
+
+test "attestation: ignore unknown target root" {
+    var mock = try createMockContext(testing.allocator);
+    defer mock.seen_blocks.deinit();
+    defer mock.seen_aggs.deinit();
+    defer mock.seen_exits.deinit();
+    defer mock.seen_proposer.deinit();
+    defer mock.seen_attester.deinit();
+
+    mock.ctx.seen_block_roots = &mock.seen_blocks;
+    mock.ctx.seen_aggregators = &mock.seen_aggs;
+    mock.ctx.seen_voluntary_exits = &mock.seen_exits;
+    mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
+    mock.ctx.seen_attester_slashings = &mock.seen_attester;
+
+    // Zero root = unknown in our mock.
+    const result = validateAttestation(96, 0, 3, [_]u8{0} ** 32, &mock.ctx);
+    try testing.expectEqual(ValidationResult.ignore, result);
+}
+
+test "bls_to_execution_change: accept valid change" {
+    var mock = try createMockContext(testing.allocator);
+    defer mock.seen_blocks.deinit();
+    defer mock.seen_aggs.deinit();
+    defer mock.seen_exits.deinit();
+    defer mock.seen_proposer.deinit();
+    defer mock.seen_attester.deinit();
+
+    mock.ctx.seen_block_roots = &mock.seen_blocks;
+    mock.ctx.seen_aggregators = &mock.seen_aggs;
+    mock.ctx.seen_voluntary_exits = &mock.seen_exits;
+    mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
+    mock.ctx.seen_attester_slashings = &mock.seen_attester;
+
+    const result = validateBlsToExecutionChange(10, &mock.ctx);
+    try testing.expectEqual(ValidationResult.accept, result);
+}
+
+test "bls_to_execution_change: reject out of bounds validator" {
+    var mock = try createMockContext(testing.allocator);
+    defer mock.seen_blocks.deinit();
+    defer mock.seen_aggs.deinit();
+    defer mock.seen_exits.deinit();
+    defer mock.seen_proposer.deinit();
+    defer mock.seen_attester.deinit();
+
+    mock.ctx.seen_block_roots = &mock.seen_blocks;
+    mock.ctx.seen_aggregators = &mock.seen_aggs;
+    mock.ctx.seen_voluntary_exits = &mock.seen_exits;
+    mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
+    mock.ctx.seen_attester_slashings = &mock.seen_attester;
+
+    const result = validateBlsToExecutionChange(1000, &mock.ctx);
+    try testing.expectEqual(ValidationResult.reject, result);
+}
+
+test "bls_to_execution_change: ignore duplicate" {
+    var mock = try createMockContext(testing.allocator);
+    defer mock.seen_blocks.deinit();
+    defer mock.seen_aggs.deinit();
+    defer mock.seen_exits.deinit();
+    defer mock.seen_proposer.deinit();
+    defer mock.seen_attester.deinit();
+
+    mock.ctx.seen_block_roots = &mock.seen_blocks;
+    mock.ctx.seen_aggregators = &mock.seen_aggs;
+    mock.ctx.seen_voluntary_exits = &mock.seen_exits;
+    mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
+    mock.ctx.seen_attester_slashings = &mock.seen_attester;
+
+    const r1 = validateBlsToExecutionChange(10, &mock.ctx);
+    try testing.expectEqual(ValidationResult.accept, r1);
+
+    const r2 = validateBlsToExecutionChange(10, &mock.ctx);
     try testing.expectEqual(ValidationResult.ignore, r2);
 }
