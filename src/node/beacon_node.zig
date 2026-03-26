@@ -46,8 +46,8 @@ const OpPool = chain_mod.OpPool;
 const SeenCache = chain_mod.SeenCache;
 const produceBlockBody = chain_mod.produceBlockBody;
 const ProducedBlockBody = chain_mod.ProducedBlockBody;
-const HeadTracker = chain_mod.HeadTracker;
-const ImportResult = chain_mod.ImportResult;
+pub const HeadTracker = chain_mod.HeadTracker;
+pub const ImportResult = chain_mod.ImportResult;
 const ImportError = chain_mod.ImportError;
 const networking = @import("networking");
 const DiscoveryService = networking.DiscoveryService;
@@ -97,6 +97,10 @@ const ForkchoiceStateV1 = execution_mod.ForkchoiceStateV1;
 const MockEngine = execution_mod.MockEngine;
 const HttpEngine = execution_mod.HttpEngine;
 const IoHttpTransport = execution_mod.IoHttpTransport;
+const PayloadAttributesV3 = execution_mod.engine_api_types.PayloadAttributesV3;
+const GetPayloadResponse = execution_mod.GetPayloadResponse;
+const constants = @import("constants");
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const metrics_mod = @import("metrics.zig");
 pub const BeaconMetrics = metrics_mod.BeaconMetrics;
@@ -338,9 +342,26 @@ pub const BlockImporter = struct {
 
         const payload = &signed_block.message.body.execution_payload;
 
+        // Convert transactions: ArrayListUnmanaged(ArrayListUnmanaged(u8)) -> []const []const u8.
+        // Each SSZ transaction is an ArrayListUnmanaged(u8); the Engine API needs []const u8 slices.
+        const ssz_txs = payload.transactions.items;
+        const tx_slices = try self.allocator.alloc([]const u8, ssz_txs.len);
+        defer self.allocator.free(tx_slices);
+        for (ssz_txs, 0..) |tx, i| {
+            tx_slices[i] = tx.items;
+        }
+
+        // Compute versioned hashes from blob_kzg_commitments.
+        // Each versioned hash = SHA256(commitment) with byte 0 set to VERSIONED_HASH_VERSION_KZG.
+        const commitments = signed_block.message.body.blob_kzg_commitments.items;
+        const versioned_hashes = try self.allocator.alloc([32]u8, commitments.len);
+        defer self.allocator.free(versioned_hashes);
+        for (commitments, 0..) |commitment, i| {
+            Sha256.hash(&commitment, &versioned_hashes[i], .{});
+            versioned_hashes[i][0] = constants.VERSIONED_HASH_VERSION_KZG;
+        }
+
         // Build the Engine API payload from the SSZ block body payload.
-        // Note: extra_data and transactions are ArrayListUnmanaged in SSZ types
-        // but []const in Engine API types — use .items to get the slice.
         const engine_payload = execution_mod.ExecutionPayloadV3{
             .parent_hash = payload.parent_hash,
             .fee_recipient = payload.fee_recipient,
@@ -355,9 +376,7 @@ pub const BlockImporter = struct {
             .extra_data = payload.extra_data.items,
             .base_fee_per_gas = payload.base_fee_per_gas,
             .block_hash = payload.block_hash,
-            // Transactions: ArrayListUnmanaged(ArrayListUnmanaged(u8)) -> skip for now.
-            // Mock engine only checks block_hash. TODO: convert for HTTP engine.
-            .transactions = &.{},
+            .transactions = tx_slices,
             // Withdrawals: same memory layout as engine_api_types.Withdrawal.
             .withdrawals = if (payload.withdrawals.items.len > 0)
                 @as([]const execution_mod.engine_api_types.Withdrawal, @ptrCast(payload.withdrawals.items))
@@ -369,12 +388,11 @@ pub const BlockImporter = struct {
 
         const parent_beacon_root = signed_block.message.parent_root;
 
-        // TODO: compute versioned hashes from blob_kzg_commitments.
-        const result = engine.newPayload(engine_payload, &.{}, parent_beacon_root) catch |err| {
+        const result = engine.newPayload(engine_payload, versioned_hashes, parent_beacon_root) catch |err| {
             std.log.warn("Engine API newPayload failed for root={s}...: {}", .{
                 &std.fmt.bytesToHex(block_root[0..4], .lower), err,
             });
-            // On EL communication failure, accept optimistically.
+            // On EL communication failure, accept optimistically and track EL offline.
             return .syncing;
         };
 
@@ -744,6 +762,13 @@ pub const BeaconNode = struct {
     http_engine: ?*HttpEngine = null,
     io_transport: ?*IoHttpTransport = null,
     engine_api: ?EngineApi = null,
+
+    /// Cached payload ID from the last forkchoiceUpdated call with payload attributes.
+    /// Used by produceBlockWithPayload to retrieve the built execution payload via getPayload.
+    cached_payload_id: ?[8]u8 = null,
+
+    /// Track whether the EL is offline (unreachable). Reset on successful Engine API call.
+    el_offline: bool = false,
 
     /// I/O context — set when the event loop starts (before services launch).
     /// Required for std.http.Client, timing, and other I/O operations.
@@ -2676,12 +2701,24 @@ pub const BeaconNode = struct {
         }
     }
 
-    /// Notify the execution layer of the current fork choice state.
+    /// Notify the EL of the current fork choice and optionally trigger payload building.
     ///
-    /// Called after each block import. Sends engine_forkchoiceUpdatedV3
-    /// with the current head, safe (justified), and finalized block hashes.
-    /// Errors are non-fatal — the block is already imported.
+    /// Called after each block import. Sends engine_forkchoiceUpdatedV3 with the
+    /// current head/safe/finalized block hashes. If payload_attrs is provided
+    /// (e.g., this node is the next proposer), also starts building a new payload.
+    /// The returned payload_id is cached for later getPayload calls.
     fn notifyForkchoiceUpdate(self: *BeaconNode, new_head_root: [32]u8) !void {
+        self.notifyForkchoiceUpdateWithAttrs(new_head_root, null) catch |err| {
+            std.log.warn("forkchoiceUpdated failed: {}", .{err});
+        };
+    }
+
+    /// Inner forkchoiceUpdated with optional payload attributes.
+    fn notifyForkchoiceUpdateWithAttrs(
+        self: *BeaconNode,
+        new_head_root: [32]u8,
+        payload_attrs: ?PayloadAttributesV3,
+    ) !void {
         const engine = self.engine_api orelse return;
         const fc = self.fork_choice orelse return;
 
@@ -2712,10 +2749,24 @@ pub const BeaconNode = struct {
             .finalized_block_hash = finalized_block_hash,
         };
 
-        const result = engine.forkchoiceUpdated(fcu_state, null) catch |err| {
+        const result = engine.forkchoiceUpdated(fcu_state, payload_attrs) catch |err| {
             std.log.warn("engine_forkchoiceUpdatedV3 failed: {}", .{err});
-            return;
+            self.el_offline = true;
+            self.api_sync_status.el_offline = true;
+            return err;
         };
+
+        // EL responded — mark as online.
+        self.el_offline = false;
+        self.api_sync_status.el_offline = false;
+
+        // Cache payload_id if the EL started building a payload.
+        if (result.payload_id) |pid| {
+            self.cached_payload_id = pid;
+            std.log.info("forkchoiceUpdated: payload building started, id={s}", .{
+                &std.fmt.bytesToHex(pid[0..8], .lower),
+            });
+        }
 
         std.log.info("forkchoiceUpdated: status={s} head={s}... safe={s}... finalized={s}...", .{
             @tagName(result.payload_status.status),
@@ -2723,6 +2774,63 @@ pub const BeaconNode = struct {
             &std.fmt.bytesToHex(safe_block_hash[0..4], .lower),
             &std.fmt.bytesToHex(finalized_block_hash[0..4], .lower),
         });
+    }
+
+    /// Trigger payload building by sending forkchoiceUpdated with payload attributes.
+    ///
+    /// Called before block production when this node is the proposer for the next slot.
+    /// Sends the current fork choice state with payload attributes to start the EL
+    /// building an execution payload. The payload_id is cached for retrieval via
+    /// getExecutionPayload().
+    pub fn preparePayload(
+        self: *BeaconNode,
+        timestamp: u64,
+        prev_randao: [32]u8,
+        fee_recipient: [20]u8,
+        withdrawals_slice: []const execution_mod.engine_api_types.Withdrawal,
+        parent_beacon_block_root: [32]u8,
+    ) !void {
+        const attrs = PayloadAttributesV3{
+            .timestamp = timestamp,
+            .prev_randao = prev_randao,
+            .suggested_fee_recipient = fee_recipient,
+            .withdrawals = withdrawals_slice,
+            .parent_beacon_block_root = parent_beacon_block_root,
+        };
+        try self.notifyForkchoiceUpdateWithAttrs(self.head_tracker.head_root, attrs);
+    }
+
+    /// Retrieve the execution payload built by the EL via engine_getPayloadV3.
+    ///
+    /// Must be called after preparePayload() has been called and the EL returned
+    /// a payload_id. Returns the complete execution payload, block value, and
+    /// blobs bundle for inclusion in the beacon block.
+    pub fn getExecutionPayload(self: *BeaconNode) !GetPayloadResponse {
+        const engine = self.engine_api orelse return error.NoEngineApi;
+        const payload_id = self.cached_payload_id orelse return error.NoPayloadId;
+
+        const result = engine.getPayload(payload_id) catch |err| {
+            std.log.warn("engine_getPayloadV3 failed: {}", .{err});
+            self.el_offline = true;
+            self.api_sync_status.el_offline = true;
+            return err;
+        };
+
+        // EL responded — mark as online.
+        self.el_offline = false;
+        self.api_sync_status.el_offline = false;
+
+        // Clear the cached payload_id — it's a one-shot.
+        self.cached_payload_id = null;
+
+        std.log.info("getPayload: block_number={d} block_value={d} txs={d} blobs={d}", .{
+            result.execution_payload.block_number,
+            @as(u64, @truncate(result.block_value)),
+            result.execution_payload.transactions.len,
+            result.blobs_bundle.blobs.len,
+        });
+
+        return result;
     }
 
     /// Get the current head info.
@@ -2764,7 +2872,7 @@ pub const BeaconNode = struct {
                 .sync_distance = ss.sync_distance,
                 .is_syncing = ss.state == .syncing,
                 .is_optimistic = ss.is_optimistic,
-                .el_offline = false,
+                .el_offline = self.el_offline,
             };
         }
         // Fallback: no sync service (e.g. tests without P2P).
@@ -2774,7 +2882,7 @@ pub const BeaconNode = struct {
             .sync_distance = 0,
             .is_syncing = false,
             .is_optimistic = false,
-            .el_offline = false,
+            .el_offline = self.el_offline,
         };
     }
 
