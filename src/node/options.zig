@@ -27,6 +27,12 @@ pub const NodeOptions = struct {
     bootnodes: []const []const u8 = &.{},
     target_peers: u32 = 50,
 
+    // ── P2P ──────────────────────────────────────────────────────
+    /// P2P listen address (IPv4), from --p2p-host.
+    p2p_host: []const u8 = "0.0.0.0",
+    /// P2P listen port (TCP/UDP), from --p2p-port.
+    p2p_port: u16 = 9000,
+
     // ── Discovery ────────────────────────────────────────────────
     /// Enable discv5 peer discovery (default: true).
     enable_discv5: bool = true,
@@ -36,6 +42,8 @@ pub const NodeOptions = struct {
     direct_peers: []const []const u8 = &.{},
     /// Enable mDNS local discovery.
     enable_mdns: bool = false,
+    /// Subscribe to all attestation subnets (--subscribe-all-subnets).
+    subscribe_all_subnets: bool = false,
 
     // ── Database ─────────────────────────────────────────────────
     data_dir: []const u8 = "",
@@ -46,13 +54,27 @@ pub const NodeOptions = struct {
     // ── Execution ────────────────────────────────────────────────
     execution_urls: []const []const u8 = &.{"http://localhost:8551"},
     jwt_secret_path: ?[]const u8 = null,
+    /// Use mock execution engine instead of real EL (--engine-mock).
+    engine_mock: bool = false,
 
     // ── API ──────────────────────────────────────────────────────
+    /// Enable the REST HTTP API (--rest flag).
+    rest_enabled: bool = false,
     rest_address: []const u8 = "127.0.0.1",
-    rest_port: u16 = 9596,
+    rest_port: u16 = 5052,
+
+    // ── Metrics ──────────────────────────────────────────────────
+    /// Enable Prometheus metrics HTTP server (--metrics flag).
+    metrics_enabled: bool = false,
+    metrics_address: []const u8 = "127.0.0.1",
+    metrics_port: u16 = 8008,
 
     // ── Validator ────────────────────────────────────────────────
     suggested_fee_recipient: ?[20]u8 = null,
+
+    // ── Sync ─────────────────────────────────────────────────────
+    /// URL to fetch checkpoint state from a beacon API (--checkpoint-sync-url).
+    checkpoint_sync_url: ?[]const u8 = null,
 
     // ── Caches ───────────────────────────────────────────────────
     max_block_states: u32 = 64,

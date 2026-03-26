@@ -789,21 +789,50 @@ fn runBeacon(
         break :blk std.fmt.parseInt(u16, port_str, 10) catch null;
     } else null;
 
+    // Parse suggested fee recipient from 0x-prefixed hex string to [20]u8.
+    const fee_recipient: ?[20]u8 = if (opts.suggest_fee_recipient) |hex_str| blk: {
+        // Strip optional "0x" prefix.
+        const stripped = if (hex_str.len >= 2 and hex_str[0] == '0' and (hex_str[1] == 'x' or hex_str[1] == 'X'))
+            hex_str[2..]
+        else
+            hex_str;
+        if (stripped.len != 40) {
+            std.log.err("Invalid --suggest-fee-recipient: expected 40 hex chars, got {d}", .{stripped.len});
+            break :blk null;
+        }
+        var addr: [20]u8 = undefined;
+        _ = std.fmt.hexToBytes(&addr, stripped) catch {
+            std.log.err("Invalid --suggest-fee-recipient: bad hex encoding", .{});
+            break :blk null;
+        };
+        break :blk addr;
+    } else null;
+
     // Build NodeOptions from parsed CLI args.
     const node_opts = NodeOptions{
         .data_dir = opts.data_dir,
         .bootnodes = bootnodes,
         .verify_signatures = opts.verify_signatures,
+        .rest_enabled = opts.rest,
         .rest_port = opts.api_port,
         .rest_address = opts.api_address,
         .execution_urls = &.{opts.execution_urls},
         .jwt_secret_path = opts.jwt_secret,
+        .engine_mock = opts.engine_mock,
         .target_peers = opts.target_peers,
         .network = network,
-        .enable_discv5 = true, // TODO: wire --no-discv5 flag
+        .p2p_host = opts.p2p_host,
+        .p2p_port = opts.p2p_port,
+        .enable_discv5 = opts.discv5,
         .discovery_port = discovery_port,
         .direct_peers = direct_peers,
-        .enable_mdns = opts.mdns, // TODO: implement mDNS
+        .enable_mdns = opts.mdns,
+        .subscribe_all_subnets = opts.subscribe_all_subnets,
+        .suggested_fee_recipient = fee_recipient,
+        .metrics_enabled = opts.metrics,
+        .metrics_port = opts.metrics_port,
+        .metrics_address = opts.metrics_address,
+        .checkpoint_sync_url = opts.checkpoint_sync_url,
     };
 
     // Create the BeaconNode.
