@@ -90,23 +90,18 @@ const TestEnvironment = struct {
     pool: Node.Pool,
     test_state: TestCachedBeaconState,
 
-    const num_validators = 256;
-    const pool_size = num_validators * 5;
+    fn init(self: *TestEnvironment, allocator: std.mem.Allocator, num_validators: u32) !void {
+        const pool_size = num_validators * 5;
 
-    fn init(allocator: std.mem.Allocator) !*TestEnvironment {
-        const self = try allocator.create(TestEnvironment);
-        errdefer allocator.destroy(self);
         self.allocator = allocator;
         self.pool = try Node.Pool.init(allocator, pool_size);
         errdefer self.pool.deinit();
         self.test_state = try TestCachedBeaconState.init(allocator, &self.pool, num_validators);
-        return self;
     }
 
     fn deinit(self: *TestEnvironment) void {
         self.test_state.deinit();
         self.pool.deinit();
-        self.allocator.destroy(self);
     }
 };
 
@@ -122,7 +117,8 @@ fn makeValidProposerSlashing(proposer_index: u64, slot: u64) ProposerSlashing {
 }
 
 test "assertValidProposerSlashing - valid proposer slashing" {
-    const env = try TestEnvironment.init(std.testing.allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
     defer env.deinit();
 
     const slashing = makeValidProposerSlashing(0, 0);
@@ -138,7 +134,8 @@ test "assertValidProposerSlashing - valid proposer slashing" {
 }
 
 test "assertValidProposerSlashing - InvalidProposerSlashingSlotMismatch" {
-    const env = try TestEnvironment.init(std.testing.allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
     defer env.deinit();
 
     var slashing = makeValidProposerSlashing(0, 0);
@@ -158,7 +155,8 @@ test "assertValidProposerSlashing - InvalidProposerSlashingSlotMismatch" {
 }
 
 test "assertValidProposerSlashing - InvalidProposerSlashingProposerIndexMismatch" {
-    const env = try TestEnvironment.init(std.testing.allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
     defer env.deinit();
 
     var slashing = makeValidProposerSlashing(0, 0);
@@ -178,7 +176,8 @@ test "assertValidProposerSlashing - InvalidProposerSlashingProposerIndexMismatch
 }
 
 test "assertValidProposerSlashing - InvalidProposerSlashingProposerIndexOutOfRange" {
-    const env = try TestEnvironment.init(std.testing.allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
     defer env.deinit();
 
     const slashing = makeValidProposerSlashing(999, 0);
@@ -197,7 +196,8 @@ test "assertValidProposerSlashing - InvalidProposerSlashingProposerIndexOutOfRan
 }
 
 test "assertValidProposerSlashing - InvalidProposerSlashingHeadersEqual" {
-    const env = try TestEnvironment.init(std.testing.allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
     defer env.deinit();
 
     var slashing = makeValidProposerSlashing(0, 0);
@@ -218,7 +218,8 @@ test "assertValidProposerSlashing - InvalidProposerSlashingHeadersEqual" {
 }
 
 test "assertValidProposerSlashing - InvalidProposerSlashingProposerNotSlashable" {
-    const env = try TestEnvironment.init(std.testing.allocator);
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
     defer env.deinit();
 
     // Mark validator 0 as already slashed
