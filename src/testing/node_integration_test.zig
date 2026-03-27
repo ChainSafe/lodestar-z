@@ -78,7 +78,7 @@ test "node integration: genesis → blocks → API" {
 
     // GET /eth/v1/beacon/genesis — always returns config data.
     const genesis_resp = api_handlers.beacon.getGenesis(node.api_context);
-    try testing.expect(genesis_resp.finalized == true);
+    try testing.expect(genesis_resp.meta.finalized orelse false);
 
     // GET /eth/v1/beacon/headers/head — should reflect last imported block.
     const head_header_resp = try api_handlers.beacon.getBlockHeader(

@@ -17,6 +17,10 @@ const Allocator = std.mem.Allocator;
 const api_mod = @import("root.zig");
 const routes_mod = @import("routes.zig");
 const response_mod = @import("response.zig");
+const content_negotiation = @import("content_negotiation.zig");
+const response_meta = @import("response_meta.zig");
+const error_response = @import("error_response.zig");
+const handler_result_mod = @import("handler_result.zig");
 const handlers = @import("handlers/root.zig");
 const context = @import("context.zig");
 const ApiContext = context.ApiContext;
@@ -120,55 +124,122 @@ pub const HttpServer = struct {
             .GET => .GET,
             .POST => .POST,
             else => {
-                try respondError(request, .method_not_allowed, "Method not allowed");
+                try respondApiError(request, .{
+                    .code = .method_not_allowed,
+                    .message = "Method not allowed",
+                });
                 return;
             },
         };
 
-        // Determine Accept header for content negotiation.
-        const accept_header = findHeader(request);
-
         // Route lookup.
         const match = routes_mod.findRoute(route_method, path) orelse {
-            try respondError(request, .not_found, "Route not found");
+            try respondApiError(request, .{
+                .code = .not_found,
+                .message = "Route not found",
+            });
             return;
         };
 
-        // Dispatch to handler and get JSON bytes.
+        // Content negotiation.
+        const accept = findHeader(request, "accept");
+        const format = switch (content_negotiation.parseAcceptHeader(accept)) {
+            .absent => content_negotiation.WireFormat.json,
+            .format => |f| f,
+            .not_acceptable => {
+                try respondApiError(request, .{
+                    .code = .not_acceptable,
+                    .message = "Supported: application/json, application/octet-stream",
+                });
+                return;
+            },
+        };
+
+        // For SSZ requests, ensure the route supports SSZ.
+        if (format == .ssz and !match.route.supports_ssz) {
+            try respondApiError(request, .{
+                .code = .not_acceptable,
+                .message = "This endpoint does not support SSZ responses",
+            });
+            return;
+        }
+
+        // Dispatch to handler and get response body.
         const result = self.dispatchHandler(match) catch |err| {
-            try respondApiError(request, err);
+            try respondApiError(request, error_response.fromZigError(err));
             return;
         };
         defer self.allocator.free(result.body);
 
-        // Content-Type based on accept header and SSZ support.
-        const content_type = if (match.route.supports_ssz and
-            types.ContentType.fromAcceptHeader(accept_header) == .ssz)
-            "application/octet-stream"
-        else
-            "application/json";
+        // Build response headers: content-type + CORS + metadata.
+        var extra_hdrs_buf: [16]http.Header = undefined;
+        var extra_count: usize = 0;
 
-        // Build response headers: content-type + CORS.
-        const extra_headers: []const http.Header = &.{
-            .{ .name = "Content-Type", .value = content_type },
-            .{ .name = "Access-Control-Allow-Origin", .value = "*" },
-            .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, OPTIONS" },
-            .{ .name = "Access-Control-Allow-Headers", .value = "Content-Type, Accept" },
-        };
+        extra_hdrs_buf[extra_count] = .{ .name = "Content-Type", .value = result.content_type };
+        extra_count += 1;
+        extra_hdrs_buf[extra_count] = .{ .name = "Access-Control-Allow-Origin", .value = "*" };
+        extra_count += 1;
+        extra_hdrs_buf[extra_count] = .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, OPTIONS" };
+        extra_count += 1;
+        extra_hdrs_buf[extra_count] = .{ .name = "Access-Control-Allow-Headers", .value = "Content-Type, Accept" };
+        extra_count += 1;
+
+        // Emit metadata headers from the handler result.
+        var meta_hdrs: response_meta.MetaHeaders = undefined;
+        response_meta.buildHeaders(result.meta, &meta_hdrs);
+        for (meta_hdrs.slice()) |h| {
+            if (extra_count < extra_hdrs_buf.len) {
+                extra_hdrs_buf[extra_count] = .{ .name = h.name, .value = h.value };
+                extra_count += 1;
+            }
+        }
 
         try request.respond(result.body, .{
             .status = statusFromCode(result.status),
-            .extra_headers = extra_headers,
+            .extra_headers = extra_hdrs_buf[0..extra_count],
         });
     }
 
     /// Dispatch result from a handler.
     pub const HandlerResult = struct {
         status: u16,
+        content_type: []const u8,
         body: []const u8,
+        meta: response_meta.ResponseMeta = .{},
     };
 
-    /// Route to the correct handler and encode the response as JSON.
+    /// Write a JSON body for a HandlerResult(T) and return a HandlerResult for the server.
+    fn makeJsonResult(
+        self: *HttpServer,
+        comptime T: type,
+        result: handler_result_mod.HandlerResult(T),
+    ) !HandlerResult {
+        const status = if (result.status != 0) result.status else 200;
+        const body = try response_mod.encodeHandlerResultJson(self.allocator, T, result);
+        return .{
+            .status = status,
+            .content_type = "application/json",
+            .body = body,
+            .meta = result.meta,
+        };
+    }
+
+    /// Write an empty body (204 / void handler).
+    fn makeVoidResult(
+        self: *HttpServer,
+        result: handler_result_mod.HandlerResult(void),
+    ) !HandlerResult {
+        const status = if (result.status != 0) result.status else 204;
+        const body = try self.allocator.dupe(u8, "");
+        return .{
+            .status = status,
+            .content_type = "application/json",
+            .body = body,
+            .meta = result.meta,
+        };
+    }
+
+    /// Route to the correct handler and encode the response.
     fn dispatchHandler(
         self: *HttpServer,
         match: routes_mod.RouteMatch,
@@ -179,120 +250,173 @@ pub const HttpServer = struct {
 
         // Node endpoints.
         if (std.mem.eql(u8, op, "getNodeIdentity")) {
-            const resp = handlers.node.getIdentity(ctx);
-            const body = try response_mod.encodeJsonResponse(alloc, types.NodeIdentity, resp);
-            return .{ .status = 200, .body = body };
+            const result = handlers.node.getIdentity(ctx);
+            return self.makeJsonResult(types.NodeIdentity, result);
         }
         if (std.mem.eql(u8, op, "getNodeVersion")) {
-            const resp = handlers.node.getVersion(ctx);
-            const body = try response_mod.encodeJsonResponse(alloc, types.NodeVersion, resp);
-            return .{ .status = 200, .body = body };
+            const result = handlers.node.getVersion(ctx);
+            return self.makeJsonResult(types.NodeVersion, result);
         }
         if (std.mem.eql(u8, op, "getSyncing")) {
-            const resp = handlers.node.getSyncing(ctx);
-            const body = try response_mod.encodeJsonResponse(alloc, types.SyncingStatus, resp);
-            return .{ .status = 200, .body = body };
+            const result = handlers.node.getSyncing(ctx);
+            return self.makeJsonResult(types.SyncingStatus, result);
         }
         if (std.mem.eql(u8, op, "getHealth")) {
-            const health = handlers.node.getHealth(ctx);
-            const status = @intFromEnum(health);
-            // Health endpoint returns just the status code, no body.
-            const body = try std.fmt.allocPrint(alloc, "{{\"status\":{d}}}", .{status});
-            return .{ .status = status, .body = body };
+            const result = handlers.node.getHealth(ctx);
+            // Health returns void with status override: 200/206/503
+            return self.makeVoidResult(result);
         }
         if (std.mem.eql(u8, op, "getPeers")) {
-            const resp = handlers.node.getPeers(ctx);
-            const body = try response_mod.encodeJsonResponse(alloc, []const types.PeerInfo, resp);
-            return .{ .status = 200, .body = body };
+            const result = handlers.node.getPeers(ctx);
+            return self.makeJsonResult([]const types.PeerInfo, result);
+        }
+        if (std.mem.eql(u8, op, "getPeerCount")) {
+            const result = handlers.node.getPeerCount(ctx);
+            return self.makeJsonResult(types.PeerCount, result);
         }
 
         // Beacon endpoints.
         if (std.mem.eql(u8, op, "getGenesis")) {
             const resp = handlers.beacon.getGenesis(ctx);
-            const body = try response_mod.encodeJsonResponse(alloc, types.GenesisData, resp);
-            return .{ .status = 200, .body = body };
+            return self.makeJsonResult(types.GenesisData, resp);
         }
         if (std.mem.eql(u8, op, "getBlockHeader")) {
             const block_id_str = match.getParam("block_id") orelse return error.InvalidBlockId;
             const block_id = try types.BlockId.parse(block_id_str);
-            const resp = try handlers.beacon.getBlockHeader(ctx, block_id);
-            const body = try response_mod.encodeJsonResponse(alloc, types.BlockHeaderData, resp);
-            return .{ .status = 200, .body = body };
+            const result = try handlers.beacon.getBlockHeader(ctx, block_id);
+            return self.makeJsonResult(types.BlockHeaderData, result);
         }
         if (std.mem.eql(u8, op, "getBlockV2")) {
             const block_id_str = match.getParam("block_id") orelse return error.InvalidBlockId;
             const block_id = try types.BlockId.parse(block_id_str);
-            const result = try handlers.beacon.getBlock(ctx, block_id);
-            // For simplicity, return SSZ bytes wrapped in a JSON envelope with hex encoding.
-            // A full implementation would handle content negotiation here.
-            const body = try std.fmt.allocPrint(alloc, "{{\"version\":\"phase0\",\"data\":\"{s}\"}}", .{result.data});
-            return .{ .status = 200, .body = body };
+            const block_result = try handlers.beacon.getBlock(ctx, block_id);
+            // SSZ bytes available — wrap them in a HandlerResult for dispatch
+            const handler_res = handler_result_mod.HandlerResult([]const u8){
+                .data = block_result.data,
+                .meta = .{
+                    .version = block_result.fork_name,
+                    .execution_optimistic = block_result.execution_optimistic,
+                    .finalized = block_result.finalized,
+                },
+                .ssz_bytes = block_result.data, // SSZ bytes already in data
+            };
+            const body = try response_mod.encodeHandlerResultJson(alloc, []const u8, handler_res);
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = body,
+                .meta = handler_res.meta,
+            };
         }
         if (std.mem.eql(u8, op, "getStateValidatorV2")) {
-            // Requires state_id and validator_id path params.
             const state_id_str = match.getParam("state_id") orelse return error.InvalidStateId;
             const validator_id_str = match.getParam("validator_id") orelse return error.InvalidValidatorId;
             const state_id = try types.StateId.parse(state_id_str);
             const validator_id = try types.ValidatorId.parse(validator_id_str);
-            const resp = try handlers.beacon.getValidator(ctx, state_id, validator_id);
-            const body = try response_mod.encodeJsonResponse(alloc, types.ValidatorData, resp);
-            return .{ .status = 200, .body = body };
+            const result = try handlers.beacon.getValidator(ctx, state_id, validator_id);
+            return self.makeJsonResult(types.ValidatorData, result);
         }
         if (std.mem.eql(u8, op, "getStateValidatorsV2")) {
             const state_id_str = match.getParam("state_id") orelse return error.InvalidStateId;
             const state_id = try types.StateId.parse(state_id_str);
-            const resp = try handlers.beacon.getValidators(ctx, state_id, .{});
-            const body = try response_mod.encodeJsonResponse(alloc, []const types.ValidatorData, resp);
-            return .{ .status = 200, .body = body };
+            const handler_res = try handlers.beacon.getValidators(ctx, state_id, .{});
+            defer alloc.free(handler_res.data);
+            return self.makeJsonResult([]const types.ValidatorData, handler_res);
         }
         if (std.mem.eql(u8, op, "getStateRoot")) {
             const state_id_str = match.getParam("state_id") orelse return error.InvalidStateId;
             const state_id = try types.StateId.parse(state_id_str);
-            const resp = try handlers.beacon.getStateRoot(ctx, state_id);
-            const body = try response_mod.encodeJsonResponse(alloc, [32]u8, resp);
-            return .{ .status = 200, .body = body };
+            const result = try handlers.beacon.getStateRoot(ctx, state_id);
+            return self.makeJsonResult([32]u8, result);
         }
         if (std.mem.eql(u8, op, "getStateFork")) {
             const state_id_str = match.getParam("state_id") orelse return error.InvalidStateId;
             const state_id = try types.StateId.parse(state_id_str);
-            const resp = try handlers.beacon.getStateFork(ctx, state_id);
-            const body = try response_mod.encodeJsonResponse(alloc, types.ForkData, resp);
-            return .{ .status = 200, .body = body };
+            const result = try handlers.beacon.getStateFork(ctx, state_id);
+            return self.makeJsonResult(types.ForkData, result);
         }
         if (std.mem.eql(u8, op, "getFinalityCheckpoints")) {
             const state_id_str = match.getParam("state_id") orelse return error.InvalidStateId;
             const state_id = try types.StateId.parse(state_id_str);
-            const resp = try handlers.beacon.getFinalityCheckpoints(ctx, state_id);
-            const body = try response_mod.encodeJsonResponse(alloc, types.FinalityCheckpoints, resp);
-            return .{ .status = 200, .body = body };
+            const result = try handlers.beacon.getFinalityCheckpoints(ctx, state_id);
+            return self.makeJsonResult(types.FinalityCheckpoints, result);
         }
         if (std.mem.eql(u8, op, "publishBlockV2")) {
-            // POST endpoint — block publishing is a stub for now.
-            return .{
-                .status = 200,
-                .body = try alloc.dupe(u8, "{\"status\":\"accepted\"}"),
-            };
+            // TODO: read request body (JSON or SSZ based on Content-Type)
+            const result = try handlers.beacon.submitBlock(ctx, &[_]u8{});
+            return self.makeVoidResult(result);
         }
 
+        // Pool GET endpoints.
+        if (std.mem.eql(u8, op, "getPoolAttestations")) {
+            const result = handlers.beacon.getPoolAttestations(ctx);
+            return self.makeJsonResult(types.PoolCounts, result);
+        }
+        if (std.mem.eql(u8, op, "getPoolVoluntaryExits")) {
+            const result = handlers.beacon.getPoolVoluntaryExits(ctx);
+            return self.makeJsonResult(usize, result);
+        }
+        if (std.mem.eql(u8, op, "getPoolProposerSlashings")) {
+            const result = handlers.beacon.getPoolProposerSlashings(ctx);
+            return self.makeJsonResult(usize, result);
+        }
+        if (std.mem.eql(u8, op, "getPoolAttesterSlashings")) {
+            const result = handlers.beacon.getPoolAttesterSlashings(ctx);
+            return self.makeJsonResult(usize, result);
+        }
+        if (std.mem.eql(u8, op, "getPoolBlsToExecutionChanges")) {
+            const result = handlers.beacon.getPoolBlsToExecutionChanges(ctx);
+            return self.makeJsonResult(usize, result);
+        }
+
+        // Pool POST endpoints (stubs — accept body, return 200).
+        if (std.mem.eql(u8, op, "submitPoolAttestations")) {
+            const result = try handlers.beacon.submitPoolAttestations(ctx, &[_]u8{});
+            return self.makeVoidResult(result);
+        }
+        if (std.mem.eql(u8, op, "submitPoolVoluntaryExits")) {
+            const result = try handlers.beacon.submitPoolVoluntaryExits(ctx, &[_]u8{});
+            return self.makeVoidResult(result);
+        }
+        if (std.mem.eql(u8, op, "submitPoolProposerSlashings")) {
+            const result = try handlers.beacon.submitPoolProposerSlashings(ctx, &[_]u8{});
+            return self.makeVoidResult(result);
+        }
+        if (std.mem.eql(u8, op, "submitPoolAttesterSlashings")) {
+            const result = try handlers.beacon.submitPoolAttesterSlashings(ctx, &[_]u8{});
+            return self.makeVoidResult(result);
+        }
+        if (std.mem.eql(u8, op, "submitPoolBlsToExecutionChanges")) {
+            const result = try handlers.beacon.submitPoolBlsToExecutionChanges(ctx, &[_]u8{});
+            return self.makeVoidResult(result);
+        }
+        if (std.mem.eql(u8, op, "submitPoolSyncCommittees")) {
+            const result = try handlers.beacon.submitPoolSyncCommittees(ctx, &[_]u8{});
+            return self.makeVoidResult(result);
+        }
 
         // Debug endpoints.
         if (std.mem.eql(u8, op, "getDebugState")) {
             const state_id_str = match.getParam("state_id") orelse return error.InvalidStateId;
             const state_id = try types.StateId.parse(state_id_str);
-            const state_bytes = try handlers.debug.getState(ctx, state_id);
-            defer alloc.free(state_bytes);
-            // Return raw bytes in a JSON envelope with hex encoding for now.
-            const body = try std.fmt.allocPrint(alloc, "{{\"data\":\"ssz_omitted\",\"size\":{d}}}", .{state_bytes.len});
-            return .{ .status = 200, .body = body };
+            const handler_res = try handlers.debug.getState(ctx, state_id);
+            defer alloc.free(handler_res.data);
+            // Wrap raw SSZ bytes in JSON envelope showing size for now.
+            const body = try std.fmt.allocPrint(alloc, "{{\"data\":\"ssz_omitted\",\"size\":{d}}}", .{handler_res.data.len});
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = body,
+                .meta = handler_res.meta,
+            };
         }
-
         if (std.mem.eql(u8, op, "getDebugHeads")) {
-            const heads = try handlers.debug.getHeads(ctx);
-            defer alloc.free(heads);
+            const handler_res = try handlers.debug.getHeads(ctx);
+            defer alloc.free(handler_res.data);
             var buf = std.ArrayListUnmanaged(u8).empty;
             errdefer buf.deinit(alloc);
             try buf.appendSlice(alloc, "{\"data\":[");
-            for (heads, 0..) |h, i| {
+            for (handler_res.data, 0..) |h, i| {
                 if (i > 0) try buf.appendSlice(alloc, ",");
                 const entry = try std.fmt.allocPrint(alloc, "{{\"slot\":{d},\"root\":\"0x{s}\"}}", .{
                     h.slot,
@@ -302,28 +426,37 @@ pub const HttpServer = struct {
                 try buf.appendSlice(alloc, entry);
             }
             try buf.appendSlice(alloc, "]}");
-            return .{ .status = 200, .body = try buf.toOwnedSlice(alloc) };
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = try buf.toOwnedSlice(alloc),
+                .meta = handler_res.meta,
+            };
         }
 
-        // Events endpoint.
+        // Events endpoint (SSE — special path).
         if (std.mem.eql(u8, op, "getEvents")) {
             handlers.events.getEvents(ctx, match.getParam("topics") orelse "") catch |err| {
                 return err;
             };
             const body = try alloc.dupe(u8, "{}");
-            return .{ .status = 200, .body = body };
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = body,
+            };
         }
 
         // Validator endpoints.
         if (std.mem.eql(u8, op, "getProposerDuties")) {
             const epoch_str = match.getParam("epoch") orelse return error.InvalidBlockId;
             const epoch = std.fmt.parseInt(u64, epoch_str, 10) catch return error.InvalidBlockId;
-            const duties = try handlers.validator.getProposerDuties(ctx, epoch);
-            defer alloc.free(duties);
+            const handler_res = try handlers.validator.getProposerDuties(ctx, epoch);
+            defer alloc.free(handler_res.data);
             var buf = std.ArrayListUnmanaged(u8).empty;
             errdefer buf.deinit(alloc);
-            try buf.appendSlice(alloc, "{\"dependent_root\":\"0x" ++ "00" ** 32 ++ "\",\"execution_optimistic\":false,\"data\":[");
-            for (duties, 0..) |d, i| {
+            try buf.appendSlice(alloc, "{\"data\":[");
+            for (handler_res.data, 0..) |d, i| {
                 if (i > 0) try buf.appendSlice(alloc, ",");
                 const entry = try std.fmt.allocPrint(alloc,
                     "{{\"pubkey\":\"0x{s}\",\"validator_index\":\"{d}\",\"slot\":\"{d}\"}}",
@@ -331,8 +464,26 @@ pub const HttpServer = struct {
                 defer alloc.free(entry);
                 try buf.appendSlice(alloc, entry);
             }
-            try buf.appendSlice(alloc, "]}");
-            return .{ .status = 200, .body = try buf.toOwnedSlice(alloc) };
+            try buf.appendSlice(alloc, "]");
+            // Emit metadata (dependent_root, execution_optimistic)
+            const meta = handler_res.meta;
+            if (meta.dependent_root) |root| {
+                const hex = std.fmt.bytesToHex(&root, .lower);
+                const dep_root = try std.fmt.allocPrint(alloc, ",\"dependent_root\":\"0x{s}\"", .{hex});
+                defer alloc.free(dep_root);
+                try buf.appendSlice(alloc, dep_root);
+            }
+            if (meta.execution_optimistic) |opt| {
+                const s = if (opt) ",\"execution_optimistic\":true" else ",\"execution_optimistic\":false";
+                try buf.appendSlice(alloc, s);
+            }
+            try buf.appendSlice(alloc, "}");
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = try buf.toOwnedSlice(alloc),
+                .meta = handler_res.meta,
+            };
         }
         if (std.mem.eql(u8, op, "getAttesterDuties")) {
             return error.NotImplemented;
@@ -341,50 +492,14 @@ pub const HttpServer = struct {
             return error.NotImplemented;
         }
 
-        // Node peer count.
-        if (std.mem.eql(u8, op, "getPeerCount")) {
-            const resp = handlers.node.getPeerCount(ctx);
-            const body = try response_mod.encodeJsonResponse(alloc, types.PeerCount, resp);
-            return .{ .status = 200, .body = body };
-        }
-
         // Config endpoints.
         if (std.mem.eql(u8, op, "getSpec")) {
-            const resp = handlers.config.getSpec(ctx);
-            const body = try response_mod.encodeJsonResponse(alloc, handlers.config.SpecData, resp);
-            return .{ .status = 200, .body = body };
+            const result = handlers.config.getSpec(ctx);
+            return self.makeJsonResult(handlers.config.SpecData, result);
         }
         if (std.mem.eql(u8, op, "getForkSchedule")) {
-            const resp = handlers.config.getForkSchedule(ctx);
-            const body = try response_mod.encodeJsonResponse(alloc, []const types.ForkScheduleEntry, resp);
-            return .{ .status = 200, .body = body };
-        }
-
-        // Pool endpoints.
-        if (std.mem.eql(u8, op, "getPoolAttestations")) {
-            const resp = handlers.beacon.getPoolAttestations(ctx);
-            const body = try response_mod.encodeJsonResponse(alloc, types.PoolCounts, resp);
-            return .{ .status = 200, .body = body };
-        }
-        if (std.mem.eql(u8, op, "getPoolVoluntaryExits")) {
-            const resp = handlers.beacon.getPoolVoluntaryExits(ctx);
-            const body = try std.fmt.allocPrint(alloc, "{{\"data\":{{\"count\":{d}}}}}", .{resp.data});
-            return .{ .status = 200, .body = body };
-        }
-        if (std.mem.eql(u8, op, "getPoolProposerSlashings")) {
-            const resp = handlers.beacon.getPoolProposerSlashings(ctx);
-            const body = try std.fmt.allocPrint(alloc, "{{\"data\":{{\"count\":{d}}}}}", .{resp.data});
-            return .{ .status = 200, .body = body };
-        }
-        if (std.mem.eql(u8, op, "getPoolAttesterSlashings")) {
-            const resp = handlers.beacon.getPoolAttesterSlashings(ctx);
-            const body = try std.fmt.allocPrint(alloc, "{{\"data\":{{\"count\":{d}}}}}", .{resp.data});
-            return .{ .status = 200, .body = body };
-        }
-        if (std.mem.eql(u8, op, "getPoolBlsToExecutionChanges")) {
-            const resp = handlers.beacon.getPoolBlsToExecutionChanges(ctx);
-            const body = try std.fmt.allocPrint(alloc, "{{\"data\":{{\"count\":{d}}}}}", .{resp.data});
-            return .{ .status = 200, .body = body };
+            const result = handlers.config.getForkSchedule(ctx);
+            return self.makeJsonResult([]const types.ForkScheduleEntry, result);
         }
 
         return error.NotImplemented;
@@ -411,7 +526,7 @@ pub const HttpServer = struct {
                 .status = 405,
                 .status_text = "Method Not Allowed",
                 .content_type = "application/json",
-                .body = "{\"message\":\"Method not allowed\"}",
+                .body = "{\"statusCode\":405,\"message\":\"Method not allowed\"}",
             };
 
         // OPTIONS (CORS preflight).
@@ -431,18 +546,26 @@ pub const HttpServer = struct {
                 .status = 404,
                 .status_text = "Not Found",
                 .content_type = "application/json",
-                .body = "{\"message\":\"Route not found\"}",
+                .body = "{\"statusCode\":404,\"message\":\"Route not found\"}",
             };
         };
 
         const result = self.dispatchHandler(match) catch |err| {
-            return err;
+            const api_err = error_response.fromZigError(err);
+            var err_buf: [256]u8 = undefined;
+            const err_json = api_err.formatJson(&err_buf);
+            return .{
+                .status = api_err.code.statusCode(),
+                .status_text = api_err.code.phrase(),
+                .content_type = "application/json",
+                .body = err_json,
+            };
         };
 
         return .{
             .status = result.status,
             .status_text = "OK",
-            .content_type = "application/json",
+            .content_type = result.content_type,
             .body = result.body,
         };
     }
@@ -472,67 +595,28 @@ fn parseIpAddress(addr: []const u8, port: u16) !net.IpAddress {
     return .{ .ip4 = net.Ip4Address.parse(addr, port) catch return error.AddressFamilyUnsupported };
 }
 
-/// Find the Accept header value from the request.
-fn findHeader(request: *http.Server.Request) ?[]const u8 {
+/// Find a named header value from the request.
+fn findHeader(request: *http.Server.Request, name: []const u8) ?[]const u8 {
     var it = request.iterateHeaders();
     while (it.next()) |header| {
-        if (std.ascii.eqlIgnoreCase(header.name, "accept")) {
+        if (std.ascii.eqlIgnoreCase(header.name, name)) {
             return header.value;
         }
     }
     return null;
 }
 
-/// Map API errors to HTTP error responses.
-fn respondError(request: *http.Server.Request, status: http.Status, message: []const u8) !void {
-    try request.respond(message, .{
-        .status = status,
+/// Send a Beacon API error response (JSON, with statusCode field).
+fn respondApiError(request: *http.Server.Request, api_err: error_response.ApiError) !void {
+    var buf: [512]u8 = undefined;
+    const json = api_err.formatJson(&buf);
+    try request.respond(json, .{
+        .status = statusFromCode(api_err.code.statusCode()),
         .extra_headers = &.{
             .{ .name = "Content-Type", .value = "application/json" },
             .{ .name = "Access-Control-Allow-Origin", .value = "*" },
         },
     });
-}
-
-fn respondApiError(request: *http.Server.Request, err: anyerror) !void {
-    const status: http.Status, const message: []const u8 = switch (err) {
-        error.BlockNotFound, error.StateNotFound, error.ValidatorNotFound, error.SlotNotFound => .{
-            .not_found, "{\"message\":\"Resource not found\"}",
-        },
-        error.InvalidBlockId, error.InvalidStateId, error.InvalidValidatorId => .{
-            .bad_request, "{\"message\":\"Invalid identifier\"}",
-        },
-        error.NotImplemented => .{
-            .not_implemented, "{\"message\":\"Not implemented\"}",
-        },
-        else => .{
-            .internal_server_error, "{\"message\":\"Internal server error\"}",
-        },
-    };
-    try respondError(request, status, message);
-}
-
-fn apiErrorResponse(err: anyerror) HttpServer.HttpResponse {
-    const status: u16, const message: []const u8 = switch (err) {
-        error.BlockNotFound, error.StateNotFound, error.ValidatorNotFound, error.SlotNotFound => .{
-            404, "{\"message\":\"Resource not found\"}",
-        },
-        error.InvalidBlockId, error.InvalidStateId, error.InvalidValidatorId => .{
-            400, "{\"message\":\"Invalid identifier\"}",
-        },
-        error.NotImplemented => .{
-            501, "{\"message\":\"Not implemented\"}",
-        },
-        else => .{
-            500, "{\"message\":\"Internal server error\"}",
-        },
-    };
-    return .{
-        .status = status,
-        .status_text = "Error",
-        .content_type = "application/json",
-        .body = message,
-    };
 }
 
 fn statusFromCode(code: u16) http.Status {
@@ -581,15 +665,42 @@ test "handleRequest GET /eth/v1/node/syncing" {
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "is_syncing") != null);
 }
 
-test "handleRequest GET /eth/v1/node/health" {
+test "handleRequest GET /eth/v1/node/health ready" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    tc.ctx.sync_status.is_syncing = false;
+    tc.ctx.sync_status.head_slot = 1000;
     const resp = try server.handleRequest("GET", "/eth/v1/node/health", null);
-    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+    defer std.testing.allocator.free(resp.body);
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
+}
+
+test "handleRequest GET /eth/v1/node/health syncing returns 206" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    tc.ctx.sync_status.is_syncing = true;
+    const resp = try server.handleRequest("GET", "/eth/v1/node/health", null);
+    defer std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 206), resp.status);
+}
+
+test "handleRequest GET /eth/v1/node/health not initialized returns 503" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    tc.ctx.sync_status.is_syncing = false;
+    tc.ctx.sync_status.head_slot = 0;
+    const resp = try server.handleRequest("GET", "/eth/v1/node/health", null);
+    defer std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 503), resp.status);
 }
 
 test "handleRequest GET /eth/v1/node/peers" {
@@ -638,7 +749,7 @@ test "handleRequest GET /eth/v1/config/fork_schedule" {
     try std.testing.expectEqual(@as(u16, 200), resp.status);
 }
 
-test "handleRequest unknown route returns 404" {
+test "handleRequest unknown route returns 404 with statusCode field" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
@@ -646,6 +757,7 @@ test "handleRequest unknown route returns 404" {
     const resp = try server.handleRequest("GET", "/eth/v1/not/a/route", null);
 
     try std.testing.expectEqual(@as(u16, 404), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "statusCode") != null);
 }
 
 test "handleRequest wrong method returns 405" {
@@ -669,6 +781,17 @@ test "handleRequest with query string" {
     try std.testing.expectEqual(@as(u16, 200), resp.status);
 }
 
+test "handleRequest pool submission POST returns 204" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("POST", "/eth/v1/beacon/pool/attestations", null);
+    defer std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 204), resp.status);
+}
+
 test "splitTarget with query" {
     const path, const query = splitTarget("/eth/v1/node/version?foo=bar");
     try std.testing.expectEqualStrings("/eth/v1/node/version", path);
@@ -684,4 +807,17 @@ test "splitTarget without query" {
 test "parseIpAddress valid" {
     const addr = try parseIpAddress("127.0.0.1", 5052);
     try std.testing.expectEqual(@as(u16, 5052), addr.ip4.port);
+}
+
+test "error responses use standard Beacon API format" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+
+    // Not found
+    const resp = try server.handleRequest("GET", "/eth/v1/not/a/route", null);
+    try std.testing.expectEqual(@as(u16, 404), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"statusCode\":404") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"message\"") != null);
 }

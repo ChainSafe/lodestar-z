@@ -12,6 +12,9 @@ const context = @import("../context.zig");
 const ApiContext = context.ApiContext;
 const CachedBeaconState = context.CachedBeaconState;
 const preset = @import("preset").preset;
+const handler_result = @import("../handler_result.zig");
+const HandlerResult = handler_result.HandlerResult;
+const ResponseMeta = handler_result.ResponseMeta;
 
 /// A beacon chain head: the pair (slot, root) of a chain tip visible to
 /// fork-choice.
@@ -30,14 +33,14 @@ pub const HeadInfo = struct {
 /// - `genesis` — returns the genesis state (slot 0) from the DB archive
 /// - slot number — returns the archived state at that slot
 /// - hex root — looks up state by state_root in the DB archive
-pub fn getState(ctx: *ApiContext, state_id: types.StateId) ![]const u8 {
+pub fn getState(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([]const u8) {
     switch (state_id) {
         .head => {
             // Try to get the head state's raw SSZ via the DB.
             // The head state root is known from the head tracker.
             const state_root = ctx.head_tracker.head_state_root;
             if (try ctx.db.getStateArchiveByRoot(state_root)) |data| {
-                return data;
+                return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = false } };
             }
             // Head state might not be archived yet — not available.
             return error.StateNotAvailable;
@@ -45,24 +48,30 @@ pub fn getState(ctx: *ApiContext, state_id: types.StateId) ![]const u8 {
         .finalized => {
             // Look up the finalized slot's state from the archive.
             const finalized_slot = ctx.head_tracker.finalized_slot;
-            return (try ctx.db.getStateArchive(finalized_slot)) orelse error.StateNotAvailable;
+            const data = (try ctx.db.getStateArchive(finalized_slot)) orelse return error.StateNotAvailable;
+            return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = true } };
         },
         .genesis => {
             // Genesis state is at slot 0.
-            return (try ctx.db.getStateArchive(0)) orelse error.StateNotAvailable;
+            const data = (try ctx.db.getStateArchive(0)) orelse return error.StateNotAvailable;
+            return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = true } };
         },
         .justified => {
             // Look up the justified slot's state from the archive.
             const justified_slot = ctx.head_tracker.justified_slot;
-            return (try ctx.db.getStateArchive(justified_slot)) orelse error.StateNotAvailable;
+            const data = (try ctx.db.getStateArchive(justified_slot)) orelse return error.StateNotAvailable;
+            return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = false } };
         },
         .slot => |slot| {
             // Direct slot lookup in the archive.
-            return (try ctx.db.getStateArchive(slot)) orelse error.StateNotAvailable;
+            const data = (try ctx.db.getStateArchive(slot)) orelse return error.StateNotAvailable;
+            const is_finalized = slot <= ctx.head_tracker.finalized_slot;
+            return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = is_finalized } };
         },
         .root => |root| {
             // Look up by state root.
-            return (try ctx.db.getStateArchiveByRoot(root)) orelse error.StateNotAvailable;
+            const data = (try ctx.db.getStateArchiveByRoot(root)) orelse return error.StateNotAvailable;
+            return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = false } };
         },
     }
 }
@@ -74,7 +83,7 @@ pub fn getState(ctx: *ApiContext, state_id: types.StateId) ![]const u8 {
 /// Note: A full implementation would query the fork-choice store for all
 /// known tips. Currently the head tracker exposes only the canonical head,
 /// so we return that single entry.
-pub fn getHeads(ctx: *ApiContext) ![]const HeadInfo {
+pub fn getHeads(ctx: *ApiContext) !HandlerResult([]const HeadInfo) {
     // Allocate a single-element slice on ctx.allocator so the caller can
     // free it uniformly.
     const heads = try ctx.allocator.alloc(HeadInfo, 1);
@@ -82,7 +91,7 @@ pub fn getHeads(ctx: *ApiContext) ![]const HeadInfo {
         .slot = ctx.head_tracker.head_slot,
         .root = ctx.head_tracker.head_root,
     };
-    return heads;
+    return .{ .data = heads };
 }
 
 // ---------------------------------------------------------------------------
@@ -127,9 +136,9 @@ test "getState slot returns data from DB archive" {
     const fake_state = [_]u8{0xDE, 0xAD, 0xBE, 0xEF};
     try tc.db.putStateArchive(42, [_]u8{0x11} ** 32, &fake_state);
 
-    const data = try getState(&tc.ctx, .{ .slot = 42 });
-    defer tc.ctx.allocator.free(data);
-    try std.testing.expectEqualSlices(u8, &fake_state, data);
+    const result = try getState(&tc.ctx, .{ .slot = 42 });
+    defer tc.ctx.allocator.free(result.data);
+    try std.testing.expectEqualSlices(u8, &fake_state, result.data);
 }
 
 test "getState root returns data from DB archive" {
@@ -140,19 +149,19 @@ test "getState root returns data from DB archive" {
     const state_root = [_]u8{0x22} ** 32;
     try tc.db.putStateArchive(100, state_root, &fake_state);
 
-    const data = try getState(&tc.ctx, .{ .root = state_root });
-    defer tc.ctx.allocator.free(data);
-    try std.testing.expectEqualSlices(u8, &fake_state, data);
+    const result = try getState(&tc.ctx, .{ .root = state_root });
+    defer tc.ctx.allocator.free(result.data);
+    try std.testing.expectEqualSlices(u8, &fake_state, result.data);
 }
 
 test "getHeads returns single head entry" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
-    const heads = try getHeads(&tc.ctx);
-    defer tc.ctx.allocator.free(heads);
+    const result = try getHeads(&tc.ctx);
+    defer tc.ctx.allocator.free(result.data);
 
-    try std.testing.expectEqual(@as(usize, 1), heads.len);
-    try std.testing.expectEqual(tc.ctx.head_tracker.head_slot, heads[0].slot);
-    try std.testing.expectEqual(tc.ctx.head_tracker.head_root, heads[0].root);
+    try std.testing.expectEqual(@as(usize, 1), result.data.len);
+    try std.testing.expectEqual(tc.ctx.head_tracker.head_slot, result.data[0].slot);
+    try std.testing.expectEqual(tc.ctx.head_tracker.head_root, result.data[0].root);
 }
