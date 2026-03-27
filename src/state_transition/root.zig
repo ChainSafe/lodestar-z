@@ -129,13 +129,15 @@ const seed = @import("./utils/seed.zig");
 pub const state_transition = @import("./state_transition.zig");
 pub const BlockExternalData = state_transition.BlockExternalData;
 pub const preset = @import("preset").preset;
-const EpochShuffling = @import("./utils/epoch_shuffling.zig");
-pub const calculateShufflingDecisionRoot = EpochShuffling.calculateShufflingDecisionRoot;
+const EpochShufflingMod = @import("./utils/epoch_shuffling.zig");
+pub const calculateShufflingDecisionRoot = EpochShufflingMod.calculateShufflingDecisionRoot;
+pub const EpochShuffling = EpochShufflingMod.EpochShuffling;
+pub const EpochShufflingRc = EpochShufflingMod.EpochShufflingRc;
 pub const processProposerLookahead = @import("./epoch/process_proposer_lookahead.zig").processProposerLookahead;
 
 test {
     testing.refAllDecls(@This());
     testing.refAllDecls(seed);
     testing.refAllDecls(state_transition);
-    testing.refAllDecls(EpochShuffling);
+    testing.refAllDecls(EpochShufflingMod);
 }
