@@ -159,6 +159,75 @@ pub fn importVerifiedBlock(
                 error.InvalidBlock => {},
                 else => return BlockImportError.ForkChoiceError,
             };
+
+            // 3a. Wire attestations from the imported block into fork choice.
+            // Only process attestations when block epoch is recent enough:
+            // blocks older than current_epoch - FORK_CHOICE_ATT_EPOCH_LIMIT have no
+            // effect on fork choice head selection.
+            const current_epoch = computeEpochAtSlot(fc.current_slot);
+            if (block_epoch + FORK_CHOICE_ATT_EPOCH_LIMIT >= current_epoch) {
+                const block_body = block_input.block.beaconBlock().beaconBlockBody();
+                const any_atts = block_body.attestations();
+                switch (any_atts) {
+                    .phase0 => |atts| {
+                        for (atts.items) |*att| {
+                            const att_target_epoch = att.data.target.epoch;
+                            const att_block_root = att.data.beacon_block_root;
+                            var indices = post_state.epoch_cache.getAttestingIndicesPhase0(att) catch continue;
+                            defer indices.deinit();
+                            for (indices.items) |validator_index| {
+                                fc.onAttestation(
+                                    ctx.allocator,
+                                    validator_index,
+                                    att_block_root,
+                                    att_target_epoch,
+                                ) catch {};
+                            }
+                        }
+                    },
+                    .electra => |atts| {
+                        for (atts.items) |*att| {
+                            const att_target_epoch = att.data.target.epoch;
+                            const att_block_root = att.data.beacon_block_root;
+                            var indices = post_state.epoch_cache.getAttestingIndicesElectra(att) catch continue;
+                            defer indices.deinit();
+                            for (indices.items) |validator_index| {
+                                fc.onAttestation(
+                                    ctx.allocator,
+                                    validator_index,
+                                    att_block_root,
+                                    att_target_epoch,
+                                ) catch {};
+                            }
+                        }
+                    },
+                }
+            }
+
+            // 3b. Wire attester slashings into fork choice.
+            // Mark equivocating validators so their weight is excluded from future head computation.
+            const any_slashings = block_input.block.beaconBlock().beaconBlockBody().attesterSlashings();
+            switch (any_slashings) {
+                inline else => |slashings| {
+                    for (slashings.items) |*slashing| {
+                        const a = slashing.attestation_1.attesting_indices.items;
+                        const b = slashing.attestation_2.attesting_indices.items;
+                        var i: usize = 0;
+                        var j: usize = 0;
+                        while (i < a.len and j < b.len) {
+                            if (a[i] == b[j]) {
+                                fc.onAttesterSlashing(&[_]u64{a[i]}) catch {};
+                                i += 1;
+                                j += 1;
+                            } else if (a[i] < b[j]) {
+                                i += 1;
+                            } else {
+                                j += 1;
+                            }
+                        }
+                    }
+                },
+            }
         }
     }
 
