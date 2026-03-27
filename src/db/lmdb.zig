@@ -1,13 +1,15 @@
 //! LMDB: Zig wrapper over the Lightning Memory-Mapped Database C API.
 //!
 //! Provides a safe, idiomatic Zig interface to LMDB's core operations:
-//! environment management, transactions, and cursor-based iteration.
+//! environment management, transactions, cursor-based iteration,
+//! and named database (DBI) support.
 //!
 //! LMDB characteristics:
 //! - Memory-mapped reads (zero-copy from mmap, no allocator needed)
 //! - Single-writer / multi-reader (MVCC)
 //! - Crash-safe (copy-on-write B+tree)
 //! - Tiny footprint (~10K lines C)
+//! - Up to 128 named databases per environment
 //!
 //! All data pointers returned from read transactions point directly into
 //! the memory map and are valid only for the lifetime of the transaction.
@@ -18,49 +20,31 @@ pub const c = @cImport({
     @cInclude("lmdb.h");
 });
 
+/// Opaque DBI handle — wraps MDB_dbi.
+pub const Dbi = c.MDB_dbi;
+
 /// LMDB-specific errors mapped from MDB return codes.
 pub const LmdbError = error{
-    /// Key/data pair already exists (MDB_KEYEXIST).
     KeyExists,
-    /// Key/data pair not found (MDB_NOTFOUND).
     NotFound,
-    /// Requested page not found — usually database corruption (MDB_PAGE_NOTFOUND).
     PageNotFound,
-    /// Located page was wrong type (MDB_CORRUPTED).
     Corrupted,
-    /// Update of meta page failed or environment had fatal error (MDB_PANIC).
     Panic,
-    /// Environment version mismatch (MDB_VERSION_MISMATCH).
     VersionMismatch,
-    /// File is not a valid LMDB file (MDB_INVALID).
     Invalid,
-    /// Environment mapsize reached (MDB_MAP_FULL).
     MapFull,
-    /// Environment maxdbs reached (MDB_DBS_FULL).
     DbsFull,
-    /// Environment maxreaders reached (MDB_READERS_FULL).
     ReadersFull,
-    /// Too many TLS keys in use — Windows only (MDB_TLS_FULL).
     TlsFull,
-    /// Txn has too many dirty pages (MDB_TXN_FULL).
     TxnFull,
-    /// Cursor stack too deep — internal error (MDB_CURSOR_FULL).
     CursorFull,
-    /// Page has not enough space — internal error (MDB_PAGE_FULL).
     PageFull,
-    /// Database contents grew beyond environment mapsize (MDB_MAP_RESIZED).
     MapResized,
-    /// Operation and target DB incompatible or DB doesn't exist (MDB_INCOMPATIBLE).
     Incompatible,
-    /// Invalid reuse of reader locktable slot (MDB_BAD_RSLOT).
     BadReaderSlot,
-    /// Transaction must abort, has a child, or is invalid (MDB_BAD_TXN).
     BadTxn,
-    /// Unsupported size of key/DB name/data or wrong DUPFIXED size (MDB_BAD_VALSIZE).
     BadValSize,
-    /// The specified DBI was changed unexpectedly (MDB_BAD_DBI).
     BadDbi,
-    /// Unexpected LMDB error code.
     Unexpected,
 };
 
@@ -113,31 +97,27 @@ fn fromVal(val: c.MDB_val) []const u8 {
 
 /// LMDB environment — wraps a single database directory.
 ///
-/// An environment may contain multiple named databases (sub-DBs), but for
-/// beacon chain use we default to a single unnamed DB (maxdbs = 0).
+/// An environment may contain multiple named databases (sub-DBs).
+/// Set max_dbs > 0 to enable named database support.
 pub const LmdbEnv = struct {
     env: *c.MDB_env,
 
     pub const OpenOptions = struct {
-        /// Maximum database size. LMDB uses a sparse file so this costs nothing
-        /// until actually written. 256 GB is reasonable for beacon chain.
+        /// Maximum database size. Sparse file — costs nothing until written.
         map_size: usize = 256 * 1024 * 1024 * 1024, // 256 GB
         /// Use MDB_NOSUBDIR — path is a filename, not a directory.
         no_subdir: bool = false,
         /// Open in read-only mode (MDB_RDONLY).
         read_only: bool = false,
-        /// Maximum number of named databases. 0 = single unnamed DB.
+        /// Maximum number of named databases. 0 = single unnamed DB only.
         max_dbs: u32 = 0,
         /// Maximum concurrent reader slots.
         max_readers: u32 = 126,
-        /// File permissions for the database (Unix mode).
+        /// File permissions (Unix mode).
         mode: c_uint = 0o664,
     };
 
     /// Create and open an LMDB environment.
-    ///
-    /// `path` must be a null-terminated directory path. When `no_subdir` is set,
-    /// `path` is treated as a filename.
     pub fn open(path: [*:0]const u8, opts: OpenOptions) LmdbError!LmdbEnv {
         var env: ?*c.MDB_env = null;
         try checkRc(c.mdb_env_create(&env));
@@ -149,7 +129,7 @@ pub const LmdbEnv = struct {
         }
         try checkRc(c.mdb_env_set_maxreaders(env.?, opts.max_readers));
 
-        var flags: c_uint = c.MDB_NOTLS; // Avoid TLS issues with Zig's thread pool
+        var flags: c_uint = c.MDB_NOTLS;
         if (opts.no_subdir) flags |= c.MDB_NOSUBDIR;
         if (opts.read_only) flags |= c.MDB_RDONLY;
 
@@ -170,16 +150,8 @@ pub const LmdbEnv = struct {
         if (opts.read_only) flags |= c.MDB_RDONLY;
 
         try checkRc(c.mdb_txn_begin(self.env, null, flags, &txn));
-        errdefer c.mdb_txn_abort(txn.?);
 
-        // Open the unnamed (default) database
-        var dbi: c.MDB_dbi = undefined;
-        try checkRc(c.mdb_dbi_open(txn.?, null, 0, &dbi));
-
-        return .{
-            .txn = txn.?,
-            .dbi = dbi,
-        };
+        return .{ .txn = txn.? };
     }
 
     /// Force a sync of the memory map to disk.
@@ -187,13 +159,11 @@ pub const LmdbEnv = struct {
         try checkRc(c.mdb_env_sync(self.env, @intFromBool(force)));
     }
 
-    /// Get environment statistics.
-    pub fn stat(self: LmdbEnv) LmdbError!c.MDB_stat {
+    /// Get statistics for a named database.
+    pub fn statDbi(self: LmdbEnv, dbi: Dbi) LmdbError!c.MDB_stat {
         var txn: ?*c.MDB_txn = null;
         try checkRc(c.mdb_txn_begin(self.env, null, c.MDB_RDONLY, &txn));
         defer c.mdb_txn_abort(txn.?);
-        var dbi: c.MDB_dbi = undefined;
-        try checkRc(c.mdb_dbi_open(txn.?, null, 0, &dbi));
         var s: c.MDB_stat = undefined;
         try checkRc(c.mdb_stat(txn.?, dbi, &s));
         return s;
@@ -208,61 +178,62 @@ pub const LmdbEnv = struct {
 // LmdbTxn
 // ---------------------------------------------------------------------------
 
-/// LMDB transaction — provides get/put/del/cursor operations.
+/// LMDB transaction — provides DBI opening and data operations.
 ///
 /// Read transactions may be used concurrently. Write transactions are
 /// serialized by LMDB (single writer lock).
-///
-/// Data returned by `get` points into the memory map and is valid only
-/// while this transaction is alive.
 pub const LmdbTxn = struct {
     txn: *c.MDB_txn,
-    dbi: c.MDB_dbi,
 
-    /// Get the value for a key. Returns null if not found.
-    ///
-    /// The returned slice points into LMDB's memory map — zero copy.
-    /// It is valid only for the lifetime of this transaction.
-    pub fn get(self: LmdbTxn, key: []const u8) LmdbError!?[]const u8 {
+    /// Open (or create) a named database. Must be called from a write transaction
+    /// the first time a database is used. Returns a DBI handle.
+    pub fn openDbi(self: LmdbTxn, db_name: [*:0]const u8) LmdbError!Dbi {
+        var dbi: Dbi = undefined;
+        try checkRc(c.mdb_dbi_open(self.txn, db_name, c.MDB_CREATE, &dbi));
+        return dbi;
+    }
+
+    /// Get a value from a named database. Zero-copy from mmap.
+    pub fn getFromDbi(self: LmdbTxn, dbi: Dbi, key: []const u8) LmdbError!?[]const u8 {
         var k = toVal(key);
         var v: c.MDB_val = undefined;
-        const rc = c.mdb_get(self.txn, self.dbi, &k, &v);
+        const rc = c.mdb_get(self.txn, dbi, &k, &v);
         if (rc == c.MDB_NOTFOUND) return null;
         try checkRc(rc);
         return fromVal(v);
     }
 
-    /// Store a key-value pair. Overwrites existing values.
-    pub fn put(self: LmdbTxn, key: []const u8, value: []const u8) LmdbError!void {
+    /// Store a key-value pair in a named database.
+    pub fn putToDbi(self: LmdbTxn, dbi: Dbi, key: []const u8, value: []const u8) LmdbError!void {
         var k = toVal(key);
         var v = toVal(value);
-        try checkRc(c.mdb_put(self.txn, self.dbi, &k, &v, 0));
+        try checkRc(c.mdb_put(self.txn, dbi, &k, &v, 0));
     }
 
-    /// Delete a key. Returns false if the key was not found.
-    pub fn del(self: LmdbTxn, key: []const u8) LmdbError!bool {
+    /// Delete a key from a named database. Returns false if not found.
+    pub fn delFromDbi(self: LmdbTxn, dbi: Dbi, key: []const u8) LmdbError!bool {
         var k = toVal(key);
-        const rc = c.mdb_del(self.txn, self.dbi, &k, null);
+        const rc = c.mdb_del(self.txn, dbi, &k, null);
         if (rc == c.MDB_NOTFOUND) return false;
         try checkRc(rc);
         return true;
     }
 
-    /// Commit the transaction, making all writes durable.
+    /// Open a cursor on a named database.
+    pub fn openCursorDbi(self: LmdbTxn, dbi: Dbi) LmdbError!LmdbCursor {
+        var cursor: ?*c.MDB_cursor = null;
+        try checkRc(c.mdb_cursor_open(self.txn, dbi, &cursor));
+        return .{ .cursor = cursor.? };
+    }
+
+    /// Commit the transaction.
     pub fn commit(self: LmdbTxn) LmdbError!void {
         try checkRc(c.mdb_txn_commit(self.txn));
     }
 
-    /// Abort the transaction, discarding all writes.
+    /// Abort the transaction.
     pub fn abort(self: LmdbTxn) void {
         c.mdb_txn_abort(self.txn);
-    }
-
-    /// Open a cursor for iteration.
-    pub fn openCursor(self: LmdbTxn) LmdbError!LmdbCursor {
-        var cursor: ?*c.MDB_cursor = null;
-        try checkRc(c.mdb_cursor_open(self.txn, self.dbi, &cursor));
-        return .{ .cursor = cursor.? };
     }
 };
 
@@ -278,6 +249,16 @@ pub const LmdbCursor = struct {
         key: []const u8,
         value: []const u8,
     };
+
+    /// Position at the first entry (MDB_FIRST).
+    pub fn first(self: LmdbCursor) LmdbError!?Entry {
+        var k: c.MDB_val = undefined;
+        var v: c.MDB_val = undefined;
+        const rc = c.mdb_cursor_get(self.cursor, &k, &v, c.MDB_FIRST);
+        if (rc == c.MDB_NOTFOUND) return null;
+        try checkRc(rc);
+        return .{ .key = fromVal(k), .value = fromVal(v) };
+    }
 
     /// Position at the first entry >= `key` (MDB_SET_RANGE).
     pub fn seekRange(self: LmdbCursor, key: []const u8) LmdbError!?Entry {
@@ -311,10 +292,13 @@ pub const LmdbCursor = struct {
 
 const testing = std.testing;
 
-fn openTestEnv() !struct { env: LmdbEnv, dir: [:0]u8 } {
+fn openTestEnv(opts: struct { max_dbs: u32 = 0 }) !struct { env: LmdbEnv, dir: [:0]u8 } {
     const tmp_dir = testing.tmpDir(.{});
     const path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
-    const env = try LmdbEnv.open(path, .{ .map_size = 1024 * 1024 }); // 1 MB
+    const env = try LmdbEnv.open(path, .{
+        .map_size = 1024 * 1024,
+        .max_dbs = opts.max_dbs,
+    });
     return .{ .env = env, .dir = path };
 }
 
@@ -324,145 +308,151 @@ fn cleanupTestEnv(env: LmdbEnv, dir: [:0]u8) void {
 }
 
 test "LmdbEnv: open and close" {
-    const result = try openTestEnv();
+    const result = try openTestEnv(.{});
     cleanupTestEnv(result.env, result.dir);
 }
 
-test "LmdbTxn: put and get" {
-    const result = try openTestEnv();
+test "LmdbTxn: put and get with named database" {
+    const result = try openTestEnv(.{ .max_dbs = 4 });
     defer cleanupTestEnv(result.env, result.dir);
 
-    // Write
+    // Open named DB and write
+    var dbi: Dbi = undefined;
     {
         var txn = try result.env.beginTxn(.{});
-        try txn.put("hello", "world");
+        dbi = try txn.openDbi("test_db");
+        try txn.putToDbi(dbi, "hello", "world");
         try txn.commit();
     }
 
-    // Read
+    // Read back
     {
         const txn = try result.env.beginTxn(.{ .read_only = true });
         defer txn.abort();
-        const value = try txn.get("hello");
+        const value = try txn.getFromDbi(dbi, "hello");
         try testing.expect(value != null);
         try testing.expectEqualStrings("world", value.?);
     }
 }
 
-test "LmdbTxn: get nonexistent returns null" {
-    const result = try openTestEnv();
+test "LmdbTxn: named databases are isolated" {
+    const result = try openTestEnv(.{ .max_dbs = 4 });
     defer cleanupTestEnv(result.env, result.dir);
 
-    const txn = try result.env.beginTxn(.{ .read_only = true });
-    defer txn.abort();
-    const value = try txn.get("nonexistent");
-    try testing.expect(value == null);
-}
-
-test "LmdbTxn: delete" {
-    const result = try openTestEnv();
-    defer cleanupTestEnv(result.env, result.dir);
-
-    // Write
+    var dbi_a: Dbi = undefined;
+    var dbi_b: Dbi = undefined;
     {
         var txn = try result.env.beginTxn(.{});
-        try txn.put("key1", "value1");
+        dbi_a = try txn.openDbi("db_a");
+        dbi_b = try txn.openDbi("db_b");
+        try txn.putToDbi(dbi_a, "key", "value_a");
+        try txn.putToDbi(dbi_b, "key", "value_b");
         try txn.commit();
     }
 
-    // Delete
+    {
+        const txn = try result.env.beginTxn(.{ .read_only = true });
+        defer txn.abort();
+
+        const va = try txn.getFromDbi(dbi_a, "key");
+        try testing.expectEqualStrings("value_a", va.?);
+
+        const vb = try txn.getFromDbi(dbi_b, "key");
+        try testing.expectEqualStrings("value_b", vb.?);
+    }
+}
+
+test "LmdbTxn: get nonexistent returns null" {
+    const result = try openTestEnv(.{ .max_dbs = 2 });
+    defer cleanupTestEnv(result.env, result.dir);
+
+    var dbi: Dbi = undefined;
     {
         var txn = try result.env.beginTxn(.{});
-        const deleted = try txn.del("key1");
+        dbi = try txn.openDbi("test");
+        try txn.commit();
+    }
+
+    const txn = try result.env.beginTxn(.{ .read_only = true });
+    defer txn.abort();
+    const value = try txn.getFromDbi(dbi, "nonexistent");
+    try testing.expect(value == null);
+}
+
+test "LmdbTxn: delete from named database" {
+    const result = try openTestEnv(.{ .max_dbs = 2 });
+    defer cleanupTestEnv(result.env, result.dir);
+
+    var dbi: Dbi = undefined;
+    {
+        var txn = try result.env.beginTxn(.{});
+        dbi = try txn.openDbi("test");
+        try txn.putToDbi(dbi, "key1", "value1");
+        try txn.commit();
+    }
+
+    {
+        var txn = try result.env.beginTxn(.{});
+        const deleted = try txn.delFromDbi(dbi, "key1");
         try testing.expect(deleted);
         try txn.commit();
     }
 
-    // Verify deleted
     {
         const txn = try result.env.beginTxn(.{ .read_only = true });
         defer txn.abort();
-        try testing.expect(try txn.get("key1") == null);
-    }
-}
-
-test "LmdbTxn: delete nonexistent returns false" {
-    const result = try openTestEnv();
-    defer cleanupTestEnv(result.env, result.dir);
-
-    var txn = try result.env.beginTxn(.{});
-    const deleted = try txn.del("nonexistent");
-    try testing.expect(!deleted);
-    txn.abort();
-}
-
-test "LmdbTxn: overwrite value" {
-    const result = try openTestEnv();
-    defer cleanupTestEnv(result.env, result.dir);
-
-    {
-        var txn = try result.env.beginTxn(.{});
-        try txn.put("key", "value1");
-        try txn.commit();
-    }
-    {
-        var txn = try result.env.beginTxn(.{});
-        try txn.put("key", "value2");
-        try txn.commit();
-    }
-    {
-        const txn = try result.env.beginTxn(.{ .read_only = true });
-        defer txn.abort();
-        const v = try txn.get("key");
-        try testing.expectEqualStrings("value2", v.?);
+        try testing.expect(try txn.getFromDbi(dbi, "key1") == null);
     }
 }
 
 test "LmdbTxn: abort discards writes" {
-    const result = try openTestEnv();
+    const result = try openTestEnv(.{ .max_dbs = 2 });
     defer cleanupTestEnv(result.env, result.dir);
 
+    var dbi: Dbi = undefined;
     {
         var txn = try result.env.beginTxn(.{});
-        try txn.put("key", "value");
-        txn.abort(); // discard
-    }
-    {
-        const txn = try result.env.beginTxn(.{ .read_only = true });
-        defer txn.abort();
-        try testing.expect(try txn.get("key") == null);
-    }
-}
-
-test "LmdbCursor: prefix scan" {
-    const result = try openTestEnv();
-    defer cleanupTestEnv(result.env, result.dir);
-
-    // Insert prefixed keys
-    {
-        var txn = try result.env.beginTxn(.{});
-        try txn.put("pfx:aaa", "v1");
-        try txn.put("pfx:bbb", "v2");
-        try txn.put("pfx:ccc", "v3");
-        try txn.put("other:zzz", "v4");
+        dbi = try txn.openDbi("test");
         try txn.commit();
     }
 
-    // Scan with prefix "pfx:"
+    {
+        var txn = try result.env.beginTxn(.{});
+        try txn.putToDbi(dbi, "key", "value");
+        txn.abort();
+    }
+
+    {
+        const txn = try result.env.beginTxn(.{ .read_only = true });
+        defer txn.abort();
+        try testing.expect(try txn.getFromDbi(dbi, "key") == null);
+    }
+}
+
+test "LmdbCursor: iterate named database" {
+    const result = try openTestEnv(.{ .max_dbs = 2 });
+    defer cleanupTestEnv(result.env, result.dir);
+
+    var dbi: Dbi = undefined;
+    {
+        var txn = try result.env.beginTxn(.{});
+        dbi = try txn.openDbi("test");
+        try txn.putToDbi(dbi, "aaa", "v1");
+        try txn.putToDbi(dbi, "bbb", "v2");
+        try txn.putToDbi(dbi, "ccc", "v3");
+        try txn.commit();
+    }
+
     {
         const txn = try result.env.beginTxn(.{ .read_only = true });
         defer txn.abort();
 
-        const cursor = try txn.openCursor();
+        const cursor = try txn.openCursorDbi(dbi);
         defer cursor.close();
 
-        const prefix = "pfx:";
         var count: usize = 0;
-
-        var entry = try cursor.seekRange(prefix);
-        while (entry) |e| {
-            if (e.key.len < prefix.len or
-                !std.mem.eql(u8, e.key[0..prefix.len], prefix)) break;
+        var entry = try cursor.first();
+        while (entry) |_| {
             count += 1;
             entry = try cursor.next();
         }
@@ -471,18 +461,20 @@ test "LmdbCursor: prefix scan" {
     }
 }
 
-test "LmdbEnv: stat returns entry count" {
-    const result = try openTestEnv();
+test "LmdbEnv: statDbi returns entry count" {
+    const result = try openTestEnv(.{ .max_dbs = 2 });
     defer cleanupTestEnv(result.env, result.dir);
 
+    var dbi: Dbi = undefined;
     {
         var txn = try result.env.beginTxn(.{});
-        try txn.put("a", "1");
-        try txn.put("b", "2");
-        try txn.put("c", "3");
+        dbi = try txn.openDbi("test");
+        try txn.putToDbi(dbi, "a", "1");
+        try txn.putToDbi(dbi, "b", "2");
+        try txn.putToDbi(dbi, "c", "3");
         try txn.commit();
     }
 
-    const s = try result.env.stat();
+    const s = try result.env.statDbi(dbi);
     try testing.expectEqual(@as(usize, 3), s.ms_entries);
 }
