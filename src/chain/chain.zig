@@ -39,6 +39,14 @@ const block_import_mod = @import("block_import.zig");
 const HeadTracker = block_import_mod.HeadTracker;
 const ImportError = block_import_mod.ImportError;
 const verifySanity = block_import_mod.verifySanity;
+
+const blocks_mod = @import("blocks/root.zig");
+const PipelineContext = blocks_mod.PipelineContext;
+const PipelineBlockInput = blocks_mod.BlockInput;
+const PipelineImportOpts = blocks_mod.ImportBlockOpts;
+const PipelineImportResult = blocks_mod.ImportResult;
+const BlockImportError = blocks_mod.BlockImportError;
+
 const op_pool_mod = @import("op_pool.zig");
 const OpPool = op_pool_mod.OpPool;
 const seen_cache_mod = @import("seen_cache.zig");
@@ -310,6 +318,54 @@ pub const Chain = struct {
         }
 
         return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // New pipeline-based block import
+    // -----------------------------------------------------------------------
+
+    /// Process a block through the staged import pipeline.
+    ///
+    /// This is the new entry point that uses the modular pipeline stages
+    /// (verify_sanity → state_transition → verify_execution → import).
+    /// It replaces the monolithic importBlock above.
+    ///
+    /// The old importBlock is kept for backward compatibility during migration.
+    pub fn processBlockPipeline(
+        self: *Chain,
+        block_input: PipelineBlockInput,
+        opts: PipelineImportOpts,
+    ) BlockImportError!PipelineImportResult {
+        const ctx = self.getPipelineContext();
+        return blocks_mod.processBlock(ctx, block_input, opts);
+    }
+
+    /// Process a batch of blocks through the staged pipeline (for range sync).
+    pub fn processBlockBatchPipeline(
+        self: *Chain,
+        block_inputs: []const PipelineBlockInput,
+        opts: PipelineImportOpts,
+    ) ![]blocks_mod.BatchBlockResult {
+        const ctx = self.getPipelineContext();
+        return blocks_mod.processBlockBatch(ctx, block_inputs, opts);
+    }
+
+    /// Build a PipelineContext from the current Chain state.
+    pub fn getPipelineContext(self: *Chain) PipelineContext {
+        const current_slot = if (self.fork_choice) |fc| fc.current_slot else self.head_tracker.head_slot;
+        return .{
+            .allocator = self.allocator,
+            .block_state_cache = self.block_state_cache,
+            .state_regen = self.state_regen,
+            .queued_regen = self.queued_regen,
+            .fork_choice = self.fork_choice,
+            .db = self.db,
+            .head_tracker = self.head_tracker,
+            .block_to_state = &self.block_to_state,
+            .event_callback = self.event_callback,
+            .execution_verifier = null, // Set by BeaconNode when EL is configured
+            .current_slot = current_slot,
+        };
     }
 
     // -----------------------------------------------------------------------

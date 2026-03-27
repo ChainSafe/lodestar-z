@@ -82,3 +82,19 @@ pub const BlobVerifyError = blob_kzg_verification.BlobVerifyError;
 pub const verifyBlobSidecar = blob_kzg_verification.verifyBlobSidecar;
 pub const verifyBlobSidecarBatch = blob_kzg_verification.verifyBlobSidecarBatch;
 pub const verifyDataColumnSidecar = blob_kzg_verification.verifyDataColumnSidecar;
+
+// Block import pipeline — staged verification and import
+pub const blocks = @import("blocks/root.zig");
+pub const BlockPipeline = blocks.pipeline;
+pub const PipelineContext = blocks.PipelineContext;
+pub const PipelineBlockInput = blocks.BlockInput;
+pub const PipelineBlockSource = blocks.BlockSource;
+pub const PipelineImportOpts = blocks.ImportBlockOpts;
+pub const PipelineImportResult = blocks.ImportResult;
+pub const VerifiedBlock = blocks.VerifiedBlock;
+pub const ExecutionStatus = blocks.ExecutionStatus;
+pub const PipelineDataAvailabilityStatus = blocks.DataAvailabilityStatus;
+pub const BlockImportError = blocks.BlockImportError;
+pub const BatchBlockResult = blocks.BatchBlockResult;
+pub const SanityOutcome = blocks.SanityOutcome;
+pub const ExecutionVerifier = blocks.ExecutionVerifier;
