@@ -5,7 +5,7 @@
 //! and exposes the core pipeline functions:
 //!
 //! - `importBlock` — full block import pipeline (sanity → STFN → FC → persist)
-//! - `importAttestation` — validate → FC weight → pool (stub)
+//! - `importAttestation` — validate → FC weight → pool
 //! - `onSlot` — FC time update, seen cache prune
 //! - `onFinalized` — archive, prune caches, prune FC (stub)
 //! - `getHead` — current head info
@@ -74,6 +74,10 @@ const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const da_mod = @import("data_availability.zig");
 const DataAvailabilityManager = da_mod.DataAvailabilityManager;
 
+/// Fork choice attestation epoch limit.
+/// Attestations from blocks older than current_epoch - 1 are skipped for fork choice.
+/// This matches Lodestar TS FORK_CHOICE_ATT_EPOCH_LIMIT = 1.
+const FORK_CHOICE_ATT_EPOCH_LIMIT: u64 = 1;
 
 // ---------------------------------------------------------------------------
 // Chain
@@ -307,6 +311,53 @@ pub const Chain = struct {
             else => return err,
         };
 
+        // Wire attestations from the imported block into fork choice.
+        // Only process attestations when block epoch is recent enough to matter for FC:
+        // If current epoch is N, blocks from epoch < N - FORK_CHOICE_ATT_EPOCH_LIMIT have no
+        // attestations that can still influence fork choice head selection.
+        if (self.fork_choice) |fc| {
+            const current_epoch = computeEpochAtSlot(fc.current_slot);
+            if (target_epoch + FORK_CHOICE_ATT_EPOCH_LIMIT >= current_epoch) {
+                for (signed_block.message.body.attestations.items) |*att| {
+                    const att_target_epoch = att.data.target.epoch;
+                    const att_block_root = att.data.beacon_block_root;
+                    var indices = post_state.epoch_cache.getAttestingIndicesElectra(att) catch continue;
+                    defer indices.deinit();
+                    for (indices.items) |validator_index| {
+                        fc.onAttestation(
+                            self.allocator,
+                            validator_index,
+                            att_block_root,
+                            att_target_epoch,
+                        ) catch {}; // Non-fatal: stale or unknown block votes silently dropped.
+                    }
+                }
+            }
+        }
+
+        // Wire attester slashings from the imported block into fork choice.
+        // Mark equivocating validators so their weight is excluded from future head computation.
+        if (self.fork_choice) |fc| {
+            for (signed_block.message.body.attester_slashings.items) |*slashing| {
+                // Find intersection of attesting_indices from attestation_1 and attestation_2.
+                const a = slashing.attestation_1.attesting_indices.items;
+                const b = slashing.attestation_2.attesting_indices.items;
+                var i: usize = 0;
+                var j: usize = 0;
+                while (i < a.len and j < b.len) {
+                    if (a[i] == b[j]) {
+                        fc.onAttesterSlashing(&[_]u64{a[i]}) catch {};
+                        i += 1;
+                        j += 1;
+                    } else if (a[i] < b[j]) {
+                        i += 1;
+                    } else {
+                        j += 1;
+                    }
+                }
+            }
+        }
+
         const result = ImportResult{
             .block_root = stfn_result.block_root,
             .state_root = stfn_result.state_root,
@@ -395,7 +446,7 @@ pub const Chain = struct {
         self: *Chain,
         attestation_slot: u64,
         committee_index: u64,
-        target_root: [32]u8,
+        beacon_block_root: [32]u8,
         target_epoch: u64,
         validator_index: u64,
         attestation: consensus_types.phase0.Attestation.Type,
@@ -403,11 +454,13 @@ pub const Chain = struct {
         _ = committee_index;
 
         // Apply vote weight to fork choice.
+        // beacon_block_root is what the validator is voting FOR (the attested block),
+        // while target_epoch is the epoch of the target checkpoint.
         if (self.fork_choice) |fc| {
             fc.onAttestation(
                 self.allocator,
                 @intCast(validator_index),
-                target_root,
+                beacon_block_root,
                 target_epoch,
             ) catch |err| {
                 std.log.warn("FC onAttestation failed for validator {d} slot {d}: {}", .{
