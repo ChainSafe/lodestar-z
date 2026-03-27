@@ -290,3 +290,232 @@ test "getSyncDuties returns NotImplemented without head state" {
     const result = getSyncDuties(&tc.ctx, 0, &[_]u64{});
     try std.testing.expectError(error.NotImplemented, result);
 }
+
+// ---------------------------------------------------------------------------
+// Block production and validator data endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /eth/v1/validator/blocks/{slot}
+///
+/// Produce an unsigned beacon block for the given slot. The validator
+/// must sign the returned block and then submit it via
+/// POST /eth/v2/beacon/blocks.
+///
+/// Takes: slot (path param), randao_reveal (query param, 0x-hex BLS sig),
+///        graffiti (optional query param, 0x-hex 32 bytes).
+///
+/// Returns a HandlerResult with the block in JSON (or SSZ if requested).
+/// The .meta.version field must be set to the fork name for the block.
+///
+/// Without a produce_block callback wired, returns NotImplemented.
+pub fn produceBlock(
+    ctx: *ApiContext,
+    slot: u64,
+    randao_reveal: [96]u8,
+    graffiti: ?[32]u8,
+) !HandlerResult(context.ProducedBlockData) {
+    const cb = ctx.produce_block orelse return error.NotImplemented;
+    const block_data = try cb.produceBlockFn(cb.ptr, ctx.allocator, .{
+        .slot = slot,
+        .randao_reveal = randao_reveal,
+        .graffiti = graffiti,
+    });
+    return .{
+        .data = block_data,
+        .meta = .{},
+    };
+}
+
+/// GET /eth/v1/validator/attestation_data
+///
+/// Get attestation data for the given slot and committee index.
+/// This is the unsigned data that validators need to create an attestation.
+///
+/// Without an attestation_data callback, returns a stub response.
+pub fn getAttestationData(
+    ctx: *ApiContext,
+    slot: u64,
+    committee_index: u64,
+) !HandlerResult(context.AttestationDataResult) {
+    if (ctx.attestation_data) |cb| {
+        const result = try cb.getAttestationDataFn(cb.ptr, slot, committee_index);
+        return .{ .data = result, .meta = .{} };
+    }
+
+    // Stub: return attestation data based on current head.
+    return .{
+        .data = .{
+            .slot = slot,
+            .index = committee_index,
+            .beacon_block_root = ctx.head_tracker.head_root,
+            .source_epoch = ctx.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
+            .source_root = ctx.head_tracker.justified_root,
+            .target_epoch = slot / preset.SLOTS_PER_EPOCH,
+            .target_root = ctx.head_tracker.head_root,
+        },
+        .meta = .{},
+    };
+}
+
+/// GET /eth/v1/validator/aggregate_attestation
+///
+/// Get the best aggregate attestation for the given slot and
+/// attestation_data_root (from the op pool).
+///
+/// Returns the raw JSON from the aggregate_attestation callback,
+/// or NotImplemented if not wired.
+pub fn getAggregateAttestation(
+    ctx: *ApiContext,
+    slot: u64,
+    attestation_data_root: [32]u8,
+) ![]const u8 {
+    const cb = ctx.aggregate_attestation orelse return error.NotImplemented;
+    return cb.getAggregateAttestationFn(cb.ptr, ctx.allocator, slot, attestation_data_root);
+}
+
+/// POST /eth/v1/validator/aggregate_and_proofs
+///
+/// Submit signed aggregate-and-proof objects for import into the op pool
+/// and broadcast to gossip.
+pub fn publishAggregateAndProofs(
+    ctx: *ApiContext,
+    body: []const u8,
+) !HandlerResult(void) {
+    if (body.len == 0) return .{ .data = {} };
+
+    if (ctx.pool_submit) |cb| {
+        if (cb.submitAggregateAndProofFn) |submit_fn| {
+            try submit_fn(cb.ptr, body);
+            return .{ .data = {} };
+        }
+    }
+
+    // Parse to validate even without a callback.
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{}) catch
+        return error.InvalidRequest;
+    defer parsed.deinit();
+
+    return .{ .data = {} };
+}
+
+/// GET /eth/v1/validator/sync_committee_contribution
+///
+/// Get a sync committee contribution for the given slot, subcommittee_index,
+/// and beacon_block_root.
+///
+/// Returns raw JSON from the sync_committee_contribution callback,
+/// or NotImplemented if not wired.
+pub fn getSyncCommitteeContribution(
+    ctx: *ApiContext,
+    slot: u64,
+    subcommittee_index: u64,
+    beacon_block_root: [32]u8,
+) ![]const u8 {
+    const cb = ctx.sync_committee_contribution orelse return error.NotImplemented;
+    return cb.getSyncCommitteeContributionFn(cb.ptr, ctx.allocator, slot, subcommittee_index, beacon_block_root);
+}
+
+/// POST /eth/v1/validator/contribution_and_proofs
+///
+/// Submit signed contribution-and-proof objects for import and broadcast.
+pub fn publishContributionAndProofs(
+    ctx: *ApiContext,
+    body: []const u8,
+) !HandlerResult(void) {
+    if (body.len == 0) return .{ .data = {} };
+
+    if (ctx.pool_submit) |cb| {
+        if (cb.submitContributionAndProofFn) |submit_fn| {
+            try submit_fn(cb.ptr, body);
+            return .{ .data = {} };
+        }
+    }
+
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{}) catch
+        return error.InvalidRequest;
+    defer parsed.deinit();
+
+    return .{ .data = {} };
+}
+
+// ---------------------------------------------------------------------------
+// Tests for new endpoints
+// ---------------------------------------------------------------------------
+
+test "getAttestationData returns stub data without callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const result = try getAttestationData(&tc.ctx, 100, 0);
+    try std.testing.expectEqual(@as(u64, 100), result.data.slot);
+    try std.testing.expectEqual(@as(u64, 0), result.data.index);
+    try std.testing.expectEqual(tc.ctx.head_tracker.head_root, result.data.beacon_block_root);
+}
+
+test "getAttestationData uses callback when wired" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const MockCb = struct {
+        fn getAttData(_: *anyopaque, slot: u64, committee_index: u64) anyerror!context.AttestationDataResult {
+            return .{
+                .slot = slot,
+                .index = committee_index,
+                .beacon_block_root = [_]u8{0x42} ** 32,
+                .source_epoch = 5,
+                .source_root = [_]u8{0x11} ** 32,
+                .target_epoch = 6,
+                .target_root = [_]u8{0x22} ** 32,
+            };
+        }
+    };
+    var dummy: u8 = 0;
+    tc.ctx.attestation_data = .{
+        .ptr = &dummy,
+        .getAttestationDataFn = &MockCb.getAttData,
+    };
+
+    const result = try getAttestationData(&tc.ctx, 200, 3);
+    try std.testing.expectEqual(@as(u64, 200), result.data.slot);
+    try std.testing.expectEqual(@as(u64, 3), result.data.index);
+    try std.testing.expectEqual([_]u8{0x42} ** 32, result.data.beacon_block_root);
+}
+
+test "produceBlock returns NotImplemented without callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const result = produceBlock(&tc.ctx, 100, [_]u8{0} ** 96, null);
+    try std.testing.expectError(error.NotImplemented, result);
+}
+
+test "getAggregateAttestation returns NotImplemented without callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const result = getAggregateAttestation(&tc.ctx, 100, [_]u8{0} ** 32);
+    try std.testing.expectError(error.NotImplemented, result);
+}
+
+test "publishAggregateAndProofs with empty body returns ok" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const result = try publishAggregateAndProofs(&tc.ctx, "");
+    _ = result;
+}
+
+test "publishContributionAndProofs with empty body returns ok" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const result = try publishContributionAndProofs(&tc.ctx, "");
+    _ = result;
+}
+
+test "getSyncCommitteeContribution returns NotImplemented without callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const result = getSyncCommitteeContribution(&tc.ctx, 100, 0, [_]u8{0} ** 32);
+    try std.testing.expectError(error.NotImplemented, result);
+}
