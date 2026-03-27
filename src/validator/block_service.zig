@@ -15,10 +15,13 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
+const consensus_types = @import("consensus_types");
 const types = @import("types.zig");
 const ProposerDuty = types.ProposerDuty;
 const BeaconApiClient = @import("api_client.zig").BeaconApiClient;
 const ValidatorStore = @import("validator_store.zig").ValidatorStore;
+const signing_mod = @import("signing.zig");
+const SigningContext = signing_mod.SigningContext;
 
 const log = std.log.scoped(.block_service);
 
@@ -33,6 +36,8 @@ pub const BlockService = struct {
     allocator: Allocator,
     api: *BeaconApiClient,
     validator_store: *ValidatorStore,
+    /// Signing context (fork_version + genesis_validators_root) for domain computation.
+    signing_ctx: SigningContext,
     /// Duties for the current epoch.
     duties: [MAX_DUTIES_PER_EPOCH]?ProposerDuty,
     duties_epoch: ?u64,
@@ -41,11 +46,13 @@ pub const BlockService = struct {
         allocator: Allocator,
         api: *BeaconApiClient,
         validator_store: *ValidatorStore,
+        signing_ctx: SigningContext,
     ) BlockService {
         return .{
             .allocator = allocator,
             .api = api,
             .validator_store = validator_store,
+            .signing_ctx = signing_ctx,
             .duties = [_]?ProposerDuty{null} ** MAX_DUTIES_PER_EPOCH,
             .duties_epoch = null,
         };
@@ -114,25 +121,38 @@ pub const BlockService = struct {
 
         log.info("proposing block slot={d} validator_index={d}", .{ slot, duty.validator_index });
 
-        // 1. Produce RANDAO reveal (sign the epoch).
-        const randao_reveal = try self.produceRandaoReveal(duty.pubkey, slot);
+        // 1. Compute RANDAO reveal: sign(epoch) with DOMAIN_RANDAO.
+        const epoch = slot / MAX_DUTIES_PER_EPOCH;
+        const randao_reveal = try self.produceRandaoReveal(duty.pubkey, epoch);
 
-        // 2. Get block from BN.
+        // 2. Get unsigned block from BN.
         const graffiti: [32]u8 = std.mem.zeroes([32]u8);
         const block_resp = try self.api.produceBlock(io, slot, randao_reveal, graffiti);
         defer self.allocator.free(block_resp.block_ssz);
 
-        // 3. Compute signing root & sign block.
-        // TODO: compute_signing_root(block, DOMAIN_BEACON_PROPOSER) using fork/genesis.
-        const signing_root: [32]u8 = std.mem.zeroes([32]u8); // stub
+        // 3. Compute block signing root using DOMAIN_BEACON_PROPOSER.
+        //    The BN returns the block as JSON; we sign the BeaconBlockHeader
+        //    (slot, proposer_index, parent_root, state_root, body_root).
+        //    For now we produce a placeholder header from the duty.
+        //    Full implementation would SSZ-decode the block and hash the header.
+        var signing_root: [32]u8 = undefined;
+        const block_header = consensus_types.phase0.BeaconBlockHeader.Type{
+            .slot = slot,
+            .proposer_index = duty.validator_index,
+            .parent_root = [_]u8{0} ** 32, // TODO: extract from block_resp
+            .state_root = [_]u8{0} ** 32,  // TODO: filled by BN
+            .body_root = [_]u8{0} ** 32,   // TODO: compute from block body
+        };
+        try signing_mod.blockHeaderSigningRoot(self.signing_ctx, &block_header, &signing_root);
+
+        // 4. Sign block.
         const block_sig = try self.validator_store.signBlock(duty.pubkey, signing_root, slot);
-        _ = block_sig;
+        const sig_bytes = block_sig.compress();
+        _ = sig_bytes;
 
-        // 4. Assemble signed block (prepend signature to SSZ bytes) — stub.
-        // TODO: SSZ-encode SignedBeaconBlock { message: block, signature: sig }
-        const signed_block_ssz: []const u8 = block_resp.block_ssz; // placeholder
-
-        // 5. Publish.
+        // 5. Assemble signed block — stub: publish raw block JSON for now.
+        //    Full implementation: SSZ-encode SignedBeaconBlock{message, signature}.
+        const signed_block_ssz: []const u8 = block_resp.block_ssz;
         try self.api.publishBlock(io, signed_block_ssz);
         log.info("published block slot={d}", .{slot});
     }
@@ -151,10 +171,9 @@ pub const BlockService = struct {
         return null;
     }
 
-    fn produceRandaoReveal(self: *BlockService, pubkey: [48]u8, slot: u64) ![96]u8 {
-        // TODO: compute_signing_root(epoch, DOMAIN_RANDAO, fork, genesis_validators_root)
-        _ = slot;
-        const signing_root: [32]u8 = std.mem.zeroes([32]u8); // stub
+    fn produceRandaoReveal(self: *BlockService, pubkey: [48]u8, epoch: u64) ![96]u8 {
+        var signing_root: [32]u8 = undefined;
+        try signing_mod.randaoSigningRoot(self.signing_ctx, epoch, &signing_root);
         const sig = try self.validator_store.signRandao(pubkey, signing_root);
         return sig.compress();
     }

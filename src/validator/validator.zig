@@ -6,16 +6,18 @@
 //! Architecture:
 //!
 //!   ValidatorClient
-//!     ├── SlotClock          — computes slots, fires callbacks
-//!     ├── BeaconApiClient    — HTTP calls + SSE stream to BN
-//!     ├── ValidatorStore     — BLS keys + slashing protection
-//!     ├── BlockService       — block proposal duties
-//!     ├── AttestationService — attester duties + aggregation
-//!     ├── SyncCommitteeService — sync committee duties + contributions
-//!     └── DoppelgangerService  — duplicate validator detection
+//!     ├── SlotClock               — computes slots, fires callbacks
+//!     ├── BeaconApiClient         — HTTP calls + SSE stream to BN
+//!     ├── ValidatorStore          — BLS keys + slashing protection
+//!     ├── ChainHeaderTracker      — SSE head event cache
+//!     ├── BlockService            — block proposal duties
+//!     ├── AttestationService      — attester duties + aggregation
+//!     ├── SyncCommitteeService    — sync committee duties + contributions
+//!     ├── PrepareBeaconProposer   — fee recipient registration
+//!     └── DoppelgangerService     — duplicate validator detection
 //!
 //! I/O model (Zig 0.16):
-//!   All blocking I/O uses std.Io (evented I/O via io_uring on Linux / GCD on macOS).
+//!   All blocking I/O uses std.Io (evented I/O via io_uring on Linux).
 //!   The `run` method takes an `Io` instance and drives the event loop.
 
 const std = @import("std");
@@ -46,9 +48,21 @@ const SyncCommitteeService = sync_mod.SyncCommitteeService;
 const dopple_mod = @import("doppelganger.zig");
 const DoppelgangerService = dopple_mod.DoppelgangerService;
 
+const chain_header_mod = @import("chain_header_tracker.zig");
+const ChainHeaderTracker = chain_header_mod.ChainHeaderTracker;
+
+const prepare_mod = @import("prepare_beacon_proposer.zig");
+const PrepareBeaconProposerService = prepare_mod.PrepareBeaconProposerService;
+
+const signing_mod = @import("signing.zig");
+const SigningContext = signing_mod.SigningContext;
+
 const bls = @import("bls");
 
 const log = std.log.scoped(.validator_client);
+
+/// Default fee recipient (zero address) — operator should override.
+const ZERO_FEE_RECIPIENT = "0x0000000000000000000000000000000000000000".*;
 
 // ---------------------------------------------------------------------------
 // ValidatorClient
@@ -62,11 +76,13 @@ pub const ValidatorClient = struct {
     clock: SlotClock,
     api: BeaconApiClient,
     validator_store: ValidatorStore,
+    header_tracker: ChainHeaderTracker,
 
     // Services.
     block_service: BlockService,
     attestation_service: AttestationService,
     sync_committee_service: SyncCommitteeService,
+    prepare_proposer: PrepareBeaconProposerService,
     doppelganger: ?DoppelgangerService,
 
     // ---------------------------------------------------------------------------
@@ -75,13 +91,15 @@ pub const ValidatorClient = struct {
 
     /// Create and initialise the ValidatorClient.
     ///
-    /// Does NOT start the clock or subscribe to SSE events.
-    /// Call `start()` after adding validator keys.
+    /// `signing_ctx` provides the fork_version and genesis_validators_root
+    /// needed to compute signing domains. Obtain from BN genesis endpoint
+    /// or supply from config.
     ///
     /// TS: Validator.init(opts, genesis)
-    pub fn init(allocator: Allocator, config: ValidatorConfig) !ValidatorClient {
-        const api = BeaconApiClient.init(allocator, config.beacon_node_url);
+    pub fn init(allocator: Allocator, config: ValidatorConfig, signing_ctx: SigningContext) !ValidatorClient {
+        var api = BeaconApiClient.init(allocator, config.beacon_node_url);
         var validator_store = ValidatorStore.init(allocator);
+        errdefer validator_store.deinit();
 
         const clock = SlotClock.init(
             config.genesis_time,
@@ -89,24 +107,40 @@ pub const ValidatorClient = struct {
             config.slots_per_epoch,
         );
 
-        const block_service = BlockService.init(allocator, undefined, &validator_store);
+        // We use pointer-to-field for service references.
+        // Pointers are stable because ValidatorClient is heap-allocated by the caller.
+        // NOTE: Services store *BeaconApiClient and *ValidatorStore by pointer.
+        //       These fields must not move after init; the client must be stable.
+        //       Pass &vc.api / &vc.validator_store after heap-allocating if needed.
+
+        const block_service = BlockService.init(allocator, &api, &validator_store, signing_ctx);
         const attestation_service = AttestationService.init(
             allocator,
-            undefined,
+            &api,
             &validator_store,
+            signing_ctx,
             config.seconds_per_slot,
         );
-        // mainnet: EPOCHS_PER_SYNC_COMMITTEE_PERIOD = 256
         const sync_committee_service = SyncCommitteeService.init(
             allocator,
-            undefined,
+            &api,
             &validator_store,
+            signing_ctx,
             config.slots_per_epoch,
-            256,
+            256, // EPOCHS_PER_SYNC_COMMITTEE_PERIOD (mainnet)
+        );
+
+        const header_tracker = ChainHeaderTracker.init(allocator, &api);
+
+        const prepare_proposer = PrepareBeaconProposerService.init(
+            allocator,
+            &api,
+            &validator_store,
+            ZERO_FEE_RECIPIENT,
         );
 
         const doppelganger: ?DoppelgangerService = if (config.doppelganger_protection)
-            DoppelgangerService.init(allocator, undefined)
+            DoppelgangerService.init(allocator, &api)
         else
             null;
 
@@ -116,9 +150,11 @@ pub const ValidatorClient = struct {
             .clock = clock,
             .api = api,
             .validator_store = validator_store,
+            .header_tracker = header_tracker,
             .block_service = block_service,
             .attestation_service = attestation_service,
             .sync_committee_service = sync_committee_service,
+            .prepare_proposer = prepare_proposer,
             .doppelganger = doppelganger,
         };
     }
@@ -135,8 +171,6 @@ pub const ValidatorClient = struct {
     /// Add a validator secret key to the store.
     ///
     /// Must be called before `start()`.
-    ///
-    /// TS: ValidatorStore.init(opts, signers, ...)
     pub fn addKey(self: *ValidatorClient, secret_key: bls.SecretKey) !void {
         try self.validator_store.addKey(secret_key);
         if (self.doppelganger) |*d| {
@@ -147,55 +181,34 @@ pub const ValidatorClient = struct {
 
     /// Start the validator client: wire up clock callbacks and enter the run loop.
     ///
-    /// Blocks until error or explicit stop (future: cancellation token).
+    /// Blocks until error or explicit stop.
     ///
-    /// TS: clock.start(signal) → runs all registered fns in background
+    /// TS: clock.start(signal) → runs all registered fns in background.
     pub fn start(self: *ValidatorClient, io: Io) !void {
         log.info("starting validator client beacon_node={s}", .{self.config.beacon_node_url});
 
+        // Wire up chain header tracker callbacks.
+        self.sync_committee_service.setHeaderTracker(&self.header_tracker);
+
         // Register clock callbacks.
-        // Each service gets both a slot callback and an epoch callback.
+        self.clock.onSlot(.{ .ctx = self, .fn_ptr = onSlotBlockService });
+        self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochBlockService });
 
-        // Block service.
-        self.clock.onSlot(.{
-            .ctx = self,
-            .fn_ptr = onSlotBlockService,
-        });
-        self.clock.onEpoch(.{
-            .ctx = self,
-            .fn_ptr = onEpochBlockService,
-        });
+        self.clock.onSlot(.{ .ctx = self, .fn_ptr = onSlotAttestationService });
+        self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochAttestationService });
 
-        // Attestation service.
-        self.clock.onSlot(.{
-            .ctx = self,
-            .fn_ptr = onSlotAttestationService,
-        });
-        self.clock.onEpoch(.{
-            .ctx = self,
-            .fn_ptr = onEpochAttestationService,
-        });
+        self.clock.onSlot(.{ .ctx = self, .fn_ptr = onSlotSyncCommitteeService });
+        self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochSyncCommitteeService });
 
-        // Sync committee service.
-        self.clock.onSlot(.{
-            .ctx = self,
-            .fn_ptr = onSlotSyncCommitteeService,
-        });
-        self.clock.onEpoch(.{
-            .ctx = self,
-            .fn_ptr = onEpochSyncCommitteeService,
-        });
+        self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochPrepareProposer });
 
-        // Doppelganger service (epoch only).
         if (self.doppelganger != null) {
-            self.clock.onEpoch(.{
-                .ctx = self,
-                .fn_ptr = onEpochDoppelganger,
-            });
+            self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochDoppelganger });
         }
 
-        // Subscribe to SSE head events (drives chain header tracker).
-        // TODO: spawn async task to call api.subscribeToEvents(["head", "block"], headCallback).
+        // TODO: spawn background fiber for ChainHeaderTracker.start(io) (SSE subscription).
+        // In Zig 0.16 with evented I/O: io.background.async(...)
+        // For now, the SSE subscription must be started externally.
 
         // Run the clock loop (blocking).
         try self.clock.run(io);
@@ -204,23 +217,20 @@ pub const ValidatorClient = struct {
     // -----------------------------------------------------------------------
     // Clock callback trampolines
     // -----------------------------------------------------------------------
-    //
-    // Zig doesn't have closures, so we use a pointer-to-self pattern.
-    // The callback fn_ptr receives `*anyopaque` which we cast back to `*ValidatorClient`.
 
     fn onSlotBlockService(ctx: *anyopaque, slot: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        // We need io here — in the full implementation the clock passes io through.
-        // For now this is a stub: the run loop will need to thread io through callbacks.
-        // TODO: pass Io through callback context.
+        // TODO: thread Io through callbacks (requires clock API change).
         _ = self;
         _ = slot;
+        log.debug("slot={d} block_service skipped (no Io in callback)", .{slot});
     }
 
     fn onEpochBlockService(ctx: *anyopaque, epoch: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
         _ = self;
         _ = epoch;
+        log.debug("epoch={d} block_service.onEpoch skipped (no Io in callback)", .{epoch});
     }
 
     fn onSlotAttestationService(ctx: *anyopaque, slot: u64) void {
@@ -245,6 +255,13 @@ pub const ValidatorClient = struct {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
         _ = self;
         _ = epoch;
+    }
+
+    fn onEpochPrepareProposer(ctx: *anyopaque, epoch: u64) void {
+        const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
+        _ = self;
+        _ = epoch;
+        log.debug("epoch={d} prepare_proposer skipped (no Io in callback)", .{epoch});
     }
 
     fn onEpochDoppelganger(ctx: *anyopaque, epoch: u64) void {
