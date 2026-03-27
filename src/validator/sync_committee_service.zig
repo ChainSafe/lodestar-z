@@ -46,6 +46,8 @@ pub const SyncCommitteeService = struct {
     signing_ctx: SigningContext,
     slots_per_epoch: u64,
     epochs_per_sync_committee_period: u64,
+    /// Seconds per slot for sub-slot timing.
+    seconds_per_slot: u64,
 
     /// Duties keyed by validator index (valid for the current sync period).
     duties: std.ArrayList(SyncCommitteeDutyWithProofs),
@@ -59,6 +61,7 @@ pub const SyncCommitteeService = struct {
         signing_ctx: SigningContext,
         slots_per_epoch: u64,
         epochs_per_sync_committee_period: u64,
+        seconds_per_slot: u64,
     ) SyncCommitteeService {
         return .{
             .allocator = allocator,
@@ -68,6 +71,7 @@ pub const SyncCommitteeService = struct {
             .signing_ctx = signing_ctx,
             .slots_per_epoch = slots_per_epoch,
             .epochs_per_sync_committee_period = epochs_per_sync_committee_period,
+            .seconds_per_slot = seconds_per_slot,
             .duties = std.ArrayList(SyncCommitteeDutyWithProofs).init(allocator),
             .duties_period = null,
         };
@@ -196,10 +200,31 @@ pub const SyncCommitteeService = struct {
         else
             [_]u8{0} ** 32;
 
+        // Sub-slot timing per Ethereum spec:
+        //   Sync committee messages: 1/3 slot (same as attestations).
+        //   Sync committee contributions: 2/3 slot.
+        const slot_duration_ns = self.seconds_per_slot * std.time.ns_per_s;
+        const one_third_ns = slot_duration_ns / 3;
+        const two_thirds_ns = slot_duration_ns * 2 / 3;
+
         // Step 1: sign and submit sync committee messages (~1/3 slot).
+        {
+            const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+            const elapsed_in_slot_ns = now_ns % slot_duration_ns;
+            if (elapsed_in_slot_ns < one_third_ns) {
+                std.Thread.sleep(one_third_ns - elapsed_in_slot_ns);
+            }
+        }
         try self.produceAndPublishMessages(io, slot, &beacon_block_root);
 
         // Step 2: produce contributions for subcommittees we aggregate (~2/3 slot).
+        {
+            const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+            const elapsed_in_slot_ns = now_ns % slot_duration_ns;
+            if (elapsed_in_slot_ns < two_thirds_ns) {
+                std.Thread.sleep(two_thirds_ns - elapsed_in_slot_ns);
+            }
+        }
         try self.produceAndPublishContributions(io, slot, &beacon_block_root);
     }
 
@@ -272,14 +297,21 @@ pub const SyncCommitteeService = struct {
                 defer self.allocator.free(contrib.aggregation_bits);
 
                 // 2. Build ContributionAndProof and sign it.
+                // Set the correct bit for our validator's position in the sync subcommittee.
+                // sc_idx is the full sync committee index (0..SYNC_COMMITTEE_SIZE-1).
+                // The bit position within the subcommittee is sc_idx % subcommittee_size.
+                const subcommittee_size = SYNC_COMMITTEE_SIZE / SYNC_COMMITTEE_SUBNET_COUNT;
+                const bit_index = sc_idx % subcommittee_size; // position within subcommittee
+                var agg_bits = [_]u8{0} ** @divTrunc(512, 4 * 8); // 16 bytes = 128 bits
+                agg_bits[bit_index / 8] |= @as(u8, 1) << @intCast(bit_index % 8);
+
                 const contribution_and_proof = consensus_types.altair.ContributionAndProof.Type{
                     .aggregator_index = dp.duty.validator_index,
                     .contribution = .{
                         .slot = slot,
                         .beacon_block_root = beacon_block_root.*,
                         .subcommittee_index = subcommittee_index,
-                        // aggregation_bits: BitVector needs actual bits — stub zeros.
-                        .aggregation_bits = .{ .data = [_]u8{0} ** @divTrunc(512, 4 * 8) },
+                        .aggregation_bits = .{ .data = agg_bits },
                         .signature = contrib.signature,
                     },
                     .selection_proof = maybe_proof orelse [_]u8{0} ** 96,
