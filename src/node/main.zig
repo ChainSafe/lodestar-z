@@ -25,6 +25,7 @@ const Allocator = std.mem.Allocator;
 const cli = @import("zig_cli");
 
 const node_mod = @import("node");
+const log_mod = @import("log");
 const BeaconNode = node_mod.BeaconNode;
 const NodeOptions = node_mod.NodeOptions;
 const NetworkName = node_mod.NetworkName;
@@ -904,6 +905,23 @@ fn runBeacon(
         .metrics_address = opts.metrics_address,
         .checkpoint_sync_url = opts.checkpoint_sync_url,
     };
+
+    // Initialize logging from CLI options.
+    {
+        const log_level = switch (opts.log_level) {
+            .@"error" => log_mod.Level.err,
+            .warn => log_mod.Level.warn,
+            .info => log_mod.Level.info,
+            .verbose => log_mod.Level.verbose,
+            .debug => log_mod.Level.debug,
+            .trace => log_mod.Level.trace,
+        };
+        const log_format: log_mod.GlobalLogger.Format = switch (opts.log_format) {
+            .human => .human,
+            .json => .json,
+        };
+        log_mod.global = log_mod.GlobalLogger.init(log_level, log_format);
+    }
 
     // Create the BeaconNode.
     const node = try BeaconNode.init(allocator, beacon_config, node_opts);

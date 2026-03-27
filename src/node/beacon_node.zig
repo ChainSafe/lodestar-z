@@ -21,6 +21,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const log = @import("log");
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -1089,6 +1090,7 @@ pub const BeaconNode = struct {
         // Wire data availability check (will be populated after node is created).
         // Note: The callback is set after BeaconNode.init returns since it needs
         // the node pointer. See the isDataAvailableCallback below.
+        log.logger(.node).info("beacon node initialized", .{});
 
         return node;
     }
@@ -1285,11 +1287,9 @@ pub const BeaconNode = struct {
         // Capture genesis validators root for fork digest computation
         self.genesis_validators_root = (try genesis_state.state.genesisValidatorsRoot()).*;
         self.chain.genesis_validators_root = self.genesis_validators_root;
-        std.log.info("Genesis validators root: 0x{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-            self.genesis_validators_root[0], self.genesis_validators_root[1],
-            self.genesis_validators_root[2], self.genesis_validators_root[3],
-            self.genesis_validators_root[4], self.genesis_validators_root[5],
-            self.genesis_validators_root[6], self.genesis_validators_root[7],
+        log.logger(.node).info("initialized from genesis", .{
+            .slot = genesis_slot,
+            .genesis_validators_root = self.genesis_validators_root,
         });
 
         // Set up clock
@@ -1490,10 +1490,11 @@ pub const BeaconNode = struct {
         self.api_head_tracker.finalized_slot = finalized_cp.epoch * preset.SLOTS_PER_EPOCH;
         self.api_head_tracker.justified_slot = justified_cp.epoch * preset.SLOTS_PER_EPOCH;
 
-        std.log.info("Initialized from checkpoint: slot={d} finalized_epoch={d} justified_epoch={d}", .{
-            cp_slot,
-            finalized_cp.epoch,
-            justified_cp.epoch,
+        log.logger(.node).info("initialized from checkpoint", .{
+            .slot = cp_slot,
+            .finalized_epoch = finalized_cp.epoch,
+            .justified_epoch = justified_cp.epoch,
+            .block_root = anchor_block_root,
         });
     }
 
@@ -1544,7 +1545,18 @@ pub const BeaconNode = struct {
             self.unknown_chain_sync.onFinalized(
                 self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH,
             );
+            log.logger(.chain).info("epoch transition", .{
+                .slot = result.slot,
+                .finalized_epoch = self.head_tracker.finalized_epoch,
+                .justified_epoch = self.head_tracker.justified_epoch,
+            });
         }
+
+        log.logger(.chain).verbose("block imported", .{
+            .slot = result.slot,
+            .root = result.block_root,
+            .epoch_transition = result.epoch_transition,
+        });
 
         return result;
     }
@@ -1665,6 +1677,7 @@ pub const BeaconNode = struct {
     /// to the Beacon API handlers.
     pub fn startApi(self: *BeaconNode, io: std.Io, address: []const u8, port: u16) !void {
         self.http_server = api_mod.HttpServer.init(self.allocator, self.api_context, address, port);
+        log.logger(.rest).info("REST API listening", .{});
         try self.http_server.?.serve(io);
     }
 
