@@ -45,6 +45,8 @@ const chain_mod = @import("chain");
 const Chain = chain_mod.Chain;
 const OpPool = chain_mod.OpPool;
 const SeenCache = chain_mod.SeenCache;
+const SyncContributionAndProofPool = chain_mod.SyncContributionAndProofPool;
+const SyncCommitteeMessagePool = chain_mod.SyncCommitteeMessagePool;
 const produceBlockBody = chain_mod.produceBlockBody;
 const ProducedBlockBody = chain_mod.ProducedBlockBody;
 const ProducedBlock = chain_mod.ProducedBlock;
@@ -721,6 +723,10 @@ pub const BeaconNode = struct {
     seen_cache: *SeenCache,
     block_importer: *BlockImporter,
 
+    // Sync committee pools — collect contributions for SyncAggregate production.
+    sync_contribution_pool: ?*SyncContributionAndProofPool,
+    sync_committee_message_pool: ?*SyncCommitteeMessagePool,
+
     // Clock
     clock: ?SlotClock,
 
@@ -894,6 +900,13 @@ pub const BeaconNode = struct {
         const op_pool = try allocator.create(OpPool);
         op_pool.* = OpPool.init(allocator);
 
+        // Sync committee pools
+        const sync_contrib_pool = try allocator.create(SyncContributionAndProofPool);
+        sync_contrib_pool.* = SyncContributionAndProofPool.init(allocator);
+
+        const sync_msg_pool = try allocator.create(SyncCommitteeMessagePool);
+        sync_msg_pool.* = SyncCommitteeMessagePool.init(allocator);
+
         const seen_cache = try allocator.create(SeenCache);
         seen_cache.* = SeenCache.init(allocator);
 
@@ -1042,6 +1055,8 @@ pub const BeaconNode = struct {
             .head_tracker = head_tracker,
             .fork_choice = null,
             .op_pool = op_pool,
+            .sync_contribution_pool = sync_contrib_pool,
+            .sync_committee_message_pool = sync_msg_pool,
             .seen_cache = seen_cache,
             .block_importer = block_importer,
             .chain = chain_struct,
@@ -1088,6 +1103,15 @@ pub const BeaconNode = struct {
 
         self.op_pool.deinit();
         allocator.destroy(self.op_pool);
+
+        if (self.sync_contribution_pool) |pool| {
+            pool.deinit();
+            allocator.destroy(pool);
+        }
+        if (self.sync_committee_message_pool) |pool| {
+            pool.deinit();
+            allocator.destroy(pool);
+        }
 
         self.head_tracker.deinit();
         allocator.destroy(self.head_tracker);
@@ -1920,6 +1944,13 @@ pub const BeaconNode = struct {
 
             // Update API sync status from the sync service.
             self.updateApiSyncStatus();
+
+            // Prune sync committee pools by current head slot.
+            {
+                const head_slot = self.head_tracker.head_slot;
+                if (self.sync_contribution_pool) |pool| pool.prune(head_slot);
+                if (self.sync_committee_message_pool) |pool| pool.prune(head_slot);
+            }
         }
     }
 
@@ -2433,6 +2464,10 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                 gh.verifyAttestationSignatureFn = &gossipVerifyAttestationSignature;
                 gh.verifyAggregateSignatureFn = &gossipVerifyAggregateSignature;
                 gh.verifySyncCommitteeSignatureFn = &gossipVerifySyncCommitteeSignature;
+
+                // Sync committee pool import callbacks.
+                gh.importSyncContributionFn = &gossipImportSyncContribution;
+                gh.importSyncCommitteeMessageFn = &gossipImportSyncCommitteeMessage;
             }
         }
 
@@ -3055,6 +3090,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             blob_commitments,
             eth1_data,
             effective_config,
+            self.sync_contribution_pool,
         );
 
         std.log.info("Produced full block: slot={d} proposer={d} parent={s}... value={d}", .{
@@ -3492,6 +3528,56 @@ fn gossipImportBlsChange(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
         return err;
     };
     try node.chain.op_pool.bls_change_pool.add(change);
+}
+
+/// Import a validated sync committee contribution into the pool.
+///
+/// Deserializes a SignedContributionAndProof, extracts the inner contribution,
+/// and adds it to the SyncContributionAndProofPool.
+fn gossipImportSyncContribution(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const pool = node.sync_contribution_pool orelse return;
+
+    var signed_cap: types.altair.SignedContributionAndProof.Type = undefined;
+    types.altair.SignedContributionAndProof.deserializeFromBytes(ssz_bytes, &signed_cap) catch |err| {
+        std.log.warn("SignedContributionAndProof SSZ decode failed: {}", .{err});
+        return err;
+    };
+
+    try pool.add(&signed_cap.message.contribution);
+}
+
+/// Import a validated sync committee message into the pool.
+///
+/// Deserializes a SyncCommitteeMessage and adds it to the SyncCommitteeMessagePool.
+/// The subnet_id determines the subcommittee index.
+///
+/// Note: Computing `index_in_subcommittee` requires knowing the validator's position
+/// within the sync committee for this epoch. For now, we use `validator_index % subcommittee_size`
+/// as a placeholder — the full implementation needs the sync committee cache from the epoch cache.
+fn gossipImportSyncCommitteeMessage(ptr: *anyopaque, ssz_bytes: []const u8, subnet: u64) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const pool = node.sync_committee_message_pool orelse return;
+
+    var msg: types.altair.SyncCommitteeMessage.Type = undefined;
+    types.altair.SyncCommitteeMessage.deserializeFromBytes(ssz_bytes, &msg) catch |err| {
+        std.log.warn("SyncCommitteeMessage SSZ decode failed: {}", .{err});
+        return err;
+    };
+
+    // Compute the index within the subcommittee.
+    // The full implementation should look up the validator's position in the
+    // sync committee from the epoch cache. For now, derive from validator_index.
+    const subcommittee_size = preset.SYNC_COMMITTEE_SIZE / constants.SYNC_COMMITTEE_SUBNET_COUNT;
+    const index_in_subcommittee = msg.validator_index % subcommittee_size;
+
+    try pool.add(
+        subnet,
+        msg.slot,
+        msg.beacon_block_root,
+        index_in_subcommittee,
+        msg.signature,
+    );
 }
 
 // ---------------------------------------------------------------------------

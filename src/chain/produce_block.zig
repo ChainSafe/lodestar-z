@@ -20,6 +20,7 @@ const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const Epoch = types.primitive.Epoch.Type;
 
 const OpPool = @import("op_pool.zig").OpPool;
+const SyncContributionAndProofPool = @import("sync_contribution_pool.zig").SyncContributionAndProofPool;
 
 // Per-block operation limits (Phase0 / pre-Electra).
 pub const MAX_ATTESTATIONS: u32 = preset.MAX_ATTESTATIONS;
@@ -275,7 +276,7 @@ fn phase0ToElectraIndexedAttestation(
 ///
 /// This function:
 /// 1. Pulls operations from the op pool
-/// 2. Builds an empty sync aggregate (no sync contribution pool yet)
+/// 2. Builds a SyncAggregate from the contribution pool (empty if null)
 /// 3. Uses the provided execution payload, eth1_data, graffiti
 /// 4. Sets blob KZG commitments and execution requests
 /// 5. RANDAO reveal is zeroed (needs validator signing key)
@@ -293,22 +294,23 @@ pub fn assembleBlock(
     blob_commitments: std.ArrayListUnmanaged(types.primitive.KZGCommitment.Type),
     eth1_data: types.phase0.Eth1Data.Type,
     config: BlockProductionConfig,
+    sync_contribution_pool: ?*SyncContributionAndProofPool,
 ) !ProducedBlock {
     // 1. Pull operations from op pool
     const ops = try produceBlockBody(allocator, slot, op_pool);
 
-    // 2. Build sync aggregate.
+    // 2. Build sync aggregate from the contribution pool.
     //
-    // Currently returns an empty sync aggregate (all zeros). A full
-    // implementation requires:
-    //   - A SyncContributionAndProofPool that collects signed contributions
-    //     from sync committee members via gossip (sync_committee_contribution_and_proof topic)
-    //   - Aggregating contributions for the previous slot's block root
-    //   - See TS Lodestar: syncContributionAndProofPool.getAggregate(previousSlot, parentBlockRoot)
+    // The sync aggregate covers the *previous* slot — sync committee members
+    // sign the block root of the previous slot. So we query for `slot - 1`
+    // and use `parent_root` as the block root they signed over.
     //
-    // Without a contribution pool, the sync aggregate will have zero
-    // participation, which is valid but suboptimal (reduces sync committee rewards).
-    const sync_aggregate = types.electra.SyncAggregate.default_value;
+    // Falls back to empty (all zeros) if no contributions are available,
+    // which is valid but suboptimal (reduces sync committee rewards).
+    const sync_aggregate = if (sync_contribution_pool) |pool|
+        pool.getSyncAggregate(if (slot > 0) slot - 1 else 0, parent_root)
+    else
+        types.electra.SyncAggregate.default_value;
 
     // 3. RANDAO reveal — zeroed (needs validator signing key)
     const randao_reveal: types.primitive.BLSSignature.Type = [_]u8{0} ** 96;
@@ -445,6 +447,7 @@ test "assembleBlock: empty pool produces valid block structure" {
         std.ArrayListUnmanaged(types.primitive.KZGCommitment.Type).empty, // no commitments
         types.phase0.Eth1Data.default_value,
         .{},
+        null, // no sync contribution pool
     );
     defer block.deinit(allocator);
 
@@ -475,6 +478,7 @@ test "assembleBlock: custom graffiti" {
         std.ArrayListUnmanaged(types.primitive.KZGCommitment.Type).empty,
         types.phase0.Eth1Data.default_value,
         .{ .graffiti = custom_graffiti },
+        null, // no sync contribution pool
     );
     defer block.deinit(allocator);
 
@@ -503,6 +507,7 @@ test "assembleBlock: with ops from pool" {
         std.ArrayListUnmanaged(types.primitive.KZGCommitment.Type).empty,
         types.phase0.Eth1Data.default_value,
         .{},
+        null, // no sync contribution pool
     );
     defer block.deinit(allocator);
 

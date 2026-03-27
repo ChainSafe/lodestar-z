@@ -116,6 +116,14 @@ pub const GossipHandler = struct {
     /// Verify sync committee message BLS signature. Returns true if valid.
     verifySyncCommitteeSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
 
+    /// Called to import a validated sync committee contribution into the pool.
+    /// Receives raw decompressed SSZ bytes.
+    importSyncContributionFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
+
+    /// Called to import a validated sync committee message into the pool.
+    /// Args: (ptr, subnet, slot, beacon_block_root, validator_index, signature_bytes)
+    importSyncCommitteeMessageFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8, subnet: u64) anyerror!void,
+
     /// Gossip dedup caches (owned). Used by Phase 1 fast validation.
     seen_cache: SeenCache,
 
@@ -156,6 +164,8 @@ pub const GossipHandler = struct {
             .verifyAttestationSignatureFn = null,
             .verifyAggregateSignatureFn = null,
             .verifySyncCommitteeSignatureFn = null,
+            .importSyncContributionFn = null,
+            .importSyncCommitteeMessageFn = null,
             .seen_cache = SeenCache.init(allocator),
             .current_slot = 0,
             .current_epoch = 0,
@@ -544,8 +554,16 @@ pub const GossipHandler = struct {
         if (contrib.contribution_slot > self.current_slot + 1) return GossipHandlerError.ValidationIgnored;
         if (self.finalized_slot > 0 and contrib.contribution_slot < self.finalized_slot) return GossipHandlerError.ValidationIgnored;
 
-        // Phase 2: log acceptance.
-        // TODO: Add to sync contribution and proof pool when implemented.
+        // Phase 2: import to sync contribution pool.
+        if (self.importSyncContributionFn) |importFn| {
+            const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+                return GossipHandlerError.DecodeFailed;
+            defer self.allocator.free(ssz_bytes);
+            importFn(self.node, ssz_bytes) catch |err| {
+                std.log.warn("Sync contribution import failed: {}", .{err});
+            };
+        }
+
         std.log.info("Accepted sync_committee_contribution_and_proof: aggregator={d} slot={d} subcommittee={d}", .{
             contrib.aggregator_index,
             contrib.contribution_slot,
@@ -560,8 +578,6 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: basic bounds check
     /// 3. Phase 2: log acceptance (no sync committee message pool yet)
     pub fn onSyncCommitteeMessage(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
-        _ = subnet_id;
-
         const decoded = decodeGossipMessage(self.allocator, .sync_committee, message_data) catch
             return GossipHandlerError.DecodeFailed;
         const msg = decoded.sync_committee;
@@ -586,11 +602,20 @@ pub const GossipHandler = struct {
             }
         }
 
-        // Phase 2: log acceptance.
-        // TODO: Add to sync committee message pool when implemented.
-        std.log.info("Accepted sync_committee message: validator={d} slot={d}", .{
+        // Phase 2: import to sync committee message pool.
+        if (self.importSyncCommitteeMessageFn) |importFn| {
+            const sc_ssz = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+                return GossipHandlerError.DecodeFailed;
+            defer self.allocator.free(sc_ssz);
+            importFn(self.node, sc_ssz, subnet_id) catch |err| {
+                std.log.warn("Sync committee message import failed: {}", .{err});
+            };
+        }
+
+        std.log.info("Accepted sync_committee message: validator={d} slot={d} subnet={d}", .{
             msg.validator_index,
             msg.slot,
+            subnet_id,
         });
     }
 
