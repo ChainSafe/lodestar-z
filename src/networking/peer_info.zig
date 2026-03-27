@@ -292,6 +292,22 @@ pub const PeerScore = struct {
         }
     }
 
+    /// Apply a reconnection cool-down period.
+    ///
+    /// Sets last_updated_ms into the future so that score decay is frozen
+    /// for the given duration. This prevents quick reconnection after
+    /// a Goodbye with certain reason codes.
+    ///
+    /// Reference: Lodestar TS score.ts RealScore.applyReconnectionCoolDown()
+    pub fn applyReconnectionCoolDown(self: *PeerScore, cool_down_ms: u64, now_ms: u64) void {
+        self.last_updated_ms = now_ms + cool_down_ms;
+    }
+
+    /// Whether the score is currently in a cool-down period (frozen).
+    pub fn isCoolingDown(self: *const PeerScore, now_ms: u64) bool {
+        return now_ms < self.last_updated_ms;
+    }
+
     /// Determine the expected state from the current score.
     pub fn state(self: *const PeerScore) ScoreState {
         if (self.score <= MIN_SCORE_BEFORE_BAN) return .banned;
@@ -517,4 +533,26 @@ test "PeerScore: ban cooldown freezes decay" {
     // Decay after cooldown — score should decay.
     ps.decayScore(frozen_until + 600_000);
     try std.testing.expect(@abs(ps.lodestar_score) < @abs(score_before));
+}
+
+test "PeerScore: reconnection cool-down" {
+    var ps = PeerScore{};
+    ps.last_updated_ms = 1000;
+
+    // Apply 5 minute cool-down.
+    ps.applyReconnectionCoolDown(5 * 60 * 1000, 1000);
+    try std.testing.expect(ps.isCoolingDown(1000));
+    try std.testing.expect(ps.isCoolingDown(100_000));
+
+    // After cool-down expires.
+    try std.testing.expect(!ps.isCoolingDown(1000 + 5 * 60 * 1000 + 1));
+
+    // Score should not decay during cool-down.
+    ps.lodestar_score = -10.0;
+    ps.decayScore(100_000); // Still in cool-down
+    try std.testing.expectEqual(@as(f64, -10.0), ps.lodestar_score);
+
+    // After cool-down, decay should work.
+    ps.decayScore(1000 + 5 * 60 * 1000 + 600_000); // After cool-down + 10 min
+    try std.testing.expect(@abs(ps.lodestar_score) < 10.0);
 }
