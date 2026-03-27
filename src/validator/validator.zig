@@ -102,7 +102,7 @@ pub const ValidatorClient = struct {
     /// TS: Validator.init(opts, genesis)
     pub fn init(allocator: Allocator, config: ValidatorConfig, signing_ctx: SigningContext) !ValidatorClient {
         var api = BeaconApiClient.init(allocator, config.beacon_node_url);
-        var validator_store = ValidatorStore.init(allocator);
+        var validator_store = try ValidatorStore.init(allocator, null); // null = no persistent DB file (TODO: wire data_dir)
         errdefer validator_store.deinit();
 
         const clock = SlotClock.init(
@@ -132,6 +132,7 @@ pub const ValidatorClient = struct {
             signing_ctx,
             config.slots_per_epoch,
             256, // EPOCHS_PER_SYNC_COMMITTEE_PERIOD (mainnet)
+            config.seconds_per_slot,
         );
 
         const header_tracker = ChainHeaderTracker.init(allocator, &api);
