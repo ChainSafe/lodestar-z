@@ -87,4 +87,10 @@ pub const NodeOptions = struct {
     /// When true, BLS signatures are verified during block import.
     /// Defaults to false for performance / test convenience.
     verify_signatures: bool = false,
+
+    // ── Logging ──────────────────────────────────────────────────
+    /// Global log level (default: info). Set via --log-level.
+    log_level: []const u8 = "info",
+    /// Log output format: "human" or "json". Set via --log-format.
+    log_format: []const u8 = "human",
 };

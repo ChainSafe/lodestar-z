@@ -206,6 +206,13 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("sync"), module_sync) catch @panic("OOM");
 
+    const module_log = b.createModule(.{
+        .root_source_file = b.path("src/log/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("log"), module_log) catch @panic("OOM");
+
     const module_node = b.createModule(.{
         .root_source_file = b.path("src/node/root.zig"),
         .target = target,
@@ -225,6 +232,7 @@ pub fn build(b: *std.Build) void {
     module_validator.addImport("preset", module_preset);
     module_validator.addImport("constants", module_constants);
     module_validator.addImport("state_transition", module_state_transition);
+    module_validator.addImport("log", module_log);
 
 
     const module_processor = b.createModule(.{
@@ -571,6 +579,16 @@ pub fn build(b: *std.Build) void {
     tls_run_test_validator.dependOn(&run_test_validator.step);
     tls_run_test.dependOn(&run_test_validator.step);
 
+    const test_log = b.addTest(.{
+        .name = "log",
+        .root_module = module_log,
+        .filters = b.option([][]const u8, "log.filters", "log test filters") orelse &[_][]const u8{},
+    });
+    const run_test_log = b.addRunArtifact(test_log);
+    const tls_run_test_log = b.step("test:log", "Run the log test");
+    tls_run_test_log.dependOn(&run_test_log.step);
+    tls_run_test.dependOn(&run_test_log.step);
+
     const test_node = b.addTest(.{
         .name = "node",
         .root_module = module_node,
@@ -874,6 +892,7 @@ pub fn build(b: *std.Build) void {
     module_node_main.addImport("zig_cli", dep_zig_cli.module("zig-cli"));
     module_node_main.addImport("sync", module_sync);
     module_node_main.addImport("preset", module_preset);
+    module_node_main.addImport("log", module_log);
 
     const exe_node = b.addExecutable(.{
         .name = "lodestar-z",
@@ -914,6 +933,7 @@ pub fn build(b: *std.Build) void {
     module_node.addImport("snappy", dep_snappy.module("snappy"));
     module_node.addImport("discv5", module_discv5);
     module_node.addImport("processor", module_processor);
+    module_node.addImport("log", module_log);
 
     module_processor.addImport("consensus_types", module_consensus_types);
     module_processor.addImport("fork_types", module_fork_types);
