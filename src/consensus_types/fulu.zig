@@ -92,7 +92,10 @@ pub const DataColumnSidecar = ssz.VariableContainerType(struct {
     kzg_commitments: ssz.FixedListType(p.KZGCommitment, preset.MAX_BLOB_COMMITMENTS_PER_BLOCK),
     kzg_proofs: ssz.FixedListType(p.KZGProof, preset.MAX_BLOB_COMMITMENTS_PER_BLOCK),
     signed_block_header: SignedBeaconBlockHeader,
-    kzg_commitments_inclusion_proof: ssz.FixedVectorType(p.Bytes32, preset.KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH),
+    kzg_commitments_inclusion_proof: ssz.FixedVectorType(
+        p.Bytes32,
+        preset.KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH,
+    ),
 });
 
 pub const MatrixEntry = ssz.FixedContainerType(struct {
@@ -119,7 +122,10 @@ pub const PartialDataColumnPartsMetadata = ssz.VariableContainerType(struct {
 pub const PartialDataColumnHeader = ssz.VariableContainerType(struct {
     kzg_commitments: ssz.FixedListType(p.KZGCommitment, preset.MAX_BLOB_COMMITMENTS_PER_BLOCK),
     signed_block_header: SignedBeaconBlockHeader,
-    kzg_commitments_inclusion_proof: ssz.FixedVectorType(p.Bytes32, preset.KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH),
+    kzg_commitments_inclusion_proof: ssz.FixedVectorType(
+        p.Bytes32,
+        preset.KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH,
+    ),
 });
 
 // Light client types
