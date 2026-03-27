@@ -98,3 +98,18 @@ pub const BlockImportError = blocks.BlockImportError;
 pub const BatchBlockResult = blocks.BatchBlockResult;
 pub const SanityOutcome = blocks.SanityOutcome;
 pub const ExecutionVerifier = blocks.ExecutionVerifier;
+// Data availability subsystem
+pub const blob_tracker = @import("blob_tracker.zig");
+pub const column_tracker = @import("column_tracker.zig");
+pub const column_reconstruction = @import("column_reconstruction.zig");
+pub const da_sampling = @import("da_sampling.zig");
+pub const data_availability = @import("data_availability.zig");
+
+// DA re-exports
+pub const BlobTracker = blob_tracker.BlobTracker;
+pub const ColumnTracker = column_tracker.ColumnTracker;
+pub const ColumnReconstructor = column_reconstruction.ColumnReconstructor;
+pub const DataAvailabilityManager = data_availability.DataAvailabilityManager;
+pub const DaStatus = data_availability.DaStatus;
+pub const DaCheckResult = data_availability.DaCheckResult;
+pub const DaConfig = data_availability.DaConfig;
