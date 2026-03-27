@@ -155,3 +155,75 @@ fn bufJoin(buf: *[std.fs.max_path_bytes]u8, segments: []const []const u8) []cons
     }
     return buf[0..pos];
 }
+
+/// Load or create a node identity using an explicit secret-key file path.
+///
+/// This is the DataDir-aware variant: instead of computing
+/// `<data_dir>/node-identity/secret-key` internally, the caller provides
+/// the exact path (e.g. `data_dir.enr_key`).
+///
+/// When `key_path` is empty, generates a random ephemeral identity.
+pub fn loadOrCreateIdentityAtPath(io: std.Io, key_path: []const u8) !NodeIdentity {
+    var secret_key: [32]u8 = undefined;
+
+    if (key_path.len > 0) {
+        secret_key = loadFromPath(io, key_path) catch |err| switch (err) {
+            error.FileNotFound => blk: {
+                const key = try generateRandomKey(io);
+                persistToPath(io, key_path, &key) catch |write_err| {
+                    log.err("Failed to persist node identity to '{s}': {}", .{ key_path, write_err });
+                    return write_err;
+                };
+                log.info("Generated new node identity at {s}", .{key_path});
+                break :blk key;
+            },
+            else => {
+                log.err("Failed to load node identity from '{s}': {}", .{ key_path, err });
+                return err;
+            },
+        };
+    } else {
+        secret_key = try generateRandomKey(io);
+        log.info("Using ephemeral node identity (no key path)", .{});
+    }
+
+    return deriveIdentity(secret_key);
+}
+
+/// Load a hex-encoded secret key from an explicit file path.
+fn loadFromPath(io: std.Io, path: []const u8) ![32]u8 {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.FileNotFound,
+        else => return error.ReadFailed,
+    };
+    defer file.close(io);
+
+    var buf: [128]u8 = undefined;
+    const stat = file.stat(io) catch return error.ReadFailed;
+    if (stat.size > buf.len) return error.ReadFailed;
+
+    const n = file.readPositionalAll(io, buf[0..@intCast(stat.size)], 0) catch
+        return error.ReadFailed;
+    const trimmed = std.mem.trim(u8, buf[0..n], " \t\n\r");
+
+    if (trimmed.len != 64) return error.InvalidKeyLength;
+
+    var secret_key: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&secret_key, trimmed) catch return error.InvalidKeyHex;
+
+    log.info("Loaded node identity from {s}", .{path});
+    return secret_key;
+}
+
+/// Write a hex-encoded secret key to an explicit file path.
+fn persistToPath(io: std.Io, path: []const u8, secret_key: *const [32]u8) !void {
+    const file = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true }) catch
+        return error.WriteFailed;
+    defer file.close(io);
+
+    var hex_buf: [65]u8 = undefined;
+    const hex = std.fmt.bufPrint(&hex_buf, "{s}\n", .{&std.fmt.bytesToHex(secret_key.*, .lower)}) catch
+        return error.WriteFailed;
+
+    file.writePositionalAll(io, hex, 0) catch return error.WriteFailed;
+}

@@ -52,3 +52,9 @@ pub const bootnode = @import("bootnode.zig");
 
 pub const shutdown = @import("shutdown.zig");
 pub const ShutdownHandler = shutdown.ShutdownHandler;
+
+pub const data_dir_mod = @import("data_dir.zig");
+pub const DataDir = data_dir_mod.DataDir;
+pub const defaultDataRoot = data_dir_mod.defaultRoot;
+
+pub const jwt_mod = @import("jwt.zig");

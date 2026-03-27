@@ -47,6 +47,8 @@ pub const NodeOptions = struct {
 
     // ── Database ─────────────────────────────────────────────────
     data_dir: []const u8 = "",
+    /// Override beacon DB path (default: <data_dir>/beacon-node/db).
+    db_path: ?[]const u8 = null,
 
     // ── Chain ────────────────────────────────────────────────────
     network: NetworkName = .mainnet,

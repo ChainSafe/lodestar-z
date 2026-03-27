@@ -81,6 +81,9 @@ const api_types = api_mod.types;
 const SlotClock = @import("clock.zig").SlotClock;
 const NodeOptions = @import("options.zig").NodeOptions;
 const identity_mod = @import("identity.zig");
+const data_dir_mod = @import("data_dir.zig");
+const DataDir = data_dir_mod.DataDir;
+const jwt_mod = @import("jwt.zig");
 const NodeIdentity = identity_mod.NodeIdentity;
 const sync_mod = @import("sync");
 const UnknownBlockSync = sync_mod.UnknownBlockSync;
@@ -847,17 +850,23 @@ pub const BeaconNode = struct {
     /// swap this for LMDB or similar. All caches, pools, and trackers
     /// are heap-allocated and owned by the node.
     pub fn init(allocator: Allocator, beacon_config: *const BeaconConfig, opts: NodeOptions) !*BeaconNode {
+        // Resolve all data-directory paths from options.
+        // When data_dir is empty the node runs in-memory (test/dev mode).
+        var maybe_dd: ?DataDir = if (opts.data_dir.len > 0)
+            try DataDir.resolve(allocator, opts)
+        else
+            null;
+        defer if (maybe_dd) |*dd| dd.deinit();
+
         // KV store → BeaconDB
         // Use LMDB if data_dir is provided; fall back to MemoryKVStore for tests.
         var kv_backend: KVBackend = undefined;
         var kv_iface: db_mod.KVStore = undefined;
 
-        if (opts.data_dir.len > 0) {
+        if (maybe_dd) |dd| {
             // Build null-terminated path for LMDB.
-            // The data directory must already exist.
-            const db_path = try std.fs.path.join(allocator, &.{ opts.data_dir, "chain.lmdb" });
-            defer allocator.free(db_path);
-            const z_path = try allocator.dupeZ(u8, db_path);
+            // Directories are created by ensureDirs() before init() is called.
+            const z_path = try allocator.dupeZ(u8, dd.beacon_db);
             defer allocator.free(z_path);
 
             const lmdb_store = try allocator.create(LmdbKVStore);
@@ -1227,23 +1236,52 @@ pub const BeaconNode = struct {
         if (self.http_engine) |he| he.setIo(io);
         if (self.io_transport) |t| t.setIo(io);
 
-        // Load JWT secret now that Io is available.
-        // Load or create node identity now that Io is available.
-        if (self.node_identity == null) {
-            self.node_identity = identity_mod.loadOrCreateIdentity(io, self.data_dir) catch |err| blk: {
-                std.log.err("Failed to load node identity: {}", .{err});
+        // Load or create node identity and JWT secret now that Io is available.
+        // When data_dir is set, resolve DataDir once to get all paths.
+        if (self.data_dir.len > 0) {
+            var dd = DataDir.resolve(self.allocator, self.node_options) catch |err| blk: {
+                std.log.err("Failed to resolve data dir paths: {}", .{err});
                 break :blk null;
             };
-        }
+            if (dd) |*data_dir| {
+                defer data_dir.deinit();
 
-        if (self.jwt_secret_path) |jwt_path| {
-            if (self.http_engine) |he| {
-                const secret = loadJwtSecret(self.allocator, io, jwt_path) catch |err| {
-                    std.log.err("Failed to load JWT secret from '{s}': {}", .{ jwt_path, err });
-                    return;
+                // Load or create node identity using the DataDir ENR key path.
+                if (self.node_identity == null) {
+                    self.node_identity = identity_mod.loadOrCreateIdentityAtPath(io, data_dir.enr_key) catch |err| blk: {
+                        std.log.err("Failed to load node identity: {}", .{err});
+                        break :blk null;
+                    };
+                }
+
+                // Load or generate JWT secret when an EL is configured.
+                if (self.http_engine) |he| {
+                    // Prefer explicit --jwt-secret; otherwise use DataDir default.
+                    const jwt_path = self.jwt_secret_path orelse data_dir.jwt_secret;
+                    const secret = jwt_mod.loadOrGenerate(io, jwt_path) catch |err| blk: {
+                        std.log.err("Failed to load/generate JWT secret from '{s}': {}", .{ jwt_path, err });
+                        break :blk null;
+                    };
+                    if (secret) |s| he.jwt_secret = s;
+                }
+            }
+        } else {
+            // No data_dir — ephemeral identity, no JWT auto-generation.
+            if (self.node_identity == null) {
+                self.node_identity = identity_mod.loadOrCreateIdentity(io, "") catch |err| blk: {
+                    std.log.err("Failed to generate ephemeral node identity: {}", .{err});
+                    break :blk null;
                 };
-                he.jwt_secret = secret;
-                std.log.info("Loaded JWT secret from {s}", .{jwt_path});
+            }
+
+            if (self.http_engine) |he| {
+                if (self.jwt_secret_path) |jwt_path| {
+                    const secret = jwt_mod.load(io, jwt_path) catch |err| blk: {
+                        std.log.err("Failed to load JWT secret from '{s}': {}", .{ jwt_path, err });
+                        break :blk null;
+                    };
+                    if (secret) |s| he.jwt_secret = s;
+                }
             }
         }
     }
