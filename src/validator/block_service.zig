@@ -130,30 +130,92 @@ pub const BlockService = struct {
         const block_resp = try self.api.produceBlock(io, slot, randao_reveal, graffiti);
         defer self.allocator.free(block_resp.block_ssz);
 
-        // 3. Compute block signing root using DOMAIN_BEACON_PROPOSER.
-        //    The BN returns the block as JSON; we sign the BeaconBlockHeader
-        //    (slot, proposer_index, parent_root, state_root, body_root).
-        //    For now we produce a placeholder header from the duty.
-        //    Full implementation would SSZ-decode the block and hash the header.
+        // 3. Extract parent_root, state_root, body_root from the BN JSON response.
+        //    The BN returns a full block in JSON. We parse out just the header fields
+        //    needed to build BeaconBlockHeader for signing.
+        //    Full SSZ decode is not yet wired; we do a shallow JSON parse.
+        var parent_root = [_]u8{0} ** 32;
+        var state_root = [_]u8{0} ** 32;
+        var body_root = [_]u8{0} ** 32;
+
+        blk: {
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), block_resp.block_ssz, .{}) catch break :blk;
+            const root_obj = switch (parsed.value) {
+                .object => |obj| obj,
+                else => break :blk,
+            };
+            // Try top-level "data" wrapper (eth/v3 response).
+            const block_val = root_obj.get("data") orelse parsed.value;
+            const block_obj = switch (block_val) {
+                .object => |obj| obj,
+                else => break :blk,
+            };
+            // Navigate into message.body or message directly.
+            const msg_val = block_obj.get("message") orelse block_val;
+            const msg_obj = switch (msg_val) {
+                .object => |obj| obj,
+                else => break :blk,
+            };
+
+            // parent_root
+            if (msg_obj.get("parent_root")) |pr_val| {
+                const pr_str = switch (pr_val) { .string => |s| s, else => "" };
+                const pr_hex = if (std.mem.startsWith(u8, pr_str, "0x")) pr_str[2..] else pr_str;
+                _ = std.fmt.hexToBytes(&parent_root, pr_hex) catch {};
+            }
+            // state_root
+            if (msg_obj.get("state_root")) |sr_val| {
+                const sr_str = switch (sr_val) { .string => |s| s, else => "" };
+                const sr_hex = if (std.mem.startsWith(u8, sr_str, "0x")) sr_str[2..] else sr_str;
+                _ = std.fmt.hexToBytes(&state_root, sr_hex) catch {};
+            }
+            // body_root — if absent, we'd need to compute it via SSZ hash of body.
+            // The BN often doesn't include body_root in the block response; it must be computed.
+            // For now, extract from block_header if present.
+            if (msg_obj.get("body_root")) |br_val| {
+                const br_str = switch (br_val) { .string => |s| s, else => "" };
+                const br_hex = if (std.mem.startsWith(u8, br_str, "0x")) br_str[2..] else br_str;
+                _ = std.fmt.hexToBytes(&body_root, br_hex) catch {};
+            }
+        }
+
         var signing_root: [32]u8 = undefined;
         const block_header = consensus_types.phase0.BeaconBlockHeader.Type{
             .slot = slot,
             .proposer_index = duty.validator_index,
-            .parent_root = [_]u8{0} ** 32, // TODO: extract from block_resp
-            .state_root = [_]u8{0} ** 32,  // TODO: filled by BN
-            .body_root = [_]u8{0} ** 32,   // TODO: compute from block body
+            .parent_root = parent_root,
+            .state_root = state_root,
+            .body_root = body_root,
         };
         try signing_mod.blockHeaderSigningRoot(self.signing_ctx, &block_header, &signing_root);
 
         // 4. Sign block.
         const block_sig = try self.validator_store.signBlock(duty.pubkey, signing_root, slot);
         const sig_bytes = block_sig.compress();
-        _ = sig_bytes;
+        const sig_hex = std.fmt.bytesToHex(&sig_bytes, .lower);
 
-        // 5. Assemble signed block — stub: publish raw block JSON for now.
-        //    Full implementation: SSZ-encode SignedBeaconBlock{message, signature}.
-        const signed_block_ssz: []const u8 = block_resp.block_ssz;
-        try self.api.publishBlock(io, signed_block_ssz);
+        // 5. Assemble SignedBeaconBlock JSON and publish.
+        //    We wrap the BN's block JSON (block_resp.block_ssz is JSON from v3 API)
+        //    by injecting the signature into the response structure.
+        //    Full implementation would SSZ-encode SignedBeaconBlock{message, signature}.
+        var signed_json = std.ArrayList(u8).init(self.allocator);
+        defer signed_json.deinit();
+        // Try to inject signature into the BN response; fall back to wrapping.
+        const raw = block_resp.block_ssz;
+        if (std.mem.endsWith(u8, std.mem.trimRight(u8, raw, " \t\r\n"), "}")) {
+            // JSON object — inject signature field before closing brace.
+            const trimmed_raw = std.mem.trimRight(u8, raw, " \t\r\n");
+            try signed_json.appendSlice(trimmed_raw[0 .. trimmed_raw.len - 1]);
+            try signed_json.writer().print(",\"signature\":\"0x{s}\"}}", .{sig_hex});
+        } else {
+            // Fallback: pass raw block and log warning.
+            log.warn("could not inject signature into block response — publishing raw body", .{});
+            try signed_json.appendSlice(raw);
+        }
+
+        try self.api.publishBlock(io, signed_json.items);
         log.info("published block slot={d}", .{slot});
     }
 

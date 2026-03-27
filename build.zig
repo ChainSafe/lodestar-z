@@ -561,6 +561,16 @@ pub fn build(b: *std.Build) void {
     tls_run_test_api.dependOn(&run_test_api.step);
     tls_run_test.dependOn(&run_test_api.step);
 
+    const test_validator = b.addTest(.{
+        .name = "validator",
+        .root_module = module_validator,
+        .filters = b.option([][]const u8, "validator.filters", "validator test filters") orelse &[_][]const u8{},
+    });
+    const run_test_validator = b.addRunArtifact(test_validator);
+    const tls_run_test_validator = b.step("test:validator", "Run the validator client tests");
+    tls_run_test_validator.dependOn(&run_test_validator.step);
+    tls_run_test.dependOn(&run_test_validator.step);
+
     const test_node = b.addTest(.{
         .name = "node",
         .root_module = module_node,

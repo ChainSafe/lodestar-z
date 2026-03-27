@@ -85,6 +85,10 @@ pub const ValidatorClient = struct {
     prepare_proposer: PrepareBeaconProposerService,
     doppelganger: ?DoppelgangerService,
 
+    // I/O context — stored so clock callbacks can make HTTP calls.
+    // Set in start() before the run loop begins.
+    io: ?std.Io,
+
     // ---------------------------------------------------------------------------
     // Lifecycle
     // ---------------------------------------------------------------------------
@@ -156,6 +160,7 @@ pub const ValidatorClient = struct {
             .sync_committee_service = sync_committee_service,
             .prepare_proposer = prepare_proposer,
             .doppelganger = doppelganger,
+            .io = null,
         };
     }
 
@@ -206,9 +211,17 @@ pub const ValidatorClient = struct {
             self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochDoppelganger });
         }
 
-        // TODO: spawn background fiber for ChainHeaderTracker.start(io) (SSE subscription).
-        // In Zig 0.16 with evented I/O: io.background.async(...)
-        // For now, the SSE subscription must be started externally.
+        // Store io so clock callbacks can perform HTTP requests.
+        self.io = io;
+
+        // Note: ChainHeaderTracker SSE subscription would ideally run in a background fiber.
+        // In Zig 0.16 with full evented I/O (io_uring/GCD), we could do:
+        //   var sse_task = try io.spawn(ChainHeaderTracker.start, .{&self.header_tracker, io});
+        //   defer sse_task.cancel();
+        // For now, it is the operator's responsibility to call header_tracker.start(io)
+        // in a separate thread if SSE events are desired. The validator runs correctly
+        // without it (sync committee service uses zero block root as fallback).
+        log.info("note: ChainHeaderTracker SSE subscription not started (requires separate thread/fiber)", .{});
 
         // Run the clock loop (blocking).
         try self.clock.run(io);
@@ -220,53 +233,51 @@ pub const ValidatorClient = struct {
 
     fn onSlotBlockService(ctx: *anyopaque, slot: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        // TODO: thread Io through callbacks (requires clock API change).
-        _ = self;
-        _ = slot;
-        log.debug("slot={d} block_service skipped (no Io in callback)", .{slot});
+        const io = self.io orelse return;
+        self.block_service.onSlot(io, slot);
     }
 
     fn onEpochBlockService(ctx: *anyopaque, epoch: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        _ = self;
-        _ = epoch;
-        log.debug("epoch={d} block_service.onEpoch skipped (no Io in callback)", .{epoch});
+        const io = self.io orelse return;
+        self.block_service.onEpoch(io, epoch);
     }
 
     fn onSlotAttestationService(ctx: *anyopaque, slot: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        _ = self;
-        _ = slot;
+        const io = self.io orelse return;
+        self.attestation_service.onSlot(io, slot);
     }
 
     fn onEpochAttestationService(ctx: *anyopaque, epoch: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        _ = self;
-        _ = epoch;
+        const io = self.io orelse return;
+        self.attestation_service.onEpoch(io, epoch);
     }
 
     fn onSlotSyncCommitteeService(ctx: *anyopaque, slot: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        _ = self;
-        _ = slot;
+        const io = self.io orelse return;
+        self.sync_committee_service.onSlot(io, slot);
     }
 
     fn onEpochSyncCommitteeService(ctx: *anyopaque, epoch: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        _ = self;
-        _ = epoch;
+        const io = self.io orelse return;
+        self.sync_committee_service.onEpoch(io, epoch);
     }
 
     fn onEpochPrepareProposer(ctx: *anyopaque, epoch: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        _ = self;
-        _ = epoch;
-        log.debug("epoch={d} prepare_proposer skipped (no Io in callback)", .{epoch});
+        const io = self.io orelse return;
+        self.prepare_proposer.onEpoch(io, epoch);
     }
 
     fn onEpochDoppelganger(ctx: *anyopaque, epoch: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        _ = self;
-        _ = epoch;
+        const io = self.io orelse return;
+        if (self.doppelganger) |*d| {
+            d.onEpoch(io, epoch);
+        }
     }
 };

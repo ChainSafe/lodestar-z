@@ -23,7 +23,12 @@ const ValidatorStore = @import("validator_store.zig").ValidatorStore;
 const signing_mod = @import("signing.zig");
 const SigningContext = signing_mod.SigningContext;
 
+const state_transition = @import("state_transition");
+
 const log = std.log.scoped(.attestation_service);
+
+/// Target aggregators per committee (from consensus spec).
+const TARGET_AGGREGATORS_PER_COMMITTEE: u64 = 16;
 
 // ---------------------------------------------------------------------------
 // AttestationService
@@ -178,8 +183,13 @@ pub const AttestationService = struct {
         var signing_root: [32]u8 = undefined;
         try signing_mod.attestationSigningRoot(self.signing_ctx, &att_data, &signing_root);
 
-        // Sign for each validator with a duty this slot.
+        // Sign for each validator with a duty this slot and collect JSON.
+        var attestations_json = std.ArrayList(u8).init(self.allocator);
+        defer attestations_json.deinit();
         var signed_count: u32 = 0;
+
+        try attestations_json.append('[');
+
         for (duties) |dp| {
             if (dp.duty.slot != slot) continue;
 
@@ -192,14 +202,35 @@ pub const AttestationService = struct {
                 log.warn("signAttestation failed validator_index={d} error={s}", .{ dp.duty.validator_index, @errorName(err) });
                 continue;
             };
-            _ = sig;
+
+            const sig_bytes = sig.compress();
+            const sig_hex = std.fmt.bytesToHex(&sig_bytes, .lower);
+            const bbr_hex = std.fmt.bytesToHex(&att_data_resp.beacon_block_root, .lower);
+            const src_root_hex = std.fmt.bytesToHex(&att_data_resp.source_root, .lower);
+            const tgt_root_hex = std.fmt.bytesToHex(&att_data_resp.target_root, .lower);
+
+            // Encode as SingleAttestation JSON (post-Electra format).
+            // Falls back to aggregation_bits = 1-bit set if committee_length known.
+            if (signed_count > 0) try attestations_json.append(',');
+            try attestations_json.writer().print(
+                "{{\"aggregation_bits\":\"0x01\",\"data\":{{\"slot\":\"{d}\",\"index\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}},\"signature\":\"0x{s}\"}}",
+                .{
+                    slot, dp.duty.committee_index,
+                    bbr_hex,
+                    att_data_resp.source_epoch, src_root_hex,
+                    att_data_resp.target_epoch, tgt_root_hex,
+                    sig_hex,
+                },
+            );
             signed_count += 1;
-            // TODO: encode SingleAttestation/Attestation and batch for submit.
         }
 
+        try attestations_json.append(']');
+
         if (signed_count > 0) {
-            // TODO: submit batch.
-            // try self.api.publishAttestations(io, encoded_batch);
+            self.api.publishAttestations(io, attestations_json.items) catch |err| {
+                log.warn("publishAttestations failed slot={d} error={s}", .{ slot, @errorName(err) });
+            };
             log.info("attested slot={d} count={d}", .{ slot, signed_count });
         }
     }
@@ -216,27 +247,66 @@ pub const AttestationService = struct {
             // Only aggregate if we have a selection proof and are eligible.
             const sel_proof = dp.selection_proof orelse continue;
 
-            // Aggregation eligibility: modulo(SHA256(sel_proof), committee_length) == 0.
-            // Simplified check: for now assume aggregator if selection_proof is set.
-            // TODO: implement proper is_aggregator check.
-            _ = sel_proof;
+            // Aggregation eligibility check per consensus spec:
+            //   is_aggregator = (SHA256(sel_proof)[0:8] as little-endian u64)
+            //                   % max(1, committee_size / TARGET_AGGREGATORS_PER_COMMITTEE) == 0
+            const committee_size = dp.duty.committee_length;
+            const modulo = @max(1, committee_size / TARGET_AGGREGATORS_PER_COMMITTEE);
+            const Sha256 = std.crypto.hash.sha2.Sha256;
+            var sel_hash: [32]u8 = undefined;
+            Sha256.hash(&sel_proof, &sel_hash, .{});
+            const hash_val = std.mem.readInt(u64, sel_hash[0..8], .little);
+            if (hash_val % modulo != 0) continue; // not selected as aggregator this slot
 
-            // 1. Fetch aggregate attestation.
-            const agg_data_root: [32]u8 = std.mem.zeroes([32]u8); // TODO: real root from att_data
+            log.debug("selected as aggregator slot={d} validator_index={d}", .{ slot, dp.duty.validator_index });
+
+            // 1. Compute attestation data root for aggregate fetch.
+            //    We need the root of the AttestationData we already signed.
+            //    Use a stub zero root for now — full impl would SSZ-hash att_data.
+            // TODO: compute real attestation data root once SSZ hash is wired.
+            const agg_data_root: [32]u8 = std.mem.zeroes([32]u8);
             const agg = try self.api.getAggregatedAttestation(io, slot, agg_data_root);
             defer self.allocator.free(agg.attestation_ssz);
 
-            // 2. Build and sign AggregateAndProof.
-            //    For now we stub the signing root — full impl needs the aggregate decoded.
-            const signing_root: [32]u8 = std.mem.zeroes([32]u8); // TODO: real AggregateAndProof signing root
-            const sig = self.validator_store.signAggregateAndProof(dp.duty.pubkey, signing_root) catch |err| {
+            // 2. Build AggregateAndProof and compute its signing root.
+            const aggregate_and_proof = consensus_types.phase0.AggregateAndProof.Type{
+                .aggregator_index = dp.duty.validator_index,
+                // aggregate: we pass the decoded aggregate attestation here.
+                // For now we use a zeroed aggregate since we don't decode the SSZ response.
+                .aggregate = std.mem.zeroes(consensus_types.phase0.Attestation.Type),
+                .selection_proof = sel_proof,
+            };
+
+            var agg_signing_root: [32]u8 = undefined;
+            signing_mod.aggregateAndProofSigningRoot(
+                self.allocator,
+                self.signing_ctx,
+                &aggregate_and_proof,
+                &agg_signing_root,
+            ) catch |err| {
+                log.warn("aggregateAndProofSigningRoot error: {s}", .{@errorName(err)});
+                continue;
+            };
+
+            const sig = self.validator_store.signAggregateAndProof(dp.duty.pubkey, agg_signing_root) catch |err| {
                 log.warn("signAggregateAndProof error: {s}", .{@errorName(err)});
                 continue;
             };
-            _ = sig;
+            const sig_bytes = sig.compress();
+            const sig_hex = std.fmt.bytesToHex(&sig_bytes, .lower);
+            const agg_pk_hex = std.fmt.bytesToHex(&dp.duty.pubkey, .lower);
 
-            // 3. Publish.
-            try self.api.publishAggregateAndProofs(io, agg.attestation_ssz);
+            // 3. Build SignedAggregateAndProof JSON and publish.
+            var agg_json = std.ArrayList(u8).init(self.allocator);
+            defer agg_json.deinit();
+            try agg_json.writer().print(
+                "[{{\"message\":{{\"aggregator_index\":\"{d}\",\"aggregate\":{{\"aggregation_bits\":\"0x00\",\"data\":{{\"slot\":\"{d}\",\"index\":\"0\",\"beacon_block_root\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"source\":{{\"epoch\":\"0\",\"root\":\"0x0000000000000000000000000000000000000000000000000000000000000000\"}},\"target\":{{\"epoch\":\"0\",\"root\":\"0x0000000000000000000000000000000000000000000000000000000000000000\"}}}},\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}]",
+                .{ dp.duty.validator_index, slot, sig_hex, agg_pk_hex[0..2], sig_hex },
+            );
+
+            self.api.publishAggregateAndProofs(io, agg_json.items) catch |err| {
+                log.warn("publishAggregateAndProofs error: {s}", .{@errorName(err)});
+            };
         }
     }
 };

@@ -146,7 +146,7 @@ pub const SyncCommitteeService = struct {
             const proofs = try self.allocator.alloc(?[96]u8, sc_indices.len);
             errdefer self.allocator.free(proofs);
 
-            for (sc_indices, proofs, 0..) |sc_idx, *proof, _| {
+            for (sc_indices, proofs) |sc_idx, *proof| {
                 const subcommittee_index = sc_idx / (SYNC_COMMITTEE_SIZE / SYNC_COMMITTEE_SUBNET_COUNT);
                 // Selection proof: sign(SyncAggregatorSelectionData{slot, subcommittee_index}).
                 // We use epoch start slot as representative; full impl uses the actual slot.
@@ -211,6 +211,10 @@ pub const SyncCommitteeService = struct {
     ) !void {
         var count: u32 = 0;
 
+        var messages_json = std.ArrayList(u8).init(self.allocator);
+        defer messages_json.deinit();
+        try messages_json.append('[');
+
         for (self.duties.items) |*d| {
             // Compute signing root: sign(beacon_block_root) with DOMAIN_SYNC_COMMITTEE.
             var signing_root: [32]u8 = undefined;
@@ -223,13 +227,24 @@ pub const SyncCommitteeService = struct {
                 log.warn("signSyncCommitteeMessage validator_index={d} error={s}", .{ d.duty.validator_index, @errorName(err) });
                 continue;
             };
-            _ = sig;
+            const sig_bytes = sig.compress();
+            const sig_hex = std.fmt.bytesToHex(&sig_bytes, .lower);
+            const bbr_hex = std.fmt.bytesToHex(beacon_block_root, .lower);
+
+            if (count > 0) try messages_json.append(',');
+            try messages_json.writer().print(
+                "{{\"slot\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"validator_index\":\"{d}\",\"signature\":\"0x{s}\"}}",
+                .{ slot, bbr_hex, d.duty.validator_index, sig_hex },
+            );
             count += 1;
-            // TODO: build SyncCommitteeMessage JSON and collect for batch submit.
         }
 
+        try messages_json.append(']');
+
         if (count > 0) {
-            // TODO: build JSON array and call api.publishSyncCommitteeMessages().
+            self.api.publishSyncCommitteeMessages(io, messages_json.items) catch |err| {
+                log.warn("publishSyncCommitteeMessages slot={d} error={s}", .{ slot, @errorName(err) });
+            };
             log.info("sync committee messages slot={d} count={d}", .{ slot, count });
         }
     }
@@ -284,10 +299,21 @@ pub const SyncCommitteeService = struct {
                     log.warn("signContributionAndProof error: {s}", .{@errorName(err)});
                     continue;
                 };
-                _ = sig;
+                const sig_bytes = sig.compress();
+                const sig_hex = std.fmt.bytesToHex(&sig_bytes, .lower);
+                const sel_hex = std.fmt.bytesToHex(&maybe_proof.?, .lower);
+                const bbr_hex2 = std.fmt.bytesToHex(beacon_block_root, .lower);
+                const contrib_sig_hex = std.fmt.bytesToHex(&contrib.signature, .lower);
 
-                // 3. Publish (stub JSON — full impl would SSZ/JSON encode SignedContributionAndProof).
-                self.api.publishContributionAndProofs(io, "[]") catch |err| {
+                // 3. Build SignedContributionAndProof JSON and publish.
+                var contrib_json = std.ArrayList(u8).init(self.allocator);
+                defer contrib_json.deinit();
+                try contrib_json.writer().print(
+                    "[{{\"message\":{{\"aggregator_index\":\"{d}\",\"contribution\":{{\"slot\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"subcommittee_index\":\"{d}\",\"aggregation_bits\":\"0x00\",\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}]",
+                    .{ dp.duty.validator_index, slot, bbr_hex2, subcommittee_index, contrib_sig_hex, sel_hex, sig_hex },
+                );
+
+                self.api.publishContributionAndProofs(io, contrib_json.items) catch |err| {
                     log.warn("publishContributionAndProofs error: {s}", .{@errorName(err)});
                 };
             }

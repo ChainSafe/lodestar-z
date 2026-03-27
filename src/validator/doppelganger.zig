@@ -52,22 +52,50 @@ pub const DoppelgangerState = struct {
 // DoppelgangerService
 // ---------------------------------------------------------------------------
 
+/// Per-validator state tracked by doppelganger service.
+pub const DoppelgangerEntry = struct {
+    pubkey: [48]u8,
+    /// Validator index — null until resolved.
+    index: ?u64,
+    state: DoppelgangerState,
+};
+
+/// Optional shutdown callback: called when doppelganger is detected.
+pub const ShutdownCallback = struct {
+    ctx: *anyopaque,
+    fn_ptr: *const fn (ctx: *anyopaque) void,
+
+    pub fn call(self: ShutdownCallback) void {
+        self.fn_ptr(self.ctx);
+    }
+};
+
 pub const DoppelgangerService = struct {
     allocator: Allocator,
     api: *BeaconApiClient,
-    /// Map: pubkey (hex string) → DoppelgangerState.
-    states: std.StringHashMap(DoppelgangerState),
+    /// Per-validator entries.
+    entries: std.ArrayList(DoppelgangerEntry),
+    /// Optional shutdown callback — called on doppelganger detection.
+    shutdown_callback: ?ShutdownCallback,
 
     pub fn init(allocator: Allocator, api: *BeaconApiClient) DoppelgangerService {
         return .{
             .allocator = allocator,
             .api = api,
-            .states = std.StringHashMap(DoppelgangerState).init(allocator),
+            .entries = std.ArrayList(DoppelgangerEntry).init(allocator),
+            .shutdown_callback = null,
         };
     }
 
     pub fn deinit(self: *DoppelgangerService) void {
-        self.states.deinit();
+        self.entries.deinit();
+    }
+
+    /// Set a shutdown callback to be called when doppelganger is detected.
+    ///
+    /// TS: DoppelgangerService.processShutdownCallback
+    pub fn setShutdownCallback(self: *DoppelgangerService, cb: ShutdownCallback) void {
+        self.shutdown_callback = cb;
     }
 
     // -----------------------------------------------------------------------
@@ -78,13 +106,20 @@ pub const DoppelgangerService = struct {
     ///
     /// TS: DoppelgangerService.registerValidator(pubkeyHex)
     pub fn registerValidator(self: *DoppelgangerService, pubkey: [48]u8) !void {
-        const key = try std.fmt.allocPrint(self.allocator, "{}", .{std.fmt.fmtSliceHexLower(&pubkey)});
-        try self.states.put(key, .{
-            .next_epoch_to_check = 0,
-            .remaining_epochs = DEFAULT_REMAINING_DETECTION_EPOCHS,
-            .status = .unverified,
+        // Check for duplicate.
+        for (self.entries.items) |e| {
+            if (std.mem.eql(u8, &e.pubkey, &pubkey)) return;
+        }
+        try self.entries.append(.{
+            .pubkey = pubkey,
+            .index = null,
+            .state = .{
+                .next_epoch_to_check = 0,
+                .remaining_epochs = DEFAULT_REMAINING_DETECTION_EPOCHS,
+                .status = .unverified,
+            },
         });
-        log.debug("registered validator for doppelganger detection pubkey=0x{s}", .{key[0..8]});
+        log.debug("registered validator for doppelganger detection pubkey=0x{}", .{std.fmt.fmtSliceHexLower(pubkey[0..4])});
     }
 
     // -----------------------------------------------------------------------
@@ -95,18 +130,20 @@ pub const DoppelgangerService = struct {
     ///
     /// TS: DoppelgangerService.getStatus(pubkeyHex) == VerifiedSafe
     pub fn isSigningAllowed(self: *const DoppelgangerService, pubkey: [48]u8) bool {
-        var key_buf: [96]u8 = undefined;
-        const key = std.fmt.bufPrint(&key_buf, "{}", .{std.fmt.fmtSliceHexLower(&pubkey)}) catch return false;
-        const state = self.states.get(key) orelse return true; // unknown → allow (protection not configured)
-        return state.status == .verified_safe;
+        for (self.entries.items) |e| {
+            if (std.mem.eql(u8, &e.pubkey, &pubkey)) {
+                return e.state.status == .verified_safe;
+            }
+        }
+        return true; // unknown → allow (protection not configured for this key)
     }
 
     /// Returns the current status for a validator pubkey.
     pub fn getStatus(self: *const DoppelgangerService, pubkey: [48]u8) DoppelgangerStatus {
-        var key_buf: [96]u8 = undefined;
-        const key = std.fmt.bufPrint(&key_buf, "{}", .{std.fmt.fmtSliceHexLower(&pubkey)}) catch return .unknown;
-        const state = self.states.get(key) orelse return .unknown;
-        return state.status;
+        for (self.entries.items) |e| {
+            if (std.mem.eql(u8, &e.pubkey, &pubkey)) return e.state.status;
+        }
+        return .unknown;
     }
 
     // -----------------------------------------------------------------------
@@ -123,49 +160,101 @@ pub const DoppelgangerService = struct {
     }
 
     fn pollLiveness(self: *DoppelgangerService, io: Io, epoch: u64) !void {
-        // Collect indices of validators still being monitored.
-        var indices_buf: [256]u64 = undefined;
-        var count: usize = 0;
-
-        var it = self.states.iterator();
-        while (it.next()) |entry| {
-            if (entry.value_ptr.status == .unverified) {
-                // TODO: resolve pubkey → index lookup.
-                _ = entry;
-                indices_buf[count] = 0; // stub
-                count += 1;
-                if (count >= indices_buf.len) break;
+        // Step 1: resolve pubkey → index for any entries that don't have one yet.
+        var needs_resolution = false;
+        for (self.entries.items) |e| {
+            if (e.state.status == .unverified and e.index == null) {
+                needs_resolution = true;
+                break;
             }
         }
-        if (count == 0) return;
 
-        const liveness = try self.api.getLiveness(io, epoch, indices_buf[0..count]);
+        if (needs_resolution) {
+            try self.resolveIndices(io);
+        }
+
+        // Step 2: collect indices of validators still being monitored.
+        var indices = std.ArrayList(u64).init(self.allocator);
+        defer indices.deinit();
+
+        for (self.entries.items) |e| {
+            if (e.state.status == .unverified) {
+                if (e.index) |idx| {
+                    try indices.append(idx);
+                }
+                // If index still unknown after resolution, skip this epoch.
+            }
+        }
+        if (indices.items.len == 0) return;
+
+        const liveness = try self.api.getLiveness(io, epoch, indices.items);
         defer self.allocator.free(liveness);
 
+        var detected = false;
         for (liveness) |live| {
             if (live.is_live) {
-                // Doppelganger detected — halt.
-                log.err("DOPPELGANGER DETECTED: validator index={d} is live on the network!", .{live.index});
-                // TODO: trigger shutdown callback (TS: processShutdownCallback).
-                // Mark all as detected.
-                var state_it = self.states.iterator();
-                while (state_it.next()) |entry| {
-                    entry.value_ptr.status = .doppelganger_detected;
+                log.err("DOPPELGANGER DETECTED: validator index={d} is live on the network at epoch={d}!", .{ live.index, epoch });
+                detected = true;
+                // Mark the specific validator as detected.
+                for (self.entries.items) |*e| {
+                    if (e.index == live.index) {
+                        e.state.status = .doppelganger_detected;
+                    }
                 }
-                return error.DoppelgangerDetected;
             }
         }
 
-        // Clean epoch — decrement remaining.
-        var state_it = self.states.iterator();
-        while (state_it.next()) |entry| {
-            if (entry.value_ptr.status == .unverified) {
-                if (entry.value_ptr.remaining_epochs > 0) {
-                    entry.value_ptr.remaining_epochs -= 1;
+        if (detected) {
+            // Trigger shutdown callback if registered.
+            if (self.shutdown_callback) |cb| {
+                log.err("triggering shutdown due to doppelganger detection", .{});
+                cb.call();
+            }
+            return error.DoppelgangerDetected;
+        }
+
+        // Clean epoch — decrement remaining and promote to verified_safe if done.
+        for (self.entries.items) |*e| {
+            if (e.state.status == .unverified) {
+                if (e.state.remaining_epochs > 0) {
+                    e.state.remaining_epochs -= 1;
                 }
-                if (entry.value_ptr.remaining_epochs == 0) {
-                    entry.value_ptr.status = .verified_safe;
-                    log.info("doppelganger check passed — validator now signing", .{});
+                if (e.state.remaining_epochs == 0) {
+                    e.state.status = .verified_safe;
+                    log.info("doppelganger check passed for pubkey=0x{} — validator now allowed to sign", .{std.fmt.fmtSliceHexLower(e.pubkey[0..4])});
+                }
+            }
+        }
+    }
+
+    /// Resolve pubkey → validator index for entries that don't have one.
+    ///
+    /// Calls api.getValidatorIndices() with all unresolved pubkeys.
+    fn resolveIndices(self: *DoppelgangerService, io: Io) !void {
+        var unresolved = std.ArrayList([48]u8).init(self.allocator);
+        defer unresolved.deinit();
+
+        for (self.entries.items) |e| {
+            if (e.index == null and e.state.status == .unverified) {
+                try unresolved.append(e.pubkey);
+            }
+        }
+        if (unresolved.items.len == 0) return;
+
+        log.debug("resolving {d} validator indices for doppelganger detection", .{unresolved.items.len});
+
+        const results = self.api.getValidatorIndices(io, unresolved.items) catch |err| {
+            log.warn("getValidatorIndices failed: {s} — will retry next epoch", .{@errorName(err)});
+            return;
+        };
+        defer self.allocator.free(results);
+
+        for (results) |r| {
+            for (self.entries.items) |*e| {
+                if (std.mem.eql(u8, &e.pubkey, &r.pubkey)) {
+                    e.index = r.index;
+                    log.debug("resolved validator index={d} for doppelganger monitoring", .{r.index});
+                    break;
                 }
             }
         }
