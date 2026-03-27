@@ -2962,8 +2962,9 @@ fn parseIp4(s: []const u8) ?[4]u8 {
     /// This is the main entry point for block production. It:
     /// 1. Gets the head state and verifies the proposer for the slot
     /// 2. Retrieves the execution payload from the EL (must call preparePayload first)
-    /// 3. Assembles the full BeaconBlockBody with all fields populated
-    /// 4. Returns a ProducedBlock with the body, blobs bundle, and metadata
+    /// 3. Converts the engine API payload to SSZ format
+    /// 4. Assembles the full BeaconBlockBody with all fields populated
+    /// 5. Returns a ProducedBlock with the body, blobs bundle, and metadata
     ///
     /// The caller is responsible for:
     /// - Calling preparePayload() before this (typically at slot N-1)
@@ -2971,17 +2972,39 @@ fn parseIp4(s: []const u8) ?[4]u8 {
     /// - Computing the state root via state transition
     /// - Signing the block
     /// - Broadcasting via gossip
-    pub fn produceFullBlock(self: *BeaconNode, slot: u64, config: BlockProductionConfig) !ProducedBlock {
+    pub fn produceFullBlock(self: *BeaconNode, slot: u64, prod_config: BlockProductionConfig) !ProducedBlock {
         const head = self.getHead();
         const parent_root = head.root;
 
         // Get execution payload from cached payload (from preparePayload)
-        var payload_response: ?GetPayloadResponse = null;
+        var exec_payload = types.electra.ExecutionPayload.default_value;
+        var blobs_bundle: ?chain_mod.produce_block.BlobsBundle = null;
+        var block_value: u256 = 0;
+        var blob_commitments = std.ArrayListUnmanaged(types.primitive.KZGCommitment.Type).empty;
+
         if (self.cached_payload_id != null) {
-            payload_response = self.getExecutionPayload() catch |err| {
+            if (self.getExecutionPayload()) |resp| {
+                // Convert engine API payload to SSZ format
+                exec_payload = try convertEnginePayload(self.allocator, resp.execution_payload);
+                blobs_bundle = .{
+                    .commitments = resp.blobs_bundle.commitments,
+                    .proofs = resp.blobs_bundle.proofs,
+                    .blobs = resp.blobs_bundle.blobs,
+                };
+                block_value = resp.block_value;
+
+                // Extract blob KZG commitments
+                if (resp.blobs_bundle.commitments.len > 0) {
+                    blob_commitments = try std.ArrayListUnmanaged(
+                        types.primitive.KZGCommitment.Type,
+                    ).initCapacity(self.allocator, resp.blobs_bundle.commitments.len);
+                    for (resp.blobs_bundle.commitments) |commitment| {
+                        blob_commitments.appendAssumeCapacity(commitment);
+                    }
+                }
+            } else |err| {
                 std.log.warn("Failed to get execution payload, producing block without it: {}", .{err});
-                payload_response = null;
-            };
+            }
         }
 
         // Get eth1_data from head state
@@ -2989,7 +3012,6 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         if (self.block_state_cache.get(parent_root)) |head_state| {
             const state_eth1 = head_state.state.eth1Data() catch null;
             if (state_eth1) |eth1_view| {
-                // Read eth1_data fields from tree view
                 eth1_data.deposit_root = (eth1_view.getFieldRoot("deposit_root") catch &std.mem.zeroes([32]u8)).*;
                 eth1_data.deposit_count = eth1_view.get("deposit_count") catch 0;
                 eth1_data.block_hash = (eth1_view.getFieldRoot("block_hash") catch &std.mem.zeroes([32]u8)).*;
@@ -3008,9 +3030,12 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             proposer_index,
             parent_root,
             self.op_pool,
-            payload_response,
+            exec_payload,
+            blobs_bundle,
+            block_value,
+            blob_commitments,
             eth1_data,
-            config,
+            prod_config,
         );
 
         std.log.info("Produced full block: slot={d} proposer={d} parent={s}... value={d}", .{
@@ -3022,9 +3047,6 @@ fn parseIp4(s: []const u8) ?[4]u8 {
 
         return block;
     }
-
-    /// Build a StatusMessage reflecting the current chain state.
-    ///
     /// Used for req/resp Status exchanges with peers.
     pub fn getStatus(self: *const BeaconNode) StatusMessage.Type {
         // Always use head_tracker which is updated during range sync import.
@@ -3133,6 +3155,77 @@ fn gossipImportBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerro
     }
 }
 
+
+/// Convert an Engine API ExecutionPayloadV3 to the SSZ ExecutionPayload type.
+///
+/// The Engine API types use raw slices ([]const []const u8 for transactions,
+/// []const Withdrawal for withdrawals). The SSZ types use ArrayListUnmanaged.
+/// This function bridges the two representations.
+fn convertEnginePayload(
+    allocator: Allocator,
+    engine_payload: execution_mod.engine_api_types.ExecutionPayloadV3,
+) !types.electra.ExecutionPayload.Type {
+    const bellatrix = @import("consensus_types").bellatrix;
+    const capella = @import("consensus_types").capella;
+
+    // Convert transactions: []const []const u8 → VariableList of ByteList
+    var transactions = try std.ArrayListUnmanaged(
+        bellatrix.Transactions.Element.Type,
+    ).initCapacity(allocator, engine_payload.transactions.len);
+    errdefer {
+        for (transactions.items) |*tx| {
+            tx.deinit(allocator);
+        }
+        transactions.deinit(allocator);
+    }
+
+    for (engine_payload.transactions) |tx_bytes| {
+        var tx_data = std.ArrayListUnmanaged(u8){};
+        try tx_data.appendSlice(allocator, tx_bytes);
+        transactions.appendAssumeCapacity(tx_data);
+    }
+
+    // Convert withdrawals: []const engine Withdrawal → FixedList of SSZ Withdrawal
+    var withdrawals = try std.ArrayListUnmanaged(
+        capella.Withdrawal.Type,
+    ).initCapacity(allocator, engine_payload.withdrawals.len);
+    errdefer withdrawals.deinit(allocator);
+
+    for (engine_payload.withdrawals) |w| {
+        withdrawals.appendAssumeCapacity(.{
+            .index = w.index,
+            .validator_index = w.validator_index,
+            .address = w.address,
+            .amount = w.amount,
+        });
+    }
+
+    // Convert extra_data: []const u8 → ArrayListUnmanaged(u8)
+    var extra_data = std.ArrayListUnmanaged(u8){};
+    if (engine_payload.extra_data.len > 0) {
+        try extra_data.appendSlice(allocator, engine_payload.extra_data);
+    }
+
+    return types.electra.ExecutionPayload.Type{
+        .parent_hash = engine_payload.parent_hash,
+        .fee_recipient = engine_payload.fee_recipient,
+        .state_root = engine_payload.state_root,
+        .receipts_root = engine_payload.receipts_root,
+        .logs_bloom = engine_payload.logs_bloom,
+        .prev_randao = engine_payload.prev_randao,
+        .block_number = engine_payload.block_number,
+        .gas_limit = engine_payload.gas_limit,
+        .gas_used = engine_payload.gas_used,
+        .timestamp = engine_payload.timestamp,
+        .extra_data = extra_data,
+        .base_fee_per_gas = engine_payload.base_fee_per_gas,
+        .block_hash = engine_payload.block_hash,
+        .transactions = transactions,
+        .withdrawals = withdrawals,
+        .blob_gas_used = engine_payload.blob_gas_used,
+        .excess_blob_gas = engine_payload.excess_blob_gas,
+    };
+}
 fn gossipGetProposerIndex(slot: u64) ?u32 {
     const node = gossip_node orelse return null;
     const head_state_root = node.head_tracker.head_state_root;
