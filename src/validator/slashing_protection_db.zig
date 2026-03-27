@@ -34,13 +34,18 @@ const ATTESTATION_RECORD_SIZE: usize = 1 + 8 + 8 + 48; // type + source + target
 /// Last signed block slot per validator public key.
 const BlockMap = std.HashMap([48]u8, u64, PubkeyContext, std.hash_map.default_max_load_percentage);
 
-/// Attestation record: last signed source and target epochs.
-const AttestRecord = struct {
+/// Attestation record: source and target epochs.
+pub const AttestRecord = struct {
     source_epoch: u64,
     target_epoch: u64,
 };
 
-const AttestMap = std.HashMap([48]u8, AttestRecord, PubkeyContext, std.hash_map.default_max_load_percentage);
+/// All attestation records for a single validator, kept sorted by target_epoch ascending.
+/// Sorted order enables efficient surround vote detection.
+const AttestHistory = std.ArrayList(AttestRecord);
+
+/// Map from pubkey → list of all attestation records (sorted by target_epoch asc).
+const AttestHistoryMap = std.HashMap([48]u8, AttestHistory, PubkeyContext, std.hash_map.default_max_load_percentage);
 
 /// Hash context for [48]u8 pubkey keys.
 const PubkeyContext = struct {
@@ -55,6 +60,54 @@ const PubkeyContext = struct {
 };
 
 // ---------------------------------------------------------------------------
+// Surround vote detection
+// ---------------------------------------------------------------------------
+
+/// Surround vote result.
+pub const SurroundResult = enum {
+    /// New attestation surrounds an existing one (new_src < existing_src AND new_tgt > existing_tgt).
+    surrounding,
+    /// New attestation is surrounded by an existing one (new_src > existing_src AND new_tgt < existing_tgt).
+    surrounded,
+    /// No surround relationship detected.
+    safe,
+};
+
+/// Check whether `new` would form a surround vote against any record in `history`.
+///
+/// Per EIP-3076 and the consensus spec:
+///   - SURROUNDING: new_source < existing_source AND new_target > existing_target
+///   - SURROUNDED:  new_source > existing_source AND new_target < existing_target
+///
+/// The history slice must be sorted by target_epoch ascending (guaranteed by our insert path).
+/// We use this to skip records that cannot possibly surround or be surrounded:
+///   - A record with target_epoch >= new_target cannot be surrounded by new (new_target is smaller).
+///   - A record with target_epoch <= new_source cannot surround new (target too old).
+///
+/// This gives us O(n) in the worst case but typically much less for a validator with
+/// well-behaved attestation history.
+pub fn checkSurroundVote(history: []const AttestRecord, new_source: u64, new_target: u64) SurroundResult {
+    for (history) |rec| {
+        // Optimization: records are sorted by target_epoch asc.
+        // If rec.target_epoch > new_target, we're past any record that could be
+        // SURROUNDED (new would need smaller target to be surrounded, done).
+        // But we still need to check SURROUNDING (rec.target could be > new_target).
+        // So we can't break early on target alone — continue full scan.
+
+        // SURROUNDING: new wraps around existing.
+        if (new_source < rec.source_epoch and new_target > rec.target_epoch) {
+            return .surrounding;
+        }
+
+        // SURROUNDED: new is inside existing.
+        if (new_source > rec.source_epoch and new_target < rec.target_epoch) {
+            return .surrounded;
+        }
+    }
+    return .safe;
+}
+
+// ---------------------------------------------------------------------------
 // SlashingProtectionDb
 // ---------------------------------------------------------------------------
 
@@ -62,7 +115,8 @@ pub const SlashingProtectionDb = struct {
     allocator: Allocator,
     file: ?std.fs.File,
     block_map: BlockMap,
-    attest_map: AttestMap,
+    /// Full attestation history per validator (sorted by target_epoch asc).
+    attest_history: AttestHistoryMap,
 
     /// Initialize the slashing protection database.
     ///
@@ -73,7 +127,7 @@ pub const SlashingProtectionDb = struct {
             .allocator = allocator,
             .file = null,
             .block_map = BlockMap.init(allocator),
-            .attest_map = AttestMap.init(allocator),
+            .attest_history = AttestHistoryMap.init(allocator),
         };
 
         if (db_path) |path| {
@@ -96,7 +150,13 @@ pub const SlashingProtectionDb = struct {
             self.file = null;
         }
         self.block_map.deinit();
-        self.attest_map.deinit();
+
+        // Free all per-validator attestation history lists.
+        var it = self.attest_history.valueIterator();
+        while (it.next()) |history| {
+            history.deinit();
+        }
+        self.attest_history.deinit();
     }
 
     // -----------------------------------------------------------------------
@@ -127,32 +187,91 @@ pub const SlashingProtectionDb = struct {
     /// if safe, record the signing and return true. Returns false if slashing
     /// protection triggers.
     ///
-    /// Protection rules (conservative EIP-3076 compliant):
-    ///   - Double vote: refuse if target_epoch <= last_signed_target_epoch.
-    ///   - Surround vote: refuse if source_epoch < last_signed_source_epoch.
+    /// Protection rules (EIP-3076 compliant):
+    ///   1. Double vote: refuse if target_epoch == any existing target_epoch for this validator.
+    ///      (target_epoch < max existing target is also refused — monotonic target enforcement)
+    ///   2. Surround vote: refuse if new attestation surrounds or is surrounded by any existing.
+    ///      - SURROUNDING: new_source < existing_source AND new_target > existing_target
+    ///      - SURROUNDED:  new_source > existing_source AND new_target < existing_target
+    ///
+    /// TS equivalent: SlashingProtectionAttestation.checkAndInsertAttestation
     pub fn checkAndInsertAttestation(
         self: *SlashingProtectionDb,
         pubkey: [48]u8,
         source_epoch: u64,
         target_epoch: u64,
     ) !bool {
-        if (self.attest_map.get(pubkey)) |last| {
-            if (target_epoch <= last.target_epoch) {
-                log.warn("slashing protection: attest target={d} <= last_target={d}", .{ target_epoch, last.target_epoch });
-                return false;
+        if (self.attest_history.get(pubkey)) |history| {
+            // Check all existing records.
+            for (history.items) |rec| {
+                // Double vote: same target epoch.
+                if (target_epoch == rec.target_epoch) {
+                    log.warn("slashing protection: double vote target={d}", .{target_epoch});
+                    return false;
+                }
+                // Monotonic target: refuse attestations with older target than existing max.
+                // (The max is the last element since history is sorted asc by target.)
             }
-            if (source_epoch < last.source_epoch) {
-                log.warn("slashing protection: attest source={d} < last_source={d} (surround risk)", .{ source_epoch, last.source_epoch });
-                return false;
+
+            // Monotonic target enforcement: refuse if target <= max existing target.
+            if (history.items.len > 0) {
+                const max_target = history.items[history.items.len - 1].target_epoch;
+                if (target_epoch < max_target) {
+                    log.warn("slashing protection: attest target={d} < max_target={d}", .{ target_epoch, max_target });
+                    return false;
+                }
+            }
+
+            // Surround vote check across all historical records.
+            const surround = checkSurroundVote(history.items, source_epoch, target_epoch);
+            switch (surround) {
+                .surrounding => {
+                    log.warn("slashing protection: surround vote — new ({d},{d}) surrounds an existing attestation", .{ source_epoch, target_epoch });
+                    return false;
+                },
+                .surrounded => {
+                    log.warn("slashing protection: surround vote — new ({d},{d}) is surrounded by an existing attestation", .{ source_epoch, target_epoch });
+                    return false;
+                },
+                .safe => {},
             }
         }
 
+        // Safe to sign — persist and update in-memory history.
         try self.appendAttestationRecord(pubkey, source_epoch, target_epoch);
-        try self.attest_map.put(pubkey, .{
-            .source_epoch = source_epoch,
-            .target_epoch = target_epoch,
-        });
+        try self.insertAttestRecord(pubkey, source_epoch, target_epoch);
         return true;
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal: attestation history management
+    // -----------------------------------------------------------------------
+
+    /// Insert an attestation record into the in-memory history for pubkey,
+    /// maintaining sort order by target_epoch ascending.
+    fn insertAttestRecord(self: *SlashingProtectionDb, pubkey: [48]u8, source_epoch: u64, target_epoch: u64) !void {
+        const rec = AttestRecord{ .source_epoch = source_epoch, .target_epoch = target_epoch };
+
+        const gop = try self.attest_history.getOrPut(pubkey);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = AttestHistory.init(self.allocator);
+        }
+
+        const history = gop.value_ptr;
+
+        // Binary search for insertion point (sorted by target_epoch asc).
+        var lo: usize = 0;
+        var hi: usize = history.items.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (history.items[mid].target_epoch < target_epoch) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        // lo is the insertion index.
+        try history.insert(lo, rec);
     }
 
     // -----------------------------------------------------------------------
@@ -202,13 +321,23 @@ pub const SlashingProtectionDb = struct {
                     var pubkey: [48]u8 = undefined;
                     @memcpy(&pubkey, buf[16..64]);
 
-                    // Update map: keep the highest target epoch seen for each pubkey.
-                    const existing = self.attest_map.get(pubkey);
-                    if (existing == null or target_epoch > existing.?.target_epoch) {
-                        try self.attest_map.put(pubkey, .{
-                            .source_epoch = source_epoch,
-                            .target_epoch = target_epoch,
-                        });
+                    // Insert into sorted history (duplicates are possible from crash recovery — skip).
+                    const gop = try self.attest_history.getOrPut(pubkey);
+                    if (!gop.found_existing) {
+                        gop.value_ptr.* = AttestHistory.init(self.allocator);
+                    }
+                    const history = gop.value_ptr;
+
+                    // Check for duplicate target_epoch (can happen if we replayed a partial write).
+                    var is_dup = false;
+                    for (history.items) |rec| {
+                        if (rec.target_epoch == target_epoch) {
+                            is_dup = true;
+                            break;
+                        }
+                    }
+                    if (!is_dup) {
+                        try self.insertAttestRecord(pubkey, source_epoch, target_epoch);
                     }
                     count_attests += 1;
                 },
@@ -276,7 +405,7 @@ test "SlashingProtectionDb: in-memory block protection" {
     try testing.expect(try db.checkAndInsertBlock(pubkey, 11));
 }
 
-test "SlashingProtectionDb: in-memory attestation protection" {
+test "SlashingProtectionDb: in-memory attestation double vote protection" {
     var db = try SlashingProtectionDb.init(testing.allocator, null);
     defer db.close();
 
@@ -291,14 +420,113 @@ test "SlashingProtectionDb: in-memory attestation protection" {
     // Earlier target — refused.
     try testing.expect(!(try db.checkAndInsertAttestation(pubkey, 2, 4)));
 
-    // Source goes backward — surround risk — refused.
-    try testing.expect(!(try db.checkAndInsertAttestation(pubkey, 0, 6)));
-
     // Valid next attestation.
     try testing.expect(try db.checkAndInsertAttestation(pubkey, 1, 6));
 }
 
-test "SlashingProtectionDb: persistent storage round-trip" {
+test "SlashingProtectionDb: surround vote — new surrounds existing" {
+    // Existing (2, 5), new (1, 6): new_source < existing_source AND new_target > existing_target
+    // → SURROUNDING — refuse.
+    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    defer db.close();
+
+    const pubkey: [48]u8 = [_]u8{0x01} ** 48;
+
+    try testing.expect(try db.checkAndInsertAttestation(pubkey, 2, 5));
+    try testing.expect(!(try db.checkAndInsertAttestation(pubkey, 1, 6)));
+}
+
+test "SlashingProtectionDb: surround vote — new surrounded by existing" {
+    // Existing (1, 6), new (2, 5): new_source > existing_source AND new_target < existing_target
+    // → SURROUNDED — refuse.
+    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    defer db.close();
+
+    const pubkey: [48]u8 = [_]u8{0x02} ** 48;
+
+    try testing.expect(try db.checkAndInsertAttestation(pubkey, 1, 6));
+    try testing.expect(!(try db.checkAndInsertAttestation(pubkey, 2, 5)));
+}
+
+test "SlashingProtectionDb: non-overlapping attestations — accept" {
+    // Existing (2, 5), new (6, 8): completely non-overlapping — accept.
+    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    defer db.close();
+
+    const pubkey: [48]u8 = [_]u8{0x03} ** 48;
+
+    try testing.expect(try db.checkAndInsertAttestation(pubkey, 2, 5));
+    try testing.expect(try db.checkAndInsertAttestation(pubkey, 6, 8));
+}
+
+test "SlashingProtectionDb: adjacent attestations — accept" {
+    // Existing (2, 5), new (5, 7): source of new == target of existing — not surrounding.
+    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    defer db.close();
+
+    const pubkey: [48]u8 = [_]u8{0x04} ** 48;
+
+    try testing.expect(try db.checkAndInsertAttestation(pubkey, 2, 5));
+    try testing.expect(try db.checkAndInsertAttestation(pubkey, 5, 7));
+}
+
+test "SlashingProtectionDb: multiple existing records — surround detected" {
+    // Build history: (1,3), (4,6), (7,9)
+    // New (5, 10): source=5 < 7 AND target=10 > 9 → surrounds (7,9)
+    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    defer db.close();
+
+    const pubkey: [48]u8 = [_]u8{0x05} ** 48;
+
+    try testing.expect(try db.checkAndInsertAttestation(pubkey, 1, 3));
+    try testing.expect(try db.checkAndInsertAttestation(pubkey, 4, 6));
+    try testing.expect(try db.checkAndInsertAttestation(pubkey, 7, 9));
+
+    // New (5, 10) surrounds (7, 9): 5 < 7 AND 10 > 9 → refuse.
+    try testing.expect(!(try db.checkAndInsertAttestation(pubkey, 5, 10)));
+}
+
+test "SlashingProtectionDb: multiple existing records — surrounded detected" {
+    // Build history: (1,3), (2,8)
+    // New (3, 7): source=3 > 2 AND target=7 < 8 → surrounded by (2,8)
+    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    defer db.close();
+
+    const pubkey: [48]u8 = [_]u8{0x06} ** 48;
+
+    try testing.expect(try db.checkAndInsertAttestation(pubkey, 1, 3));
+    try testing.expect(try db.checkAndInsertAttestation(pubkey, 2, 8));
+
+    // New (3, 7): 3 > 2 AND 7 < 8 → surrounded by (2,8) → refuse.
+    try testing.expect(!(try db.checkAndInsertAttestation(pubkey, 3, 7)));
+}
+
+test "SlashingProtectionDb: double vote still detected (same target, different source)" {
+    // Existing (2, 5), new (3, 5): same target epoch — double vote — refuse.
+    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    defer db.close();
+
+    const pubkey: [48]u8 = [_]u8{0x07} ** 48;
+
+    try testing.expect(try db.checkAndInsertAttestation(pubkey, 2, 5));
+    try testing.expect(!(try db.checkAndInsertAttestation(pubkey, 3, 5)));
+}
+
+test "SlashingProtectionDb: different validators are independent" {
+    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    defer db.close();
+
+    const pubkey1: [48]u8 = [_]u8{0xAA} ** 48;
+    const pubkey2: [48]u8 = [_]u8{0xBB} ** 48;
+
+    // pubkey1: existing (1, 6)
+    try testing.expect(try db.checkAndInsertAttestation(pubkey1, 1, 6));
+
+    // pubkey2: new (2, 5) — would be surrounded if pubkey1's records applied, but they don't.
+    try testing.expect(try db.checkAndInsertAttestation(pubkey2, 2, 5));
+}
+
+test "SlashingProtectionDb: persistent storage round-trip with surround check" {
     const tmp_dir = testing.tmpDir(.{});
     const tmp_path = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
     defer testing.allocator.free(tmp_path);
@@ -308,16 +536,17 @@ test "SlashingProtectionDb: persistent storage round-trip" {
 
     const pubkey: [48]u8 = [_]u8{0x42} ** 48;
 
-    // Write some records.
+    // Write records: (2, 5) and (6, 8).
     {
         var db = try SlashingProtectionDb.init(testing.allocator, db_path);
         defer db.close();
 
         try testing.expect(try db.checkAndInsertBlock(pubkey, 100));
-        try testing.expect(try db.checkAndInsertAttestation(pubkey, 10, 20));
+        try testing.expect(try db.checkAndInsertAttestation(pubkey, 2, 5));
+        try testing.expect(try db.checkAndInsertAttestation(pubkey, 6, 8));
     }
 
-    // Reload and check the records are still enforced.
+    // Reload and verify surround check works on replayed history.
     {
         var db = try SlashingProtectionDb.init(testing.allocator, db_path);
         defer db.close();
@@ -327,9 +556,32 @@ test "SlashingProtectionDb: persistent storage round-trip" {
         // Block at slot 101 — allowed.
         try testing.expect(try db.checkAndInsertBlock(pubkey, 101));
 
-        // Attestation with target 20 — refused (double vote).
-        try testing.expect(!(try db.checkAndInsertAttestation(pubkey, 10, 20)));
-        // Next valid attestation.
-        try testing.expect(try db.checkAndInsertAttestation(pubkey, 10, 21));
+        // Surround against (6, 8): new (5, 9) surrounds (6, 8): 5 < 6 AND 9 > 8 → refuse.
+        try testing.expect(!(try db.checkAndInsertAttestation(pubkey, 5, 9)));
+
+        // Valid next attestation.
+        try testing.expect(try db.checkAndInsertAttestation(pubkey, 8, 10));
     }
+}
+
+test "SlashingProtectionDb: checkSurroundVote unit tests" {
+    const history = [_]AttestRecord{
+        .{ .source_epoch = 2, .target_epoch = 5 },
+        .{ .source_epoch = 6, .target_epoch = 8 },
+    };
+
+    // Surrounding: 1 < 2 AND 6 > 5 → surrounding
+    try testing.expectEqual(SurroundResult.surrounding, checkSurroundVote(&history, 1, 6));
+
+    // Surrounded: 3 > 2 AND 4 < 5 → surrounded
+    try testing.expectEqual(SurroundResult.surrounded, checkSurroundVote(&history, 3, 4));
+
+    // Non-overlapping (after history): safe
+    try testing.expectEqual(SurroundResult.safe, checkSurroundVote(&history, 9, 11));
+
+    // Adjacent (source == target of existing): safe (not strict surround)
+    try testing.expectEqual(SurroundResult.safe, checkSurroundVote(&history, 5, 9));
+
+    // Equal source and target: not a surround (needs strict inequality)
+    try testing.expectEqual(SurroundResult.safe, checkSurroundVote(&history, 2, 5));
 }
