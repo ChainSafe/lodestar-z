@@ -42,6 +42,28 @@ pub const SyncStatus = struct {
 
 /// Stub for state regeneration. In the full implementation this would
 /// load or replay state to a requested slot/root.
+/// Callback for accessing state regeneration from the API layer.
+/// Uses a type-erased pointer so the API doesn't depend directly on
+/// the chain's QueuedStateRegen / StateRegen types.
+pub const StateRegenCallback = struct {
+    ptr: *anyopaque,
+    /// Get a state by its state root. Returns null if not available.
+    getStateByRootFn: *const fn (ptr: *anyopaque, state_root: [32]u8) ?*CachedBeaconState,
+    /// Get a pre-state for a given parent root and block slot. Returns null on failure.
+    getPreStateFn: ?*const fn (ptr: *anyopaque, parent_root: [32]u8, block_slot: u64) ?*CachedBeaconState,
+
+    pub fn getStateByRoot(self: *const StateRegenCallback, state_root: [32]u8) ?*CachedBeaconState {
+        return self.getStateByRootFn(self.ptr, state_root);
+    }
+
+    pub fn getPreState(self: *const StateRegenCallback, parent_root: [32]u8, block_slot: u64) ?*CachedBeaconState {
+        if (self.getPreStateFn) |f| return f(self.ptr, parent_root, block_slot);
+        return null;
+    }
+};
+
+/// Legacy stub for backward compatibility. Will be removed once all
+/// callers migrate to StateRegenCallback.
 pub const StateRegen = struct {
     /// Placeholder — returns null until real state regen is implemented.
     pub fn getStateAtSlot(_: *StateRegen, _: u64) ?*anyopaque {
@@ -126,6 +148,9 @@ pub const ApiContext = struct {
 
     /// State access (for state queries).
     regen: *StateRegen,
+    /// Optional state regen callback backed by the real QueuedStateRegen.
+    /// When set, API handlers use this for state lookups instead of ad-hoc DB queries.
+    state_regen_callback: ?StateRegenCallback = null,
 
     /// Block / state database.
     db: *BeaconDB,

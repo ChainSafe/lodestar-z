@@ -29,6 +29,8 @@ const CachedBeaconState = state_transition.CachedBeaconState;
 const BlockStateCache = state_transition.BlockStateCache;
 const CheckpointStateCache = state_transition.CheckpointStateCache;
 const StateRegen = state_transition.StateRegen;
+const QueuedStateRegen = @import("queued_regen.zig").QueuedStateRegen;
+const RegenPriority = @import("queued_regen.zig").RegenPriority;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const db_mod = @import("db");
 const BeaconDB = db_mod.BeaconDB;
@@ -74,6 +76,10 @@ pub const Chain = struct {
     block_state_cache: *BlockStateCache,
     checkpoint_state_cache: *CheckpointStateCache,
     state_regen: *StateRegen,
+    /// Queued state regenerator — optional, wraps state_regen with
+    /// request deduplication and priority queuing. When set, used for
+    /// pre-state lookups in block import and API handlers.
+    queued_regen: ?*QueuedStateRegen,
     db: *BeaconDB,
     op_pool: *OpPool,
     seen_cache: *SeenCache,
@@ -114,6 +120,7 @@ pub const Chain = struct {
             .block_state_cache = block_state_cache,
             .checkpoint_state_cache = checkpoint_state_cache,
             .state_regen = state_regen,
+            .queued_regen = null,
             .db = db,
             .op_pool = op_pool,
             .seen_cache = seen_cache,
@@ -194,19 +201,30 @@ pub const Chain = struct {
         };
 
         // Stage 2: State transition.
-        const pre_state = self.getStateByBlockRoot(parent_root) orelse {
-            std.log.warn("NoPreStateAvailable: parent_root={s}... block_to_state has {d} entries", .{
-                &std.fmt.bytesToHex(parent_root[0..4], .lower),
-                self.block_to_state.count(),
-            });
-            return error.NoPreStateAvailable;
-        };
+        // Use queued regen (with dedup + priority) when available,
+        // fall back to direct cache lookup.
+        const pre_state = if (self.queued_regen) |qr|
+            qr.getPreState(parent_root, block_slot, .block_import) catch |err| {
+                std.log.warn("QueuedRegen.getPreState failed: parent_root={s}... err={}", .{
+                    &std.fmt.bytesToHex(parent_root[0..4], .lower),
+                    err,
+                });
+                return error.NoPreStateAvailable;
+            }
+        else
+            self.getStateByBlockRoot(parent_root) orelse {
+                std.log.warn("NoPreStateAvailable: parent_root={s}... block_to_state has {d} entries", .{
+                    &std.fmt.bytesToHex(parent_root[0..4], .lower),
+                    self.block_to_state.count(),
+                });
+                return error.NoPreStateAvailable;
+            };
 
         const stfn_result = try self.runStateTransition(pre_state, signed_block, block_slot);
         const post_state = stfn_result.post_state;
 
         // Stage 3: Cache post-state + persist block.
-        _ = try self.state_regen.onNewBlock(post_state, true);
+        _ = if (self.queued_regen) |qr| try qr.onNewBlock(post_state, true) else try self.state_regen.onNewBlock(post_state, true);
         try self.block_to_state.put(stfn_result.block_root, stfn_result.state_root);
 
         const any_signed = AnySignedBeaconBlock{ .full_electra = @constCast(signed_block) };
@@ -221,10 +239,18 @@ pub const Chain = struct {
                 cp_state.deinit();
                 self.allocator.destroy(cp_state);
             }
-            try self.state_regen.onCheckpoint(
-                .{ .epoch = target_epoch, .root = stfn_result.block_root },
-                cp_state,
-            );
+            if (self.queued_regen) |qr| {
+                try qr.onCheckpoint(
+                    .{ .epoch = target_epoch, .root = stfn_result.block_root },
+                    cp_state,
+                );
+            } else {
+                try self.state_regen.onCheckpoint(
+                    .{ .epoch = target_epoch, .root = stfn_result.block_root },
+                    cp_state,
+                );
+            }
+
         }
 
         // Stage 4: Head tracking + fork choice update.
@@ -499,7 +525,7 @@ pub const Chain = struct {
         try state_transition.processSlots(self.allocator, post_state, target_slot, .{});
         try post_state.state.commit();
 
-        const new_state_root = try self.state_regen.onNewBlock(post_state, true);
+        const new_state_root = if (self.queued_regen) |qr| try qr.onNewBlock(post_state, true) else try self.state_regen.onNewBlock(post_state, true);
 
         try self.block_to_state.put(
             self.head_tracker.head_root,
