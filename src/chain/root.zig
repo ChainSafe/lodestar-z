@@ -46,3 +46,6 @@ pub const DEFAULT_GRAFFITI = produce_block.DEFAULT_GRAFFITI;
 test {
     testing.refAllDecls(@This());
 }
+pub const sync_contribution_pool = @import("sync_contribution_pool.zig");
+pub const SyncContributionAndProofPool = sync_contribution_pool.SyncContributionAndProofPool;
+pub const SyncCommitteeMessagePool = sync_contribution_pool.SyncCommitteeMessagePool;
