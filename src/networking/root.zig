@@ -100,3 +100,27 @@ pub const ClientKind = peer_info.ClientKind;
 pub const connection_manager = @import("connection_manager.zig");
 pub const ConnectionManager = connection_manager.ConnectionManager;
 pub const ConnectionManagerConfig = connection_manager.ConnectionManagerConfig;
+
+// Subnet subscription management.
+pub const subnet_service = @import("subnet_service.zig");
+pub const SubnetService = subnet_service.SubnetService;
+pub const SubnetSubscription = subnet_service.SubnetSubscription;
+pub const SubnetKind = subnet_service.SubnetKind;
+pub const SubnetId = subnet_service.SubnetId;
+
+// Gossipsub scoring parameters.
+pub const scoring_parameters = @import("scoring_parameters.zig");
+pub const TopicScoringParams = scoring_parameters.TopicScoringParams;
+pub const PeerScoringThresholds = scoring_parameters.PeerScoringThresholds;
+
+// Per-peer request rate limiter.
+pub const rate_limiter = @import("rate_limiter.zig");
+pub const RateLimiter = rate_limiter.RateLimiter;
+pub const RateLimiterProtocol = rate_limiter.Protocol;
+pub const TokenBucket = rate_limiter.TokenBucket;
+
+// Status cache.
+pub const status_cache = @import("status_cache.zig");
+pub const StatusCache = status_cache.StatusCache;
+pub const CachedStatus = status_cache.CachedStatus;
+pub const ChainHeadInfo = status_cache.ChainHeadInfo;
