@@ -137,4 +137,10 @@ pub const ValidatorConfig = struct {
     slots_per_epoch: u64 = 32,
     /// Whether doppelganger protection is enabled.
     doppelganger_protection: bool = true,
+    /// Path to slashing protection DB file (null = in-memory only).
+    slashing_protection_path: ?[]const u8 = null,
+    /// Path to keystores directory.
+    keystores_dir: ?[]const u8 = null,
+    /// Path to secrets directory.
+    secrets_dir: ?[]const u8 = null,
 };

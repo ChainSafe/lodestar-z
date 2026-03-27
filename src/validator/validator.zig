@@ -102,7 +102,7 @@ pub const ValidatorClient = struct {
     /// TS: Validator.init(opts, genesis)
     pub fn init(allocator: Allocator, config: ValidatorConfig, signing_ctx: SigningContext) !ValidatorClient {
         var api = BeaconApiClient.init(allocator, config.beacon_node_url);
-        var validator_store = try ValidatorStore.init(allocator, null); // null = no persistent DB file (TODO: wire data_dir)
+        var validator_store = try ValidatorStore.init(allocator, config.slashing_protection_path);
         errdefer validator_store.deinit();
 
         const clock = SlotClock.init(
