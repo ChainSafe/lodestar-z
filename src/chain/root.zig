@@ -68,3 +68,10 @@ pub const ReprocessQueue = reprocess.ReprocessQueue;
 pub const PendingBlock = reprocess.PendingBlock;
 pub const PendingReason = reprocess.PendingReason;
 pub const BlockVerification = block_verification;
+
+// Queued state regeneration
+pub const queued_regen = @import("queued_regen.zig");
+pub const QueuedStateRegen = queued_regen.QueuedStateRegen;
+pub const RegenPriority = queued_regen.RegenPriority;
+pub const RegenKey = queued_regen.RegenKey;
+pub const RegenRequest = queued_regen.RegenRequest;
