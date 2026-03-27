@@ -54,3 +54,8 @@ pub const SignedBlock = interchange.SignedBlock;
 pub const SignedAttestation = interchange.SignedAttestation;
 pub const importInterchange = interchange.importInterchange;
 pub const exportInterchange = interchange.exportInterchange;
+
+pub const key_discovery = @import("key_discovery.zig");
+pub const KeyDiscovery = key_discovery.KeyDiscovery;
+pub const DiscoveredKey = key_discovery.DiscoveredKey;
+pub const LoadedKey = key_discovery.LoadedKey;
