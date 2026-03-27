@@ -130,3 +130,15 @@ pub const status_cache = @import("status_cache.zig");
 pub const StatusCache = status_cache.StatusCache;
 pub const CachedStatus = status_cache.CachedStatus;
 pub const ChainHeadInfo = status_cache.ChainHeadInfo;
+
+// Multi-component peer scoring (v2).
+pub const PeerScoreService = peer_scoring.PeerScoreService;
+pub const PeerScoringStats = peer_scoring.PeerScoringStats;
+pub const GossipRejectReason = peer_scoring.GossipRejectReason;
+pub const ReqRespOutcome = peer_scoring.ReqRespOutcome;
+pub const ReqRespProtocol = peer_scoring.ReqRespProtocol;
+pub const reconnectionCoolDownMs = peer_scoring.reconnectionCoolDownMs;
+
+// Enhanced rate limiter.
+pub const RateLimitResult = rate_limiter.RateLimitResult;
+pub const GlobalRateConfig = rate_limiter.GlobalRateConfig;

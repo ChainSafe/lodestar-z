@@ -1,8 +1,11 @@
 //! Per-peer request rate limiting for the Ethereum consensus req/resp protocol.
 //!
-//! Implements a token bucket algorithm per peer per protocol. Each peer starts with
-//! a full bucket of tokens. Each request consumes one token. Tokens replenish at a
-//! configured rate over time.
+//! Implements a token bucket algorithm per peer per protocol, with:
+//! - Per-peer per-protocol rate limiting
+//! - Global rate limiting across all peers
+//! - Backpressure mode: returns how long to wait instead of just rejecting
+//! - Response-count-based token consumption (range requests consume more)
+//! - Score penalty integration for repeated rate limit violations
 //!
 //! Time is passed explicitly (now_ns: i128) to keep this module free of I/O
 //! dependencies and easily testable.
@@ -35,6 +38,26 @@ pub const Protocol = enum {
     pub const COUNT = std.meta.fields(Protocol).len;
 };
 
+// ── Rate limit result ─────────────────────────────────────────────────────────
+
+/// Result of a rate limit check.
+pub const RateLimitResult = union(enum) {
+    /// Request is allowed.
+    allowed,
+    /// Request is denied. Contains the delay in nanoseconds before the
+    /// request could be retried (backpressure information).
+    denied: i128,
+
+    pub fn isAllowed(self: RateLimitResult) bool {
+        return self == .allowed;
+    }
+
+    /// For backward compatibility: returns true if allowed.
+    pub fn toBool(self: RateLimitResult) bool {
+        return self == .allowed;
+    }
+};
+
 // ── Token bucket ──────────────────────────────────────────────────────────────
 
 /// Token bucket for a single (peer, protocol) pair.
@@ -57,14 +80,53 @@ pub const TokenBucket = struct {
         };
     }
 
-    /// Attempt to consume one token. Returns true if allowed.
+    /// Attempt to consume `count` tokens. Returns true if allowed.
     pub fn tryConsume(self: *TokenBucket, now_ns: i128) bool {
+        return self.tryConsumeN(1, now_ns);
+    }
+
+    /// Attempt to consume `count` tokens. Returns true if allowed.
+    pub fn tryConsumeN(self: *TokenBucket, count: u32, now_ns: i128) bool {
         self.refill(now_ns);
-        if (self.tokens >= 1.0) {
-            self.tokens -= 1.0;
+        const needed: f64 = @floatFromInt(count);
+        if (self.tokens >= needed) {
+            self.tokens -= needed;
             return true;
         }
         return false;
+    }
+
+    /// Check if `count` tokens are available without consuming.
+    pub fn canConsume(self: *TokenBucket, count: u32, now_ns: i128) bool {
+        self.refill(now_ns);
+        return self.tokens >= @as(f64, @floatFromInt(count));
+    }
+
+    /// Calculate how many nanoseconds until `count` tokens are available.
+    /// Returns 0 if tokens are already available.
+    pub fn timeUntilAvailable(self: *TokenBucket, count: u32, now_ns: i128) i128 {
+        self.refill(now_ns);
+        const needed: f64 = @as(f64, @floatFromInt(count));
+        if (self.tokens >= needed) return 0;
+        const deficit = needed - self.tokens;
+        if (self.rate_per_ns <= 0) return std.math.maxInt(i128); // Never replenishes
+        return @intFromFloat(@ceil(deficit / self.rate_per_ns));
+    }
+
+    /// Attempt to consume tokens, returning backpressure information.
+    pub fn tryConsumeWithBackpressure(self: *TokenBucket, count: u32, now_ns: i128) RateLimitResult {
+        self.refill(now_ns);
+        const needed: f64 = @as(f64, @floatFromInt(count));
+        if (self.tokens >= needed) {
+            self.tokens -= needed;
+            return .allowed;
+        }
+        const deficit = needed - self.tokens;
+        const wait_ns: i128 = if (self.rate_per_ns > 0)
+            @intFromFloat(@ceil(deficit / self.rate_per_ns))
+        else
+            std.math.maxInt(i128);
+        return .{ .denied = wait_ns };
     }
 
     /// Replenish tokens based on elapsed time.
@@ -133,6 +195,14 @@ pub const DEFAULT_RATE_CONFIGS = blk: {
     break :blk configs;
 };
 
+/// Global rate limit configuration.
+pub const GlobalRateConfig = struct {
+    /// Total requests per second across all peers.
+    rate_per_second: f64 = 500.0,
+    /// Maximum burst across all peers.
+    burst: u32 = 1000,
+};
+
 // ── Per-peer bucket set ───────────────────────────────────────────────────────
 
 /// One token bucket per protocol for a single peer.
@@ -150,14 +220,32 @@ pub const PeerBuckets = struct {
     pub fn tryConsume(self: *PeerBuckets, protocol: Protocol, now_ns: i128) bool {
         return self.buckets[@intFromEnum(protocol)].tryConsume(now_ns);
     }
+
+    /// Attempt to consume `count` tokens for a protocol.
+    /// Used for range requests that consume tokens proportional to response count.
+    pub fn tryConsumeN(self: *PeerBuckets, protocol: Protocol, count: u32, now_ns: i128) bool {
+        return self.buckets[@intFromEnum(protocol)].tryConsumeN(count, now_ns);
+    }
+
+    /// Check with backpressure info.
+    pub fn tryConsumeWithBackpressure(self: *PeerBuckets, protocol: Protocol, count: u32, now_ns: i128) RateLimitResult {
+        return self.buckets[@intFromEnum(protocol)].tryConsumeWithBackpressure(count, now_ns);
+    }
 };
 
 // ── RateLimiter ───────────────────────────────────────────────────────────────
 
 /// Per-peer request rate limiter for req/resp protocols.
 ///
+/// Features:
+/// - Per-peer per-protocol token bucket rate limiting
+/// - Global rate limit across all peers
+/// - Backpressure mode: returns wait time instead of just allow/deny
+/// - Response-count-based consumption for range requests
+/// - Rate limit hit counting for score penalty integration
+///
 /// Time (now_ns) is passed explicitly to all methods. The caller is responsible
-/// for providing a monotonic timestamp in nanoseconds (e.g., from std.Io.Clock).
+/// for providing a monotonic timestamp in nanoseconds.
 ///
 /// Peers are identified by a u64 numeric id.
 pub const RateLimiter = struct {
@@ -166,51 +254,124 @@ pub const RateLimiter = struct {
     peers: std.AutoHashMap(u64, PeerBuckets),
     /// Rate limit configuration per protocol.
     configs: [Protocol.COUNT]ProtocolRateConfig,
+    /// Global rate limit bucket (across all peers).
+    global_bucket: TokenBucket,
+    /// Per-peer rate limit hit counter (for score penalty integration).
+    hit_counts: std.AutoHashMap(u64, u32),
     /// Stats: total requests allowed / denied.
     total_allowed: u64,
     total_denied: u64,
+    /// Total requests denied by global limit specifically.
+    total_global_denied: u64,
 
     pub fn init(allocator: Allocator) RateLimiter {
-        return initWithConfigs(allocator, &DEFAULT_RATE_CONFIGS);
+        return initWithConfigs(allocator, &DEFAULT_RATE_CONFIGS, .{});
     }
 
-    pub fn initWithConfigs(allocator: Allocator, configs: []const ProtocolRateConfig) RateLimiter {
+    pub fn initWithConfigs(
+        allocator: Allocator,
+        configs: []const ProtocolRateConfig,
+        global_config: GlobalRateConfig,
+    ) RateLimiter {
         var cfg: [Protocol.COUNT]ProtocolRateConfig = undefined;
         @memcpy(&cfg, configs);
         return .{
             .allocator = allocator,
             .peers = std.AutoHashMap(u64, PeerBuckets).init(allocator),
             .configs = cfg,
+            .global_bucket = TokenBucket.init(
+                @floatFromInt(global_config.burst),
+                global_config.rate_per_second,
+                0,
+            ),
+            .hit_counts = std.AutoHashMap(u64, u32).init(allocator),
             .total_allowed = 0,
             .total_denied = 0,
+            .total_global_denied = 0,
         };
     }
 
     pub fn deinit(self: *RateLimiter) void {
         self.peers.deinit();
+        self.hit_counts.deinit();
     }
 
     /// Check whether a request from the given peer on the given protocol is allowed.
     ///
     /// Consumes a token if allowed. `now_ns` is a monotonic nanosecond timestamp.
-    /// Returns false if rate limited.
+    /// Returns false if rate limited (by either per-peer or global limit).
     pub fn allowRequest(self: *RateLimiter, peer_id: u64, protocol: Protocol, now_ns: i128) !bool {
+        return (try self.allowRequestN(peer_id, protocol, 1, now_ns)).toBool();
+    }
+
+    /// Check whether a request consuming `count` tokens is allowed.
+    ///
+    /// For range requests, `count` should be the expected number of response items.
+    /// This follows Lighthouse's approach where BlocksByRange(count=64) consumes
+    /// 64 tokens instead of 1.
+    pub fn allowRequestN(
+        self: *RateLimiter,
+        peer_id: u64,
+        protocol: Protocol,
+        count: u32,
+        now_ns: i128,
+    ) !RateLimitResult {
+        // Check global limit first.
+        const global_result = self.global_bucket.tryConsumeWithBackpressure(count, now_ns);
+        if (!global_result.isAllowed()) {
+            self.total_denied += 1;
+            self.total_global_denied += 1;
+            try self.recordHit(peer_id);
+            log.warn("global rate limit exceeded for peer {} on protocol {s}", .{
+                peer_id,
+                @tagName(protocol),
+            });
+            return global_result;
+        }
+
+        // Check per-peer limit.
         const entry = try self.peers.getOrPut(peer_id);
         if (!entry.found_existing) {
             entry.value_ptr.* = PeerBuckets.init(&self.configs, now_ns);
         }
 
-        const allowed = entry.value_ptr.tryConsume(protocol, now_ns);
-        if (allowed) {
+        const peer_result = entry.value_ptr.tryConsumeWithBackpressure(protocol, count, now_ns);
+        if (peer_result.isAllowed()) {
             self.total_allowed += 1;
         } else {
+            // Refund global tokens since peer limit denied.
+            self.global_bucket.tokens = @min(
+                self.global_bucket.burst,
+                self.global_bucket.tokens + @as(f64, @floatFromInt(count)),
+            );
             self.total_denied += 1;
+            try self.recordHit(peer_id);
             log.warn("rate limit exceeded for peer {} on protocol {s}", .{
                 peer_id,
                 @tagName(protocol),
             });
         }
-        return allowed;
+        return peer_result;
+    }
+
+    /// Record a rate limit hit for score penalty tracking.
+    fn recordHit(self: *RateLimiter, peer_id: u64) !void {
+        const entry = try self.hit_counts.getOrPut(peer_id);
+        if (!entry.found_existing) {
+            entry.value_ptr.* = 0;
+        }
+        entry.value_ptr.* += 1;
+    }
+
+    /// Get the number of rate limit hits for a peer since last reset.
+    /// Used by the scoring system to apply penalties for repeated violations.
+    pub fn getHitCount(self: *const RateLimiter, peer_id: u64) u32 {
+        return self.hit_counts.get(peer_id) orelse 0;
+    }
+
+    /// Reset hit counts (called periodically by peer manager heartbeat).
+    pub fn resetHitCounts(self: *RateLimiter) void {
+        self.hit_counts.clearRetainingCapacity();
     }
 
     /// Called when a response is received (hook for future response-based limiting).
@@ -227,12 +388,14 @@ pub const RateLimiter = struct {
             if (self.peers.remove(peer_id)) {
                 log.debug("pruned rate limiter state for peer {}", .{peer_id});
             }
+            _ = self.hit_counts.remove(peer_id);
         }
     }
 
     /// Remove a single peer.
     pub fn removePeer(self: *RateLimiter, peer_id: u64) void {
         _ = self.peers.remove(peer_id);
+        _ = self.hit_counts.remove(peer_id);
     }
 
     /// Number of tracked peers.
@@ -246,6 +409,11 @@ pub const RateLimiter = struct {
             return @floatFromInt(self.configs[@intFromEnum(protocol)].burst);
         };
         return buckets.buckets[@intFromEnum(protocol)].currentTokens(now_ns);
+    }
+
+    /// Current global bucket tokens.
+    pub fn globalTokenCount(self: *RateLimiter, now_ns: i128) f64 {
+        return self.global_bucket.currentTokens(now_ns);
     }
 };
 
@@ -274,11 +442,9 @@ test "TokenBucket: empty bucket denies requests" {
 test "TokenBucket: tokens replenish over time" {
     var bucket = TokenBucket.init(1.0, 1.0, 0); // 1 token/sec
 
-    // Consume initial token.
     try testing.expect(bucket.tryConsume(0));
     try testing.expect(!bucket.tryConsume(0));
 
-    // Simulate 2 seconds elapsed.
     const later_ns: i128 = 2 * std.time.ns_per_s;
     try testing.expect(bucket.tryConsume(later_ns));
 }
@@ -286,23 +452,63 @@ test "TokenBucket: tokens replenish over time" {
 test "TokenBucket: tokens capped at burst" {
     var bucket = TokenBucket.init(5.0, 10.0, 0);
 
-    // Simulate a long time — should cap at burst=5.
     const later_ns: i128 = 1000 * std.time.ns_per_s;
     const tokens = bucket.currentTokens(later_ns);
     try testing.expectEqual(@as(f64, 5.0), tokens);
+}
+
+test "TokenBucket: consume N tokens" {
+    var bucket = TokenBucket.init(10.0, 1.0, 0);
+
+    try testing.expect(bucket.tryConsumeN(5, 0));
+    try testing.expectEqual(@as(f64, 5.0), bucket.currentTokens(0));
+    try testing.expect(!bucket.tryConsumeN(6, 0));
+    try testing.expect(bucket.tryConsumeN(5, 0));
+}
+
+test "TokenBucket: backpressure returns wait time" {
+    var bucket = TokenBucket.init(1.0, 1.0, 0); // 1 token/sec
+
+    // Consume the only token.
+    const r1 = bucket.tryConsumeWithBackpressure(1, 0);
+    try testing.expectEqual(RateLimitResult.allowed, r1);
+
+    // Next request is denied with wait time.
+    const r2 = bucket.tryConsumeWithBackpressure(1, 0);
+    switch (r2) {
+        .denied => |wait_ns| {
+            // Should need to wait ~1 second (1 token at 1/sec).
+            try testing.expect(wait_ns > 0);
+            try testing.expect(wait_ns <= std.time.ns_per_s);
+        },
+        .allowed => return error.TestUnexpectedResult,
+    }
+}
+
+test "TokenBucket: timeUntilAvailable" {
+    var bucket = TokenBucket.init(2.0, 1.0, 0); // 2 burst, 1/sec
+
+    // Full bucket — available immediately.
+    try testing.expectEqual(@as(i128, 0), bucket.timeUntilAvailable(2, 0));
+
+    // Consume all.
+    _ = bucket.tryConsumeN(2, 0);
+
+    // Need to wait for 1 token.
+    const wait = bucket.timeUntilAvailable(1, 0);
+    try testing.expect(wait > 0);
+    try testing.expect(wait <= std.time.ns_per_s);
 }
 
 test "RateLimiter: allows requests within burst" {
     var limiter = RateLimiter.init(testing.allocator);
     defer limiter.deinit();
 
-    // Status burst is 5.
     var i: usize = 0;
     while (i < 5) : (i += 1) {
         const allowed = try limiter.allowRequest(42, .status, 0);
         try testing.expect(allowed);
     }
-    // 6th should be denied.
     const denied = try limiter.allowRequest(42, .status, 0);
     try testing.expect(!denied);
 }
@@ -311,14 +517,11 @@ test "RateLimiter: different peers are independent" {
     var limiter = RateLimiter.init(testing.allocator);
     defer limiter.deinit();
 
-    // Exhaust peer 1's status tokens.
     var i: usize = 0;
     while (i < 5) : (i += 1) {
         _ = try limiter.allowRequest(1, .status, 0);
     }
     try testing.expect(!(try limiter.allowRequest(1, .status, 0)));
-
-    // Peer 2 should still have tokens.
     try testing.expect(try limiter.allowRequest(2, .status, 0));
 }
 
@@ -326,14 +529,11 @@ test "RateLimiter: different protocols are independent" {
     var limiter = RateLimiter.init(testing.allocator);
     defer limiter.deinit();
 
-    // Exhaust status.
     var i: usize = 0;
     while (i < 5) : (i += 1) {
         _ = try limiter.allowRequest(1, .status, 0);
     }
     try testing.expect(!(try limiter.allowRequest(1, .status, 0)));
-
-    // Ping should be unaffected.
     try testing.expect(try limiter.allowRequest(1, .ping, 0));
 }
 
@@ -354,12 +554,102 @@ test "RateLimiter: replenishment over time" {
     var limiter = RateLimiter.init(testing.allocator);
     defer limiter.deinit();
 
-    // Exhaust ping tokens (burst = 2).
     _ = try limiter.allowRequest(1, .ping, 0);
     _ = try limiter.allowRequest(1, .ping, 0);
     try testing.expect(!(try limiter.allowRequest(1, .ping, 0)));
 
-    // After 2 minutes, should have replenished (rate = 2/min, 2 min = 4 tokens, cap 2).
     const two_minutes_ns: i128 = 2 * 60 * std.time.ns_per_s;
     try testing.expect(try limiter.allowRequest(1, .ping, two_minutes_ns));
+}
+
+test "RateLimiter: global rate limit" {
+    // Create limiter with very low global limit.
+    var limiter = RateLimiter.initWithConfigs(
+        testing.allocator,
+        &DEFAULT_RATE_CONFIGS,
+        .{ .rate_per_second = 1.0, .burst = 3 },
+    );
+    defer limiter.deinit();
+
+    // 3 requests from different peers should all succeed (within global burst).
+    try testing.expect((try limiter.allowRequestN(1, .status, 1, 0)).isAllowed());
+    try testing.expect((try limiter.allowRequestN(2, .status, 1, 0)).isAllowed());
+    try testing.expect((try limiter.allowRequestN(3, .status, 1, 0)).isAllowed());
+
+    // 4th request should be denied by global limit even though per-peer has tokens.
+    const result = try limiter.allowRequestN(4, .status, 1, 0);
+    try testing.expect(!result.isAllowed());
+    try testing.expect(limiter.total_global_denied > 0);
+}
+
+test "RateLimiter: backpressure provides wait time" {
+    var limiter = RateLimiter.init(testing.allocator);
+    defer limiter.deinit();
+
+    // Exhaust status tokens (burst = 5).
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        _ = try limiter.allowRequestN(1, .status, 1, 0);
+    }
+
+    // Next request should be denied with backpressure info.
+    const result = try limiter.allowRequestN(1, .status, 1, 0);
+    switch (result) {
+        .denied => |wait_ns| {
+            try testing.expect(wait_ns > 0);
+        },
+        .allowed => return error.TestUnexpectedResult,
+    }
+}
+
+test "RateLimiter: multi-token consumption for range requests" {
+    var limiter = RateLimiter.init(testing.allocator);
+    defer limiter.deinit();
+
+    // beacon_blocks_by_range has burst=10.
+    // Consume 8 tokens at once.
+    try testing.expect((try limiter.allowRequestN(1, .beacon_blocks_by_range, 8, 0)).isAllowed());
+
+    // Only 2 tokens left — requesting 5 should fail.
+    try testing.expect(!(try limiter.allowRequestN(1, .beacon_blocks_by_range, 5, 0)).isAllowed());
+
+    // But 2 should still work.
+    try testing.expect((try limiter.allowRequestN(1, .beacon_blocks_by_range, 2, 0)).isAllowed());
+}
+
+test "RateLimiter: hit count tracking" {
+    var limiter = RateLimiter.init(testing.allocator);
+    defer limiter.deinit();
+
+    // Exhaust status tokens.
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        _ = try limiter.allowRequest(1, .status, 0);
+    }
+
+    // Hit rate limit 3 times.
+    _ = try limiter.allowRequest(1, .status, 0);
+    _ = try limiter.allowRequest(1, .status, 0);
+    _ = try limiter.allowRequest(1, .status, 0);
+
+    try testing.expectEqual(@as(u32, 3), limiter.getHitCount(1));
+    try testing.expectEqual(@as(u32, 0), limiter.getHitCount(2));
+
+    // Reset should clear counts.
+    limiter.resetHitCounts();
+    try testing.expectEqual(@as(u32, 0), limiter.getHitCount(1));
+}
+
+test "RateLimiter: global token count" {
+    var limiter = RateLimiter.initWithConfigs(
+        testing.allocator,
+        &DEFAULT_RATE_CONFIGS,
+        .{ .rate_per_second = 10.0, .burst = 100 },
+    );
+    defer limiter.deinit();
+
+    try testing.expectEqual(@as(f64, 100.0), limiter.globalTokenCount(0));
+
+    _ = try limiter.allowRequest(1, .status, 0);
+    try testing.expectEqual(@as(f64, 99.0), limiter.globalTokenCount(0));
 }
