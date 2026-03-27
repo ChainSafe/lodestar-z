@@ -108,6 +108,12 @@ pub const SubnetSubscription = subnet_service.SubnetSubscription;
 pub const SubnetKind = subnet_service.SubnetKind;
 pub const SubnetId = subnet_service.SubnetId;
 
+// PeerDAS custody column management.
+pub const custody = @import("custody.zig");
+pub const column_subnet_service = @import("column_subnet_service.zig");
+pub const ColumnSubnetService = column_subnet_service.ColumnSubnetService;
+pub const PeerCustodyInfo = column_subnet_service.PeerCustodyInfo;
+
 // Gossipsub scoring parameters.
 pub const scoring_parameters = @import("scoring_parameters.zig");
 pub const TopicScoringParams = scoring_parameters.TopicScoringParams;
