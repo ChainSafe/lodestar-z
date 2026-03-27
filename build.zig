@@ -1275,20 +1275,20 @@ pub fn build(b: *std.Build) void {
     module_bench_hashing.addImport("zbench", dep_zbench.module("zbench"));
 
     module_bench_fork_choice_update_head.addImport("fork_choice", module_fork_choice);
+    module_bench_fork_choice_update_head.addImport("state_transition", module_state_transition);
     module_bench_fork_choice_update_head.addImport("config", module_config);
     module_bench_fork_choice_update_head.addImport("constants", module_constants);
-    module_bench_fork_choice_update_head.addImport("state_transition", module_state_transition);
     module_bench_fork_choice_update_head.addImport("zbench", dep_zbench.module("zbench"));
 
     module_bench_fork_choice_compute_deltas.addImport("fork_choice", module_fork_choice);
     module_bench_fork_choice_compute_deltas.addImport("zbench", dep_zbench.module("zbench"));
 
     module_bench_fork_choice_on_attestation.addImport("fork_choice", module_fork_choice);
-    module_bench_fork_choice_on_attestation.addImport("config", module_config);
-    module_bench_fork_choice_on_attestation.addImport("constants", module_constants);
     module_bench_fork_choice_on_attestation.addImport("consensus_types", module_consensus_types);
     module_bench_fork_choice_on_attestation.addImport("fork_types", module_fork_types);
+    module_bench_fork_choice_on_attestation.addImport("constants", module_constants);
     module_bench_fork_choice_on_attestation.addImport("state_transition", module_state_transition);
+    module_bench_fork_choice_on_attestation.addImport("config", module_config);
     module_bench_fork_choice_on_attestation.addImport("zbench", dep_zbench.module("zbench"));
 
     module_bench_process_block.addImport("state_transition", module_state_transition);
