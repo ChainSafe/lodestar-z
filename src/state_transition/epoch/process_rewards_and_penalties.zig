@@ -34,11 +34,11 @@ pub fn processRewardsAndPenalties(
     if (slashing_penalties) |slashings| {
         for (rewards, penalties, balances, 0..) |reward, penalty, *balance, i| {
             const slashing: u64 = if (i < slashings.len) slashings[i] else 0;
-            balance.* = (try std.math.add(u64, balance.*, reward)) -| penalty -| slashing;
+            balance.* = ((balance.* +| reward) -| penalty) -| slashing;
         }
     } else {
         for (rewards, penalties, balances) |reward, penalty, *balance| {
-            balance.* = (try std.math.add(u64, balance.*, reward)) -| penalty;
+            balance.* = (balance.* +| reward) -| penalty;
         }
     }
 
