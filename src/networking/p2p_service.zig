@@ -56,6 +56,12 @@ const BlocksByRangeProtocol = eth2_protocols.BlocksByRangeProtocol;
 const BlocksByRootProtocol = eth2_protocols.BlocksByRootProtocol;
 const BlobSidecarsByRangeProtocol = eth2_protocols.BlobSidecarsByRangeProtocol;
 const BlobSidecarsByRootProtocol = eth2_protocols.BlobSidecarsByRootProtocol;
+const DataColumnsByRangeProtocol = eth2_protocols.DataColumnsByRangeProtocol;
+const DataColumnsByRootProtocol = eth2_protocols.DataColumnsByRootProtocol;
+const LightClientBootstrapProtocol = eth2_protocols.LightClientBootstrapProtocol;
+const LightClientUpdatesByRangeProtocol = eth2_protocols.LightClientUpdatesByRangeProtocol;
+const LightClientFinalityUpdateProtocol = eth2_protocols.LightClientFinalityUpdateProtocol;
+const LightClientOptimisticUpdateProtocol = eth2_protocols.LightClientOptimisticUpdateProtocol;
 
 const log = std.log.scoped(.p2p_service);
 
@@ -72,6 +78,12 @@ pub const Eth2Switch = swarm_mod.Switch(.{
         BlocksByRootProtocol,
         BlobSidecarsByRangeProtocol,
         BlobSidecarsByRootProtocol,
+        DataColumnsByRangeProtocol,
+        DataColumnsByRootProtocol,
+        LightClientBootstrapProtocol,
+        LightClientUpdatesByRangeProtocol,
+        LightClientFinalityUpdateProtocol,
+        LightClientOptimisticUpdateProtocol,
         GossipsubHandler,
         IdentifyHandler,
     },
@@ -196,6 +208,12 @@ pub const P2pService = struct {
                 BlocksByRootProtocol.init(allocator, config.req_resp_context),
                 BlobSidecarsByRangeProtocol.init(allocator, config.req_resp_context),
                 BlobSidecarsByRootProtocol.init(allocator, config.req_resp_context),
+                DataColumnsByRangeProtocol.init(allocator, config.req_resp_context),
+                DataColumnsByRootProtocol.init(allocator, config.req_resp_context),
+                LightClientBootstrapProtocol.init(allocator, config.req_resp_context),
+                LightClientUpdatesByRangeProtocol.init(allocator, config.req_resp_context),
+                LightClientFinalityUpdateProtocol.init(allocator, config.req_resp_context),
+                LightClientOptimisticUpdateProtocol.init(allocator, config.req_resp_context),
                 GossipsubHandler{ .svc = gossipsub },
                 IdentifyHandler{
                     .allocator = allocator,
@@ -211,6 +229,12 @@ pub const P2pService = struct {
                             "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy",
                             "/eth2/beacon_chain/req/blob_sidecars_by_range/1/ssz_snappy",
                             "/eth2/beacon_chain/req/blob_sidecars_by_root/1/ssz_snappy",
+                            "/eth2/beacon_chain/req/data_column_sidecars_by_range/1/ssz_snappy",
+                            "/eth2/beacon_chain/req/data_column_sidecars_by_root/1/ssz_snappy",
+                            "/eth2/beacon_chain/req/light_client_bootstrap/1/ssz_snappy",
+                            "/eth2/beacon_chain/req/light_client_updates_by_range/1/ssz_snappy",
+                            "/eth2/beacon_chain/req/light_client_finality_update/1/ssz_snappy",
+                            "/eth2/beacon_chain/req/light_client_optimistic_update/1/ssz_snappy",
                             "/meshsub/1.2.0",
                             "/ipfs/id/1.0.0",
                         },

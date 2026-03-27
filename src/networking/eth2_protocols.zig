@@ -324,3 +324,41 @@ test "eth2_protocols: IDs match what protocolId() generates" {
         BlobSidecarsByRootProtocol.id,
     );
 }
+
+// ─── PeerDAS and LightClient protocol handlers ────────────────────────────────
+
+/// DataColumnSidecarsByRange (fulu/PeerDAS).
+pub const DataColumnsByRangeProtocol = makeProtocolHandler(
+    .data_column_sidecars_by_range,
+    "/eth2/beacon_chain/req/data_column_sidecars_by_range/1/ssz_snappy",
+);
+
+/// DataColumnSidecarsByRoot (fulu/PeerDAS).
+pub const DataColumnsByRootProtocol = makeProtocolHandler(
+    .data_column_sidecars_by_root,
+    "/eth2/beacon_chain/req/data_column_sidecars_by_root/1/ssz_snappy",
+);
+
+/// LightClientBootstrap stub (altair+).
+pub const LightClientBootstrapProtocol = makeProtocolHandler(
+    .light_client_bootstrap,
+    "/eth2/beacon_chain/req/light_client_bootstrap/1/ssz_snappy",
+);
+
+/// LightClientUpdatesByRange stub (altair+).
+pub const LightClientUpdatesByRangeProtocol = makeProtocolHandler(
+    .light_client_updates_by_range,
+    "/eth2/beacon_chain/req/light_client_updates_by_range/1/ssz_snappy",
+);
+
+/// LightClientFinalityUpdate stub (altair+).
+pub const LightClientFinalityUpdateProtocol = makeProtocolHandler(
+    .light_client_finality_update,
+    "/eth2/beacon_chain/req/light_client_finality_update/1/ssz_snappy",
+);
+
+/// LightClientOptimisticUpdate stub (altair+).
+pub const LightClientOptimisticUpdateProtocol = makeProtocolHandler(
+    .light_client_optimistic_update,
+    "/eth2/beacon_chain/req/light_client_optimistic_update/1/ssz_snappy",
+);
