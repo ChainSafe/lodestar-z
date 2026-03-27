@@ -52,4 +52,18 @@ test {
     testing.refAllDecls(handlers);
     testing.refAllDecls(http_server);
     _ = test_helpers;
+    testing.refAllDecls(content_negotiation);
+    testing.refAllDecls(response_meta);
+    testing.refAllDecls(error_response);
 }
+pub const content_negotiation = @import("content_negotiation.zig");
+pub const response_meta = @import("response_meta.zig");
+pub const error_response = @import("error_response.zig");
+
+// Re-export key framework types at top level
+pub const WireFormat = content_negotiation.WireFormat;
+pub const NegotiationResult = content_negotiation.NegotiationResult;
+pub const ResponseMeta = response_meta.ResponseMeta;
+pub const Fork = response_meta.Fork;
+pub const ApiError = error_response.ApiError;
+pub const ErrorCode = error_response.ErrorCode;

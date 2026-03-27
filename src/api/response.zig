@@ -9,6 +9,28 @@
 const std = @import("std");
 const types = @import("types.zig");
 
+const content_negotiation = @import("content_negotiation.zig");
+const response_meta = @import("response_meta.zig");
+const error_response = @import("error_response.zig");
+
+/// Re-exports: content negotiation
+pub const WireFormat = content_negotiation.WireFormat;
+pub const NegotiationResult = content_negotiation.NegotiationResult;
+pub const parseAcceptHeader = content_negotiation.parseAcceptHeader;
+pub const parseContentTypeHeader = content_negotiation.parseContentTypeHeader;
+
+/// Re-exports: response metadata
+pub const ResponseMeta = response_meta.ResponseMeta;
+pub const Fork = response_meta.Fork;
+pub const MetaHeader = response_meta.MetaHeader;
+pub const buildMetaHeaders = response_meta.buildHeaders;
+
+/// Re-exports: error responses
+pub const ApiError = error_response.ApiError;
+pub const ErrorCode = error_response.ErrorCode;
+pub const fromZigError = error_response.fromZigError;
+pub const formatZigError = error_response.formatZigError;
+
 const IoWriter = std.Io.Writer;
 const IoError = IoWriter.Error;
 
