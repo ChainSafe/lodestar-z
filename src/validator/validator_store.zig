@@ -23,6 +23,8 @@ const types = @import("types.zig");
 const SlashingProtectionRecord = types.SlashingProtectionRecord;
 const ValidatorStatus = types.ValidatorStatus;
 
+const SlashingProtectionDb = @import("slashing_protection_db.zig").SlashingProtectionDb;
+
 const log = std.log.scoped(.validator_store);
 
 // ---------------------------------------------------------------------------
@@ -50,16 +52,24 @@ pub const ValidatorRecord = struct {
 pub const ValidatorStore = struct {
     allocator: Allocator,
     validators: std.ArrayList(ValidatorRecord),
+    /// Persistent slashing protection database.
+    slashing_db: SlashingProtectionDb,
 
-    pub fn init(allocator: Allocator) ValidatorStore {
+    /// Initialize the ValidatorStore with an optional persistent slashing protection DB.
+    ///
+    /// Pass db_path = null for in-memory-only mode (tests, no persistence).
+    pub fn init(allocator: Allocator, db_path: ?[]const u8) !ValidatorStore {
+        const slashing_db = try SlashingProtectionDb.init(allocator, db_path);
         return .{
             .allocator = allocator,
             .validators = std.ArrayList(ValidatorRecord).init(allocator),
+            .slashing_db = slashing_db,
         };
     }
 
     pub fn deinit(self: *ValidatorStore) void {
         self.validators.deinit();
+        self.slashing_db.close();
     }
 
     // -----------------------------------------------------------------------
@@ -156,15 +166,14 @@ pub const ValidatorStore = struct {
     ) !Signature {
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
 
-        // Slashing protection: double-proposal check.
-        if (validator.slashing.last_signed_block_slot) |last_slot| {
-            if (slot <= last_slot) {
-                log.warn("slashing protection: refusing to sign block at slot {d} (last signed: {d})", .{ slot, last_slot });
-                return error.SlashingProtectionTriggered;
-            }
+        // Slashing protection: double-proposal check (persistent DB).
+        const block_allowed = try self.slashing_db.checkAndInsertBlock(pubkey, slot);
+        if (!block_allowed) {
+            log.warn("slashing protection: refusing to sign block at slot {d}", .{slot});
+            return error.SlashingProtectionTriggered;
         }
 
-        // Update slashing record.
+        // Also update the in-memory SlashingProtectionRecord for quick reference.
         validator.slashing.last_signed_block_slot = slot;
 
         // Sign the root.
@@ -204,24 +213,14 @@ pub const ValidatorStore = struct {
     ) !Signature {
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
 
-        // Slashing protection: double-vote / non-monotonic target check.
-        if (validator.slashing.last_signed_attestation_target_epoch) |last_target| {
-            if (target_epoch <= last_target) {
-                log.warn("slashing protection: refusing attestation target_epoch={d} (last={d})", .{ target_epoch, last_target });
-                return error.SlashingProtectionTriggered;
-            }
+        // Slashing protection: double-vote / surround vote check (persistent DB).
+        const attest_allowed = try self.slashing_db.checkAndInsertAttestation(pubkey, source_epoch, target_epoch);
+        if (!attest_allowed) {
+            log.warn("slashing protection: refusing attestation source={d} target={d}", .{ source_epoch, target_epoch });
+            return error.SlashingProtectionTriggered;
         }
 
-        // Slashing protection: source epoch must not go backwards.
-        // If source goes backward while target goes forward, that creates a surround vote.
-        if (validator.slashing.last_signed_attestation_source_epoch) |last_source| {
-            if (source_epoch < last_source) {
-                log.warn("slashing protection: refusing attestation source_epoch={d} < last_source={d} (surround vote risk)", .{ source_epoch, last_source });
-                return error.SlashingProtectionTriggered;
-            }
-        }
-
-        // Update slashing record.
+        // Also update the in-memory SlashingProtectionRecord for quick reference.
         validator.slashing.last_signed_attestation_source_epoch = source_epoch;
         validator.slashing.last_signed_attestation_target_epoch = target_epoch;
 
@@ -302,7 +301,7 @@ fn makeDummyKey() SecretKey {
 }
 
 test "ValidatorStore: addKey and allIndices" {
-    var store = ValidatorStore.init(testing.allocator);
+    var store = try ValidatorStore.init(testing.allocator, null);
     defer store.deinit();
 
     const sk = makeDummyKey();
@@ -325,7 +324,7 @@ test "ValidatorStore: addKey and allIndices" {
 }
 
 test "ValidatorStore: slashing protection — block double proposal" {
-    var store = ValidatorStore.init(testing.allocator);
+    var store = try ValidatorStore.init(testing.allocator, null);
     defer store.deinit();
 
     const sk = makeDummyKey();
@@ -348,7 +347,7 @@ test "ValidatorStore: slashing protection — block double proposal" {
 }
 
 test "ValidatorStore: slashing protection — attestation double vote" {
-    var store = ValidatorStore.init(testing.allocator);
+    var store = try ValidatorStore.init(testing.allocator, null);
     defer store.deinit();
 
     const sk = makeDummyKey();
@@ -374,7 +373,7 @@ test "ValidatorStore: slashing protection — attestation double vote" {
 }
 
 test "ValidatorStore: allPubkeys" {
-    var store = ValidatorStore.init(testing.allocator);
+    var store = try ValidatorStore.init(testing.allocator, null);
     defer store.deinit();
 
     const sk = makeDummyKey();

@@ -75,6 +75,20 @@ pub const NodeOptions = struct {
     /// Set via --graffiti CLI option. When null, defaults to "lodestar-z".
     graffiti: ?[32]u8 = null,
 
+    // ── Validator Client (VC mode) ────────────────────────────────
+    /// Path to directory containing EIP-2335 keystore files (--validator-keys).
+    validator_keys_dir: ?[]const u8 = null,
+    /// Path to directory containing keystore password files (--validator-secrets).
+    validator_secrets_dir: ?[]const u8 = null,
+    /// Beacon node REST API URL for the VC to connect to (--beacon-node-url).
+    beacon_node_url: []const u8 = "http://localhost:5052",
+    /// Enable doppelganger protection: wait one epoch before attesting to detect
+    /// another instance signing for the same validator (--doppelganger-detection).
+    doppelganger_detection: bool = false,
+    /// URL of a Web3Signer remote signing service (--web3signer-url).
+    /// When set, signing is delegated to the external service instead of local keys.
+    web3signer_url: ?[]const u8 = null,
+
     // ── Sync ─────────────────────────────────────────────────────
     /// URL to fetch checkpoint state from a beacon API (--checkpoint-sync-url).
     checkpoint_sync_url: ?[]const u8 = null,

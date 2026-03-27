@@ -1,9 +1,8 @@
 //! EIP-2335 keystore loading for the Validator Client.
 //!
 //! Parses the EIP-2335 JSON keystore format (BIP-39 / eth2 key standard).
-//! Decryption (scrypt/pbkdf2 + AES-128-CTR + checksum) is type-complete
-//! but returns error.NotImplemented for the actual crypto until we have
-//! scrypt/pbkdf2 in zig std.
+//! Implements the full decryption flow:
+//!   scrypt/pbkdf2 → checksum verify → AES-128-CTR decrypt → BLS SecretKey.
 //!
 //! References:
 //!   https://eips.ethereum.org/EIPS/eip-2335
@@ -106,11 +105,57 @@ pub const Keystore = struct {
 };
 
 // ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Decode a hex string into a freshly-allocated byte slice.
+fn hexDecodeAlloc(allocator: Allocator, hex: []const u8) ![]u8 {
+    if (hex.len % 2 != 0) return error.InvalidHexLength;
+    const out = try allocator.alloc(u8, hex.len / 2);
+    errdefer allocator.free(out);
+    _ = try std.fmt.hexToBytes(out, hex);
+    return out;
+}
+
+/// AES-128-CTR: XOR `src` into `dst` using big-endian counter starting at 0.
+///
+/// EIP-2335 uses AES-128-CTR with a 16-byte IV as the initial counter value,
+/// incrementing as a 128-bit big-endian integer.
+fn aesCtr128Xor(dst: []u8, src: []const u8, key: [16]u8, iv: [16]u8) void {
+    std.debug.assert(dst.len == src.len);
+    const Aes128 = std.crypto.core.aes.Aes128;
+    const enc_ctx = Aes128.initEnc(key);
+
+    var counter: [16]u8 = iv;
+    var i: usize = 0;
+    while (i < src.len) {
+        // Encrypt the counter block to produce keystream block.
+        var keystream: [16]u8 = undefined;
+        enc_ctx.encrypt(&keystream, &counter);
+
+        // XOR up to 16 bytes.
+        const chunk_len = @min(16, src.len - i);
+        for (0..chunk_len) |j| {
+            dst[i + j] = src[i + j] ^ keystream[j];
+        }
+        i += chunk_len;
+
+        // Increment counter as big-endian 128-bit integer.
+        var k: usize = 15;
+        while (true) {
+            counter[k] +%= 1;
+            if (counter[k] != 0 or k == 0) break;
+            k -= 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Decryptor
 // ---------------------------------------------------------------------------
 
 /// Handles the multi-step EIP-2335 decrypt flow.
-/// 
+///
 /// Steps:
 ///   1. Derive decryption key from password via KDF (scrypt or pbkdf2).
 ///   2. Verify checksum: SHA256(decryption_key[16..32] ++ cipher.message) == checksum.message
@@ -124,54 +169,139 @@ pub const KeystoreDecryptor = struct {
     }
 
     /// Decrypt a keystore and return the BLS secret key.
-    ///
-    /// Returns error.NotImplemented for the actual KDF+AES crypto.
-    /// The type flow is complete — callers can use this stub in tests.
     pub fn decrypt(self: *KeystoreDecryptor, keystore: *const Keystore, password: []const u8) !SecretKey {
-        _ = password;
-
+        // Step 1: KDF — derive 32-byte decryption key.
+        var decryption_key: [32]u8 = undefined;
         switch (keystore.crypto.kdf.function) {
             .scrypt => {
-                // TODO: scrypt(N=params.n, r=params.r, p=params.p, dk_len=params.dklen, password, salt)
-                log.warn("scrypt KDF not yet implemented", .{});
-                return error.NotImplemented;
+                const params_obj = switch (keystore.crypto.kdf.params_json) {
+                    .object => |obj| obj,
+                    else => return error.InvalidKeystoreJson,
+                };
+                const n_val = params_obj.get("n") orelse return error.MissingKdfParam;
+                const r_val = params_obj.get("r") orelse return error.MissingKdfParam;
+                const p_val = params_obj.get("p") orelse return error.MissingKdfParam;
+                const dklen_val = params_obj.get("dklen") orelse return error.MissingKdfParam;
+                const salt_val = params_obj.get("salt") orelse return error.MissingKdfParam;
+
+                const n: u64 = switch (n_val) {
+                    .integer => |v| @intCast(v),
+                    else => return error.InvalidKdfParam,
+                };
+                const r: u30 = @intCast(switch (r_val) {
+                    .integer => |v| @as(u64, @intCast(v)),
+                    else => return error.InvalidKdfParam,
+                });
+                const p: u30 = @intCast(switch (p_val) {
+                    .integer => |v| @as(u64, @intCast(v)),
+                    else => return error.InvalidKdfParam,
+                });
+                const dklen: u64 = switch (dklen_val) {
+                    .integer => |v| @intCast(v),
+                    else => return error.InvalidKdfParam,
+                };
+                const salt_hex = switch (salt_val) {
+                    .string => |s| s,
+                    else => return error.InvalidKdfParam,
+                };
+
+                if (dklen != 32) return error.UnsupportedDklen;
+
+                const salt = try hexDecodeAlloc(self.allocator, salt_hex);
+                defer self.allocator.free(salt);
+
+                // Compute ln = log2(N).
+                if (n == 0 or (n & (n - 1)) != 0) return error.InvalidScryptN;
+                const ln: u6 = @intCast(std.math.log2(n));
+
+                const scrypt_params = std.crypto.pwhash.scrypt.Params{
+                    .ln = ln,
+                    .r = r,
+                    .p = p,
+                };
+                try std.crypto.pwhash.scrypt.kdf(
+                    self.allocator,
+                    &decryption_key,
+                    password,
+                    salt,
+                    scrypt_params,
+                );
+                log.debug("scrypt KDF complete ln={d} r={d} p={d}", .{ ln, r, p });
             },
             .pbkdf2 => {
-                // TODO: pbkdf2_hmac_sha256(password, salt, c=params.c, dk_len=params.dklen)
-                log.warn("pbkdf2 KDF not yet implemented", .{});
-                return error.NotImplemented;
+                const params_obj = switch (keystore.crypto.kdf.params_json) {
+                    .object => |obj| obj,
+                    else => return error.InvalidKeystoreJson,
+                };
+                const c_val = params_obj.get("c") orelse return error.MissingKdfParam;
+                const dklen_val = params_obj.get("dklen") orelse return error.MissingKdfParam;
+                const salt_val = params_obj.get("salt") orelse return error.MissingKdfParam;
+
+                const c: u32 = @intCast(switch (c_val) {
+                    .integer => |v| @as(u64, @intCast(v)),
+                    else => return error.InvalidKdfParam,
+                });
+                const dklen: u64 = switch (dklen_val) {
+                    .integer => |v| @intCast(v),
+                    else => return error.InvalidKdfParam,
+                };
+                const salt_hex = switch (salt_val) {
+                    .string => |s| s,
+                    else => return error.InvalidKdfParam,
+                };
+
+                if (dklen != 32) return error.UnsupportedDklen;
+
+                const salt = try hexDecodeAlloc(self.allocator, salt_hex);
+                defer self.allocator.free(salt);
+
+                const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+                try std.crypto.pwhash.pbkdf2(&decryption_key, password, salt, c, HmacSha256);
+                log.debug("pbkdf2 KDF complete c={d}", .{c});
             },
         }
 
-        // Post-KDF steps (unreachable until KDF is implemented):
-        //
-        //   const decryption_key: [32]u8 = <kdf output>;
-        //
-        //   // Step 2: verify checksum
-        //   var cipher_bytes: []u8 = try hexDecode(self.allocator, keystore.crypto.cipher.message);
-        //   defer self.allocator.free(cipher_bytes);
-        //   var checksum_input: [48]u8 = undefined;
-        //   @memcpy(checksum_input[0..16], decryption_key[16..32]);
-        //   @memcpy(checksum_input[16..48], cipher_bytes[0..32]);
-        //   var computed_checksum: [32]u8 = undefined;
-        //   std.crypto.hash.sha2.Sha256.hash(&checksum_input, &computed_checksum, .{});
-        //   const expected_checksum = try hexDecode(self.allocator, keystore.crypto.checksum.message);
-        //   defer self.allocator.free(expected_checksum);
-        //   if (!std.mem.eql(u8, &computed_checksum, expected_checksum)) return error.InvalidChecksum;
-        //
-        //   // Step 3: AES-128-CTR decrypt
-        //   var iv_bytes: [16]u8 = undefined;
-        //   _ = try std.fmt.hexToBytes(&iv_bytes, ...) // iv
-        //   var plaintext = try self.allocator.dupe(u8, cipher_bytes);
-        //   defer self.allocator.free(plaintext);
-        //   std.crypto.stream.aes.Aes128Ctr.xor(plaintext, cipher_bytes, decryption_key[0..16].*, iv_bytes, 0);
-        //
-        //   // Step 4: interpret 32-byte plaintext as BLS secret key
-        //   var sk_bytes: [32]u8 = undefined;
-        //   @memcpy(&sk_bytes, plaintext[0..32]);
-        //   return SecretKey.fromBytes(sk_bytes);
+        // Step 2: verify checksum.
+        // checksum = SHA256(decryption_key[16..32] || cipher_message_bytes)
+        const cipher_bytes = try hexDecodeAlloc(self.allocator, keystore.crypto.cipher.message);
+        defer self.allocator.free(cipher_bytes);
 
-        _ = self;
+        var checksum_input = try self.allocator.alloc(u8, 16 + cipher_bytes.len);
+        defer self.allocator.free(checksum_input);
+        @memcpy(checksum_input[0..16], decryption_key[16..32]);
+        @memcpy(checksum_input[16..], cipher_bytes);
+
+        var computed_checksum: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(checksum_input, &computed_checksum, .{});
+
+        const expected_checksum = try hexDecodeAlloc(self.allocator, keystore.crypto.checksum.message);
+        defer self.allocator.free(expected_checksum);
+
+        if (!std.mem.eql(u8, &computed_checksum, expected_checksum)) {
+            log.warn("keystore checksum mismatch — wrong password or corrupted keystore", .{});
+            return error.InvalidChecksum;
+        }
+
+        // Step 3: AES-128-CTR decrypt.
+        var iv_bytes: [16]u8 = undefined;
+        const iv_hex = keystore.crypto.cipher.iv;
+        if (iv_hex.len != 32) return error.InvalidIvLength;
+        _ = try std.fmt.hexToBytes(&iv_bytes, iv_hex);
+
+        var key_bytes: [16]u8 = undefined;
+        @memcpy(&key_bytes, decryption_key[0..16]);
+
+        const plaintext = try self.allocator.alloc(u8, cipher_bytes.len);
+        defer self.allocator.free(plaintext);
+        aesCtr128Xor(plaintext, cipher_bytes, key_bytes, iv_bytes);
+
+        // Step 4: interpret 32-byte plaintext as BLS secret key.
+        if (plaintext.len < 32) return error.InvalidKeystoreSize;
+        var sk_bytes: [32]u8 = undefined;
+        @memcpy(&sk_bytes, plaintext[0..32]);
+
+        log.debug("keystore decryption successful", .{});
+        return SecretKey.deserialize(&sk_bytes) catch return error.InvalidBLSSecretKey;
     }
 };
 
@@ -183,8 +313,6 @@ pub const KeystoreDecryptor = struct {
 ///
 /// Allocator is used for JSON parsing (freed on return).
 /// Returns the decrypted BLS SecretKey on success.
-///
-/// Currently returns error.NotImplemented for actual decryption.
 ///
 /// TS: LocalKeystoreManager.importKeystore(keystoreStr, password)
 pub fn loadKeystore(allocator: Allocator, json_bytes: []const u8, password: []const u8) !SecretKey {
@@ -359,9 +487,130 @@ test "loadKeystore: rejects invalid json" {
     try testing.expectError(error.InvalidKeystoreJson, loadKeystore(testing.allocator, "not-json", "password"));
 }
 
-test "loadKeystore: parses v4 scrypt keystore and returns NotImplemented" {
+test "loadKeystore: EIP-2335 scrypt test vector" {
+    // Test vector from https://eips.ethereum.org/EIPS/eip-2335#test-vectors
+    // Password: "testpassword"
+    // Secret key: 0x000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f
     const json =
-        \\{"version":4,"uuid":"1234","description":"test","pubkey":"","path":"m/12381/3600/0/0/0","crypto":{"kdf":{"function":"scrypt","params":{"dklen":32,"n":262144,"p":1,"r":8,"salt":"ab0c7876052600dd703518d83ec67bf294ea5d3f08db28bfdb0028de58975843"},"message":""},"checksum":{"function":"sha256","message":"8a9f5d9912ed7ad069bee7d9f2571b500884c5cc8e29ef9ef18a5bd3e7b3ca71"},"cipher":{"function":"aes-128-ctr","params":{"iv":"264daa3f303d7259501c93d997d84fe6"},"message":"cee418436f7c26a2d7bb61bf51e81d3a3f9f8be92e93fbf6d3cef1e0e8c0ba7b"}}}
+        \\{
+        \\  "crypto": {
+        \\    "kdf": {
+        \\      "function": "scrypt",
+        \\      "params": {
+        \\        "dklen": 32,
+        \\        "n": 262144,
+        \\        "p": 1,
+        \\        "r": 8,
+        \\        "salt": "d4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3"
+        \\      },
+        \\      "message": ""
+        \\    },
+        \\    "checksum": {
+        \\      "function": "sha256",
+        \\      "params": {},
+        \\      "message": "d2217fe5f3e9a1e34581ef8a78f7c9928e436d36dacc5e846abde07dd3dccbbe"
+        \\    },
+        \\    "cipher": {
+        \\      "function": "aes-128-ctr",
+        \\      "params": {
+        \\        "iv": "264daa3f303d7259501c93d997d84fe6"
+        \\      },
+        \\      "message": "06ae90d55fe0a6e9c5c3bc5b170827b2e5cce3929ed3f116c2811e6366dfe20f"
+        \\    }
+        \\  },
+        \\  "description": "This is a test keystore that uses scrypt to secure the secret.",
+        \\  "pubkey": "9612d7a727c9d0a22e185a1c768478dfe919cada9266988cb32359c11f2b7b27f4ae4040902382ae2910c15e2b420d07",
+        \\  "path": "m/12381/60/3141592653/0",
+        \\  "uuid": "1d85ae20-35c5-4611-98e8-aa14a633906f",
+        \\  "version": 4
+        \\}
     ;
-    try testing.expectError(error.NotImplemented, loadKeystore(testing.allocator, json, "testpassword"));
+    const sk = try loadKeystore(testing.allocator, json, "testpassword");
+    const sk_bytes = sk.serialize();
+    const expected_hex = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
+    var expected: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected, expected_hex);
+    try testing.expectEqualSlices(u8, &expected, &sk_bytes);
+}
+
+test "loadKeystore: EIP-2335 pbkdf2 test vector" {
+    // Test vector from https://eips.ethereum.org/EIPS/eip-2335#test-vectors
+    // Password: "testpassword"
+    // Secret key: 0x000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f
+    const json =
+        \\{
+        \\  "crypto": {
+        \\    "kdf": {
+        \\      "function": "pbkdf2",
+        \\      "params": {
+        \\        "dklen": 32,
+        \\        "c": 262144,
+        \\        "prf": "hmac-sha256",
+        \\        "salt": "d4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3"
+        \\      },
+        \\      "message": ""
+        \\    },
+        \\    "checksum": {
+        \\      "function": "sha256",
+        \\      "params": {},
+        \\      "message": "8a9f5d9912ed7ad069bee7d9f2571b500884c5cc8e29ef9ef18a5bd3e7b3ca71"
+        \\    },
+        \\    "cipher": {
+        \\      "function": "aes-128-ctr",
+        \\      "params": {
+        \\        "iv": "264daa3f303d7259501c93d997d84fe6"
+        \\      },
+        \\      "message": "cee418436f7c26a2d7bb61bf51e81d3a3f9f8be92e93fbf6d3cef1e0e8c0ba7b"
+        \\    }
+        \\  },
+        \\  "description": "This is a test keystore that uses pbkdf2 to secure the secret.",
+        \\  "pubkey": "9612d7a727c9d0a22e185a1c768478dfe919cada9266988cb32359c11f2b7b27f4ae4040902382ae2910c15e2b420d07",
+        \\  "path": "m/12381/60/0/0",
+        \\  "uuid": "64625def-3331-4eea-ab6f-782f3ed16a83",
+        \\  "version": 4
+        \\}
+    ;
+    const sk = try loadKeystore(testing.allocator, json, "testpassword");
+    const sk_bytes = sk.serialize();
+    const expected_hex = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
+    var expected: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected, expected_hex);
+    try testing.expectEqualSlices(u8, &expected, &sk_bytes);
+}
+
+test "loadKeystore: wrong password → InvalidChecksum" {
+    const json =
+        \\{
+        \\  "crypto": {
+        \\    "kdf": {
+        \\      "function": "pbkdf2",
+        \\      "params": {
+        \\        "dklen": 32,
+        \\        "c": 262144,
+        \\        "prf": "hmac-sha256",
+        \\        "salt": "d4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3"
+        \\      },
+        \\      "message": ""
+        \\    },
+        \\    "checksum": {
+        \\      "function": "sha256",
+        \\      "params": {},
+        \\      "message": "8a9f5d9912ed7ad069bee7d9f2571b500884c5cc8e29ef9ef18a5bd3e7b3ca71"
+        \\    },
+        \\    "cipher": {
+        \\      "function": "aes-128-ctr",
+        \\      "params": {
+        \\        "iv": "264daa3f303d7259501c93d997d84fe6"
+        \\      },
+        \\      "message": "cee418436f7c26a2d7bb61bf51e81d3a3f9f8be92e93fbf6d3cef1e0e8c0ba7b"
+        \\    }
+        \\  },
+        \\  "description": "test",
+        \\  "pubkey": "",
+        \\  "path": "",
+        \\  "uuid": "test-uuid",
+        \\  "version": 4
+        \\}
+    ;
+    try testing.expectError(error.InvalidChecksum, loadKeystore(testing.allocator, json, "wrongpassword"));
 }
