@@ -93,4 +93,14 @@ pub const NodeOptions = struct {
     log_level: []const u8 = "info",
     /// Log output format: "human" or "json". Set via --log-format.
     log_format: []const u8 = "human",
+    /// Path to log file (optional). Set via --log-file.
+    log_file: ?[]const u8 = null,
+    /// Log level for file output (default: same as log_level). Set via --log-file-level.
+    log_file_level: ?[]const u8 = null,
+    /// Max size in bytes before rotating log file (default 100MB).
+    log_rotate_max_size: u64 = 100 * 1024 * 1024,
+    /// Number of rotated log files to keep (default 7).
+    log_rotate_max_files: u32 = 7,
+    /// Enable daily rotation (default: true when --log-file set).
+    log_rotate_daily: bool = true,
 };
