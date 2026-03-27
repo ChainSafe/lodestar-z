@@ -21,7 +21,6 @@ const ApiContext = context.ApiContext;
 pub const HttpMethod = enum {
     GET,
     POST,
-    DELETE,
 };
 
 
@@ -211,6 +210,39 @@ pub const routes = [_]Route{
         .meta_flags = .{ .execution_optimistic = true },
     },
 
+    .{
+        .method = .GET,
+        .path = "/eth/v1/validator/blocks/{slot}",
+        .operation_id = "produceBlock",
+        .supports_ssz = true,
+        .meta_flags = .{ .version = true },
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/validator/attestation_data",
+        .operation_id = "getAttestationData",
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/validator/aggregate_attestation",
+        .operation_id = "getAggregateAttestation",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/aggregate_and_proofs",
+        .operation_id = "publishAggregateAndProofs",
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/validator/sync_committee_contribution",
+        .operation_id = "getSyncCommitteeContribution",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/contribution_and_proofs",
+        .operation_id = "publishContributionAndProofs",
+    },
+
     // -- Debug --
     .{
         .method = .GET,
@@ -248,38 +280,6 @@ pub const routes = [_]Route{
         .method = .GET,
         .path = "/eth/v1/config/fork_schedule",
         .operation_id = "getForkSchedule",
-    },
-
-    // -- Keymanager API (EIP-3042) --
-    .{
-        .method = .GET,
-        .path = "/eth/v1/keystores",
-        .operation_id = "listKeystores",
-    },
-    .{
-        .method = .POST,
-        .path = "/eth/v1/keystores",
-        .operation_id = "importKeystores",
-    },
-    .{
-        .method = .DELETE,
-        .path = "/eth/v1/keystores",
-        .operation_id = "deleteKeystores",
-    },
-    .{
-        .method = .GET,
-        .path = "/eth/v1/remotekeys",
-        .operation_id = "listRemoteKeys",
-    },
-    .{
-        .method = .POST,
-        .path = "/eth/v1/remotekeys",
-        .operation_id = "importRemoteKeys",
-    },
-    .{
-        .method = .DELETE,
-        .path = "/eth/v1/remotekeys",
-        .operation_id = "deleteRemoteKeys",
     },
 };
 

@@ -123,7 +123,6 @@ pub const HttpServer = struct {
         const route_method: routes_mod.HttpMethod = switch (request.head.method) {
             .GET => .GET,
             .POST => .POST,
-            .DELETE => .DELETE,
             else => {
                 try respondApiError(request, .{
                     .code = .method_not_allowed,
@@ -166,7 +165,25 @@ pub const HttpServer = struct {
         }
 
         // Dispatch to handler and get response body.
-        const result = self.dispatchHandler(match) catch |err| {
+        // Read request body for POST methods.
+        var request_body: []const u8 = &[_]u8{};
+        var request_body_owned = false;
+        if (route_method == .POST) {
+            var reader_buf: [4096]u8 = undefined;
+            const body_reader = request.readerExpectNone(&reader_buf);
+            // Read up to 1MB body
+            const max_body = 1 << 20;
+            request_body = body_reader.readAlloc(self.allocator, max_body) catch &[_]u8{};
+            request_body_owned = true;
+        }
+        defer if (request_body_owned) self.allocator.free(request_body);
+
+        const dc = DispatchContext{
+            .match = match,
+            .query = if (std.mem.indexOfScalar(u8, target, '?')) |idx| target[idx + 1..] else null,
+            .body = request_body,
+        };
+        const result = self.dispatchHandler(dc) catch |err| {
             try respondApiError(request, error_response.fromZigError(err));
             return;
         };
@@ -241,19 +258,34 @@ pub const HttpServer = struct {
     }
 
     /// Route to the correct handler and encode the response.
+    /// Context for dispatching a handler: route match + query params + body.
+    const DispatchContext = struct {
+        match: routes_mod.RouteMatch,
+        /// Raw query string (e.g. "slot=100&committee_index=0"), or null.
+        query: ?[]const u8 = null,
+        /// Request body bytes (for POST), or empty slice.
+        body: []const u8 = &[_]u8{},
+
+        /// Get a query parameter value by name.
+        pub fn getQuery(self: *const DispatchContext, name: []const u8) ?[]const u8 {
+            const qs = self.query orelse return null;
+            var pairs = std.mem.splitScalar(u8, qs, '&');
+            while (pairs.next()) |pair| {
+                if (std.mem.indexOfScalar(u8, pair, '=')) |eq| {
+                    const k = pair[0..eq];
+                    const v = pair[eq + 1 ..];
+                    if (std.mem.eql(u8, k, name)) return v;
+                }
+            }
+            return null;
+        }
+    };
+
     fn dispatchHandler(
         self: *HttpServer,
-        match: routes_mod.RouteMatch,
+        dc: DispatchContext,
     ) !HandlerResult {
-        return self.dispatchHandlerWithContext(match, null, null);
-    }
-
-    fn dispatchHandlerWithContext(
-        self: *HttpServer,
-        match: routes_mod.RouteMatch,
-        request_body: ?[]const u8,
-        auth_header: ?[]const u8,
-    ) !HandlerResult {
+        const match = dc.match;
         const op = match.route.operation_id;
         const alloc = self.allocator;
         const ctx = self.api_context;
@@ -353,7 +385,7 @@ pub const HttpServer = struct {
         }
         if (std.mem.eql(u8, op, "publishBlockV2")) {
             // TODO: read request body (JSON or SSZ based on Content-Type)
-            const result = try handlers.beacon.submitBlock(ctx, &[_]u8{});
+            const result = try handlers.beacon.submitBlock(ctx, dc.body);
             return self.makeVoidResult(result);
         }
 
@@ -381,27 +413,27 @@ pub const HttpServer = struct {
 
         // Pool POST endpoints (stubs — accept body, return 200).
         if (std.mem.eql(u8, op, "submitPoolAttestations")) {
-            const result = try handlers.beacon.submitPoolAttestations(ctx, &[_]u8{});
+            const result = try handlers.beacon.submitPoolAttestations(ctx, dc.body);
             return self.makeVoidResult(result);
         }
         if (std.mem.eql(u8, op, "submitPoolVoluntaryExits")) {
-            const result = try handlers.beacon.submitPoolVoluntaryExits(ctx, &[_]u8{});
+            const result = try handlers.beacon.submitPoolVoluntaryExits(ctx, dc.body);
             return self.makeVoidResult(result);
         }
         if (std.mem.eql(u8, op, "submitPoolProposerSlashings")) {
-            const result = try handlers.beacon.submitPoolProposerSlashings(ctx, &[_]u8{});
+            const result = try handlers.beacon.submitPoolProposerSlashings(ctx, dc.body);
             return self.makeVoidResult(result);
         }
         if (std.mem.eql(u8, op, "submitPoolAttesterSlashings")) {
-            const result = try handlers.beacon.submitPoolAttesterSlashings(ctx, &[_]u8{});
+            const result = try handlers.beacon.submitPoolAttesterSlashings(ctx, dc.body);
             return self.makeVoidResult(result);
         }
         if (std.mem.eql(u8, op, "submitPoolBlsToExecutionChanges")) {
-            const result = try handlers.beacon.submitPoolBlsToExecutionChanges(ctx, &[_]u8{});
+            const result = try handlers.beacon.submitPoolBlsToExecutionChanges(ctx, dc.body);
             return self.makeVoidResult(result);
         }
         if (std.mem.eql(u8, op, "submitPoolSyncCommittees")) {
-            const result = try handlers.beacon.submitPoolSyncCommittees(ctx, &[_]u8{});
+            const result = try handlers.beacon.submitPoolSyncCommittees(ctx, dc.body);
             return self.makeVoidResult(result);
         }
 
@@ -512,30 +544,129 @@ pub const HttpServer = struct {
             return self.makeJsonResult([]const types.ForkScheduleEntry, result);
         }
 
-        // Keymanager API (EIP-3042).
-        if (std.mem.eql(u8, op, "listKeystores")) {
-            const body = try handlers.keymanager.listKeystores(ctx, auth_header);
-            return .{ .status = 200, .content_type = "application/json", .body = body };
+        // --- New validator endpoints ---
+
+        if (std.mem.eql(u8, op, "produceBlock")) {
+            // GET /eth/v1/validator/blocks/{slot}?randao_reveal=0x...&graffiti=0x...
+            const slot_str = match.getParam("slot") orelse return error.InvalidRequest;
+            const slot = std.fmt.parseInt(u64, slot_str, 10) catch return error.InvalidRequest;
+
+            const randao_hex = dc.getQuery("randao_reveal") orelse return error.InvalidRequest;
+            const randao_src = if (std.mem.startsWith(u8, randao_hex, "0x")) randao_hex[2..] else randao_hex;
+            if (randao_src.len != 192) return error.InvalidRequest;
+            var randao_reveal: [96]u8 = undefined;
+            _ = std.fmt.hexToBytes(&randao_reveal, randao_src) catch return error.InvalidRequest;
+
+            const graffiti: ?[32]u8 = if (dc.getQuery("graffiti")) |grf| blk: {
+                const grf_src = if (std.mem.startsWith(u8, grf, "0x")) grf[2..] else grf;
+                if (grf_src.len == 64) {
+                    var g: [32]u8 = undefined;
+                    _ = std.fmt.hexToBytes(&g, grf_src) catch break :blk null;
+                    break :blk g;
+                }
+                break :blk null;
+            } else null;
+
+            const handler_res = try handlers.validator.produceBlock(ctx, slot, randao_reveal, graffiti);
+            // Return the SSZ bytes wrapped in JSON data envelope
+            // Hex-encode ssz_bytes (runtime-length slice) manually
+            const ssz_hex = blk: {
+                const buf = try alloc.alloc(u8, handler_res.data.ssz_bytes.len * 2);
+                for (handler_res.data.ssz_bytes, 0..) |byte, bi| {
+                    const hi = bi * 2;
+                    const hi_nibble: u8 = (byte >> 4) & 0xf;
+                    const lo_nibble: u8 = byte & 0xf;
+                    buf[hi] = if (hi_nibble < 10) '0' + hi_nibble else 'a' + hi_nibble - 10;
+                    buf[hi + 1] = if (lo_nibble < 10) '0' + lo_nibble else 'a' + lo_nibble - 10;
+                }
+                break :blk buf;
+            };
+            defer alloc.free(ssz_hex);
+            const body_json = try std.fmt.allocPrint(alloc,
+                "{{\"data\":\"0x{s}\",\"version\":\"{s}\"}}",
+                .{ ssz_hex, handler_res.data.fork });
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = body_json,
+                .meta = handler_res.meta,
+            };
         }
-        if (std.mem.eql(u8, op, "importKeystores")) {
-            const body = try handlers.keymanager.importKeystores(ctx, auth_header, request_body orelse "{}");
-            return .{ .status = 200, .content_type = "application/json", .body = body };
+
+        if (std.mem.eql(u8, op, "getAttestationData")) {
+            // GET /eth/v1/validator/attestation_data?slot=...&committee_index=...
+            const slot_str = dc.getQuery("slot") orelse return error.InvalidRequest;
+            const committee_str = dc.getQuery("committee_index") orelse "0";
+            const slot = std.fmt.parseInt(u64, slot_str, 10) catch return error.InvalidRequest;
+            const committee_index = std.fmt.parseInt(u64, committee_str, 10) catch return error.InvalidRequest;
+
+            const handler_res = try handlers.validator.getAttestationData(ctx, slot, committee_index);
+            const d = handler_res.data;
+            const body_json = try std.fmt.allocPrint(alloc,
+                "{{\"data\":{{\"slot\":\"{d}\",\"index\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}}}}",
+                .{
+                    d.slot, d.index,
+                    std.fmt.bytesToHex(&d.beacon_block_root, .lower),
+                    d.source_epoch, std.fmt.bytesToHex(&d.source_root, .lower),
+                    d.target_epoch, std.fmt.bytesToHex(&d.target_root, .lower),
+                });
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = body_json,
+            };
         }
-        if (std.mem.eql(u8, op, "deleteKeystores")) {
-            const body = try handlers.keymanager.deleteKeystores(ctx, auth_header, request_body orelse "{}");
-            return .{ .status = 200, .content_type = "application/json", .body = body };
+
+        if (std.mem.eql(u8, op, "getAggregateAttestation")) {
+            // GET /eth/v1/validator/aggregate_attestation?slot=...&attestation_data_root=0x...
+            const slot_str = dc.getQuery("slot") orelse return error.InvalidRequest;
+            const root_hex = dc.getQuery("attestation_data_root") orelse return error.InvalidRequest;
+            const slot = std.fmt.parseInt(u64, slot_str, 10) catch return error.InvalidRequest;
+            const root_src = if (std.mem.startsWith(u8, root_hex, "0x")) root_hex[2..] else root_hex;
+            if (root_src.len != 64) return error.InvalidRequest;
+            var data_root: [32]u8 = undefined;
+            _ = std.fmt.hexToBytes(&data_root, root_src) catch return error.InvalidRequest;
+
+            const raw_json = try handlers.validator.getAggregateAttestation(ctx, slot, data_root);
+            defer alloc.free(raw_json);
+            const envelope = try std.fmt.allocPrint(alloc, "{{\"data\":{s}}}", .{raw_json});
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = envelope,
+            };
         }
-        if (std.mem.eql(u8, op, "listRemoteKeys")) {
-            const body = try handlers.keymanager.listRemoteKeys(ctx, auth_header);
-            return .{ .status = 200, .content_type = "application/json", .body = body };
+
+        if (std.mem.eql(u8, op, "publishAggregateAndProofs")) {
+            const handler_res = try handlers.validator.publishAggregateAndProofs(ctx, dc.body);
+            return self.makeVoidResult(handler_res);
         }
-        if (std.mem.eql(u8, op, "importRemoteKeys")) {
-            const body = try handlers.keymanager.importRemoteKeys(ctx, auth_header, request_body orelse "{}");
-            return .{ .status = 200, .content_type = "application/json", .body = body };
+
+        if (std.mem.eql(u8, op, "getSyncCommitteeContribution")) {
+            // GET /eth/v1/validator/sync_committee_contribution?slot=...&subcommittee_index=...&beacon_block_root=0x...
+            const slot_str = dc.getQuery("slot") orelse return error.InvalidRequest;
+            const subnet_str = dc.getQuery("subcommittee_index") orelse "0";
+            const root_hex = dc.getQuery("beacon_block_root") orelse return error.InvalidRequest;
+            const slot = std.fmt.parseInt(u64, slot_str, 10) catch return error.InvalidRequest;
+            const subcommittee_index = std.fmt.parseInt(u64, subnet_str, 10) catch return error.InvalidRequest;
+            const root_src = if (std.mem.startsWith(u8, root_hex, "0x")) root_hex[2..] else root_hex;
+            if (root_src.len != 64) return error.InvalidRequest;
+            var block_root: [32]u8 = undefined;
+            _ = std.fmt.hexToBytes(&block_root, root_src) catch return error.InvalidRequest;
+
+            const raw_json = try handlers.validator.getSyncCommitteeContribution(ctx, slot, subcommittee_index, block_root);
+            defer alloc.free(raw_json);
+            const envelope = try std.fmt.allocPrint(alloc, "{{\"data\":{s}}}", .{raw_json});
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = envelope,
+            };
         }
-        if (std.mem.eql(u8, op, "deleteRemoteKeys")) {
-            const body = try handlers.keymanager.deleteRemoteKeys(ctx, auth_header, request_body orelse "{}");
-            return .{ .status = 200, .content_type = "application/json", .body = body };
+
+        if (std.mem.eql(u8, op, "publishContributionAndProofs")) {
+            const handler_res = try handlers.validator.publishContributionAndProofs(ctx, dc.body);
+            return self.makeVoidResult(handler_res);
         }
 
         return error.NotImplemented;
@@ -551,14 +682,11 @@ pub const HttpServer = struct {
         path: []const u8,
         body: ?[]const u8,
     ) !HttpResponse {
-        _ = body;
 
         const route_method: routes_mod.HttpMethod = if (std.mem.eql(u8, method, "GET"))
             .GET
         else if (std.mem.eql(u8, method, "POST"))
             .POST
-        else if (std.mem.eql(u8, method, "DELETE"))
-            .DELETE
         else
             return .{
                 .status = 405,
@@ -588,7 +716,13 @@ pub const HttpServer = struct {
             };
         };
 
-        const result = self.dispatchHandler(match) catch |err| {
+        const clean_query = if (std.mem.indexOfScalar(u8, path, '?')) |idx| path[idx+1..] else null;
+        const dc_test = DispatchContext{
+            .match = match,
+            .query = clean_query,
+            .body = body orelse &[_]u8{},
+        };
+        const result = self.dispatchHandler(dc_test) catch |err| {
             const api_err = error_response.fromZigError(err);
             var err_buf: [256]u8 = undefined;
             const err_json = api_err.formatJson(&err_buf);
@@ -803,8 +937,7 @@ test "handleRequest wrong method returns 405" {
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
-    // PATCH is not a supported method — returns 405.
-    const resp = try server.handleRequest("PATCH", "/eth/v1/node/version", null);
+    const resp = try server.handleRequest("DELETE", "/eth/v1/node/version", null);
 
     try std.testing.expectEqual(@as(u16, 405), resp.status);
 }
@@ -859,4 +992,90 @@ test "error responses use standard Beacon API format" {
     try std.testing.expectEqual(@as(u16, 404), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"statusCode\":404") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"message\"") != null);
+}
+
+test "handleRequest GET /eth/v1/validator/attestation_data returns 200" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("GET", "/eth/v1/validator/attestation_data?slot=100&committee_index=0", null);
+    defer std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "beacon_block_root") != null);
+}
+
+test "handleRequest POST /eth/v1/validator/aggregate_and_proofs returns 204" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("POST", "/eth/v1/validator/aggregate_and_proofs", null);
+    defer std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 204), resp.status);
+}
+
+test "handleRequest POST /eth/v1/validator/contribution_and_proofs returns 204" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("POST", "/eth/v1/validator/contribution_and_proofs", null);
+    defer std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 204), resp.status);
+}
+
+test "handleRequest POST /eth/v2/beacon/blocks without import returns error" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    // submitBlock returns NotImplemented since no block_import is wired
+    // Error responses from handleRequest are stack-allocated (not heap), so no free needed.
+    const resp = try server.handleRequest("POST", "/eth/v2/beacon/blocks", "{}");
+
+    // NotImplemented maps to 500 or 501
+    try std.testing.expect(resp.status >= 400);
+}
+
+test "handleRequest pool submission POST attestations with body" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const body =
+        \\[{"aggregation_bits":"0x01","data":{"slot":100,"index":0,"beacon_block_root":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source":{"epoch":0,"root":"0x0000000000000000000000000000000000000000000000000000000000000000"},"target":{"epoch":1,"root":"0x0000000000000000000000000000000000000000000000000000000000000000"}},"signature":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}]
+    ;
+    const resp = try server.handleRequest("POST", "/eth/v1/beacon/pool/attestations", body);
+    defer std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 204), resp.status);
+}
+
+test "handleRequest pool submission POST voluntary_exits with body" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const body =
+        \\{"message":{"epoch":100,"validator_index":42},"signature":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}
+    ;
+    const resp = try server.handleRequest("POST", "/eth/v1/beacon/pool/voluntary_exits", body);
+    defer std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 204), resp.status);
+}
+
+test "DispatchContext.getQuery parses query params" {
+    const dc = HttpServer.DispatchContext{
+        .match = undefined,
+        .query = "slot=100&committee_index=3&beacon_block_root=0xaabb",
+    };
+    try std.testing.expectEqualStrings("100", dc.getQuery("slot").?);
+    try std.testing.expectEqualStrings("3", dc.getQuery("committee_index").?);
+    try std.testing.expectEqualStrings("0xaabb", dc.getQuery("beacon_block_root").?);
+    try std.testing.expect(dc.getQuery("missing") == null);
 }

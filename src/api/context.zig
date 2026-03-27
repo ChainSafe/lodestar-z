@@ -42,28 +42,6 @@ pub const SyncStatus = struct {
 
 /// Stub for state regeneration. In the full implementation this would
 /// load or replay state to a requested slot/root.
-/// Callback for accessing state regeneration from the API layer.
-/// Uses a type-erased pointer so the API doesn't depend directly on
-/// the chain's QueuedStateRegen / StateRegen types.
-pub const StateRegenCallback = struct {
-    ptr: *anyopaque,
-    /// Get a state by its state root. Returns null if not available.
-    getStateByRootFn: *const fn (ptr: *anyopaque, state_root: [32]u8) ?*CachedBeaconState,
-    /// Get a pre-state for a given parent root and block slot. Returns null on failure.
-    getPreStateFn: ?*const fn (ptr: *anyopaque, parent_root: [32]u8, block_slot: u64) ?*CachedBeaconState,
-
-    pub fn getStateByRoot(self: *const StateRegenCallback, state_root: [32]u8) ?*CachedBeaconState {
-        return self.getStateByRootFn(self.ptr, state_root);
-    }
-
-    pub fn getPreState(self: *const StateRegenCallback, parent_root: [32]u8, block_slot: u64) ?*CachedBeaconState {
-        if (self.getPreStateFn) |f| return f(self.ptr, parent_root, block_slot);
-        return null;
-    }
-};
-
-/// Legacy stub for backward compatibility. Will be removed once all
-/// callers migrate to StateRegenCallback.
 pub const StateRegen = struct {
     /// Placeholder — returns null until real state regen is implemented.
     pub fn getStateAtSlot(_: *StateRegen, _: u64) ?*anyopaque {
@@ -81,6 +59,21 @@ pub const StateRegen = struct {
 pub const BlockImportCallback = struct {
     ptr: *anyopaque,
     importFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
+};
+
+/// Callback for accessing state regeneration from the API layer.
+pub const StateRegenCallback = struct {
+    ptr: *anyopaque,
+    getStateByRootFn: *const fn (ptr: *anyopaque, state_root: [32]u8) ?*CachedBeaconState,
+    getPreStateFn: ?*const fn (ptr: *anyopaque, parent_root: [32]u8, block_slot: u64) ?*CachedBeaconState,
+
+    pub fn getStateByRoot(self: *const StateRegenCallback, state_root: [32]u8) ?*CachedBeaconState {
+        return self.getStateByRootFn(self.ptr, state_root);
+    }
+    pub fn getPreState(self: *const StateRegenCallback, parent_root: [32]u8, block_slot: u64) ?*CachedBeaconState {
+        if (self.getPreStateFn) |f| return f(self.ptr, parent_root, block_slot);
+        return null;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -140,31 +133,113 @@ pub const OpPoolCallback = struct {
 
 
 // ---------------------------------------------------------------------------
-// Keymanager callback — type-erased access to ValidatorStore + auth
+// Pool submission callback
 // ---------------------------------------------------------------------------
 
+/// Type-erased callback for submitting items to operation pools.
+pub const PoolSubmitCallback = struct {
+    ptr: *anyopaque,
+    /// Submit attestations (raw JSON bytes, array of SingleAttestation or Attestation).
+    submitAttestationFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+    /// Submit a signed voluntary exit (raw JSON bytes).
+    submitVoluntaryExitFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+    /// Submit a proposer slashing (raw JSON bytes).
+    submitProposerSlashingFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+    /// Submit an attester slashing (raw JSON bytes).
+    submitAttesterSlashingFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+    /// Submit signed BLS-to-execution changes (raw JSON bytes, array).
+    submitBlsChangeFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+    /// Submit sync committee messages (raw JSON bytes, array).
+    submitSyncCommitteeMessageFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+    /// Submit aggregate and proofs (raw JSON bytes, array).
+    submitAggregateAndProofFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+    /// Submit contribution and proofs (raw JSON bytes, array).
+    submitContributionAndProofFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+};
+
+// ---------------------------------------------------------------------------
+// Produce block callback
+// ---------------------------------------------------------------------------
+
+/// Parameters for block production.
+pub const ProduceBlockParams = struct {
+    slot: u64,
+    randao_reveal: [96]u8,
+    graffiti: ?[32]u8 = null,
+};
+
+/// Result of block production (minimal, for API response).
+pub const ProducedBlockData = struct {
+    /// Raw SSZ bytes of the produced BeaconBlock (unsigned).
+    ssz_bytes: []const u8,
+    /// Fork name for the produced block (e.g. "electra").
+    fork: []const u8,
+};
+
+/// Callback for producing blocks (GET /eth/v1/validator/blocks/{slot}).
+pub const ProduceBlockCallback = struct {
+    ptr: *anyopaque,
+    /// Produce a block for the given slot. Caller owns returned ssz_bytes.
+    produceBlockFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, params: ProduceBlockParams) anyerror!ProducedBlockData,
+};
+
+// ---------------------------------------------------------------------------
+// Attestation data callback
+// ---------------------------------------------------------------------------
+
+/// Result of attestation data query.
+pub const AttestationDataResult = struct {
+    slot: u64,
+    index: u64,
+    beacon_block_root: [32]u8,
+    source_epoch: u64,
+    source_root: [32]u8,
+    target_epoch: u64,
+    target_root: [32]u8,
+};
+
+/// Callback for getting attestation data (GET /eth/v1/validator/attestation_data).
+pub const AttestationDataCallback = struct {
+    ptr: *anyopaque,
+    getAttestationDataFn: *const fn (ptr: *anyopaque, slot: u64, committee_index: u64) anyerror!AttestationDataResult,
+};
+
+// ---------------------------------------------------------------------------
+// Aggregate attestation callback
+// ---------------------------------------------------------------------------
+
+/// Callback for getting best aggregate attestation from pool.
+pub const AggregateAttestationCallback = struct {
+    ptr: *anyopaque,
+    /// Returns raw JSON bytes of the best aggregate attestation. Caller owns.
+    getAggregateAttestationFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, slot: u64, attestation_data_root: [32]u8) anyerror![]const u8,
+};
+
+// ---------------------------------------------------------------------------
+// Sync committee contribution callback
+// ---------------------------------------------------------------------------
+
+/// Callback for getting sync committee contribution.
+pub const SyncCommitteeContributionCallback = struct {
+    ptr: *anyopaque,
+    /// Returns raw JSON bytes of the contribution. Caller owns.
+    getSyncCommitteeContributionFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, slot: u64, subcommittee_index: u64, beacon_block_root: [32]u8) anyerror![]const u8,
+};
 /// Validator key info for listing.
 pub const ValidatorKeyInfo = struct {
-    /// Compressed BLS public key (48 bytes).
     pubkey: [48]u8,
-    /// HD derivation path (empty for imported keys).
     derivation_path: []const u8,
-    /// Whether this is a read-only (remote signer) key.
     readonly: bool,
 };
 
 /// Remote signer key info.
 pub const RemoteKeyInfo = struct {
-    /// Compressed BLS public key (48 bytes).
     pubkey: [48]u8,
-    /// Web3Signer URL.
     url: []const u8,
-    /// Always false for remote keys managed here.
     readonly: bool,
 };
 
-/// Type-erased callback interface to the validator key manager.
-/// Allows the API module to manage keys without importing the validator module.
+/// Result of a key delete operation.
 pub const KeymanagerCallback = struct {
     ptr: *anyopaque,
     /// Validate bearer token — returns error.Unauthorized if invalid.
@@ -195,15 +270,13 @@ pub const DeleteKeyResult = struct {
 // ApiContext
 // ---------------------------------------------------------------------------
 
+
 pub const ApiContext = struct {
     /// Chain head tracking.
     head_tracker: *HeadTracker,
 
     /// State access (for state queries).
     regen: *StateRegen,
-    /// Optional state regen callback backed by the real QueuedStateRegen.
-    /// When set, API handlers use this for state lookups instead of ad-hoc DB queries.
-    state_regen_callback: ?StateRegenCallback = null,
 
     /// Block / state database.
     db: *BeaconDB,
@@ -235,6 +308,22 @@ pub const ApiContext = struct {
     /// Optional operation pool callback. Nil until wired by BeaconNode.init.
     op_pool: ?OpPoolCallback = null,
 
-    /// Optional Keymanager API callback. Nil if Keymanager API is disabled.
+    /// Optional pool submission callback. Nil until wired by BeaconNode.init.
+    pool_submit: ?PoolSubmitCallback = null,
+
+    /// Optional block production callback. Nil until wired by BeaconNode.init.
+    produce_block: ?ProduceBlockCallback = null,
+
+    /// Optional attestation data callback. Nil until wired by BeaconNode.init.
+    attestation_data: ?AttestationDataCallback = null,
+
+    /// Optional aggregate attestation callback. Nil until wired by BeaconNode.init.
+    aggregate_attestation: ?AggregateAttestationCallback = null,
+
+    /// Optional sync committee contribution callback. Nil until wired by BeaconNode.init.
+    sync_committee_contribution: ?SyncCommitteeContributionCallback = null,
+    /// Optional state regen callback.
+    state_regen_callback: ?StateRegenCallback = null,
+    /// Optional keymanager callback.
     keymanager: ?KeymanagerCallback = null,
 };
