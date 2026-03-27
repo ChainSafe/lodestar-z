@@ -49,3 +49,22 @@ test {
 pub const sync_contribution_pool = @import("sync_contribution_pool.zig");
 pub const SyncContributionAndProofPool = sync_contribution_pool.SyncContributionAndProofPool;
 pub const SyncCommitteeMessagePool = sync_contribution_pool.SyncCommitteeMessagePool;
+
+// New chain pipeline modules
+pub const shuffling_cache = @import("shuffling_cache.zig");
+pub const beacon_proposer_cache = @import("beacon_proposer_cache.zig");
+pub const prepare_next_slot = @import("prepare_next_slot.zig");
+pub const archive_store = @import("archive_store.zig");
+pub const block_verification = @import("block_verification.zig");
+pub const reprocess = @import("reprocess.zig");
+
+// Re-exports
+pub const ShufflingCache = shuffling_cache.ShufflingCache;
+pub const BeaconProposerCache = beacon_proposer_cache.BeaconProposerCache;
+pub const ProposerInfo = beacon_proposer_cache.ProposerInfo;
+pub const PrepareNextSlot = prepare_next_slot.PrepareNextSlot;
+pub const ArchiveStore = archive_store.ArchiveStore;
+pub const ReprocessQueue = reprocess.ReprocessQueue;
+pub const PendingBlock = reprocess.PendingBlock;
+pub const PendingReason = reprocess.PendingReason;
+pub const BlockVerification = block_verification;
