@@ -11,11 +11,14 @@ const CachedBeaconState = context.CachedBeaconState;
 const preset = @import("preset").preset;
 const fork_types = @import("fork_types");
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
+const handler_result = @import("../handler_result.zig");
+const HandlerResult = handler_result.HandlerResult;
+const ResponseMeta = handler_result.ResponseMeta;
 
 /// GET /eth/v1/beacon/genesis
 ///
 /// Returns genesis time, genesis validators root, and genesis fork version.
-pub fn getGenesis(ctx: *ApiContext) types.ApiResponse(types.GenesisData) {
+pub fn getGenesis(ctx: *ApiContext) HandlerResult(types.GenesisData) {
     const cfg = ctx.beacon_config;
     return .{
         .data = .{
@@ -23,19 +26,21 @@ pub fn getGenesis(ctx: *ApiContext) types.ApiResponse(types.GenesisData) {
             .genesis_validators_root = cfg.genesis_validator_root,
             .genesis_fork_version = cfg.chain.GENESIS_FORK_VERSION,
         },
-        .finalized = true,
+        .meta = .{ .finalized = true },
     };
 }
 
 /// GET /eth/v1/beacon/headers/{block_id}
 ///
 /// Returns the block header for the given block identifier.
-pub fn getBlockHeader(ctx: *ApiContext, block_id: types.BlockId) !types.ApiResponse(types.BlockHeaderData) {
+pub fn getBlockHeader(ctx: *ApiContext, block_id: types.BlockId) !HandlerResult(types.BlockHeaderData) {
     const result = try resolveBlockHeader(ctx, block_id);
     return .{
         .data = result.header,
-        .execution_optimistic = result.execution_optimistic,
-        .finalized = result.finalized,
+        .meta = .{
+            .execution_optimistic = result.execution_optimistic,
+            .finalized = result.finalized,
+        },
     };
 }
 
@@ -54,11 +59,15 @@ pub fn getBlock(ctx: *ApiContext, block_id: types.BlockId) !BlockResult {
         (try ctx.db.getBlockArchiveByRoot(slot_info.root)) orelse
         return error.BlockNotFound;
 
+    // Determine fork from slot for version metadata
+    const fork_name = forkNameFromSlot(ctx, slot_info.slot);
+
     return .{
         .data = block_bytes,
         .slot = slot_info.slot,
         .execution_optimistic = !slot_info.finalized,
         .finalized = slot_info.finalized,
+        .fork_name = fork_name,
     };
 }
 
@@ -68,7 +77,22 @@ pub const BlockResult = struct {
     slot: u64,
     execution_optimistic: bool,
     finalized: bool,
+    fork_name: handler_result.Fork = .phase0,
 };
+
+/// Determine the fork name for a given slot using the beacon config.
+fn forkNameFromSlot(ctx: *ApiContext, slot: u64) handler_result.Fork {
+    const fork_seq = ctx.beacon_config.forkSeq(slot);
+    return switch (fork_seq) {
+        .phase0 => .phase0,
+        .altair => .altair,
+        .bellatrix => .bellatrix,
+        .capella => .capella,
+        .deneb => .deneb,
+        .electra => .electra,
+        else => .phase0,
+    };
+}
 
 /// GET /eth/v2/beacon/states/{state_id}/validators
 ///
@@ -82,7 +106,7 @@ pub fn getValidators(
     ctx: *ApiContext,
     state_id: types.StateId,
     _: types.ValidatorQuery,
-) !types.ApiResponse([]const types.ValidatorData) {
+) !HandlerResult([]const types.ValidatorData) {
     // Try the head state callback for head/justified.
     const use_head = switch (state_id) {
         .head, .justified => true,
@@ -107,7 +131,7 @@ pub fn getValidators(
 fn buildValidatorResponse(
     ctx: *ApiContext,
     state: *CachedBeaconState,
-) !types.ApiResponse([]const types.ValidatorData) {
+) !HandlerResult([]const types.ValidatorData) {
     // Read validators and balances from the state
     const validators = try state.state.validatorsSlice(ctx.allocator);
     defer ctx.allocator.free(validators);
@@ -140,6 +164,10 @@ fn buildValidatorResponse(
 
     return .{
         .data = try result.toOwnedSlice(ctx.allocator),
+        .meta = .{
+            .execution_optimistic = false,
+            .finalized = false,
+        },
     };
 }
 
@@ -150,7 +178,7 @@ pub fn getValidator(
     ctx: *ApiContext,
     state_id: types.StateId,
     validator_id: types.ValidatorId,
-) !types.ApiResponse(types.ValidatorData) {
+) !HandlerResult(types.ValidatorData) {
     // Only head state is available via the head_state callback for now.
     const use_head = switch (state_id) {
         .head, .justified => true,
@@ -202,17 +230,19 @@ pub fn getValidator(
                 .withdrawable_epoch = v.withdrawable_epoch,
             },
         },
+        .meta = .{},
     };
 }
 
 /// GET /eth/v1/beacon/states/{state_id}/root
 ///
 /// Returns the state root for the given state identifier.
-pub fn getStateRoot(ctx: *ApiContext, state_id: types.StateId) !types.ApiResponse([32]u8) {
+pub fn getStateRoot(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([32]u8) {
     switch (state_id) {
         .head => {
             return .{
                 .data = ctx.head_tracker.head_state_root,
+                .meta = .{},
             };
         },
         .finalized => {
@@ -220,19 +250,20 @@ pub fn getStateRoot(ctx: *ApiContext, state_id: types.StateId) !types.ApiRespons
             // Approximate with head_state_root for now if finalized == head.
             return .{
                 .data = ctx.head_tracker.head_state_root,
-                .finalized = true,
+                .meta = .{ .finalized = true },
             };
         },
         .genesis => {
             // Genesis state root would be stored in config/DB.
             return .{
                 .data = [_]u8{0} ** 32, // placeholder
-                .finalized = true,
+                .meta = .{ .finalized = true },
             };
         },
         .justified => {
             return .{
                 .data = ctx.head_tracker.head_state_root,
+                .meta = .{},
             };
         },
         .slot => |slot| {
@@ -252,13 +283,14 @@ pub fn getStateRoot(ctx: *ApiContext, state_id: types.StateId) !types.ApiRespons
             const state_root = any_block.beaconBlock().stateRoot().*;
             return .{
                 .data = state_root,
-                .finalized = slot <= ctx.head_tracker.finalized_slot,
+                .meta = .{ .finalized = slot <= ctx.head_tracker.finalized_slot },
             };
         },
         .root => |root| {
             // The state_id IS the root
             return .{
                 .data = root,
+                .meta = .{},
             };
         },
     }
@@ -267,7 +299,7 @@ pub fn getStateRoot(ctx: *ApiContext, state_id: types.StateId) !types.ApiRespons
 /// GET /eth/v1/beacon/states/{state_id}/fork
 ///
 /// Returns the fork data for the given state.
-pub fn getStateFork(ctx: *ApiContext, state_id: types.StateId) !types.ApiResponse(types.ForkData) {
+pub fn getStateFork(ctx: *ApiContext, state_id: types.StateId) !HandlerResult(types.ForkData) {
     // Determine the slot to compute the fork for
     const slot = resolveStateSlot(ctx, state_id);
 
@@ -296,9 +328,11 @@ pub fn getStateFork(ctx: *ApiContext, state_id: types.StateId) !types.ApiRespons
 
     return .{
         .data = result,
-        .finalized = switch (state_id) {
-            .finalized, .genesis => true,
-            else => false,
+        .meta = .{
+            .finalized = switch (state_id) {
+                .finalized, .genesis => true,
+                else => false,
+            },
         },
     };
 }
@@ -310,7 +344,7 @@ pub fn getStateFork(ctx: *ApiContext, state_id: types.StateId) !types.ApiRespons
 /// Note: Full implementation requires loading the beacon state for each state_id.
 /// Currently returns data from the head tracker which only tracks the current head's
 /// finalized/justified data. Non-head state_ids fall back to head tracker data.
-pub fn getFinalityCheckpoints(ctx: *ApiContext, _: types.StateId) !types.ApiResponse(types.FinalityCheckpoints) {
+pub fn getFinalityCheckpoints(ctx: *ApiContext, _: types.StateId) !HandlerResult(types.FinalityCheckpoints) {
     // TODO: Load actual state for non-head state_ids. This requires state regen to be
     // wired into the API context so we can load the beacon state at any slot/root.
     return .{
@@ -328,6 +362,7 @@ pub fn getFinalityCheckpoints(ctx: *ApiContext, _: types.StateId) !types.ApiResp
                 .root = ctx.head_tracker.finalized_root,
             },
         },
+        .meta = .{},
     };
 }
 
@@ -341,9 +376,45 @@ pub fn getFinalityCheckpoints(ctx: *ApiContext, _: types.StateId) !types.ApiResp
 pub fn submitBlock(
     ctx: *ApiContext,
     block_bytes: []const u8,
-) !void {
+) !HandlerResult(void) {
     const cb = ctx.block_import orelse return error.NotImplemented;
     try cb.importFn(cb.ptr, block_bytes);
+    return .{ .data = {} };
+}
+
+/// POST /eth/v1/beacon/pool/attestations
+/// POST /eth/v1/beacon/pool/voluntary_exits
+/// POST /eth/v1/beacon/pool/proposer_slashings
+/// POST /eth/v1/beacon/pool/attester_slashings
+/// POST /eth/v1/beacon/pool/bls_to_execution_changes
+/// POST /eth/v1/beacon/pool/sync_committees
+///
+/// All pool submission endpoints follow the same pattern: accept an encoded
+/// object (JSON or SSZ), validate/process, return 200 on success.
+/// These are stubs — full implementation requires op pool write callbacks.
+pub fn submitPoolAttestations(_: *ApiContext, _: []const u8) !HandlerResult(void) {
+    // TODO: wire op pool submit callback
+    return .{ .data = {} };
+}
+
+pub fn submitPoolVoluntaryExits(_: *ApiContext, _: []const u8) !HandlerResult(void) {
+    return .{ .data = {} };
+}
+
+pub fn submitPoolProposerSlashings(_: *ApiContext, _: []const u8) !HandlerResult(void) {
+    return .{ .data = {} };
+}
+
+pub fn submitPoolAttesterSlashings(_: *ApiContext, _: []const u8) !HandlerResult(void) {
+    return .{ .data = {} };
+}
+
+pub fn submitPoolBlsToExecutionChanges(_: *ApiContext, _: []const u8) !HandlerResult(void) {
+    return .{ .data = {} };
+}
+
+pub fn submitPoolSyncCommittees(_: *ApiContext, _: []const u8) !HandlerResult(void) {
+    return .{ .data = {} };
 }
 
 // ---------------------------------------------------------------------------
@@ -354,7 +425,7 @@ pub fn submitBlock(
 ///
 /// Returns pending attestation group count from the operation pool.
 /// The full response with attestation data requires the op pool callback.
-pub fn getPoolAttestations(ctx: *ApiContext) types.ApiResponse(types.PoolCounts) {
+pub fn getPoolAttestations(ctx: *ApiContext) HandlerResult(types.PoolCounts) {
     const counts = getPoolCountsFromCtx(ctx);
     return .{
         .data = .{
@@ -370,7 +441,7 @@ pub fn getPoolAttestations(ctx: *ApiContext) types.ApiResponse(types.PoolCounts)
 /// GET /eth/v1/beacon/pool/voluntary_exits
 ///
 /// Returns the count of pending voluntary exits.
-pub fn getPoolVoluntaryExits(ctx: *ApiContext) types.ApiResponse(usize) {
+pub fn getPoolVoluntaryExits(ctx: *ApiContext) HandlerResult(usize) {
     const counts = getPoolCountsFromCtx(ctx);
     return .{ .data = counts[1] };
 }
@@ -378,7 +449,7 @@ pub fn getPoolVoluntaryExits(ctx: *ApiContext) types.ApiResponse(usize) {
 /// GET /eth/v1/beacon/pool/proposer_slashings
 ///
 /// Returns the count of pending proposer slashings.
-pub fn getPoolProposerSlashings(ctx: *ApiContext) types.ApiResponse(usize) {
+pub fn getPoolProposerSlashings(ctx: *ApiContext) HandlerResult(usize) {
     const counts = getPoolCountsFromCtx(ctx);
     return .{ .data = counts[2] };
 }
@@ -386,7 +457,7 @@ pub fn getPoolProposerSlashings(ctx: *ApiContext) types.ApiResponse(usize) {
 /// GET /eth/v1/beacon/pool/attester_slashings
 ///
 /// Returns the count of pending attester slashings.
-pub fn getPoolAttesterSlashings(ctx: *ApiContext) types.ApiResponse(usize) {
+pub fn getPoolAttesterSlashings(ctx: *ApiContext) HandlerResult(usize) {
     const counts = getPoolCountsFromCtx(ctx);
     return .{ .data = counts[3] };
 }
@@ -394,7 +465,7 @@ pub fn getPoolAttesterSlashings(ctx: *ApiContext) types.ApiResponse(usize) {
 /// GET /eth/v1/beacon/pool/bls_to_execution_changes
 ///
 /// Returns the count of pending BLS-to-execution changes.
-pub fn getPoolBlsToExecutionChanges(ctx: *ApiContext) types.ApiResponse(usize) {
+pub fn getPoolBlsToExecutionChanges(ctx: *ApiContext) HandlerResult(usize) {
     const counts = getPoolCountsFromCtx(ctx);
     return .{ .data = counts[4] };
 }
@@ -559,7 +630,7 @@ test "getGenesis returns genesis data from config" {
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const resp = getGenesis(&tc.ctx);
     try std.testing.expectEqual(@as(u64, 1606824000), resp.data.genesis_time);
-    try std.testing.expect(resp.finalized);
+    try std.testing.expect(resp.meta.finalized orelse false);
 }
 
 test "getStateRoot for head returns head state root" {
@@ -606,7 +677,7 @@ test "getStateFork returns genesis fork for slot 0" {
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const resp = try getStateFork(&tc.ctx, .genesis);
     try std.testing.expectEqual(tc.ctx.beacon_config.chain.GENESIS_FORK_VERSION, resp.data.current_version);
-    try std.testing.expect(resp.finalized);
+    try std.testing.expect(resp.meta.finalized orelse false);
 }
 
 test "getFinalityCheckpoints returns checkpoint data" {
@@ -811,7 +882,8 @@ test "submitBlock invokes block_import callback" {
     };
 
     const fake_bytes = [_]u8{0xDE, 0xAD, 0xBE, 0xEF} ** 4;
-    try submitBlock(&tc.ctx, &fake_bytes);
+    const result = try submitBlock(&tc.ctx, &fake_bytes);
+    _ = result;
 
     try std.testing.expect(mock.called);
     try std.testing.expectEqual(fake_bytes.len, mock.received_len);

@@ -13,6 +13,9 @@ const CachedBeaconState = context.CachedBeaconState;
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
 const EpochCache = state_transition.EpochCache;
+const handler_result = @import("../handler_result.zig");
+const HandlerResult = handler_result.HandlerResult;
+const ResponseMeta = handler_result.ResponseMeta;
 
 // ---------------------------------------------------------------------------
 // Duty types
@@ -58,7 +61,7 @@ pub const SyncDuty = struct {
 /// Uses the EpochCache from the head CachedBeaconState to look up real
 /// proposer assignments and validator pubkeys. Falls back to a zeroed
 /// stub if the head state is unavailable.
-pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) ![]ProposerDuty {
+pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) !HandlerResult([]ProposerDuty) {
     const slots_per_epoch = preset.SLOTS_PER_EPOCH;
     const epoch_start = epoch * slots_per_epoch;
 
@@ -89,7 +92,13 @@ pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) ![]ProposerDuty {
                     .slot = epoch_start + i,
                 };
             }
-            return duties;
+            return .{
+                .data = duties,
+                .meta = .{
+                    .execution_optimistic = false,
+                    .dependent_root = ctx.head_tracker.head_root,
+                },
+            };
         }
     }
 
@@ -102,7 +111,13 @@ pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) ![]ProposerDuty {
         };
     }
 
-    return duties;
+    return .{
+        .data = duties,
+        .meta = .{
+            .execution_optimistic = false,
+            .dependent_root = ctx.head_tracker.head_root,
+        },
+    };
 }
 
 /// POST /eth/v1/validator/duties/attester/{epoch}
@@ -114,7 +129,7 @@ pub fn getAttesterDuties(
     ctx: *ApiContext,
     epoch: u64,
     validator_indices: []const u64,
-) ![]AttesterDuty {
+) !HandlerResult([]AttesterDuty) {
     const cb = ctx.head_state orelse return error.NotImplemented;
     const state = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
     const epoch_cache = state.epoch_cache;
@@ -157,7 +172,13 @@ pub fn getAttesterDuties(
         }
     }
 
-    return result.toOwnedSlice(ctx.allocator);
+    return .{
+        .data = try result.toOwnedSlice(ctx.allocator),
+        .meta = .{
+            .execution_optimistic = false,
+            .dependent_root = ctx.head_tracker.head_root,
+        },
+    };
 }
 
 /// POST /eth/v1/validator/duties/sync/{epoch}
@@ -169,7 +190,7 @@ pub fn getSyncDuties(
     ctx: *ApiContext,
     epoch: u64,
     validator_indices: []const u64,
-) ![]SyncDuty {
+) !HandlerResult([]SyncDuty) {
     const cb = ctx.head_state orelse return error.NotImplemented;
     const state = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
     const epoch_cache = state.epoch_cache;
@@ -207,7 +228,12 @@ pub fn getSyncDuties(
         }
     }
 
-    return result.toOwnedSlice(ctx.allocator);
+    return .{
+        .data = try result.toOwnedSlice(ctx.allocator),
+        .meta = .{
+            .execution_optimistic = false,
+        },
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -220,20 +246,20 @@ test "getProposerDuties returns SLOTS_PER_EPOCH entries" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
-    const duties = try getProposerDuties(&tc.ctx, 0);
-    defer tc.ctx.allocator.free(duties);
+    const result = try getProposerDuties(&tc.ctx, 0);
+    defer tc.ctx.allocator.free(result.data);
 
-    try std.testing.expectEqual(preset.SLOTS_PER_EPOCH, duties.len);
+    try std.testing.expectEqual(preset.SLOTS_PER_EPOCH, result.data.len);
 }
 
 test "getProposerDuties assigns correct slots for epoch 0" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
-    const duties = try getProposerDuties(&tc.ctx, 0);
-    defer tc.ctx.allocator.free(duties);
+    const result = try getProposerDuties(&tc.ctx, 0);
+    defer tc.ctx.allocator.free(result.data);
 
-    for (duties, 0..) |duty, i| {
+    for (result.data, 0..) |duty, i| {
         try std.testing.expectEqual(@as(u64, i), duty.slot);
     }
 }
@@ -243,12 +269,12 @@ test "getProposerDuties assigns correct slots for epoch 3" {
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
     const epoch: u64 = 3;
-    const duties = try getProposerDuties(&tc.ctx, epoch);
-    defer tc.ctx.allocator.free(duties);
+    const result = try getProposerDuties(&tc.ctx, epoch);
+    defer tc.ctx.allocator.free(result.data);
 
     const expected_start = epoch * preset.SLOTS_PER_EPOCH;
-    try std.testing.expectEqual(expected_start, duties[0].slot);
-    try std.testing.expectEqual(expected_start + preset.SLOTS_PER_EPOCH - 1, duties[duties.len - 1].slot);
+    try std.testing.expectEqual(expected_start, result.data[0].slot);
+    try std.testing.expectEqual(expected_start + preset.SLOTS_PER_EPOCH - 1, result.data[result.data.len - 1].slot);
 }
 
 test "getAttesterDuties returns NotImplemented without head state" {

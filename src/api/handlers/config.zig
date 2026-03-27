@@ -9,6 +9,8 @@ const context = @import("../context.zig");
 const ApiContext = context.ApiContext;
 const config_mod = @import("config");
 const ForkSeq = config_mod.ForkSeq;
+const handler_result = @import("../handler_result.zig");
+const HandlerResult = handler_result.HandlerResult;
 
 /// GET /eth/v1/config/spec
 ///
@@ -18,7 +20,7 @@ const ForkSeq = config_mod.ForkSeq;
 /// Since the full spec has ~100 fields, we return the ChainConfig struct
 /// which the JSON encoder can serialize. The HTTP layer can flatten this
 /// into the string-keyed format the spec requires.
-pub fn getSpec(ctx: *ApiContext) types.ApiResponse(SpecData) {
+pub fn getSpec(ctx: *ApiContext) HandlerResult(SpecData) {
     return .{
         .data = .{
             .config_name = ctx.beacon_config.chain.CONFIG_NAME,
@@ -61,7 +63,7 @@ pub const SpecData = struct {
 /// GET /eth/v1/config/fork_schedule
 ///
 /// Returns the fork schedule — an ordered list of past and future forks.
-pub fn getForkSchedule(ctx: *ApiContext) types.ApiResponse([]const types.ForkScheduleEntry) {
+pub fn getForkSchedule(ctx: *ApiContext) HandlerResult([]const types.ForkScheduleEntry) {
     // Build entries from the config's ascending fork order.
     // We store up to ForkSeq.count entries in a static buffer.
     const forks = ctx.beacon_config.forks_ascending_epoch_order;

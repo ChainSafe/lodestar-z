@@ -8,11 +8,13 @@ const std = @import("std");
 const types = @import("../types.zig");
 const context = @import("../context.zig");
 const ApiContext = context.ApiContext;
+const handler_result = @import("../handler_result.zig");
+const HandlerResult = handler_result.HandlerResult;
 
 /// GET /eth/v1/node/identity
 ///
 /// Returns the node's network identity: peer ID, ENR, listening addresses.
-pub fn getIdentity(ctx: *ApiContext) types.ApiResponse(types.NodeIdentity) {
+pub fn getIdentity(ctx: *ApiContext) HandlerResult(types.NodeIdentity) {
     return .{
         .data = ctx.node_identity,
     };
@@ -21,7 +23,7 @@ pub fn getIdentity(ctx: *ApiContext) types.ApiResponse(types.NodeIdentity) {
 /// GET /eth/v1/node/version
 ///
 /// Returns the node's version string in the format: `lodestar-z/v{version}/{os}-{arch}`.
-pub fn getVersion(_: *ApiContext) types.ApiResponse(types.NodeVersion) {
+pub fn getVersion(_: *ApiContext) HandlerResult(types.NodeVersion) {
     return .{
         .data = .{
             .version = "lodestar-z/v0.0.1/zig-linux-x86_64",
@@ -32,7 +34,7 @@ pub fn getVersion(_: *ApiContext) types.ApiResponse(types.NodeVersion) {
 /// GET /eth/v1/node/syncing
 ///
 /// Returns the current sync status of the node.
-pub fn getSyncing(ctx: *ApiContext) types.ApiResponse(types.SyncingStatus) {
+pub fn getSyncing(ctx: *ApiContext) HandlerResult(types.SyncingStatus) {
     const sync = ctx.sync_status;
     return .{
         .data = .{
@@ -51,17 +53,21 @@ pub fn getSyncing(ctx: *ApiContext) types.ApiResponse(types.SyncingStatus) {
 /// - 200: ready (synced)
 /// - 206: syncing
 /// - 503: not initialized
-pub fn getHealth(ctx: *ApiContext) types.HealthStatus {
-    if (ctx.sync_status.is_syncing) return .syncing;
-    if (ctx.sync_status.head_slot == 0) return .not_initialized;
-    return .ready;
+pub fn getHealth(ctx: *ApiContext) HandlerResult(void) {
+    const status: u16 = if (ctx.sync_status.is_syncing)
+        206
+    else if (ctx.sync_status.head_slot == 0)
+        503
+    else
+        200;
+    return .{ .data = {}, .status = status };
 }
 
 /// GET /eth/v1/node/peers
 ///
 /// Returns the list of connected peers with their state, direction, and agent.
 /// Uses the PeerDBCallback if wired; returns empty list otherwise.
-pub fn getPeers(ctx: *ApiContext) types.ApiResponse([]const types.PeerInfo) {
+pub fn getPeers(ctx: *ApiContext) HandlerResult([]const types.PeerInfo) {
     const cb = ctx.peer_db orelse return .{
         .data = &[_]types.PeerInfo{},
     };
@@ -95,7 +101,7 @@ pub fn getPeers(ctx: *ApiContext) types.ApiResponse([]const types.PeerInfo) {
 ///
 /// Returns aggregate counts of peers in each connection state.
 /// Uses the PeerDBCallback if wired; returns zeros otherwise.
-pub fn getPeerCount(ctx: *ApiContext) types.ApiResponse(types.PeerCount) {
+pub fn getPeerCount(ctx: *ApiContext) HandlerResult(types.PeerCount) {
     const cb = ctx.peer_db orelse return .{
         .data = .{
             .disconnected = 0,
@@ -146,27 +152,30 @@ test "getSyncing reflects sync status" {
     try std.testing.expectEqual(@as(u64, 100), resp.data.sync_distance);
 }
 
-test "getHealth returns syncing when syncing" {
+test "getHealth returns syncing (206) when syncing" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     tc.ctx.sync_status.is_syncing = true;
-    try std.testing.expectEqual(types.HealthStatus.syncing, getHealth(&tc.ctx));
+    const result = getHealth(&tc.ctx);
+    try std.testing.expectEqual(@as(u16, 206), result.status);
 }
 
-test "getHealth returns not_initialized when head_slot is 0" {
+test "getHealth returns not_initialized (503) when head_slot is 0" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     tc.ctx.sync_status.is_syncing = false;
     tc.ctx.sync_status.head_slot = 0;
-    try std.testing.expectEqual(types.HealthStatus.not_initialized, getHealth(&tc.ctx));
+    const result = getHealth(&tc.ctx);
+    try std.testing.expectEqual(@as(u16, 503), result.status);
 }
 
-test "getHealth returns ready when synced" {
+test "getHealth returns ready (200) when synced" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     tc.ctx.sync_status.is_syncing = false;
     tc.ctx.sync_status.head_slot = 1000;
-    try std.testing.expectEqual(types.HealthStatus.ready, getHealth(&tc.ctx));
+    const result = getHealth(&tc.ctx);
+    try std.testing.expectEqual(@as(u16, 200), result.status);
 }
 
 test "getPeers returns empty list when no peer_db" {
