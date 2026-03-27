@@ -1,6 +1,8 @@
 //! Tests for the BeaconDB high-level interface.
 //!
 //! Exercises all typed accessors using the MemoryKVStore backend.
+//! The BeaconDB API is unchanged — only the internal key encoding changed
+//! from bucket-prefixed keys to named databases.
 
 const std = @import("std");
 const beacon_db_mod = @import("beacon_db.zig");
@@ -75,19 +77,16 @@ test "BeaconDB: put and get block archive by slot" {
 
     try t.db.putBlockArchive(slot, root, block_data);
 
-    // Get by slot
     const by_slot = try t.db.getBlockArchive(slot);
     defer if (by_slot) |b| allocator.free(b);
     try std.testing.expect(by_slot != null);
     try std.testing.expectEqualSlices(u8, block_data, by_slot.?);
 
-    // Get by root (via index)
     const by_root = try t.db.getBlockArchiveByRoot(root);
     defer if (by_root) |b| allocator.free(b);
     try std.testing.expect(by_root != null);
     try std.testing.expectEqualSlices(u8, block_data, by_root.?);
 
-    // Get root by slot
     const looked_up_root = try t.db.getBlockRootBySlot(slot);
     try std.testing.expect(looked_up_root != null);
     try std.testing.expectEqualSlices(u8, &root, &looked_up_root.?);
@@ -118,13 +117,11 @@ test "BeaconDB: put and get state archive" {
 
     try t.db.putStateArchive(slot, state_root, state_data);
 
-    // Get by slot
     const by_slot = try t.db.getStateArchive(slot);
     defer if (by_slot) |s| allocator.free(s);
     try std.testing.expect(by_slot != null);
     try std.testing.expectEqualSlices(u8, state_data, by_slot.?);
 
-    // Look up slot by state root
     const looked_up_slot = try t.db.getStateArchiveSlotByRoot(state_root);
     try std.testing.expect(looked_up_slot != null);
     try std.testing.expectEqual(slot, looked_up_slot.?);
@@ -305,26 +302,24 @@ test "BeaconDB: put and get attester slashing" {
     try std.testing.expectEqualSlices(u8, "attester_slashing_data", result.?);
 }
 
-// ---- Bucket isolation ----
+// ---- Named database isolation ----
 
 test "BeaconDB: different bucket types do not collide" {
     const allocator = std.testing.allocator;
     var t = makeTestDB(allocator);
     defer destroyTestDB(allocator, t.store);
 
-    // Store a block and blob sidecars with the same root
     const root = [_]u8{0x55} ** 32;
     try t.db.putBlock(root, "block_data");
     try t.db.putBlobSidecars(root, "blob_data");
     try t.db.putDataColumnSidecars(root, "column_data");
 
-    // Each should return its own data
     const block = try t.db.getBlock(root);
     defer if (block) |b| allocator.free(b);
     const blob = try t.db.getBlobSidecars(root);
     defer if (blob) |b| allocator.free(b);
     const col = try t.db.getDataColumnSidecars(root);
-    defer if (col) |c| allocator.free(c);
+    defer if (col) |c_val| allocator.free(c_val);
 
     try std.testing.expectEqualSlices(u8, "block_data", block.?);
     try std.testing.expectEqualSlices(u8, "blob_data", blob.?);

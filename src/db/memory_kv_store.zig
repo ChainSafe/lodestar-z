@@ -1,40 +1,48 @@
-//! MemoryKVStore: in-memory KVStore implementation.
+//! MemoryKVStore: in-memory KVStore implementation with named database support.
 //!
-//! Uses a sorted StringHashMap for storage. Suitable for:
+//! Uses a separate StringArrayHashMap per DatabaseId. Suitable for:
 //! - Unit tests
 //! - Deterministic simulation testing (DST)
 //! - Development without external dependencies
 //!
 //! Thread-safety: NOT thread-safe. Callers must synchronize externally.
-//! This matches the beacon chain's single-threaded block processing model.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const kv_store = @import("kv_store.zig");
 const KVStore = kv_store.KVStore;
 const BatchOp = kv_store.BatchOp;
+const DatabaseId = @import("buckets.zig").DatabaseId;
+
+const DataMap = std.StringArrayHashMap([]const u8);
 
 pub const MemoryKVStore = struct {
     allocator: Allocator,
-    /// Stored data: keys and values are both owned by this map.
-    data: std.StringArrayHashMap([]const u8),
+    /// One HashMap per named database.
+    databases: [DatabaseId.count]DataMap,
     closed: bool,
 
     pub fn init(allocator: Allocator) MemoryKVStore {
+        var databases: [DatabaseId.count]DataMap = undefined;
+        for (&databases) |*db| {
+            db.* = DataMap.init(allocator);
+        }
         return .{
             .allocator = allocator,
-            .data = std.StringArrayHashMap([]const u8).init(allocator),
+            .databases = databases,
             .closed = false,
         };
     }
 
     pub fn deinit(self: *MemoryKVStore) void {
-        var it = self.data.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.value_ptr.*);
-            self.allocator.free(entry.key_ptr.*);
+        for (&self.databases) |*db| {
+            var it = db.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.value_ptr.*);
+                self.allocator.free(entry.key_ptr.*);
+            }
+            db.deinit();
         }
-        self.data.deinit();
     }
 
     pub fn kvStore(self: *MemoryKVStore) KVStore {
@@ -44,9 +52,22 @@ pub const MemoryKVStore = struct {
         };
     }
 
-    /// Number of entries in the store.
+    /// Number of entries across all databases.
     pub fn count(self: *const MemoryKVStore) usize {
-        return self.data.count();
+        var total: usize = 0;
+        for (self.databases) |db| {
+            total += db.count();
+        }
+        return total;
+    }
+
+    /// Number of entries in a specific database.
+    pub fn countIn(self: *const MemoryKVStore, db_id: DatabaseId) usize {
+        return self.databases[@intFromEnum(db_id)].count();
+    }
+
+    fn getDb(self: *MemoryKVStore, db_id: DatabaseId) *DataMap {
+        return &self.databases[@intFromEnum(db_id)];
     }
 
     // ---- VTable implementation ----
@@ -56,21 +77,23 @@ pub const MemoryKVStore = struct {
         .put = memPut,
         .delete = memDelete,
         .writeBatch = memWriteBatch,
-        .keysWithPrefix = memKeysWithPrefix,
-        .entriesWithPrefix = memEntriesWithPrefix,
+        .allKeys = memAllKeys,
+        .allEntries = memAllEntries,
         .close = memClose,
     };
 
-    fn memGet(ptr: *anyopaque, key: []const u8) anyerror!?[]const u8 {
+    fn memGet(ptr: *anyopaque, db_id: DatabaseId, key: []const u8) anyerror!?[]const u8 {
         const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.StoreClosed;
-        const value = self.data.get(key) orelse return null;
+        const db = self.getDb(db_id);
+        const value = db.get(key) orelse return null;
         return try self.allocator.dupe(u8, value);
     }
 
-    fn memPut(ptr: *anyopaque, key: []const u8, value: []const u8) anyerror!void {
+    fn memPut(ptr: *anyopaque, db_id: DatabaseId, key: []const u8, value: []const u8) anyerror!void {
         const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.StoreClosed;
+        const db = self.getDb(db_id);
 
         const owned_value = try self.allocator.dupe(u8, value);
         errdefer self.allocator.free(owned_value);
@@ -78,19 +101,19 @@ pub const MemoryKVStore = struct {
         const owned_key = try self.allocator.dupe(u8, key);
         errdefer self.allocator.free(owned_key);
 
-        const result = try self.data.getOrPut(owned_key);
+        const result = try db.getOrPut(owned_key);
         if (result.found_existing) {
-            // Free old value and the new duplicate key (map already has a key)
             self.allocator.free(result.value_ptr.*);
             self.allocator.free(owned_key);
         }
         result.value_ptr.* = owned_value;
     }
 
-    fn memDelete(ptr: *anyopaque, key: []const u8) anyerror!void {
+    fn memDelete(ptr: *anyopaque, db_id: DatabaseId, key: []const u8) anyerror!void {
         const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.StoreClosed;
-        if (self.data.fetchOrderedRemove(key)) |old| {
+        const db = self.getDb(db_id);
+        if (db.fetchOrderedRemove(key)) |old| {
             self.allocator.free(old.value);
             self.allocator.free(old.key);
         }
@@ -100,19 +123,18 @@ pub const MemoryKVStore = struct {
         const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.StoreClosed;
 
-        // Apply all operations. On error, partial writes may have occurred
-        // (same as real DB behavior for non-transactional batch writes).
         for (ops) |op| {
             switch (op) {
-                .put => |p| try memPut(@ptrCast(self), p.key, p.value),
-                .delete => |d| try memDelete(@ptrCast(self), d.key),
+                .put => |p| try memPut(@ptrCast(self), p.db, p.key, p.value),
+                .delete => |d| try memDelete(@ptrCast(self), d.db, d.key),
             }
         }
     }
 
-    fn memKeysWithPrefix(ptr: *anyopaque, prefix: []const u8) anyerror![]const []const u8 {
+    fn memAllKeys(ptr: *anyopaque, db_id: DatabaseId) anyerror![]const []const u8 {
         const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.StoreClosed;
+        const db = self.getDb(db_id);
 
         var result: std.ArrayListUnmanaged([]const u8) = .empty;
         errdefer {
@@ -120,21 +142,18 @@ pub const MemoryKVStore = struct {
             result.deinit(self.allocator);
         }
 
-        var it = self.data.iterator();
+        var it = db.iterator();
         while (it.next()) |entry| {
-            if (entry.key_ptr.*.len >= prefix.len and
-                std.mem.eql(u8, entry.key_ptr.*[0..prefix.len], prefix))
-            {
-                try result.append(self.allocator, try self.allocator.dupe(u8, entry.key_ptr.*));
-            }
+            try result.append(self.allocator, try self.allocator.dupe(u8, entry.key_ptr.*));
         }
 
         return try result.toOwnedSlice(self.allocator);
     }
 
-    fn memEntriesWithPrefix(ptr: *anyopaque, prefix: []const u8) anyerror!KVStore.EntryList {
+    fn memAllEntries(ptr: *anyopaque, db_id: DatabaseId) anyerror!KVStore.EntryList {
         const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.StoreClosed;
+        const db = self.getDb(db_id);
 
         var keys: std.ArrayListUnmanaged([]const u8) = .empty;
         var values: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -145,14 +164,10 @@ pub const MemoryKVStore = struct {
             values.deinit(self.allocator);
         }
 
-        var it = self.data.iterator();
+        var it = db.iterator();
         while (it.next()) |entry| {
-            if (entry.key_ptr.*.len >= prefix.len and
-                std.mem.eql(u8, entry.key_ptr.*[0..prefix.len], prefix))
-            {
-                try keys.append(self.allocator, try self.allocator.dupe(u8, entry.key_ptr.*));
-                try values.append(self.allocator, try self.allocator.dupe(u8, entry.value_ptr.*));
-            }
+            try keys.append(self.allocator, try self.allocator.dupe(u8, entry.key_ptr.*));
+            try values.append(self.allocator, try self.allocator.dupe(u8, entry.value_ptr.*));
         }
 
         return .{
