@@ -94,6 +94,20 @@ pub const WithdrawalsResult = @import("./block/process_withdrawals.zig").Withdra
 
 pub const test_utils = @import("test_utils/root.zig");
 
+// Signature set constructors for BLS verification (gossip + block processing).
+pub const signature_sets = struct {
+    pub const proposer = @import("signature_sets/proposer.zig");
+    pub const voluntary_exits = @import("signature_sets/voluntary_exits.zig");
+    pub const proposer_slashings = @import("signature_sets/proposer_slashings.zig");
+    pub const indexed_attestation = @import("signature_sets/indexed_attestation.zig");
+    pub const bls_to_execution_change = @import("signature_sets/bls_to_execution_change.zig");
+
+    pub const SingleSignatureSet = @import("utils/signature_sets.zig").SingleSignatureSet;
+    pub const AggregatedSignatureSet = @import("utils/signature_sets.zig").AggregatedSignatureSet;
+    pub const verifySingleSignatureSet = @import("utils/signature_sets.zig").verifySingleSignatureSet;
+    pub const verifyAggregatedSignatureSet = @import("utils/signature_sets.zig").verifyAggregatedSignatureSet;
+};
+
 pub const bls = @import("utils/bls.zig");
 pub const load_state = @import("./utils/load_state.zig");
 pub const load_cached_state = @import("./utils/load_cached_state.zig");

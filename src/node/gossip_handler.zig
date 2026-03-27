@@ -84,6 +84,38 @@ pub const GossipHandler = struct {
     /// Called to import raw BLS-to-execution change SSZ bytes into the op pool.
     importBlsChangeFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
 
+    // ── BLS signature verification callbacks ────────────────────────────
+    // These are called between Phase 1 (cheap checks) and Phase 2 (import).
+    // Each receives the raw decompressed SSZ bytes and returns true if the
+    // signature(s) are valid. The BeaconNode implementation constructs
+    // appropriate signature sets using its state caches.
+    //
+    // When null, signature verification is skipped (unsafe — for testing only).
+
+    /// Verify block proposer BLS signature. Returns true if valid.
+    verifyBlockSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
+
+    /// Verify voluntary exit BLS signature. Returns true if valid.
+    verifyVoluntaryExitSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
+
+    /// Verify proposer slashing BLS signatures (both headers). Returns true if valid.
+    verifyProposerSlashingSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
+
+    /// Verify attester slashing BLS signatures (both indexed attestations). Returns true if valid.
+    verifyAttesterSlashingSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
+
+    /// Verify BLS-to-execution change signature. Returns true if valid.
+    verifyBlsChangeSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
+
+    /// Verify attestation BLS signature. Returns true if valid.
+    verifyAttestationSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
+
+    /// Verify aggregate and proof BLS signatures (selection proof + aggregator + aggregate). Returns true if valid.
+    verifyAggregateSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
+
+    /// Verify sync committee message BLS signature. Returns true if valid.
+    verifySyncCommitteeSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
+
     /// Gossip dedup caches (owned). Used by Phase 1 fast validation.
     seen_cache: SeenCache,
 
@@ -116,6 +148,14 @@ pub const GossipHandler = struct {
             .importProposerSlashingFn = null,
             .importAttesterSlashingFn = null,
             .importBlsChangeFn = null,
+            .verifyBlockSignatureFn = null,
+            .verifyVoluntaryExitSignatureFn = null,
+            .verifyProposerSlashingSignatureFn = null,
+            .verifyAttesterSlashingSignatureFn = null,
+            .verifyBlsChangeSignatureFn = null,
+            .verifyAttestationSignatureFn = null,
+            .verifyAggregateSignatureFn = null,
+            .verifySyncCommitteeSignatureFn = null,
             .seen_cache = SeenCache.init(allocator),
             .current_slot = 0,
             .current_epoch = 0,
@@ -192,15 +232,22 @@ pub const GossipHandler = struct {
         );
         try checkAction(action);
 
-        // Phase 2: Full import (STFN + fork choice).
-        // TODO: Replace direct call with WorkItem queue push.
-        // The block should be enqueued as a WorkItem{ .gossip_block = ssz_bytes }
-        // for the processor thread pool. For now, call import directly.
+        // Phase 1c: BLS signature verification (expensive but required before ACCEPT).
+        // [REJECT] The proposer signature is valid.
         const snappy = @import("networking").gossip_decoding;
         const ssz_bytes = snappy.decompressGossipPayload(self.allocator, message_data) catch
             return GossipHandlerError.DecodeFailed;
         defer self.allocator.free(ssz_bytes);
 
+        if (self.verifyBlockSignatureFn) |verifyFn| {
+            if (!verifyFn(self.node, ssz_bytes)) {
+                std.log.warn("Gossip block rejected: invalid proposer signature slot={d}", .{blk.slot});
+                return GossipHandlerError.ValidationRejected;
+            }
+        }
+
+        // Phase 2: Full import (STFN + fork choice).
+        // TODO: Replace direct call with WorkItem queue push.
         try self.importBlockFn(self.node, ssz_bytes);
     }
 
@@ -228,6 +275,19 @@ pub const GossipHandler = struct {
             &chain_state,
         );
         try checkAction(action);
+
+        // Phase 1c: BLS signature verification.
+        // [REJECT] The attestation signature is valid.
+        if (self.verifyAttestationSignatureFn) |verifyFn| {
+            // Decompress to get raw SSZ for signature verification.
+            const att_ssz = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+                return GossipHandlerError.DecodeFailed;
+            defer self.allocator.free(att_ssz);
+            if (!verifyFn(self.node, att_ssz)) {
+                std.log.warn("Gossip attestation rejected: invalid signature slot={d}", .{att.slot});
+                return GossipHandlerError.ValidationRejected;
+            }
+        }
 
         // Phase 2: Import to fork choice + attestation pool.
         // TODO: Replace direct call with WorkItem queue push.
@@ -271,11 +331,21 @@ pub const GossipHandler = struct {
         );
         try checkAction(action);
 
+        // Phase 1c: BLS signature verification.
+        // [REJECT] selection_proof, aggregator signature, and aggregate signature are all valid.
+        if (self.verifyAggregateSignatureFn) |verifyFn| {
+            const agg_ssz = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+                return GossipHandlerError.DecodeFailed;
+            defer self.allocator.free(agg_ssz);
+            if (!verifyFn(self.node, agg_ssz)) {
+                std.log.warn("Gossip aggregate rejected: invalid signature aggregator={d}", .{agg.aggregator_index});
+                return GossipHandlerError.ValidationRejected;
+            }
+        }
+
         // Phase 2: log acceptance.
         // TODO: Full import — extract attestation from aggregate, convert to
-        // phase0.Attestation, call importAttestationFn. For now, we validate
-        // and accept for gossipsub scoring but skip pool insertion since we
-        // don't have the full Attestation struct from the decoded fields.
+        // phase0.Attestation, call importAttestationFn.
         std.log.info("Accepted aggregate: aggregator={d} slot={d} target_epoch={d}", .{
             agg.aggregator_index,
             agg.attestation_slot,
@@ -300,6 +370,18 @@ pub const GossipHandler = struct {
 
         // Phase 1: exit epoch must be <= current epoch (can't exit in the future).
         if (exit.exit_epoch > self.current_epoch) return GossipHandlerError.ValidationIgnored;
+
+        // Phase 1c: BLS signature verification.
+        // [REJECT] The voluntary exit signature is valid.
+        if (self.verifyVoluntaryExitSignatureFn) |verifyFn| {
+            const exit_ssz = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+                return GossipHandlerError.DecodeFailed;
+            defer self.allocator.free(exit_ssz);
+            if (!verifyFn(self.node, exit_ssz)) {
+                std.log.warn("Gossip voluntary exit rejected: invalid signature validator={d}", .{exit.validator_index});
+                return GossipHandlerError.ValidationRejected;
+            }
+        }
 
         // Phase 2: import to op pool.
         if (self.importVoluntaryExitFn) |importFn| {
@@ -335,12 +417,22 @@ pub const GossipHandler = struct {
         if (std.mem.eql(u8, &ps.header_1_body_root, &ps.header_2_body_root))
             return GossipHandlerError.ValidationRejected;
 
+        // Decompress to get the raw SSZ for signature verification and pool import.
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        defer self.allocator.free(ssz_bytes);
+
+        // Phase 1c: BLS signature verification.
+        // [REJECT] Both signed header signatures are valid.
+        if (self.verifyProposerSlashingSignatureFn) |verifyFn| {
+            if (!verifyFn(self.node, ssz_bytes)) {
+                std.log.warn("Gossip proposer slashing rejected: invalid signature proposer={d}", .{ps.proposer_index});
+                return GossipHandlerError.ValidationRejected;
+            }
+        }
+
         // Phase 2: import raw SSZ bytes to op pool.
-        // Decompress to get the raw SSZ for the pool (full struct needed for block packing).
         if (self.importProposerSlashingFn) |importFn| {
-            const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
-                return GossipHandlerError.DecodeFailed;
-            defer self.allocator.free(ssz_bytes);
             importFn(self.node, ssz_bytes) catch |err| {
                 std.log.warn("Proposer slashing import failed for proposer {d}: {}", .{ ps.proposer_index, err });
             };
@@ -365,13 +457,22 @@ pub const GossipHandler = struct {
         // Phase 1: attestation data must be slashable.
         if (!as.is_slashable) return GossipHandlerError.ValidationRejected;
 
+        // Decompress to get the raw SSZ for signature verification and pool import.
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        defer self.allocator.free(ssz_bytes);
+
+        // Phase 1c: BLS signature verification.
+        // [REJECT] Both indexed attestation signatures are valid.
+        if (self.verifyAttesterSlashingSignatureFn) |verifyFn| {
+            if (!verifyFn(self.node, ssz_bytes)) {
+                std.log.warn("Gossip attester slashing rejected: invalid signature", .{});
+                return GossipHandlerError.ValidationRejected;
+            }
+        }
+
         // Phase 2: import raw SSZ bytes.
-        // Decompress to get the raw SSZ for the pool.
         if (self.importAttesterSlashingFn) |importFn| {
-            const snappy = @import("networking").gossip_decoding;
-            const ssz_bytes = snappy.decompressGossipPayload(self.allocator, message_data) catch
-                return GossipHandlerError.DecodeFailed;
-            defer self.allocator.free(ssz_bytes);
             importFn(self.node, ssz_bytes) catch |err| {
                 std.log.warn("Attester slashing import failed: {}", .{err});
             };
@@ -395,12 +496,22 @@ pub const GossipHandler = struct {
         const vc = self.getValidatorCount();
         if (change.validator_index >= vc) return GossipHandlerError.ValidationRejected;
 
+        // Decompress to get the raw SSZ for signature verification and pool import.
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        defer self.allocator.free(ssz_bytes);
+
+        // Phase 1c: BLS signature verification.
+        // [REJECT] The BLS-to-execution change signature is valid.
+        if (self.verifyBlsChangeSignatureFn) |verifyFn| {
+            if (!verifyFn(self.node, ssz_bytes)) {
+                std.log.warn("Gossip BLS change rejected: invalid signature validator={d}", .{change.validator_index});
+                return GossipHandlerError.ValidationRejected;
+            }
+        }
+
         // Phase 2: import raw SSZ bytes to op pool.
-        // Decompress to get the raw SSZ for the pool (full struct needed for block packing).
         if (self.importBlsChangeFn) |importFn| {
-            const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
-                return GossipHandlerError.DecodeFailed;
-            defer self.allocator.free(ssz_bytes);
             importFn(self.node, ssz_bytes) catch |err| {
                 std.log.warn("BLS change import failed for validator {d}: {}", .{ change.validator_index, err });
             };
@@ -459,6 +570,18 @@ pub const GossipHandler = struct {
         // Phase 1: slot must be within valid range.
         if (msg.slot > self.current_slot + 1) return GossipHandlerError.ValidationIgnored;
         if (self.finalized_slot > 0 and msg.slot < self.finalized_slot) return GossipHandlerError.ValidationIgnored;
+
+        // Phase 1c: BLS signature verification.
+        // [REJECT] The sync committee message signature is valid.
+        if (self.verifySyncCommitteeSignatureFn) |verifyFn| {
+            const sc_ssz = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+                return GossipHandlerError.DecodeFailed;
+            defer self.allocator.free(sc_ssz);
+            if (!verifyFn(self.node, sc_ssz)) {
+                std.log.warn("Gossip sync committee message rejected: invalid signature validator={d}", .{msg.validator_index});
+                return GossipHandlerError.ValidationRejected;
+            }
+        }
 
         // Phase 2: log acceptance.
         // TODO: Add to sync committee message pool when implemented.

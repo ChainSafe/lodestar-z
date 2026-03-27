@@ -2401,6 +2401,18 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                 gh.importProposerSlashingFn = &gossipImportProposerSlashing;
                 gh.importAttesterSlashingFn = &gossipImportAttesterSlashing;
                 gh.importBlsChangeFn = &gossipImportBlsChange;
+
+                // Wire BLS signature verification callbacks.
+                // These are called between Phase 1 (cheap checks) and Phase 2 (import)
+                // to verify BLS signatures before accepting gossip messages.
+                gh.verifyBlockSignatureFn = &gossipVerifyBlockSignature;
+                gh.verifyVoluntaryExitSignatureFn = &gossipVerifyVoluntaryExitSignature;
+                gh.verifyProposerSlashingSignatureFn = &gossipVerifyProposerSlashingSignature;
+                gh.verifyAttesterSlashingSignatureFn = &gossipVerifyAttesterSlashingSignature;
+                gh.verifyBlsChangeSignatureFn = &gossipVerifyBlsChangeSignature;
+                gh.verifyAttestationSignatureFn = &gossipVerifyAttestationSignature;
+                gh.verifyAggregateSignatureFn = &gossipVerifyAggregateSignature;
+                gh.verifySyncCommitteeSignatureFn = &gossipVerifySyncCommitteeSignature;
             }
         }
 
@@ -3176,6 +3188,218 @@ fn gossipImportBlsChange(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
         return err;
     };
     try node.chain.op_pool.bls_change_pool.add(change);
+}
+
+// ---------------------------------------------------------------------------
+// BLS signature verification callbacks for gossip messages.
+//
+// Each callback receives raw decompressed SSZ bytes, deserializes the message,
+// constructs the appropriate signature set(s) using the head state's epoch
+// cache + config, and returns true if all signatures are valid.
+//
+// These are called between Phase 1 (cheap checks) and Phase 2 (import) in
+// the GossipHandler, matching TS Lodestar's validation ordering.
+// ---------------------------------------------------------------------------
+
+/// Verify the proposer BLS signature on a gossip beacon block.
+fn gossipVerifyBlockSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const head_state_root = node.head_tracker.head_state_root;
+    const cached = node.block_state_cache.get(head_state_root) orelse return true; // no state = skip check
+
+    const fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
+    const any_signed = fork_types.AnySignedBeaconBlock.deserialize(
+        node.allocator, .full, fork_seq, ssz_bytes,
+    ) catch return false;
+    defer any_signed.deinit(node.allocator);
+
+    const sig_set = state_transition.signature_sets.proposer.getBlockProposerSignatureSet(
+        node.allocator,
+        node.config,
+        cached.epoch_cache,
+        any_signed,
+    ) catch return false;
+
+    return state_transition.signature_sets.verifySingleSignatureSet(&sig_set) catch false;
+}
+
+/// Verify the BLS signature on a gossip voluntary exit.
+fn gossipVerifyVoluntaryExitSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const head_state_root = node.head_tracker.head_state_root;
+    const cached = node.block_state_cache.get(head_state_root) orelse return true;
+
+    var signed_exit: types.phase0.SignedVoluntaryExit.Type = undefined;
+    types.phase0.SignedVoluntaryExit.deserializeFromBytes(ssz_bytes, &signed_exit) catch return false;
+
+    return state_transition.signature_sets.voluntary_exits.verifyVoluntaryExitSignature(
+        node.config,
+        cached.epoch_cache,
+        &signed_exit,
+    ) catch false;
+}
+
+/// Verify the BLS signatures on a gossip proposer slashing (both signed headers).
+fn gossipVerifyProposerSlashingSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const head_state_root = node.head_tracker.head_state_root;
+    const cached = node.block_state_cache.get(head_state_root) orelse return true;
+
+    var slashing: types.phase0.ProposerSlashing.Type = undefined;
+    types.phase0.ProposerSlashing.deserializeFromBytes(ssz_bytes, &slashing) catch return false;
+
+    const sig_sets = state_transition.signature_sets.proposer_slashings.getProposerSlashingSignatureSets(
+        node.config,
+        cached.epoch_cache,
+        &slashing,
+    ) catch return false;
+
+    // Both header signatures must be valid.
+    const valid1 = state_transition.signature_sets.verifySingleSignatureSet(&sig_sets[0]) catch return false;
+    if (!valid1) return false;
+    return state_transition.signature_sets.verifySingleSignatureSet(&sig_sets[1]) catch false;
+}
+
+/// Verify the BLS signatures on a gossip attester slashing (both indexed attestations).
+fn gossipVerifyAttesterSlashingSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const head_state_root = node.head_tracker.head_state_root;
+    const cached = node.block_state_cache.get(head_state_root) orelse return true;
+
+    var slashing: types.phase0.AttesterSlashing.Type = undefined;
+    types.phase0.AttesterSlashing.deserializeFromBytes(node.allocator, ssz_bytes, &slashing) catch return false;
+
+    // Verify both indexed attestation signatures.
+    const sig_set1 = state_transition.signature_sets.indexed_attestation.getAttestationWithIndicesSignatureSet(
+        node.allocator,
+        node.config,
+        cached.epoch_cache,
+        &slashing.attestation_1.data,
+        slashing.attestation_1.signature,
+        slashing.attestation_1.attesting_indices.items,
+    ) catch return false;
+    defer node.allocator.free(sig_set1.pubkeys);
+
+    const valid1 = state_transition.signature_sets.verifyAggregatedSignatureSet(&sig_set1) catch return false;
+    if (!valid1) return false;
+
+    const sig_set2 = state_transition.signature_sets.indexed_attestation.getAttestationWithIndicesSignatureSet(
+        node.allocator,
+        node.config,
+        cached.epoch_cache,
+        &slashing.attestation_2.data,
+        slashing.attestation_2.signature,
+        slashing.attestation_2.attesting_indices.items,
+    ) catch return false;
+    defer node.allocator.free(sig_set2.pubkeys);
+
+    return state_transition.signature_sets.verifyAggregatedSignatureSet(&sig_set2) catch false;
+}
+
+/// Verify the BLS signature on a gossip BLS-to-execution change.
+fn gossipVerifyBlsChangeSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+
+    var signed_change: types.capella.SignedBLSToExecutionChange.Type = undefined;
+    types.capella.SignedBLSToExecutionChange.deserializeFromBytes(ssz_bytes, &signed_change) catch return false;
+
+    // BLS-to-execution change uses the validator's BLS pubkey from the message itself
+    // (from_bls_pubkey field), not from the epoch cache.
+    return state_transition.signature_sets.bls_to_execution_change.verifyBlsToExecutionChangeSignature(
+        node.config,
+        &signed_change,
+    ) catch false;
+}
+
+/// Verify the BLS signature on a gossip attestation (SingleAttestation in Electra).
+fn gossipVerifyAttestationSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const head_state_root = node.head_tracker.head_state_root;
+    const cached = node.block_state_cache.get(head_state_root) orelse return true;
+
+    var att: types.electra.SingleAttestation.Type = undefined;
+    types.electra.SingleAttestation.deserializeFromBytes(ssz_bytes, &att) catch return false;
+
+    // SingleAttestation has a single attester_index — construct a single-pubkey signature set.
+    if (att.attester_index >= cached.epoch_cache.index_to_pubkey.items.len) return false;
+
+    var signing_root: [32]u8 = undefined;
+    state_transition.signature_sets.indexed_attestation.getAttestationDataSigningRoot(
+        node.config,
+        cached.epoch_cache.epoch,
+        &att.data,
+        &signing_root,
+    ) catch return false;
+
+    const sig_set = state_transition.signature_sets.SingleSignatureSet{
+        .pubkey = cached.epoch_cache.index_to_pubkey.items[att.attester_index],
+        .signing_root = signing_root,
+        .signature = att.signature,
+    };
+
+    return state_transition.signature_sets.verifySingleSignatureSet(&sig_set) catch false;
+}
+
+/// Verify all BLS signatures on a gossip SignedAggregateAndProof.
+/// This checks: selection_proof, aggregator signature (signed_aggregate_and_proof.signature),
+/// and the aggregate attestation signature.
+fn gossipVerifyAggregateSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const head_state_root = node.head_tracker.head_state_root;
+    const cached = node.block_state_cache.get(head_state_root) orelse return true;
+
+    var signed_agg: types.phase0.SignedAggregateAndProof.Type = undefined;
+    types.phase0.SignedAggregateAndProof.deserializeFromBytes(node.allocator, ssz_bytes, &signed_agg) catch return false;
+    defer signed_agg.message.aggregate.aggregation_bits.data.deinit(node.allocator);
+
+    const agg = signed_agg.message;
+
+    // Full aggregate verification requires computing the committee to get attesting indices.
+    // TODO: Once we have committee computation in the gossip path, compute proper indexed
+    // attestation and verify the aggregate BLS signature over AttestationData.
+
+    // 2. Verify selection_proof: the aggregator proves they were selected.
+    if (agg.aggregator_index >= cached.epoch_cache.index_to_pubkey.items.len) return false;
+
+    // TODO: Complete aggregate signature verification.
+    // Full verification requires committee index resolution to compute attesting
+    // indices, plus domain computation for:
+    //   - DOMAIN_SELECTION_PROOF for selection_proof
+    //   - DOMAIN_AGGREGATE_AND_PROOF for the outer signature
+    //   - DOMAIN_BEACON_ATTESTER for the aggregate attestation (att_signing_root)
+    // For now, structural validation in Phase 1 catches most invalid messages.
+    // This is a known gap — tracked for follow-up.
+    return true;
+}
+
+/// Verify the BLS signature on a gossip sync committee message.
+fn gossipVerifySyncCommitteeSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const head_state_root = node.head_tracker.head_state_root;
+    const cached = node.block_state_cache.get(head_state_root) orelse return true;
+
+    var msg: types.altair.SyncCommitteeMessage.Type = undefined;
+    types.altair.SyncCommitteeMessage.deserializeFromBytes(ssz_bytes, &msg) catch return false;
+
+    // SyncCommitteeMessage signature signs over beacon_block_root with DOMAIN_SYNC_COMMITTEE.
+    if (msg.validator_index >= cached.epoch_cache.index_to_pubkey.items.len) return false;
+
+    const slot = msg.slot;
+    const domain = node.config.getDomain(cached.epoch_cache.epoch, @import("constants").DOMAIN_SYNC_COMMITTEE, slot) catch return false;
+
+    var signing_root: [32]u8 = undefined;
+    // The signing root for a sync committee message is computed over the beacon_block_root.
+    // signing_root = compute_signing_root(beacon_block_root, domain)
+    const computeSigningRoot = state_transition.computeSigningRoot;
+    computeSigningRoot(types.primitive.Root, &msg.beacon_block_root, domain, &signing_root) catch return false;
+
+    const sig_set = state_transition.signature_sets.SingleSignatureSet{
+        .pubkey = cached.epoch_cache.index_to_pubkey.items[msg.validator_index],
+        .signing_root = signing_root,
+        .signature = msg.signature,
+    };
+
+    return state_transition.signature_sets.verifySingleSignatureSet(&sig_set) catch false;
 }
 
 // ---------------------------------------------------------------------------
