@@ -102,6 +102,12 @@ pub const MatrixEntry = ssz.FixedContainerType(struct {
     row_index: RowIndex,
 });
 
+// Networking request/response identifiers
+pub const DataColumnsByRootIdentifier = ssz.VariableContainerType(struct {
+    block_root: p.Root,
+    columns: ssz.FixedListType(ColumnIndex, @import("preset").NUMBER_OF_COLUMNS),
+});
+
 // Cell Dissemination types (consensus-specs #4558)
 pub const PartialDataColumnSidecar = ssz.VariableContainerType(struct {
     cells_present_bitmap: ssz.BitListType(preset.MAX_BLOB_COMMITMENTS_PER_BLOCK),
