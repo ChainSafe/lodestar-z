@@ -54,6 +54,8 @@ pub const ValidatorStore = struct {
     validators: std.ArrayList(ValidatorRecord),
     /// Persistent slashing protection database.
     slashing_db: SlashingProtectionDb,
+    /// Mutex protecting validators list for concurrent add/remove.
+    mutex: std.Thread.Mutex,
 
     /// Initialize the ValidatorStore with an optional persistent slashing protection DB.
     ///
@@ -64,6 +66,7 @@ pub const ValidatorStore = struct {
             .allocator = allocator,
             .validators = std.ArrayList(ValidatorRecord).init(allocator),
             .slashing_db = slashing_db,
+            .mutex = .{},
         };
     }
 
@@ -76,10 +79,18 @@ pub const ValidatorStore = struct {
     // Key management
     // -----------------------------------------------------------------------
 
-    /// Add a validator key to the store.
+    /// Add a validator key to the store (thread-safe).
     ///
+    /// No-op if the key is already present.
     /// TS: ValidatorStore.init(opts, signers, ...) — signers map to keys here.
     pub fn addKey(self: *ValidatorStore, secret_key: SecretKey) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.addKeyLocked(secret_key);
+    }
+
+    /// Add a validator key (caller must hold mutex).
+    fn addKeyLocked(self: *ValidatorStore, secret_key: SecretKey) !void {
         const pk = secret_key.toPublicKey();
         const pubkey_bytes = pk.compress();
 
@@ -101,6 +112,64 @@ pub const ValidatorStore = struct {
             },
         });
         log.debug("added validator pubkey={}", .{std.fmt.fmtSliceHexLower(&pubkey_bytes)});
+    }
+
+    /// Add a validator at runtime (alias for addKey; thread-safe).
+    ///
+    /// Used by the Keymanager API POST /eth/v1/keystores.
+    pub fn addValidator(self: *ValidatorStore, secret_key: SecretKey) !void {
+        return self.addKey(secret_key);
+    }
+
+    /// Remove a validator key at runtime (thread-safe).
+    ///
+    /// Returns true if the key was found and removed; false if not found.
+    /// Used by the Keymanager API DELETE /eth/v1/keystores.
+    ///
+    /// TS: ValidatorStore.deleteKeystore(pubkey)
+    pub fn removeValidator(self: *ValidatorStore, pubkey: [48]u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.validators.items, 0..) |v, i| {
+            if (std.mem.eql(u8, &v.pubkey, &pubkey)) {
+                _ = self.validators.swapRemove(i);
+                log.info("removed validator pubkey={}", .{std.fmt.fmtSliceHexLower(&pubkey)});
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Validator metadata for listing.
+    pub const ValidatorInfo = struct {
+        /// Compressed BLS public key.
+        pubkey: [48]u8,
+        /// HD derivation path (empty for imported keystores).
+        derivation_path: []const u8,
+        /// Whether the key is read-only (remote signer or imported without secret).
+        readonly: bool,
+    };
+
+    /// List all validators with metadata (thread-safe).
+    ///
+    /// Returns a caller-owned slice. Caller must free.
+    /// Used by the Keymanager API GET /eth/v1/keystores.
+    ///
+    /// TS: ValidatorStore.getLocalKeystoreInfo()
+    pub fn listValidators(self: *ValidatorStore, allocator: Allocator) ![]ValidatorInfo {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const result = try allocator.alloc(ValidatorInfo, self.validators.items.len);
+        for (self.validators.items, result) |v, *out| {
+            out.* = .{
+                .pubkey = v.pubkey,
+                .derivation_path = "",
+                .readonly = false,
+            };
+        }
+        return result;
     }
 
     /// Return an empty slice — use allPubkeys() for an owned copy.
@@ -383,4 +452,30 @@ test "ValidatorStore: allPubkeys" {
     defer testing.allocator.free(pks);
     try testing.expectEqual(@as(usize, 1), pks.len);
     try testing.expectEqualSlices(u8, &sk.toPublicKey().compress(), &pks[0]);
+}
+
+test "ValidatorStore: addValidator, listValidators, removeValidator" {
+    var store = try ValidatorStore.init(testing.allocator, null);
+    defer store.deinit();
+
+    const sk = makeDummyKey();
+    try store.addValidator(sk);
+
+    const infos = try store.listValidators(testing.allocator);
+    defer testing.allocator.free(infos);
+
+    try testing.expectEqual(@as(usize, 1), infos.len);
+    try testing.expectEqualSlices(u8, &sk.toPublicKey().compress(), &infos[0].pubkey);
+    try testing.expect(!infos[0].readonly);
+
+    // Remove.
+    const removed = store.removeValidator(sk.toPublicKey().compress());
+    try testing.expect(removed);
+
+    const infos2 = try store.listValidators(testing.allocator);
+    defer testing.allocator.free(infos2);
+    try testing.expectEqual(@as(usize, 0), infos2.len);
+
+    // Remove again — not found.
+    try testing.expect(!store.removeValidator(sk.toPublicKey().compress()));
 }
