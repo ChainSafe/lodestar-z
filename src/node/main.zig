@@ -722,8 +722,8 @@ fn slotClockLoop(io: Io, node: *BeaconNode) !void {
             });
         }
 
-        if (node.sync_controller) |sc| {
-            sc.tick() catch |err| {
+        if (node.sync_service_inst) |sync_svc| {
+            sync_svc.tick() catch |err| {
                 std.log.warn("sync tick error: {}", .{err});
             };
         }

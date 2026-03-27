@@ -22,9 +22,7 @@ pub const ImportResult = beacon_node.ImportResult;
 pub const HeadInfo = beacon_node.HeadInfo;
 pub const SyncStatus = beacon_node.SyncStatus;
 
-pub const sync_controller = @import("sync_controller.zig");
-pub const SyncController = sync_controller.SyncController;
-pub const BlockRequester = sync_controller.BlockRequester;
+// sync_controller removed — SyncService is the direct entry point.
 
 pub const SlotClock = clock.SlotClock;
 pub const NodeOptions = options.NodeOptions;
