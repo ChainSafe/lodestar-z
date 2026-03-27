@@ -1,7 +1,8 @@
 //! BeaconMetrics — comprehensive Prometheus metrics for the beacon node.
 //!
-//! 40+ metrics covering chain state, block processing, state transition,
-//! fork choice, attestation pool, P2P, discovery, sync, API, DB, and memory.
+//! 50+ metrics covering chain state, block processing, state transition,
+//! fork choice, attestation pool, P2P, discovery, sync, API, DB,
+//! execution layer, and memory/cache internals.
 //!
 //! All metrics are defined as comptime constants so noop mode (zero overhead)
 //! is trivially achievable by calling `initNoop()`.
@@ -37,6 +38,8 @@ const reqresp_request_buckets = [_]f64{ 0.01, 0.05, 0.1, 0.5, 1.0, 5.0 };
 const api_request_buckets = [_]f64{ 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0 };
 const db_read_buckets = [_]f64{ 0.0001, 0.001, 0.005, 0.01, 0.05 };
 const db_write_buckets = [_]f64{ 0.0001, 0.001, 0.005, 0.01, 0.05 };
+const el_request_buckets = [_]f64{ 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0 };
+const state_regen_buckets = [_]f64{ 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0 };
 
 /// All beacon node metrics in a single struct.
 ///
@@ -51,7 +54,8 @@ const db_write_buckets = [_]f64{ 0.0001, 0.001, 0.005, 0.01, 0.05 };
 ///   - Sync (status, distance, pending batches)
 ///   - API (request count, latency)
 ///   - DB (read/write latency, block count)
-///   - Memory / internals (cache sizes, PMT pool)
+///   - Execution layer (newPayload, forkchoiceUpdated latency)
+///   - Memory / internals (cache sizes, hit/miss rates)
 pub const BeaconMetrics = struct {
     // ===================================================================
     // Chain
@@ -93,6 +97,8 @@ pub const BeaconMetrics = struct {
     process_block_seconds: Histogram(f64, &process_block_buckets),
     /// processEpoch latency (epoch transition only) in seconds.
     process_epoch_seconds: Histogram(f64, &process_epoch_buckets),
+    /// State regeneration latency in seconds.
+    state_regen_seconds: Histogram(f64, &state_regen_buckets),
 
     // ===================================================================
     // Fork choice
@@ -120,12 +126,18 @@ pub const BeaconMetrics = struct {
 
     /// Number of currently connected peers.
     peers_connected: Gauge(u64),
+    /// Total peer connection events.
+    peer_connected_total: Counter(u64),
+    /// Total peer disconnection events.
+    peer_disconnected_total: Counter(u64),
     /// Total gossip messages received from the network.
     gossip_messages_received: Counter(u64),
     /// Total gossip messages that passed validation.
     gossip_messages_validated: Counter(u64),
     /// Total gossip messages that failed validation and were rejected.
     gossip_messages_rejected: Counter(u64),
+    /// Total gossip messages that were ignored (e.g. duplicates).
+    gossip_messages_ignored: Counter(u64),
     /// Total req/resp requests served (all methods combined).
     reqresp_requests_total: Counter(u64),
     /// Histogram of req/resp request handling latency in seconds.
@@ -172,13 +184,40 @@ pub const BeaconMetrics = struct {
     db_block_count: Gauge(u64),
 
     // ===================================================================
-    // Memory / internals
+    // Execution layer
+    // ===================================================================
+
+    /// Histogram of engine_newPayload request latency in seconds.
+    execution_new_payload_seconds: Histogram(f64, &el_request_buckets),
+    /// Histogram of engine_forkchoiceUpdated request latency in seconds.
+    execution_forkchoice_updated_seconds: Histogram(f64, &el_request_buckets),
+    /// Histogram of engine_getPayload request latency in seconds.
+    execution_get_payload_seconds: Histogram(f64, &el_request_buckets),
+    /// Total EL payload status=VALID responses.
+    execution_payload_valid_total: Counter(u64),
+    /// Total EL payload status=INVALID responses.
+    execution_payload_invalid_total: Counter(u64),
+    /// Total EL payload status=SYNCING responses.
+    execution_payload_syncing_total: Counter(u64),
+    /// Total EL request errors (transport / timeout / decode).
+    execution_errors_total: Counter(u64),
+
+    // ===================================================================
+    // Memory / internals / caches
     // ===================================================================
 
     /// Number of states currently cached in the BlockStateCache.
     state_cache_size: Gauge(u64),
+    /// Total state cache hits.
+    state_cache_hit_total: Counter(u64),
+    /// Total state cache misses.
+    state_cache_miss_total: Counter(u64),
     /// Number of checkpoint epochs currently cached in CheckpointStateCache.
     checkpoint_cache_size: Gauge(u64),
+    /// Total shuffling cache hits.
+    shuffling_cache_hit_total: Counter(u64),
+    /// Total shuffling cache misses.
+    shuffling_cache_miss_total: Counter(u64),
     /// Number of PMT pool nodes currently in use.
     pmt_pool_used_nodes: Gauge(u64),
 
@@ -210,6 +249,7 @@ pub const BeaconMetrics = struct {
             .state_transition_seconds = Histogram(f64, &state_transition_buckets).init("beacon_state_transition_seconds", .{}, ro),
             .process_block_seconds = Histogram(f64, &process_block_buckets).init("beacon_process_block_seconds", .{}, ro),
             .process_epoch_seconds = Histogram(f64, &process_epoch_buckets).init("beacon_process_epoch_seconds", .{}, ro),
+            .state_regen_seconds = Histogram(f64, &state_regen_buckets).init("beacon_state_regen_seconds", .{}, ro),
 
             // Fork choice
             .fork_choice_reprocessed_total = Counter(u64).init("beacon_fork_choice_reprocessed_total", .{}, ro),
@@ -222,9 +262,12 @@ pub const BeaconMetrics = struct {
 
             // Network / P2P
             .peers_connected = Gauge(u64).init("p2p_peer_count", .{}, ro),
+            .peer_connected_total = Counter(u64).init("p2p_peer_connected_total", .{}, ro),
+            .peer_disconnected_total = Counter(u64).init("p2p_peer_disconnected_total", .{}, ro),
             .gossip_messages_received = Counter(u64).init("beacon_gossip_messages_received_total", .{}, ro),
             .gossip_messages_validated = Counter(u64).init("beacon_gossip_messages_validated_total", .{}, ro),
             .gossip_messages_rejected = Counter(u64).init("beacon_gossip_messages_rejected_total", .{}, ro),
+            .gossip_messages_ignored = Counter(u64).init("beacon_gossip_messages_ignored_total", .{}, ro),
             .reqresp_requests_total = Counter(u64).init("beacon_reqresp_requests_total", .{}, ro),
             .reqresp_request_seconds = Histogram(f64, &reqresp_request_buckets).init("beacon_reqresp_request_seconds", .{}, ro),
 
@@ -246,9 +289,22 @@ pub const BeaconMetrics = struct {
             .db_write_seconds = Histogram(f64, &db_write_buckets).init("beacon_db_write_seconds", .{}, ro),
             .db_block_count = Gauge(u64).init("beacon_db_block_count", .{}, ro),
 
+            // Execution layer
+            .execution_new_payload_seconds = Histogram(f64, &el_request_buckets).init("execution_new_payload_seconds", .{}, ro),
+            .execution_forkchoice_updated_seconds = Histogram(f64, &el_request_buckets).init("execution_forkchoice_updated_seconds", .{}, ro),
+            .execution_get_payload_seconds = Histogram(f64, &el_request_buckets).init("execution_get_payload_seconds", .{}, ro),
+            .execution_payload_valid_total = Counter(u64).init("execution_payload_valid_total", .{}, ro),
+            .execution_payload_invalid_total = Counter(u64).init("execution_payload_invalid_total", .{}, ro),
+            .execution_payload_syncing_total = Counter(u64).init("execution_payload_syncing_total", .{}, ro),
+            .execution_errors_total = Counter(u64).init("execution_errors_total", .{}, ro),
+
             // Memory / internals
             .state_cache_size = Gauge(u64).init("beacon_state_cache_size", .{}, ro),
+            .state_cache_hit_total = Counter(u64).init("beacon_state_cache_hit_total", .{}, ro),
+            .state_cache_miss_total = Counter(u64).init("beacon_state_cache_miss_total", .{}, ro),
             .checkpoint_cache_size = Gauge(u64).init("beacon_checkpoint_cache_size", .{}, ro),
+            .shuffling_cache_hit_total = Counter(u64).init("beacon_shuffling_cache_hit_total", .{}, ro),
+            .shuffling_cache_miss_total = Counter(u64).init("beacon_shuffling_cache_miss_total", .{}, ro),
             .pmt_pool_used_nodes = Gauge(u64).init("beacon_pmt_pool_used_nodes", .{}, ro),
         };
     }
@@ -272,10 +328,15 @@ test "BeaconMetrics: init fields are accessible" {
     m.blocks_imported_total.incr();
     m.peers_connected.set(10);
     m.reqresp_request_seconds.observe(0.05);
+    m.execution_new_payload_seconds.observe(0.1);
+    m.peer_connected_total.incr();
+    m.state_cache_hit_total.incr();
     // Verify no panics and basic values are set.
     try std.testing.expectEqual(@as(u64, 42), m.head_slot.impl.value);
     try std.testing.expectEqual(@as(u64, 1), m.blocks_imported_total.impl.count);
     try std.testing.expectEqual(@as(u64, 10), m.peers_connected.impl.value);
+    try std.testing.expectEqual(@as(u64, 1), m.peer_connected_total.impl.count);
+    try std.testing.expectEqual(@as(u64, 1), m.state_cache_hit_total.impl.count);
 }
 
 test "BeaconMetrics: initNoop produces zero-overhead stubs" {
@@ -283,9 +344,13 @@ test "BeaconMetrics: initNoop produces zero-overhead stubs" {
     var m = BeaconMetrics.initNoop();
     m.head_slot.set(999);
     m.blocks_imported_total.incr();
+    m.execution_new_payload_seconds.observe(1.0);
+    m.peer_connected_total.incr();
+    m.state_cache_hit_total.incr();
     // Noop: the union tag is .noop so no values are stored.
     try std.testing.expect(std.meta.activeTag(m.head_slot) == .noop);
     try std.testing.expect(std.meta.activeTag(m.blocks_imported_total) == .noop);
+    try std.testing.expect(std.meta.activeTag(m.execution_new_payload_seconds) == .noop);
 }
 
 test "BeaconMetrics: write produces Prometheus output" {
@@ -294,6 +359,9 @@ test "BeaconMetrics: write produces Prometheus output" {
     m.finalized_epoch.set(3);
     m.blocks_imported_total.incr();
     m.blocks_imported_total.incr();
+    m.execution_new_payload_seconds.observe(0.5);
+    m.peer_connected_total.incr();
+    m.state_cache_hit_total.incr();
 
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
@@ -306,4 +374,9 @@ test "BeaconMetrics: write produces Prometheus output" {
     try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_peer_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_reqresp_request_seconds") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_api_request_seconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "execution_new_payload_seconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "execution_forkchoice_updated_seconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_peer_connected_total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_state_cache_hit_total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_shuffling_cache_hit_total") != null);
 }
