@@ -4,7 +4,7 @@ const SignedBLSToExecutionChange = types.capella.SignedBLSToExecutionChange.Type
 const BeaconConfig = @import("config").BeaconConfig;
 const SingleSignatureSet = @import("../utils/signature_sets.zig").SingleSignatureSet;
 const c = @import("constants");
-const blst = @import("blst");
+const bls = @import("bls");
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const Root = types.primitive.Root.Type;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
@@ -22,7 +22,7 @@ pub fn getBlsToExecutionChangeSignatureSet(config: *const BeaconConfig, signed_b
     try computeSigningRoot(types.capella.BLSToExecutionChange, &signed_bls_to_execution_change.message, domain, &signing_root);
 
     return SingleSignatureSet{
-        .pubkey = try blst.PublicKey.uncompress(&signed_bls_to_execution_change.message.from_bls_pubkey),
+        .pubkey = try bls.PublicKey.uncompress(&signed_bls_to_execution_change.message.from_bls_pubkey),
         .signing_root = signing_root,
         .signature = signed_bls_to_execution_change.signature,
     };

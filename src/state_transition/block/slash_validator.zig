@@ -34,7 +34,7 @@ pub fn slashValidator(
     var validator = try validators.get(@intCast(slashed_index));
 
     // TODO: Bellatrix initiateValidatorExit validators.update() with the one below
-    try initiateValidatorExit(fork, config, epoch_cache, state, &validator);
+    try initiateValidatorExit(fork, config, epoch_cache, state, validator);
 
     try validator.set("slashed", true);
     var latest_block_header = try state.latestBlockHeader();
@@ -59,7 +59,6 @@ pub fn slashValidator(
     try slashings.set(@intCast(slashing_index), cur_slashings + effective_balance);
     epoch_cache.total_slashings_by_increment += slashed_effective_balance_increments;
 
-    // TODO(ct): define MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA
     const min_slashing_penalty_quotient: usize = switch (fork) {
         .phase0 => preset.MIN_SLASHING_PENALTY_QUOTIENT,
         .altair => preset.MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR,
@@ -70,7 +69,6 @@ pub fn slashValidator(
     try decreaseBalance(fork, state, slashed_index, @divFloor(effective_balance, min_slashing_penalty_quotient));
 
     // apply proposer and whistleblower rewards
-    // TODO(ct): define WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA
     const whistleblower_reward = switch (fork) {
         .electra, .fulu, .gloas => @divFloor(effective_balance, preset.WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA),
         else => @divFloor(effective_balance, preset.WHISTLEBLOWER_REWARD_QUOTIENT),
@@ -96,8 +94,8 @@ pub fn slashValidator(
 
     if (fork.gte(.altair)) {
         const previous_epoch = computePreviousEpoch(epoch);
-        const is_active_previous_epoch = try isActiveValidatorView(&validator, previous_epoch);
-        const is_active_current_epoch = try isActiveValidatorView(&validator, epoch);
+        const is_active_previous_epoch = try isActiveValidatorView(validator, previous_epoch);
+        const is_active_current_epoch = try isActiveValidatorView(validator, epoch);
 
         var previous_participation = try state.previousEpochParticipation();
         if (is_active_previous_epoch and (try previous_participation.get(@intCast(slashed_index))) & TIMELY_TARGET == TIMELY_TARGET) {

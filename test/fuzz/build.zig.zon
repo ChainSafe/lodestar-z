@@ -1,0 +1,15 @@
+.{
+    .name = .lodestar_z_fuzz,
+    .version = "0.1.0",
+    .fingerprint = 0xa5f5892cc2169277,
+    .minimum_zig_version = "0.14.1",
+    .dependencies = .{
+        .lodestar_z = .{ .path = "../../" },
+        .afl = .{ .path = "../../pkg/afl++" },
+        .snappy = .{
+            .url = "git+https://github.com/chainsafe/snappy.zig#206a3019ed9f5cb1e382bddca9a51d7c3e7d8cd3",
+            .hash = "snappy-0.1.0-n4Aaqtw4AAA1bcVRSEh4ERJs4_Tjzph4cXEMPdYtQbeA",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "tools" },
+}

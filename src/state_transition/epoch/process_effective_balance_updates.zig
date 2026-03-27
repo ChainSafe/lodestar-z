@@ -42,8 +42,8 @@ pub fn processEffectiveBalanceUpdates(
     };
     const is_compounding_validator_arr = cache.is_compounding_validator_arr.items;
 
-    var previous_epoch_participation: types.altair.EpochParticipation.TreeView = undefined;
-    var current_epoch_participation: types.altair.EpochParticipation.TreeView = undefined;
+    var previous_epoch_participation: *types.altair.EpochParticipation.TreeView = undefined;
+    var current_epoch_participation: *types.altair.EpochParticipation.TreeView = undefined;
     if (comptime fork.gte(.altair)) {
         previous_epoch_participation = try state.previousEpochParticipation();
         current_epoch_participation = try state.currentEpochParticipation();

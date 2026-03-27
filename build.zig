@@ -141,6 +141,14 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("ssz"), module_ssz) catch @panic("OOM");
 
+    const module_bls = b.createModule(.{
+        .root_source_file = b.path("src/bls/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    module_bls.linkLibrary(dep_blst.artifact("blst"));
+    b.modules.put(b.dupe("bls"), module_bls) catch @panic("OOM");
+
     const module_state_transition = b.createModule(.{
         .root_source_file = b.path("src/state_transition/root.zig"),
         .target = target,
@@ -178,28 +186,28 @@ pub fn build(b: *std.Build) void {
     const tls_run_exe_download_era_files = b.step("run:download_era_files", "Run the download_era_files executable");
     tls_run_exe_download_era_files.dependOn(&run_exe_download_era_files.step);
 
-    const module_metrics_era = b.createModule(.{
-        .root_source_file = b.path("examples/metrics_era.zig"),
+    const module_metrics_stf = b.createModule(.{
+        .root_source_file = b.path("examples/metrics.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("metrics_era"), module_metrics_era) catch @panic("OOM");
+    b.modules.put(b.dupe("metrics_stf"), module_metrics_stf) catch @panic("OOM");
 
-    const exe_metrics_era = b.addExecutable(.{
-        .name = "metrics_era",
-        .root_module = module_metrics_era,
+    const exe_metrics_stf = b.addExecutable(.{
+        .name = "metrics_stf",
+        .root_module = module_metrics_stf,
     });
 
-    const install_exe_metrics_era = b.addInstallArtifact(exe_metrics_era, .{});
+    const install_exe_metrics_stf = b.addInstallArtifact(exe_metrics_stf, .{});
 
-    const tls_install_exe_metrics_era = b.step("build-exe:metrics_era", "Install the metrics_era executable");
-    tls_install_exe_metrics_era.dependOn(&install_exe_metrics_era.step);
-    b.getInstallStep().dependOn(&install_exe_metrics_era.step);
+    const tls_install_exe_metrics_stf = b.step("build-exe:metrics_stf", "Install the metrics_stf executable");
+    tls_install_exe_metrics_stf.dependOn(&install_exe_metrics_stf.step);
+    b.getInstallStep().dependOn(&install_exe_metrics_stf.step);
 
-    const run_exe_metrics_era = b.addRunArtifact(exe_metrics_era);
-    if (b.args) |args| run_exe_metrics_era.addArgs(args);
-    const tls_run_exe_metrics_era = b.step("run:metrics_era", "Run the metrics_era executable");
-    tls_run_exe_metrics_era.dependOn(&run_exe_metrics_era.step);
+    const run_exe_metrics_stf = b.addRunArtifact(exe_metrics_stf);
+    if (b.args) |args| run_exe_metrics_stf.addArgs(args);
+    const tls_run_exe_metrics_stf = b.step("run:metrics_stf", "Run the metrics_stf executable");
+    tls_run_exe_metrics_stf.dependOn(&run_exe_metrics_stf.step);
 
     const module_download_spec_tests = b.createModule(.{
         .root_source_file = b.path("test/spec/download_spec_tests.zig"),
@@ -292,6 +300,29 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_exe_write_ssz_static_spec_tests.addArgs(args);
     const tls_run_exe_write_ssz_static_spec_tests = b.step("run:write_ssz_static_spec_tests", "Run the write_ssz_static_spec_tests executable");
     tls_run_exe_write_ssz_static_spec_tests.dependOn(&run_exe_write_ssz_static_spec_tests.step);
+
+    const module_write_bls_spec_tests = b.createModule(.{
+        .root_source_file = b.path("test/spec/bls/write_spec_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("write_bls_spec_tests"), module_write_bls_spec_tests) catch @panic("OOM");
+
+    const exe_write_bls_spec_tests = b.addExecutable(.{
+        .name = "write_bls_spec_tests",
+        .root_module = module_write_bls_spec_tests,
+    });
+
+    const install_exe_write_bls_spec_tests = b.addInstallArtifact(exe_write_bls_spec_tests, .{});
+
+    const tls_install_exe_write_bls_spec_tests = b.step("build-exe:write_bls_spec_tests", "Install the write_bls_spec_tests executable");
+    tls_install_exe_write_bls_spec_tests.dependOn(&install_exe_write_bls_spec_tests.step);
+    b.getInstallStep().dependOn(&install_exe_write_bls_spec_tests.step);
+
+    const run_exe_write_bls_spec_tests = b.addRunArtifact(exe_write_bls_spec_tests);
+    if (b.args) |args| run_exe_write_bls_spec_tests.addArgs(args);
+    const tls_run_exe_write_bls_spec_tests = b.step("run:write_bls_spec_tests", "Run the write_bls_spec_tests executable");
+    tls_run_exe_write_bls_spec_tests.dependOn(&run_exe_write_bls_spec_tests.step);
 
     const module_bench_ssz_attestation = b.createModule(.{
         .root_source_file = b.path("bench/ssz/attestation.zig"),
@@ -712,6 +743,20 @@ pub fn build(b: *std.Build) void {
     tls_run_test_ssz.dependOn(&run_test_ssz.step);
     tls_run_test.dependOn(&run_test_ssz.step);
 
+    const test_bls = b.addTest(.{
+        .name = "bls",
+        .root_module = module_bls,
+        .filters = b.option([][]const u8, "bls.filters", "bls test filters") orelse &[_][]const u8{},
+    });
+    const install_test_bls = b.addInstallArtifact(test_bls, .{});
+    const tls_install_test_bls = b.step("build-test:bls", "Install the bls test");
+    tls_install_test_bls.dependOn(&install_test_bls.step);
+
+    const run_test_bls = b.addRunArtifact(test_bls);
+    const tls_run_test_bls = b.step("test:bls", "Run the bls test");
+    tls_run_test_bls.dependOn(&run_test_bls.step);
+    tls_run_test.dependOn(&run_test_bls.step);
+
     const test_state_transition = b.addTest(.{
         .name = "state_transition",
         .root_module = module_state_transition,
@@ -754,19 +799,19 @@ pub fn build(b: *std.Build) void {
     tls_run_test_download_era_files.dependOn(&run_test_download_era_files.step);
     tls_run_test.dependOn(&run_test_download_era_files.step);
 
-    const test_metrics_era = b.addTest(.{
-        .name = "metrics_era",
-        .root_module = module_metrics_era,
-        .filters = b.option([][]const u8, "metrics_era.filters", "metrics_era test filters") orelse &[_][]const u8{},
+    const test_metrics_stf = b.addTest(.{
+        .name = "metrics_stf",
+        .root_module = module_metrics_stf,
+        .filters = b.option([][]const u8, "metrics_stf.filters", "metrics_stf test filters") orelse &[_][]const u8{},
     });
-    const install_test_metrics_era = b.addInstallArtifact(test_metrics_era, .{});
-    const tls_install_test_metrics_era = b.step("build-test:metrics_era", "Install the metrics_era test");
-    tls_install_test_metrics_era.dependOn(&install_test_metrics_era.step);
+    const install_test_metrics_stf = b.addInstallArtifact(test_metrics_stf, .{});
+    const tls_install_test_metrics_stf = b.step("build-test:metrics_stf", "Install the metrics_stf test");
+    tls_install_test_metrics_stf.dependOn(&install_test_metrics_stf.step);
 
-    const run_test_metrics_era = b.addRunArtifact(test_metrics_era);
-    const tls_run_test_metrics_era = b.step("test:metrics_era", "Run the metrics_era test");
-    tls_run_test_metrics_era.dependOn(&run_test_metrics_era.step);
-    tls_run_test.dependOn(&run_test_metrics_era.step);
+    const run_test_metrics_stf = b.addRunArtifact(test_metrics_stf);
+    const tls_run_test_metrics_stf = b.step("test:metrics_stf", "Run the metrics_stf test");
+    tls_run_test_metrics_stf.dependOn(&run_test_metrics_stf.step);
+    tls_run_test.dependOn(&run_test_metrics_stf.step);
 
     const test_download_spec_tests = b.addTest(.{
         .name = "download_spec_tests",
@@ -823,6 +868,20 @@ pub fn build(b: *std.Build) void {
     const tls_run_test_write_ssz_static_spec_tests = b.step("test:write_ssz_static_spec_tests", "Run the write_ssz_static_spec_tests test");
     tls_run_test_write_ssz_static_spec_tests.dependOn(&run_test_write_ssz_static_spec_tests.step);
     tls_run_test.dependOn(&run_test_write_ssz_static_spec_tests.step);
+
+    const test_write_bls_spec_tests = b.addTest(.{
+        .name = "write_bls_spec_tests",
+        .root_module = module_write_bls_spec_tests,
+        .filters = b.option([][]const u8, "write_bls_spec_tests.filters", "write_bls_spec_tests test filters") orelse &[_][]const u8{},
+    });
+    const install_test_write_bls_spec_tests = b.addInstallArtifact(test_write_bls_spec_tests, .{});
+    const tls_install_test_write_bls_spec_tests = b.step("build-test:write_bls_spec_tests", "Install the write_bls_spec_tests test");
+    tls_install_test_write_bls_spec_tests.dependOn(&install_test_write_bls_spec_tests.step);
+
+    const run_test_write_bls_spec_tests = b.addRunArtifact(test_write_bls_spec_tests);
+    const tls_run_test_write_bls_spec_tests = b.step("test:write_bls_spec_tests", "Run the write_bls_spec_tests test");
+    tls_run_test_write_bls_spec_tests.dependOn(&run_test_write_bls_spec_tests.step);
+    tls_run_test.dependOn(&run_test_write_bls_spec_tests.step);
 
     const test_bench_ssz_attestation = b.addTest(.{
         .name = "bench_ssz_attestation",
@@ -1076,6 +1135,27 @@ pub fn build(b: *std.Build) void {
     tls_run_test_ssz_static_spec_tests.dependOn(&run_test_ssz_static_spec_tests.step);
     tls_run_test.dependOn(&run_test_ssz_static_spec_tests.step);
 
+    const module_bls_spec_tests = b.createModule(.{
+        .root_source_file = b.path("test/spec/bls/spec_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("bls_spec_tests"), module_bls_spec_tests) catch @panic("OOM");
+
+    const test_bls_spec_tests = b.addTest(.{
+        .name = "bls_spec_tests",
+        .root_module = module_bls_spec_tests,
+        .filters = b.option([][]const u8, "bls_spec_tests.filters", "bls_spec_tests test filters") orelse &[_][]const u8{},
+    });
+    const install_test_bls_spec_tests = b.addInstallArtifact(test_bls_spec_tests, .{});
+    const tls_install_test_bls_spec_tests = b.step("build-test:bls_spec_tests", "Install the bls_spec_tests test");
+    tls_install_test_bls_spec_tests.dependOn(&install_test_bls_spec_tests.step);
+
+    const run_test_bls_spec_tests = b.addRunArtifact(test_bls_spec_tests);
+    const tls_run_test_bls_spec_tests = b.step("test:bls_spec_tests", "Run the bls_spec_tests test");
+    tls_run_test_bls_spec_tests.dependOn(&run_test_bls_spec_tests.step);
+    tls_run_test.dependOn(&run_test_bls_spec_tests.step);
+
     module_config.addImport("build_options", options_module_build_options);
     module_config.addImport("preset", module_preset);
     module_config.addImport("consensus_types", module_consensus_types);
@@ -1122,7 +1202,7 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("ssz", module_ssz);
     module_state_transition.addImport("config", module_config);
     module_state_transition.addImport("consensus_types", module_consensus_types);
-    module_state_transition.addImport("blst", dep_blst.module("blst"));
+    module_state_transition.addImport("bls", module_bls);
     module_state_transition.addImport("fork_types", module_fork_types);
     module_state_transition.addImport("preset", module_preset);
     module_state_transition.addImport("constants", module_constants);
@@ -1140,13 +1220,14 @@ pub fn build(b: *std.Build) void {
 
     module_download_era_files.addImport("download_era_options", options_module_download_era_options);
 
-    module_metrics_era.addImport("consensus_types", module_consensus_types);
-    module_metrics_era.addImport("state_transition", module_state_transition);
-    module_metrics_era.addImport("download_era_options", options_module_download_era_options);
-    module_metrics_era.addImport("era", module_era);
-    module_metrics_era.addImport("config", module_config);
-    module_metrics_era.addImport("preset", module_preset);
-    module_metrics_era.addImport("httpz", dep_httpz.module("httpz"));
+    module_metrics_stf.addImport("consensus_types", module_consensus_types);
+    module_metrics_stf.addImport("fork_types", module_fork_types);
+    module_metrics_stf.addImport("state_transition", module_state_transition);
+    module_metrics_stf.addImport("download_era_options", options_module_download_era_options);
+    module_metrics_stf.addImport("era", module_era);
+    module_metrics_stf.addImport("config", module_config);
+    module_metrics_stf.addImport("preset", module_preset);
+    module_metrics_stf.addImport("httpz", dep_httpz.module("httpz"));
 
     module_download_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
 
@@ -1159,6 +1240,8 @@ pub fn build(b: *std.Build) void {
     module_write_ssz_generic_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
 
     module_write_ssz_static_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
+
+    module_write_bls_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
 
     module_bench_ssz_attestation.addImport("config", module_config);
     module_bench_ssz_attestation.addImport("consensus_types", module_consensus_types);
@@ -1226,7 +1309,7 @@ pub fn build(b: *std.Build) void {
     module_bench_process_epoch.addImport("download_era_options", options_module_download_era_options);
     module_bench_process_epoch.addImport("era", module_era);
 
-    module_bindings.addImport("blst", dep_blst.module("blst"));
+    module_bindings.addImport("bls", module_bls);
     module_bindings.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_bindings.addImport("ssz", module_ssz);
     module_bindings.addImport("consensus_types", module_consensus_types);
@@ -1249,7 +1332,7 @@ pub fn build(b: *std.Build) void {
     module_spec_tests.addImport("snappy", dep_snappy.module("snappy"));
     module_spec_tests.addImport("state_transition", module_state_transition);
     module_spec_tests.addImport("ssz", module_ssz);
-    module_spec_tests.addImport("blst", dep_blst.module("blst"));
+    module_spec_tests.addImport("bls", module_bls);
     module_spec_tests.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_spec_tests.addImport("hex", module_hex);
 
@@ -1268,4 +1351,9 @@ pub fn build(b: *std.Build) void {
     module_ssz_static_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
     module_ssz_static_spec_tests.addImport("consensus_types", module_consensus_types);
     module_ssz_static_spec_tests.addImport("yaml", dep_yaml.module("yaml"));
+
+    module_bls_spec_tests.addImport("bls", module_bls);
+    module_bls_spec_tests.addImport("hex", module_hex);
+    module_bls_spec_tests.addImport("yaml", dep_yaml.module("yaml"));
+    module_bls_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
 }

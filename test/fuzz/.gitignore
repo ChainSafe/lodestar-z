@@ -1,0 +1,8 @@
+zig-out/
+zig-cache/
+.zig-cache/
+output/
+afl-out/
+
+# Spec-extracted seeds (regenerate with: zig build extract-corpus)
+corpus/*-initial/spec-*

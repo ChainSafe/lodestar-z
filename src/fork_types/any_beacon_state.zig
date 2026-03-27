@@ -8,8 +8,7 @@ const Gindex = @import("persistent_merkle_tree").Gindex;
 const createSingleProof = @import("persistent_merkle_tree").proof.createSingleProof;
 const SingleProof = @import("persistent_merkle_tree").proof.SingleProof;
 const isBasicType = @import("ssz").isBasicType;
-const BaseTreeView = @import("ssz").BaseTreeView;
-const CloneOpts = @import("ssz").BaseTreeView.CloneOpts;
+const CloneOpts = @import("ssz").CloneOpts;
 const ct = @import("consensus_types");
 const constants = @import("constants");
 const BeaconState = @import("./beacon_state.zig").BeaconState;
@@ -23,14 +22,14 @@ pub fn readSlotFromAnyBeaconStateBytes(bytes: []const u8) u64 {
 
 /// wrapper for all AnyBeaconState types across forks so that we don't have to do switch/case for all methods
 pub const AnyBeaconState = union(ForkSeq) {
-    phase0: ct.phase0.BeaconState.TreeView,
-    altair: ct.altair.BeaconState.TreeView,
-    bellatrix: ct.bellatrix.BeaconState.TreeView,
-    capella: ct.capella.BeaconState.TreeView,
-    deneb: ct.deneb.BeaconState.TreeView,
-    electra: ct.electra.BeaconState.TreeView,
-    fulu: ct.fulu.BeaconState.TreeView,
-    gloas: ct.gloas.BeaconState.TreeView,
+    phase0: *ct.phase0.BeaconState.TreeView,
+    altair: *ct.altair.BeaconState.TreeView,
+    bellatrix: *ct.bellatrix.BeaconState.TreeView,
+    capella: *ct.capella.BeaconState.TreeView,
+    deneb: *ct.deneb.BeaconState.TreeView,
+    electra: *ct.electra.BeaconState.TreeView,
+    fulu: *ct.fulu.BeaconState.TreeView,
+    gloas: *ct.gloas.BeaconState.TreeView,
 
     pub fn fromValue(allocator: Allocator, pool: *Node.Pool, comptime fork_seq: ForkSeq, value: anytype) !AnyBeaconState {
         return switch (fork_seq) {
@@ -91,51 +90,51 @@ pub const AnyBeaconState = union(ForkSeq) {
     }
 
     pub fn serialize(self: AnyBeaconState, allocator: Allocator) ![]u8 {
-        var s = self;
+        const s = self;
         switch (s) {
-            .phase0 => |*state| {
+            .phase0 => |state| {
                 const out = try allocator.alloc(u8, try state.serializedSize());
                 errdefer allocator.free(out);
                 _ = try state.serializeIntoBytes(out);
                 return out;
             },
-            .altair => |*state| {
+            .altair => |state| {
                 const out = try allocator.alloc(u8, try state.serializedSize());
                 errdefer allocator.free(out);
                 _ = try state.serializeIntoBytes(out);
                 return out;
             },
-            .bellatrix => |*state| {
+            .bellatrix => |state| {
                 const out = try allocator.alloc(u8, try state.serializedSize());
                 errdefer allocator.free(out);
                 _ = try state.serializeIntoBytes(out);
                 return out;
             },
-            .capella => |*state| {
+            .capella => |state| {
                 const out = try allocator.alloc(u8, try state.serializedSize());
                 errdefer allocator.free(out);
                 _ = try state.serializeIntoBytes(out);
                 return out;
             },
-            .deneb => |*state| {
+            .deneb => |state| {
                 const out = try allocator.alloc(u8, try state.serializedSize());
                 errdefer allocator.free(out);
                 _ = try state.serializeIntoBytes(out);
                 return out;
             },
-            .electra => |*state| {
+            .electra => |state| {
                 const out = try allocator.alloc(u8, try state.serializedSize());
                 errdefer allocator.free(out);
                 _ = try state.serializeIntoBytes(out);
                 return out;
             },
-            .fulu => |*state| {
+            .fulu => |state| {
                 const out = try allocator.alloc(u8, try state.serializedSize());
                 errdefer allocator.free(out);
                 _ = try state.serializeIntoBytes(out);
                 return out;
             },
-            .gloas => |*state| {
+            .gloas => |state| {
                 const out = try allocator.alloc(u8, try state.serializedSize());
                 errdefer allocator.free(out);
                 _ = try state.serializeIntoBytes(out);
@@ -159,28 +158,22 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn baseView(self: *AnyBeaconState) BaseTreeView {
-        return switch (self.*) {
-            inline else => |*state| state.base_view,
-        };
-    }
-
     pub fn clone(self: *AnyBeaconState, opts: CloneOpts) !AnyBeaconState {
         return switch (self.*) {
-            .phase0 => |*state| .{ .phase0 = try state.clone(opts) },
-            .altair => |*state| .{ .altair = try state.clone(opts) },
-            .bellatrix => |*state| .{ .bellatrix = try state.clone(opts) },
-            .capella => |*state| .{ .capella = try state.clone(opts) },
-            .deneb => |*state| .{ .deneb = try state.clone(opts) },
-            .electra => |*state| .{ .electra = try state.clone(opts) },
-            .fulu => |*state| .{ .fulu = try state.clone(opts) },
-            .gloas => |*state| .{ .gloas = try state.clone(opts) },
+            .phase0 => |state| .{ .phase0 = try state.clone(opts) },
+            .altair => |state| .{ .altair = try state.clone(opts) },
+            .bellatrix => |state| .{ .bellatrix = try state.clone(opts) },
+            .capella => |state| .{ .capella = try state.clone(opts) },
+            .deneb => |state| .{ .deneb = try state.clone(opts) },
+            .electra => |state| .{ .electra = try state.clone(opts) },
+            .fulu => |state| .{ .fulu = try state.clone(opts) },
+            .gloas => |state| .{ .gloas = try state.clone(opts) },
         };
     }
 
     pub fn commit(self: *AnyBeaconState) !void {
         switch (self.*) {
-            inline else => |*state| try state.commit(),
+            inline else => |state| try state.commit(),
         }
     }
 
@@ -189,10 +182,10 @@ pub const AnyBeaconState = union(ForkSeq) {
         try self.commit();
         const gindex: Gindex = @enumFromInt(gindex_value);
         return switch (self.*) {
-            inline else => |*state| try createSingleProof(
+            inline else => |state| try createSingleProof(
                 allocator,
-                state.base_view.pool,
-                state.base_view.data.root,
+                state.pool,
+                state.root,
                 gindex,
             ),
         };
@@ -209,18 +202,18 @@ pub const AnyBeaconState = union(ForkSeq) {
 
     pub fn hashTreeRoot(self: *AnyBeaconState) !*const [32]u8 {
         return switch (self.*) {
-            inline else => |*state| try state.hashTreeRoot(),
+            inline else => |state| try state.hashTreeRoot(),
         };
     }
 
     pub fn deinit(self: *AnyBeaconState) void {
         switch (self.*) {
-            inline else => |*state| state.deinit(),
+            inline else => |state| state.deinit(),
         }
     }
 
     pub fn forkSeq(self: *AnyBeaconState) ForkSeq {
-        return (self.*);
+        return std.meta.activeTag(self.*);
     }
 
     // pub fn castFromFork(comptime f: ForkSeq, )
@@ -238,39 +231,39 @@ pub const AnyBeaconState = union(ForkSeq) {
 
     pub fn genesisTime(self: *AnyBeaconState) !u64 {
         return switch (self.*) {
-            inline else => |*state| try state.get("genesis_time"),
+            inline else => |state| try state.get("genesis_time"),
         };
     }
 
     pub fn genesisValidatorsRoot(self: *AnyBeaconState) !*const [32]u8 {
         return switch (self.*) {
-            inline else => |*state| try state.getRoot("genesis_validators_root"),
+            inline else => |state| try state.getFieldRoot("genesis_validators_root"),
         };
     }
 
     pub fn slot(self: *AnyBeaconState) !u64 {
         return switch (self.*) {
-            inline else => |*state| try state.get("slot"),
+            inline else => |state| try state.get("slot"),
         };
     }
 
     pub fn setSlot(self: *AnyBeaconState, s: u64) !void {
         switch (self.*) {
-            inline else => |*state| try state.set("slot", s),
+            inline else => |state| try state.set("slot", s),
         }
     }
 
-    pub fn fork(self: *AnyBeaconState) !ct.phase0.Fork.TreeView {
+    pub fn fork(self: *AnyBeaconState) !*ct.phase0.Fork.TreeView {
         return switch (self.*) {
-            inline else => |*state| try state.get("fork"),
+            inline else => |state| try state.get("fork"),
         };
     }
 
     pub fn forkCurrentVersion(self: *AnyBeaconState) ![4]u8 {
         var f = switch (self.*) {
-            inline else => |*state| try state.getReadonly("fork"),
+            inline else => |state| try state.getReadonly("fork"),
         };
-        const current_version_root = try f.getRoot("current_version");
+        const current_version_root = try f.getFieldRoot("current_version");
         var version: [4]u8 = undefined;
         @memcpy(&version, current_version_root[0..4]);
         return version;
@@ -278,73 +271,73 @@ pub const AnyBeaconState = union(ForkSeq) {
 
     pub fn setFork(self: *AnyBeaconState, f: *const ct.phase0.Fork.Type) !void {
         switch (self.*) {
-            inline else => |*state| try state.setValue("fork", f),
+            inline else => |state| try state.setValue("fork", f),
         }
     }
 
-    pub fn latestBlockHeader(self: *AnyBeaconState) !ct.phase0.BeaconBlockHeader.TreeView {
+    pub fn latestBlockHeader(self: *AnyBeaconState) !*ct.phase0.BeaconBlockHeader.TreeView {
         return switch (self.*) {
-            inline else => |*state| try state.get("latest_block_header"),
+            inline else => |state| try state.get("latest_block_header"),
         };
     }
 
     pub fn setLatestBlockHeader(self: *AnyBeaconState, header: *const ct.phase0.BeaconBlockHeader.Type) !void {
         switch (self.*) {
-            inline else => |*state| try state.setValue("latest_block_header", header),
+            inline else => |state| try state.setValue("latest_block_header", header),
         }
     }
 
-    pub fn blockRoots(self: *AnyBeaconState) !ct.phase0.HistoricalBlockRoots.TreeView {
+    pub fn blockRoots(self: *AnyBeaconState) !*ct.phase0.HistoricalBlockRoots.TreeView {
         return switch (self.*) {
-            inline else => |*state| try state.get("block_roots"),
+            inline else => |state| try state.get("block_roots"),
         };
     }
 
     pub fn blockRootsRoot(self: *AnyBeaconState) !*const [32]u8 {
         return switch (self.*) {
-            inline else => |*state| try state.getRoot("block_roots"),
+            inline else => |state| try state.getFieldRoot("block_roots"),
         };
     }
 
-    pub fn stateRoots(self: *AnyBeaconState) !ct.phase0.HistoricalStateRoots.TreeView {
+    pub fn stateRoots(self: *AnyBeaconState) !*ct.phase0.HistoricalStateRoots.TreeView {
         return switch (self.*) {
-            inline else => |*state| try state.get("state_roots"),
+            inline else => |state| try state.get("state_roots"),
         };
     }
 
     pub fn stateRootsRoot(self: *AnyBeaconState) !*const [32]u8 {
         return switch (self.*) {
-            inline else => |*state| try state.getRoot("state_roots"),
+            inline else => |state| try state.getFieldRoot("state_roots"),
         };
     }
 
-    pub fn historicalRoots(self: *AnyBeaconState) !ct.phase0.HistoricalRoots.TreeView {
+    pub fn historicalRoots(self: *AnyBeaconState) !*ct.phase0.HistoricalRoots.TreeView {
         return switch (self.*) {
-            inline else => |*state| try state.get("historical_roots"),
+            inline else => |state| try state.get("historical_roots"),
         };
     }
 
-    pub fn eth1Data(self: *AnyBeaconState) !ct.phase0.Eth1Data.TreeView {
+    pub fn eth1Data(self: *AnyBeaconState) !*ct.phase0.Eth1Data.TreeView {
         return switch (self.*) {
-            inline else => |*state| try state.get("eth1_data"),
+            inline else => |state| try state.get("eth1_data"),
         };
     }
 
     pub fn setEth1Data(self: *AnyBeaconState, eth1_data: *const ct.phase0.Eth1Data.Type) !void {
         switch (self.*) {
-            inline else => |*state| try state.setValue("eth1_data", eth1_data),
+            inline else => |state| try state.setValue("eth1_data", eth1_data),
         }
     }
 
-    pub fn eth1DataVotes(self: *AnyBeaconState) !ct.phase0.Eth1DataVotes.TreeView {
+    pub fn eth1DataVotes(self: *AnyBeaconState) !*ct.phase0.Eth1DataVotes.TreeView {
         return switch (self.*) {
-            inline else => |*state| try state.get("eth1_data_votes"),
+            inline else => |state| try state.get("eth1_data_votes"),
         };
     }
 
-    pub fn setEth1DataVotes(self: *AnyBeaconState, eth1_data_votes: ct.phase0.Eth1DataVotes.TreeView) !void {
+    pub fn setEth1DataVotes(self: *AnyBeaconState, eth1_data_votes: *ct.phase0.Eth1DataVotes.TreeView) !void {
         switch (self.*) {
-            inline else => |*state| try state.set("eth1_data_votes", eth1_data_votes),
+            inline else => |state| try state.set("eth1_data_votes", eth1_data_votes),
         }
     }
 
@@ -355,19 +348,19 @@ pub const AnyBeaconState = union(ForkSeq) {
 
     pub fn resetEth1DataVotes(self: *AnyBeaconState) !void {
         switch (self.*) {
-            inline else => |*state| try state.setValue("eth1_data_votes", &ct.phase0.Eth1DataVotes.default_value),
+            inline else => |state| try state.setValue("eth1_data_votes", &ct.phase0.Eth1DataVotes.default_value),
         }
     }
 
     pub fn eth1DepositIndex(self: *AnyBeaconState) !u64 {
         return switch (self.*) {
-            inline else => |*state| try state.get("eth1_deposit_index"),
+            inline else => |state| try state.get("eth1_deposit_index"),
         };
     }
 
     pub fn setEth1DepositIndex(self: *AnyBeaconState, index: u64) !void {
         return switch (self.*) {
-            inline else => |*state| try state.set("eth1_deposit_index", index),
+            inline else => |state| try state.set("eth1_deposit_index", index),
         };
     }
 
@@ -375,15 +368,15 @@ pub const AnyBeaconState = union(ForkSeq) {
         try self.setEth1DepositIndex(try self.eth1DepositIndex() + 1);
     }
 
-    pub fn validators(self: *AnyBeaconState) !ct.phase0.Validators.TreeView {
+    pub fn validators(self: *AnyBeaconState) !*ct.phase0.Validators.TreeView {
         return switch (self.*) {
-            inline else => |*state| try state.get("validators"),
+            inline else => |state| try state.get("validators"),
         };
     }
 
     pub fn validatorsCount(self: *AnyBeaconState) !usize {
         return switch (self.*) {
-            inline else => |*state| {
+            inline else => |state| {
                 var validators_view = try state.getReadonly("validators");
                 return validators_view.length();
             },
@@ -395,16 +388,16 @@ pub const AnyBeaconState = union(ForkSeq) {
     /// Caller owns the returned slice and must free it with the same allocator.
     pub fn validatorsSlice(self: *AnyBeaconState, allocator: Allocator) ![]ct.phase0.Validator.Type {
         return switch (self.*) {
-            inline else => |*state| {
+            inline else => |state| {
                 var validators_view = try state.getReadonly("validators");
                 return validators_view.getAllReadonlyValues(allocator);
             },
         };
     }
 
-    pub fn balances(self: *AnyBeaconState) !ct.phase0.Balances.TreeView {
+    pub fn balances(self: *AnyBeaconState) !*ct.phase0.Balances.TreeView {
         return switch (self.*) {
-            inline else => |*state| try state.get("balances"),
+            inline else => |state| try state.get("balances"),
         };
     }
 
@@ -413,7 +406,7 @@ pub const AnyBeaconState = union(ForkSeq) {
     /// Caller owns the returned slice and must free it with the same allocator.
     pub fn balancesSlice(self: *AnyBeaconState, allocator: Allocator) ![]u64 {
         return switch (self.*) {
-            inline else => |*state| {
+            inline else => |state| {
                 var balances_view = try state.get("balances");
                 try balances_view.commit();
                 return balances_view.getAll(allocator);
@@ -423,13 +416,13 @@ pub const AnyBeaconState = union(ForkSeq) {
 
     pub fn setBalances(self: *AnyBeaconState, b: *const ct.phase0.Balances.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.setValue("balances", b),
+            inline else => |state| try state.setValue("balances", b),
         };
     }
 
-    pub fn randaoMixes(self: *AnyBeaconState) !ct.phase0.RandaoMixes.TreeView {
+    pub fn randaoMixes(self: *AnyBeaconState) !*ct.phase0.RandaoMixes.TreeView {
         return switch (self.*) {
-            inline else => |*state| try state.get("randao_mixes"),
+            inline else => |state| try state.get("randao_mixes"),
         };
     }
 
@@ -438,29 +431,29 @@ pub const AnyBeaconState = union(ForkSeq) {
         try mixes.setValue(epoch % preset.EPOCHS_PER_HISTORICAL_VECTOR, randao_mix);
     }
 
-    pub fn slashings(self: *AnyBeaconState) !ct.phase0.Slashings.TreeView {
+    pub fn slashings(self: *AnyBeaconState) !*ct.phase0.Slashings.TreeView {
         return switch (self.*) {
-            inline else => |*state| try state.get("slashings"),
+            inline else => |state| try state.get("slashings"),
         };
     }
 
-    pub fn previousEpochPendingAttestations(self: *AnyBeaconState) !ct.phase0.EpochAttestations.TreeView {
+    pub fn previousEpochPendingAttestations(self: *AnyBeaconState) !*ct.phase0.EpochAttestations.TreeView {
         return switch (self.*) {
-            .phase0 => |*state| try state.get("previous_epoch_attestations"),
+            .phase0 => |state| try state.get("previous_epoch_attestations"),
             else => error.InvalidAtFork,
         };
     }
 
-    pub fn currentEpochPendingAttestations(self: *AnyBeaconState) !ct.phase0.EpochAttestations.TreeView {
+    pub fn currentEpochPendingAttestations(self: *AnyBeaconState) !*ct.phase0.EpochAttestations.TreeView {
         return switch (self.*) {
-            .phase0 => |*state| try state.get("current_epoch_attestations"),
+            .phase0 => |state| try state.get("current_epoch_attestations"),
             else => error.InvalidAtFork,
         };
     }
 
     pub fn rotateEpochPendingAttestations(self: *AnyBeaconState) !void {
         return switch (self.*) {
-            .phase0 => |*state| {
+            .phase0 => |state| {
                 const current_root = try state.getRootNode("current_epoch_attestations");
                 try state.setRootNode("previous_epoch_attestations", current_root);
                 try state.setValue("current_epoch_attestations", &ct.phase0.EpochAttestations.default_value);
@@ -469,38 +462,38 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn previousEpochParticipation(self: *AnyBeaconState) !ct.altair.EpochParticipation.TreeView {
+    pub fn previousEpochParticipation(self: *AnyBeaconState) !*ct.altair.EpochParticipation.TreeView {
         return switch (self.*) {
             .phase0 => error.InvalidAtFork,
-            inline else => |*state| try state.get("previous_epoch_participation"),
+            inline else => |state| try state.get("previous_epoch_participation"),
         };
     }
 
     pub fn setPreviousEpochParticipation(self: *AnyBeaconState, participations: *const ct.altair.EpochParticipation.Type) !void {
         return switch (self.*) {
             .phase0 => error.InvalidAtFork,
-            inline else => |*state| try state.setValue("previous_epoch_participation", participations),
+            inline else => |state| try state.setValue("previous_epoch_participation", participations),
         };
     }
 
-    pub fn currentEpochParticipation(self: *AnyBeaconState) !ct.altair.EpochParticipation.TreeView {
+    pub fn currentEpochParticipation(self: *AnyBeaconState) !*ct.altair.EpochParticipation.TreeView {
         return switch (self.*) {
             .phase0 => error.InvalidAtFork,
-            inline else => |*state| try state.get("current_epoch_participation"),
+            inline else => |state| try state.get("current_epoch_participation"),
         };
     }
 
     pub fn setCurrentEpochParticipation(self: *AnyBeaconState, participations: *const ct.altair.EpochParticipation.Type) !void {
         return switch (self.*) {
             .phase0 => error.InvalidAtFork,
-            inline else => |*state| try state.setValue("current_epoch_participation", participations),
+            inline else => |state| try state.setValue("current_epoch_participation", participations),
         };
     }
 
     pub fn rotateEpochParticipation(self: *AnyBeaconState) !void {
         return switch (self.*) {
             .phase0 => error.InvalidAtFork,
-            inline else => |*state| {
+            inline else => |state| {
                 var current_epoch_participation = try state.get("current_epoch_participation");
                 try current_epoch_participation.commit();
                 const length = try current_epoch_participation.length();
@@ -513,111 +506,111 @@ pub const AnyBeaconState = union(ForkSeq) {
 
                 // Reset current_epoch_participation by rebuilding a zeroed SSZ List of the same length.
                 const new_current_root = try ct.altair.EpochParticipation.tree.zeros(
-                    state.base_view.pool,
+                    state.pool,
                     length,
                 );
-                errdefer state.base_view.pool.unref(new_current_root);
+                errdefer state.pool.unref(new_current_root);
                 try state.setRootNode("current_epoch_participation", new_current_root);
             },
         };
     }
 
-    pub fn justificationBits(self: *AnyBeaconState) !ct.phase0.JustificationBits.TreeView {
+    pub fn justificationBits(self: *AnyBeaconState) !*ct.phase0.JustificationBits.TreeView {
         return switch (self.*) {
-            inline else => |*state| try state.get("justification_bits"),
+            inline else => |state| try state.get("justification_bits"),
         };
     }
 
     pub fn setJustificationBits(self: *AnyBeaconState, bits: *const ct.phase0.JustificationBits.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.setValue("justification_bits", bits),
+            inline else => |state| try state.setValue("justification_bits", bits),
         };
     }
 
     pub fn previousJustifiedCheckpoint(self: *AnyBeaconState, out: *ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.getValue(undefined, "previous_justified_checkpoint", out),
+            inline else => |state| try state.getValue(undefined, "previous_justified_checkpoint", out),
         };
     }
 
     pub fn setPreviousJustifiedCheckpoint(self: *AnyBeaconState, checkpoint: *const ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.setValue("previous_justified_checkpoint", checkpoint),
+            inline else => |state| try state.setValue("previous_justified_checkpoint", checkpoint),
         };
     }
 
     pub fn currentJustifiedCheckpoint(self: *AnyBeaconState, out: *ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.getValue(undefined, "current_justified_checkpoint", out),
+            inline else => |state| try state.getValue(undefined, "current_justified_checkpoint", out),
         };
     }
 
     pub fn setCurrentJustifiedCheckpoint(self: *AnyBeaconState, checkpoint: *const ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.setValue("current_justified_checkpoint", checkpoint),
+            inline else => |state| try state.setValue("current_justified_checkpoint", checkpoint),
         };
     }
 
     pub fn finalizedCheckpoint(self: *AnyBeaconState, out: *ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.getValue(undefined, "finalized_checkpoint", out),
+            inline else => |state| try state.getValue(undefined, "finalized_checkpoint", out),
         };
     }
 
     pub fn setFinalizedCheckpoint(self: *AnyBeaconState, checkpoint: *const ct.phase0.Checkpoint.Type) !void {
         return switch (self.*) {
-            inline else => |*state| try state.setValue("finalized_checkpoint", checkpoint),
+            inline else => |state| try state.setValue("finalized_checkpoint", checkpoint),
         };
     }
 
     pub fn finalizedEpoch(self: *AnyBeaconState) !u64 {
         return switch (self.*) {
-            inline else => |*state| {
+            inline else => |state| {
                 var checkpoint_view = try state.getReadonly("finalized_checkpoint");
                 return try checkpoint_view.get("epoch");
             },
         };
     }
 
-    pub fn inactivityScores(self: *AnyBeaconState) !ct.altair.InactivityScores.TreeView {
+    pub fn inactivityScores(self: *AnyBeaconState) !*ct.altair.InactivityScores.TreeView {
         return switch (self.*) {
             .phase0 => error.InvalidAtFork,
-            inline else => |*state| try state.get("inactivity_scores"),
+            inline else => |state| try state.get("inactivity_scores"),
         };
     }
 
-    pub fn currentSyncCommittee(self: *AnyBeaconState) !ct.altair.SyncCommittee.TreeView {
+    pub fn currentSyncCommittee(self: *AnyBeaconState) !*ct.altair.SyncCommittee.TreeView {
         return switch (self.*) {
             .phase0 => error.InvalidAtFork,
-            inline else => |*state| try state.get("current_sync_committee"),
+            inline else => |state| try state.get("current_sync_committee"),
         };
     }
 
     pub fn setCurrentSyncCommittee(self: *AnyBeaconState, sync_committee: *const ct.altair.SyncCommittee.Type) !void {
         return switch (self.*) {
             .phase0 => error.InvalidAtFork,
-            inline else => |*state| try state.setValue("current_sync_committee", sync_committee),
+            inline else => |state| try state.setValue("current_sync_committee", sync_committee),
         };
     }
 
-    pub fn nextSyncCommittee(self: *AnyBeaconState) !ct.altair.SyncCommittee.TreeView {
+    pub fn nextSyncCommittee(self: *AnyBeaconState) !*ct.altair.SyncCommittee.TreeView {
         return switch (self.*) {
             .phase0 => error.InvalidAtFork,
-            inline else => |*state| try state.get("next_sync_committee"),
+            inline else => |state| try state.get("next_sync_committee"),
         };
     }
 
     pub fn setNextSyncCommittee(self: *AnyBeaconState, sync_committee: *const ct.altair.SyncCommittee.Type) !void {
         return switch (self.*) {
             .phase0 => error.InvalidAtFork,
-            inline else => |*state| try state.setValue("next_sync_committee", sync_committee),
+            inline else => |state| try state.setValue("next_sync_committee", sync_committee),
         };
     }
 
     pub fn rotateSyncCommittees(self: *AnyBeaconState, next_sync_committee: *const ct.altair.SyncCommittee.Type) !void {
         return switch (self.*) {
             .phase0 => error.InvalidAtFork,
-            inline else => |*state| {
+            inline else => |state| {
                 const next_sync_committee_root = try state.getRootNode("next_sync_committee");
                 try state.setRootNode("current_sync_committee", next_sync_committee_root);
                 try state.setValue("next_sync_committee", next_sync_committee);
@@ -628,23 +621,23 @@ pub const AnyBeaconState = union(ForkSeq) {
     pub fn latestExecutionPayloadHeader(self: *AnyBeaconState, allocator: Allocator, out: *AnyExecutionPayloadHeader) !void {
         return switch (self.*) {
             .phase0, .altair, .gloas => error.InvalidAtFork,
-            .bellatrix => |*state| {
+            .bellatrix => |state| {
                 out.* = .{ .bellatrix = undefined };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.bellatrix);
             },
-            .capella => |*state| {
+            .capella => |state| {
                 out.* = .{ .capella = undefined };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.capella);
             },
-            .deneb => |*state| {
+            .deneb => |state| {
                 out.* = .{ .deneb = undefined };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.deneb);
             },
-            .electra => |*state| {
+            .electra => |state| {
                 out.* = .{ .deneb = undefined };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.deneb);
             },
-            .fulu => |*state| {
+            .fulu => |state| {
                 out.* = .{ .deneb = undefined };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.deneb);
             },
@@ -654,16 +647,16 @@ pub const AnyBeaconState = union(ForkSeq) {
     pub fn latestExecutionPayloadHeaderBlockHash(self: *AnyBeaconState) !*const [32]u8 {
         return switch (self.*) {
             .phase0, .altair, .gloas => error.InvalidAtFork,
-            inline else => |*state| {
+            inline else => |state| {
                 var header = try state.get("latest_execution_payload_header");
-                return try header.getRoot("block_hash");
+                return try header.getFieldRoot("block_hash");
             },
         };
     }
 
     pub fn executionPayloadAvailability(self: *AnyBeaconState, index: usize) !bool {
         return switch (self.*) {
-            .gloas => |*state| {
+            .gloas => |state| {
                 var bv = try state.get("execution_payload_availability");
                 return try bv.get(index);
             },
@@ -673,11 +666,11 @@ pub const AnyBeaconState = union(ForkSeq) {
 
     pub fn setLatestExecutionPayloadHeader(self: *AnyBeaconState, header: *const AnyExecutionPayloadHeader) !void {
         switch (self.*) {
-            .bellatrix => |*state| try state.setValue("latest_execution_payload_header", &header.bellatrix),
-            .capella => |*state| try state.setValue("latest_execution_payload_header", &header.capella),
-            .deneb => |*state| try state.setValue("latest_execution_payload_header", &header.deneb),
-            .electra => |*state| try state.setValue("latest_execution_payload_header", &header.deneb),
-            .fulu => |*state| try state.setValue("latest_execution_payload_header", &header.deneb),
+            .bellatrix => |state| try state.setValue("latest_execution_payload_header", &header.bellatrix),
+            .capella => |state| try state.setValue("latest_execution_payload_header", &header.capella),
+            .deneb => |state| try state.setValue("latest_execution_payload_header", &header.deneb),
+            .electra => |state| try state.setValue("latest_execution_payload_header", &header.deneb),
+            .fulu => |state| try state.setValue("latest_execution_payload_header", &header.deneb),
             .phase0, .altair, .gloas => return error.InvalidAtFork,
         }
     }
@@ -685,169 +678,169 @@ pub const AnyBeaconState = union(ForkSeq) {
     pub fn nextWithdrawalIndex(self: *AnyBeaconState) !u64 {
         return switch (self.*) {
             .phase0, .altair, .bellatrix => error.InvalidAtFork,
-            inline else => |*state| try state.get("next_withdrawal_index"),
+            inline else => |state| try state.get("next_withdrawal_index"),
         };
     }
 
     pub fn setNextWithdrawalIndex(self: *AnyBeaconState, next_withdrawal_index: u64) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix => error.InvalidAtFork,
-            inline else => |*state| try state.set("next_withdrawal_index", next_withdrawal_index),
+            inline else => |state| try state.set("next_withdrawal_index", next_withdrawal_index),
         };
     }
 
     pub fn nextWithdrawalValidatorIndex(self: *AnyBeaconState) !u64 {
         return switch (self.*) {
             .phase0, .altair, .bellatrix => error.InvalidAtFork,
-            inline else => |*state| try state.get("next_withdrawal_validator_index"),
+            inline else => |state| try state.get("next_withdrawal_validator_index"),
         };
     }
 
     pub fn setNextWithdrawalValidatorIndex(self: *AnyBeaconState, next_withdrawal_validator_index: u64) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix => error.InvalidAtFork,
-            inline else => |*state| try state.set("next_withdrawal_validator_index", next_withdrawal_validator_index),
+            inline else => |state| try state.set("next_withdrawal_validator_index", next_withdrawal_validator_index),
         };
     }
 
-    pub fn historicalSummaries(self: *AnyBeaconState) !ct.capella.HistoricalSummaries.TreeView {
+    pub fn historicalSummaries(self: *AnyBeaconState) !*ct.capella.HistoricalSummaries.TreeView {
         return switch (self.*) {
             .phase0, .altair, .bellatrix => error.InvalidAtFork,
-            inline else => |*state| try state.get("historical_summaries"),
+            inline else => |state| try state.get("historical_summaries"),
         };
     }
 
     pub fn depositRequestsStartIndex(self: *AnyBeaconState) !u64 {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.get("deposit_requests_start_index"),
+            inline else => |state| try state.get("deposit_requests_start_index"),
         };
     }
 
     pub fn setDepositRequestsStartIndex(self: *AnyBeaconState, index: u64) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.set("deposit_requests_start_index", index),
+            inline else => |state| try state.set("deposit_requests_start_index", index),
         };
     }
 
     pub fn depositBalanceToConsume(self: *AnyBeaconState) !u64 {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.get("deposit_balance_to_consume"),
+            inline else => |state| try state.get("deposit_balance_to_consume"),
         };
     }
 
     pub fn setDepositBalanceToConsume(self: *AnyBeaconState, balance: u64) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.set("deposit_balance_to_consume", balance),
+            inline else => |state| try state.set("deposit_balance_to_consume", balance),
         };
     }
 
     pub fn exitBalanceToConsume(self: *AnyBeaconState) !u64 {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.get("exit_balance_to_consume"),
+            inline else => |state| try state.get("exit_balance_to_consume"),
         };
     }
 
     pub fn setExitBalanceToConsume(self: *AnyBeaconState, balance: u64) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.set("exit_balance_to_consume", balance),
+            inline else => |state| try state.set("exit_balance_to_consume", balance),
         };
     }
 
     pub fn earliestExitEpoch(self: *AnyBeaconState) !u64 {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.get("earliest_exit_epoch"),
+            inline else => |state| try state.get("earliest_exit_epoch"),
         };
     }
 
     pub fn setEarliestExitEpoch(self: *AnyBeaconState, epoch: u64) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.set("earliest_exit_epoch", epoch),
+            inline else => |state| try state.set("earliest_exit_epoch", epoch),
         };
     }
 
     pub fn consolidationBalanceToConsume(self: *AnyBeaconState) !u64 {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.get("consolidation_balance_to_consume"),
+            inline else => |state| try state.get("consolidation_balance_to_consume"),
         };
     }
 
     pub fn setConsolidationBalanceToConsume(self: *AnyBeaconState, balance: u64) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.set("consolidation_balance_to_consume", balance),
+            inline else => |state| try state.set("consolidation_balance_to_consume", balance),
         };
     }
 
     pub fn earliestConsolidationEpoch(self: *AnyBeaconState) !u64 {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.get("earliest_consolidation_epoch"),
+            inline else => |state| try state.get("earliest_consolidation_epoch"),
         };
     }
 
     pub fn setEarliestConsolidationEpoch(self: *AnyBeaconState, epoch: u64) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.set("earliest_consolidation_epoch", epoch),
+            inline else => |state| try state.set("earliest_consolidation_epoch", epoch),
         };
     }
 
-    pub fn pendingDeposits(self: *AnyBeaconState) !ct.electra.PendingDeposits.TreeView {
+    pub fn pendingDeposits(self: *AnyBeaconState) !*ct.electra.PendingDeposits.TreeView {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.get("pending_deposits"),
+            inline else => |state| try state.get("pending_deposits"),
         };
     }
 
-    pub fn setPendingDeposits(self: *AnyBeaconState, deposits: ct.electra.PendingDeposits.TreeView) !void {
+    pub fn setPendingDeposits(self: *AnyBeaconState, deposits: *ct.electra.PendingDeposits.TreeView) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.set("pending_deposits", deposits),
+            inline else => |state| try state.set("pending_deposits", deposits),
         };
     }
 
-    pub fn pendingPartialWithdrawals(self: *AnyBeaconState) !ct.electra.PendingPartialWithdrawals.TreeView {
+    pub fn pendingPartialWithdrawals(self: *AnyBeaconState) !*ct.electra.PendingPartialWithdrawals.TreeView {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.get("pending_partial_withdrawals"),
+            inline else => |state| try state.get("pending_partial_withdrawals"),
         };
     }
 
-    pub fn setPendingPartialWithdrawals(self: *AnyBeaconState, pending_partial_withdrawals: ct.electra.PendingPartialWithdrawals.TreeView) !void {
+    pub fn setPendingPartialWithdrawals(self: *AnyBeaconState, pending_partial_withdrawals: *ct.electra.PendingPartialWithdrawals.TreeView) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.set("pending_partial_withdrawals", pending_partial_withdrawals),
+            inline else => |state| try state.set("pending_partial_withdrawals", pending_partial_withdrawals),
         };
     }
 
-    pub fn pendingConsolidations(self: *AnyBeaconState) !ct.electra.PendingConsolidations.TreeView {
+    pub fn pendingConsolidations(self: *AnyBeaconState) !*ct.electra.PendingConsolidations.TreeView {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.get("pending_consolidations"),
+            inline else => |state| try state.get("pending_consolidations"),
         };
     }
 
-    pub fn setPendingConsolidations(self: *AnyBeaconState, consolidations: ct.electra.PendingConsolidations.TreeView) !void {
+    pub fn setPendingConsolidations(self: *AnyBeaconState, consolidations: *ct.electra.PendingConsolidations.TreeView) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb => error.InvalidAtFork,
-            inline else => |*state| try state.set("pending_consolidations", consolidations),
+            inline else => |state| try state.set("pending_consolidations", consolidations),
         };
     }
 
     /// Get proposer_lookahead
-    pub fn proposerLookahead(self: *AnyBeaconState) !ct.fulu.ProposerLookahead.TreeView {
+    pub fn proposerLookahead(self: *AnyBeaconState) !*ct.fulu.ProposerLookahead.TreeView {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb, .electra => error.InvalidAtFork,
-            inline else => |*state| try state.get("proposer_lookahead"),
+            inline else => |state| try state.get("proposer_lookahead"),
         };
     }
 
@@ -861,7 +854,7 @@ pub const AnyBeaconState = union(ForkSeq) {
     pub fn setProposerLookahead(self: *AnyBeaconState, proposer_lookahead: *const [ct.fulu.ProposerLookahead.length]u64) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb, .electra => error.InvalidAtFork,
-            inline else => |*state| try state.setValue("proposer_lookahead", proposer_lookahead),
+            inline else => |state| try state.setValue("proposer_lookahead", proposer_lookahead),
         };
     }
 
@@ -872,11 +865,10 @@ pub const AnyBeaconState = union(ForkSeq) {
         comptime T: type,
         allocator: Allocator,
         pool: *Node.Pool,
-        state: F.TreeView,
-    ) !T.TreeView {
+        state: *F.TreeView,
+    ) !*T.TreeView {
         // first ensure that the source state is committed
-        var committed_state = state;
-        try committed_state.commit();
+        try state.commit();
 
         var upgraded = try T.TreeView.fromValue(allocator, pool, &T.default_value);
         errdefer upgraded.deinit();
@@ -892,11 +884,11 @@ pub const AnyBeaconState = union(ForkSeq) {
 
                 if (comptime isBasicType(f.type)) {
                     // For basic fields, get() returns a copy, so we can directly set it.
-                    try upgraded.set(f.name, try committed_state.get(f.name));
+                    try upgraded.set(f.name, try state.get(f.name));
                 } else {
-                    // For composite fields, get() returns a borrowed TreeView backed by committed_state caches.
+                    // For composite fields, get() returns a borrowed *TreeView backed by state caches.
                     // Clone it to create an owned view, then transfer ownership to upgraded.
-                    var field_view = try committed_state.get(f.name);
+                    var field_view = try state.get(f.name);
                     var owned_field_view = try field_view.clone(.{ .transfer_cache = true });
                     errdefer owned_field_view.deinit();
                     try upgraded.set(f.name, owned_field_view);
@@ -919,8 +911,8 @@ pub const AnyBeaconState = union(ForkSeq) {
                 .altair = try populateFields(
                     ct.phase0.BeaconState,
                     ct.altair.BeaconState,
-                    state.base_view.allocator,
-                    state.base_view.pool,
+                    state.allocator,
+                    state.pool,
                     state,
                 ),
             },
@@ -928,8 +920,8 @@ pub const AnyBeaconState = union(ForkSeq) {
                 .bellatrix = try populateFields(
                     ct.altair.BeaconState,
                     ct.bellatrix.BeaconState,
-                    state.base_view.allocator,
-                    state.base_view.pool,
+                    state.allocator,
+                    state.pool,
                     state,
                 ),
             },
@@ -937,8 +929,8 @@ pub const AnyBeaconState = union(ForkSeq) {
                 .capella = try populateFields(
                     ct.bellatrix.BeaconState,
                     ct.capella.BeaconState,
-                    state.base_view.allocator,
-                    state.base_view.pool,
+                    state.allocator,
+                    state.pool,
                     state,
                 ),
             },
@@ -946,8 +938,8 @@ pub const AnyBeaconState = union(ForkSeq) {
                 .deneb = try populateFields(
                     ct.capella.BeaconState,
                     ct.deneb.BeaconState,
-                    state.base_view.allocator,
-                    state.base_view.pool,
+                    state.allocator,
+                    state.pool,
                     state,
                 ),
             },
@@ -955,8 +947,8 @@ pub const AnyBeaconState = union(ForkSeq) {
                 .electra = try populateFields(
                     ct.deneb.BeaconState,
                     ct.electra.BeaconState,
-                    state.base_view.allocator,
-                    state.base_view.pool,
+                    state.allocator,
+                    state.pool,
                     state,
                 ),
             },
@@ -964,8 +956,8 @@ pub const AnyBeaconState = union(ForkSeq) {
                 .fulu = try populateFields(
                     ct.electra.BeaconState,
                     ct.fulu.BeaconState,
-                    state.base_view.allocator,
-                    state.base_view.pool,
+                    state.allocator,
+                    state.pool,
                     state,
                 ),
             },

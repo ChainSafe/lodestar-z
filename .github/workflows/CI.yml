@@ -91,18 +91,34 @@ jobs:
       - name: Run config tests
         run: |
           zig build test:config
+      - name: Run constants tests
+        run: |
+          zig build test:constants
       - name: Run consensus-type tests
         run: |
           zig build test:consensus_types
+      - name: Run fork_types tests
+        run: |
+          zig build test:fork_types
+      - name: Run era tests
+        run: |
+          zig build test:era
       - name: Run preset tests
         run: |
           zig build test:preset
+      - name: Run bls tests
+        run: |
+          zig build test:bls
       - name: Run state-transition tests
         run: |
           zig build test:state_transition
       - name: Run fork-choice tests
         run: |
           zig build test:fork_choice
+
+      - name: Build benchmarks
+        run: |
+          zig build build-exe:bench_hashing build-exe:bench_merkle_gindex build-exe:bench_merkle_node build-exe:bench_ssz_attestation build-exe:bench_ssz_block build-exe:bench_ssz_state build-exe:bench_process_block build-exe:bench_process_epoch
 
   build-test-slow:
     name: slow tests 
@@ -170,6 +186,33 @@ jobs:
         run: |
           zig build test:ssz_static_spec_tests -Dpreset=mainnet
 
+  spec-test-bls:
+    name: spec tests - bls
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Restore spec tests cache
+        uses: actions/cache@v4
+        with:
+          path: test/spec/spec_tests
+          key: spec-test-data-${{ hashFiles('build.zig') }}
+      - name: Download spec tests
+        run: |
+          zig build run:download_spec_tests
+      - name: Write BLS spec tests
+        run: |
+          zig build run:write_bls_spec_tests
+      - name: Run BLS spec tests
+        run: |
+          zig build test:bls_spec_tests
+
   spec-test-minimal:
     name: spec tests - minimal
     # It takes time to download and run spec tests, so we only run them on ubuntu-latest
@@ -228,6 +271,34 @@ jobs:
         run: |
           zig build test:spec_tests -Dpreset=mainnet
 
+  build-fuzz:
+    name: build fuzz harnesses
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Install AFL++ and LLVM
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y afl++ llvm
+      - name: Verify AFL++ and LLVM are available
+        run: |
+          afl-cc --version
+          if command -v llvm-config >/dev/null 2>&1; then
+            llvm-config --version
+          else
+            llvm-config-18 --version
+          fi
+      - name: Build fuzz harnesses
+        run: |
+          cd test/fuzz && zig build
+
   bindings-test:
     name: bindings - test
     runs-on: ubuntu-latest
@@ -266,3 +337,18 @@ jobs:
       - name: Test bindings
         run: |
           pnpm test
+
+  build-examples:
+    name: build examples
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Build metrics example
+        run: |
+          zig build build-exe:metrics_stf
