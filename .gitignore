@@ -20,3 +20,4 @@ node_modules/
 # Claude Code local config
 .claude/settings.local.json
 .claude/plans/
+zig-pkg/
