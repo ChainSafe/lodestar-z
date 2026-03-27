@@ -30,7 +30,9 @@ const fork_types = @import("fork_types");
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
 const state_transition = @import("state_transition");
-const BatchVerifier = @import("bls").BatchVerifier;
+const bls_mod = @import("bls");
+const BatchVerifier = bls_mod.BatchVerifier;
+const BlsThreadPool = bls_mod.ThreadPool;
 const CachedBeaconState = state_transition.CachedBeaconState;
 const BlockStateCache = state_transition.BlockStateCache;
 const CheckpointStateCache = state_transition.CheckpointStateCache;
@@ -147,6 +149,11 @@ pub const BlockImporter = struct {
 
     /// When true, BLS signatures are verified in processBlock.
     verify_signatures: bool,
+
+    /// Optional BLS thread pool for parallel batch signature verification.
+    /// When set, BatchVerifier dispatches to multiple threads (~3-10x speedup).
+    /// Initialized by BeaconNode.setIo() once std.Io is available.
+    bls_thread_pool: ?*BlsThreadPool = null,
 
     /// Optional metrics pointer for execution layer timing.
     metrics: ?*BeaconMetrics = null,
@@ -465,7 +472,8 @@ pub const BlockImporter = struct {
                         }
                         // Use batch verification when signatures are enabled for ~3-10x speedup.
                         // Collect all signature sets during processBlock, then verify in one shot.
-                        var batch = BatchVerifier.init(null);
+                        // When a BLS thread pool is available, verification is parallelized across workers.
+                        var batch = BatchVerifier.init(self.bls_thread_pool);
                         const opts = state_transition.ProcessBlockOpts{
                             .verify_signature = self.verify_signatures,
                             .batch_verifier = if (self.verify_signatures) &batch else null,
@@ -839,6 +847,11 @@ pub const BeaconNode = struct {
     /// I/O context — set when the event loop starts (before services launch).
     /// Required for std.http.Client, timing, and other I/O operations.
     io: ?std.Io = null,
+
+    /// BLS thread pool for parallel signature verification.
+    /// Initialized in setIo() once std.Io is available (ThreadPool requires Io for synchronization).
+    /// Shared between BlockImporter (block import) and GossipHandler (gossip BLS — TODO).
+    bls_thread_pool: ?*BlsThreadPool = null,
 
     /// JWT secret file path — loaded lazily in setIo() when Io becomes available.
     jwt_secret_path: ?[]const u8 = null,
@@ -1265,6 +1278,9 @@ pub const BeaconNode = struct {
         // KZG trusted setup cleanup.
         if (self.kzg) |*k| k.deinit(allocator);
 
+        // BLS thread pool cleanup (must happen before allocator destroy).
+        if (self.bls_thread_pool) |pool| pool.deinit();
+
         allocator.destroy(self);
     }
 
@@ -1293,6 +1309,22 @@ pub const BeaconNode = struct {
         self.io = io;
         if (self.http_engine) |he| he.setIo(io);
         if (self.io_transport) |t| t.setIo(io);
+
+        // Initialize the BLS thread pool for parallel signature verification.
+        // Uses num_cpus / 2 workers (minimum 1), reserving cores for I/O and STFN.
+        if (self.bls_thread_pool == null) {
+            const cpu_count = std.Thread.getCpuCount() catch 4;
+            const n_workers: u16 = @intCast(@max(@min(cpu_count / 2, BlsThreadPool.MAX_WORKERS), 1));
+            self.bls_thread_pool = BlsThreadPool.init(self.allocator, io, .{ .n_workers = n_workers }) catch |err| blk: {
+                std.log.err("Failed to initialize BLS thread pool: {}", .{err});
+                break :blk null;
+            };
+            if (self.bls_thread_pool) |pool| {
+                // Wire pool into the block importer for batch BLS verification.
+                self.block_importer.bls_thread_pool = pool;
+                std.log.info("BLS thread pool initialized with {d} workers", .{pool.n_workers});
+            }
+        }
 
         // Load or create node identity and JWT secret now that Io is available.
         // When data_dir is set, resolve DataDir once to get all paths.
