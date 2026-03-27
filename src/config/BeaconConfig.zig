@@ -132,6 +132,14 @@ pub fn init(chain_config: ChainConfig, genesis_validator_root: Root) BeaconConfi
         .prev_fork_seq = ForkSeq.electra,
     };
 
+    const gloas = ForkInfo{
+        .fork_seq = ForkSeq.gloas,
+        .epoch = chain_config.GLOAS_FORK_EPOCH,
+        .version = chain_config.GLOAS_FORK_VERSION,
+        .prev_version = chain_config.FULU_FORK_VERSION,
+        .prev_fork_seq = ForkSeq.fulu,
+    };
+
     const forks_ascending_epoch_order = [ForkSeq.count]ForkInfo{
         phase0,
         altair,
@@ -140,8 +148,10 @@ pub fn init(chain_config: ChainConfig, genesis_validator_root: Root) BeaconConfi
         deneb,
         electra,
         fulu,
+        gloas,
     };
     const forks_descending_epoch_order = [ForkSeq.count]ForkInfo{
+        gloas,
         fulu,
         electra,
         deneb,
@@ -213,7 +223,7 @@ pub fn getMaxBlobsPerBlock(self: *const BeaconConfig, epoch: Epoch) u64 {
     return switch (fork) {
         .deneb => self.chain.MAX_BLOBS_PER_BLOCK,
         .electra => self.chain.MAX_BLOBS_PER_BLOCK_ELECTRA,
-        .fulu => {
+        .fulu, .gloas => {
             for (0..self.chain.BLOB_SCHEDULE.len) |i| {
                 const schedule = self.chain.BLOB_SCHEDULE[self.chain.BLOB_SCHEDULE.len - i - 1];
                 if (epoch >= schedule.EPOCH) return schedule.MAX_BLOBS_PER_BLOCK;
@@ -229,6 +239,32 @@ pub fn getMaxBlobsPerBlock(self: *const BeaconConfig, epoch: Epoch) u64 {
 /// Return the maximum number of blob sidecars that may be requested for the given fork.
 pub fn getMaxRequestBlobSidecars(self: *const BeaconConfig, fork: ForkSeq) u64 {
     return if (fork.gte(.electra)) self.chain.MAX_REQUEST_BLOB_SIDECARS_ELECTRA else self.chain.MAX_REQUEST_BLOB_SIDECARS;
+}
+
+/// Convert basis points to milliseconds into the slot.
+///
+/// Integer rounding via `(x + 5000) / 10000`.
+pub fn getSlotComponentDurationMs(self: *const BeaconConfig, basis_points: u64) u64 {
+    return (basis_points * self.chain.SLOT_DURATION_MS + 5000) / 10000;
+}
+
+/// Return the proposer reorg cutoff in milliseconds.
+///
+/// The fork parameter is currently unused — the cutoff is fork-independent.
+/// It exists for forward-compatibility should a future fork change the cutoff.
+pub fn getProposerReorgCutoffMs(self: *const BeaconConfig, _: ForkSeq) u64 {
+    return self.getSlotComponentDurationMs(self.chain.PROPOSER_REORG_CUTOFF_BPS);
+}
+
+/// Return the attestation due time in milliseconds for the given fork.
+///
+/// Pre-Gloas uses `ATTESTATION_DUE_BPS`; Gloas+ uses `ATTESTATION_DUE_BPS_GLOAS`
+/// (shorter window to accommodate the ePBS payload reveal phase).
+pub fn getAttestationDueMs(self: *const BeaconConfig, fork: ForkSeq) u64 {
+    if (fork.gte(.gloas)) {
+        return self.getSlotComponentDurationMs(self.chain.ATTESTATION_DUE_BPS_GLOAS);
+    }
+    return self.getSlotComponentDurationMs(self.chain.ATTESTATION_DUE_BPS);
 }
 
 /// Compute the signature domain for a message.

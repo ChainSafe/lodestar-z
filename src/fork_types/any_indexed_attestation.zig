@@ -45,4 +45,11 @@ pub const AnyIndexedAttestation = union(enum) {
             inline else => |att| att.data.slot,
         };
     }
+
+    /// Get the committee index from attestation data.
+    pub fn index(self: *const AnyIndexedAttestation) ct.primitive.CommitteeIndex.Type {
+        return switch (self.*) {
+            inline else => |att| att.data.index,
+        };
+    }
 };

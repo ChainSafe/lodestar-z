@@ -83,6 +83,7 @@ pub const validator_status = @import("./utils/validator_status.zig");
 pub const ValidatorStatus = validator_status.ValidatorStatus;
 pub const getValidatorStatus = validator_status.getValidatorStatus;
 pub const getBlockRootAtSlot = @import("./utils/block_root.zig").getBlockRootAtSlot;
+pub const computeSlotsSinceEpochStart = @import("./utils/epoch.zig").computeSlotsSinceEpochStart;
 pub const computeStartSlotAtEpoch = @import("./utils/epoch.zig").computeStartSlotAtEpoch;
 pub const deinitStateTransition = @import("./state_transition.zig").deinitStateTransition;
 pub const isExecutionEnabled = @import("./utils/execution.zig").isExecutionEnabled;

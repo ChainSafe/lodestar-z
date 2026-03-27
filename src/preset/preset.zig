@@ -84,6 +84,9 @@ const PresetMainnet = struct {
     pub const GENESIS_SLOT = 0;
     pub const MAX_PENDING_DEPOSITS_PER_EPOCH = 16;
     pub const PTC_SIZE = 512;
+    pub const MAX_PAYLOAD_ATTESTATIONS = 4;
+    pub const BUILDER_REGISTRY_LIMIT = 1_099_511_627_776;
+    pub const BUILDER_PENDING_WITHDRAWALS_LIMIT = 1_048_576;
 };
 
 const PresetMinimal = struct {
@@ -158,6 +161,9 @@ const PresetMinimal = struct {
     pub const MAX_PENDING_PARTIALS_PER_WITHDRAWALS_SWEEP = 2;
     pub const MAX_PENDING_DEPOSITS_PER_EPOCH = PresetMainnet.MAX_PENDING_DEPOSITS_PER_EPOCH;
     pub const PTC_SIZE = 2;
+    pub const MAX_PAYLOAD_ATTESTATIONS = 4;
+    pub const BUILDER_REGISTRY_LIMIT = 1_099_511_627_776;
+    pub const BUILDER_PENDING_WITHDRAWALS_LIMIT = 1_048_576;
 };
 
 const preset_str = @import("build_options").preset;

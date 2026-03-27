@@ -6,8 +6,6 @@ pub const compute_deltas = @import("compute_deltas.zig");
 pub const proto_array = @import("proto_array.zig");
 pub const store = @import("store.zig");
 pub const fork_choice = @import("fork_choice.zig");
-pub const interface = @import("interface.zig");
-pub const safe_blocks = @import("safe_blocks.zig");
 
 pub const ProtoBlock = proto_array.ProtoBlock;
 pub const ProtoNode = proto_array.ProtoNode;
@@ -33,6 +31,7 @@ pub const RootContext = proto_array.RootContext;
 pub const VoteTracker = vote_tracker.VoteTracker;
 pub const Votes = vote_tracker.Votes;
 pub const NULL_VOTE_INDEX = vote_tracker.NULL_VOTE_INDEX;
+pub const INIT_VOTE_SLOT = vote_tracker.INIT_VOTE_SLOT;
 
 pub const computeDeltas = compute_deltas.computeDeltas;
 pub const ComputeDeltasResult = compute_deltas.ComputeDeltasResult;
@@ -41,7 +40,7 @@ pub const EquivocatingIndices = compute_deltas.EquivocatingIndices;
 pub const VoteIndex = compute_deltas.VoteIndex;
 
 pub const ForkChoiceStruct = fork_choice.ForkChoice;
-pub const QueuedAttestation = fork_choice.QueuedAttestation;
+pub const ValidatorVoteMap = fork_choice.ValidatorVoteMap;
 pub const BlockAttestationMap = fork_choice.BlockAttestationMap;
 pub const QueuedAttestationMap = fork_choice.QueuedAttestationMap;
 pub const RootSet = fork_choice.RootSet;
@@ -56,20 +55,18 @@ pub const EventCallback = store.EventCallback;
 pub const ForkChoiceStoreEvents = store.ForkChoiceStoreEvents;
 pub const computeTotalBalance = store.computeTotalBalance;
 
-pub const EpochDifference = interface.EpochDifference;
-pub const AncestorStatus = interface.AncestorStatus;
-pub const AncestorResult = interface.AncestorResult;
-pub const NotReorgedReason = interface.NotReorgedReason;
-pub const ShouldOverrideForkChoiceUpdateResult = interface.ShouldOverrideForkChoiceUpdateResult;
-pub const ForkChoiceOpts = interface.ForkChoiceOpts;
-pub const UpdateHeadOpt = interface.UpdateHeadOpt;
-pub const UpdateAndGetHeadOpt = interface.UpdateAndGetHeadOpt;
-pub const UpdateAndGetHeadResult = interface.UpdateAndGetHeadResult;
-pub const CheckpointWithPayloadAndBalance = interface.CheckpointWithPayloadAndBalance;
-pub const CheckpointWithPayloadAndTotalBalance = interface.CheckpointWithPayloadAndTotalBalance;
-
-pub const getSafeBeaconBlockRoot = safe_blocks.getSafeBeaconBlockRoot;
-pub const getSafeExecutionBlockHash = safe_blocks.getSafeExecutionBlockHash;
+pub const EpochDifference = fork_choice.EpochDifference;
+pub const AncestorStatus = fork_choice.AncestorStatus;
+pub const AncestorResult = fork_choice.AncestorResult;
+pub const NotReorgedReason = fork_choice.NotReorgedReason;
+pub const ShouldOverrideForkChoiceUpdateResult = fork_choice.ShouldOverrideForkChoiceUpdateResult;
+pub const ForkChoiceOpts = fork_choice.ForkChoiceOpts;
+pub const UpdateHeadOpt = fork_choice.UpdateHeadOpt;
+pub const UpdateAndGetHeadOpt = fork_choice.UpdateAndGetHeadOpt;
+pub const UpdateAndGetHeadResult = fork_choice.UpdateAndGetHeadResult;
+pub const CheckpointWithPayloadAndBalance = fork_choice.CheckpointWithPayloadAndBalance;
+pub const CheckpointWithPayloadAndTotalBalance = fork_choice.CheckpointWithPayloadAndTotalBalance;
+pub const onBlockFromProto = fork_choice.onBlockFromProto;
 
 test {
     testing.refAllDecls(@This());

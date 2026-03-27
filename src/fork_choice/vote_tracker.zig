@@ -13,6 +13,9 @@ const Slot = primitives.Slot.Type;
 /// Safe because 0xFFFFFFFF / slots-per-year > 1,634 years of non-finalized network.
 pub const NULL_VOTE_INDEX: u32 = std.math.maxInt(u32);
 
+/// Initial value for vote slots, indicating no vote has been cast yet.
+pub const INIT_VOTE_SLOT: Slot = 0;
+
 /// Tracks a single validator's fork choice vote.
 ///
 /// Gloas spec: LatestMessage { slot, root }.
@@ -27,7 +30,7 @@ pub const VoteTracker = struct {
     /// Index of the block this validator will vote for (on next computeDeltas).
     next_index: u32 = NULL_VOTE_INDEX,
     /// Slot of the validator's latest vote. Used by onAttestation to reject stale votes.
-    next_slot: Slot = 0,
+    next_slot: Slot = INIT_VOTE_SLOT,
 };
 
 /// SoA storage for per-validator fork choice votes.
@@ -71,7 +74,7 @@ pub const Votes = struct {
         const next_slots = self.multi_list.items(.next_slot);
         @memset(current_indices[current_len..validator_count], NULL_VOTE_INDEX);
         @memset(next_indices[current_len..validator_count], NULL_VOTE_INDEX);
-        @memset(next_slots[current_len..validator_count], 0);
+        @memset(next_slots[current_len..validator_count], INIT_VOTE_SLOT);
     }
 
     /// Get the raw SoA arrays for direct field access.
@@ -96,7 +99,7 @@ test "VoteTracker default is null votes" {
     const vote: VoteTracker = .{};
     try testing.expectEqual(NULL_VOTE_INDEX, vote.current_index);
     try testing.expectEqual(NULL_VOTE_INDEX, vote.next_index);
-    try testing.expectEqual(@as(Slot, 0), vote.next_slot);
+    try testing.expectEqual(INIT_VOTE_SLOT, vote.next_slot);
 }
 
 test "VoteTracker size" {
@@ -126,7 +129,7 @@ test "Votes ensureValidatorCount grow sequence" {
     for (0..votes.len()) |i| {
         try testing.expectEqual(NULL_VOTE_INDEX, s.current_indices[i]);
         try testing.expectEqual(NULL_VOTE_INDEX, s.next_indices[i]);
-        try testing.expectEqual(@as(Slot, 0), s.next_slots[i]);
+        try testing.expectEqual(INIT_VOTE_SLOT, s.next_slots[i]);
     }
 }
 

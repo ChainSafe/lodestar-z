@@ -222,24 +222,25 @@ pub fn stateTransition(
         inline else => |f| {
             switch (block.blockType()) {
                 inline else => |bt| {
-                    if (comptime bt == .blinded and f.lt(.bellatrix)) {
+                    if (comptime (bt == .blinded and f.lt(.bellatrix)) or (bt == .blinded and f.gte(.gloas))) {
                         return error.InvalidBlockTypeForFork;
+                    } else {
+                        try processBlock(
+                            f,
+                            allocator,
+                            config,
+                            post_epoch_cache,
+                            post_state.castToFork(f),
+                            &post_cached_state.slashings_cache,
+                            bt,
+                            block.castToFork(bt, f),
+                            BlockExternalData{
+                                .execution_payload_status = .valid,
+                                .data_availability_status = .available,
+                            },
+                            .{ .verify_signature = opts.verify_signatures },
+                        );
                     }
-                    try processBlock(
-                        f,
-                        allocator,
-                        config,
-                        post_epoch_cache,
-                        post_state.castToFork(f),
-                        &post_cached_state.slashings_cache,
-                        bt,
-                        block.castToFork(bt, f),
-                        BlockExternalData{
-                            .execution_payload_status = .valid,
-                            .data_availability_status = .available,
-                        },
-                        .{ .verify_signature = opts.verify_signatures },
-                    );
                 },
             }
         },

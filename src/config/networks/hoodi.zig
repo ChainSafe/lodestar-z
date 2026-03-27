@@ -1,3 +1,4 @@
+const std = @import("std");
 const ChainConfig = @import("../ChainConfig.zig");
 const BeaconConfig = @import("../BeaconConfig.zig");
 const b = @import("hex").hexToBytesComptime;
@@ -29,6 +30,8 @@ pub const chain_config = mainnet.chain_config.merge(.{
     .ELECTRA_FORK_EPOCH = 2048,
     .FULU_FORK_VERSION = b(4, "0x70000910"),
     .FULU_FORK_EPOCH = 50688,
+    .GLOAS_FORK_VERSION = b(4, "0x80000910"),
+    .GLOAS_FORK_EPOCH = std.math.maxInt(u64),
 
     // Time parameters
     .SECONDS_PER_ETH1_BLOCK = 12,

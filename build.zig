@@ -431,6 +431,75 @@ pub fn build(b: *std.Build) void {
     const tls_run_exe_bench_hashing = b.step("run:bench_hashing", "Run the bench_hashing executable");
     tls_run_exe_bench_hashing.dependOn(&run_exe_bench_hashing.step);
 
+    const module_bench_fork_choice_update_head = b.createModule(.{
+        .root_source_file = b.path("bench/fork_choice/update_head.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("bench_fork_choice_update_head"), module_bench_fork_choice_update_head) catch @panic("OOM");
+
+    const exe_bench_fork_choice_update_head = b.addExecutable(.{
+        .name = "bench_fork_choice_update_head",
+        .root_module = module_bench_fork_choice_update_head,
+    });
+
+    const install_exe_bench_fork_choice_update_head = b.addInstallArtifact(exe_bench_fork_choice_update_head, .{});
+
+    const tls_install_exe_bench_fork_choice_update_head = b.step("build-exe:bench_fork_choice_update_head", "Install the bench_fork_choice_update_head executable");
+    tls_install_exe_bench_fork_choice_update_head.dependOn(&install_exe_bench_fork_choice_update_head.step);
+    b.getInstallStep().dependOn(&install_exe_bench_fork_choice_update_head.step);
+
+    const run_exe_bench_fork_choice_update_head = b.addRunArtifact(exe_bench_fork_choice_update_head);
+    if (b.args) |args| run_exe_bench_fork_choice_update_head.addArgs(args);
+    const tls_run_exe_bench_fork_choice_update_head = b.step("run:bench_fork_choice_update_head", "Run the bench_fork_choice_update_head executable");
+    tls_run_exe_bench_fork_choice_update_head.dependOn(&run_exe_bench_fork_choice_update_head.step);
+
+    const module_bench_fork_choice_compute_deltas = b.createModule(.{
+        .root_source_file = b.path("bench/fork_choice/compute_deltas.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("bench_fork_choice_compute_deltas"), module_bench_fork_choice_compute_deltas) catch @panic("OOM");
+
+    const exe_bench_fork_choice_compute_deltas = b.addExecutable(.{
+        .name = "bench_fork_choice_compute_deltas",
+        .root_module = module_bench_fork_choice_compute_deltas,
+    });
+
+    const install_exe_bench_fork_choice_compute_deltas = b.addInstallArtifact(exe_bench_fork_choice_compute_deltas, .{});
+
+    const tls_install_exe_bench_fork_choice_compute_deltas = b.step("build-exe:bench_fork_choice_compute_deltas", "Install the bench_fork_choice_compute_deltas executable");
+    tls_install_exe_bench_fork_choice_compute_deltas.dependOn(&install_exe_bench_fork_choice_compute_deltas.step);
+    b.getInstallStep().dependOn(&install_exe_bench_fork_choice_compute_deltas.step);
+
+    const run_exe_bench_fork_choice_compute_deltas = b.addRunArtifact(exe_bench_fork_choice_compute_deltas);
+    if (b.args) |args| run_exe_bench_fork_choice_compute_deltas.addArgs(args);
+    const tls_run_exe_bench_fork_choice_compute_deltas = b.step("run:bench_fork_choice_compute_deltas", "Run the bench_fork_choice_compute_deltas executable");
+    tls_run_exe_bench_fork_choice_compute_deltas.dependOn(&run_exe_bench_fork_choice_compute_deltas.step);
+
+    const module_bench_fork_choice_on_attestation = b.createModule(.{
+        .root_source_file = b.path("bench/fork_choice/on_attestation.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("bench_fork_choice_on_attestation"), module_bench_fork_choice_on_attestation) catch @panic("OOM");
+
+    const exe_bench_fork_choice_on_attestation = b.addExecutable(.{
+        .name = "bench_fork_choice_on_attestation",
+        .root_module = module_bench_fork_choice_on_attestation,
+    });
+
+    const install_exe_bench_fork_choice_on_attestation = b.addInstallArtifact(exe_bench_fork_choice_on_attestation, .{});
+
+    const tls_install_exe_bench_fork_choice_on_attestation = b.step("build-exe:bench_fork_choice_on_attestation", "Install the bench_fork_choice_on_attestation executable");
+    tls_install_exe_bench_fork_choice_on_attestation.dependOn(&install_exe_bench_fork_choice_on_attestation.step);
+    b.getInstallStep().dependOn(&install_exe_bench_fork_choice_on_attestation.step);
+
+    const run_exe_bench_fork_choice_on_attestation = b.addRunArtifact(exe_bench_fork_choice_on_attestation);
+    if (b.args) |args| run_exe_bench_fork_choice_on_attestation.addArgs(args);
+    const tls_run_exe_bench_fork_choice_on_attestation = b.step("run:bench_fork_choice_on_attestation", "Run the bench_fork_choice_on_attestation executable");
+    tls_run_exe_bench_fork_choice_on_attestation.dependOn(&run_exe_bench_fork_choice_on_attestation.step);
+
     const module_bench_process_block = b.createModule(.{
         .root_source_file = b.path("bench/state_transition/process_block.zig"),
         .target = target,
@@ -839,6 +908,48 @@ pub fn build(b: *std.Build) void {
     tls_run_test_bench_hashing.dependOn(&run_test_bench_hashing.step);
     tls_run_test.dependOn(&run_test_bench_hashing.step);
 
+    const test_bench_fork_choice_update_head = b.addTest(.{
+        .name = "bench_fork_choice_update_head",
+        .root_module = module_bench_fork_choice_update_head,
+        .filters = b.option([][]const u8, "bench_fork_choice_update_head.filters", "bench_fork_choice_update_head test filters") orelse &[_][]const u8{},
+    });
+    const install_test_bench_fork_choice_update_head = b.addInstallArtifact(test_bench_fork_choice_update_head, .{});
+    const tls_install_test_bench_fork_choice_update_head = b.step("build-test:bench_fork_choice_update_head", "Install the bench_fork_choice_update_head test");
+    tls_install_test_bench_fork_choice_update_head.dependOn(&install_test_bench_fork_choice_update_head.step);
+
+    const run_test_bench_fork_choice_update_head = b.addRunArtifact(test_bench_fork_choice_update_head);
+    const tls_run_test_bench_fork_choice_update_head = b.step("test:bench_fork_choice_update_head", "Run the bench_fork_choice_update_head test");
+    tls_run_test_bench_fork_choice_update_head.dependOn(&run_test_bench_fork_choice_update_head.step);
+    tls_run_test.dependOn(&run_test_bench_fork_choice_update_head.step);
+
+    const test_bench_fork_choice_compute_deltas = b.addTest(.{
+        .name = "bench_fork_choice_compute_deltas",
+        .root_module = module_bench_fork_choice_compute_deltas,
+        .filters = b.option([][]const u8, "bench_fork_choice_compute_deltas.filters", "bench_fork_choice_compute_deltas test filters") orelse &[_][]const u8{},
+    });
+    const install_test_bench_fork_choice_compute_deltas = b.addInstallArtifact(test_bench_fork_choice_compute_deltas, .{});
+    const tls_install_test_bench_fork_choice_compute_deltas = b.step("build-test:bench_fork_choice_compute_deltas", "Install the bench_fork_choice_compute_deltas test");
+    tls_install_test_bench_fork_choice_compute_deltas.dependOn(&install_test_bench_fork_choice_compute_deltas.step);
+
+    const run_test_bench_fork_choice_compute_deltas = b.addRunArtifact(test_bench_fork_choice_compute_deltas);
+    const tls_run_test_bench_fork_choice_compute_deltas = b.step("test:bench_fork_choice_compute_deltas", "Run the bench_fork_choice_compute_deltas test");
+    tls_run_test_bench_fork_choice_compute_deltas.dependOn(&run_test_bench_fork_choice_compute_deltas.step);
+    tls_run_test.dependOn(&run_test_bench_fork_choice_compute_deltas.step);
+
+    const test_bench_fork_choice_on_attestation = b.addTest(.{
+        .name = "bench_fork_choice_on_attestation",
+        .root_module = module_bench_fork_choice_on_attestation,
+        .filters = b.option([][]const u8, "bench_fork_choice_on_attestation.filters", "bench_fork_choice_on_attestation test filters") orelse &[_][]const u8{},
+    });
+    const install_test_bench_fork_choice_on_attestation = b.addInstallArtifact(test_bench_fork_choice_on_attestation, .{});
+    const tls_install_test_bench_fork_choice_on_attestation = b.step("build-test:bench_fork_choice_on_attestation", "Install the bench_fork_choice_on_attestation test");
+    tls_install_test_bench_fork_choice_on_attestation.dependOn(&install_test_bench_fork_choice_on_attestation.step);
+
+    const run_test_bench_fork_choice_on_attestation = b.addRunArtifact(test_bench_fork_choice_on_attestation);
+    const tls_run_test_bench_fork_choice_on_attestation = b.step("test:bench_fork_choice_on_attestation", "Run the bench_fork_choice_on_attestation test");
+    tls_run_test_bench_fork_choice_on_attestation.dependOn(&run_test_bench_fork_choice_on_attestation.step);
+    tls_run_test.dependOn(&run_test_bench_fork_choice_on_attestation.step);
+
     const test_bench_process_block = b.addTest(.{
         .name = "bench_process_block",
         .root_module = module_bench_process_block,
@@ -1079,6 +1190,21 @@ pub fn build(b: *std.Build) void {
 
     module_bench_hashing.addImport("hashing", module_hashing);
     module_bench_hashing.addImport("zbench", dep_zbench.module("zbench"));
+
+    module_bench_fork_choice_update_head.addImport("fork_choice", module_fork_choice);
+    module_bench_fork_choice_update_head.addImport("config", module_config);
+    module_bench_fork_choice_update_head.addImport("constants", module_constants);
+    module_bench_fork_choice_update_head.addImport("zbench", dep_zbench.module("zbench"));
+
+    module_bench_fork_choice_compute_deltas.addImport("fork_choice", module_fork_choice);
+    module_bench_fork_choice_compute_deltas.addImport("zbench", dep_zbench.module("zbench"));
+
+    module_bench_fork_choice_on_attestation.addImport("fork_choice", module_fork_choice);
+    module_bench_fork_choice_on_attestation.addImport("config", module_config);
+    module_bench_fork_choice_on_attestation.addImport("constants", module_constants);
+    module_bench_fork_choice_on_attestation.addImport("consensus_types", module_consensus_types);
+    module_bench_fork_choice_on_attestation.addImport("fork_types", module_fork_types);
+    module_bench_fork_choice_on_attestation.addImport("zbench", dep_zbench.module("zbench"));
 
     module_bench_process_block.addImport("state_transition", module_state_transition);
     module_bench_process_block.addImport("fork_types", module_fork_types);
