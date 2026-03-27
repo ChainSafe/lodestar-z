@@ -2973,6 +2973,12 @@ fn parseIp4(s: []const u8) ?[4]u8 {
     /// - Signing the block
     /// - Broadcasting via gossip
     pub fn produceFullBlock(self: *BeaconNode, slot: u64, prod_config: BlockProductionConfig) !ProducedBlock {
+        // Merge node-level graffiti as fallback: per-request > node option > default
+        var effective_config = prod_config;
+        if (effective_config.graffiti == null) {
+            effective_config.graffiti = self.node_options.graffiti;
+        }
+
         const head = self.getHead();
         const parent_root = head.root;
 
@@ -3035,7 +3041,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             block_value,
             blob_commitments,
             eth1_data,
-            prod_config,
+            effective_config,
         );
 
         std.log.info("Produced full block: slot={d} proposer={d} parent={s}... value={d}", .{

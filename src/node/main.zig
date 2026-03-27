@@ -354,6 +354,13 @@ const app_spec = cli.app(.{
                     .group = "chain",
                 }, null),
 
+                .graffiti = cli.option(?[]const u8, .{
+                    .long = "graffiti",
+                    .description = "Custom graffiti string for block production (max 32 bytes UTF-8)",
+                    .env = "LODESTAR_Z_GRAFFITI",
+                    .group = "chain",
+                }, null),
+
                 .emit_payload_attributes = cli.flag(.{
                     .long = "emit-payload-attributes",
                     .description = "SSE emit execution payloadAttributes before every slot",
@@ -862,6 +869,14 @@ fn runBeacon(
         break :blk addr;
     } else null;
 
+    // Parse graffiti: UTF-8 string → [32]u8 zero-padded
+    const graffiti_bytes: ?[32]u8 = if (opts.graffiti) |graffiti_str| blk: {
+        var g: [32]u8 = [_]u8{0} ** 32;
+        const copy_len = @min(graffiti_str.len, 32);
+        @memcpy(g[0..copy_len], graffiti_str[0..copy_len]);
+        break :blk g;
+    } else null;
+
     // Build NodeOptions from parsed CLI args.
     const node_opts = NodeOptions{
         .data_dir = opts.data_dir,
@@ -883,6 +898,7 @@ fn runBeacon(
         .enable_mdns = opts.mdns,
         .subscribe_all_subnets = opts.subscribe_all_subnets,
         .suggested_fee_recipient = fee_recipient,
+        .graffiti = graffiti_bytes,
         .metrics_enabled = opts.metrics,
         .metrics_port = opts.metrics_port,
         .metrics_address = opts.metrics_address,
