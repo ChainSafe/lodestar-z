@@ -965,8 +965,8 @@ pub const AnyBeaconState = union(ForkSeq) {
                 .gloas = try populateFields(
                     ct.fulu.BeaconState,
                     ct.gloas.BeaconState,
-                    state.base_view.allocator,
-                    state.base_view.pool,
+                    state.allocator,
+                    state.pool,
                     state,
                 ),
             },
