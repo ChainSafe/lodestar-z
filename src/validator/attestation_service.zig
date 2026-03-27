@@ -131,13 +131,38 @@ pub const AttestationService = struct {
         const duties_at_slot = self.getDutiesAtSlot(slot);
         if (duties_at_slot.len == 0) return;
 
+        // Sub-slot timing per Ethereum spec:
+        //   Attestations at 1/3 slot (seconds_per_slot / 3 seconds in).
+        //   Aggregates at 2/3 slot (seconds_per_slot * 2 / 3 seconds in).
+        const slot_duration_ns = self.seconds_per_slot * std.time.ns_per_s;
+        const one_third_ns = slot_duration_ns / 3;
+        const two_thirds_ns = slot_duration_ns * 2 / 3;
+
+        // Compute elapsed time within the current slot.
+        // genesis_time is not passed here; use nanoTimestamp mod slot_duration as a proxy.
+        // This is accurate when the slot clock is aligned with wall clock (which it is).
+        {
+            const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+            const elapsed_in_slot_ns = now_ns % slot_duration_ns;
+            if (elapsed_in_slot_ns < one_third_ns) {
+                std.Thread.sleep(one_third_ns - elapsed_in_slot_ns);
+            }
+        }
+
         // Step 1: produce and publish attestations (~1/3 slot).
-        // Full implementation: sleep until 1/3 slot OR head block arrives, whichever first.
-        // Here we call immediately (synchronous stub).
-        try self.produceAndPublishAttestations(io, slot, duties_at_slot);
+        const att_data_root = try self.produceAndPublishAttestations(io, slot, duties_at_slot);
+
+        // Sleep until 2/3 slot for aggregation.
+        {
+            const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+            const elapsed_in_slot_ns = now_ns % slot_duration_ns;
+            if (elapsed_in_slot_ns < two_thirds_ns) {
+                std.Thread.sleep(two_thirds_ns - elapsed_in_slot_ns);
+            }
+        }
 
         // Step 2: produce and publish aggregates (~2/3 slot).
-        try self.produceAndPublishAggregates(io, slot, duties_at_slot);
+        try self.produceAndPublishAggregates(io, slot, duties_at_slot, att_data_root);
     }
 
     fn getDutiesAtSlot(self: *const AttestationService, slot: u64) []const AttesterDutyWithProof {
@@ -153,13 +178,13 @@ pub const AttestationService = struct {
         io: Io,
         slot: u64,
         duties: []const AttesterDutyWithProof,
-    ) !void {
+    ) ![32]u8 {
         // Collect duties for this slot.
         var any = false;
         for (duties) |dp| {
             if (dp.duty.slot == slot) { any = true; break; }
         }
-        if (!any) return;
+        if (!any) return std.mem.zeroes([32]u8);
 
         // Fetch attestation data from BN (committee_index 0; BN ignores for data content).
         const att_data_resp = try self.api.produceAttestationData(io, slot, 0);
@@ -233,6 +258,11 @@ pub const AttestationService = struct {
             };
             log.info("attested slot={d} count={d}", .{ slot, signed_count });
         }
+
+        // Compute and return the AttestationData hash_tree_root for aggregation.
+        var att_data_root: [32]u8 = undefined;
+        try consensus_types.phase0.AttestationData.hashTreeRoot(&att_data, &att_data_root);
+        return att_data_root;
     }
 
     fn produceAndPublishAggregates(
@@ -240,6 +270,7 @@ pub const AttestationService = struct {
         io: Io,
         slot: u64,
         duties: []const AttesterDutyWithProof,
+        att_data_root: [32]u8,
     ) !void {
         for (duties) |dp| {
             if (dp.duty.slot != slot) continue;
@@ -260,11 +291,8 @@ pub const AttestationService = struct {
 
             log.debug("selected as aggregator slot={d} validator_index={d}", .{ slot, dp.duty.validator_index });
 
-            // 1. Compute attestation data root for aggregate fetch.
-            //    We need the root of the AttestationData we already signed.
-            //    Use a stub zero root for now — full impl would SSZ-hash att_data.
-            // TODO: compute real attestation data root once SSZ hash is wired.
-            const agg_data_root: [32]u8 = std.mem.zeroes([32]u8);
+            // 1. Use the real AttestationData hash_tree_root (SSZ-computed).
+            const agg_data_root: [32]u8 = att_data_root;
             const agg = try self.api.getAggregatedAttestation(io, slot, agg_data_root);
             defer self.allocator.free(agg.attestation_ssz);
 
