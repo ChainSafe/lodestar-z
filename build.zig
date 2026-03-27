@@ -832,6 +832,7 @@ pub fn build(b: *std.Build) void {
     module_chain.addImport("fork_choice", module_fork_choice);
     module_chain.addImport("networking", module_networking);
     module_chain.addImport("bls", module_bls);
+    module_chain.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
 
     // sync module imports
     module_sync.addImport("db", module_db);

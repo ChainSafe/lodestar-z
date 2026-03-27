@@ -44,6 +44,7 @@ const MemoryKVStore = db_mod.MemoryKVStore;
 const LmdbKVStore = db_mod.LmdbKVStore;
 const chain_mod = @import("chain");
 const Chain = chain_mod.Chain;
+const QueuedStateRegen = chain_mod.QueuedStateRegen;
 const OpPool = chain_mod.OpPool;
 const SeenCache = chain_mod.SeenCache;
 const SyncContributionAndProofPool = chain_mod.SyncContributionAndProofPool;
@@ -719,6 +720,7 @@ pub const BeaconNode = struct {
     // Core components
     db: *BeaconDB,
     state_regen: *StateRegen,
+    queued_regen: *QueuedStateRegen,
     block_state_cache: *BlockStateCache,
     checkpoint_state_cache: *CheckpointStateCache,
     head_tracker: *HeadTracker,
@@ -907,6 +909,10 @@ pub const BeaconNode = struct {
         const regen = try allocator.create(StateRegen);
         regen.* = StateRegen.initWithDB(allocator, block_cache, cp_cache, db, null, null);
 
+        // QueuedStateRegen — wraps regen with request deduplication and priority queuing.
+        const queued_regen = try allocator.create(QueuedStateRegen);
+        queued_regen.* = QueuedStateRegen.init(allocator, regen);
+
         // HeadTracker
         const head_tracker = try allocator.create(HeadTracker);
         head_tracker.* = HeadTracker.init(allocator, [_]u8{0} ** 32);
@@ -951,6 +957,7 @@ pub const BeaconNode = struct {
             head_tracker,
         );
         chain_struct.verify_signatures = opts.verify_signatures;
+        chain_struct.queued_regen = queued_regen;
 
         // API stubs
         const api_head = try allocator.create(api_mod.context.HeadTracker);
@@ -1065,6 +1072,7 @@ pub const BeaconNode = struct {
             .node_options = opts,
             .db = db,
             .state_regen = regen,
+            .queued_regen = queued_regen,
             .block_state_cache = block_cache,
             .checkpoint_state_cache = cp_cache,
             .head_tracker = head_tracker,
@@ -1160,6 +1168,8 @@ pub const BeaconNode = struct {
         allocator.destroy(self.block_import_ctx);
         allocator.destroy(self.head_state_cb_ctx);
 
+        self.queued_regen.deinit();
+        allocator.destroy(self.queued_regen);
         allocator.destroy(self.state_regen);
 
         self.checkpoint_state_cache.deinit();
@@ -1311,7 +1321,7 @@ pub const BeaconNode = struct {
         const genesis_slot = try genesis_state.state.slot();
 
         // Cache the genesis state
-        const state_root = try self.state_regen.onNewBlock(genesis_state, true);
+        const state_root = try self.queued_regen.onNewBlock(genesis_state, true);
 
         // Register genesis block_root → state_root mapping for block importer.
         // Incoming blocks reference parent_root = genesis_block_root, so the
@@ -1446,7 +1456,7 @@ pub const BeaconNode = struct {
         });
 
         // Cache the checkpoint state.
-        const cached_state_root = try self.state_regen.onNewBlock(checkpoint_state, true);
+        const cached_state_root = try self.queued_regen.onNewBlock(checkpoint_state, true);
 
         // Register block_root → state_root mapping.
         try self.block_importer.registerGenesisRoot(anchor_block_root, cached_state_root);
@@ -1688,7 +1698,7 @@ pub const BeaconNode = struct {
         try post_state.state.commit();
 
         // Cache the new state as the head.
-        const new_state_root = try self.state_regen.onNewBlock(post_state, true);
+        const new_state_root = try self.queued_regen.onNewBlock(post_state, true);
 
         // Update block_importer's block_root -> state_root mapping so the
         // next block import can find this state as parent.
@@ -4710,7 +4720,7 @@ test "BeaconNode: archiveState stores state bytes in DB and retrieves them" {
 
     // Place a state in the block cache with a known state root.
     const state = try test_state.cached_state.clone(allocator, .{});
-    const state_root = try node.state_regen.onNewBlock(state, true);
+    const state_root = try node.queued_regen.onNewBlock(state, true);
 
     const slot: u64 = 32; // epoch 1 boundary
 

@@ -120,10 +120,17 @@ pub fn getValidators(
         return buildValidatorResponse(ctx, state);
     }
 
-    // For non-head state_ids, we'd need to deserialize state from the DB.
-    // Full state deserialization requires a CachedBeaconState which is expensive;
-    // for now, return StateNotAvailable for non-head state_ids until full
-    // state regen is wired up.
+    // Try state regen callback for non-head state lookups.
+    if (ctx.state_regen_callback) |regen_cb| {
+        const state = switch (state_id) {
+            .root => |root| regen_cb.getStateByRoot(root),
+            .head, .justified => unreachable, // handled above
+            else => null, // slot-based lookup not yet wired
+        };
+        if (state) |s| return buildValidatorResponse(ctx, s);
+    }
+
+    // State regen not available or lookup failed.
     return error.StateNotAvailable;
 }
 
