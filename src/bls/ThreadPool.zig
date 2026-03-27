@@ -195,6 +195,9 @@ pub fn verifyMultipleAggregateSignatures(
         rands.len != n_elems)
         return BlstError.VerifyFail;
 
+    // Acquire dispatch lock — serializes concurrent verification requests.
+    // Uses tryLock+spinloop because std.atomic.Mutex (Zig 0.16) has no blocking lock().
+    // Contention is expected to be rare (typically one caller at a time).
     while (!pool.dispatch_mutex.tryLock()) {
         std.atomic.spinLoopHint();
     }
@@ -299,6 +302,7 @@ pub fn aggregateVerify(
     const n_elems = pks.len;
     if (n_elems == 0 or msgs.len != n_elems) return BlstError.VerifyFail;
 
+    // Acquire dispatch lock (see comment in verifyMultipleAggregateSignatures).
     while (!pool.dispatch_mutex.tryLock()) {
         std.atomic.spinLoopHint();
     }

@@ -20,7 +20,6 @@ const testing = std.testing;
 const networking = @import("networking");
 const GossipTopicType = networking.GossipTopicType;
 const gossip_decoding = networking.gossip_decoding;
-const decodeGossipMessage = networking.decodeGossipMessage;
 const DecodedGossipMessage = networking.DecodedGossipMessage;
 
 const chain = @import("chain");
@@ -219,8 +218,13 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: fast validation (< 1 ms)
     /// 3. Phase 2: queue full import as a work item
     pub fn onBeaconBlock(self: *GossipHandler, message_data: []const u8) !void {
-        // Phase 1a: Decompress + decode.
-        const decoded = decodeGossipMessage(self.allocator, .beacon_block, message_data) catch
+        // Decompress once — reused for decode, BLS verify, and import.
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        defer self.allocator.free(ssz_bytes);
+
+        // Phase 1a: Decode from already-decompressed SSZ bytes.
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .beacon_block, ssz_bytes) catch
             return GossipHandlerError.DecodeFailed;
         const blk = decoded.beacon_block;
 
@@ -244,11 +248,6 @@ pub const GossipHandler = struct {
 
         // Phase 1c: BLS signature verification (expensive but required before ACCEPT).
         // [REJECT] The proposer signature is valid.
-        const snappy = @import("networking").gossip_decoding;
-        const ssz_bytes = snappy.decompressGossipPayload(self.allocator, message_data) catch
-            return GossipHandlerError.DecodeFailed;
-        defer self.allocator.free(ssz_bytes);
-
         if (self.verifyBlockSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
                 std.log.warn("Gossip block rejected: invalid proposer signature slot={d}", .{blk.slot});
@@ -273,8 +272,13 @@ pub const GossipHandler = struct {
         // Requires epoch cache access (committee count per slot) — needs a callback or state query.
         _ = subnet_id;
 
-        // Phase 1a: Decompress + decode.
-        const decoded = decodeGossipMessage(self.allocator, .beacon_attestation, message_data) catch
+        // Decompress once — reused for decode, BLS verify, and import.
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        defer self.allocator.free(ssz_bytes);
+
+        // Phase 1a: Decode from already-decompressed SSZ bytes.
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .beacon_attestation, ssz_bytes) catch
             return GossipHandlerError.DecodeFailed;
         const att = decoded.beacon_attestation;
 
@@ -292,11 +296,7 @@ pub const GossipHandler = struct {
         // Phase 1c: BLS signature verification.
         // [REJECT] The attestation signature is valid.
         if (self.verifyAttestationSignatureFn) |verifyFn| {
-            // Decompress to get raw SSZ for signature verification.
-            const att_ssz = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
-                return GossipHandlerError.DecodeFailed;
-            defer self.allocator.free(att_ssz);
-            if (!verifyFn(self.node, att_ssz)) {
+            if (!verifyFn(self.node, ssz_bytes)) {
                 std.log.warn("Gossip attestation rejected: invalid signature slot={d}", .{att.slot});
                 return GossipHandlerError.ValidationRejected;
             }
@@ -328,8 +328,13 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: fast validation (aggregator bounds, slot range, dedup)
     /// 3. Phase 2: import to fork choice + attestation pool
     pub fn onAggregateAndProof(self: *GossipHandler, message_data: []const u8) !void {
-        // Phase 1a: Decompress + decode.
-        const decoded = decodeGossipMessage(self.allocator, .beacon_aggregate_and_proof, message_data) catch
+        // Decompress once — reused for decode, BLS verify, and import.
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        defer self.allocator.free(ssz_bytes);
+
+        // Phase 1a: Decode from already-decompressed SSZ bytes.
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .beacon_aggregate_and_proof, ssz_bytes) catch
             return GossipHandlerError.DecodeFailed;
         const agg = decoded.beacon_aggregate_and_proof;
 
@@ -347,10 +352,7 @@ pub const GossipHandler = struct {
         // Phase 1c: BLS signature verification.
         // [REJECT] selection_proof, aggregator signature, and aggregate signature are all valid.
         if (self.verifyAggregateSignatureFn) |verifyFn| {
-            const agg_ssz = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
-                return GossipHandlerError.DecodeFailed;
-            defer self.allocator.free(agg_ssz);
-            if (!verifyFn(self.node, agg_ssz)) {
+            if (!verifyFn(self.node, ssz_bytes)) {
                 std.log.warn("Gossip aggregate rejected: invalid signature aggregator={d}", .{agg.aggregator_index});
                 return GossipHandlerError.ValidationRejected;
             }
@@ -373,7 +375,13 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: basic bounds check (validator index within set)
     /// 3. Phase 2: import to op pool
     pub fn onVoluntaryExit(self: *GossipHandler, message_data: []const u8) !void {
-        const decoded = decodeGossipMessage(self.allocator, .voluntary_exit, message_data) catch
+        // Decompress once — reused for decode, BLS verify, and import.
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        defer self.allocator.free(ssz_bytes);
+
+        // Phase 1a: Decode from already-decompressed SSZ bytes.
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .voluntary_exit, ssz_bytes) catch
             return GossipHandlerError.DecodeFailed;
         const exit = decoded.voluntary_exit;
 
@@ -387,10 +395,7 @@ pub const GossipHandler = struct {
         // Phase 1c: BLS signature verification.
         // [REJECT] The voluntary exit signature is valid.
         if (self.verifyVoluntaryExitSignatureFn) |verifyFn| {
-            const exit_ssz = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
-                return GossipHandlerError.DecodeFailed;
-            defer self.allocator.free(exit_ssz);
-            if (!verifyFn(self.node, exit_ssz)) {
+            if (!verifyFn(self.node, ssz_bytes)) {
                 std.log.warn("Gossip voluntary exit rejected: invalid signature validator={d}", .{exit.validator_index});
                 return GossipHandlerError.ValidationRejected;
             }
@@ -415,7 +420,13 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: headers must have same slot but different body roots (different blocks)
     /// 3. Phase 2: import to op pool
     pub fn onProposerSlashing(self: *GossipHandler, message_data: []const u8) !void {
-        const decoded = decodeGossipMessage(self.allocator, .proposer_slashing, message_data) catch
+        // Decompress once — reused for decode, BLS verify, and import.
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        defer self.allocator.free(ssz_bytes);
+
+        // Phase 1a: Decode from already-decompressed SSZ bytes.
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .proposer_slashing, ssz_bytes) catch
             return GossipHandlerError.DecodeFailed;
         const ps = decoded.proposer_slashing;
 
@@ -429,11 +440,6 @@ pub const GossipHandler = struct {
         // Phase 1: body roots must differ (different blocks for same slot = slashable).
         if (std.mem.eql(u8, &ps.header_1_body_root, &ps.header_2_body_root))
             return GossipHandlerError.ValidationRejected;
-
-        // Decompress to get the raw SSZ for signature verification and pool import.
-        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
-            return GossipHandlerError.DecodeFailed;
-        defer self.allocator.free(ssz_bytes);
 
         // Phase 1c: BLS signature verification.
         // [REJECT] Both signed header signatures are valid.
@@ -463,17 +469,18 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: attestation data must be slashable (double vote or surround vote)
     /// 3. Phase 2: import raw SSZ to op pool (full deserialization happens at pool layer)
     pub fn onAttesterSlashing(self: *GossipHandler, message_data: []const u8) !void {
-        const decoded = decodeGossipMessage(self.allocator, .attester_slashing, message_data) catch
+        // Decompress once — reused for decode, BLS verify, and import.
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        defer self.allocator.free(ssz_bytes);
+
+        // Phase 1a: Decode from already-decompressed SSZ bytes.
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .attester_slashing, ssz_bytes) catch
             return GossipHandlerError.DecodeFailed;
         const as = decoded.attester_slashing;
 
         // Phase 1: attestation data must be slashable.
         if (!as.is_slashable) return GossipHandlerError.ValidationRejected;
-
-        // Decompress to get the raw SSZ for signature verification and pool import.
-        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
-            return GossipHandlerError.DecodeFailed;
-        defer self.allocator.free(ssz_bytes);
 
         // Phase 1c: BLS signature verification.
         // [REJECT] Both indexed attestation signatures are valid.
@@ -501,18 +508,19 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: validator index must be within known set
     /// 3. Phase 2: import to op pool
     pub fn onBlsToExecutionChange(self: *GossipHandler, message_data: []const u8) !void {
-        const decoded = decodeGossipMessage(self.allocator, .bls_to_execution_change, message_data) catch
+        // Decompress once — reused for decode, BLS verify, and import.
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        defer self.allocator.free(ssz_bytes);
+
+        // Phase 1a: Decode from already-decompressed SSZ bytes.
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .bls_to_execution_change, ssz_bytes) catch
             return GossipHandlerError.DecodeFailed;
         const change = decoded.bls_to_execution_change;
 
         // Phase 1: validator index must be within known set.
         const vc = self.getValidatorCount();
         if (change.validator_index >= vc) return GossipHandlerError.ValidationRejected;
-
-        // Decompress to get the raw SSZ for signature verification and pool import.
-        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
-            return GossipHandlerError.DecodeFailed;
-        defer self.allocator.free(ssz_bytes);
 
         // Phase 1c: BLS signature verification.
         // [REJECT] The BLS-to-execution change signature is valid.
@@ -542,7 +550,13 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: basic bounds check (aggregator within validator set)
     /// 3. Phase 2: log acceptance (no sync contribution pool yet)
     pub fn onSyncCommitteeContribution(self: *GossipHandler, message_data: []const u8) !void {
-        const decoded = decodeGossipMessage(self.allocator, .sync_committee_contribution_and_proof, message_data) catch
+        // Decompress once — reused for decode and import.
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        defer self.allocator.free(ssz_bytes);
+
+        // Phase 1a: Decode from already-decompressed SSZ bytes.
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .sync_committee_contribution_and_proof, ssz_bytes) catch
             return GossipHandlerError.DecodeFailed;
         const contrib = decoded.sync_committee_contribution_and_proof;
 
@@ -556,9 +570,6 @@ pub const GossipHandler = struct {
 
         // Phase 2: import to sync contribution pool.
         if (self.importSyncContributionFn) |importFn| {
-            const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
-                return GossipHandlerError.DecodeFailed;
-            defer self.allocator.free(ssz_bytes);
             importFn(self.node, ssz_bytes) catch |err| {
                 std.log.warn("Sync contribution import failed: {}", .{err});
             };
@@ -578,7 +589,13 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: basic bounds check
     /// 3. Phase 2: log acceptance (no sync committee message pool yet)
     pub fn onSyncCommitteeMessage(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
-        const decoded = decodeGossipMessage(self.allocator, .sync_committee, message_data) catch
+        // Decompress once — reused for decode, BLS verify, and import.
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        defer self.allocator.free(ssz_bytes);
+
+        // Phase 1a: Decode from already-decompressed SSZ bytes.
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .sync_committee, ssz_bytes) catch
             return GossipHandlerError.DecodeFailed;
         const msg = decoded.sync_committee;
 
@@ -593,10 +610,7 @@ pub const GossipHandler = struct {
         // Phase 1c: BLS signature verification.
         // [REJECT] The sync committee message signature is valid.
         if (self.verifySyncCommitteeSignatureFn) |verifyFn| {
-            const sc_ssz = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
-                return GossipHandlerError.DecodeFailed;
-            defer self.allocator.free(sc_ssz);
-            if (!verifyFn(self.node, sc_ssz)) {
+            if (!verifyFn(self.node, ssz_bytes)) {
                 std.log.warn("Gossip sync committee message rejected: invalid signature validator={d}", .{msg.validator_index});
                 return GossipHandlerError.ValidationRejected;
             }
@@ -604,10 +618,7 @@ pub const GossipHandler = struct {
 
         // Phase 2: import to sync committee message pool.
         if (self.importSyncCommitteeMessageFn) |importFn| {
-            const sc_ssz = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
-                return GossipHandlerError.DecodeFailed;
-            defer self.allocator.free(sc_ssz);
-            importFn(self.node, sc_ssz, subnet_id) catch |err| {
+            importFn(self.node, ssz_bytes, subnet_id) catch |err| {
                 std.log.warn("Sync committee message import failed: {}", .{err});
             };
         }
@@ -626,7 +637,13 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: basic bounds check (slot range, proposer)
     /// 3. Phase 2: decompress full payload and import via BeaconNode
     pub fn onBlobSidecar(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
-        const decoded = decodeGossipMessage(self.allocator, .blob_sidecar, message_data) catch
+        // Decompress once — reused for decode and import.
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        defer self.allocator.free(ssz_bytes);
+
+        // Phase 1a: Decode from already-decompressed SSZ bytes.
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .blob_sidecar, ssz_bytes) catch
             return GossipHandlerError.DecodeFailed;
         const blob = decoded.blob_sidecar;
 
@@ -640,12 +657,6 @@ pub const GossipHandler = struct {
         // Phase 1: proposer must be within known validator set.
         const vc = self.getValidatorCount();
         if (blob.proposer_index >= vc) return GossipHandlerError.ValidationRejected;
-
-        // Phase 2: decompress and import the full blob sidecar.
-        // The import function in BeaconNode stores the raw sidecar bytes.
-        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
-            return GossipHandlerError.DecodeFailed;
-        defer self.allocator.free(ssz_bytes);
 
         // Compute block root from the signed block header in the sidecar.
         // For now, use a synthetic root from (slot, proposer, parent) like blocks.
