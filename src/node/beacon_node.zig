@@ -2980,7 +2980,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             return .{
                 .head_slot = ss.head_slot,
                 .sync_distance = ss.sync_distance,
-                .is_syncing = ss.state == .syncing,
+                .is_syncing = ss.state == .syncing_finalized or ss.state == .syncing_head,
                 .is_optimistic = ss.is_optimistic,
                 .el_offline = self.el_offline,
             };
