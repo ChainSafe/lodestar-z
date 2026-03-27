@@ -20,6 +20,15 @@
 //!   --log-level <level>   Logging verbosity
 
 const std = @import("std");
+
+/// Override std.log to route through our logging framework.
+/// Set log_level to .debug so std.log does not eliminate calls at comptime —
+/// our GlobalLogger handles runtime level filtering with finer granularity
+/// (6 levels including verbose and trace).
+pub const std_options: std.Options = .{
+    .logFn = log_mod.stdLogFn,
+    .log_level = .debug,
+};
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const cli = @import("zig_cli");
@@ -935,6 +944,36 @@ fn runBeacon(
         };
         log_mod.global = log_mod.GlobalLogger.init(log_level, log_format);
     }
+
+    // Initialize file transport if --log-file is set.
+    var file_transport: ?log_mod.FileTransport = null;
+    if (opts.log_file) |log_file_path| {
+        const file_level: log_mod.Level = switch (opts.log_file_level) {
+                .@"error" => .err,
+                .warn => .warn,
+                .info => .info,
+                .verbose => .verbose,
+                .debug => .debug,
+                .trace => .trace,
+            };
+
+        file_transport = log_mod.FileTransport.init(log_file_path, file_level, .{
+            .max_size_bytes = 100 * 1024 * 1024, // 100MB default
+            .max_files = opts.log_file_daily_rotate,
+            .daily = opts.log_file_daily_rotate > 0,
+        }) catch |err| blk: {
+            std.log.err("Failed to open log file '{s}': {}", .{ log_file_path, err });
+            break :blk null;
+        };
+
+        if (file_transport) |*ft| {
+            log_mod.global.setFileTransport(ft);
+            std.log.info("File logging enabled: {s} (level={s})", .{
+                log_file_path, file_level.asText(),
+            });
+        }
+    }
+    defer if (file_transport) |*ft| ft.close();
 
     // Create the BeaconNode.
     const node = try BeaconNode.init(allocator, beacon_config, node_opts);
