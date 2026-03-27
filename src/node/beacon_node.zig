@@ -3046,6 +3046,141 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         });
 
         return block;
+
+    }
+    /// Produce a full block and import it locally.
+    ///
+    /// This is the complete block production pipeline:
+    /// 1. Produce block body with execution payload
+    /// 2. Wrap in BeaconBlock with slot, proposer, parent root
+    /// 3. Compute state root via state transition (with verification off)
+    /// 4. Wrap in SignedBeaconBlock (with zero signature — VC signs separately)
+    /// 5. Import the block locally
+    ///
+    /// Returns the signed block and import result. The block is owned by the
+    /// caller and must be freed.
+    ///
+    /// Preconditions:
+    /// - preparePayload() called at slot N-1 (to have a cached payload)
+    /// - Head state available in block_state_cache
+    pub fn produceAndImportBlock(
+        self: *BeaconNode,
+        slot: u64,
+        prod_config: BlockProductionConfig,
+    ) !struct { signed_block: *types.electra.SignedBeaconBlock.Type, import_result: ImportResult } {
+        // 1. Produce block body
+        var produced = try self.produceFullBlock(slot, prod_config);
+
+        // 2. Build BeaconBlock (state_root is zeroed; we compute it next)
+        const signed_block = try self.allocator.create(types.electra.SignedBeaconBlock.Type);
+        errdefer self.allocator.destroy(signed_block);
+
+        signed_block.* = .{
+            .message = .{
+                .slot = slot,
+                .proposer_index = produced.proposer_index,
+                .parent_root = produced.parent_root,
+                .state_root = [_]u8{0} ** 32, // filled below
+                .body = produced.block_body,
+            },
+            .signature = [_]u8{0} ** 96, // zero sig — VC signs
+        };
+
+        // 3. Compute state root by running state transition
+        if (self.block_state_cache.get(produced.parent_root)) |head_state| {
+            const any_block = fork_types.AnySignedBeaconBlock{ .full_electra = signed_block };
+
+            const post_state = state_transition.stateTransition(
+                self.allocator,
+                head_state,
+                any_block,
+                .{
+                    .verify_state_root = false,
+                    .verify_proposer = false,
+                    .verify_signatures = false,
+                    .transfer_cache = false,
+                },
+            ) catch |err| {
+                std.log.warn("State transition for state root computation failed: {}", .{err});
+                return err;
+            };
+            defer {
+                post_state.deinit();
+                self.allocator.destroy(post_state);
+            }
+
+            const state_root = post_state.state.hashTreeRoot() catch |err| {
+                std.log.warn("hashTreeRoot failed: {}", .{err});
+                return err;
+            };
+
+            // Fill in the computed state root
+            signed_block.message.state_root = state_root.*;
+
+            std.log.info("Computed state root for block: slot={d} state_root={s}...", .{
+                slot,
+                &std.fmt.bytesToHex(state_root[0..4], .lower),
+            });
+        } else {
+            std.log.warn("No head state available for state root computation at slot={d}", .{slot});
+        }
+
+        // 4. Import the block locally
+        const import_result = try self.importBlock(signed_block);
+
+        std.log.info("Block produced and imported: slot={d} root={s}...", .{
+            slot,
+            &std.fmt.bytesToHex(import_result.block_root[0..4], .lower),
+        });
+
+        // Transfer body ownership — ProducedBlock.deinit not needed since
+        // the signed_block now owns the body data
+        produced.block_body = types.electra.BeaconBlockBody.default_value;
+
+        return .{
+            .signed_block = signed_block,
+            .import_result = import_result,
+        };
+    }
+
+    /// Broadcast a signed block to the network via gossip.
+    ///
+    /// Serializes and publishes the block on the beacon_block gossip topic.
+    /// Should be called after produceAndImportBlock() succeeds.
+    ///
+    /// NOTE: Gossip encoding (SSZ + Snappy) and topic construction are
+    /// handled by the networking layer's gossip adapter. This method
+    /// delegates to publishGossip which handles compression internally.
+    pub fn broadcastBlock(
+        self: *BeaconNode,
+        signed_block: *const types.electra.SignedBeaconBlock.Type,
+    ) !void {
+        const p2p = self.p2p_service orelse {
+            std.log.warn("No P2P service — cannot broadcast block at slot={d}", .{signed_block.message.slot});
+            return;
+        };
+
+        // Serialize the signed block to SSZ
+        const serialized_size = types.electra.SignedBeaconBlock.serializedSize(signed_block);
+        const buf = try self.allocator.alloc(u8, serialized_size);
+        defer self.allocator.free(buf);
+        _ = types.electra.SignedBeaconBlock.serializeIntoBytes(signed_block, buf);
+
+        // Build gossip topic for current fork
+        const head_slot = self.getHead().slot;
+        const fork_digest = self.config.forkDigestAtSlot(head_slot, self.genesis_validators_root);
+        var topic_buf: [128]u8 = undefined;
+        const topic = std.fmt.bufPrint(&topic_buf, "/eth2/{s}/beacon_block/ssz_snappy", .{
+            &std.fmt.bytesToHex(fork_digest[0..], .lower),
+        }) catch return;
+
+        // Publish via gossip (P2P layer handles Snappy compression)
+        _ = p2p.publishGossip(topic, buf) catch |err| {
+            std.log.warn("Failed to broadcast block at slot={d}: {}", .{ signed_block.message.slot, err });
+            return;
+        };
+
+        std.log.info("Broadcast block via gossip: slot={d}", .{signed_block.message.slot});
     }
     /// Used for req/resp Status exchanges with peers.
     pub fn getStatus(self: *const BeaconNode) StatusMessage.Type {
