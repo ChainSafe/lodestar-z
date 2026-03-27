@@ -19,6 +19,18 @@ pub fn computeSigningRoot(comptime T: type, ssz_object: *const T.Type, domain: *
     try types.phase0.SigningData.hashTreeRoot(&domain_wrapped_object, out);
 }
 
+/// Return the signing root of a variable-length SSZ object (requires allocator for hashTreeRoot).
+pub fn computeSigningRootAlloc(comptime T: type, allocator: Allocator, ssz_object: *const T.Type, domain: *const Domain, out: *[32]u8) !void {
+    var object_root: Root = undefined;
+    try T.hashTreeRoot(allocator, ssz_object, &object_root);
+    const domain_wrapped_object: SigningData = .{
+        .object_root = object_root,
+        .domain = domain.*,
+    };
+
+    try types.phase0.SigningData.hashTreeRoot(&domain_wrapped_object, out);
+}
+
 pub fn computeBlockSigningRoot(allocator: Allocator, block: AnyBeaconBlock, domain: *const Domain, out: *[32]u8) !void {
     var object_root: Root = undefined;
     try block.hashTreeRoot(allocator, &object_root);

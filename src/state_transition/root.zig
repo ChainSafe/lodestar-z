@@ -8,6 +8,7 @@ pub const TransitionOpt = @import("state_transition.zig").TransitionOpt;
 pub const metrics = @import("metrics.zig");
 
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
+pub const computeSigningRootAlloc = @import("./utils/signing_root.zig").computeSigningRootAlloc;
 pub const computeEpochAtSlot = @import("./utils/epoch.zig").computeEpochAtSlot;
 pub const CachedBeaconState = @import("./cache/state_cache.zig").CachedBeaconState;
 pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
@@ -84,6 +85,7 @@ pub const ValidatorStatus = validator_status.ValidatorStatus;
 pub const getValidatorStatus = validator_status.getValidatorStatus;
 pub const getBlockRootAtSlot = @import("./utils/block_root.zig").getBlockRootAtSlot;
 pub const computeStartSlotAtEpoch = @import("./utils/epoch.zig").computeStartSlotAtEpoch;
+pub const isAggregatorFromCommitteeLength = @import("./utils/aggregator.zig").isAggregatorFromCommitteeLength;
 pub const deinitStateTransition = @import("./state_transition.zig").deinitStateTransition;
 pub const isExecutionEnabled = @import("./utils/execution.zig").isExecutionEnabled;
 pub const isMergeTransitionComplete = @import("./utils/execution.zig").isMergeTransitionComplete;
@@ -93,6 +95,20 @@ pub const getEffectiveBalanceIncrementsZeroInactive = @import("./utils/balance.z
 pub const WithdrawalsResult = @import("./block/process_withdrawals.zig").WithdrawalsResult;
 
 pub const test_utils = @import("test_utils/root.zig");
+
+// Signature set constructors for BLS verification (gossip + block processing).
+pub const signature_sets = struct {
+    pub const proposer = @import("signature_sets/proposer.zig");
+    pub const voluntary_exits = @import("signature_sets/voluntary_exits.zig");
+    pub const proposer_slashings = @import("signature_sets/proposer_slashings.zig");
+    pub const indexed_attestation = @import("signature_sets/indexed_attestation.zig");
+    pub const bls_to_execution_change = @import("signature_sets/bls_to_execution_change.zig");
+
+    pub const SingleSignatureSet = @import("utils/signature_sets.zig").SingleSignatureSet;
+    pub const AggregatedSignatureSet = @import("utils/signature_sets.zig").AggregatedSignatureSet;
+    pub const verifySingleSignatureSet = @import("utils/signature_sets.zig").verifySingleSignatureSet;
+    pub const verifyAggregatedSignatureSet = @import("utils/signature_sets.zig").verifyAggregatedSignatureSet;
+};
 
 pub const bls = @import("utils/bls.zig");
 pub const load_state = @import("./utils/load_state.zig");
