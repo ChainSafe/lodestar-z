@@ -166,12 +166,12 @@ pub const ClientKind = enum {
     pub fn fromAgentVersion(agent: []const u8) ClientKind {
         if (agent.len == 0) return .unknown;
         if (std.mem.startsWith(u8, agent, "Lighthouse")) return .lighthouse;
+        if (std.mem.startsWith(u8, agent, "lodestar-z")) return .lodestar_z;
         if (std.mem.startsWith(u8, agent, "lodestar")) return .lodestar;
         if (std.mem.startsWith(u8, agent, "Nimbus")) return .nimbus;
         if (std.mem.startsWith(u8, agent, "Prysm")) return .prysm;
         if (std.mem.startsWith(u8, agent, "teku")) return .teku;
         if (std.mem.startsWith(u8, agent, "Grandine")) return .grandine;
-        if (std.mem.startsWith(u8, agent, "lodestar-z")) return .lodestar_z;
         return .unknown;
     }
 };
