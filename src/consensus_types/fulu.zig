@@ -102,6 +102,26 @@ pub const MatrixEntry = ssz.FixedContainerType(struct {
     row_index: RowIndex,
 });
 
+// Cell Dissemination types (consensus-specs #4558)
+pub const PartialDataColumnSidecar = ssz.VariableContainerType(struct {
+    cells_present_bitmap: ssz.BitListType(preset.MAX_BLOB_COMMITMENTS_PER_BLOCK),
+    partial_column: ssz.FixedListType(Cell, preset.MAX_BLOB_COMMITMENTS_PER_BLOCK),
+    kzg_proofs: ssz.FixedListType(p.KZGProof, preset.MAX_BLOB_COMMITMENTS_PER_BLOCK),
+    // Optional header, only sent on eager pushes
+    header: ssz.VariableListType(PartialDataColumnHeader, 1),
+});
+
+pub const PartialDataColumnPartsMetadata = ssz.VariableContainerType(struct {
+    available: ssz.BitListType(preset.MAX_BLOB_COMMITMENTS_PER_BLOCK),
+    requests: ssz.BitListType(preset.MAX_BLOB_COMMITMENTS_PER_BLOCK),
+});
+
+pub const PartialDataColumnHeader = ssz.VariableContainerType(struct {
+    kzg_commitments: ssz.FixedListType(p.KZGCommitment, preset.MAX_BLOB_COMMITMENTS_PER_BLOCK),
+    signed_block_header: SignedBeaconBlockHeader,
+    kzg_commitments_inclusion_proof: ssz.FixedVectorType(p.Bytes32, preset.KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH),
+});
+
 // Light client types
 pub const LightClientHeader = electra.LightClientHeader;
 pub const LightClientBootstrap = electra.LightClientBootstrap;
