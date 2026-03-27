@@ -3341,8 +3341,17 @@ fn gossipVerifyAttestationSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool
 }
 
 /// Verify all BLS signatures on a gossip SignedAggregateAndProof.
-/// This checks: selection_proof, aggregator signature (signed_aggregate_and_proof.signature),
-/// and the aggregate attestation signature.
+///
+/// Per the consensus spec (p2p-interface.md) this checks three signatures:
+/// 1. selection_proof — aggregator signed over `slot` with DOMAIN_SELECTION_PROOF
+/// 2. aggregator signature — outer SignedAggregateAndProof.signature over
+///    AggregateAndProof with DOMAIN_AGGREGATE_AND_PROOF
+/// 3. aggregate attestation — aggregate BLS signature over AttestationData
+///    with DOMAIN_BEACON_ATTESTER
+///
+/// Additionally validates:
+/// - aggregator_index is within the committee for the attestation's slot/index
+/// - aggregator is selected via is_aggregator check on committee length
 fn gossipVerifyAggregateSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
     const head_state_root = node.head_tracker.head_state_root;
@@ -3353,23 +3362,91 @@ fn gossipVerifyAggregateSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
     defer signed_agg.message.aggregate.aggregation_bits.data.deinit(node.allocator);
 
     const agg = signed_agg.message;
+    const att_data = agg.aggregate.data;
+    const att_slot = att_data.slot;
+    const committee_index = att_data.index;
+    const epoch = cached.epoch_cache.epoch;
 
-    // Full aggregate verification requires computing the committee to get attesting indices.
-    // TODO: Once we have committee computation in the gossip path, compute proper indexed
-    // attestation and verify the aggregate BLS signature over AttestationData.
-
-    // 2. Verify selection_proof: the aggregator proves they were selected.
+    // [REJECT] aggregator_index must be within the validator set.
     if (agg.aggregator_index >= cached.epoch_cache.index_to_pubkey.items.len) return false;
+    const aggregator_pubkey = cached.epoch_cache.index_to_pubkey.items[agg.aggregator_index];
 
-    // TODO: Complete aggregate signature verification.
-    // Full verification requires committee index resolution to compute attesting
-    // indices, plus domain computation for:
-    //   - DOMAIN_SELECTION_PROOF for selection_proof
-    //   - DOMAIN_AGGREGATE_AND_PROOF for the outer signature
-    //   - DOMAIN_BEACON_ATTESTER for the aggregate attestation (att_signing_root)
-    // For now, structural validation in Phase 1 catches most invalid messages.
-    // This is a known gap — tracked for follow-up.
-    return true;
+    // Get the beacon committee for the attestation's slot + committee_index.
+    const committee = cached.epoch_cache.getBeaconCommittee(att_slot, committee_index) catch return false;
+
+    // [REJECT] The aggregator's validator index is within the committee.
+    var aggregator_in_committee = false;
+    for (committee) |vi| {
+        if (vi == agg.aggregator_index) {
+            aggregator_in_committee = true;
+            break;
+        }
+    }
+    if (!aggregator_in_committee) return false;
+
+    // [REJECT] aggregate_and_proof.selection_proof selects the validator as an aggregator.
+    // is_aggregator: hash(selection_proof)[0:8] as u64 % max(1, committee_len / TARGET_AGGREGATORS) == 0
+    const isAggregatorFromCommitteeLength = @import("state_transition").isAggregatorFromCommitteeLength;
+    if (!isAggregatorFromCommitteeLength(committee.len, agg.selection_proof)) return false;
+
+    const computeSigningRoot = state_transition.computeSigningRoot;
+    const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
+
+    // --- Signature 1: selection_proof ---
+    // signing_root = compute_signing_root(Slot, att_slot, getDomain(DOMAIN_SELECTION_PROOF, att_slot))
+    const selection_domain = node.config.getDomain(epoch, constants.DOMAIN_SELECTION_PROOF, att_slot) catch return false;
+    var selection_signing_root: [32]u8 = undefined;
+    computeSigningRoot(types.primitive.Slot, &att_slot, selection_domain, &selection_signing_root) catch return false;
+
+    const selection_sig_set = state_transition.signature_sets.SingleSignatureSet{
+        .pubkey = aggregator_pubkey,
+        .signing_root = selection_signing_root,
+        .signature = agg.selection_proof,
+    };
+    const selection_valid = state_transition.signature_sets.verifySingleSignatureSet(&selection_sig_set) catch return false;
+    if (!selection_valid) return false;
+
+    // --- Signature 2: aggregator signature (outer SignedAggregateAndProof.signature) ---
+    // signing_root = compute_signing_root(AggregateAndProof, agg, getDomain(DOMAIN_AGGREGATE_AND_PROOF, start_slot))
+    const computeSigningRootAlloc = state_transition.computeSigningRootAlloc;
+    const target_epoch_start_slot = computeStartSlotAtEpoch(att_data.target.epoch);
+    const agg_domain = node.config.getDomain(epoch, constants.DOMAIN_AGGREGATE_AND_PROOF, target_epoch_start_slot) catch return false;
+    var agg_signing_root: [32]u8 = undefined;
+    computeSigningRootAlloc(types.phase0.AggregateAndProof, node.allocator, &agg, agg_domain, &agg_signing_root) catch return false;
+
+    const agg_sig_set = state_transition.signature_sets.SingleSignatureSet{
+        .pubkey = aggregator_pubkey,
+        .signing_root = agg_signing_root,
+        .signature = signed_agg.signature,
+    };
+    const agg_valid = state_transition.signature_sets.verifySingleSignatureSet(&agg_sig_set) catch return false;
+    if (!agg_valid) return false;
+
+    // --- Signature 3: aggregate attestation signature ---
+    // The aggregate attestation is a BLS aggregate over AttestationData signed by all
+    // attesting validators with DOMAIN_BEACON_ATTESTER.
+    // Get attesting indices from aggregation_bits intersected with committee.
+    var attesting_indices = agg.aggregate.aggregation_bits.intersectValues(
+        u64,
+        node.allocator,
+        committee,
+    ) catch return false;
+    defer attesting_indices.deinit();
+
+    if (attesting_indices.items.len == 0) return false;
+
+    // Build aggregated signature set with all attesting pubkeys.
+    const att_sig_set = state_transition.signature_sets.indexed_attestation.getAttestationWithIndicesSignatureSet(
+        node.allocator,
+        node.config,
+        cached.epoch_cache,
+        &att_data,
+        agg.aggregate.signature,
+        attesting_indices.items,
+    ) catch return false;
+    defer node.allocator.free(att_sig_set.pubkeys);
+
+    return state_transition.signature_sets.verifyAggregatedSignatureSet(&att_sig_set) catch false;
 }
 
 /// Verify the BLS signature on a gossip sync committee message.

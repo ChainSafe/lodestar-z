@@ -258,6 +258,9 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: fast validation (< 1 ms) — slot range, committee bounds, dedup
     /// 3. Phase 2: import to fork choice + attestation pool
     pub fn onAttestation(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
+        // TODO: Validate attestation is on the correct subnet.
+        // Spec: compute_subnet_for_attestation(committees_per_slot, slot, committee_index) == subnet_id
+        // Requires epoch cache access (committee count per slot) — needs a callback or state query.
         _ = subnet_id;
 
         // Phase 1a: Decompress + decode.
