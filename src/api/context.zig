@@ -116,6 +116,59 @@ pub const OpPoolCallback = struct {
     getPoolCountsFn: *const fn (ptr: *anyopaque) [5]usize,
 };
 
+
+// ---------------------------------------------------------------------------
+// Keymanager callback — type-erased access to ValidatorStore + auth
+// ---------------------------------------------------------------------------
+
+/// Validator key info for listing.
+pub const ValidatorKeyInfo = struct {
+    /// Compressed BLS public key (48 bytes).
+    pubkey: [48]u8,
+    /// HD derivation path (empty for imported keys).
+    derivation_path: []const u8,
+    /// Whether this is a read-only (remote signer) key.
+    readonly: bool,
+};
+
+/// Remote signer key info.
+pub const RemoteKeyInfo = struct {
+    /// Compressed BLS public key (48 bytes).
+    pubkey: [48]u8,
+    /// Web3Signer URL.
+    url: []const u8,
+    /// Always false for remote keys managed here.
+    readonly: bool,
+};
+
+/// Type-erased callback interface to the validator key manager.
+/// Allows the API module to manage keys without importing the validator module.
+pub const KeymanagerCallback = struct {
+    ptr: *anyopaque,
+    /// Validate bearer token — returns error.Unauthorized if invalid.
+    validateTokenFn: *const fn (ptr: *anyopaque, auth_header: ?[]const u8) anyerror!void,
+    /// List all local validator keys. Caller owns result + slice.
+    listKeysFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]ValidatorKeyInfo,
+    /// Import a keystore JSON string with password. Returns status string ("imported"/"duplicate"/"error").
+    importKeyFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, keystore_json: []const u8, password: []const u8, slashing_protection: ?[]const u8) anyerror![]const u8,
+    /// Delete a key by pubkey. Returns status ("deleted"/"not_found"/"error") + slashing protection JSON.
+    deleteKeyFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, pubkey: [48]u8) anyerror!DeleteKeyResult,
+    /// List remote signer keys. Caller owns result + slice.
+    listRemoteKeysFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]RemoteKeyInfo,
+    /// Import a remote key. Returns status string ("imported"/"duplicate"/"error").
+    importRemoteKeyFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, pubkey: [48]u8, url: []const u8) anyerror![]const u8,
+    /// Delete a remote key. Returns status string ("deleted"/"not_found"/"error").
+    deleteRemoteKeyFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, pubkey: [48]u8) anyerror![]const u8,
+};
+
+/// Result of a key delete operation.
+pub const DeleteKeyResult = struct {
+    /// "deleted", "not_found", or "error"
+    status: []const u8,
+    /// EIP-3076 interchange JSON for the deleted key (empty if not_found).
+    slashing_protection: []const u8,
+};
+
 // ---------------------------------------------------------------------------
 // ApiContext
 // ---------------------------------------------------------------------------
@@ -156,4 +209,7 @@ pub const ApiContext = struct {
 
     /// Optional operation pool callback. Nil until wired by BeaconNode.init.
     op_pool: ?OpPoolCallback = null,
+
+    /// Optional Keymanager API callback. Nil if Keymanager API is disabled.
+    keymanager: ?KeymanagerCallback = null,
 };
