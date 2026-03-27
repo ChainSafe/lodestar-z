@@ -190,6 +190,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
                     .deneb => AnySignedBeaconBlock{ .full_deneb = block },
                     .electra => AnySignedBeaconBlock{ .full_electra = block },
                     .fulu => AnySignedBeaconBlock{ .full_fulu = block },
+                    .gloas => AnySignedBeaconBlock{ .full_gloas = block },
                 };
                 const input_cached_state = if (result) |res| res else self.pre.cached_state;
                 {
