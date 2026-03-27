@@ -73,7 +73,6 @@ const ApiContext = api_mod.context.ApiContext;
 const api_types = api_mod.types;
 
 const SlotClock = @import("clock.zig").SlotClock;
-const SyncController = @import("sync_controller.zig").SyncController;
 const NodeOptions = @import("options.zig").NodeOptions;
 const identity_mod = @import("identity.zig");
 const NodeIdentity = identity_mod.NodeIdentity;
@@ -81,10 +80,9 @@ const sync_mod = @import("sync");
 const UnknownBlockSync = sync_mod.UnknownBlockSync;
 const SyncService = sync_mod.SyncService;
 const SyncMode = sync_mod.SyncMode;
-const PeerManager = sync_mod.PeerManager;
-const BatchRequestCallback = sync_mod.BatchRequestCallback;
-const BlockImporterCallback = sync_mod.BlockImporterCallback;
+const SyncServiceCallbacks = sync_mod.SyncServiceCallbacks;
 const BatchBlock = sync_mod.BatchBlock;
+const BatchId = sync_mod.BatchId;
 
 const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
@@ -599,19 +597,16 @@ pub const SyncCallbackCtx = struct {
     pending_requests: [32]PendingBatchRequest = undefined,
     pending_count: u8 = 0,
 
-    /// Create a BlockImporterCallback that imports blocks through the node.
-    pub fn importerCallback(self: *SyncCallbackCtx) BlockImporterCallback {
+    /// Create a SyncServiceCallbacks that bridges to this context.
+    pub fn syncServiceCallbacks(self: *SyncCallbackCtx) SyncServiceCallbacks {
         return .{
             .ptr = @ptrCast(self),
-            .importFn = &syncImportBlock,
-        };
-    }
-
-    /// Create a BatchRequestCallback that queues requests for later P2P dispatch.
-    pub fn requesterCallback(self: *SyncCallbackCtx) BatchRequestCallback {
-        return .{
-            .ptr = @ptrCast(self),
-            .requestFn = &syncRequestBatch,
+            .importBlockFn = &syncImportBlock,
+            .requestBlocksByRangeFn = &syncRequestBlocksByRange,
+            .requestBlockByRootFn = &syncRequestBlockByRoot,
+            .reportPeerFn = &syncReportPeer,
+            .getConnectedPeersFn = &syncGetConnectedPeers,
+            .setGossipEnabledFn = &syncSetGossipEnabled,
         };
     }
 
@@ -652,13 +647,17 @@ pub const SyncCallbackCtx = struct {
         }
     }
 
-    fn syncRequestBatch(
+    fn syncRequestBlocksByRange(
         ptr: *anyopaque,
+        chain_id: u32,
         batch_id: u32,
+        generation: u32,
+        peer_id: []const u8,
         start_slot: u64,
         count: u64,
-        peer_id: []const u8,
     ) void {
+        _ = chain_id;
+        _ = generation;
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         if (ctx.pending_count >= 32) {
             std.log.warn("SyncCallbackCtx: pending request queue full, dropping batch {d}", .{batch_id});
@@ -677,6 +676,24 @@ pub const SyncCallbackCtx = struct {
         std.log.debug("SyncCallbackCtx: queued batch {d} slots {d}..{d} for peer {s}", .{
             batch_id, start_slot, start_slot + count - 1, peer_id,
         });
+    }
+
+    fn syncRequestBlockByRoot(_: *anyopaque, _: [32]u8, _: []const u8) void {
+        // TODO: implement block-by-root request via P2P
+    }
+
+    fn syncReportPeer(_: *anyopaque, _: []const u8) void {
+        // TODO: integrate with networking peer scoring
+    }
+
+    fn syncGetConnectedPeers(_: *anyopaque) []const []const u8 {
+        // TODO: return connected peer IDs from networking PeerManager
+        return &.{};
+    }
+
+    fn syncSetGossipEnabled(_: *anyopaque, enabled: bool) void {
+        // TODO: subscribe/unsubscribe gossip topics based on sync state
+        std.log.info("Gossip {s}", .{if (enabled) "enabled" else "disabled"});
     }
 };
 
@@ -746,12 +763,12 @@ pub const BeaconNode = struct {
 
     // Sync controller — wires P2P events into the sync pipeline.
     // Optional: nil until initialized (e.g. when running without P2P).
-    sync_controller: ?*SyncController = null,
+    // sync_controller removed — SyncService is the direct entry point.
 
     // Sync subsystem components (lazily initialized when P2P starts).
-    sync_peer_manager: ?*PeerManager = null,
+
     sync_service_inst: ?*SyncService = null,
-    sync_callback_ctx: ?*SyncCallbackCtx = null,
+    sync_callback_ctx: ?*SyncCallbackCtx = null,  // bridges to P2P transport
 
     // GossipHandler — lazily initialized when P2P starts (owns its SeenSets).
     gossip_handler: ?*GossipHandler = null,
@@ -1146,19 +1163,14 @@ pub const BeaconNode = struct {
         }
 
         // Sync pipeline cleanup.
-        if (self.sync_controller) |sc| {
-            allocator.destroy(sc);
-        }
+        // sync_controller removed — cleanup is in sync_service_inst.
         if (self.sync_service_inst) |svc| {
             allocator.destroy(svc);
         }
         if (self.sync_callback_ctx) |ctx| {
             allocator.destroy(ctx);
         }
-        if (self.sync_peer_manager) |pm| {
-            pm.deinit();
-            allocator.destroy(pm);
-        }
+        // sync_peer_manager removed — networking PeerManager is used directly.
 
         self.unknown_block_sync.deinit();
         allocator.destroy(self);
@@ -1803,9 +1815,9 @@ pub const BeaconNode = struct {
 
         // Notify sync controller of the new peer — this triggers the sync
         // state machine to evaluate whether range sync should start.
-        if (self.sync_controller) |sc| {
-            sc.onPeerConnected(peer_id, peer_status) catch |err| {
-                std.log.warn("SyncController.onPeerConnected failed: {}", .{err});
+        if (self.sync_service_inst) |sync_svc| {
+            sync_svc.onPeerStatus(peer_id, peer_status) catch |err| {
+                std.log.warn("SyncService.onPeerStatus failed: {}", .{err});
             };
         }
 
@@ -1877,9 +1889,9 @@ pub const BeaconNode = struct {
 
             // Tick the sync service state machine — evaluates mode, dispatches
             // new batches, re-dispatches failed ones.
-            if (self.sync_controller) |sc| {
-                sc.tick() catch |err| {
-                    std.log.warn("SyncController.tick failed: {}", .{err});
+            if (self.sync_service_inst) |sync_svc| {
+                sync_svc.tick() catch |err| {
+                    std.log.warn("SyncService.tick failed: {}", .{err});
                 };
             }
 
@@ -1962,38 +1974,27 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         std.log.info("Connection manager initialized (target_peers={d})", .{cm.config.target_peers});
     }
 
-    /// Initialize the sync pipeline (PeerManager, SyncService, SyncController).
+    /// Initialize the sync pipeline (SyncService — direct, no SyncController).
     ///
     /// Called once from startP2p() after the P2P service is ready. Creates
     /// heap-allocated sync components and wires them into the BeaconNode.
     pub fn initSyncPipeline(self: *BeaconNode) !void {
         const allocator = self.allocator;
 
-        // PeerManager tracks connected peers and their chain views.
-        const pm = try allocator.create(PeerManager);
-        pm.* = PeerManager.init(allocator);
-        self.sync_peer_manager = pm;
-
         // SyncCallbackCtx bridges sync callbacks to the P2P transport.
         const cb_ctx = try allocator.create(SyncCallbackCtx);
         cb_ctx.* = .{ .node = self };
         self.sync_callback_ctx = cb_ctx;
 
-        // SyncService: top-level sync coordinator with range sync.
+        // SyncService: top-level sync coordinator (range sync + unknown block sync).
         const svc = try allocator.create(SyncService);
         svc.* = SyncService.init(
             allocator,
-            cb_ctx.importerCallback(),
-            cb_ctx.requesterCallback(),
-            pm,
+            cb_ctx.syncServiceCallbacks(),
             self.head_tracker.head_slot,
+            0, // local_finalized_epoch — updated when finalization progresses
         );
         self.sync_service_inst = svc;
-
-        // SyncController: glue between P2P events and sync pipeline.
-        const sc = try allocator.create(SyncController);
-        sc.* = SyncController.init(allocator, self, svc, pm);
-        self.sync_controller = sc;
 
         std.log.info("Sync pipeline initialized (head_slot={d})", .{self.head_tracker.head_slot});
     }
@@ -2005,7 +2006,8 @@ fn parseIp4(s: []const u8) ?[4]u8 {
     /// results back to the sync controller.
     fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
         const cb_ctx = self.sync_callback_ctx orelse return;
-        const sc = self.sync_controller orelse return;
+        const sync_svc = self.sync_service_inst orelse return;
+        _ = sync_svc;
 
         while (cb_ctx.pending_count > 0) {
             // Pop the first pending request.
@@ -2025,7 +2027,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             // Fetch raw blocks via P2P.
             const blocks = self.fetchRawBlocksByRange(io, svc, peer_id, req.start_slot, req.count) catch |err| {
                 std.log.warn("Batch {d} fetch failed: {}", .{ req.batch_id, err });
-                sc.onBatchError(req.batch_id);
+                if (self.sync_service_inst) |ssvc| ssvc.onBatchError(0, req.batch_id, 0, "");
                 continue;
             };
             defer {
@@ -2037,17 +2039,15 @@ fn parseIp4(s: []const u8) ?[4]u8 {
 
             if (blocks.len == 0) {
                 std.log.warn("Batch {d}: empty response from peer", .{req.batch_id});
-                sc.onBatchError(req.batch_id);
+                if (self.sync_service_inst) |ssvc| ssvc.onBatchError(0, req.batch_id, 0, "");
                 continue;
             }
 
-            // Feed blocks to the sync controller which imports them
-            // via the BlockImporterCallback.
-            sc.onBlocksReceived(req.batch_id, blocks) catch |err| {
-                std.log.warn("Batch {d} import failed: {}", .{ req.batch_id, err });
-                sc.onBatchError(req.batch_id);
-                continue;
-            };
+            // Route blocks through the SyncService.
+            if (self.sync_service_inst) |ssvc| {
+                // TODO: wire chain_id and generation from the pending request
+                ssvc.onBatchResponse(0, req.batch_id, 0, blocks);
+            }
 
             std.log.info("Batch {d}: delivered {d} blocks to sync pipeline", .{
                 req.batch_id, blocks.len,
@@ -2218,7 +2218,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             const status = svc.getSyncStatus();
             self.api_sync_status.head_slot = status.head_slot;
             self.api_sync_status.sync_distance = status.sync_distance;
-            self.api_sync_status.is_syncing = status.state == .syncing;
+            self.api_sync_status.is_syncing = status.state == .syncing_finalized or status.state == .syncing_head;
             self.api_sync_status.is_optimistic = status.is_optimistic;
         }
     }
@@ -2330,10 +2330,10 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                 peer_status.finalized_root[2], peer_status.finalized_root[3],
             });
 
-            // Notify sync controller of the peer's head.
-            if (self.sync_controller) |sc| {
-                sc.onPeerConnected(peer_id, peer_status) catch |err| {
-                    std.log.warn("SyncController.onPeerConnected failed: {}", .{err});
+            // Notify sync service of the peer's head.
+            if (self.sync_service_inst) |sync_svc| {
+                sync_svc.onPeerStatus(peer_id, peer_status) catch |err| {
+                    std.log.warn("SyncService.onPeerStatus failed: {}", .{err});
                 };
             }
 
@@ -2721,43 +2721,10 @@ fn parseIp4(s: []const u8) ?[4]u8 {
 
     /// After a block is successfully imported, check if any orphan children
     /// were waiting on it and try to import them.
+    /// The new UnknownBlockSync handles recursive resolution internally
+    /// via resolveChildren() when callbacks are set.
     fn processPendingChildren(self: *BeaconNode, parent_root: [32]u8) void {
-        const children = self.unknown_block_sync.onParentImported(parent_root) catch return;
-        defer self.allocator.free(children);
-
-        for (children) |child| {
-            defer self.allocator.free(child.block_bytes);
-
-            // Deserialize and import.
-            const raw_fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
-            const fork_seq = if (@intFromEnum(raw_fork_seq) > @intFromEnum(config_mod.ForkSeq.electra))
-                config_mod.ForkSeq.electra
-            else
-                raw_fork_seq;
-            const any_signed = AnySignedBeaconBlock.deserialize(
-                self.allocator, .full, fork_seq, child.block_bytes,
-            ) catch |err| {
-                std.log.warn("Failed to deserialize pending child: {}", .{err});
-                continue;
-            };
-            defer any_signed.deinit(self.allocator);
-
-            switch (any_signed) {
-                .full_electra => |blk| {
-                    const result = self.importBlock(blk) catch |err| {
-                        std.log.warn("Failed to import pending child slot={d}: {}", .{ child.slot, err });
-                        continue;
-                    };
-                    std.log.info("Imported pending child slot={d} root={s}...", .{
-                        result.slot,
-                        &std.fmt.bytesToHex(result.block_root[0..4], .lower),
-                    });
-                    // Recursively check for more children.
-                    self.processPendingChildren(result.block_root);
-                },
-                else => {},
-            }
-        }
+        self.unknown_block_sync.notifyBlockImported(parent_root) catch {};
     }
 
     /// Notify the EL of the current fork choice and optionally trigger payload building.
@@ -3363,9 +3330,9 @@ fn reqRespOnGoodbye(ptr: *anyopaque, reason: u64) void {
 
 fn reqRespOnPeerStatus(ptr: *anyopaque, status: StatusMessage.Type) void {
     const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    if (ctx.node.sync_controller) |sc| {
-        sc.onPeerConnected("unknown", status) catch |err| {
-            std.log.warn("SyncController.onPeerConnected failed: {}", .{err});
+    if (ctx.node.sync_service_inst) |sync_svc| {
+        sync_svc.onPeerStatus("unknown", status) catch |err| {
+            std.log.warn("SyncService.onPeerStatus failed: {}", .{err});
         };
     }
 }

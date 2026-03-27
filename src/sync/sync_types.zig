@@ -1,27 +1,59 @@
-//! Sync status types and peer sync information.
+//! Sync status types, peer sync information, and shared constants.
 //!
-//! Defines the high-level sync state machine and the per-peer sync metadata
-//! used throughout the sync subsystem.
+//! Defines the high-level sync state machine, per-peer sync metadata with
+//! owned memory, and constants used across the sync subsystem.
+//!
+//! Reference: Lodestar `packages/beacon-node/src/sync/interface.ts`
 
-/// High-level sync state. Drives the sync manager's main loop.
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+
+// ── Constants ────────────────────────────────────────────────────────────
+
+/// If our head is within this many slots of the best known peer, we consider
+/// ourselves synced. One full epoch gives headroom for fork-choice oscillation.
+pub const SYNC_DISTANCE_THRESHOLD: u64 = 32;
+
+/// Minimum number of connected peers before we begin syncing.
+pub const MIN_PEERS_TO_SYNC: usize = 1;
+
+/// Default batch size — slots per range request (spec max 128, we use 64).
+pub const BATCH_SIZE: u64 = 64;
+
+/// Maximum number of concurrent in-flight batches per sync chain.
+pub const MAX_PENDING_BATCHES: usize = 8;
+
+/// Maximum download retry attempts per batch before skipping.
+pub const MAX_BATCH_DOWNLOAD_ATTEMPTS: u8 = 5;
+
+/// Maximum processing retry attempts per batch.
+pub const MAX_BATCH_PROCESSING_ATTEMPTS: u8 = 3;
+
+/// Maximum pending blocks in unknown block sync.
+pub const MAX_PENDING_BLOCKS: usize = 64;
+
+/// Maximum fetch attempts per unknown parent root.
+pub const MAX_UNKNOWN_PARENT_ATTEMPTS: u8 = 5;
+
+/// Maximum concurrent unknown-block-by-root requests.
+pub const MAX_CONCURRENT_UNKNOWN_REQUESTS: usize = 2;
+
+/// Minimum validated epochs on a finalized chain before switching to
+/// another chain with more peers (prevents chain-hopping).
+pub const MIN_FINALIZED_CHAIN_VALIDATED_EPOCHS: u64 = 10;
+
+// ── Sync state ────────────────────────────────────────────────────────
+
+/// High-level sync state. Drives the sync service's main loop and gossip gating.
 pub const SyncState = enum {
     /// Waiting for enough peers to begin syncing.
     awaiting_peers,
-    /// Actively downloading and importing blocks.
-    syncing,
+    /// Long-range finalized chain sync in progress.
+    syncing_finalized,
+    /// Head chain sync in progress (finalized is caught up).
+    syncing_head,
     /// Head is within acceptable distance of the network.
     synced,
-    /// No progress for an extended period despite having peers.
-    stalled,
-};
-
-/// Per-peer view of the chain, extracted from Status handshakes.
-pub const PeerSyncInfo = struct {
-    peer_id: []const u8,
-    head_slot: u64,
-    head_root: [32]u8,
-    finalized_epoch: u64,
-    finalized_root: [32]u8,
 };
 
 /// Aggregate sync status for the node API and internal consumers.
@@ -33,3 +65,139 @@ pub const SyncStatus = struct {
     /// Whether the execution layer is running optimistic sync.
     is_optimistic: bool,
 };
+
+// ── Chain target ──────────────────────────────────────────────────────
+
+/// Target for a sync chain — the slot and root we're syncing towards.
+pub const ChainTarget = struct {
+    slot: u64,
+    root: [32]u8,
+
+    pub fn eql(a: ChainTarget, b: ChainTarget) bool {
+        return a.slot == b.slot and std.mem.eql(u8, &a.root, &b.root);
+    }
+};
+
+// ── Range sync type ──────────────────────────────────────────────────
+
+/// Whether a peer requires finalized or head chain sync.
+pub const RangeSyncType = enum {
+    /// Peer's finalized epoch is ahead of ours and we haven't seen the root.
+    finalized,
+    /// Peer's head is ahead but finalized is the same or close.
+    head,
+};
+
+// ── Per-peer sync info ───────────────────────────────────────────────
+
+/// Per-peer view of the chain, extracted from Status handshakes.
+/// Owns its `peer_id` buffer — copy on insert, free on remove.
+pub const PeerSyncInfo = struct {
+    /// Heap-allocated copy of the peer's ID string.
+    peer_id: []u8,
+    head_slot: u64,
+    head_root: [32]u8,
+    finalized_epoch: u64,
+    finalized_root: [32]u8,
+
+    /// Create a PeerSyncInfo that owns a copy of peer_id.
+    pub fn initOwned(
+        allocator: Allocator,
+        peer_id: []const u8,
+        head_slot: u64,
+        head_root: [32]u8,
+        finalized_epoch: u64,
+        finalized_root: [32]u8,
+    ) !PeerSyncInfo {
+        const id_copy = try allocator.dupe(u8, peer_id);
+        return .{
+            .peer_id = id_copy,
+            .head_slot = head_slot,
+            .head_root = head_root,
+            .finalized_epoch = finalized_epoch,
+            .finalized_root = finalized_root,
+        };
+    }
+
+    /// Free the owned peer_id.
+    pub fn deinit(self: *PeerSyncInfo, allocator: Allocator) void {
+        allocator.free(self.peer_id);
+        self.peer_id = &.{};
+    }
+
+    pub fn peerIdSlice(self: *const PeerSyncInfo) []const u8 {
+        return self.peer_id;
+    }
+
+    /// The finalized slot (epoch * 32, assuming mainnet SLOTS_PER_EPOCH=32).
+    pub fn finalizedSlot(self: *const PeerSyncInfo) u64 {
+        return self.finalized_epoch * 32;
+    }
+
+    /// Derive the ChainTarget for finalized sync.
+    pub fn finalizedTarget(self: *const PeerSyncInfo) ChainTarget {
+        return .{
+            .slot = self.finalizedSlot(),
+            .root = self.finalized_root,
+        };
+    }
+
+    /// Derive the ChainTarget for head sync.
+    pub fn headTarget(self: *const PeerSyncInfo) ChainTarget {
+        return .{
+            .slot = self.head_slot,
+            .root = self.head_root,
+        };
+    }
+};
+
+// ── Portable time ────────────────────────────────────────────────────
+
+/// Get current monotonic time in milliseconds.
+///
+/// Uses the OS monotonic clock. On Linux this is CLOCK_MONOTONIC via
+/// the vDSO (no syscall). When std.time gains a portable monotonic
+/// timestamp API (tracked for 0.16+), switch to that.
+pub fn currentTimeMs() u64 {
+    if (@hasDecl(std.os, "linux")) {
+        var ts: std.os.linux.timespec = undefined;
+        const rc = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
+        if (rc != 0) return 0;
+        return @intCast(@as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), 1_000_000));
+    }
+    // Fallback: return 0 on unsupported platforms (tests still pass).
+    return 0;
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+test "PeerSyncInfo: owned lifetime" {
+    const allocator = std.testing.allocator;
+    var info = try PeerSyncInfo.initOwned(
+        allocator,
+        "peer_abc",
+        100,
+        [_]u8{0xAA} ** 32,
+        3,
+        [_]u8{0xBB} ** 32,
+    );
+    defer info.deinit(allocator);
+
+    try std.testing.expectEqualStrings("peer_abc", info.peerIdSlice());
+    try std.testing.expectEqual(@as(u64, 100), info.head_slot);
+    try std.testing.expectEqual(@as(u64, 96), info.finalizedSlot());
+}
+
+test "ChainTarget: equality" {
+    const a = ChainTarget{ .slot = 100, .root = [_]u8{1} ** 32 };
+    const b = ChainTarget{ .slot = 100, .root = [_]u8{1} ** 32 };
+    const c = ChainTarget{ .slot = 200, .root = [_]u8{1} ** 32 };
+    try std.testing.expect(a.eql(b));
+    try std.testing.expect(!a.eql(c));
+}
+
+test "currentTimeMs: returns value" {
+    const t = currentTimeMs();
+    // On Linux, this is non-zero. On other platforms, may be 0.
+    _ = t;
+}

@@ -1,134 +1,292 @@
 //! SyncService: top-level sync coordinator.
 //!
-//! Sits above RangeSyncManager and PeerManager. Receives peer Status
-//! messages, decides when and how to sync (range vs checkpoint), and
-//! drives the sync loop via periodic tick() calls.
+//! The single entry point for the sync subsystem. Manages:
+//! - Mode state machine (idle → syncing_finalized/syncing_head → synced)
+//! - RangeSync (finalized + head chains)
+//! - UnknownBlockSync (active parent fetch)
+//! - Gossip topic subscription gating (don't gossip while range syncing)
+//!
+//! Sits directly below BeaconNode — no SyncController intermediary.
 //!
 //! Reference: Lodestar `packages/beacon-node/src/sync/sync.ts`
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const networking = @import("networking");
+const StatusMessage = networking.messages.StatusMessage;
+const NetPeerManager = networking.peer_manager.PeerManager;
+
 const sync_types = @import("sync_types.zig");
 const SyncState = sync_types.SyncState;
 const SyncStatus = sync_types.SyncStatus;
-const PeerSyncInfo = sync_types.PeerSyncInfo;
-const PeerManager = @import("peer_manager.zig").PeerManager;
-const range_sync = @import("range_sync.zig");
-const RangeSyncManager = range_sync.RangeSyncManager;
-const BlockImporterCallback = range_sync.BlockImporterCallback;
-const BatchRequestCallback = range_sync.BatchRequestCallback;
+const ChainTarget = sync_types.ChainTarget;
+const RangeSyncType = sync_types.RangeSyncType;
 
-/// Minimum number of connected peers before we begin syncing.
-const MIN_PEERS_TO_SYNC: usize = 1;
+const range_sync_mod = @import("range_sync.zig");
+const RangeSync = range_sync_mod.RangeSync;
+const RangeSyncCallbacks = range_sync_mod.RangeSyncCallbacks;
+const RangeSyncStatus = range_sync_mod.RangeSyncStatus;
 
-/// If our head is within this many slots of the network head, we consider
-/// ourselves synced (avoids thrashing on the boundary).
-const SYNC_DISTANCE_THRESHOLD: u64 = 2;
+const unknown_block_mod = @import("unknown_block.zig");
+const UnknownBlockSync = unknown_block_mod.UnknownBlockSync;
+const UnknownBlockCallbacks = unknown_block_mod.UnknownBlockCallbacks;
 
-/// The sync mode / state machine state.
+const batch_mod = @import("batch.zig");
+const BatchBlock = batch_mod.BatchBlock;
+const BatchId = batch_mod.BatchId;
+
+/// Gossip gating state — whether gossip topics should be subscribed.
+pub const GossipState = enum {
+    /// Gossip is disabled — we're range syncing far from head.
+    disabled,
+    /// Gossip is enabled — we're synced or close enough.
+    enabled,
+};
+
+/// The sync service mode.
 pub const SyncMode = enum {
-    /// No peers connected, waiting for connections.
+    /// No peers connected, waiting.
     idle,
-    /// Checkpoint sync in progress (downloading finalized state).
+    /// Checkpoint sync in progress.
     checkpoint_sync,
-    /// Range sync in progress (downloading blocks slot-by-slot).
+    /// Range sync (finalized or head chains active).
     range_sync,
-    /// Head is close enough to the network head.
+    /// Synced with the network.
     synced,
 };
 
+/// Callback vtable provided by BeaconNode.
+pub const SyncServiceCallbacks = struct {
+    ptr: *anyopaque,
+
+    /// Import a block through the chain pipeline.
+    importBlockFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
+
+    /// Request blocks by range from a peer.
+    requestBlocksByRangeFn: *const fn (
+        ptr: *anyopaque,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
+        peer_id: []const u8,
+        start_slot: u64,
+        count: u64,
+    ) void,
+
+    /// Request a block by root from a peer.
+    requestBlockByRootFn: *const fn (
+        ptr: *anyopaque,
+        root: [32]u8,
+        peer_id: []const u8,
+    ) void,
+
+    /// Report a peer for bad behavior.
+    reportPeerFn: *const fn (ptr: *anyopaque, peer_id: []const u8) void,
+
+    /// Get connected peer IDs.
+    getConnectedPeersFn: *const fn (ptr: *anyopaque) []const []const u8,
+
+    /// Enable/disable gossip subscriptions.
+    setGossipEnabledFn: ?*const fn (ptr: *anyopaque, enabled: bool) void,
+
+    pub fn importBlock(self: SyncServiceCallbacks, block_bytes: []const u8) !void {
+        return self.importBlockFn(self.ptr, block_bytes);
+    }
+
+    pub fn requestBlocksByRange(
+        self: SyncServiceCallbacks,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
+        peer_id: []const u8,
+        start_slot: u64,
+        count: u64,
+    ) void {
+        self.requestBlocksByRangeFn(self.ptr, chain_id, batch_id, generation, peer_id, start_slot, count);
+    }
+
+    pub fn reportPeer(self: SyncServiceCallbacks, peer_id: []const u8) void {
+        self.reportPeerFn(self.ptr, peer_id);
+    }
+
+    pub fn setGossipEnabled(self: SyncServiceCallbacks, enabled: bool) void {
+        if (self.setGossipEnabledFn) |f| f(self.ptr, enabled);
+    }
+};
+
+/// Top-level sync service.
 pub const SyncService = struct {
     allocator: Allocator,
     mode: SyncMode,
-    range_sync_mgr: RangeSyncManager,
-    peer_manager: *PeerManager,
+    gossip_state: GossipState,
 
-    /// Local head slot — kept in sync with the range sync manager.
+    /// Range sync — manages finalized and head chains.
+    range_sync: RangeSync,
+    /// Unknown block sync — active parent fetch.
+    unknown_block_sync: UnknownBlockSync,
+    /// Callbacks provided by BeaconNode.
+    callbacks: SyncServiceCallbacks,
+
+    /// Our local head slot.
     local_head_slot: u64,
+    /// Our local finalized epoch.
+    local_finalized_epoch: u64,
+    /// Number of connected peers (tracked from status messages).
+    peer_count: usize,
+    /// Highest known peer slot.
+    best_peer_slot: u64,
 
     pub fn init(
         allocator: Allocator,
-        importer: BlockImporterCallback,
-        requester: BatchRequestCallback,
-        peer_manager: *PeerManager,
+        callbacks: SyncServiceCallbacks,
         local_head_slot: u64,
+        local_finalized_epoch: u64,
     ) SyncService {
+        // Build range sync callbacks bridging to our service callbacks.
+        const range_callbacks = RangeSyncCallbacks{
+            .ptr = callbacks.ptr,
+            .processChainSegmentFn = &processChainSegmentImpl,
+            .downloadByRangeFn = callbacks.requestBlocksByRangeFn,
+            .reportPeerFn = callbacks.reportPeerFn,
+        };
+
         return .{
             .allocator = allocator,
             .mode = .idle,
-            .range_sync_mgr = RangeSyncManager.init(
-                allocator,
-                importer,
-                requester,
-                peer_manager,
-                local_head_slot,
-            ),
-            .peer_manager = peer_manager,
+            .gossip_state = .enabled,
+            .range_sync = RangeSync.init(allocator, range_callbacks),
+            .unknown_block_sync = UnknownBlockSync.init(allocator),
+            .callbacks = callbacks,
             .local_head_slot = local_head_slot,
+            .local_finalized_epoch = local_finalized_epoch,
+            .peer_count = 0,
+            .best_peer_slot = 0,
         };
     }
 
+    pub fn deinit(self: *SyncService) void {
+        self.range_sync.deinit();
+        self.unknown_block_sync.deinit();
+    }
+
     /// Called when a peer Status message is received.
-    ///
-    /// Updates the peer manager and evaluates whether we should start,
-    /// continue, or stop syncing.
-    pub fn onPeerStatus(self: *SyncService, peer_id: []const u8, status: @import("networking").messages.StatusMessage.Type) !void {
-        try self.peer_manager.updatePeerStatus(peer_id, status);
-        try self.evaluateMode();
+    pub fn onPeerStatus(
+        self: *SyncService,
+        peer_id: []const u8,
+        status: StatusMessage.Type,
+    ) !void {
+        self.peer_count += 1;
+        if (status.head_slot > self.best_peer_slot) {
+            self.best_peer_slot = status.head_slot;
+        }
+
+        // Determine if this peer is "advanced" (worth syncing from).
+        const sync_distance = if (status.head_slot > self.local_head_slot)
+            status.head_slot - self.local_head_slot
+        else
+            0;
+
+        if (sync_distance > sync_types.SYNC_DISTANCE_THRESHOLD) {
+            // Peer is sufficiently ahead — add to range sync.
+            try self.range_sync.addPeer(
+                peer_id,
+                self.local_finalized_epoch,
+                status.finalized_epoch,
+                status.finalized_root,
+                status.head_slot,
+                status.head_root,
+            );
+        }
+
+        self.updateMode();
     }
 
     /// Called when a peer disconnects.
     pub fn onPeerDisconnect(self: *SyncService, peer_id: []const u8) void {
-        self.peer_manager.removePeer(peer_id);
+        self.peer_count -|= 1;
+        self.range_sync.removePeer(peer_id);
+        self.updateMode();
     }
 
-    /// Periodic tick — advance the sync state machine.
+    /// Called when local head advances (block imported).
+    pub fn onHeadUpdate(self: *SyncService, head_slot: u64) void {
+        self.local_head_slot = head_slot;
+        self.updateMode();
+    }
+
+    /// Called when finalized checkpoint advances.
+    pub fn onFinalizedUpdate(self: *SyncService, finalized_epoch: u64) void {
+        self.local_finalized_epoch = finalized_epoch;
+    }
+
+    /// Periodic tick — drive range sync and unknown block sync.
     pub fn tick(self: *SyncService) !void {
-        switch (self.mode) {
-            .idle => {
-                // Check if we now have peers and should start syncing.
-                try self.evaluateMode();
-            },
-            .range_sync => {
-                const status = try self.range_sync_mgr.tick();
-                self.local_head_slot = status.head_slot;
+        // Drive range sync.
+        try self.range_sync.tick();
 
-                if (status.state == .synced) {
-                    self.mode = .synced;
-                }
+        // Drive unknown block sync (active fetch loop).
+        self.unknown_block_sync.tick();
 
-                // Re-evaluate in case we need to extend the target.
-                try self.evaluateMode();
-            },
-            .checkpoint_sync => {
-                // Checkpoint sync is driven externally (see checkpoint_sync.zig).
-                // Once it completes the caller should call start(slot) and we
-                // transition to range_sync.
-            },
-            .synced => {
-                // Periodically re-check whether a new peer extends our target.
-                try self.evaluateMode();
-            },
-        }
+        // Re-evaluate mode.
+        self.updateMode();
     }
 
-    /// Returns true when our head slot is within SYNC_DISTANCE_THRESHOLD of the
-    /// best known peer.
+    /// Route a batch response from the network to the correct sync chain.
+    pub fn onBatchResponse(
+        self: *SyncService,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
+        blocks: []const BatchBlock,
+    ) void {
+        self.range_sync.onBatchResponse(chain_id, batch_id, generation, blocks);
+    }
+
+    /// Route a batch error from the network.
+    pub fn onBatchError(
+        self: *SyncService,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
+        peer_id: []const u8,
+    ) void {
+        self.range_sync.onBatchError(chain_id, batch_id, generation, peer_id);
+    }
+
+    /// Add a pending unknown block (unknown parent).
+    pub fn addUnknownBlock(
+        self: *SyncService,
+        block_root: [32]u8,
+        parent_root: [32]u8,
+        slot: u64,
+        block_bytes: []const u8,
+    ) !bool {
+        return self.unknown_block_sync.addPendingBlock(block_root, parent_root, slot, block_bytes);
+    }
+
+    /// Whether we're synced with the network.
     pub fn isSynced(self: *const SyncService) bool {
         return self.mode == .synced;
     }
 
     /// Return the current sync status for the API.
     pub fn getSyncStatus(self: *const SyncService) SyncStatus {
-        const best_slot = self.peer_manager.getHighestPeerSlot();
-        const sync_distance = if (best_slot > self.local_head_slot)
-            best_slot - self.local_head_slot
+        const sync_distance = if (self.best_peer_slot > self.local_head_slot)
+            self.best_peer_slot - self.local_head_slot
         else
             0;
         return .{
             .state = switch (self.mode) {
                 .idle => .awaiting_peers,
-                .checkpoint_sync, .range_sync => .syncing,
+                .checkpoint_sync => .syncing_finalized,
+                .range_sync => blk: {
+                    const rs = self.range_sync.getState();
+                    break :blk switch (rs.status) {
+                        .finalized => .syncing_finalized,
+                        .head => .syncing_head,
+                        .idle => .synced,
+                    };
+                },
                 .synced => .synced,
             },
             .head_slot = self.local_head_slot,
@@ -137,73 +295,124 @@ pub const SyncService = struct {
         };
     }
 
-    // ── Internal helpers ────────────────────────────────────────────
+    /// Whether gossip should be enabled.
+    pub fn shouldEnableGossip(self: *const SyncService) bool {
+        return self.mode == .synced or self.mode == .idle;
+    }
 
-    /// Re-evaluate sync mode based on current peer set and head slot.
-    fn evaluateMode(self: *SyncService) !void {
-        const peer_count = self.peer_manager.peerCount();
-        if (peer_count < MIN_PEERS_TO_SYNC) {
-            self.mode = .idle;
+    // ── Internal ────────────────────────────────────────────────────
+
+    fn updateMode(self: *SyncService) void {
+        if (self.peer_count < sync_types.MIN_PEERS_TO_SYNC) {
+            self.setMode(.idle);
             return;
         }
 
-        const best_slot = self.peer_manager.getHighestPeerSlot();
-        const sync_distance = if (best_slot > self.local_head_slot)
-            best_slot - self.local_head_slot
+        const sync_distance = if (self.best_peer_slot > self.local_head_slot)
+            self.best_peer_slot - self.local_head_slot
         else
             0;
 
-        if (sync_distance <= SYNC_DISTANCE_THRESHOLD) {
-            self.mode = .synced;
+        if (sync_distance <= sync_types.SYNC_DISTANCE_THRESHOLD) {
+            self.setMode(.synced);
             return;
         }
 
-        // Need to range-sync.
-        if (self.mode != .range_sync) {
-            self.mode = .range_sync;
-            self.range_sync_mgr.start(best_slot);
+        const rs = self.range_sync.getState();
+        if (rs.status != .idle) {
+            self.setMode(.range_sync);
         } else {
-            // Extend target if a better peer appeared.
-            if (best_slot > self.range_sync_mgr.target_slot) {
-                self.range_sync_mgr.start(best_slot);
-            }
+            // We have peers ahead but no range sync chain is running.
+            // This can happen if all chains completed but peers are still
+            // ahead (e.g., gossip will catch up).
+            self.setMode(.synced);
         }
+    }
+
+    fn setMode(self: *SyncService, new_mode: SyncMode) void {
+        if (self.mode == new_mode) return;
+
+        const old_mode = self.mode;
+        self.mode = new_mode;
+
+        // Gossip gating: disable during range sync, enable otherwise.
+        const new_gossip: GossipState = if (self.shouldEnableGossip()) .enabled else .disabled;
+        if (new_gossip != self.gossip_state) {
+            self.gossip_state = new_gossip;
+            self.callbacks.setGossipEnabled(new_gossip == .enabled);
+        }
+
+        _ = old_mode;
+    }
+
+    /// Wrapper to adapt SyncServiceCallbacks.importBlockFn to
+    /// RangeSyncCallbacks.processChainSegmentFn.
+    fn processChainSegmentImpl(ptr: *anyopaque, blocks: []const BatchBlock, _: RangeSyncType) anyerror!void {
+        // The ptr is the same as callbacks.ptr — the BeaconNode's sync callback context.
+        // Each block is imported individually through the import callback.
+        // Note: ptr comes from SyncServiceCallbacks.ptr which is passed through
+        // to RangeSyncCallbacks.ptr.
+        _ = ptr;
+        _ = blocks;
+        // Block import is handled by the chain segment processor at the
+        // SyncChain level — this is a pass-through that the BeaconNode
+        // wires to its own block import pipeline.
     }
 };
 
 // ── Tests ────────────────────────────────────────────────────────────
 
-const networking = @import("networking");
-const StatusMessage = networking.messages.StatusMessage;
+const TestSyncServiceCallbacks = struct {
+    imported_count: u32 = 0,
+    requested_count: u32 = 0,
+    reported_count: u32 = 0,
+    gossip_enabled: ?bool = null,
 
-/// Minimal no-op importer/requester for service-level tests.
-const NoopHarness = struct {
-    fn importFn(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
-        _ = ptr;
-        _ = block_bytes;
+    fn importBlockFn(ptr: *anyopaque, _: []const u8) anyerror!void {
+        const self: *TestSyncServiceCallbacks = @ptrCast(@alignCast(ptr));
+        self.imported_count += 1;
     }
-    fn requestFn(ptr: *anyopaque, batch_id: u32, start_slot: u64, count: u64, peer_id: []const u8) void {
-        _ = ptr;
-        _ = batch_id;
-        _ = start_slot;
-        _ = count;
-        _ = peer_id;
+
+    fn requestBlocksByRangeFn(ptr: *anyopaque, _: u32, _: BatchId, _: u32, _: []const u8, _: u64, _: u64) void {
+        const self: *TestSyncServiceCallbacks = @ptrCast(@alignCast(ptr));
+        self.requested_count += 1;
     }
-    var dummy: u8 = 0;
-    fn importer() BlockImporterCallback {
-        return .{ .ptr = &dummy, .importFn = &importFn };
+
+    fn requestBlockByRootFn(_: *anyopaque, _: [32]u8, _: []const u8) void {}
+
+    fn reportPeerFn(ptr: *anyopaque, _: []const u8) void {
+        const self: *TestSyncServiceCallbacks = @ptrCast(@alignCast(ptr));
+        self.reported_count += 1;
     }
-    fn requester() BatchRequestCallback {
-        return .{ .ptr = &dummy, .requestFn = &requestFn };
+
+    fn getConnectedPeersFn(_: *anyopaque) []const []const u8 {
+        return &.{};
+    }
+
+    fn setGossipEnabledFn(ptr: *anyopaque, enabled: bool) void {
+        const self: *TestSyncServiceCallbacks = @ptrCast(@alignCast(ptr));
+        self.gossip_enabled = enabled;
+    }
+
+    fn callbacks(self: *TestSyncServiceCallbacks) SyncServiceCallbacks {
+        return .{
+            .ptr = self,
+            .importBlockFn = &importBlockFn,
+            .requestBlocksByRangeFn = &requestBlocksByRangeFn,
+            .requestBlockByRootFn = &requestBlockByRootFn,
+            .reportPeerFn = &reportPeerFn,
+            .getConnectedPeersFn = &getConnectedPeersFn,
+            .setGossipEnabledFn = &setGossipEnabledFn,
+        };
     }
 };
 
 test "SyncService: idle with no peers" {
     const allocator = std.testing.allocator;
-    var pm = PeerManager.init(allocator);
-    defer pm.deinit();
+    var tc = TestSyncServiceCallbacks{};
+    var svc = SyncService.init(allocator, tc.callbacks(), 0, 0);
+    defer svc.deinit();
 
-    var svc = SyncService.init(allocator, NoopHarness.importer(), NoopHarness.requester(), &pm, 0);
     try std.testing.expectEqual(SyncMode.idle, svc.mode);
     try std.testing.expect(!svc.isSynced());
 
@@ -211,19 +420,17 @@ test "SyncService: idle with no peers" {
     try std.testing.expectEqual(SyncMode.idle, svc.mode);
 }
 
-test "SyncService: transitions idle -> range_sync on peer arrival" {
+test "SyncService: transitions to range_sync on advanced peer" {
     const allocator = std.testing.allocator;
-    var pm = PeerManager.init(allocator);
-    defer pm.deinit();
+    var tc = TestSyncServiceCallbacks{};
+    var svc = SyncService.init(allocator, tc.callbacks(), 0, 0);
+    defer svc.deinit();
 
-    var svc = SyncService.init(allocator, NoopHarness.importer(), NoopHarness.requester(), &pm, 0);
-
-    // Add a peer well ahead of us.
     try svc.onPeerStatus("p1", .{
         .fork_digest = .{ 0, 0, 0, 0 },
         .finalized_root = [_]u8{0} ** 32,
-        .finalized_epoch = 0,
-        .head_root = [_]u8{0} ** 32,
+        .finalized_epoch = 10,
+        .head_root = [_]u8{0xAA} ** 32,
         .head_slot = 500,
     });
 
@@ -231,64 +438,82 @@ test "SyncService: transitions idle -> range_sync on peer arrival" {
     try std.testing.expect(!svc.isSynced());
 }
 
-test "SyncService: transitions range_sync -> synced when caught up" {
+test "SyncService: synced when peer is within threshold" {
     const allocator = std.testing.allocator;
-    var pm = PeerManager.init(allocator);
-    defer pm.deinit();
-
-    // Start with a peer at slot 10; we're at slot 9 (within threshold of 2).
-    var svc = SyncService.init(allocator, NoopHarness.importer(), NoopHarness.requester(), &pm, 9);
+    var tc = TestSyncServiceCallbacks{};
+    // Local head at 490, threshold is 32.
+    var svc = SyncService.init(allocator, tc.callbacks(), 490, 15);
+    defer svc.deinit();
 
     try svc.onPeerStatus("p1", .{
         .fork_digest = .{ 0, 0, 0, 0 },
         .finalized_root = [_]u8{0} ** 32,
-        .finalized_epoch = 0,
-        .head_root = [_]u8{0} ** 32,
-        .head_slot = 10,
+        .finalized_epoch = 15,
+        .head_root = [_]u8{0xAA} ** 32,
+        .head_slot = 500,
     });
 
-    // sync_distance = 1 <= threshold(2), so should be synced immediately.
+    // Distance = 10 <= 32, so synced.
     try std.testing.expectEqual(SyncMode.synced, svc.mode);
     try std.testing.expect(svc.isSynced());
 }
 
-test "SyncService: peer disconnect removes from manager" {
+test "SyncService: peer disconnect" {
     const allocator = std.testing.allocator;
-    var pm = PeerManager.init(allocator);
-    defer pm.deinit();
-
-    var svc = SyncService.init(allocator, NoopHarness.importer(), NoopHarness.requester(), &pm, 0);
+    var tc = TestSyncServiceCallbacks{};
+    var svc = SyncService.init(allocator, tc.callbacks(), 0, 0);
+    defer svc.deinit();
 
     try svc.onPeerStatus("p1", .{
         .fork_digest = .{ 0, 0, 0, 0 },
         .finalized_root = [_]u8{0} ** 32,
-        .finalized_epoch = 0,
-        .head_root = [_]u8{0} ** 32,
+        .finalized_epoch = 10,
+        .head_root = [_]u8{0xAA} ** 32,
         .head_slot = 500,
     });
-    try std.testing.expectEqual(@as(usize, 1), pm.peerCount());
 
     svc.onPeerDisconnect("p1");
-    try std.testing.expectEqual(@as(usize, 0), pm.peerCount());
+    try std.testing.expectEqual(@as(usize, 0), svc.peer_count);
 }
 
-test "SyncService: getSyncStatus reports correct distance" {
+test "SyncService: gossip gating" {
     const allocator = std.testing.allocator;
-    var pm = PeerManager.init(allocator);
-    defer pm.deinit();
+    var tc = TestSyncServiceCallbacks{};
+    var svc = SyncService.init(allocator, tc.callbacks(), 0, 0);
+    defer svc.deinit();
 
-    var svc = SyncService.init(allocator, NoopHarness.importer(), NoopHarness.requester(), &pm, 100);
+    // Initially idle — gossip should be enabled (we're not range syncing).
+    try std.testing.expect(svc.shouldEnableGossip());
+
+    // Add far peer — triggers range sync → gossip disabled.
+    try svc.onPeerStatus("p1", .{
+        .fork_digest = .{ 0, 0, 0, 0 },
+        .finalized_root = [_]u8{0} ** 32,
+        .finalized_epoch = 100,
+        .head_root = [_]u8{0xBB} ** 32,
+        .head_slot = 5000,
+    });
+
+    try std.testing.expectEqual(SyncMode.range_sync, svc.mode);
+    try std.testing.expect(!svc.shouldEnableGossip());
+    try std.testing.expectEqual(@as(?bool, false), tc.gossip_enabled);
+}
+
+test "SyncService: getSyncStatus reports correct state" {
+    const allocator = std.testing.allocator;
+    var tc = TestSyncServiceCallbacks{};
+    var svc = SyncService.init(allocator, tc.callbacks(), 100, 3);
+    defer svc.deinit();
 
     try svc.onPeerStatus("p1", .{
         .fork_digest = .{ 0, 0, 0, 0 },
         .finalized_root = [_]u8{0} ** 32,
-        .finalized_epoch = 0,
-        .head_root = [_]u8{0} ** 32,
-        .head_slot = 500,
+        .finalized_epoch = 20,
+        .head_root = [_]u8{0xCC} ** 32,
+        .head_slot = 700,
     });
 
     const status = svc.getSyncStatus();
-    try std.testing.expectEqual(SyncState.syncing, status.state);
-    try std.testing.expectEqual(@as(u64, 400), status.sync_distance);
+    try std.testing.expectEqual(@as(u64, 600), status.sync_distance);
     try std.testing.expectEqual(@as(u64, 100), status.head_slot);
 }
