@@ -68,3 +68,11 @@ pub const ReprocessQueue = reprocess.ReprocessQueue;
 pub const PendingBlock = reprocess.PendingBlock;
 pub const PendingReason = reprocess.PendingReason;
 pub const BlockVerification = block_verification;
+
+// KZG verification for blob sidecars and data columns
+pub const blob_kzg_verification = @import("blob_kzg_verification.zig");
+pub const BlobVerifyInput = blob_kzg_verification.BlobVerifyInput;
+pub const BlobVerifyError = blob_kzg_verification.BlobVerifyError;
+pub const verifyBlobSidecar = blob_kzg_verification.verifyBlobSidecar;
+pub const verifyBlobSidecarBatch = blob_kzg_verification.verifyBlobSidecarBatch;
+pub const verifyDataColumnSidecar = blob_kzg_verification.verifyDataColumnSidecar;
