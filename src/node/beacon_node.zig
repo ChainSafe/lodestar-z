@@ -79,6 +79,7 @@ const identity_mod = @import("identity.zig");
 const NodeIdentity = identity_mod.NodeIdentity;
 const sync_mod = @import("sync");
 const UnknownBlockSync = sync_mod.UnknownBlockSync;
+const UnknownChainSync = sync_mod.UnknownChainSync;
 const SyncService = sync_mod.SyncService;
 const SyncMode = sync_mod.SyncMode;
 const PeerManager = sync_mod.PeerManager;
@@ -760,6 +761,13 @@ pub const BeaconNode = struct {
     // Initialized eagerly in init(); used by the gossip block import path.
     unknown_block_sync: UnknownBlockSync,
 
+    // Unknown chain sync — backwards header chain sync for blocks/roots
+    // not in fork choice. Tracks multiple chains of headers backwards
+    // until they link to our known chain, then hands off to forward sync.
+    // Complements unknown_block_sync with a header-only approach that
+    // handles extended non-finality without OOMing.
+    unknown_chain_sync: UnknownChainSync,
+
     // Execution Layer engine (Engine API client or mock).
     mock_engine: ?*MockEngine = null,
     http_engine: ?*HttpEngine = null,
@@ -1032,6 +1040,7 @@ pub const BeaconNode = struct {
             .block_import_ctx = block_import_ctx,
             .head_state_cb_ctx = head_state_cb_ctx,
             .unknown_block_sync = UnknownBlockSync.init(allocator),
+            .unknown_chain_sync = UnknownChainSync.init(allocator),
         };
 
         // Wire engine API into block importer for execution payload verification.
@@ -1161,6 +1170,7 @@ pub const BeaconNode = struct {
         }
 
         self.unknown_block_sync.deinit();
+        self.unknown_chain_sync.deinit();
         allocator.destroy(self);
     }
 
@@ -1494,6 +1504,10 @@ pub const BeaconNode = struct {
             // Archive the post-epoch state for cold-path recovery.
             // Errors are non-fatal — the block is already imported.
             self.archiveState(result.slot, result.state_root) catch {};
+            // Prune backwards chains that are behind finalization.
+            self.unknown_chain_sync.onFinalized(
+                self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH,
+            );
         }
 
         return result;
@@ -1808,6 +1822,9 @@ pub const BeaconNode = struct {
                 std.log.warn("SyncController.onPeerConnected failed: {}", .{err});
             };
         }
+
+        // Feed peer's head root to unknown chain sync.
+        self.unknown_chain_sync.onPeerConnected(peer_id, peer_status.head_root) catch {};
 
         // Process any pending sync batch requests that were queued by the
         // sync controller during onPeerConnected evaluation.
@@ -2717,11 +2734,30 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                 self.unknown_block_sync.pendingCount(),
             });
         }
+
+        // Also feed the unknown chain sync — it tracks the parent root as
+        // an unknown chain and builds backwards to our fork choice.
+        self.unknown_chain_sync.onUnknownBlockInput(
+            blk.message.slot,
+            block_root,
+            blk.message.parent_root,
+            null, // peer_id not available from gossip context
+        ) catch {};
+
+        // If the parent root is truly unknown, start a chain for it.
+        self.unknown_chain_sync.onUnknownBlockRoot(
+            blk.message.parent_root,
+            null,
+        ) catch {};
     }
 
     /// After a block is successfully imported, check if any orphan children
-    /// were waiting on it and try to import them.
+    /// were waiting on it and try to import them. Also notifies the unknown
+    /// chain sync so it can link any backwards chains.
     fn processPendingChildren(self: *BeaconNode, parent_root: [32]u8) void {
+        // Notify backwards chain sync — may link a chain.
+        self.unknown_chain_sync.onBlockImported(parent_root);
+
         const children = self.unknown_block_sync.onParentImported(parent_root) catch return;
         defer self.allocator.free(children);
 
@@ -3368,6 +3404,9 @@ fn reqRespOnPeerStatus(ptr: *anyopaque, status: StatusMessage.Type) void {
             std.log.warn("SyncController.onPeerConnected failed: {}", .{err});
         };
     }
+    // Feed peer's head root to unknown chain sync — if it's not in our
+    // fork choice, this starts a backwards chain to discover the fork.
+    ctx.node.unknown_chain_sync.onPeerConnected("unknown", status.head_root) catch {};
 }
 
 

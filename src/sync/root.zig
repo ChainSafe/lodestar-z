@@ -19,6 +19,7 @@ pub const range_sync = @import("range_sync.zig");
 pub const checkpoint_sync = @import("checkpoint_sync.zig");
 pub const sync_service = @import("sync_service.zig");
 pub const unknown_block_sync = @import("unknown_block_sync.zig");
+pub const unknown_chain = @import("unknown_chain/root.zig");
 
 // Re-export key types for convenience.
 pub const SyncState = sync_types.SyncState;
@@ -47,6 +48,11 @@ pub const SyncMode = sync_service.SyncMode;
 
 pub const UnknownBlockSync = unknown_block_sync.UnknownBlockSync;
 pub const PendingBlock = unknown_block_sync.PendingBlock;
+
+pub const UnknownChainSync = unknown_chain.UnknownChainSync;
+pub const BackwardsChain = unknown_chain.BackwardsChain;
+pub const MinimalHeader = unknown_chain.MinimalHeader;
+pub const ChainState = unknown_chain.ChainState;
 
 test {
     testing.refAllDecls(@This());
