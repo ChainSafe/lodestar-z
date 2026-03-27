@@ -487,13 +487,18 @@ pub const BlockImporter = struct {
         }
 
         // Compute block root from header.
+        // Per spec (process_slot), the next block's parent_root is computed from
+        // state.latest_block_header AFTER filling in the actual state_root
+        // (state_root=0 gets replaced by the computed post-state root in processSlot).
+        // We must use the computed state_root here so the stored block_root
+        // matches what the next block generator will use as parent_root.
         var br_body_root: [32]u8 = undefined;
         try types.electra.BeaconBlockBody.hashTreeRoot(self.allocator, &signed_block.message.body, &br_body_root);
         const hdr = types.phase0.BeaconBlockHeader.Type{
             .slot = block_slot,
             .proposer_index = signed_block.message.proposer_index,
             .parent_root = signed_block.message.parent_root,
-            .state_root = signed_block.message.state_root,
+            .state_root = state_root, // Use computed post-state root, not block's declared (possibly 0)
             .body_root = br_body_root,
         };
         var computed_block_root: [32]u8 = undefined;
@@ -1249,29 +1254,21 @@ pub const BeaconNode = struct {
         // The genesis block root is the hash of the latest block header stored
         // in the genesis state. This matches what BlockGenerator computes as
         // parent_root when building the first block (from state.latestBlockHeader()).
-        // Compute the genesis state root first — needed for the genesis block root.
-        // The genesis state's latestBlockHeader has state_root=0x00..00 initially;
-        // per spec, the actual genesis block root uses the real state_root.
+        //
+        // Use the header as-is (including its stored state_root), which is the
+        // same computation BlockGenerator.generateBlockWithOpts performs:
+        //   state.latestBlockHeader().hashTreeRoot()
+        // We must NOT replace state_root with a freshly computed hash here —
+        // that would produce a different root than the block generator uses,
+        // causing UnknownParentBlock errors on the first imported block.
         try genesis_state.state.commit();
-        const state_root_for_header = (try genesis_state.state.hashTreeRoot()).*;
 
         var genesis_header = try genesis_state.state.latestBlockHeader();
-        // Per spec: genesis block header has state_root=0 initially.
-        // Compute the genesis block root with the real state_root filled in,
-        // but do NOT mutate the live tree — read fields into a plain struct.
-        const header_slot = try genesis_header.get("slot");
-        const header_proposer = try genesis_header.get("proposer_index");
-        const header_parent = (try genesis_header.getFieldRoot("parent_root")).*;
-        const header_body = (try genesis_header.getFieldRoot("body_root")).*;
-        const genesis_header_val = types.phase0.BeaconBlockHeader.Type{
-            .slot = header_slot,
-            .proposer_index = header_proposer,
-            .parent_root = header_parent,
-            .state_root = state_root_for_header,
-            .body_root = header_body,
-        };
-        var genesis_block_root: [32]u8 = undefined;
-        try types.phase0.BeaconBlockHeader.hashTreeRoot(&genesis_header_val, &genesis_block_root);
+        const genesis_block_root = (try genesis_header.hashTreeRoot()).*;
+
+        // Use the genesis STATE slot as the head slot. For real genesis this is 0;
+        // for checkpoint sync / test states it may be non-zero.
+        const genesis_slot = try genesis_state.state.slot();
 
         // Cache the genesis state
         const state_root = try self.state_regen.onNewBlock(genesis_state, true);
@@ -1282,8 +1279,8 @@ pub const BeaconNode = struct {
         try self.block_importer.registerGenesisRoot(genesis_block_root, state_root);
         try self.chain.registerGenesisRoot(genesis_block_root, state_root);
 
-        // Set head at slot 0
-        try self.head_tracker.onBlock(genesis_block_root, 0, state_root);
+        // Set head at the genesis state's slot (may be non-zero for checkpoint states).
+        try self.head_tracker.onBlock(genesis_block_root, genesis_slot, state_root);
 
         // Capture genesis validators root for fork digest computation
         self.genesis_validators_root = (try genesis_state.state.genesisValidatorsRoot()).*;

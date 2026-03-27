@@ -146,31 +146,38 @@ pub const SimNodeHarness = struct {
         // Clone head state so we can advance it to look up the correct
         // proposer. BeaconNode.importBlock does the same clone internally,
         // but we need the post-advance epoch cache BEFORE building the block.
-        var post_state = try head_state.clone(
-            self.allocator,
-            .{ .transfer_cache = false },
-        );
-        errdefer {
+        //
+        // Use a nested scope to ensure post_state cleanup errdefer does not
+        // fire after we manually free it below (Zig errdefers cannot be cancelled).
+        const signed_block = blk: {
+            var post_state = try head_state.clone(
+                self.allocator,
+                .{ .transfer_cache = false },
+            );
+            errdefer {
+                post_state.deinit();
+                self.allocator.destroy(post_state);
+            }
+
+            // Advance to target slot (triggers epoch transition if needed).
+            try state_transition.processSlots(
+                self.allocator,
+                post_state,
+                target_slot,
+                .{},
+            );
+
+            // Generate block using post-advance state (correct proposer / epoch cache).
+            const blk_val = try self.block_gen.generateBlockWithOpts(post_state, target_slot, .{
+                .participation_rate = self.participation_rate,
+            });
+
+            // Free the temporary post-state (BeaconNode.importBlock makes its own copy).
             post_state.deinit();
             self.allocator.destroy(post_state);
-        }
 
-        // Advance to target slot (triggers epoch transition if needed).
-        try state_transition.processSlots(
-            self.allocator,
-            post_state,
-            target_slot,
-            .{},
-        );
-
-        // Generate block using post-advance state (correct proposer / epoch cache).
-        const signed_block = try self.block_gen.generateBlockWithOpts(post_state, target_slot, .{
-            .participation_rate = self.participation_rate,
-        });
-
-        // Free the temporary post-state (BeaconNode.importBlock makes its own copy).
-        post_state.deinit();
-        self.allocator.destroy(post_state);
+            break :blk blk_val;
+        };
 
         defer {
             const types = @import("consensus_types");
