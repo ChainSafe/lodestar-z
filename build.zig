@@ -213,6 +213,19 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("node"), module_node) catch @panic("OOM");
 
+    const module_validator = b.createModule(.{
+        .root_source_file = b.path("src/validator/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("validator"), module_validator) catch @panic("OOM");
+    module_validator.addImport("bls", module_bls);
+    module_validator.addImport("consensus_types", module_consensus_types);
+    module_validator.addImport("config", module_config);
+    module_validator.addImport("preset", module_preset);
+    module_validator.addImport("constants", module_constants);
+    module_validator.addImport("state_transition", module_state_transition);
+
 
     const module_processor = b.createModule(.{
         .root_source_file = b.path("src/processor/root.zig"),

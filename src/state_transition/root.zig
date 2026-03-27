@@ -141,3 +141,6 @@ test {
     testing.refAllDecls(state_transition);
     testing.refAllDecls(EpochShufflingMod);
 }
+pub const computeDomain = @import("./utils/domain.zig").computeDomain;
+pub const computeBlockSigningRoot = @import("./utils/signing_root.zig").computeBlockSigningRoot;
+pub const forkVersion = @import("./utils/domain.zig").forkVersion;
