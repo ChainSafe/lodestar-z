@@ -18,6 +18,29 @@ pub const Withdrawal = struct {
     amount: u64,
 };
 
+/// DepositRequest (Electra EIP-6110): deposit from execution layer.
+pub const DepositRequest = struct {
+    pubkey: [48]u8,
+    withdrawal_credentials: [32]u8,
+    amount: u64,
+    signature: [96]u8,
+    index: u64,
+};
+
+/// WithdrawalRequest (Electra EIP-7002): validator withdrawal triggered on EL.
+pub const WithdrawalRequest = struct {
+    source_address: [20]u8,
+    validator_pubkey: [48]u8,
+    amount: u64,
+};
+
+/// ConsolidationRequest (Electra EIP-7251): validator consolidation on EL.
+pub const ConsolidationRequest = struct {
+    source_address: [20]u8,
+    source_pubkey: [48]u8,
+    target_pubkey: [48]u8,
+};
+
 /// Status returned by the execution engine after validating a payload.
 pub const ExecutionPayloadStatus = enum {
     valid,
@@ -45,6 +68,23 @@ pub const ForkchoiceStateV1 = struct {
     finalized_block_hash: [32]u8,
 };
 
+// ── PayloadAttributes ─────────────────────────────────────────────────────────
+
+/// V1 payload attributes (Bellatrix): no withdrawals, no parent_beacon_block_root.
+pub const PayloadAttributesV1 = struct {
+    timestamp: u64,
+    prev_randao: [32]u8,
+    suggested_fee_recipient: [20]u8,
+};
+
+/// V2 payload attributes (Capella): adds withdrawals.
+pub const PayloadAttributesV2 = struct {
+    timestamp: u64,
+    prev_randao: [32]u8,
+    suggested_fee_recipient: [20]u8,
+    withdrawals: []const Withdrawal,
+};
+
 /// Payload attributes sent with forkchoiceUpdated to trigger block building.
 /// V3 includes parent_beacon_block_root (post-Deneb).
 pub const PayloadAttributesV3 = struct {
@@ -60,6 +100,45 @@ pub const ForkchoiceUpdatedResponse = struct {
     payload_status: PayloadStatusV1,
     /// Identifier of the payload build process; null when no build was requested.
     payload_id: ?[8]u8 = null,
+};
+
+// ── Execution Payloads ────────────────────────────────────────────────────────
+
+/// Execution payload V1 (Bellatrix): no withdrawals, no blob fields.
+pub const ExecutionPayloadV1 = struct {
+    parent_hash: [32]u8,
+    fee_recipient: [20]u8,
+    state_root: [32]u8,
+    receipts_root: [32]u8,
+    logs_bloom: [256]u8,
+    prev_randao: [32]u8,
+    block_number: u64,
+    gas_limit: u64,
+    gas_used: u64,
+    timestamp: u64,
+    extra_data: []const u8,
+    base_fee_per_gas: u256,
+    block_hash: [32]u8,
+    transactions: []const []const u8,
+};
+
+/// Execution payload V2 (Capella): adds withdrawals.
+pub const ExecutionPayloadV2 = struct {
+    parent_hash: [32]u8,
+    fee_recipient: [20]u8,
+    state_root: [32]u8,
+    receipts_root: [32]u8,
+    logs_bloom: [256]u8,
+    prev_randao: [32]u8,
+    block_number: u64,
+    gas_limit: u64,
+    gas_used: u64,
+    timestamp: u64,
+    extra_data: []const u8,
+    base_fee_per_gas: u256,
+    block_hash: [32]u8,
+    transactions: []const []const u8,
+    withdrawals: []const Withdrawal,
 };
 
 /// Execution payload as returned by the EL (V3: post-Deneb with blob gas fields).
@@ -83,9 +162,56 @@ pub const ExecutionPayloadV3 = struct {
     excess_blob_gas: u64,
 };
 
-/// Response from engine_getPayloadV3.
+/// Execution payload V4 (Electra): adds deposit_requests, withdrawal_requests,
+/// consolidation_requests.
+pub const ExecutionPayloadV4 = struct {
+    parent_hash: [32]u8,
+    fee_recipient: [20]u8,
+    state_root: [32]u8,
+    receipts_root: [32]u8,
+    logs_bloom: [256]u8,
+    prev_randao: [32]u8,
+    block_number: u64,
+    gas_limit: u64,
+    gas_used: u64,
+    timestamp: u64,
+    extra_data: []const u8,
+    base_fee_per_gas: u256,
+    block_hash: [32]u8,
+    transactions: []const []const u8,
+    withdrawals: []const Withdrawal,
+    blob_gas_used: u64,
+    excess_blob_gas: u64,
+    deposit_requests: []const DepositRequest,
+    withdrawal_requests: []const WithdrawalRequest,
+    consolidation_requests: []const ConsolidationRequest,
+};
+
+// ── Payload responses ─────────────────────────────────────────────────────────
+
+/// Response from engine_getPayloadV1 (Bellatrix).
+pub const GetPayloadResponseV1 = struct {
+    execution_payload: ExecutionPayloadV1,
+    block_value: u256,
+};
+
+/// Response from engine_getPayloadV2 (Capella).
+pub const GetPayloadResponseV2 = struct {
+    execution_payload: ExecutionPayloadV2,
+    block_value: u256,
+};
+
+/// Response from engine_getPayloadV3 (Deneb).
 pub const GetPayloadResponse = struct {
     execution_payload: ExecutionPayloadV3,
+    block_value: u256,
+    blobs_bundle: BlobsBundle,
+    should_override_builder: bool,
+};
+
+/// Response from engine_getPayloadV4 (Electra).
+pub const GetPayloadResponseV4 = struct {
+    execution_payload: ExecutionPayloadV4,
     block_value: u256,
     blobs_bundle: BlobsBundle,
     should_override_builder: bool,
@@ -153,4 +279,88 @@ test "Withdrawal struct layout" {
     };
     try testing.expectEqual(@as(u64, 42), w.index);
     try testing.expectEqual(@as(u64, 32_000_000_000), w.amount);
+}
+
+test "ExecutionPayloadV1 struct" {
+    const p = ExecutionPayloadV1{
+        .parent_hash = std.mem.zeroes([32]u8),
+        .fee_recipient = std.mem.zeroes([20]u8),
+        .state_root = std.mem.zeroes([32]u8),
+        .receipts_root = std.mem.zeroes([32]u8),
+        .logs_bloom = std.mem.zeroes([256]u8),
+        .prev_randao = std.mem.zeroes([32]u8),
+        .block_number = 1,
+        .gas_limit = 30_000_000,
+        .gas_used = 21_000,
+        .timestamp = 1_700_000_000,
+        .extra_data = &.{},
+        .base_fee_per_gas = 1_000_000_000,
+        .block_hash = [_]u8{0x01} ** 32,
+        .transactions = &.{},
+    };
+    try testing.expectEqual(@as(u64, 1), p.block_number);
+    try testing.expect(!@hasField(ExecutionPayloadV1, "withdrawals"));
+    try testing.expect(!@hasField(ExecutionPayloadV1, "blob_gas_used"));
+}
+
+test "ExecutionPayloadV2 has withdrawals but no blob fields" {
+    try testing.expect(@hasField(ExecutionPayloadV2, "withdrawals"));
+    try testing.expect(!@hasField(ExecutionPayloadV2, "blob_gas_used"));
+    try testing.expect(!@hasField(ExecutionPayloadV2, "excess_blob_gas"));
+}
+
+test "ExecutionPayloadV3 has withdrawals and blob fields" {
+    try testing.expect(@hasField(ExecutionPayloadV3, "withdrawals"));
+    try testing.expect(@hasField(ExecutionPayloadV3, "blob_gas_used"));
+    try testing.expect(@hasField(ExecutionPayloadV3, "excess_blob_gas"));
+}
+
+test "ExecutionPayloadV4 has Electra request fields" {
+    try testing.expect(@hasField(ExecutionPayloadV4, "deposit_requests"));
+    try testing.expect(@hasField(ExecutionPayloadV4, "withdrawal_requests"));
+    try testing.expect(@hasField(ExecutionPayloadV4, "consolidation_requests"));
+}
+
+test "PayloadAttributesV1 no withdrawals" {
+    try testing.expect(!@hasField(PayloadAttributesV1, "withdrawals"));
+    try testing.expect(!@hasField(PayloadAttributesV1, "parent_beacon_block_root"));
+}
+
+test "PayloadAttributesV2 has withdrawals but no parent_beacon_block_root" {
+    try testing.expect(@hasField(PayloadAttributesV2, "withdrawals"));
+    try testing.expect(!@hasField(PayloadAttributesV2, "parent_beacon_block_root"));
+}
+
+test "PayloadAttributesV3 has withdrawals and parent_beacon_block_root" {
+    try testing.expect(@hasField(PayloadAttributesV3, "withdrawals"));
+    try testing.expect(@hasField(PayloadAttributesV3, "parent_beacon_block_root"));
+}
+
+test "DepositRequest struct" {
+    const dr = DepositRequest{
+        .pubkey = [_]u8{0x01} ** 48,
+        .withdrawal_credentials = [_]u8{0x02} ** 32,
+        .amount = 32_000_000_000,
+        .signature = [_]u8{0x03} ** 96,
+        .index = 0,
+    };
+    try testing.expectEqual(@as(u64, 32_000_000_000), dr.amount);
+}
+
+test "WithdrawalRequest struct" {
+    const wr = WithdrawalRequest{
+        .source_address = [_]u8{0xaa} ** 20,
+        .validator_pubkey = [_]u8{0xbb} ** 48,
+        .amount = 1_000_000_000,
+    };
+    try testing.expectEqual(@as(u64, 1_000_000_000), wr.amount);
+}
+
+test "ConsolidationRequest struct" {
+    const cr = ConsolidationRequest{
+        .source_address = [_]u8{0x01} ** 20,
+        .source_pubkey = [_]u8{0x02} ** 48,
+        .target_pubkey = [_]u8{0x03} ** 48,
+    };
+    try testing.expectEqual([_]u8{0x01} ** 20, cr.source_address);
 }
