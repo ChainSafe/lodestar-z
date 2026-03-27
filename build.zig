@@ -224,6 +224,7 @@ pub fn build(b: *std.Build) void {
     module_validator.addImport("config", module_config);
     module_validator.addImport("preset", module_preset);
     module_validator.addImport("constants", module_constants);
+    module_validator.addImport("state_transition", module_state_transition);
 
 
     const module_processor = b.createModule(.{
