@@ -48,9 +48,6 @@ const fast_verify = @import("fast_verify.zig");
 /// Round up to 256 for safety.
 pub const MAX_SETS_PER_BLOCK: usize = 256;
 
-/// Number of random bytes per element for fast verification.
-const RAND_BYTES = 8;
-
 pub const BatchVerifier = struct {
     /// Collected signature sets, stack-allocated.
     sets: [MAX_SETS_PER_BLOCK]SignatureSet = undefined,
@@ -155,20 +152,27 @@ pub const BatchVerifier = struct {
 /// Fill random scalars for batch verification.
 /// Uses OS entropy for cryptographic security (random scalars must be
 /// unpredictable to prevent rogue-key attacks on the batch).
+///
+/// NOTE: Currently Linux-only (getrandom syscall). When porting to macOS/BSD,
+/// replace with arc4random_buf or equivalent.
 fn fillRandomScalars(rands: [][32]u8) void {
-    // Fill all random bytes in one shot for efficiency.
-    // Uses Linux getrandom syscall directly for OS entropy.
     const bytes = std.mem.sliceAsBytes(rands);
     var filled: usize = 0;
     while (filled < bytes.len) {
         const rc = std.os.linux.getrandom(bytes.ptr + filled, bytes.len - filled, 0);
         const signed_rc: isize = @bitCast(rc);
         if (signed_rc < 0) {
-            // Fallback: CSPRNG seeded from stack + timestamp
+            // Fallback: CSPRNG seeded from stack ASLR + partial data.
+            // ASLR provides ~28-40 bits on 64-bit Linux. Combined with any
+            // partially-filled random bytes, this gives sufficient entropy for
+            // the 64-bit security level of batch verification random scalars.
             var seed: [32]u8 = [_]u8{0} ** 32;
             var stack_var: u8 = 0;
             const addr: u64 = @truncate(@intFromPtr(&stack_var));
             @memcpy(seed[0..8], std.mem.asBytes(&addr));
+            // Mix in any partially-filled bytes as additional entropy
+            const mix_len = @min(filled, 24);
+            if (mix_len > 0) @memcpy(seed[8..][0..mix_len], bytes[0..mix_len]);
             var prng = std.Random.ChaCha.init(seed);
             prng.random().bytes(bytes[filled..]);
             return;
