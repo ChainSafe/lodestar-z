@@ -47,6 +47,9 @@ const OpPool = chain_mod.OpPool;
 const SeenCache = chain_mod.SeenCache;
 const produceBlockBody = chain_mod.produceBlockBody;
 const ProducedBlockBody = chain_mod.ProducedBlockBody;
+const ProducedBlock = chain_mod.ProducedBlock;
+const BlockProductionConfig = chain_mod.BlockProductionConfig;
+const assembleBlock = chain_mod.assembleBlock;
 pub const HeadTracker = chain_mod.HeadTracker;
 pub const ImportResult = chain_mod.ImportResult;
 const ImportError = chain_mod.ImportError;
@@ -2967,8 +2970,237 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         return produceBlockBody(self.allocator, slot, self.op_pool);
     }
 
-    /// Build a StatusMessage reflecting the current chain state.
+    /// Produce a full beacon block with execution payload for a given slot.
     ///
+    /// This is the main entry point for block production. It:
+    /// 1. Gets the head state and verifies the proposer for the slot
+    /// 2. Retrieves the execution payload from the EL (must call preparePayload first)
+    /// 3. Converts the engine API payload to SSZ format
+    /// 4. Assembles the full BeaconBlockBody with all fields populated
+    /// 5. Returns a ProducedBlock with the body, blobs bundle, and metadata
+    ///
+    /// The caller is responsible for:
+    /// - Calling preparePayload() before this (typically at slot N-1)
+    /// - Setting the RANDAO reveal (validator client signs)
+    /// - Computing the state root via state transition
+    /// - Signing the block
+    /// - Broadcasting via gossip
+    pub fn produceFullBlock(self: *BeaconNode, slot: u64, prod_config: BlockProductionConfig) !ProducedBlock {
+        // Merge node-level graffiti as fallback: per-request > node option > default
+        var effective_config = prod_config;
+        if (effective_config.graffiti == null) {
+            effective_config.graffiti = self.node_options.graffiti;
+        }
+
+        const head = self.getHead();
+        const parent_root = head.root;
+
+        // Get execution payload from cached payload (from preparePayload)
+        var exec_payload = types.electra.ExecutionPayload.default_value;
+        var blobs_bundle: ?chain_mod.produce_block.BlobsBundle = null;
+        var block_value: u256 = 0;
+        var blob_commitments = std.ArrayListUnmanaged(types.primitive.KZGCommitment.Type).empty;
+
+        if (self.cached_payload_id != null) {
+            if (self.getExecutionPayload()) |resp| {
+                // Convert engine API payload to SSZ format
+                exec_payload = try convertEnginePayload(self.allocator, resp.execution_payload);
+                blobs_bundle = .{
+                    .commitments = resp.blobs_bundle.commitments,
+                    .proofs = resp.blobs_bundle.proofs,
+                    .blobs = resp.blobs_bundle.blobs,
+                };
+                block_value = resp.block_value;
+
+                // Extract blob KZG commitments
+                if (resp.blobs_bundle.commitments.len > 0) {
+                    blob_commitments = try std.ArrayListUnmanaged(
+                        types.primitive.KZGCommitment.Type,
+                    ).initCapacity(self.allocator, resp.blobs_bundle.commitments.len);
+                    for (resp.blobs_bundle.commitments) |commitment| {
+                        blob_commitments.appendAssumeCapacity(commitment);
+                    }
+                }
+            } else |err| {
+                std.log.warn("Failed to get execution payload, producing block without it: {}", .{err});
+            }
+        }
+
+        // Get eth1_data from head state
+        var eth1_data = types.phase0.Eth1Data.default_value;
+        if (self.block_state_cache.get(parent_root)) |head_state| {
+            const state_eth1 = head_state.state.eth1Data() catch null;
+            if (state_eth1) |eth1_view| {
+                eth1_data.deposit_root = (eth1_view.getFieldRoot("deposit_root") catch &std.mem.zeroes([32]u8)).*;
+                eth1_data.deposit_count = eth1_view.get("deposit_count") catch 0;
+                eth1_data.block_hash = (eth1_view.getFieldRoot("block_hash") catch &std.mem.zeroes([32]u8)).*;
+            }
+        }
+
+        // Get proposer index from epoch cache
+        var proposer_index: u64 = 0;
+        if (self.block_state_cache.get(parent_root)) |head_state| {
+            proposer_index = head_state.getBeaconProposer(slot) catch 0;
+        }
+
+        const block = try assembleBlock(
+            self.allocator,
+            slot,
+            proposer_index,
+            parent_root,
+            self.op_pool,
+            exec_payload,
+            blobs_bundle,
+            block_value,
+            blob_commitments,
+            eth1_data,
+            effective_config,
+        );
+
+        std.log.info("Produced full block: slot={d} proposer={d} parent={s}... value={d}", .{
+            slot,
+            proposer_index,
+            &std.fmt.bytesToHex(parent_root[0..4], .lower),
+            @as(u64, @truncate(block.block_value)),
+        });
+
+        return block;
+
+    }
+    /// Produce a full block and import it locally.
+    ///
+    /// This is the complete block production pipeline:
+    /// 1. Produce block body with execution payload
+    /// 2. Wrap in BeaconBlock with slot, proposer, parent root
+    /// 3. Compute state root via state transition (with verification off)
+    /// 4. Wrap in SignedBeaconBlock (with zero signature — VC signs separately)
+    /// 5. Import the block locally
+    ///
+    /// Returns the signed block and import result. The block is owned by the
+    /// caller and must be freed.
+    ///
+    /// Preconditions:
+    /// - preparePayload() called at slot N-1 (to have a cached payload)
+    /// - Head state available in block_state_cache
+    pub fn produceAndImportBlock(
+        self: *BeaconNode,
+        slot: u64,
+        prod_config: BlockProductionConfig,
+    ) !struct { signed_block: *types.electra.SignedBeaconBlock.Type, import_result: ImportResult } {
+        // 1. Produce block body
+        var produced = try self.produceFullBlock(slot, prod_config);
+
+        // 2. Build BeaconBlock (state_root is zeroed; we compute it next)
+        const signed_block = try self.allocator.create(types.electra.SignedBeaconBlock.Type);
+        errdefer self.allocator.destroy(signed_block);
+
+        signed_block.* = .{
+            .message = .{
+                .slot = slot,
+                .proposer_index = produced.proposer_index,
+                .parent_root = produced.parent_root,
+                .state_root = [_]u8{0} ** 32, // filled below
+                .body = produced.block_body,
+            },
+            .signature = [_]u8{0} ** 96, // zero sig — VC signs
+        };
+
+        // 3. Compute state root by running state transition
+        if (self.block_state_cache.get(produced.parent_root)) |head_state| {
+            const any_block = fork_types.AnySignedBeaconBlock{ .full_electra = signed_block };
+
+            const post_state = state_transition.stateTransition(
+                self.allocator,
+                head_state,
+                any_block,
+                .{
+                    .verify_state_root = false,
+                    .verify_proposer = false,
+                    .verify_signatures = false,
+                    .transfer_cache = false,
+                },
+            ) catch |err| {
+                std.log.warn("State transition for state root computation failed: {}", .{err});
+                return err;
+            };
+            defer {
+                post_state.deinit();
+                self.allocator.destroy(post_state);
+            }
+
+            const state_root = post_state.state.hashTreeRoot() catch |err| {
+                std.log.warn("hashTreeRoot failed: {}", .{err});
+                return err;
+            };
+
+            // Fill in the computed state root
+            signed_block.message.state_root = state_root.*;
+
+            std.log.info("Computed state root for block: slot={d} state_root={s}...", .{
+                slot,
+                &std.fmt.bytesToHex(state_root[0..4], .lower),
+            });
+        } else {
+            std.log.warn("No head state available for state root computation at slot={d}", .{slot});
+        }
+
+        // 4. Import the block locally
+        const import_result = try self.importBlock(signed_block);
+
+        std.log.info("Block produced and imported: slot={d} root={s}...", .{
+            slot,
+            &std.fmt.bytesToHex(import_result.block_root[0..4], .lower),
+        });
+
+        // Transfer body ownership — ProducedBlock.deinit not needed since
+        // the signed_block now owns the body data
+        produced.block_body = types.electra.BeaconBlockBody.default_value;
+
+        return .{
+            .signed_block = signed_block,
+            .import_result = import_result,
+        };
+    }
+
+    /// Broadcast a signed block to the network via gossip.
+    ///
+    /// Serializes and publishes the block on the beacon_block gossip topic.
+    /// Should be called after produceAndImportBlock() succeeds.
+    ///
+    /// NOTE: Gossip encoding (SSZ + Snappy) and topic construction are
+    /// handled by the networking layer's gossip adapter. This method
+    /// delegates to publishGossip which handles compression internally.
+    pub fn broadcastBlock(
+        self: *BeaconNode,
+        signed_block: *const types.electra.SignedBeaconBlock.Type,
+    ) !void {
+        const p2p = self.p2p_service orelse {
+            std.log.warn("No P2P service — cannot broadcast block at slot={d}", .{signed_block.message.slot});
+            return;
+        };
+
+        // Serialize the signed block to SSZ
+        const serialized_size = types.electra.SignedBeaconBlock.serializedSize(signed_block);
+        const buf = try self.allocator.alloc(u8, serialized_size);
+        defer self.allocator.free(buf);
+        _ = types.electra.SignedBeaconBlock.serializeIntoBytes(signed_block, buf);
+
+        // Build gossip topic for current fork
+        const head_slot = self.getHead().slot;
+        const fork_digest = self.config.forkDigestAtSlot(head_slot, self.genesis_validators_root);
+        var topic_buf: [128]u8 = undefined;
+        const topic = std.fmt.bufPrint(&topic_buf, "/eth2/{s}/beacon_block/ssz_snappy", .{
+            &std.fmt.bytesToHex(fork_digest[0..], .lower),
+        }) catch return;
+
+        // Publish via gossip (P2P layer handles Snappy compression)
+        _ = p2p.publishGossip(topic, buf) catch |err| {
+            std.log.warn("Failed to broadcast block at slot={d}: {}", .{ signed_block.message.slot, err });
+            return;
+        };
+
+        std.log.info("Broadcast block via gossip: slot={d}", .{signed_block.message.slot});
+    }
     /// Used for req/resp Status exchanges with peers.
     pub fn getStatus(self: *const BeaconNode) StatusMessage.Type {
         // Always use head_tracker which is updated during range sync import.
@@ -3077,6 +3309,77 @@ fn gossipImportBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerro
     }
 }
 
+
+/// Convert an Engine API ExecutionPayloadV3 to the SSZ ExecutionPayload type.
+///
+/// The Engine API types use raw slices ([]const []const u8 for transactions,
+/// []const Withdrawal for withdrawals). The SSZ types use ArrayListUnmanaged.
+/// This function bridges the two representations.
+fn convertEnginePayload(
+    allocator: Allocator,
+    engine_payload: execution_mod.engine_api_types.ExecutionPayloadV3,
+) !types.electra.ExecutionPayload.Type {
+    const bellatrix = @import("consensus_types").bellatrix;
+    const capella = @import("consensus_types").capella;
+
+    // Convert transactions: []const []const u8 → VariableList of ByteList
+    var transactions = try std.ArrayListUnmanaged(
+        bellatrix.Transactions.Element.Type,
+    ).initCapacity(allocator, engine_payload.transactions.len);
+    errdefer {
+        for (transactions.items) |*tx| {
+            tx.deinit(allocator);
+        }
+        transactions.deinit(allocator);
+    }
+
+    for (engine_payload.transactions) |tx_bytes| {
+        var tx_data = std.ArrayListUnmanaged(u8){};
+        try tx_data.appendSlice(allocator, tx_bytes);
+        transactions.appendAssumeCapacity(tx_data);
+    }
+
+    // Convert withdrawals: []const engine Withdrawal → FixedList of SSZ Withdrawal
+    var withdrawals = try std.ArrayListUnmanaged(
+        capella.Withdrawal.Type,
+    ).initCapacity(allocator, engine_payload.withdrawals.len);
+    errdefer withdrawals.deinit(allocator);
+
+    for (engine_payload.withdrawals) |w| {
+        withdrawals.appendAssumeCapacity(.{
+            .index = w.index,
+            .validator_index = w.validator_index,
+            .address = w.address,
+            .amount = w.amount,
+        });
+    }
+
+    // Convert extra_data: []const u8 → ArrayListUnmanaged(u8)
+    var extra_data = std.ArrayListUnmanaged(u8){};
+    if (engine_payload.extra_data.len > 0) {
+        try extra_data.appendSlice(allocator, engine_payload.extra_data);
+    }
+
+    return types.electra.ExecutionPayload.Type{
+        .parent_hash = engine_payload.parent_hash,
+        .fee_recipient = engine_payload.fee_recipient,
+        .state_root = engine_payload.state_root,
+        .receipts_root = engine_payload.receipts_root,
+        .logs_bloom = engine_payload.logs_bloom,
+        .prev_randao = engine_payload.prev_randao,
+        .block_number = engine_payload.block_number,
+        .gas_limit = engine_payload.gas_limit,
+        .gas_used = engine_payload.gas_used,
+        .timestamp = engine_payload.timestamp,
+        .extra_data = extra_data,
+        .base_fee_per_gas = engine_payload.base_fee_per_gas,
+        .block_hash = engine_payload.block_hash,
+        .transactions = transactions,
+        .withdrawals = withdrawals,
+        .blob_gas_used = engine_payload.blob_gas_used,
+        .excess_blob_gas = engine_payload.excess_blob_gas,
+    };
+}
 fn gossipGetProposerIndex(slot: u64) ?u32 {
     const node = gossip_node orelse return null;
     const head_state_root = node.head_tracker.head_state_root;

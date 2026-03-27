@@ -71,6 +71,9 @@ pub const NodeOptions = struct {
 
     // ── Validator ────────────────────────────────────────────────
     suggested_fee_recipient: ?[20]u8 = null,
+    /// Custom graffiti string (UTF-8, max 32 bytes, zero-padded).
+    /// Set via --graffiti CLI option. When null, defaults to "lodestar-z".
+    graffiti: ?[32]u8 = null,
 
     // ── Sync ─────────────────────────────────────────────────────
     /// URL to fetch checkpoint state from a beacon API (--checkpoint-sync-url).
