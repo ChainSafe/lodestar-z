@@ -601,6 +601,12 @@ const app_spec = cli.app(.{
             .env = "LODESTAR_Z_DATA_DIR",
         }, ""),
 
+        .db_path = cli.option(?[]const u8, .{
+            .long = "db-path",
+            .description = "Override beacon database directory (default: <data-dir>/beacon-node/db)",
+            .env = "LODESTAR_Z_DB_PATH",
+        }, null),
+
         .params_file = cli.option(?[]const u8, .{
             .long = "params-file",
             .description = "Network config params YAML file",
@@ -823,9 +829,15 @@ fn runBeacon(
     }
     std.log.info("  execution:  {s}", .{opts.execution_urls});
 
-    // Ensure data directory exists.
+    // Ensure data directory tree exists using DataDir path resolution.
     if (opts.data_dir.len > 0) {
-        try Io.Dir.cwd().createDirPath(io, opts.data_dir);
+        var dd = try node_mod.DataDir.resolve(allocator, NodeOptions{
+            .data_dir = opts.data_dir,
+            .network = network,
+            .db_path = opts.db_path,
+        });
+        defer dd.deinit();
+        try dd.ensureDirs(io);
         std.log.info("  data directory ready: {s}", .{opts.data_dir});
     }
 
@@ -880,6 +892,7 @@ fn runBeacon(
     // Build NodeOptions from parsed CLI args.
     const node_opts = NodeOptions{
         .data_dir = opts.data_dir,
+        .db_path = opts.db_path,
         .bootnodes = bootnodes,
         .verify_signatures = opts.verify_signatures,
         .rest_enabled = opts.rest,
