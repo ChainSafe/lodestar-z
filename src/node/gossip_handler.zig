@@ -25,6 +25,8 @@ const DecodedGossipMessage = networking.DecodedGossipMessage;
 const chain = @import("chain");
 const SeenCache = chain.SeenCache;
 const chain_gossip = chain.gossip_validation;
+
+const BeaconMetrics = @import("metrics.zig").BeaconMetrics;
 const GossipAction = chain_gossip.GossipAction;
 const ChainState = chain_gossip.ChainState;
 
@@ -136,6 +138,9 @@ pub const GossipHandler = struct {
     isKnownBlockRoot: *const fn (root: [32]u8) bool,
     getValidatorCount: *const fn () u32,
 
+    /// Optional metrics pointer — records gossip accept/reject/ignore counts.
+    metrics: ?*BeaconMetrics = null,
+
     /// Allocate a GossipHandler on the heap and initialise owned SeenCache.
     pub fn create(
         allocator: Allocator,
@@ -144,6 +149,9 @@ pub const GossipHandler = struct {
         getProposerIndex: *const fn (slot: u64) ?u32,
         isKnownBlockRoot: *const fn (root: [32]u8) bool,
         getValidatorCount: *const fn () u32,
+
+    /// Optional metrics pointer — records gossip accept/reject/ignore counts.
+    metrics: ?*BeaconMetrics = null,
     ) !*GossipHandler {
         const self = try allocator.create(GossipHandler);
         self.* = .{
@@ -679,12 +687,23 @@ pub const GossipHandler = struct {
 
     /// Route a gossip message by topic type.
     pub fn onGossipMessage(self: *GossipHandler, topic: GossipTopicType, data: []const u8) !void {
+        if (self.metrics) |m| m.gossip_messages_received.incr();
+
         self.onGossipMessageWithSubnet(topic, null, data) catch |err| {
             switch (err) {
-                GossipHandlerError.ValidationIgnored => {},
+                GossipHandlerError.ValidationIgnored => {
+                    if (self.metrics) |m| m.gossip_messages_ignored.incr();
+                },
+                GossipHandlerError.ValidationRejected => {
+                    if (self.metrics) |m| m.gossip_messages_rejected.incr();
+                    return err;
+                },
                 else => return err,
             }
+            return;
         };
+
+        if (self.metrics) |m| m.gossip_messages_validated.incr();
     }
 
     /// Route a gossip message by topic type, with optional subnet_id for subnet-indexed topics.

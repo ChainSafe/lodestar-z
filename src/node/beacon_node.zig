@@ -145,6 +145,9 @@ pub const BlockImporter = struct {
     /// When true, BLS signatures are verified in processBlock.
     verify_signatures: bool,
 
+    /// Optional metrics pointer for execution layer timing.
+    metrics: ?*BeaconMetrics = null,
+
     /// Maps block root → state root for state lookup in block cache.
     block_to_state: std.AutoArrayHashMap([32]u8, [32]u8),
 
@@ -399,13 +402,26 @@ pub const BlockImporter = struct {
 
         const parent_beacon_root = signed_block.message.parent_root;
 
+        const np_start = std.time.nanoTimestamp();
         const result = engine.newPayload(engine_payload, versioned_hashes, parent_beacon_root) catch |err| {
             std.log.warn("Engine API newPayload failed for root={s}...: {}", .{
                 &std.fmt.bytesToHex(block_root[0..4], .lower), err,
             });
+            if (self.metrics) |m| m.execution_errors_total.incr();
             // On EL communication failure, accept optimistically and track EL offline.
             return .syncing;
         };
+        const np_elapsed = @as(f64, @floatFromInt(std.time.nanoTimestamp() - np_start)) / 1e9;
+
+        if (self.metrics) |m| {
+            m.execution_new_payload_seconds.observe(np_elapsed);
+            switch (result.status) {
+                .valid => m.execution_payload_valid_total.incr(),
+                .invalid => m.execution_payload_invalid_total.incr(),
+                .syncing, .accepted => m.execution_payload_syncing_total.incr(),
+                else => {},
+            }
+        }
 
         std.log.info("Engine API newPayload slot {d}: status={s}", .{
             signed_block.message.slot, @tagName(result.status),
@@ -1095,6 +1111,9 @@ pub const BeaconNode = struct {
 
         // Wire engine API into block importer for execution payload verification.
         block_importer.engine_api = engine;
+
+        // Wire metrics into block importer for EL timing.
+        block_importer.metrics = self.metrics;
 
         // Wire data availability check (will be populated after node is created).
         // Note: The callback is set after BeaconNode.init returns since it needs
@@ -1969,7 +1988,10 @@ pub const BeaconNode = struct {
             // Run discovery tick — find new peers if below target.
             if (self.discovery_service) |ds| {
                 if (self.connection_manager) |cm| {
-                    ds.setConnectedPeers(cm.connectedCount());
+                    const peer_count = cm.connectedCount();
+                    ds.setConnectedPeers(peer_count);
+                    // Update peer count gauge each tick.
+                    if (self.metrics) |m| m.peers_connected.set(@intCast(peer_count));
                 }
                 ds.discoverPeers();
             }
@@ -1992,6 +2014,15 @@ pub const BeaconNode = struct {
 
             // Update API sync status from the sync service.
             self.updateApiSyncStatus();
+
+            // Update sync metrics.
+            if (self.metrics) |m| {
+                if (self.sync_service_inst) |sync_svc| {
+                    const status = sync_svc.getSyncStatus();
+                    m.sync_status.set(if (sync_svc.isSynced()) @as(u64, 0) else @as(u64, 1));
+                    m.sync_distance.set(status.sync_distance);
+                }
+            }
 
             // Prune sync committee pools by current head slot.
             {
@@ -2516,6 +2547,9 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                 // Sync committee pool import callbacks.
                 gh.importSyncContributionFn = &gossipImportSyncContribution;
                 gh.importSyncCommitteeMessageFn = &gossipImportSyncCommitteeMessage;
+
+                // Wire metrics so gossip accept/reject/ignore are counted.
+                gh.metrics = self.metrics;
             }
         }
 
@@ -2907,16 +2941,21 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             .finalized_block_hash = finalized_block_hash,
         };
 
+        const fcu_start = std.time.nanoTimestamp();
         const result = engine.forkchoiceUpdated(fcu_state, payload_attrs) catch |err| {
             std.log.warn("engine_forkchoiceUpdatedV3 failed: {}", .{err});
             self.el_offline = true;
             self.api_sync_status.el_offline = true;
+            if (self.metrics) |m| m.execution_errors_total.incr();
             return err;
         };
+        const fcu_elapsed = @as(f64, @floatFromInt(std.time.nanoTimestamp() - fcu_start)) / 1e9;
 
         // EL responded — mark as online.
         self.el_offline = false;
         self.api_sync_status.el_offline = false;
+
+        if (self.metrics) |m| m.execution_forkchoice_updated_seconds.observe(fcu_elapsed);
 
         // Cache payload_id if the EL started building a payload.
         if (result.payload_id) |pid| {
