@@ -738,7 +738,7 @@ pub const ForkChoice = struct {
         target_epoch: Epoch,
         att_data_root: Root,
         force_import: bool,
-    ) ForkChoiceError!void {
+    ) (Allocator.Error || ForkChoiceError)!void {
         // There is no point in processing an attestation with an empty bitfield. Reject
         // it immediately. This is not in the specification, however it should be transparent
         // to other nodes. We return early here to avoid wasting precious resources verifying
