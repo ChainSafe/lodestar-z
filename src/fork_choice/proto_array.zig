@@ -4619,10 +4619,7 @@ test "ProtoNode.toBlock round-trip" {
     try testing.expectEqual(recovered.parent_block_hash, null);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Port: Gloas PTC Edge Cases (Group 5)
-// Source: TS gloas.test.ts
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── Gloas PTC edge cases ──
 
 test "notifyPtcMessages ignores unknown block root" {
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
@@ -4687,16 +4684,13 @@ test "isPayloadTimely returns false for unknown block" {
     try testing.expect(!pa.isPayloadTimely(makeRoot(0xFF)));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Port: Gloas EMPTY vs FULL Tiebreaker (Group 6)
-// Source: TS gloas.test.ts
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── Gloas EMPTY vs FULL tiebreaker ──
 
+// Block at slot 5, current_slot=6 (n-1 condition: slot+1 == current).
+// Both EMPTY and FULL have effectiveWeight=0, tiebreaker by payload status.
+// For FULL to be demoted, shouldExtendPayload must return false.
+// That requires: not timely, boost_root exists, boost parent == block, boost extends EMPTY (not FULL).
 test "Gloas tiebreaker: EMPTY beats FULL for slot n-1 blocks (effectiveWeight zeroed)" {
-    // Block at slot 5, current_slot=6 (n-1 condition: slot+1 == current).
-    // Both EMPTY and FULL have effectiveWeight=0, tiebreaker by payload status.
-    // For FULL to be demoted, shouldExtendPayload must return false.
-    // That requires: not timely, boost_root exists, boost parent == block, boost extends EMPTY (not FULL).
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
@@ -4735,10 +4729,10 @@ test "Gloas tiebreaker: EMPTY beats FULL for slot n-1 blocks (effectiveWeight ze
     try testing.expectEqual(empty_idx, pending_node.best_child.?);
 }
 
+// Same block at slot 5, current_slot=6, but with PTC supermajority.
+// isPayloadTimely → true → shouldExtendPayload returns true → FULL ordinal stays 2.
+// FULL (2) > EMPTY (1) → FULL wins.
 test "Gloas tiebreaker: FULL beats EMPTY when payload is timely at slot n-1" {
-    // Same block at slot 5, current_slot=6, but with PTC supermajority.
-    // isPayloadTimely → true → shouldExtendPayload returns true → FULL ordinal stays 2.
-    // FULL (2) > EMPTY (1) → FULL wins.
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
@@ -4763,9 +4757,9 @@ test "Gloas tiebreaker: FULL beats EMPTY when payload is timely at slot n-1" {
     try testing.expectEqual(full_idx, pending_node.best_child.?);
 }
 
+// Block at slot 3, current_slot=6 (not n-1: 3+1 != 6).
+// effectiveWeight returns actual node.weight, not 0.
 test "Gloas tiebreaker: older slots (n-2) use weight comparison not tiebreaker" {
-    // Block at slot 3, current_slot=6 (not n-1: 3+1 != 6).
-    // effectiveWeight returns actual node.weight, not 0.
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
@@ -4798,10 +4792,7 @@ test "Gloas tiebreaker: older slots (n-2) use weight comparison not tiebreaker" 
     try testing.expectEqual(vi.gloas.empty, pending_node2.best_child.?);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Port: Gloas Additional Tests (Group 7)
-// Source: Go gloas_test.go
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── Gloas additional tests ──
 
 test "shouldExtendPayload returns false for untimely full" {
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);

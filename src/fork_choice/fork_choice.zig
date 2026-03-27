@@ -2158,10 +2158,7 @@ fn deinitTestForkChoice(allocator: Allocator, fc: *ForkChoice) void {
     allocator.destroy(fc_store);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Proposer Reorg Tests (Group 1+2)
-//         Go reorg_late_blocks_test.go
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── Proposer reorg tests ──
 
 /// Test-only helper: create ForkChoice with custom options.
 fn initTestForkChoiceWithOpts(
@@ -2411,9 +2408,7 @@ test "shouldOverrideFCU no override: timing fails" {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// getDependentRoot tests (Group 3)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── getDependentRoot tests ──
 
 /// Compute target root for a block at `slot`, given `skipped_slots`.
 fn getTargetRoot(slot: Slot, skipped_slots: []const Slot) Root {
@@ -2525,12 +2520,15 @@ test "getDependentRoot table-driven" {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// getAllAncestorBlocks / getAllNonAncestorBlocks tests (Group 4)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── getAllAncestorBlocks / getAllNonAncestorBlocks tests ──
 
+// Tree:
+//       0(genesis)
+//       |
+//       1(block_a)
+//       |
+//       2(block_b)
 test "getAllAncestorBlocks returns non-finalized ancestors from blockRoot" {
-    // Chain: genesis(0) → block_a(1) → block_b(2)
     const genesis_root = hashFromByte(0x01);
     const block_a_root = hashFromByte(0x02);
     const block_b_root = hashFromByte(0x03);
@@ -2566,10 +2564,15 @@ test "getAllAncestorBlocks returns non-finalized ancestors from blockRoot" {
     try testing.expectEqual(block_a_root, ancestors[1].block_root);
 }
 
+// Tree:
+//       0(genesis)
+//      / \
+//   1(a)  1(fork)
+//     |
+//   2(b)
+//     |
+//   3(c)
 test "getAllAncestorAndNonAncestorBlocks equals getAllAncestorBlocks + getAllNonAncestorBlocks" {
-    // Chain: genesis(0) → a(1) → b(2) → c(3)
-    //                  \→ fork(1)
-    // getAllAncestorAndNonAncestorBlocks equals getAllAncestorBlocks + getAllNonAncestorBlocks
     const genesis_root = hashFromByte(0x01);
     const a_root = hashFromByte(0x02);
     const b_root = hashFromByte(0x03);
@@ -2629,12 +2632,16 @@ test "getAllAncestorAndNonAncestorBlocks equals getAllAncestorBlocks + getAllNon
     }
 }
 
+// Tree:
+//       genesis
+//      / \
+//     a   b
+//         |
+//         c
+// 4 validators with balances [100, 200, 200, 300].
+// Validators 1,2 vote for b; validator 3 votes for c. Head → b (400 > 300).
+// Slash validator 1 → c becomes head. Re-slash validator 1 → noop.
 test "onAttesterSlashing affects head via computeDeltas" {
-    // Port of Prysm TestForkChoice_RemoveEquivocating.
-    // Tree: genesis → a (slot 1), a → b (slot 2), a → c (slot 3).
-    // 4 validators with balances [100, 200, 200, 300].
-    // Validators 1,2 vote for b; validator 3 votes for c. Head → b (400 > 300).
-    // Slash validator 1 → c becomes head. Re-slash validator 1 → noop.
     const genesis_root = hashFromByte(0x01);
     const a_root = hashFromByte(0x02);
     const b_root = hashFromByte(0x03);
@@ -2679,13 +2686,13 @@ test "onAttesterSlashing affects head via computeDeltas" {
     try testing.expectEqual(c_root, fc.head.block_root);
 }
 
+// Tree:
+//       0(genesis)
+//      /  |  \
+//     a   b   c
+//             |
+//             d
 test "multiple forks competing with votes" {
-    // Fork diagram:
-    //     genesis(0)
-    //       / | \
-    //      a  b  c   (all at slot 1)
-    //              \
-    //               d (slot 2)
     const genesis_root = hashFromByte(0x01);
     const a_root = hashFromByte(0x02);
     const b_root = hashFromByte(0x03);
@@ -2725,8 +2732,25 @@ test "multiple forks competing with votes" {
     try testing.expectEqual(@as(usize, 3), heads.len);
 }
 
+// Tree:
+//   0(genesis)
+//       |
+//       1
+//       |
+//       2
+//       |
+//       3
+//       |
+//       4
+//       |
+//       5
+//       |
+//       6
+//       |
+//       7
+//       |
+//       8
 test "deep chain head selection follows longest weighted branch" {
-    // Build a deep chain: genesis → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
     const genesis_root = hashFromByte(0x01);
     const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
 
@@ -2757,10 +2781,7 @@ test "deep chain head selection follows longest weighted branch" {
     try testing.expectEqual(@as(usize, 9), fc.proto_array.nodes.items.len); // genesis + 8 blocks
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Group 2 (continued): shouldOverrideForkChoiceUpdate — additional reason tests
-// shouldOverrideForkChoiceUpdate tests
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── shouldOverrideForkChoiceUpdate tests (continued) ──
 
 test "shouldOverrideFCU no override: not FFG competitive" {
     // Head has lower uj_epoch than parent → not FFG competitive → no override.
@@ -2816,18 +2837,20 @@ test "shouldOverrideFCU no override: not shuffling stable (epoch boundary)" {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Group 11: Edge cases — Balance update tests
-// Source: Go forkchoice_test.go (TestForkChoice_UpdateBalances*)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── Balance update tests ──
 
+// Tree:
+//       genesis
+//         |
+//       node1
+//         |
+//       node2
+//         |
+//       node3
+// 3 validators, each voting for their respective node.
+// justifiedBalances = [10, 20, 30] → each node gets its voter's balance.
+// Zig verifies per-node weight = {60, 50, 30} (back-propagated).
 test "balance positive change: fresh votes with new balances" {
-    // Port of Prysm TestForkChoice_UpdateBalancesPositiveChange.
-    // Chain: genesis → node1 (slot 1) → node2 (slot 2) → node3 (slot 3)
-    // 3 validators, each voting for their respective node.
-    // justifiedBalances = [10, 20, 30] → each node gets its voter's balance.
-    // Prysm verifies per-node balance = {10, 20, 30}.
-    // Zig verifies per-node weight = {60, 50, 30} (back-propagated).
     const allocator = testing.allocator;
     const genesis_root = hashFromByte(0x01);
     const root1 = hashFromByte(0x02);
@@ -2866,12 +2889,18 @@ test "balance positive change: fresh votes with new balances" {
     try testing.expectEqual(@as(i64, 30), fc.proto_array.nodes.items[idx3].weight);
 }
 
+// Tree:
+//       genesis
+//         |
+//       node1
+//         |
+//       node2
+//         |
+//       node3
+// Each node balance=100 initially.
+// old_balances = [100, 100, 100], new_balances = [10, 20, 30].
+// Zig verifies per-node weight = {60, 50, 30} (back-propagated).
 test "balance negative change: existing balances decrease" {
-    // Port of Prysm TestForkChoice_UpdateBalancesNegativeChange.
-    // Chain: genesis → node1 → node2 → node3, each node balance=100 initially.
-    // old_balances = [100, 100, 100], new_balances = [10, 20, 30].
-    // Prysm verifies per-node balance = {10, 20, 30}.
-    // Zig verifies per-node weight = {60, 50, 30} (back-propagated).
     const allocator = testing.allocator;
     const genesis_root = hashFromByte(0x01);
     const root1 = hashFromByte(0x02);
@@ -2922,13 +2951,16 @@ test "balance negative change: existing balances decrease" {
     try testing.expectEqual(@as(i64, 30), fc.proto_array.nodes.items[idx3].weight);
 }
 
+// Tree:
+//       genesis
+//         |
+//       node1
+//         |
+//       node2
+// old_balances = [100, 100], new_balances = [50, 200].
+// Votes point to same nodes with same slot.
+// Zig verifies per-node weight = {250, 200} (back-propagated).
 test "balance same slot change: balance update without vote movement" {
-    // Port of Prysm TestForkChoice_UpdateBalancesSameSlot.
-    // Chain: genesis → node1 (slot 1) → node2 (slot 2).
-    // old_balances = [100, 100], new_balances = [50, 200].
-    // Votes point to same nodes with same slot.
-    // Prysm verifies per-node balance = {50, 200}.
-    // Zig verifies per-node weight = {250, 200} (back-propagated).
     const allocator = testing.allocator;
     const genesis_root = hashFromByte(0x01);
     const root1 = hashFromByte(0x02);
@@ -2973,14 +3005,18 @@ test "balance same slot change: balance update without vote movement" {
     try testing.expectEqual(@as(i64, 200), fc.proto_array.nodes.items[idx2].weight);
 }
 
+// Tree:
+//       genesis
+//         |
+//       node1
+//         |
+//       node2
+//         |
+//       node3
+// 3 validators, each voting for their respective node.
+// old_balances = [125, 125, 125], new_balances = [10, 20, 30].
+// Verifies that negative deltas do not cause unsigned overflow.
 test "balance underflow clamping: old > new does not wrap unsigned" {
-    // Port of Prysm TestForkChoice_UpdateBalancesUnderflow.
-    // Prysm verifies per-node `balance`, Zig verifies per-node `weight` (back-propagated).
-    // Same tree structure, same balance values; expected weights differ due to propagation.
-    // Chain: genesis → node1 (slot 1) → node2 (slot 2) → node3 (slot 3)
-    // 3 validators, each voting for their respective node.
-    // old_balances = [125, 125, 125], new_balances = [10, 20, 30].
-    // Verifies that negative deltas do not cause unsigned overflow.
     const allocator = testing.allocator;
     const genesis_root = hashFromByte(0x01);
     const root1 = hashFromByte(0x02);
@@ -3067,19 +3103,22 @@ test "failed insertion cleanup: unknown parent does not leave dangling root" {
     try testing.expectEqual(@as(?u32, null), fc.proto_array.getDefaultNodeIndex(orphan_root));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Group 12: Prysm 1:1 ports — IsCanonical, AncestorRoot, CommonAncestor
-// Source: Go forkchoice_test.go
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── IsCanonical / AncestorRoot tests ──
 
+// Tree:
+//         0(genesis)
+//          / \
+//     1(slot 1)  2(slot 2)
+//         |          |
+//     3(slot 3)  4(slot 4)
+//                    |
+//                5(slot 5)
+//                    |
+//                6(slot 6)
+// Default head = 6 (longest chain by tiebreaker).
+// Canonical: genesis YES, 1 NO, 2 YES, 3 NO, 4 YES, 5 YES, 6 YES.
 test "IsCanonical: default head follows longest chain" {
-    // Port of Prysm TestForkChoice_IsCanonical.
-    // Tree (two competing branches from genesis):
-    //   genesis(0) → 1(slot 1) → 3(slot 3)
-    //            \→ 2(slot 2) → 4(slot 4) → 5(slot 5) → 6(slot 6)
-    // Default head = 6 (longest chain by tiebreaker).
-    // Canonical: genesis YES, 1 NO, 2 YES, 3 NO, 4 YES, 5 YES, 6 YES.
-    const genesis_root = ZERO_HASH; // Prysm uses ZeroHash as genesis root
+    const genesis_root = ZERO_HASH;
     const root1 = hashFromByte(0x11);
     const root2 = hashFromByte(0x12);
     const root3 = hashFromByte(0x13);
@@ -3122,12 +3161,18 @@ test "IsCanonical: default head follows longest chain" {
     try testing.expect(try fc.getCanonicalBlockByRoot(root6) != null); // 6: YES
 }
 
+// Tree:
+//       0(genesis)
+//         |
+//       1(slot 1)
+//         |
+//       2(slot 2)
+//         |
+//       3(slot 5)
+// AncestorRoot(3, slot=6) → 3 (slot 5 <= 6).
+// AncestorRoot(3, slot=5) → 3 (exact match).
+// AncestorRoot(3, slot=1) → 1.
 test "AncestorRoot: walks up to ancestor at or before given slot" {
-    // Port of Prysm TestForkChoice_AncestorRoot.
-    // Chain: genesis(0) → 1(slot 1) → 2(slot 2) → 3(slot 5).
-    // AncestorRoot(3, slot=6) → 3 (slot 5 <= 6).
-    // AncestorRoot(3, slot=5) → 3 (exact match).
-    // AncestorRoot(3, slot=1) → 1.
     const genesis_root = hashFromByte(0x01);
     const root1 = hashFromByte(0x21);
     const root2 = hashFromByte(0x22);
@@ -3161,10 +3206,14 @@ test "AncestorRoot: walks up to ancestor at or before given slot" {
     try testing.expectEqual(root1, a1.block_root);
 }
 
+// Tree:
+//       0(genesis)
+//         |
+//       1(slot 100)
+//         |
+//       3(slot 101)
+// AncestorRoot(3, slot=100) → 1.
 test "AncestorRoot: equal slot returns parent" {
-    // Port of Prysm TestForkChoice_AncestorEqualSlot.
-    // Chain: genesis(0) → 1(slot 100) → 3(slot 101).
-    // AncestorRoot(3, slot=100) → 1.
     const genesis_root = hashFromByte(0x01);
     const root1 = hashFromByte(0x31);
     const root3 = hashFromByte(0x33);
@@ -3187,10 +3236,14 @@ test "AncestorRoot: equal slot returns parent" {
     try testing.expectEqual(root1, ancestor.block_root);
 }
 
+// Tree:
+//       0(genesis)
+//         |
+//       1(slot 100)
+//         |
+//       3(slot 200)
+// AncestorRoot(3, slot=150) → 1 (largest slot <= 150).
 test "AncestorRoot: lower slot with gap returns parent" {
-    // Port of Prysm TestForkChoice_AncestorLowerSlot.
-    // Chain: genesis(0) → 1(slot 100) → 3(slot 200).
-    // AncestorRoot(3, slot=150) → 1 (largest slot <= 150).
     const genesis_root = hashFromByte(0x01);
     const root1 = hashFromByte(0x41);
     const root3 = hashFromByte(0x43);
