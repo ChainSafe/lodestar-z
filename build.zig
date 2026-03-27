@@ -735,8 +735,7 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("hex", module_hex);
     module_state_transition.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_state_transition.addImport("db", module_db);
-    // TODO: metrics dep not yet 0.16-compatible
-    // module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
+    module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
 
     module_networking.addImport("snappy", dep_snappy.module("snappy"));
     module_networking.addImport("ssz", module_ssz);
