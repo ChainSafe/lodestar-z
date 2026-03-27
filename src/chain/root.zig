@@ -38,6 +38,10 @@ pub const validateGossipAttestation = gossip_validation.validateGossipAttestatio
 pub const validateGossipAggregate = gossip_validation.validateGossipAggregate;
 pub const validateGossipDataColumnSidecar = gossip_validation.validateGossipDataColumnSidecar;
 pub const ProducedBlockBody = produce_block.ProducedBlockBody;
+pub const ProducedBlock = produce_block.ProducedBlock;
+pub const BlockProductionConfig = produce_block.BlockProductionConfig;
+pub const assembleBlock = produce_block.assembleBlock;
+pub const DEFAULT_GRAFFITI = produce_block.DEFAULT_GRAFFITI;
 
 test {
     testing.refAllDecls(@This());

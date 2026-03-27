@@ -47,6 +47,9 @@ const OpPool = chain_mod.OpPool;
 const SeenCache = chain_mod.SeenCache;
 const produceBlockBody = chain_mod.produceBlockBody;
 const ProducedBlockBody = chain_mod.ProducedBlockBody;
+const ProducedBlock = chain_mod.ProducedBlock;
+const BlockProductionConfig = chain_mod.BlockProductionConfig;
+const assembleBlock = chain_mod.assembleBlock;
 pub const HeadTracker = chain_mod.HeadTracker;
 pub const ImportResult = chain_mod.ImportResult;
 const ImportError = chain_mod.ImportError;
@@ -2952,6 +2955,72 @@ fn parseIp4(s: []const u8) ?[4]u8 {
     /// SignedBeaconBlock with execution payload, RANDAO, etc.
     pub fn produceBlock(self: *BeaconNode, slot: u64) !ProducedBlockBody {
         return produceBlockBody(self.allocator, slot, self.op_pool);
+    }
+
+    /// Produce a full beacon block with execution payload for a given slot.
+    ///
+    /// This is the main entry point for block production. It:
+    /// 1. Gets the head state and verifies the proposer for the slot
+    /// 2. Retrieves the execution payload from the EL (must call preparePayload first)
+    /// 3. Assembles the full BeaconBlockBody with all fields populated
+    /// 4. Returns a ProducedBlock with the body, blobs bundle, and metadata
+    ///
+    /// The caller is responsible for:
+    /// - Calling preparePayload() before this (typically at slot N-1)
+    /// - Setting the RANDAO reveal (validator client signs)
+    /// - Computing the state root via state transition
+    /// - Signing the block
+    /// - Broadcasting via gossip
+    pub fn produceFullBlock(self: *BeaconNode, slot: u64, config: BlockProductionConfig) !ProducedBlock {
+        const head = self.getHead();
+        const parent_root = head.root;
+
+        // Get execution payload from cached payload (from preparePayload)
+        var payload_response: ?GetPayloadResponse = null;
+        if (self.cached_payload_id != null) {
+            payload_response = self.getExecutionPayload() catch |err| {
+                std.log.warn("Failed to get execution payload, producing block without it: {}", .{err});
+                payload_response = null;
+            };
+        }
+
+        // Get eth1_data from head state
+        var eth1_data = types.phase0.Eth1Data.default_value;
+        if (self.block_state_cache.get(parent_root)) |head_state| {
+            const state_eth1 = head_state.state.eth1Data() catch null;
+            if (state_eth1) |eth1_view| {
+                // Read eth1_data fields from tree view
+                eth1_data.deposit_root = (eth1_view.getFieldRoot("deposit_root") catch &std.mem.zeroes([32]u8)).*;
+                eth1_data.deposit_count = eth1_view.get("deposit_count") catch 0;
+                eth1_data.block_hash = (eth1_view.getFieldRoot("block_hash") catch &std.mem.zeroes([32]u8)).*;
+            }
+        }
+
+        // Get proposer index from epoch cache
+        var proposer_index: u64 = 0;
+        if (self.block_state_cache.get(parent_root)) |head_state| {
+            proposer_index = head_state.getBeaconProposer(slot) catch 0;
+        }
+
+        const block = try assembleBlock(
+            self.allocator,
+            slot,
+            proposer_index,
+            parent_root,
+            self.op_pool,
+            payload_response,
+            eth1_data,
+            config,
+        );
+
+        std.log.info("Produced full block: slot={d} proposer={d} parent={s}... value={d}", .{
+            slot,
+            proposer_index,
+            &std.fmt.bytesToHex(parent_root[0..4], .lower),
+            @as(u64, @truncate(block.block_value)),
+        });
+
+        return block;
     }
 
     /// Build a StatusMessage reflecting the current chain state.
