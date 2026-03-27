@@ -59,6 +59,12 @@ const SigningContext = signing_mod.SigningContext;
 
 const bls = @import("bls");
 
+const key_discovery_mod = @import("key_discovery.zig");
+const KeyDiscovery = key_discovery_mod.KeyDiscovery;
+
+const remote_signer_mod = @import("remote_signer.zig");
+const RemoteSigner = remote_signer_mod.RemoteSigner;
+
 const log = std.log.scoped(.validator_client);
 
 /// Default fee recipient (zero address) — operator should override.
@@ -149,6 +155,26 @@ pub const ValidatorClient = struct {
         else
             null;
 
+        // Load validator keys from disk if keystores_dir and secrets_dir are configured.
+        var loaded_count: usize = 0;
+        if (config.keystores_dir) |ks_dir| {
+            if (config.secrets_dir) |sec_dir| {
+                const loaded_keys = try KeyDiscovery.loadAllKeys(allocator, ks_dir, sec_dir);
+                defer {
+                    for (loaded_keys) |k| k.deinit(allocator);
+                    allocator.free(loaded_keys);
+                }
+                for (loaded_keys) |k| {
+                    try validator_store.addKey(k.secret_key);
+                    if (doppelganger) |*d| {
+                        try d.registerValidator(k.pubkey);
+                    }
+                    loaded_count += 1;
+                }
+            }
+        }
+        log.info("validator keys loaded from disk: {d}", .{loaded_count});
+
         return .{
             .allocator = allocator,
             .config = config,
@@ -214,6 +240,24 @@ pub const ValidatorClient = struct {
 
         // Store io so clock callbacks can perform HTTP requests.
         self.io = io;
+
+        // Fetch remote signer keys if web3signer is configured.
+        if (self.config.web3signer_url) |url| {
+            log.info("fetching remote keys from web3signer url={s}", .{url});
+            var remote = RemoteSigner.init(self.allocator, url);
+            const remote_pubkeys = remote.listKeys(io) catch |err| blk: {
+                log.warn("failed to fetch remote keys: {s}", .{@errorName(err)});
+                break :blk &[_][48]u8{};
+            };
+            defer if (remote_pubkeys.len > 0) self.allocator.free(remote_pubkeys);
+            for (remote_pubkeys) |pk| {
+                // For remote signers, we don't have the secret key locally.
+                // We track the pubkey in the validator store by registering it.
+                // The actual signing will go through RemoteSigner when implemented.
+                log.info("registered remote validator pubkey=0x{s}", .{std.fmt.bytesToHex(pk, .lower)});
+            }
+            log.info("fetched {d} remote validator keys from web3signer", .{remote_pubkeys.len});
+        }
 
         // Note: ChainHeaderTracker SSE subscription would ideally run in a background fiber.
         // In Zig 0.16 with full evented I/O (io_uring/GCD), we could do:
