@@ -67,7 +67,7 @@ The [prior gist](https://gist.github.com/lodekeeper-z/75de0d483e7395e663c34aa58d
 | 18 | Processor | ~10 | ~2,000 | 5 | 2,090 | 🟠 Partial | ~50% | No |
 | 19 | Testing Infra | ~20 | ~3,000 | 23 | 6,825 | 🟡 Substantial | ~80% | No |
 | 20 | Data Availability | ~15 | ~3,000 | partial | ~500 | 🔴 Minimal | ~20% | For Fulu |
-| 21 | CLI | ~30 | ~5,000 | 2 | ~400 | 🔴 Minimal | ~15% | No |
+| 21 | CLI | ~30 | ~5,000 | 3+ | ~960 | 🟡 Substantial | ~60% | No |
 | 22 | Slasher | ~40 | ~6,000 | 0 | 0 | ❌ None | 0% | No |
 | 23 | Key Management | ~10 | ~1,500 | 0* | 0 | 🔴 Minimal | ~15%* | For VC |
 
@@ -680,12 +680,25 @@ The KV abstraction + LMDB backend exceeds the TS leveldb-based abstraction in so
 
 ### 21. CLI
 
-**Status: 🔴 Minimal (15%)**
+**Status: 🟡 Substantial (60%)**
 
-Zig has basic flags via `src/node/options.zig`. Missing subcommand architecture, config file, preset selection via CLI, key management commands, and migration system.
+Zig has a full CLI framework via `zig-cli` (external dep on Codeberg, `lodekeeper-z/zig-cli`). Integrated in `src/node/main.zig` with subcommand architecture:
 
-**Priority:** Low for devnet (flags sufficient); High for production  
-**Effort:** 3-4 weeks for usable production CLI
+**What's implemented:**
+- Subcommands: `beacon`, `validator`, `dev`, `bootnode`
+- ~63 CLI options covering: network, P2P, discovery, engine API, REST API, metrics, logging, checkpoint sync, data dir, validator keys, Web3Signer, graffiti, fee recipient, doppelganger
+- RC config file loading support
+- Network-aware preset selection
+- Environment variable support via zig-cli
+
+**What's missing:**
+- Key management subcommands (`keys import`, `keys list`, `keys delete`)
+- DB migration commands
+- `lightclient` subcommand
+- Some advanced options (weak subjectivity checkpoint, builder/MEV flags)
+
+**Priority:** Low for devnet (current coverage is sufficient); Medium for production  
+**Effort:** 1-2 weeks for remaining CLI gaps
 
 ---
 

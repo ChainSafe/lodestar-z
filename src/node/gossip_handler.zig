@@ -149,9 +149,6 @@ pub const GossipHandler = struct {
         getProposerIndex: *const fn (slot: u64) ?u32,
         isKnownBlockRoot: *const fn (root: [32]u8) bool,
         getValidatorCount: *const fn () u32,
-
-    /// Optional metrics pointer — records gossip accept/reject/ignore counts.
-    metrics: ?*BeaconMetrics = null,
     ) !*GossipHandler {
         const self = try allocator.create(GossipHandler);
         self.* = .{

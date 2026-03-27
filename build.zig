@@ -56,6 +56,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const dep_c_kzg = b.dependency("c_kzg", .{
+        .optimize = optimize,
+        .target = target,
+    });
+
     const dep_metrics = b.dependency("metrics", .{
         .optimize = optimize,
         .target = target,
@@ -148,6 +153,15 @@ pub fn build(b: *std.Build) void {
     });
     module_bls.linkLibrary(dep_blst.artifact("blst"));
     b.modules.put(b.dupe("bls"), module_bls) catch @panic("OOM");
+
+    // KZG module (c-kzg-4844 bindings for blob/cell verification)
+    const module_kzg = b.createModule(.{
+        .root_source_file = b.path("src/kzg/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    module_kzg.addImport("c_kzg", dep_c_kzg.module("c_kzg"));
+    b.modules.put(b.dupe("kzg"), module_kzg) catch @panic("OOM");
 
     const module_state_transition = b.createModule(.{
         .root_source_file = b.path("src/state_transition/root.zig"),
@@ -529,6 +543,16 @@ pub fn build(b: *std.Build) void {
     tls_run_test_chain.dependOn(&run_test_chain.step);
     tls_run_test.dependOn(&run_test_chain.step);
 
+    const test_kzg = b.addTest(.{
+        .name = "kzg",
+        .root_module = module_kzg,
+        .filters = b.option([][]const u8, "kzg.filters", "kzg test filters") orelse &[_][]const u8{},
+    });
+    const run_test_kzg = b.addRunArtifact(test_kzg);
+    const tls_run_test_kzg = b.step("test:kzg", "Run the KZG module tests");
+    tls_run_test_kzg.dependOn(&run_test_kzg.step);
+    tls_run_test.dependOn(&run_test_kzg.step);
+
     const test_sync = b.addTest(.{
         .name = "sync",
         .root_module = module_sync,
@@ -736,6 +760,9 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_state_transition.addImport("db", module_db);
     module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
+    module_state_transition.addImport("kzg", module_kzg);
+    // TODO: metrics dep not yet 0.16-compatible
+    // module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
 
     module_networking.addImport("snappy", dep_snappy.module("snappy"));
     module_networking.addImport("ssz", module_ssz);
@@ -832,6 +859,7 @@ pub fn build(b: *std.Build) void {
     module_chain.addImport("networking", module_networking);
     module_chain.addImport("bls", module_bls);
     module_chain.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+    module_chain.addImport("kzg", module_kzg);
 
     // sync module imports
     module_sync.addImport("db", module_db);
@@ -921,6 +949,7 @@ pub fn build(b: *std.Build) void {
     module_node.addImport("constants", module_constants);
     module_node.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_node.addImport("bls", module_bls);
+    module_node.addImport("kzg", module_kzg);
     module_node.addImport("hex", module_hex);
     module_node.addImport("build_options", options_module_build_options);
     module_node.addImport("fork_choice", module_fork_choice);

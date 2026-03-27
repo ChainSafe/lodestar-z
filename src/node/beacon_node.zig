@@ -113,6 +113,8 @@ const PayloadAttributesV3 = execution_mod.engine_api_types.PayloadAttributesV3;
 const GetPayloadResponse = execution_mod.GetPayloadResponse;
 const constants = @import("constants");
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const kzg_mod = @import("kzg");
+const Kzg = kzg_mod.Kzg;
 
 const metrics_mod = @import("metrics.zig");
 pub const BeaconMetrics = metrics_mod.BeaconMetrics;
@@ -403,7 +405,7 @@ pub const BlockImporter = struct {
 
         const parent_beacon_root = signed_block.message.parent_root;
 
-        const np_start = std.time.nanoTimestamp();
+        // TODO: timing for 0.16 (nanoTimestamp removed)
         const result = engine.newPayload(engine_payload, versioned_hashes, parent_beacon_root) catch |err| {
             std.log.warn("Engine API newPayload failed for root={s}...: {}", .{
                 &std.fmt.bytesToHex(block_root[0..4], .lower), err,
@@ -412,10 +414,10 @@ pub const BlockImporter = struct {
             // On EL communication failure, accept optimistically and track EL offline.
             return .syncing;
         };
-        const np_elapsed = @as(f64, @floatFromInt(std.time.nanoTimestamp() - np_start)) / 1e9;
+            // TODO: record EL timing
 
         if (self.metrics) |m| {
-            m.execution_new_payload_seconds.observe(np_elapsed);
+            // m.execution_new_payload_seconds.observe(0); // TODO: timing
             switch (result.status) {
                 .valid => m.execution_payload_valid_total.incr(),
                 .invalid => m.execution_payload_invalid_total.incr(),
@@ -857,6 +859,10 @@ pub const BeaconNode = struct {
     // Bootnode ENRs — provided via --bootnodes CLI flag, used to dial initial peers.
     bootnodes: []const []const u8 = &.{},
 
+    /// KZG trusted setup — loaded once at startup, shared across all KZG operations.
+    /// Null until loadKzgTrustedSetup() is called (or if running pre-Deneb only).
+    kzg: ?Kzg = null,
+
     pub const KVBackend = union(enum) {
         memory: *MemoryKVStore,
         lmdb: *LmdbKVStore,
@@ -1121,7 +1127,7 @@ pub const BeaconNode = struct {
         block_importer.engine_api = engine;
 
         // Wire metrics into block importer for EL timing.
-        block_importer.metrics = self.metrics;
+        block_importer.metrics = node.metrics;
 
         // Wire data availability check (will be populated after node is created).
         // Note: The callback is set after BeaconNode.init returns since it needs
@@ -1255,7 +1261,30 @@ pub const BeaconNode = struct {
 
         self.unknown_block_sync.deinit();
         self.unknown_chain_sync.deinit();
+
+        // KZG trusted setup cleanup.
+        if (self.kzg) |*k| k.deinit(allocator);
+
         allocator.destroy(self);
+    }
+
+    /// Load the KZG trusted setup from a file path.
+    ///
+    /// Must be called before any KZG operations (blob verification, cell
+    /// verification).  Typically called once at node startup.
+    ///
+    /// The setup is stored in `self.kzg` and freed in `deinit()`.
+    ///
+    /// ```zig
+    /// try node.loadKzgTrustedSetup("trusted_setup.txt");
+    /// ```
+    pub fn loadKzgTrustedSetup(self: *BeaconNode, trusted_setup_path: []const u8) !void {
+        if (self.kzg != null) {
+            // Already loaded — free the old one first.
+            self.kzg.?.deinit(self.allocator);
+        }
+        self.kzg = try Kzg.initFromFile(self.allocator, trusted_setup_path);
+        std.log.info("KZG trusted setup loaded from '{s}'", .{trusted_setup_path});
     }
 
     /// Set the I/O context for the node and all sub-components.
@@ -2951,7 +2980,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             .finalized_block_hash = finalized_block_hash,
         };
 
-        const fcu_start = std.time.nanoTimestamp();
+        // TODO: timing for 0.16
         const result = engine.forkchoiceUpdated(fcu_state, payload_attrs) catch |err| {
             std.log.warn("engine_forkchoiceUpdatedV3 failed: {}", .{err});
             self.el_offline = true;
@@ -2959,13 +2988,13 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             if (self.metrics) |m| m.execution_errors_total.incr();
             return err;
         };
-        const fcu_elapsed = @as(f64, @floatFromInt(std.time.nanoTimestamp() - fcu_start)) / 1e9;
+        // const fcu_elapsed = 0;
 
         // EL responded — mark as online.
         self.el_offline = false;
         self.api_sync_status.el_offline = false;
 
-        if (self.metrics) |m| m.execution_forkchoice_updated_seconds.observe(fcu_elapsed);
+        // if (self.metrics) |m| m.execution_forkchoice_updated_seconds.observe(0);
 
         // Cache payload_id if the EL started building a payload.
         if (result.payload_id) |pid| {
