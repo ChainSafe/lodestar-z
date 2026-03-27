@@ -92,9 +92,18 @@ pub const ProducedBlock = struct {
     /// Free owned resources.
     pub fn deinit(self: *ProducedBlock, allocator: Allocator) void {
         var body = &self.block_body;
+        // Electra attestations own their aggregation_bits data
+        for (body.attestations.items) |*att| {
+            att.aggregation_bits.data.deinit(allocator);
+        }
         body.attestations.deinit(allocator);
         body.voluntary_exits.deinit(allocator);
         body.proposer_slashings.deinit(allocator);
+        // Electra attester slashings own their IndexedAttestation indices
+        for (body.attester_slashings.items) |*sl| {
+            sl.attestation_1.attesting_indices.deinit(allocator);
+            sl.attestation_2.attesting_indices.deinit(allocator);
+        }
         body.attester_slashings.deinit(allocator);
         body.bls_to_execution_changes.deinit(allocator);
         body.deposits.deinit(allocator);
@@ -151,6 +160,113 @@ pub fn produceBlockBody(
     };
 }
 
+
+// ---------------------------------------------------------------------------
+// Format conversion helpers: Phase0 → Electra
+//
+// The op pool stores attestations and attester slashings in Phase0 format
+// (the format they arrive in from gossip). Electra blocks require a different
+// layout:
+//   - Attestation: aggregation_bits is over ALL committees (not one),
+//     committee_bits indicates which committee(s) are represented.
+//   - AttesterSlashing: uses Electra IndexedAttestation (larger max indices).
+//   - IndexedAttestation: max attesting_indices = MAX_VALIDATORS_PER_COMMITTEE * MAX_COMMITTEES_PER_SLOT
+//
+// These helpers convert Phase0 items to Electra format for block inclusion.
+// ---------------------------------------------------------------------------
+
+/// Convert a Phase0 attestation to Electra format.
+///
+/// In Electra, attestations have:
+///   - aggregation_bits: BitList[MAX_VALIDATORS_PER_COMMITTEE * MAX_COMMITTEES_PER_SLOT]
+///   - committee_bits: BitVector[MAX_COMMITTEES_PER_SLOT] — indicates which committee
+///   - data.index is always 0 (committee identified by committee_bits)
+///
+/// For a Phase0 attestation targeting committee `index`:
+///   1. Set the corresponding bit in committee_bits
+///   2. Place aggregation_bits at the correct offset within the larger bitfield
+///      (for single-committee conversion, just copy them directly — the bits
+///       represent validators within that single committee)
+pub fn phase0ToElectraAttestation(
+    allocator: Allocator,
+    phase0_att: types.phase0.Attestation.Type,
+) !types.electra.Attestation.Type {
+    const committee_index = phase0_att.data.index;
+
+    // Committee bits type: BitVector[MAX_COMMITTEES_PER_SLOT]
+    const CommitteeBits = @import("ssz").BitVectorType(preset.MAX_COMMITTEES_PER_SLOT);
+    // Aggregation bits type: BitList[MAX_VALIDATORS_PER_COMMITTEE * MAX_COMMITTEES_PER_SLOT]
+    const AggBits = @import("ssz").BitListType(preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT);
+
+    // Build committee_bits: set bit for the committee this attestation is from
+    var committee_bits = CommitteeBits.default_value;
+    committee_bits.set(@intCast(committee_index), true) catch {};
+
+    // Copy aggregation_bits — in the single-committee case, the bits directly
+    // represent validators in that committee. For a full implementation with
+    // aggregation across committees, we'd need to offset by committee position.
+    var agg_bits: AggBits.Type = AggBits.default_value;
+    if (phase0_att.aggregation_bits.data.items.len > 0) {
+        var new_data = try std.ArrayListUnmanaged(u8).initCapacity(
+            allocator,
+            phase0_att.aggregation_bits.data.items.len,
+        );
+        new_data.appendSliceAssumeCapacity(phase0_att.aggregation_bits.data.items);
+        agg_bits.data = new_data;
+        agg_bits.bit_len = phase0_att.aggregation_bits.bit_len;
+    }
+
+    // Electra attestation data has index=0 (committee is in committee_bits)
+    var electra_data = phase0_att.data;
+    electra_data.index = 0;
+
+    return types.electra.Attestation.Type{
+        .aggregation_bits = agg_bits,
+        .data = electra_data,
+        .signature = phase0_att.signature,
+        .committee_bits = committee_bits,
+    };
+}
+
+/// Convert a Phase0 attester slashing to Electra format.
+///
+/// The only difference is the IndexedAttestation type: Electra allows
+/// MAX_VALIDATORS_PER_COMMITTEE * MAX_COMMITTEES_PER_SLOT attesting indices
+/// (vs just MAX_VALIDATORS_PER_COMMITTEE in Phase0).
+///
+/// The actual attesting_indices data is identical — we just need to wrap
+/// it in the larger-capacity Electra IndexedAttestation type.
+pub fn phase0ToElectraAttesterSlashing(
+    allocator: Allocator,
+    phase0_slashing: types.phase0.AttesterSlashing.Type,
+) !types.electra.AttesterSlashing.Type {
+    return types.electra.AttesterSlashing.Type{
+        .attestation_1 = try phase0ToElectraIndexedAttestation(allocator, phase0_slashing.attestation_1),
+        .attestation_2 = try phase0ToElectraIndexedAttestation(allocator, phase0_slashing.attestation_2),
+    };
+}
+
+/// Convert a Phase0 IndexedAttestation to Electra format.
+///
+/// Copies the attesting_indices into the larger-capacity Electra list.
+fn phase0ToElectraIndexedAttestation(
+    allocator: Allocator,
+    phase0_ia: types.phase0.IndexedAttestation.Type,
+) !types.electra.IndexedAttestation.Type {
+    // Copy attesting_indices to the electra-sized list
+    var indices = try std.ArrayListUnmanaged(types.primitive.ValidatorIndex.Type).initCapacity(
+        allocator,
+        phase0_ia.attesting_indices.items.len,
+    );
+    indices.appendSliceAssumeCapacity(phase0_ia.attesting_indices.items);
+
+    return types.electra.IndexedAttestation.Type{
+        .attesting_indices = indices,
+        .data = phase0_ia.data,
+        .signature = phase0_ia.signature,
+    };
+}
+
 /// Assemble a full Electra BeaconBlockBody from op pool operations and
 /// a pre-converted execution payload.
 ///
@@ -181,7 +297,17 @@ pub fn assembleBlock(
     // 1. Pull operations from op pool
     const ops = try produceBlockBody(allocator, slot, op_pool);
 
-    // 2. Build sync aggregate (empty — no sync contribution pool yet)
+    // 2. Build sync aggregate.
+    //
+    // Currently returns an empty sync aggregate (all zeros). A full
+    // implementation requires:
+    //   - A SyncContributionAndProofPool that collects signed contributions
+    //     from sync committee members via gossip (sync_committee_contribution_and_proof topic)
+    //   - Aggregating contributions for the previous slot's block root
+    //   - See TS Lodestar: syncContributionAndProofPool.getAggregate(previousSlot, parentBlockRoot)
+    //
+    // Without a contribution pool, the sync aggregate will have zero
+    // participation, which is valid but suboptimal (reduces sync committee rewards).
     const sync_aggregate = types.electra.SyncAggregate.default_value;
 
     // 3. RANDAO reveal — zeroed (needs validator signing key)
@@ -190,14 +316,40 @@ pub fn assembleBlock(
     // 4. Graffiti
     const graffiti = config.graffiti orelse DEFAULT_GRAFFITI;
 
-    // 5. Assemble the full Electra BeaconBlockBody
+    // 5. Convert phase0 attestations and attester slashings to electra format
+    var electra_attestations = std.ArrayListUnmanaged(types.electra.Attestation.Type).empty;
+    errdefer {
+        for (electra_attestations.items) |*att| {
+            att.aggregation_bits.data.deinit(allocator);
+        }
+        electra_attestations.deinit(allocator);
+    }
+    for (ops.attestations) |att| {
+        const electra_att = try phase0ToElectraAttestation(allocator, att);
+        try electra_attestations.append(allocator, electra_att);
+    }
+
+    var electra_slashings = std.ArrayListUnmanaged(types.electra.AttesterSlashing.Type).empty;
+    errdefer {
+        for (electra_slashings.items) |*sl| {
+            sl.attestation_1.attesting_indices.deinit(allocator);
+            sl.attestation_2.attesting_indices.deinit(allocator);
+        }
+        electra_slashings.deinit(allocator);
+    }
+    for (ops.attester_slashings) |sl| {
+        const electra_sl = try phase0ToElectraAttesterSlashing(allocator, sl);
+        try electra_slashings.append(allocator, electra_sl);
+    }
+
+    // 6. Assemble the full Electra BeaconBlockBody
     const block_body = types.electra.BeaconBlockBody.Type{
         .randao_reveal = randao_reveal,
         .eth1_data = eth1_data,
         .graffiti = graffiti,
         .proposer_slashings = std.ArrayListUnmanaged(types.phase0.ProposerSlashing.Type).fromOwnedSlice(ops.proposer_slashings),
-        .attester_slashings = std.ArrayListUnmanaged(types.electra.AttesterSlashing.Type).empty, // TODO: convert phase0 → electra format
-        .attestations = std.ArrayListUnmanaged(types.electra.Attestation.Type).empty, // TODO: convert phase0 → electra format
+        .attester_slashings = electra_slashings,
+        .attestations = electra_attestations,
         .deposits = std.ArrayListUnmanaged(types.phase0.Deposit.Type).empty, // Electra: deposits via EL
         .voluntary_exits = std.ArrayListUnmanaged(types.phase0.SignedVoluntaryExit.Type).fromOwnedSlice(ops.voluntary_exits),
         .sync_aggregate = sync_aggregate,
@@ -207,17 +359,17 @@ pub fn assembleBlock(
         .execution_requests = types.electra.ExecutionRequests.default_value,
     };
 
-    // Free the phase0 op slices we didn't transfer (attester_slashings, attestations)
-    // TODO: When we have electra-format pool methods, these become direct transfers
+    // Free the original phase0 slices (we copied/converted them above)
     allocator.free(ops.attester_slashings);
     allocator.free(ops.attestations);
 
     std.log.info(
-        "Assembled block body: slot={d} proposer={d} txs={d} exits={d} slashings={d} bls_changes={d} blobs={d}",
+        "Assembled block body: slot={d} proposer={d} txs={d} atts={d} exits={d} slashings={d} bls_changes={d} blobs={d}",
         .{
             slot,
             proposer_index,
             exec_payload.transactions.items.len,
+            block_body.attestations.items.len,
             block_body.voluntary_exits.items.len,
             block_body.proposer_slashings.items.len,
             block_body.bls_to_execution_changes.items.len,
