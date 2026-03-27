@@ -24,6 +24,7 @@ const Allocator = std.mem.Allocator;
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
+const preset_root = @import("preset");
 const fork_types = @import("fork_types");
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
@@ -3266,16 +3267,19 @@ fn reqRespGetBlobByRoot(ptr: *anyopaque, root: [32]u8, index: u64) ?[]const u8 {
     const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
 
-    // TODO: Per-index lookup requires deserializing the stored blob sidecar list.
-    // For now, return the full sidecars blob only when index == 0.
-    if (index != 0) return null;
-
     const maybe_bytes = node.db.getBlobSidecars(root) catch return null;
     const bytes = maybe_bytes orelse return null;
     defer node.allocator.free(bytes);
 
-    const copy = ctx.scratch.alloc(u8, bytes.len) catch return null;
-    @memcpy(copy, bytes);
+    // Stored data is a concatenation of fixed-size BlobSidecars.
+    // Extract the individual sidecar at the requested index.
+    const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
+    const start = index * sidecar_size;
+    const end = start + sidecar_size;
+    if (end > bytes.len) return null;
+
+    const copy = ctx.scratch.alloc(u8, sidecar_size) catch return null;
+    @memcpy(copy, bytes[start..end]);
     return copy;
 }
 
@@ -3323,6 +3327,7 @@ fn reqRespGetBlobsByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const 
 
     var results: std.ArrayList([]const u8) = .empty;
     // No defer deinit — scratch arena owns the memory.
+    const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
 
     var slot: u64 = start_slot;
     while (slot < start_slot + count) : (slot += 1) {
@@ -3331,9 +3336,13 @@ fn reqRespGetBlobsByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const 
         const bytes = maybe_bytes orelse continue;
         defer node.allocator.free(bytes);
 
-        const copy = ctx.scratch.alloc(u8, bytes.len) catch continue;
-        @memcpy(copy, bytes);
-        results.append(ctx.scratch, copy) catch continue;
+        // Split concatenated blob sidecars into individual entries.
+        var offset: usize = 0;
+        while (offset + sidecar_size <= bytes.len) : (offset += sidecar_size) {
+            const copy = ctx.scratch.alloc(u8, sidecar_size) catch continue;
+            @memcpy(copy, bytes[offset..][0..sidecar_size]);
+            results.append(ctx.scratch, copy) catch continue;
+        }
     }
 
     return results.toOwnedSlice(ctx.scratch) catch &.{};
@@ -3822,27 +3831,40 @@ test "BeaconNode: importBlobSidecar and onReqResp BlobSidecarsByRoot returns sto
     const node = try BeaconNode.init(allocator, test_state.cached_state.config, .{});
     defer node.deinit();
 
-    // Store a fake blob sidecar blob via importBlobSidecar.
+    // Store two concatenated blob sidecars via importBlobSidecar.
+    const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
     const blob_root = [_]u8{0xBB} ** 32;
-    const fake_blob_bytes = [_]u8{0xDE, 0xAD, 0xBE, 0xEF} ** 8;
-    try node.importBlobSidecar(blob_root, &fake_blob_bytes);
+    const fake_blob_bytes = try allocator.alloc(u8, sidecar_size * 2);
+    defer allocator.free(fake_blob_bytes);
+    @memset(fake_blob_bytes[0..sidecar_size], 0xAA); // blob index 0
+    @memset(fake_blob_bytes[sidecar_size..], 0xBB); // blob index 1
+    try node.importBlobSidecar(blob_root, fake_blob_bytes);
 
-    // Build a BlobSidecarsByRoot request: [root, index=0] pair.
-    // The wire format for BlobSidecarsByRoot is a list of (root[32], index u64) pairs.
+    // Request index 0 — should return the first sidecar.
     var request_bytes: [32 + 8]u8 = undefined;
     @memcpy(request_bytes[0..32], &blob_root);
-    std.mem.writeInt(u64, request_bytes[32..40], 0, .little); // index = 0
+    std.mem.writeInt(u64, request_bytes[32..40], 0, .little);
 
-    const chunks = try node.onReqResp(.blob_sidecars_by_root, &request_bytes);
-    defer freeResponseChunks(allocator, chunks);
+    const chunks0 = try node.onReqResp(.blob_sidecars_by_root, &request_bytes);
+    defer freeResponseChunks(allocator, chunks0);
 
-    // Should return 1 chunk with the stored blob bytes.
-    try std.testing.expectEqual(@as(usize, 1), chunks.len);
-    try std.testing.expectEqual(networking.protocol.ResponseCode.success, chunks[0].result);
-    try std.testing.expectEqualSlices(u8, &fake_blob_bytes, chunks[0].ssz_payload);
+    try std.testing.expectEqual(@as(usize, 1), chunks0.len);
+    try std.testing.expectEqual(networking.protocol.ResponseCode.success, chunks0[0].result);
+    try std.testing.expectEqual(@as(usize, sidecar_size), chunks0[0].ssz_payload.len);
+    try std.testing.expectEqual(@as(u8, 0xAA), chunks0[0].ssz_payload[0]);
+
+    // Request index 1 — should return the second sidecar.
+    std.mem.writeInt(u64, request_bytes[32..40], 1, .little);
+
+    const chunks1 = try node.onReqResp(.blob_sidecars_by_root, &request_bytes);
+    defer freeResponseChunks(allocator, chunks1);
+
+    try std.testing.expectEqual(@as(usize, 1), chunks1.len);
+    try std.testing.expectEqual(@as(usize, sidecar_size), chunks1[0].ssz_payload.len);
+    try std.testing.expectEqual(@as(u8, 0xBB), chunks1[0].ssz_payload[0]);
 }
 
-test "BeaconNode: importBlobSidecar index != 0 returns null" {
+test "BeaconNode: importBlobSidecar out-of-bounds index returns empty" {
     const Node = @import("persistent_merkle_tree").Node;
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
@@ -3856,20 +3878,22 @@ test "BeaconNode: importBlobSidecar index != 0 returns null" {
     const node = try BeaconNode.init(allocator, test_state.cached_state.config, .{});
     defer node.deinit();
 
-    // Store blob sidecar data.
+    // Store a single blob sidecar.
+    const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
     const blob_root = [_]u8{0xCC} ** 32;
-    const fake_blob_bytes = [_]u8{0x01, 0x02, 0x03} ** 10;
-    try node.importBlobSidecar(blob_root, &fake_blob_bytes);
+    const fake_blob_bytes = try allocator.alloc(u8, sidecar_size);
+    defer allocator.free(fake_blob_bytes);
+    @memset(fake_blob_bytes, 0x01);
+    try node.importBlobSidecar(blob_root, fake_blob_bytes);
 
-    // Request index = 1 — should return no chunks (null skipped by handleRequest).
+    // Request index = 1 — out of bounds, should return no chunks.
     var request_bytes: [32 + 8]u8 = undefined;
     @memcpy(request_bytes[0..32], &blob_root);
-    std.mem.writeInt(u64, request_bytes[32..40], 1, .little); // index = 1
+    std.mem.writeInt(u64, request_bytes[32..40], 1, .little);
 
     const chunks = try node.onReqResp(.blob_sidecars_by_root, &request_bytes);
     defer freeResponseChunks(allocator, chunks);
 
-    // index != 0: not returned (TODO: per-index deserialisation).
     try std.testing.expectEqual(@as(usize, 0), chunks.len);
 }
 
@@ -3887,17 +3911,26 @@ test "BeaconNode: onReqResp BlobSidecarsByRange returns stored blobs" {
     const node = try BeaconNode.init(allocator, test_state.cached_state.config, .{});
     defer node.deinit();
 
+    const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
+
     // Register block roots for slots 5 and 6.
     const root_5 = [_]u8{0x05} ** 32;
     const root_6 = [_]u8{0x06} ** 32;
     try node.head_tracker.onBlock(root_5, 5, [_]u8{0} ** 32);
     try node.head_tracker.onBlock(root_6, 6, [_]u8{0} ** 32);
 
-    // Store blob sidecars for both blocks.
-    const blob_5 = [_]u8{0xA5} ** 16;
-    const blob_6 = [_]u8{0xA6} ** 16;
-    try node.importBlobSidecar(root_5, &blob_5);
-    try node.importBlobSidecar(root_6, &blob_6);
+    // Store 2 blob sidecars for slot 5, 1 for slot 6.
+    const blob_5 = try allocator.alloc(u8, sidecar_size * 2);
+    defer allocator.free(blob_5);
+    @memset(blob_5[0..sidecar_size], 0xA5);
+    @memset(blob_5[sidecar_size..], 0xA6);
+
+    const blob_6 = try allocator.alloc(u8, sidecar_size);
+    defer allocator.free(blob_6);
+    @memset(blob_6, 0xB6);
+
+    try node.importBlobSidecar(root_5, blob_5);
+    try node.importBlobSidecar(root_6, blob_6);
 
     // Request range [5, 3): slots 5, 6, 7. Slot 7 has no blobs.
     const request = networking.messages.BlobSidecarsByRangeRequest.Type{
@@ -3910,10 +3943,12 @@ test "BeaconNode: onReqResp BlobSidecarsByRange returns stored blobs" {
     const chunks = try node.onReqResp(.blob_sidecars_by_range, &buf);
     defer freeResponseChunks(allocator, chunks);
 
-    // Slots 5 and 6 have blobs; slot 7 has no block root → skipped.
-    try std.testing.expectEqual(@as(usize, 2), chunks.len);
-    try std.testing.expectEqualSlices(u8, &blob_5, chunks[0].ssz_payload);
-    try std.testing.expectEqualSlices(u8, &blob_6, chunks[1].ssz_payload);
+    // Slot 5 has 2 sidecars, slot 6 has 1, slot 7 has none → 3 total chunks.
+    try std.testing.expectEqual(@as(usize, 3), chunks.len);
+    try std.testing.expectEqual(@as(usize, sidecar_size), chunks[0].ssz_payload.len);
+    try std.testing.expectEqual(@as(u8, 0xA5), chunks[0].ssz_payload[0]);
+    try std.testing.expectEqual(@as(u8, 0xA6), chunks[1].ssz_payload[0]);
+    try std.testing.expectEqual(@as(u8, 0xB6), chunks[2].ssz_payload[0]);
 }
 
 test "BeaconNode: archiveState stores state bytes in DB and retrieves them" {
