@@ -63,6 +63,10 @@ pub const SseEvent = chain_types.SseEvent;
 
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 
+const da_mod = @import("data_availability.zig");
+const DataAvailabilityManager = da_mod.DataAvailabilityManager;
+
+
 // ---------------------------------------------------------------------------
 // Chain
 // ---------------------------------------------------------------------------
@@ -84,6 +88,12 @@ pub const Chain = struct {
     op_pool: *OpPool,
     seen_cache: *SeenCache,
     head_tracker: *HeadTracker,
+
+    // --- Data availability ---
+    /// Data availability manager — optional. When set, blocks are checked
+    /// for DA completeness before final import. If DA is pending, the block
+    /// is queued for reprocessing when data arrives.
+    da_manager: ?*DataAvailabilityManager,
 
     // --- Block import state ---
     /// When true, BLS signatures are verified during block import.
@@ -125,6 +135,7 @@ pub const Chain = struct {
             .op_pool = op_pool,
             .seen_cache = seen_cache,
             .head_tracker = head_tracker,
+            .da_manager = null,
             .verify_signatures = false,
             .block_to_state = std.AutoArrayHashMap([32]u8, [32]u8).init(allocator),
             .event_callback = null,
@@ -410,6 +421,11 @@ pub const Chain = struct {
         else
             0;
         self.seen_cache.pruneBlocks(prune_slot);
+
+        // Prune DA tracking data outside the availability window.
+        if (self.da_manager) |dam| {
+            dam.pruneOldData(prune_slot);
+        }
 
         // Emit SSE finalized_checkpoint event.
         if (self.event_callback) |cb| {
