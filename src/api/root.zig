@@ -67,3 +67,5 @@ pub const ResponseMeta = response_meta.ResponseMeta;
 pub const Fork = response_meta.Fork;
 pub const ApiError = error_response.ApiError;
 pub const ErrorCode = error_response.ErrorCode;
+pub const handler_result = @import("handler_result.zig");
+pub const HandlerResult = handler_result.HandlerResult;

@@ -3,7 +3,9 @@
 //! Handles serializing handler responses into JSON or SSZ bytes based on
 //! the client's Accept header (content negotiation).
 //!
-//! JSON responses follow the Beacon API envelope: `{ "data": ..., "execution_optimistic": ..., "finalized": ... }`.
+//! JSON responses follow the Beacon API envelope:
+//! - With metadata: `{ "data": ..., "version": "deneb", "execution_optimistic": false, "finalized": true }`
+//! - Without metadata: `{ "data": ... }`
 //! SSZ responses return raw `application/octet-stream` bytes.
 
 const std = @import("std");
@@ -12,6 +14,7 @@ const types = @import("types.zig");
 const content_negotiation = @import("content_negotiation.zig");
 const response_meta = @import("response_meta.zig");
 const error_response = @import("error_response.zig");
+const handler_result = @import("handler_result.zig");
 
 /// Re-exports: content negotiation
 pub const WireFormat = content_negotiation.WireFormat;
@@ -31,10 +34,66 @@ pub const ErrorCode = error_response.ErrorCode;
 pub const fromZigError = error_response.fromZigError;
 pub const formatZigError = error_response.formatZigError;
 
+/// Re-exports: handler result
+pub const HandlerResult = handler_result.HandlerResult;
+pub const VoidResult = handler_result.VoidResult;
+
 const IoWriter = std.Io.Writer;
 const IoError = IoWriter.Error;
 
-/// Encode an ApiResponse as a JSON byte string.
+/// Encode a HandlerResult as JSON bytes, including ResponseMeta in the body.
+///
+/// For endpoints WITH meta (version, execution_optimistic, etc.):
+/// ```json
+/// { "data": {...}, "version": "deneb", "execution_optimistic": false, "finalized": true }
+/// ```
+///
+/// For endpoints WITHOUT meta (all fields null):
+/// ```json
+/// { "data": {...} }
+/// ```
+pub fn encodeHandlerResultJson(
+    allocator: std.mem.Allocator,
+    comptime T: type,
+    result: handler_result.HandlerResult(T),
+) (IoError || std.mem.Allocator.Error)![]u8 {
+    var aw: IoWriter.Allocating = .init(allocator);
+    errdefer aw.deinit();
+
+    const w = &aw.writer;
+    try writeAll(w, "{");
+
+    // Emit "data" field
+    try writeAll(w, "\"data\":");
+    try writeJsonValue(w, T, &result.data);
+
+    // Emit metadata fields inline (only those that are non-null)
+    const meta = result.meta;
+    if (meta.version) |fork| {
+        try writeAll(w, ",\"version\":\"");
+        try writeAll(w, fork.toString());
+        try writeAll(w, "\"");
+    }
+    if (meta.execution_optimistic) |opt| {
+        try writeAll(w, ",\"execution_optimistic\":");
+        try writeAll(w, if (opt) "true" else "false");
+    }
+    if (meta.finalized) |fin| {
+        try writeAll(w, ",\"finalized\":");
+        try writeAll(w, if (fin) "true" else "false");
+    }
+    if (meta.dependent_root) |root| {
+        try writeAll(w, ",\"dependent_root\":\"0x");
+        const hex = std.fmt.bytesToHex(&root, .lower);
+        try writeAll(w, &hex);
+        try writeAll(w, "\"");
+    }
+
+    try writeAll(w, "}");
+    return aw.toOwnedSlice();
+}
+
+/// Encode an ApiResponse as a JSON byte string (legacy format, kept for compat).
 ///
 /// Produces the standard Beacon API envelope:
 /// ```json
@@ -74,6 +133,18 @@ pub fn encodeJsonResponse(
 
     writeAll(&aw.writer, "}") catch return error.OutOfMemory;
     return aw.toOwnedSlice();
+}
+
+/// Format an ApiError as JSON bytes.
+///
+/// Returns `{ "statusCode": N, "message": "..." }` per Beacon API spec.
+pub fn encodeErrorJson(
+    allocator: std.mem.Allocator,
+    api_err: error_response.ApiError,
+) std.mem.Allocator.Error![]u8 {
+    var buf: [512]u8 = undefined;
+    const json = api_err.formatJson(&buf);
+    return allocator.dupe(u8, json);
 }
 
 fn writeAll(writer: *IoWriter, data: []const u8) IoError!void {
@@ -149,7 +220,7 @@ fn writeJsonValue(writer: *IoWriter, comptime T: type, value: *const T) IoError!
                 try writeByte(writer, '"');
                 try writeAll(writer, field.name);
                 try writeAll(writer, "\":");
-                try writeJsonValue(writer, field.type, &@field(value, field.name));
+                try writeJsonValue(writer, field.type, &@field(value.*, field.name));
             }
             try writeByte(writer, '}');
         },
@@ -174,6 +245,9 @@ fn writeJsonValue(writer: *IoWriter, comptime T: type, value: *const T) IoError!
                 }
                 try writeByte(writer, ']');
             }
+        },
+        .void => {
+            // void type writes nothing (no body for 204/void responses)
         },
         else => {
             try writeAll(writer, "null");
@@ -249,4 +323,73 @@ test "encodeJsonResponse empty slice" {
     defer std.testing.allocator.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"items\":[]") != null);
+}
+
+test "encodeHandlerResultJson with metadata" {
+    const TestData = struct {
+        value: u64,
+    };
+
+    const meta = ResponseMeta{
+        .version = .deneb,
+        .execution_optimistic = false,
+        .finalized = true,
+    };
+
+    const result = HandlerResult(TestData){
+        .data = .{ .value = 123 },
+        .meta = meta,
+    };
+
+    const json = try encodeHandlerResultJson(std.testing.allocator, TestData, result);
+    defer std.testing.allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"data\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"version\":\"deneb\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"execution_optimistic\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"finalized\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"value\":123") != null);
+}
+
+test "encodeHandlerResultJson without metadata" {
+    const TestData = struct {
+        value: u64,
+    };
+
+    const result = HandlerResult(TestData){
+        .data = .{ .value = 42 },
+        .meta = .{},
+    };
+
+    const json = try encodeHandlerResultJson(std.testing.allocator, TestData, result);
+    defer std.testing.allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"data\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "version") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "execution_optimistic") == null);
+}
+
+test "encodeHandlerResultJson dependent_root" {
+    const TestData = struct {
+        x: u64,
+    };
+    const root = [_]u8{0xab} ** 32;
+    const result = HandlerResult(TestData){
+        .data = .{ .x = 1 },
+        .meta = .{ .dependent_root = root },
+    };
+
+    const json = try encodeHandlerResultJson(std.testing.allocator, TestData, result);
+    defer std.testing.allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"dependent_root\":\"0x") != null);
+}
+
+test "encodeErrorJson" {
+    const err = error_response.ApiError{ .code = .not_found, .message = "Block not found" };
+    const json = try encodeErrorJson(std.testing.allocator, err);
+    defer std.testing.allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"statusCode\":404") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "Block not found") != null);
 }
