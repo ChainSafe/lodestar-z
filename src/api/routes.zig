@@ -21,6 +21,7 @@ const ApiContext = context.ApiContext;
 pub const HttpMethod = enum {
     GET,
     POST,
+    DELETE,
 };
 
 
@@ -248,6 +249,38 @@ pub const routes = [_]Route{
         .path = "/eth/v1/config/fork_schedule",
         .operation_id = "getForkSchedule",
     },
+
+    // -- Keymanager API (EIP-3042) --
+    .{
+        .method = .GET,
+        .path = "/eth/v1/keystores",
+        .operation_id = "listKeystores",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/keystores",
+        .operation_id = "importKeystores",
+    },
+    .{
+        .method = .DELETE,
+        .path = "/eth/v1/keystores",
+        .operation_id = "deleteKeystores",
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/remotekeys",
+        .operation_id = "listRemoteKeys",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/remotekeys",
+        .operation_id = "importRemoteKeys",
+    },
+    .{
+        .method = .DELETE,
+        .path = "/eth/v1/remotekeys",
+        .operation_id = "deleteRemoteKeys",
+    },
 };
 
 /// Path segment — either a literal string or a named parameter.
@@ -441,5 +474,5 @@ test "findRoute wrong method" {
 
 test "route count" {
     // Verify we defined all expected routes
-    try std.testing.expectEqual(@as(usize, 34), routes.len);
+    try std.testing.expectEqual(@as(usize, 40), routes.len);
 }

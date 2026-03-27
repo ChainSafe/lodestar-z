@@ -54,3 +54,14 @@ pub const SignedBlock = interchange.SignedBlock;
 pub const SignedAttestation = interchange.SignedAttestation;
 pub const importInterchange = interchange.importInterchange;
 pub const exportInterchange = interchange.exportInterchange;
+
+pub const key_discovery = @import("key_discovery.zig");
+pub const KeyDiscovery = key_discovery.KeyDiscovery;
+pub const DiscoveredKey = key_discovery.DiscoveredKey;
+pub const LoadedKey = key_discovery.LoadedKey;
+pub const keymanager_auth = @import("keymanager_auth.zig");
+pub const KeymanagerAuth = keymanager_auth.KeymanagerAuth;
+pub const keystore_create = @import("keystore_create.zig");
+pub const createKeystore = keystore_create.createKeystore;
+pub const encryptKeystore = keystore_create.encryptKeystore;
+pub const writeKeystoreToDir = keystore_create.writeKeystoreToDir;

@@ -123,6 +123,7 @@ pub const HttpServer = struct {
         const route_method: routes_mod.HttpMethod = switch (request.head.method) {
             .GET => .GET,
             .POST => .POST,
+            .DELETE => .DELETE,
             else => {
                 try respondApiError(request, .{
                     .code = .method_not_allowed,
@@ -243,6 +244,15 @@ pub const HttpServer = struct {
     fn dispatchHandler(
         self: *HttpServer,
         match: routes_mod.RouteMatch,
+    ) !HandlerResult {
+        return self.dispatchHandlerWithContext(match, null, null);
+    }
+
+    fn dispatchHandlerWithContext(
+        self: *HttpServer,
+        match: routes_mod.RouteMatch,
+        request_body: ?[]const u8,
+        auth_header: ?[]const u8,
     ) !HandlerResult {
         const op = match.route.operation_id;
         const alloc = self.allocator;
@@ -502,6 +512,32 @@ pub const HttpServer = struct {
             return self.makeJsonResult([]const types.ForkScheduleEntry, result);
         }
 
+        // Keymanager API (EIP-3042).
+        if (std.mem.eql(u8, op, "listKeystores")) {
+            const body = try handlers.keymanager.listKeystores(ctx, auth_header);
+            return .{ .status = 200, .content_type = "application/json", .body = body };
+        }
+        if (std.mem.eql(u8, op, "importKeystores")) {
+            const body = try handlers.keymanager.importKeystores(ctx, auth_header, request_body orelse "{}");
+            return .{ .status = 200, .content_type = "application/json", .body = body };
+        }
+        if (std.mem.eql(u8, op, "deleteKeystores")) {
+            const body = try handlers.keymanager.deleteKeystores(ctx, auth_header, request_body orelse "{}");
+            return .{ .status = 200, .content_type = "application/json", .body = body };
+        }
+        if (std.mem.eql(u8, op, "listRemoteKeys")) {
+            const body = try handlers.keymanager.listRemoteKeys(ctx, auth_header);
+            return .{ .status = 200, .content_type = "application/json", .body = body };
+        }
+        if (std.mem.eql(u8, op, "importRemoteKeys")) {
+            const body = try handlers.keymanager.importRemoteKeys(ctx, auth_header, request_body orelse "{}");
+            return .{ .status = 200, .content_type = "application/json", .body = body };
+        }
+        if (std.mem.eql(u8, op, "deleteRemoteKeys")) {
+            const body = try handlers.keymanager.deleteRemoteKeys(ctx, auth_header, request_body orelse "{}");
+            return .{ .status = 200, .content_type = "application/json", .body = body };
+        }
+
         return error.NotImplemented;
     }
 
@@ -521,6 +557,8 @@ pub const HttpServer = struct {
             .GET
         else if (std.mem.eql(u8, method, "POST"))
             .POST
+        else if (std.mem.eql(u8, method, "DELETE"))
+            .DELETE
         else
             return .{
                 .status = 405,
@@ -765,7 +803,8 @@ test "handleRequest wrong method returns 405" {
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
-    const resp = try server.handleRequest("DELETE", "/eth/v1/node/version", null);
+    // PATCH is not a supported method — returns 405.
+    const resp = try server.handleRequest("PATCH", "/eth/v1/node/version", null);
 
     try std.testing.expectEqual(@as(u16, 405), resp.status);
 }

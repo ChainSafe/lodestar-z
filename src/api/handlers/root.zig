@@ -11,6 +11,7 @@ pub const config = @import("config.zig");
 pub const debug = @import("debug.zig");
 pub const events = @import("events.zig");
 pub const validator = @import("validator.zig");
+pub const keymanager = @import("keymanager.zig");
 
 test {
     testing.refAllDecls(node);
@@ -19,4 +20,5 @@ test {
     testing.refAllDecls(debug);
     testing.refAllDecls(events);
     testing.refAllDecls(validator);
+    testing.refAllDecls(keymanager);
 }

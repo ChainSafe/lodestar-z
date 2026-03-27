@@ -143,4 +143,7 @@ pub const ValidatorConfig = struct {
     keystores_dir: ?[]const u8 = null,
     /// Path to secrets directory.
     secrets_dir: ?[]const u8 = null,
+    /// URL of Web3Signer remote signing service (null = disabled).
+    /// When set, public keys are fetched from the signer at startup.
+    web3signer_url: ?[]const u8 = null,
 };
