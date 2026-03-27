@@ -116,6 +116,101 @@ pub const OpPoolCallback = struct {
     getPoolCountsFn: *const fn (ptr: *anyopaque) [5]usize,
 };
 
+
+// ---------------------------------------------------------------------------
+// Pool submission callback
+// ---------------------------------------------------------------------------
+
+/// Type-erased callback for submitting items to operation pools.
+pub const PoolSubmitCallback = struct {
+    ptr: *anyopaque,
+    /// Submit attestations (raw JSON bytes, array of SingleAttestation or Attestation).
+    submitAttestationFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+    /// Submit a signed voluntary exit (raw JSON bytes).
+    submitVoluntaryExitFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+    /// Submit a proposer slashing (raw JSON bytes).
+    submitProposerSlashingFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+    /// Submit an attester slashing (raw JSON bytes).
+    submitAttesterSlashingFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+    /// Submit signed BLS-to-execution changes (raw JSON bytes, array).
+    submitBlsChangeFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+    /// Submit sync committee messages (raw JSON bytes, array).
+    submitSyncCommitteeMessageFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+    /// Submit aggregate and proofs (raw JSON bytes, array).
+    submitAggregateAndProofFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+    /// Submit contribution and proofs (raw JSON bytes, array).
+    submitContributionAndProofFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+};
+
+// ---------------------------------------------------------------------------
+// Produce block callback
+// ---------------------------------------------------------------------------
+
+/// Parameters for block production.
+pub const ProduceBlockParams = struct {
+    slot: u64,
+    randao_reveal: [96]u8,
+    graffiti: ?[32]u8 = null,
+};
+
+/// Result of block production (minimal, for API response).
+pub const ProducedBlockData = struct {
+    /// Raw SSZ bytes of the produced BeaconBlock (unsigned).
+    ssz_bytes: []const u8,
+    /// Fork name for the produced block (e.g. "electra").
+    fork: []const u8,
+};
+
+/// Callback for producing blocks (GET /eth/v1/validator/blocks/{slot}).
+pub const ProduceBlockCallback = struct {
+    ptr: *anyopaque,
+    /// Produce a block for the given slot. Caller owns returned ssz_bytes.
+    produceBlockFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, params: ProduceBlockParams) anyerror!ProducedBlockData,
+};
+
+// ---------------------------------------------------------------------------
+// Attestation data callback
+// ---------------------------------------------------------------------------
+
+/// Result of attestation data query.
+pub const AttestationDataResult = struct {
+    slot: u64,
+    index: u64,
+    beacon_block_root: [32]u8,
+    source_epoch: u64,
+    source_root: [32]u8,
+    target_epoch: u64,
+    target_root: [32]u8,
+};
+
+/// Callback for getting attestation data (GET /eth/v1/validator/attestation_data).
+pub const AttestationDataCallback = struct {
+    ptr: *anyopaque,
+    getAttestationDataFn: *const fn (ptr: *anyopaque, slot: u64, committee_index: u64) anyerror!AttestationDataResult,
+};
+
+// ---------------------------------------------------------------------------
+// Aggregate attestation callback
+// ---------------------------------------------------------------------------
+
+/// Callback for getting best aggregate attestation from pool.
+pub const AggregateAttestationCallback = struct {
+    ptr: *anyopaque,
+    /// Returns raw JSON bytes of the best aggregate attestation. Caller owns.
+    getAggregateAttestationFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, slot: u64, attestation_data_root: [32]u8) anyerror![]const u8,
+};
+
+// ---------------------------------------------------------------------------
+// Sync committee contribution callback
+// ---------------------------------------------------------------------------
+
+/// Callback for getting sync committee contribution.
+pub const SyncCommitteeContributionCallback = struct {
+    ptr: *anyopaque,
+    /// Returns raw JSON bytes of the contribution. Caller owns.
+    getSyncCommitteeContributionFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, slot: u64, subcommittee_index: u64, beacon_block_root: [32]u8) anyerror![]const u8,
+};
+
 // ---------------------------------------------------------------------------
 // ApiContext
 // ---------------------------------------------------------------------------
@@ -156,4 +251,19 @@ pub const ApiContext = struct {
 
     /// Optional operation pool callback. Nil until wired by BeaconNode.init.
     op_pool: ?OpPoolCallback = null,
+
+    /// Optional pool submission callback. Nil until wired by BeaconNode.init.
+    pool_submit: ?PoolSubmitCallback = null,
+
+    /// Optional block production callback. Nil until wired by BeaconNode.init.
+    produce_block: ?ProduceBlockCallback = null,
+
+    /// Optional attestation data callback. Nil until wired by BeaconNode.init.
+    attestation_data: ?AttestationDataCallback = null,
+
+    /// Optional aggregate attestation callback. Nil until wired by BeaconNode.init.
+    aggregate_attestation: ?AggregateAttestationCallback = null,
+
+    /// Optional sync committee contribution callback. Nil until wired by BeaconNode.init.
+    sync_committee_contribution: ?SyncCommitteeContributionCallback = null,
 };

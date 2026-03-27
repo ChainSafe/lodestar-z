@@ -210,6 +210,39 @@ pub const routes = [_]Route{
         .meta_flags = .{ .execution_optimistic = true },
     },
 
+    .{
+        .method = .GET,
+        .path = "/eth/v1/validator/blocks/{slot}",
+        .operation_id = "produceBlock",
+        .supports_ssz = true,
+        .meta_flags = .{ .version = true },
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/validator/attestation_data",
+        .operation_id = "getAttestationData",
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/validator/aggregate_attestation",
+        .operation_id = "getAggregateAttestation",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/aggregate_and_proofs",
+        .operation_id = "publishAggregateAndProofs",
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/validator/sync_committee_contribution",
+        .operation_id = "getSyncCommitteeContribution",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/contribution_and_proofs",
+        .operation_id = "publishContributionAndProofs",
+    },
+
     // -- Debug --
     .{
         .method = .GET,
@@ -441,5 +474,5 @@ test "findRoute wrong method" {
 
 test "route count" {
     // Verify we defined all expected routes
-    try std.testing.expectEqual(@as(usize, 34), routes.len);
+    try std.testing.expectEqual(@as(usize, 40), routes.len);
 }
