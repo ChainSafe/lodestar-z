@@ -12,13 +12,21 @@ const engine_api = @import("engine_api.zig");
 const types = @import("engine_api_types.zig");
 
 const EngineApi = engine_api.EngineApi;
+const ExecutionPayloadV1 = types.ExecutionPayloadV1;
+const ExecutionPayloadV2 = types.ExecutionPayloadV2;
 const ExecutionPayloadV3 = types.ExecutionPayloadV3;
+const ExecutionPayloadV4 = types.ExecutionPayloadV4;
 const ExecutionPayloadStatus = types.ExecutionPayloadStatus;
 const PayloadStatusV1 = types.PayloadStatusV1;
 const ForkchoiceStateV1 = types.ForkchoiceStateV1;
+const PayloadAttributesV1 = types.PayloadAttributesV1;
+const PayloadAttributesV2 = types.PayloadAttributesV2;
 const PayloadAttributesV3 = types.PayloadAttributesV3;
 const ForkchoiceUpdatedResponse = types.ForkchoiceUpdatedResponse;
+const GetPayloadResponseV1 = types.GetPayloadResponseV1;
+const GetPayloadResponseV2 = types.GetPayloadResponseV2;
 const GetPayloadResponse = types.GetPayloadResponse;
+const GetPayloadResponseV4 = types.GetPayloadResponseV4;
 const BlobsBundle = types.BlobsBundle;
 
 pub const MockEngine = struct {
@@ -30,11 +38,11 @@ pub const MockEngine = struct {
     /// Per-block-hash status overrides for newPayload responses.
     status_overrides: std.AutoHashMap([32]u8, ExecutionPayloadStatus),
 
-    /// Stored payloads keyed by block hash, populated by newPayload calls.
-    payloads: std.AutoHashMap([32]u8, StoredPayload),
+    /// Stored V3 payloads keyed by block hash, populated by newPayload calls.
+    payloads: std.AutoHashMap([32]u8, StoredPayloadV3),
 
     /// Built payloads keyed by payload_id, populated by forkchoiceUpdated with attributes.
-    built_payloads: std.AutoHashMap([8]u8, StoredPayload),
+    built_payloads: std.AutoHashMap([8]u8, StoredPayloadV3),
 
     /// Last forkchoice state received.
     last_forkchoice_state: ?ForkchoiceStateV1 = null,
@@ -42,8 +50,8 @@ pub const MockEngine = struct {
     /// Monotonically increasing payload ID counter.
     next_payload_id: u64 = 0,
 
-    /// Internal storage for a payload and its metadata.
-    const StoredPayload = struct {
+    /// Internal storage for a V3 payload and its metadata.
+    const StoredPayloadV3 = struct {
         payload: ExecutionPayloadV3,
         block_value: u256 = 0,
     };
@@ -52,8 +60,8 @@ pub const MockEngine = struct {
         return .{
             .allocator = allocator,
             .status_overrides = std.AutoHashMap([32]u8, ExecutionPayloadStatus).init(allocator),
-            .payloads = std.AutoHashMap([32]u8, StoredPayload).init(allocator),
-            .built_payloads = std.AutoHashMap([8]u8, StoredPayload).init(allocator),
+            .payloads = std.AutoHashMap([32]u8, StoredPayloadV3).init(allocator),
+            .built_payloads = std.AutoHashMap([8]u8, StoredPayloadV3).init(allocator),
         };
     }
 
@@ -76,77 +84,234 @@ pub const MockEngine = struct {
         try self.status_overrides.put(block_hash, status);
     }
 
-    // ── vtable ───────────────────────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    fn makePayloadId(self: *MockEngine) [8]u8 {
+        var id_bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &id_bytes, self.next_payload_id, .little);
+        self.next_payload_id += 1;
+        return id_bytes;
+    }
+
+    fn statusForHash(self: *const MockEngine, block_hash: [32]u8) ExecutionPayloadStatus {
+        return self.status_overrides.get(block_hash) orelse self.default_status;
+    }
+
+    fn payloadStatusResponse(self: *const MockEngine, block_hash: [32]u8) PayloadStatusV1 {
+        const status = self.statusForHash(block_hash);
+        return PayloadStatusV1{
+            .status = status,
+            .latest_valid_hash = if (status == .valid) block_hash else null,
+        };
+    }
+
+    /// Build a minimal stub V3 payload for a given forkchoice state and optional attributes.
+    fn buildStubV3(
+        self: *MockEngine,
+        state: ForkchoiceStateV1,
+        attrs_timestamp: u64,
+        attrs_prev_randao: [32]u8,
+        attrs_withdrawals: []const types.Withdrawal,
+    ) StoredPayloadV3 {
+        // If the head was a known payload, use it as base.
+        if (self.payloads.get(state.head_block_hash)) |s| {
+            return s;
+        }
+        return .{ .payload = .{
+            .parent_hash = state.head_block_hash,
+            .fee_recipient = std.mem.zeroes([20]u8),
+            .state_root = std.mem.zeroes([32]u8),
+            .receipts_root = std.mem.zeroes([32]u8),
+            .logs_bloom = std.mem.zeroes([256]u8),
+            .prev_randao = attrs_prev_randao,
+            .block_number = 0,
+            .gas_limit = 30_000_000,
+            .gas_used = 0,
+            .timestamp = attrs_timestamp,
+            .extra_data = &.{},
+            .base_fee_per_gas = 0,
+            .block_hash = std.mem.zeroes([32]u8),
+            .transactions = &.{},
+            .withdrawals = attrs_withdrawals,
+            .blob_gas_used = 0,
+            .excess_blob_gas = 0,
+        } };
+    }
+
+    // ── vtable ────────────────────────────────────────────────────────────────
 
     const vtable = EngineApi.VTable{
-        .newPayloadV3 = @ptrCast(&newPayloadV3),
-        .forkchoiceUpdatedV3 = @ptrCast(&forkchoiceUpdatedV3),
-        .getPayloadV3 = @ptrCast(&getPayloadV3),
+        .newPayloadV1 = @ptrCast(&newPayloadV1Impl),
+        .newPayloadV2 = @ptrCast(&newPayloadV2Impl),
+        .newPayloadV3 = @ptrCast(&newPayloadV3Impl),
+        .newPayloadV4 = @ptrCast(&newPayloadV4Impl),
+        .forkchoiceUpdatedV1 = @ptrCast(&forkchoiceUpdatedV1Impl),
+        .forkchoiceUpdatedV2 = @ptrCast(&forkchoiceUpdatedV2Impl),
+        .forkchoiceUpdatedV3 = @ptrCast(&forkchoiceUpdatedV3Impl),
+        .getPayloadV1 = @ptrCast(&getPayloadV1Impl),
+        .getPayloadV2 = @ptrCast(&getPayloadV2Impl),
+        .getPayloadV3 = @ptrCast(&getPayloadV3Impl),
+        .getPayloadV4 = @ptrCast(&getPayloadV4Impl),
     };
 
-    fn newPayloadV3(
+    // ── newPayload implementations ────────────────────────────────────────────
+
+    fn newPayloadV1Impl(
+        self: *MockEngine,
+        payload: ExecutionPayloadV1,
+    ) anyerror!PayloadStatusV1 {
+        // Promote to V3 for storage (fill missing fields with zero).
+        const v3 = ExecutionPayloadV3{
+            .parent_hash = payload.parent_hash,
+            .fee_recipient = payload.fee_recipient,
+            .state_root = payload.state_root,
+            .receipts_root = payload.receipts_root,
+            .logs_bloom = payload.logs_bloom,
+            .prev_randao = payload.prev_randao,
+            .block_number = payload.block_number,
+            .gas_limit = payload.gas_limit,
+            .gas_used = payload.gas_used,
+            .timestamp = payload.timestamp,
+            .extra_data = payload.extra_data,
+            .base_fee_per_gas = payload.base_fee_per_gas,
+            .block_hash = payload.block_hash,
+            .transactions = payload.transactions,
+            .withdrawals = &.{},
+            .blob_gas_used = 0,
+            .excess_blob_gas = 0,
+        };
+        try self.payloads.put(payload.block_hash, .{ .payload = v3 });
+        return self.payloadStatusResponse(payload.block_hash);
+    }
+
+    fn newPayloadV2Impl(
+        self: *MockEngine,
+        payload: ExecutionPayloadV2,
+    ) anyerror!PayloadStatusV1 {
+        const v3 = ExecutionPayloadV3{
+            .parent_hash = payload.parent_hash,
+            .fee_recipient = payload.fee_recipient,
+            .state_root = payload.state_root,
+            .receipts_root = payload.receipts_root,
+            .logs_bloom = payload.logs_bloom,
+            .prev_randao = payload.prev_randao,
+            .block_number = payload.block_number,
+            .gas_limit = payload.gas_limit,
+            .gas_used = payload.gas_used,
+            .timestamp = payload.timestamp,
+            .extra_data = payload.extra_data,
+            .base_fee_per_gas = payload.base_fee_per_gas,
+            .block_hash = payload.block_hash,
+            .transactions = payload.transactions,
+            .withdrawals = payload.withdrawals,
+            .blob_gas_used = 0,
+            .excess_blob_gas = 0,
+        };
+        try self.payloads.put(payload.block_hash, .{ .payload = v3 });
+        return self.payloadStatusResponse(payload.block_hash);
+    }
+
+    fn newPayloadV3Impl(
         self: *MockEngine,
         payload: ExecutionPayloadV3,
         _: []const [32]u8,
         _: [32]u8,
     ) anyerror!PayloadStatusV1 {
-        // Store the payload.
         try self.payloads.put(payload.block_hash, .{ .payload = payload });
-
-        // Check for per-hash override, otherwise use default.
-        const status = self.status_overrides.get(payload.block_hash) orelse self.default_status;
-
-        return PayloadStatusV1{
-            .status = status,
-            .latest_valid_hash = if (status == .valid) payload.block_hash else null,
-        };
+        return self.payloadStatusResponse(payload.block_hash);
     }
 
-    fn forkchoiceUpdatedV3(
+    fn newPayloadV4Impl(
+        self: *MockEngine,
+        payload: ExecutionPayloadV4,
+        _: []const [32]u8,
+        _: [32]u8,
+    ) anyerror!PayloadStatusV1 {
+        // Demote to V3 for storage (V4-specific fields are dropped).
+        const v3 = ExecutionPayloadV3{
+            .parent_hash = payload.parent_hash,
+            .fee_recipient = payload.fee_recipient,
+            .state_root = payload.state_root,
+            .receipts_root = payload.receipts_root,
+            .logs_bloom = payload.logs_bloom,
+            .prev_randao = payload.prev_randao,
+            .block_number = payload.block_number,
+            .gas_limit = payload.gas_limit,
+            .gas_used = payload.gas_used,
+            .timestamp = payload.timestamp,
+            .extra_data = payload.extra_data,
+            .base_fee_per_gas = payload.base_fee_per_gas,
+            .block_hash = payload.block_hash,
+            .transactions = payload.transactions,
+            .withdrawals = payload.withdrawals,
+            .blob_gas_used = payload.blob_gas_used,
+            .excess_blob_gas = payload.excess_blob_gas,
+        };
+        try self.payloads.put(payload.block_hash, .{ .payload = v3 });
+        return self.payloadStatusResponse(payload.block_hash);
+    }
+
+    // ── forkchoiceUpdated implementations ─────────────────────────────────────
+
+    fn forkchoiceUpdatedV1Impl(
+        self: *MockEngine,
+        state: ForkchoiceStateV1,
+        attrs: ?PayloadAttributesV1,
+    ) anyerror!ForkchoiceUpdatedResponse {
+        self.last_forkchoice_state = state;
+
+        var payload_id: ?[8]u8 = null;
+        if (attrs) |a| {
+            const id = self.makePayloadId();
+            const stub = self.buildStubV3(state, a.timestamp, a.prev_randao, &.{});
+            try self.built_payloads.put(id, stub);
+            payload_id = id;
+        }
+
+        return forkchoiceResponse(self, state, payload_id);
+    }
+
+    fn forkchoiceUpdatedV2Impl(
+        self: *MockEngine,
+        state: ForkchoiceStateV1,
+        attrs: ?PayloadAttributesV2,
+    ) anyerror!ForkchoiceUpdatedResponse {
+        self.last_forkchoice_state = state;
+
+        var payload_id: ?[8]u8 = null;
+        if (attrs) |a| {
+            const id = self.makePayloadId();
+            const stub = self.buildStubV3(state, a.timestamp, a.prev_randao, a.withdrawals);
+            try self.built_payloads.put(id, stub);
+            payload_id = id;
+        }
+
+        return forkchoiceResponse(self, state, payload_id);
+    }
+
+    fn forkchoiceUpdatedV3Impl(
         self: *MockEngine,
         state: ForkchoiceStateV1,
         attrs: ?PayloadAttributesV3,
     ) anyerror!ForkchoiceUpdatedResponse {
         self.last_forkchoice_state = state;
 
-        // If payload attributes are provided, start "building" a payload.
         var payload_id: ?[8]u8 = null;
-        if (attrs != null) {
-            var id_bytes: [8]u8 = undefined;
-            std.mem.writeInt(u64, &id_bytes, self.next_payload_id, .little);
-            self.next_payload_id += 1;
-
-            // Create a minimal built payload from the forkchoice head.
-            const stored = self.payloads.get(state.head_block_hash);
-            if (stored) |s| {
-                try self.built_payloads.put(id_bytes, s);
-            } else {
-                // No existing payload — store a stub keyed by the head hash.
-                const stub = ExecutionPayloadV3{
-                    .parent_hash = state.head_block_hash,
-                    .fee_recipient = std.mem.zeroes([20]u8),
-                    .state_root = std.mem.zeroes([32]u8),
-                    .receipts_root = std.mem.zeroes([32]u8),
-                    .logs_bloom = std.mem.zeroes([256]u8),
-                    .prev_randao = if (attrs) |a| a.prev_randao else std.mem.zeroes([32]u8),
-                    .block_number = 0,
-                    .gas_limit = 30_000_000,
-                    .gas_used = 0,
-                    .timestamp = if (attrs) |a| a.timestamp else 0,
-                    .extra_data = &.{},
-                    .base_fee_per_gas = 0,
-                    .block_hash = std.mem.zeroes([32]u8),
-                    .transactions = &.{},
-                    .withdrawals = if (attrs) |a| a.withdrawals else &.{},
-                    .blob_gas_used = 0,
-                    .excess_blob_gas = 0,
-                };
-                try self.built_payloads.put(id_bytes, .{ .payload = stub });
-            }
-            payload_id = id_bytes;
+        if (attrs) |a| {
+            const id = self.makePayloadId();
+            const stub = self.buildStubV3(state, a.timestamp, a.prev_randao, a.withdrawals);
+            try self.built_payloads.put(id, stub);
+            payload_id = id;
         }
 
-        // Determine status: valid if head is known, syncing otherwise.
+        return forkchoiceResponse(self, state, payload_id);
+    }
+
+    fn forkchoiceResponse(
+        self: *MockEngine,
+        state: ForkchoiceStateV1,
+        payload_id: ?[8]u8,
+    ) ForkchoiceUpdatedResponse {
         const status: ExecutionPayloadStatus = if (self.payloads.contains(state.head_block_hash))
             .valid
         else
@@ -161,7 +326,66 @@ pub const MockEngine = struct {
         };
     }
 
-    fn getPayloadV3(
+    // ── getPayload implementations ────────────────────────────────────────────
+
+    fn getPayloadV1Impl(
+        self: *MockEngine,
+        payload_id: [8]u8,
+    ) anyerror!GetPayloadResponseV1 {
+        const stored = self.built_payloads.get(payload_id) orelse
+            return error.UnknownPayload;
+        const p = stored.payload;
+        return GetPayloadResponseV1{
+            .execution_payload = .{
+                .parent_hash = p.parent_hash,
+                .fee_recipient = p.fee_recipient,
+                .state_root = p.state_root,
+                .receipts_root = p.receipts_root,
+                .logs_bloom = p.logs_bloom,
+                .prev_randao = p.prev_randao,
+                .block_number = p.block_number,
+                .gas_limit = p.gas_limit,
+                .gas_used = p.gas_used,
+                .timestamp = p.timestamp,
+                .extra_data = p.extra_data,
+                .base_fee_per_gas = p.base_fee_per_gas,
+                .block_hash = p.block_hash,
+                .transactions = p.transactions,
+            },
+            .block_value = stored.block_value,
+        };
+    }
+
+    fn getPayloadV2Impl(
+        self: *MockEngine,
+        payload_id: [8]u8,
+    ) anyerror!GetPayloadResponseV2 {
+        const stored = self.built_payloads.get(payload_id) orelse
+            return error.UnknownPayload;
+        const p = stored.payload;
+        return GetPayloadResponseV2{
+            .execution_payload = .{
+                .parent_hash = p.parent_hash,
+                .fee_recipient = p.fee_recipient,
+                .state_root = p.state_root,
+                .receipts_root = p.receipts_root,
+                .logs_bloom = p.logs_bloom,
+                .prev_randao = p.prev_randao,
+                .block_number = p.block_number,
+                .gas_limit = p.gas_limit,
+                .gas_used = p.gas_used,
+                .timestamp = p.timestamp,
+                .extra_data = p.extra_data,
+                .base_fee_per_gas = p.base_fee_per_gas,
+                .block_hash = p.block_hash,
+                .transactions = p.transactions,
+                .withdrawals = p.withdrawals,
+            },
+            .block_value = stored.block_value,
+        };
+    }
+
+    fn getPayloadV3Impl(
         self: *MockEngine,
         payload_id: [8]u8,
     ) anyerror!GetPayloadResponse {
@@ -179,21 +403,91 @@ pub const MockEngine = struct {
             .should_override_builder = false,
         };
     }
+
+    fn getPayloadV4Impl(
+        self: *MockEngine,
+        payload_id: [8]u8,
+    ) anyerror!GetPayloadResponseV4 {
+        const stored = self.built_payloads.get(payload_id) orelse
+            return error.UnknownPayload;
+        const p = stored.payload;
+        return GetPayloadResponseV4{
+            .execution_payload = .{
+                .parent_hash = p.parent_hash,
+                .fee_recipient = p.fee_recipient,
+                .state_root = p.state_root,
+                .receipts_root = p.receipts_root,
+                .logs_bloom = p.logs_bloom,
+                .prev_randao = p.prev_randao,
+                .block_number = p.block_number,
+                .gas_limit = p.gas_limit,
+                .gas_used = p.gas_used,
+                .timestamp = p.timestamp,
+                .extra_data = p.extra_data,
+                .base_fee_per_gas = p.base_fee_per_gas,
+                .block_hash = p.block_hash,
+                .transactions = p.transactions,
+                .withdrawals = p.withdrawals,
+                .blob_gas_used = p.blob_gas_used,
+                .excess_blob_gas = p.excess_blob_gas,
+                .deposit_requests = &.{},
+                .withdrawal_requests = &.{},
+                .consolidation_requests = &.{},
+            },
+            .block_value = stored.block_value,
+            .blobs_bundle = .{
+                .commitments = &.{},
+                .proofs = &.{},
+                .blobs = &.{},
+            },
+            .should_override_builder = false,
+        };
+    }
 };
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
-test "MockEngine: newPayload returns valid by default" {
+test "MockEngine: newPayload V3 returns valid by default" {
     var mock = MockEngine.init(testing.allocator);
     defer mock.deinit();
 
     const api = mock.engine();
-    const payload = makeTestPayload([_]u8{0x01} ** 32);
+    const payload = makeTestPayloadV3([_]u8{0x01} ** 32);
 
     const result = try api.newPayload(payload, &.{}, std.mem.zeroes([32]u8));
     try testing.expectEqual(ExecutionPayloadStatus.valid, result.status);
     try testing.expect(result.latest_valid_hash != null);
     try testing.expectEqual([_]u8{0x01} ** 32, result.latest_valid_hash.?);
+}
+
+test "MockEngine: newPayload V1 returns valid" {
+    var mock = MockEngine.init(testing.allocator);
+    defer mock.deinit();
+
+    const api = mock.engine();
+    const payload = makeTestPayloadV1([_]u8{0x10} ** 32);
+    const result = try api.newPayloadV1(payload);
+    try testing.expectEqual(ExecutionPayloadStatus.valid, result.status);
+}
+
+test "MockEngine: newPayload V2 returns valid" {
+    var mock = MockEngine.init(testing.allocator);
+    defer mock.deinit();
+
+    const api = mock.engine();
+    const payload = makeTestPayloadV2([_]u8{0x20} ** 32);
+    const result = try api.newPayloadV2(payload);
+    try testing.expectEqual(ExecutionPayloadStatus.valid, result.status);
+}
+
+test "MockEngine: newPayload V4 returns valid" {
+    var mock = MockEngine.init(testing.allocator);
+    defer mock.deinit();
+
+    const api = mock.engine();
+    const payload = makeTestPayloadV4([_]u8{0x40} ** 32);
+    const result = try api.newPayloadV4(payload, &.{}, std.mem.zeroes([32]u8));
+    try testing.expectEqual(ExecutionPayloadStatus.valid, result.status);
 }
 
 test "MockEngine: newPayload with status override" {
@@ -204,21 +498,78 @@ test "MockEngine: newPayload with status override" {
     try mock.setPayloadStatus(block_hash, .invalid);
 
     const api = mock.engine();
-    const payload = makeTestPayload(block_hash);
+    const payload = makeTestPayloadV3(block_hash);
 
     const result = try api.newPayload(payload, &.{}, std.mem.zeroes([32]u8));
     try testing.expectEqual(ExecutionPayloadStatus.invalid, result.status);
     try testing.expect(result.latest_valid_hash == null);
 }
 
-test "MockEngine: forkchoiceUpdated without attributes" {
+test "MockEngine: forkchoiceUpdatedV1 without attributes" {
     var mock = MockEngine.init(testing.allocator);
     defer mock.deinit();
 
-    // Submit a payload first so the head is known.
+    const api = mock.engine();
+    const block_hash = [_]u8{0x30} ** 32;
+    _ = try api.newPayloadV1(makeTestPayloadV1(block_hash));
+
+    const fcu = try api.forkchoiceUpdatedV1(.{
+        .head_block_hash = block_hash,
+        .safe_block_hash = block_hash,
+        .finalized_block_hash = block_hash,
+    }, null);
+    try testing.expectEqual(ExecutionPayloadStatus.valid, fcu.payload_status.status);
+    try testing.expect(fcu.payload_id == null);
+}
+
+test "MockEngine: forkchoiceUpdatedV1 with attributes returns payload_id" {
+    var mock = MockEngine.init(testing.allocator);
+    defer mock.deinit();
+
+    const api = mock.engine();
+    const block_hash = [_]u8{0x31} ** 32;
+    _ = try api.newPayloadV1(makeTestPayloadV1(block_hash));
+
+    const fcu = try api.forkchoiceUpdatedV1(.{
+        .head_block_hash = block_hash,
+        .safe_block_hash = block_hash,
+        .finalized_block_hash = block_hash,
+    }, .{
+        .timestamp = 1_000_000,
+        .prev_randao = [_]u8{0xbb} ** 32,
+        .suggested_fee_recipient = [_]u8{0xcc} ** 20,
+    });
+    try testing.expect(fcu.payload_id != null);
+}
+
+test "MockEngine: forkchoiceUpdatedV2 with attributes returns payload_id" {
+    var mock = MockEngine.init(testing.allocator);
+    defer mock.deinit();
+
+    const api = mock.engine();
+    const block_hash = [_]u8{0x32} ** 32;
+    _ = try api.newPayloadV2(makeTestPayloadV2(block_hash));
+
+    const fcu = try api.forkchoiceUpdatedV2(.{
+        .head_block_hash = block_hash,
+        .safe_block_hash = block_hash,
+        .finalized_block_hash = block_hash,
+    }, .{
+        .timestamp = 2_000_000,
+        .prev_randao = [_]u8{0xdd} ** 32,
+        .suggested_fee_recipient = [_]u8{0xee} ** 20,
+        .withdrawals = &.{},
+    });
+    try testing.expect(fcu.payload_id != null);
+}
+
+test "MockEngine: forkchoiceUpdated V3 without attributes" {
+    var mock = MockEngine.init(testing.allocator);
+    defer mock.deinit();
+
     const api = mock.engine();
     const block_hash = [_]u8{0x03} ** 32;
-    _ = try api.newPayload(makeTestPayload(block_hash), &.{}, std.mem.zeroes([32]u8));
+    _ = try api.newPayload(makeTestPayloadV3(block_hash), &.{}, std.mem.zeroes([32]u8));
 
     const fcu = try api.forkchoiceUpdated(.{
         .head_block_hash = block_hash,
@@ -231,13 +582,13 @@ test "MockEngine: forkchoiceUpdated without attributes" {
     try testing.expect(mock.last_forkchoice_state != null);
 }
 
-test "MockEngine: forkchoiceUpdated with attributes returns payload_id" {
+test "MockEngine: forkchoiceUpdated V3 with attributes returns payload_id" {
     var mock = MockEngine.init(testing.allocator);
     defer mock.deinit();
 
     const api = mock.engine();
     const block_hash = [_]u8{0x04} ** 32;
-    _ = try api.newPayload(makeTestPayload(block_hash), &.{}, std.mem.zeroes([32]u8));
+    _ = try api.newPayload(makeTestPayloadV3(block_hash), &.{}, std.mem.zeroes([32]u8));
 
     const fcu = try api.forkchoiceUpdated(.{
         .head_block_hash = block_hash,
@@ -255,13 +606,13 @@ test "MockEngine: forkchoiceUpdated with attributes returns payload_id" {
     try testing.expect(fcu.payload_id != null);
 }
 
-test "MockEngine: getPayload returns built payload" {
+test "MockEngine: getPayload V3 returns built payload" {
     var mock = MockEngine.init(testing.allocator);
     defer mock.deinit();
 
     const api = mock.engine();
     const block_hash = [_]u8{0x05} ** 32;
-    _ = try api.newPayload(makeTestPayload(block_hash), &.{}, std.mem.zeroes([32]u8));
+    _ = try api.newPayload(makeTestPayloadV3(block_hash), &.{}, std.mem.zeroes([32]u8));
 
     const fcu = try api.forkchoiceUpdated(.{
         .head_block_hash = block_hash,
@@ -279,6 +630,54 @@ test "MockEngine: getPayload returns built payload" {
     const resp = try api.getPayload(payload_id);
     try testing.expectEqual(block_hash, resp.execution_payload.block_hash);
     try testing.expect(!resp.should_override_builder);
+}
+
+test "MockEngine: getPayloadV1 returns built payload" {
+    var mock = MockEngine.init(testing.allocator);
+    defer mock.deinit();
+
+    const api = mock.engine();
+    const block_hash = [_]u8{0x61} ** 32;
+    _ = try api.newPayloadV1(makeTestPayloadV1(block_hash));
+
+    const fcu = try api.forkchoiceUpdatedV1(.{
+        .head_block_hash = block_hash,
+        .safe_block_hash = block_hash,
+        .finalized_block_hash = block_hash,
+    }, .{
+        .timestamp = 100,
+        .prev_randao = std.mem.zeroes([32]u8),
+        .suggested_fee_recipient = std.mem.zeroes([20]u8),
+    });
+
+    const pid = fcu.payload_id.?;
+    const resp = try api.getPayloadV1(pid);
+    try testing.expectEqual(block_hash, resp.execution_payload.block_hash);
+}
+
+test "MockEngine: getPayloadV4 returns built payload" {
+    var mock = MockEngine.init(testing.allocator);
+    defer mock.deinit();
+
+    const api = mock.engine();
+    const block_hash = [_]u8{0x64} ** 32;
+    _ = try api.newPayloadV4(makeTestPayloadV4(block_hash), &.{}, std.mem.zeroes([32]u8));
+
+    const fcu = try api.forkchoiceUpdated(.{
+        .head_block_hash = block_hash,
+        .safe_block_hash = block_hash,
+        .finalized_block_hash = block_hash,
+    }, .{
+        .timestamp = 400,
+        .prev_randao = std.mem.zeroes([32]u8),
+        .suggested_fee_recipient = std.mem.zeroes([20]u8),
+        .withdrawals = &.{},
+        .parent_beacon_block_root = std.mem.zeroes([32]u8),
+    });
+
+    const pid = fcu.payload_id.?;
+    const resp = try api.getPayloadV4(pid);
+    try testing.expectEqual(block_hash, resp.execution_payload.block_hash);
 }
 
 test "MockEngine: getPayload with unknown id returns error" {
@@ -305,8 +704,48 @@ test "MockEngine: forkchoiceUpdated with unknown head returns syncing" {
     try testing.expect(fcu.payload_status.latest_valid_hash == null);
 }
 
-/// Create a minimal test payload with the given block hash.
-fn makeTestPayload(block_hash: [32]u8) ExecutionPayloadV3 {
+// ── Test helpers ──────────────────────────────────────────────────────────────
+
+fn makeTestPayloadV1(block_hash: [32]u8) ExecutionPayloadV1 {
+    return .{
+        .parent_hash = std.mem.zeroes([32]u8),
+        .fee_recipient = std.mem.zeroes([20]u8),
+        .state_root = std.mem.zeroes([32]u8),
+        .receipts_root = std.mem.zeroes([32]u8),
+        .logs_bloom = std.mem.zeroes([256]u8),
+        .prev_randao = std.mem.zeroes([32]u8),
+        .block_number = 1,
+        .gas_limit = 30_000_000,
+        .gas_used = 21_000,
+        .timestamp = 1_700_000_000,
+        .extra_data = &.{},
+        .base_fee_per_gas = 1_000_000_000,
+        .block_hash = block_hash,
+        .transactions = &.{},
+    };
+}
+
+fn makeTestPayloadV2(block_hash: [32]u8) ExecutionPayloadV2 {
+    return .{
+        .parent_hash = std.mem.zeroes([32]u8),
+        .fee_recipient = std.mem.zeroes([20]u8),
+        .state_root = std.mem.zeroes([32]u8),
+        .receipts_root = std.mem.zeroes([32]u8),
+        .logs_bloom = std.mem.zeroes([256]u8),
+        .prev_randao = std.mem.zeroes([32]u8),
+        .block_number = 1,
+        .gas_limit = 30_000_000,
+        .gas_used = 21_000,
+        .timestamp = 1_700_000_000,
+        .extra_data = &.{},
+        .base_fee_per_gas = 1_000_000_000,
+        .block_hash = block_hash,
+        .transactions = &.{},
+        .withdrawals = &.{},
+    };
+}
+
+fn makeTestPayloadV3(block_hash: [32]u8) ExecutionPayloadV3 {
     return .{
         .parent_hash = std.mem.zeroes([32]u8),
         .fee_recipient = std.mem.zeroes([20]u8),
@@ -325,5 +764,30 @@ fn makeTestPayload(block_hash: [32]u8) ExecutionPayloadV3 {
         .withdrawals = &.{},
         .blob_gas_used = 0,
         .excess_blob_gas = 0,
+    };
+}
+
+fn makeTestPayloadV4(block_hash: [32]u8) ExecutionPayloadV4 {
+    return .{
+        .parent_hash = std.mem.zeroes([32]u8),
+        .fee_recipient = std.mem.zeroes([20]u8),
+        .state_root = std.mem.zeroes([32]u8),
+        .receipts_root = std.mem.zeroes([32]u8),
+        .logs_bloom = std.mem.zeroes([256]u8),
+        .prev_randao = std.mem.zeroes([32]u8),
+        .block_number = 1,
+        .gas_limit = 30_000_000,
+        .gas_used = 21_000,
+        .timestamp = 1_700_000_000,
+        .extra_data = &.{},
+        .base_fee_per_gas = 1_000_000_000,
+        .block_hash = block_hash,
+        .transactions = &.{},
+        .withdrawals = &.{},
+        .blob_gas_used = 0,
+        .excess_blob_gas = 0,
+        .deposit_requests = &.{},
+        .withdrawal_requests = &.{},
+        .consolidation_requests = &.{},
     };
 }

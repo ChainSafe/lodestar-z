@@ -17,15 +17,26 @@ const json_rpc = @import("json_rpc.zig");
 const types = @import("engine_api_types.zig");
 
 const EngineApi = engine_api.EngineApi;
+const ExecutionPayloadV1 = types.ExecutionPayloadV1;
+const ExecutionPayloadV2 = types.ExecutionPayloadV2;
 const ExecutionPayloadV3 = types.ExecutionPayloadV3;
+const ExecutionPayloadV4 = types.ExecutionPayloadV4;
 const PayloadStatusV1 = types.PayloadStatusV1;
 const ExecutionPayloadStatus = types.ExecutionPayloadStatus;
 const ForkchoiceStateV1 = types.ForkchoiceStateV1;
+const PayloadAttributesV1 = types.PayloadAttributesV1;
+const PayloadAttributesV2 = types.PayloadAttributesV2;
 const PayloadAttributesV3 = types.PayloadAttributesV3;
 const ForkchoiceUpdatedResponse = types.ForkchoiceUpdatedResponse;
+const GetPayloadResponseV1 = types.GetPayloadResponseV1;
+const GetPayloadResponseV2 = types.GetPayloadResponseV2;
 const GetPayloadResponse = types.GetPayloadResponse;
+const GetPayloadResponseV4 = types.GetPayloadResponseV4;
 const BlobsBundle = types.BlobsBundle;
 const Withdrawal = types.Withdrawal;
+const DepositRequest = types.DepositRequest;
+const WithdrawalRequest = types.WithdrawalRequest;
+const ConsolidationRequest = types.ConsolidationRequest;
 
 // ── Transport interface ───────────────────────────────────────────────────────
 
@@ -164,9 +175,17 @@ pub const HttpEngine = struct {
     // ── vtable ────────────────────────────────────────────────────────────────
 
     const vtable = EngineApi.VTable{
+        .newPayloadV1 = @ptrCast(&newPayloadV1),
+        .newPayloadV2 = @ptrCast(&newPayloadV2),
         .newPayloadV3 = @ptrCast(&newPayloadV3),
+        .newPayloadV4 = @ptrCast(&newPayloadV4),
+        .forkchoiceUpdatedV1 = @ptrCast(&forkchoiceUpdatedV1),
+        .forkchoiceUpdatedV2 = @ptrCast(&forkchoiceUpdatedV2),
         .forkchoiceUpdatedV3 = @ptrCast(&forkchoiceUpdatedV3),
+        .getPayloadV1 = @ptrCast(&getPayloadV1),
+        .getPayloadV2 = @ptrCast(&getPayloadV2),
         .getPayloadV3 = @ptrCast(&getPayloadV3),
+        .getPayloadV4 = @ptrCast(&getPayloadV4),
     };
 
     fn newPayloadV3(
@@ -273,6 +292,260 @@ pub const HttpEngine = struct {
         defer parsed.deinit();
 
         return decodeGetPayloadResponse(self.allocator, parsed.value);
+    }
+
+    // ── newPayload V1 / V2 / V4 ───────────────────────────────────────────────
+
+    fn newPayloadV1(
+        self: *HttpEngine,
+        payload: ExecutionPayloadV1,
+    ) anyerror!PayloadStatusV1 {
+        const id = self.nextId();
+
+        const payload_json = try encodeExecutionPayloadV1(self.allocator, payload);
+        defer self.allocator.free(payload_json);
+
+        const params_json = try std.fmt.allocPrint(
+            self.allocator,
+            "[{s}]",
+            .{payload_json},
+        );
+        defer self.allocator.free(params_json);
+
+        const body = try encodeRawRequest(self.allocator, "engine_newPayloadV1", params_json, id);
+        defer self.allocator.free(body);
+
+        const response = try self.sendRequest(body);
+        defer self.allocator.free(response);
+
+        var parsed = try json_rpc.decodeResponse(PayloadStatusJson, self.allocator, response);
+        defer parsed.deinit();
+
+        return decodePayloadStatus(parsed.value);
+    }
+
+    fn newPayloadV2(
+        self: *HttpEngine,
+        payload: ExecutionPayloadV2,
+    ) anyerror!PayloadStatusV1 {
+        const id = self.nextId();
+
+        const payload_json = try encodeExecutionPayloadV2(self.allocator, payload);
+        defer self.allocator.free(payload_json);
+
+        const params_json = try std.fmt.allocPrint(
+            self.allocator,
+            "[{s}]",
+            .{payload_json},
+        );
+        defer self.allocator.free(params_json);
+
+        const body = try encodeRawRequest(self.allocator, "engine_newPayloadV2", params_json, id);
+        defer self.allocator.free(body);
+
+        const response = try self.sendRequest(body);
+        defer self.allocator.free(response);
+
+        var parsed = try json_rpc.decodeResponse(PayloadStatusJson, self.allocator, response);
+        defer parsed.deinit();
+
+        return decodePayloadStatus(parsed.value);
+    }
+
+    fn newPayloadV4(
+        self: *HttpEngine,
+        payload: ExecutionPayloadV4,
+        versioned_hashes: []const [32]u8,
+        parent_beacon_root: [32]u8,
+    ) anyerror!PayloadStatusV1 {
+        const id = self.nextId();
+
+        const payload_json = try encodeExecutionPayloadV4(self.allocator, payload);
+        defer self.allocator.free(payload_json);
+
+        const vh_json = try encodeVersionedHashes(self.allocator, versioned_hashes);
+        defer self.allocator.free(vh_json);
+
+        const pbr_hex = try hexEncodeFixed(self.allocator, &parent_beacon_root);
+        defer self.allocator.free(pbr_hex);
+
+        const params_json = try std.fmt.allocPrint(
+            self.allocator,
+            "[{s},{s},\"{s}\"]",
+            .{ payload_json, vh_json, pbr_hex },
+        );
+        defer self.allocator.free(params_json);
+
+        const body = try encodeRawRequest(self.allocator, "engine_newPayloadV4", params_json, id);
+        defer self.allocator.free(body);
+
+        const response = try self.sendRequest(body);
+        defer self.allocator.free(response);
+
+        var parsed = try json_rpc.decodeResponse(PayloadStatusJson, self.allocator, response);
+        defer parsed.deinit();
+
+        return decodePayloadStatus(parsed.value);
+    }
+
+    // ── forkchoiceUpdated V1 / V2 ─────────────────────────────────────────────
+
+    fn forkchoiceUpdatedV1(
+        self: *HttpEngine,
+        state: ForkchoiceStateV1,
+        attrs: ?PayloadAttributesV1,
+    ) anyerror!ForkchoiceUpdatedResponse {
+        const id = self.nextId();
+
+        const state_json = try encodeForkchoiceState(self.allocator, state);
+        defer self.allocator.free(state_json);
+
+        const attrs_json = if (attrs) |a| blk: {
+            break :blk try encodePayloadAttributesV1(self.allocator, a);
+        } else blk: {
+            break :blk try self.allocator.dupe(u8, "null");
+        };
+        defer self.allocator.free(attrs_json);
+
+        const params_json = try std.fmt.allocPrint(
+            self.allocator,
+            "[{s},{s}]",
+            .{ state_json, attrs_json },
+        );
+        defer self.allocator.free(params_json);
+
+        const body = try encodeRawRequest(self.allocator, "engine_forkchoiceUpdatedV1", params_json, id);
+        defer self.allocator.free(body);
+
+        const response = try self.sendRequest(body);
+        defer self.allocator.free(response);
+
+        var parsed = try json_rpc.decodeResponse(ForkchoiceUpdatedJson, self.allocator, response);
+        defer parsed.deinit();
+
+        return decodeForkchoiceUpdatedResponse(parsed.value);
+    }
+
+    fn forkchoiceUpdatedV2(
+        self: *HttpEngine,
+        state: ForkchoiceStateV1,
+        attrs: ?PayloadAttributesV2,
+    ) anyerror!ForkchoiceUpdatedResponse {
+        const id = self.nextId();
+
+        const state_json = try encodeForkchoiceState(self.allocator, state);
+        defer self.allocator.free(state_json);
+
+        const attrs_json = if (attrs) |a| blk: {
+            break :blk try encodePayloadAttributesV2(self.allocator, a);
+        } else blk: {
+            break :blk try self.allocator.dupe(u8, "null");
+        };
+        defer self.allocator.free(attrs_json);
+
+        const params_json = try std.fmt.allocPrint(
+            self.allocator,
+            "[{s},{s}]",
+            .{ state_json, attrs_json },
+        );
+        defer self.allocator.free(params_json);
+
+        const body = try encodeRawRequest(self.allocator, "engine_forkchoiceUpdatedV2", params_json, id);
+        defer self.allocator.free(body);
+
+        const response = try self.sendRequest(body);
+        defer self.allocator.free(response);
+
+        var parsed = try json_rpc.decodeResponse(ForkchoiceUpdatedJson, self.allocator, response);
+        defer parsed.deinit();
+
+        return decodeForkchoiceUpdatedResponse(parsed.value);
+    }
+
+    // ── getPayload V1 / V2 / V4 ──────────────────────────────────────────────
+
+    fn getPayloadV1(
+        self: *HttpEngine,
+        payload_id: [8]u8,
+    ) anyerror!GetPayloadResponseV1 {
+        const id = self.nextId();
+
+        const pid_hex = try hexEncodeFixed(self.allocator, &payload_id);
+        defer self.allocator.free(pid_hex);
+
+        const params_json = try std.fmt.allocPrint(
+            self.allocator,
+            "[\"{s}\"]",
+            .{pid_hex},
+        );
+        defer self.allocator.free(params_json);
+
+        const body = try encodeRawRequest(self.allocator, "engine_getPayloadV1", params_json, id);
+        defer self.allocator.free(body);
+
+        const response = try self.sendRequest(body);
+        defer self.allocator.free(response);
+
+        var parsed = try json_rpc.decodeResponse(GetPayloadV1Json, self.allocator, response);
+        defer parsed.deinit();
+
+        return decodeGetPayloadResponseV1(parsed.value);
+    }
+
+    fn getPayloadV2(
+        self: *HttpEngine,
+        payload_id: [8]u8,
+    ) anyerror!GetPayloadResponseV2 {
+        const id = self.nextId();
+
+        const pid_hex = try hexEncodeFixed(self.allocator, &payload_id);
+        defer self.allocator.free(pid_hex);
+
+        const params_json = try std.fmt.allocPrint(
+            self.allocator,
+            "[\"{s}\"]",
+            .{pid_hex},
+        );
+        defer self.allocator.free(params_json);
+
+        const body = try encodeRawRequest(self.allocator, "engine_getPayloadV2", params_json, id);
+        defer self.allocator.free(body);
+
+        const response = try self.sendRequest(body);
+        defer self.allocator.free(response);
+
+        var parsed = try json_rpc.decodeResponse(GetPayloadV2Json, self.allocator, response);
+        defer parsed.deinit();
+
+        return decodeGetPayloadResponseV2(parsed.value);
+    }
+
+    fn getPayloadV4(
+        self: *HttpEngine,
+        payload_id: [8]u8,
+    ) anyerror!GetPayloadResponseV4 {
+        const id = self.nextId();
+
+        const pid_hex = try hexEncodeFixed(self.allocator, &payload_id);
+        defer self.allocator.free(pid_hex);
+
+        const params_json = try std.fmt.allocPrint(
+            self.allocator,
+            "[\"{s}\"]",
+            .{pid_hex},
+        );
+        defer self.allocator.free(params_json);
+
+        const body = try encodeRawRequest(self.allocator, "engine_getPayloadV4", params_json, id);
+        defer self.allocator.free(body);
+
+        const response = try self.sendRequest(body);
+        defer self.allocator.free(response);
+
+        var parsed = try json_rpc.decodeResponse(GetPayloadV4Json, self.allocator, response);
+        defer parsed.deinit();
+
+        return decodeGetPayloadResponseV4(self.allocator, parsed.value);
     }
 };
 
@@ -460,6 +733,307 @@ fn encodeVersionedHashes(allocator: Allocator, hashes: []const [32]u8) ![]const 
     }
 
     return joinJsonArray(allocator, parts.items);
+}
+
+fn encodePayloadAttributesV1(allocator: Allocator, attrs: PayloadAttributesV1) ![]const u8 {
+    const timestamp = try hexEncodeU64(allocator, attrs.timestamp);
+    defer allocator.free(timestamp);
+    const prev_randao = try hexEncodeFixed(allocator, &attrs.prev_randao);
+    defer allocator.free(prev_randao);
+    const fee_recipient = try hexEncodeFixed(allocator, &attrs.suggested_fee_recipient);
+    defer allocator.free(fee_recipient);
+
+    return std.fmt.allocPrint(
+        allocator,
+        "{{\"timestamp\":\"{s}\",\"prevRandao\":\"{s}\",\"suggestedFeeRecipient\":\"{s}\"}}",
+        .{ timestamp, prev_randao, fee_recipient },
+    );
+}
+
+fn encodePayloadAttributesV2(allocator: Allocator, attrs: PayloadAttributesV2) ![]const u8 {
+    const timestamp = try hexEncodeU64(allocator, attrs.timestamp);
+    defer allocator.free(timestamp);
+    const prev_randao = try hexEncodeFixed(allocator, &attrs.prev_randao);
+    defer allocator.free(prev_randao);
+    const fee_recipient = try hexEncodeFixed(allocator, &attrs.suggested_fee_recipient);
+    defer allocator.free(fee_recipient);
+    const withdrawals = try encodeWithdrawals(allocator, attrs.withdrawals);
+    defer allocator.free(withdrawals);
+
+    return std.fmt.allocPrint(
+        allocator,
+        "{{\"timestamp\":\"{s}\",\"prevRandao\":\"{s}\",\"suggestedFeeRecipient\":\"{s}\",\"withdrawals\":{s}}}",
+        .{ timestamp, prev_randao, fee_recipient, withdrawals },
+    );
+}
+
+fn encodeExecutionPayloadV1(allocator: Allocator, p: ExecutionPayloadV1) ![]const u8 {
+    const parent_hash = try hexEncodeFixed(allocator, &p.parent_hash);
+    defer allocator.free(parent_hash);
+    const fee_recipient = try hexEncodeFixed(allocator, &p.fee_recipient);
+    defer allocator.free(fee_recipient);
+    const state_root = try hexEncodeFixed(allocator, &p.state_root);
+    defer allocator.free(state_root);
+    const receipts_root = try hexEncodeFixed(allocator, &p.receipts_root);
+    defer allocator.free(receipts_root);
+    const logs_bloom = try hexEncodeFixed(allocator, &p.logs_bloom);
+    defer allocator.free(logs_bloom);
+    const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
+    defer allocator.free(prev_randao);
+    const block_number = try hexEncodeU64(allocator, p.block_number);
+    defer allocator.free(block_number);
+    const gas_limit = try hexEncodeU64(allocator, p.gas_limit);
+    defer allocator.free(gas_limit);
+    const gas_used = try hexEncodeU64(allocator, p.gas_used);
+    defer allocator.free(gas_used);
+    const timestamp = try hexEncodeU64(allocator, p.timestamp);
+    defer allocator.free(timestamp);
+    const extra_data = try hexEncode(allocator, p.extra_data);
+    defer allocator.free(extra_data);
+    const base_fee = try hexEncodeU256(allocator, p.base_fee_per_gas);
+    defer allocator.free(base_fee);
+    const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
+    defer allocator.free(block_hash);
+    const transactions = try encodeTransactions(allocator, p.transactions);
+    defer allocator.free(transactions);
+
+    return std.fmt.allocPrint(allocator,
+        \\{{
+        \\"parentHash":"{s}",
+        \\"feeRecipient":"{s}",
+        \\"stateRoot":"{s}",
+        \\"receiptsRoot":"{s}",
+        \\"logsBloom":"{s}",
+        \\"prevRandao":"{s}",
+        \\"blockNumber":"{s}",
+        \\"gasLimit":"{s}",
+        \\"gasUsed":"{s}",
+        \\"timestamp":"{s}",
+        \\"extraData":"{s}",
+        \\"baseFeePerGas":"{s}",
+        \\"blockHash":"{s}",
+        \\"transactions":{s}
+        \\}}
+    , .{
+        parent_hash,  fee_recipient, state_root,  receipts_root,
+        logs_bloom,   prev_randao,   block_number, gas_limit,
+        gas_used,     timestamp,     extra_data,   base_fee,
+        block_hash,   transactions,
+    });
+}
+
+fn encodeExecutionPayloadV2(allocator: Allocator, p: ExecutionPayloadV2) ![]const u8 {
+    const parent_hash = try hexEncodeFixed(allocator, &p.parent_hash);
+    defer allocator.free(parent_hash);
+    const fee_recipient = try hexEncodeFixed(allocator, &p.fee_recipient);
+    defer allocator.free(fee_recipient);
+    const state_root = try hexEncodeFixed(allocator, &p.state_root);
+    defer allocator.free(state_root);
+    const receipts_root = try hexEncodeFixed(allocator, &p.receipts_root);
+    defer allocator.free(receipts_root);
+    const logs_bloom = try hexEncodeFixed(allocator, &p.logs_bloom);
+    defer allocator.free(logs_bloom);
+    const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
+    defer allocator.free(prev_randao);
+    const block_number = try hexEncodeU64(allocator, p.block_number);
+    defer allocator.free(block_number);
+    const gas_limit = try hexEncodeU64(allocator, p.gas_limit);
+    defer allocator.free(gas_limit);
+    const gas_used = try hexEncodeU64(allocator, p.gas_used);
+    defer allocator.free(gas_used);
+    const timestamp = try hexEncodeU64(allocator, p.timestamp);
+    defer allocator.free(timestamp);
+    const extra_data = try hexEncode(allocator, p.extra_data);
+    defer allocator.free(extra_data);
+    const base_fee = try hexEncodeU256(allocator, p.base_fee_per_gas);
+    defer allocator.free(base_fee);
+    const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
+    defer allocator.free(block_hash);
+    const transactions = try encodeTransactions(allocator, p.transactions);
+    defer allocator.free(transactions);
+    const withdrawals = try encodeWithdrawals(allocator, p.withdrawals);
+    defer allocator.free(withdrawals);
+
+    return std.fmt.allocPrint(allocator,
+        \\{{
+        \\"parentHash":"{s}",
+        \\"feeRecipient":"{s}",
+        \\"stateRoot":"{s}",
+        \\"receiptsRoot":"{s}",
+        \\"logsBloom":"{s}",
+        \\"prevRandao":"{s}",
+        \\"blockNumber":"{s}",
+        \\"gasLimit":"{s}",
+        \\"gasUsed":"{s}",
+        \\"timestamp":"{s}",
+        \\"extraData":"{s}",
+        \\"baseFeePerGas":"{s}",
+        \\"blockHash":"{s}",
+        \\"transactions":{s},
+        \\"withdrawals":{s}
+        \\}}
+    , .{
+        parent_hash,  fee_recipient, state_root,   receipts_root,
+        logs_bloom,   prev_randao,   block_number,  gas_limit,
+        gas_used,     timestamp,     extra_data,    base_fee,
+        block_hash,   transactions,  withdrawals,
+    });
+}
+
+fn encodeDepositRequest(allocator: Allocator, dr: DepositRequest) ![]const u8 {
+    const pubkey = try hexEncodeFixed(allocator, &dr.pubkey);
+    defer allocator.free(pubkey);
+    const wc = try hexEncodeFixed(allocator, &dr.withdrawal_credentials);
+    defer allocator.free(wc);
+    const amount = try hexEncodeU64(allocator, dr.amount);
+    defer allocator.free(amount);
+    const sig = try hexEncodeFixed(allocator, &dr.signature);
+    defer allocator.free(sig);
+    const index = try hexEncodeU64(allocator, dr.index);
+    defer allocator.free(index);
+    return std.fmt.allocPrint(
+        allocator,
+        "{{\"pubkey\":\"{s}\",\"withdrawalCredentials\":\"{s}\",\"amount\":\"{s}\",\"signature\":\"{s}\",\"index\":\"{s}\"}}",
+        .{ pubkey, wc, amount, sig, index },
+    );
+}
+
+fn encodeWithdrawalRequest(allocator: Allocator, wr: WithdrawalRequest) ![]const u8 {
+    const src = try hexEncodeFixed(allocator, &wr.source_address);
+    defer allocator.free(src);
+    const vpk = try hexEncodeFixed(allocator, &wr.validator_pubkey);
+    defer allocator.free(vpk);
+    const amt = try hexEncodeU64(allocator, wr.amount);
+    defer allocator.free(amt);
+    return std.fmt.allocPrint(
+        allocator,
+        "{{\"sourceAddress\":\"{s}\",\"validatorPubkey\":\"{s}\",\"amount\":\"{s}\"}}",
+        .{ src, vpk, amt },
+    );
+}
+
+fn encodeConsolidationRequest(allocator: Allocator, cr: ConsolidationRequest) ![]const u8 {
+    const src = try hexEncodeFixed(allocator, &cr.source_address);
+    defer allocator.free(src);
+    const spk = try hexEncodeFixed(allocator, &cr.source_pubkey);
+    defer allocator.free(spk);
+    const tpk = try hexEncodeFixed(allocator, &cr.target_pubkey);
+    defer allocator.free(tpk);
+    return std.fmt.allocPrint(
+        allocator,
+        "{{\"sourceAddress\":\"{s}\",\"sourcePubkey\":\"{s}\",\"targetPubkey\":\"{s}\"}}",
+        .{ src, spk, tpk },
+    );
+}
+
+fn encodeDepositRequests(allocator: Allocator, requests: []const DepositRequest) ![]const u8 {
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (parts.items) |p| allocator.free(p);
+        parts.deinit(allocator);
+    }
+    for (requests) |r| {
+        try parts.append(allocator, try encodeDepositRequest(allocator, r));
+    }
+    return joinJsonArray(allocator, parts.items);
+}
+
+fn encodeWithdrawalRequests(allocator: Allocator, requests: []const WithdrawalRequest) ![]const u8 {
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (parts.items) |p| allocator.free(p);
+        parts.deinit(allocator);
+    }
+    for (requests) |r| {
+        try parts.append(allocator, try encodeWithdrawalRequest(allocator, r));
+    }
+    return joinJsonArray(allocator, parts.items);
+}
+
+fn encodeConsolidationRequests(allocator: Allocator, requests: []const ConsolidationRequest) ![]const u8 {
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (parts.items) |p| allocator.free(p);
+        parts.deinit(allocator);
+    }
+    for (requests) |r| {
+        try parts.append(allocator, try encodeConsolidationRequest(allocator, r));
+    }
+    return joinJsonArray(allocator, parts.items);
+}
+
+fn encodeExecutionPayloadV4(allocator: Allocator, p: ExecutionPayloadV4) ![]const u8 {
+    const parent_hash = try hexEncodeFixed(allocator, &p.parent_hash);
+    defer allocator.free(parent_hash);
+    const fee_recipient = try hexEncodeFixed(allocator, &p.fee_recipient);
+    defer allocator.free(fee_recipient);
+    const state_root = try hexEncodeFixed(allocator, &p.state_root);
+    defer allocator.free(state_root);
+    const receipts_root = try hexEncodeFixed(allocator, &p.receipts_root);
+    defer allocator.free(receipts_root);
+    const logs_bloom = try hexEncodeFixed(allocator, &p.logs_bloom);
+    defer allocator.free(logs_bloom);
+    const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
+    defer allocator.free(prev_randao);
+    const block_number = try hexEncodeU64(allocator, p.block_number);
+    defer allocator.free(block_number);
+    const gas_limit = try hexEncodeU64(allocator, p.gas_limit);
+    defer allocator.free(gas_limit);
+    const gas_used = try hexEncodeU64(allocator, p.gas_used);
+    defer allocator.free(gas_used);
+    const timestamp = try hexEncodeU64(allocator, p.timestamp);
+    defer allocator.free(timestamp);
+    const extra_data = try hexEncode(allocator, p.extra_data);
+    defer allocator.free(extra_data);
+    const base_fee = try hexEncodeU256(allocator, p.base_fee_per_gas);
+    defer allocator.free(base_fee);
+    const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
+    defer allocator.free(block_hash);
+    const transactions = try encodeTransactions(allocator, p.transactions);
+    defer allocator.free(transactions);
+    const withdrawals = try encodeWithdrawals(allocator, p.withdrawals);
+    defer allocator.free(withdrawals);
+    const blob_gas_used = try hexEncodeU64(allocator, p.blob_gas_used);
+    defer allocator.free(blob_gas_used);
+    const excess_blob_gas = try hexEncodeU64(allocator, p.excess_blob_gas);
+    defer allocator.free(excess_blob_gas);
+    const deposit_requests = try encodeDepositRequests(allocator, p.deposit_requests);
+    defer allocator.free(deposit_requests);
+    const withdrawal_requests = try encodeWithdrawalRequests(allocator, p.withdrawal_requests);
+    defer allocator.free(withdrawal_requests);
+    const consolidation_requests = try encodeConsolidationRequests(allocator, p.consolidation_requests);
+    defer allocator.free(consolidation_requests);
+
+    return std.fmt.allocPrint(allocator,
+        \\{{
+        \\"parentHash":"{s}",
+        \\"feeRecipient":"{s}",
+        \\"stateRoot":"{s}",
+        \\"receiptsRoot":"{s}",
+        \\"logsBloom":"{s}",
+        \\"prevRandao":"{s}",
+        \\"blockNumber":"{s}",
+        \\"gasLimit":"{s}",
+        \\"gasUsed":"{s}",
+        \\"timestamp":"{s}",
+        \\"extraData":"{s}",
+        \\"baseFeePerGas":"{s}",
+        \\"blockHash":"{s}",
+        \\"transactions":{s},
+        \\"withdrawals":{s},
+        \\"blobGasUsed":"{s}",
+        \\"excessBlobGas":"{s}",
+        \\"depositRequests":{s},
+        \\"withdrawalRequests":{s},
+        \\"consolidationRequests":{s}
+        \\}}
+    , .{
+        parent_hash,          fee_recipient,        state_root,           receipts_root,
+        logs_bloom,           prev_randao,           block_number,         gas_limit,
+        gas_used,             timestamp,             extra_data,           base_fee,
+        block_hash,           transactions,          withdrawals,          blob_gas_used,
+        excess_blob_gas,      deposit_requests,      withdrawal_requests,  consolidation_requests,
+    });
 }
 
 fn encodeExecutionPayloadV3(allocator: Allocator, p: ExecutionPayloadV3) ![]const u8 {
@@ -683,6 +1257,133 @@ fn decodeGetPayloadResponse(allocator: Allocator, j: GetPayloadJson) !GetPayload
     return GetPayloadResponse{
         .execution_payload = payload,
         .block_value = block_value,
+        .blobs_bundle = .{
+            .commitments = &.{},
+            .proofs = &.{},
+            .blobs = &.{},
+        },
+        .should_override_builder = j.shouldOverrideBuilder,
+    };
+}
+
+// ── V1/V2/V4 JSON response types & decoders ─────────────────────────────────
+
+/// JSON representation for ExecutionPayloadV1 (no withdrawals, no blob fields).
+const ExecutionPayloadJsonV1 = struct {
+    parentHash: []const u8,
+    feeRecipient: []const u8,
+    stateRoot: []const u8,
+    receiptsRoot: []const u8,
+    logsBloom: []const u8,
+    prevRandao: []const u8,
+    blockNumber: []const u8,
+    gasLimit: []const u8,
+    gasUsed: []const u8,
+    timestamp: []const u8,
+    extraData: []const u8,
+    baseFeePerGas: []const u8,
+    blockHash: []const u8,
+    transactions: []const []const u8,
+};
+
+const GetPayloadV1Json = struct {
+    executionPayload: ExecutionPayloadJsonV1,
+    blockValue: []const u8,
+};
+
+fn decodeGetPayloadResponseV1(_: GetPayloadV1Json) !GetPayloadResponseV1 {
+    // Stub: full decoding not needed for mock tests; populate from raw JSON fields.
+    return error.NotImplemented;
+}
+
+/// JSON representation for ExecutionPayloadV2 (adds withdrawals).
+const ExecutionPayloadJsonV2 = struct {
+    parentHash: []const u8,
+    feeRecipient: []const u8,
+    stateRoot: []const u8,
+    receiptsRoot: []const u8,
+    logsBloom: []const u8,
+    prevRandao: []const u8,
+    blockNumber: []const u8,
+    gasLimit: []const u8,
+    gasUsed: []const u8,
+    timestamp: []const u8,
+    extraData: []const u8,
+    baseFeePerGas: []const u8,
+    blockHash: []const u8,
+    transactions: []const []const u8,
+    withdrawals: []const WithdrawalJson,
+};
+
+const GetPayloadV2Json = struct {
+    executionPayload: ExecutionPayloadJsonV2,
+    blockValue: []const u8,
+};
+
+fn decodeGetPayloadResponseV2(_: GetPayloadV2Json) !GetPayloadResponseV2 {
+    return error.NotImplemented;
+}
+
+/// JSON representation for ExecutionPayloadV4 (Electra, adds request arrays).
+const ExecutionPayloadJsonV4 = struct {
+    parentHash: []const u8,
+    feeRecipient: []const u8,
+    stateRoot: []const u8,
+    receiptsRoot: []const u8,
+    logsBloom: []const u8,
+    prevRandao: []const u8,
+    blockNumber: []const u8,
+    gasLimit: []const u8,
+    gasUsed: []const u8,
+    timestamp: []const u8,
+    extraData: []const u8,
+    baseFeePerGas: []const u8,
+    blockHash: []const u8,
+    transactions: []const []const u8,
+    withdrawals: []const WithdrawalJson,
+    blobGasUsed: []const u8,
+    excessBlobGas: []const u8,
+    depositRequests: []const std.json.Value,
+    withdrawalRequests: []const std.json.Value,
+    consolidationRequests: []const std.json.Value,
+};
+
+const GetPayloadV4Json = struct {
+    executionPayload: ExecutionPayloadJsonV4,
+    blockValue: []const u8,
+    blobsBundle: BlobsBundleJson,
+    shouldOverrideBuilder: bool,
+};
+
+fn decodeGetPayloadResponseV4(allocator: Allocator, j: GetPayloadV4Json) !GetPayloadResponseV4 {
+    _ = allocator;
+    const ep = j.executionPayload;
+    const payload = ExecutionPayloadV4{
+        .parent_hash = try hexDecode32(ep.parentHash),
+        .fee_recipient = try hexDecode20(ep.feeRecipient),
+        .state_root = try hexDecode32(ep.stateRoot),
+        .receipts_root = try hexDecode32(ep.receiptsRoot),
+        .logs_bloom = try hexDecode256(ep.logsBloom),
+        .prev_randao = try hexDecode32(ep.prevRandao),
+        .block_number = try hexDecodeU64(ep.blockNumber),
+        .gas_limit = try hexDecodeU64(ep.gasLimit),
+        .gas_used = try hexDecodeU64(ep.gasUsed),
+        .timestamp = try hexDecodeU64(ep.timestamp),
+        .extra_data = ep.extraData,
+        .base_fee_per_gas = try hexDecodeU256(ep.baseFeePerGas),
+        .block_hash = try hexDecode32(ep.blockHash),
+        .transactions = ep.transactions,
+        .withdrawals = &.{},
+        .blob_gas_used = try hexDecodeU64(ep.blobGasUsed),
+        .excess_blob_gas = try hexDecodeU64(ep.excessBlobGas),
+        .deposit_requests = &.{},
+        .withdrawal_requests = &.{},
+        .consolidation_requests = &.{},
+    };
+
+    return GetPayloadResponseV4{
+        .execution_payload = payload,
+        .block_value = try hexDecodeU256(j.blockValue),
         .blobs_bundle = .{
             .commitments = &.{},
             .proofs = &.{},

@@ -12,6 +12,7 @@ pub const engine_api = @import("engine_api.zig");
 pub const json_rpc = @import("json_rpc.zig");
 pub const mock_engine = @import("mock_engine.zig");
 pub const http_engine = @import("http_engine.zig");
+pub const payload_id_cache = @import("payload_id_cache.zig");
 
 // Re-export primary types for convenience.
 pub const EngineApi = engine_api.EngineApi;
@@ -21,6 +22,7 @@ pub const Transport = http_engine.Transport;
 pub const Header = http_engine.Header;
 pub const MockTransport = http_engine.MockTransport;
 pub const IoHttpTransport = http_engine.IoHttpTransport;
+pub const PayloadIdCache = payload_id_cache.PayloadIdCache;
 
 pub const ExecutionPayloadStatus = engine_api_types.ExecutionPayloadStatus;
 pub const PayloadStatusV1 = engine_api_types.PayloadStatusV1;
@@ -36,4 +38,5 @@ test {
     testing.refAllDecls(json_rpc);
     testing.refAllDecls(mock_engine);
     testing.refAllDecls(http_engine);
+    testing.refAllDecls(payload_id_cache);
 }
