@@ -1,5 +1,4 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
 const BeaconState = @import("fork_types").BeaconState;
@@ -38,7 +37,6 @@ const RewardPenaltyItem = struct {
 /// consumer should deinit `rewards` and `penalties` arrays
 pub fn getRewardsAndPenaltiesAltair(
     comptime fork: ForkSeq,
-    allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
@@ -55,10 +53,11 @@ pub fn getRewardsAndPenaltiesAltair(
     @memset(penalties, 0);
 
     const is_in_inactivity_leak = isInInactivityLeak(epoch_cache.epoch, try state.finalizedEpoch());
-    // effectiveBalance is multiple of EFFECTIVE_BALANCE_INCREMENT and less than MAX_EFFECTIVE_BALANCE
-    // so there are limited values of them like 32, 31, 30
-    var reward_penalty_item_cache = std.AutoHashMap(u64, RewardPenaltyItem).init(allocator);
-    defer reward_penalty_item_cache.deinit();
+    // effectiveBalance is a multiple of EFFECTIVE_BALANCE_INCREMENT and bounded by max effective balance,
+    // so effective_balance_increment has a small range (0..max_increment). Use a fixed array for O(1) lookup
+    // instead of a HashMap — avoids allocation and hashing overhead in the hot validator loop.
+    const max_increment = comptime preset.MAX_EFFECTIVE_BALANCE_ELECTRA / EFFECTIVE_BALANCE_INCREMENT + 1;
+    var reward_penalty_item_cache: [max_increment]?RewardPenaltyItem = .{null} ** max_increment;
 
     const inactivity_penality_multiplier: u64 =
         if (fork == ForkSeq.altair) INACTIVITY_PENALTY_QUOTIENT_ALTAIR else INACTIVITY_PENALTY_QUOTIENT_BELLATRIX;
@@ -74,7 +73,7 @@ pub fn getRewardsAndPenaltiesAltair(
 
         const effective_balance_increment = effective_balance_increments[i];
 
-        const reward_penalty_item = if (reward_penalty_item_cache.get(effective_balance_increment)) |rpi| rpi else blk: {
+        const reward_penalty_item = if (reward_penalty_item_cache[effective_balance_increment]) |rpi| rpi else blk: {
             const base_reward = effective_balance_increment * cache.base_reward_per_increment;
             const ts_weigh = PARTICIPATION_FLAG_WEIGHTS[TIMELY_SOURCE_FLAG_INDEX];
             const tt_weigh = PARTICIPATION_FLAG_WEIGHTS[TIMELY_TARGET_FLAG_INDEX];
@@ -93,7 +92,7 @@ pub fn getRewardsAndPenaltiesAltair(
                 .timely_source_penalty = @divFloor(base_reward * ts_weigh, WEIGHT_DENOMINATOR),
                 .timely_target_penalty = @divFloor(base_reward * tt_weigh, WEIGHT_DENOMINATOR),
             };
-            try reward_penalty_item_cache.put(effective_balance_increment, rpi);
+            reward_penalty_item_cache[effective_balance_increment] = rpi;
             break :blk rpi;
         };
 

@@ -1,5 +1,4 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const attester_status = @import("../utils/attester_status.zig");
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
@@ -34,7 +33,7 @@ const RewardPenaltyItem = struct {
     finality_delay_penalty: u64,
 };
 
-pub fn getAttestationDeltas(allocator: Allocator, epoch_cache: *const EpochCache, cache: *const EpochTransitionCache, finalized_epoch: u64, rewards: []u64, penalties: []u64) !void {
+pub fn getAttestationDeltas(epoch_cache: *const EpochCache, cache: *const EpochTransitionCache, finalized_epoch: u64, rewards: []u64, penalties: []u64) !void {
     const flags = cache.flags;
     const proposer_indices = cache.proposer_indices;
     const inclusion_delays = cache.inclusion_delays;
@@ -66,12 +65,11 @@ pub fn getAttestationDeltas(allocator: Allocator, epoch_cache: *const EpochCache
     const proposer_reward_quotient = PROPOSER_REWARD_QUOTIENT;
     const is_in_inactivity_leak = finality_delay > MIN_EPOCHS_TO_INACTIVITY_PENALTY;
 
-    // effectiveBalance is multiple of EFFECTIVE_BALANCE_INCREMENT and less than MAX_EFFECTIVE_BALANCE
-    // so there are limited values of them like 32, 31, 30
-    // TODO(bing): do not deinit and only clear for future use
-    var reward_penalty_item_cache = std.AutoHashMap(u64, RewardPenaltyItem).init(allocator);
-    reward_penalty_item_cache.clearAndFree();
-    defer reward_penalty_item_cache.deinit();
+    // effectiveBalance is a multiple of EFFECTIVE_BALANCE_INCREMENT and bounded by max effective balance,
+    // so effective_balance_increment has a small range (0..max_increment). Use a fixed array for O(1) lookup
+    // instead of a HashMap — avoids allocation and hashing overhead in the hot validator loop.
+    const max_increment = comptime preset.MAX_EFFECTIVE_BALANCE_ELECTRA / preset.EFFECTIVE_BALANCE_INCREMENT + 1;
+    var reward_penalty_item_cache: [max_increment]?RewardPenaltyItem = .{null} ** max_increment;
 
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
     std.debug.assert(flags.len <= effective_balance_increments.items.len);
@@ -80,7 +78,7 @@ pub fn getAttestationDeltas(allocator: Allocator, epoch_cache: *const EpochCache
         const effective_balance_increment = effective_balance_increments.items[i];
         const effective_balance: u64 = @as(u64, effective_balance_increment) * preset.EFFECTIVE_BALANCE_INCREMENT;
 
-        const rewards_items = if (reward_penalty_item_cache.get(effective_balance_increment)) |ri| ri else blk: {
+        const rewards_items = if (reward_penalty_item_cache[effective_balance_increment]) |ri| ri else blk: {
             const base_reward = @divFloor(@divFloor(effective_balance * BASE_REWARD_FACTOR, balance_sq_root), BASE_REWARDS_PER_EPOCH);
             const proposer_reward = @divFloor(base_reward, proposer_reward_quotient);
             const ri = RewardPenaltyItem{
@@ -93,7 +91,7 @@ pub fn getAttestationDeltas(allocator: Allocator, epoch_cache: *const EpochCache
                 .base_penalty = base_reward * BASE_REWARDS_PER_EPOCH_CONST - proposer_reward,
                 .finality_delay_penalty = @divFloor((effective_balance * finality_delay), INACTIVITY_PENALTY_QUOTIENT),
             };
-            try reward_penalty_item_cache.put(effective_balance_increment, ri);
+            reward_penalty_item_cache[effective_balance_increment] = ri;
             break :blk ri;
         };
 
