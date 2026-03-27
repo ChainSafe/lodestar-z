@@ -112,6 +112,8 @@ const PayloadAttributesV3 = execution_mod.engine_api_types.PayloadAttributesV3;
 const GetPayloadResponse = execution_mod.GetPayloadResponse;
 const constants = @import("constants");
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const kzg_mod = @import("kzg");
+const Kzg = kzg_mod.Kzg;
 
 const metrics_mod = @import("metrics.zig");
 pub const BeaconMetrics = metrics_mod.BeaconMetrics;
@@ -839,6 +841,10 @@ pub const BeaconNode = struct {
     // Bootnode ENRs — provided via --bootnodes CLI flag, used to dial initial peers.
     bootnodes: []const []const u8 = &.{},
 
+    /// KZG trusted setup — loaded once at startup, shared across all KZG operations.
+    /// Null until loadKzgTrustedSetup() is called (or if running pre-Deneb only).
+    kzg: ?Kzg = null,
+
     pub const KVBackend = union(enum) {
         memory: *MemoryKVStore,
         lmdb: *LmdbKVStore,
@@ -1226,7 +1232,30 @@ pub const BeaconNode = struct {
 
         self.unknown_block_sync.deinit();
         self.unknown_chain_sync.deinit();
+
+        // KZG trusted setup cleanup.
+        if (self.kzg) |*k| k.deinit(allocator);
+
         allocator.destroy(self);
+    }
+
+    /// Load the KZG trusted setup from a file path.
+    ///
+    /// Must be called before any KZG operations (blob verification, cell
+    /// verification).  Typically called once at node startup.
+    ///
+    /// The setup is stored in `self.kzg` and freed in `deinit()`.
+    ///
+    /// ```zig
+    /// try node.loadKzgTrustedSetup("trusted_setup.txt");
+    /// ```
+    pub fn loadKzgTrustedSetup(self: *BeaconNode, trusted_setup_path: []const u8) !void {
+        if (self.kzg != null) {
+            // Already loaded — free the old one first.
+            self.kzg.?.deinit(self.allocator);
+        }
+        self.kzg = try Kzg.initFromFile(self.allocator, trusted_setup_path);
+        std.log.info("KZG trusted setup loaded from '{s}'", .{trusted_setup_path});
     }
 
     /// Set the I/O context for the node and all sub-components.
