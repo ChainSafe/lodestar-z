@@ -2428,8 +2428,14 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                             .beacon_block => {
                                 self.handleGossipBlock(gossip_decoding, msg.data);
                             },
-                            .beacon_attestation, .beacon_aggregate_and_proof => {
-                                // Route through GossipHandler for attestations and aggregates.
+                            .data_column_sidecar => {
+                                // Route data column sidecars through decompress + import.
+                                self.handleGossipDataColumn(gossip_decoding, msg.data, parsed.subnet_id);
+                            },
+                            else => {
+                                // Route all other topics through GossipHandler:
+                                // attestations, aggregates, voluntary exits, slashings,
+                                // BLS changes, sync committee messages/contributions, blob sidecars.
                                 if (self.gossip_handler) |gh| {
                                     // Update clock state for validation using head tracker.
                                     {
@@ -2452,11 +2458,6 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                                     };
                                 }
                             },
-                            .data_column_sidecar => {
-                                // Route data column sidecars through decompress + import.
-                                self.handleGossipDataColumn(gossip_decoding, msg.data, parsed.subnet_id);
-                            },
-                            else => {}, // TODO: other topic types
                         }
                     },
                     else => {},

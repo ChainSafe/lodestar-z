@@ -19,6 +19,7 @@ const gossip_topics = @import("gossip_topics.zig");
 const GossipTopicType = gossip_topics.GossipTopicType;
 const Allocator = std.mem.Allocator;
 const capella = consensus_types.capella;
+const altair = consensus_types.altair;
 
 
 /// Errors that can occur during gossip message decoding.
@@ -76,6 +77,30 @@ pub const DecodedBlsChange = struct {
     validator_index: u64,
 };
 
+/// Result of decoding a sync_committee_contribution_and_proof gossip message.
+pub const DecodedSyncContributionAndProof = struct {
+    aggregator_index: u64,
+    contribution_slot: u64,
+    subcommittee_index: u64,
+    beacon_block_root: [32]u8,
+};
+
+/// Result of decoding a sync_committee (SyncCommitteeMessage) gossip message.
+pub const DecodedSyncCommitteeMessage = struct {
+    slot: u64,
+    validator_index: u64,
+    beacon_block_root: [32]u8,
+};
+
+/// Result of decoding a blob_sidecar gossip message.
+/// Extracts header fields for validation without full sidecar deserialization.
+pub const DecodedBlobSidecar = struct {
+    index: u64,
+    slot: u64,
+    proposer_index: u64,
+    block_parent_root: [32]u8,
+};
+
 /// Result of decoding a beacon_attestation (SingleAttestation) gossip message.
 /// In Electra, individual gossip attestations use SingleAttestation format
 /// (one validator per message, no aggregation bits).
@@ -119,9 +144,9 @@ pub const DecodedGossipMessage = union(GossipTopicType) {
     proposer_slashing: DecodedProposerSlashing,
     attester_slashing: DecodedAttesterSlashing,
     bls_to_execution_change: DecodedBlsChange,
-    blob_sidecar: void,
-    sync_committee_contribution_and_proof: void,
-    sync_committee: void,
+    blob_sidecar: DecodedBlobSidecar,
+    sync_committee_contribution_and_proof: DecodedSyncContributionAndProof,
+    sync_committee: DecodedSyncCommitteeMessage,
     data_column_sidecar: void,
 };
 
@@ -243,11 +268,51 @@ pub fn decodeFromSszBytes(
                 .validator_index = signed_change.message.validator_index,
             } };
         },
-        .blob_sidecar,
-        .sync_committee_contribution_and_proof,
-        .sync_committee,
-        .data_column_sidecar,
-        => return error.UnsupportedTopicType,
+        .sync_committee_contribution_and_proof => {
+            var signed_cap: altair.SignedContributionAndProof.Type = undefined;
+            altair.SignedContributionAndProof.deserializeFromBytes(ssz_bytes, &signed_cap) catch
+                return error.SszDeserializationFailed;
+            const contrib = signed_cap.message.contribution;
+            return .{ .sync_committee_contribution_and_proof = .{
+                .aggregator_index = signed_cap.message.aggregator_index,
+                .contribution_slot = contrib.slot,
+                .subcommittee_index = contrib.subcommittee_index,
+                .beacon_block_root = contrib.beacon_block_root,
+            } };
+        },
+        .sync_committee => {
+            var msg: altair.SyncCommitteeMessage.Type = undefined;
+            altair.SyncCommitteeMessage.deserializeFromBytes(ssz_bytes, &msg) catch
+                return error.SszDeserializationFailed;
+            return .{ .sync_committee = .{
+                .slot = msg.slot,
+                .validator_index = msg.validator_index,
+                .beacon_block_root = msg.beacon_block_root,
+            } };
+        },
+        .blob_sidecar => {
+            // BlobSidecar is a large container (>128 KB due to the blob field).
+            // Extract only the fixed-offset header fields we need for validation.
+            // Layout: index(8) + blob(131072) + kzg_commitment(48) + kzg_proof(48) +
+            //         signed_block_header { signature(96) + header { slot(8) + proposer_index(8) + parent_root(32) + ... } }
+            // signed_block_header offset: 8 + 131072 + 48 + 48 = 131176
+            // header starts after signature: 131176 + 96 = 131272
+            // slot @ 131272, proposer_index @ 131280, parent_root @ 131288
+            const min_size = 131288 + 32; // need through parent_root
+            if (ssz_bytes.len < min_size) return error.SszDeserializationFailed;
+            const index = std.mem.readInt(u64, ssz_bytes[0..8], .little);
+            const slot = std.mem.readInt(u64, ssz_bytes[131272..131280], .little);
+            const proposer_index = std.mem.readInt(u64, ssz_bytes[131280..131288], .little);
+            var parent_root: [32]u8 = undefined;
+            @memcpy(&parent_root, ssz_bytes[131288..131320]);
+            return .{ .blob_sidecar = .{
+                .index = index,
+                .slot = slot,
+                .proposer_index = proposer_index,
+                .block_parent_root = parent_root,
+            } };
+        },
+        .data_column_sidecar => return error.UnsupportedTopicType,
     }
 }
 

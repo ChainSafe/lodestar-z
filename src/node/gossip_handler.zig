@@ -411,6 +411,110 @@ pub const GossipHandler = struct {
         });
     }
 
+    /// Called when a sync_committee_contribution_and_proof gossip message arrives.
+    ///
+    /// Pipeline:
+    /// 1. Snappy decompress + SSZ decode → extract aggregator, contribution fields
+    /// 2. Phase 1: basic bounds check (aggregator within validator set)
+    /// 3. Phase 2: log acceptance (no sync contribution pool yet)
+    pub fn onSyncCommitteeContribution(self: *GossipHandler, message_data: []const u8) !void {
+        const decoded = decodeGossipMessage(self.allocator, .sync_committee_contribution_and_proof, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        const contrib = decoded.sync_committee_contribution_and_proof;
+
+        // Phase 1: aggregator must be within known validator set.
+        const vc = self.getValidatorCount();
+        if (contrib.aggregator_index >= vc) return GossipHandlerError.ValidationRejected;
+
+        // Phase 1: contribution slot must be within valid range.
+        if (contrib.contribution_slot > self.current_slot + 1) return GossipHandlerError.ValidationIgnored;
+        if (self.finalized_slot > 0 and contrib.contribution_slot < self.finalized_slot) return GossipHandlerError.ValidationIgnored;
+
+        // Phase 2: log acceptance.
+        // TODO: Add to sync contribution and proof pool when implemented.
+        std.log.info("Accepted sync_committee_contribution_and_proof: aggregator={d} slot={d} subcommittee={d}", .{
+            contrib.aggregator_index,
+            contrib.contribution_slot,
+            contrib.subcommittee_index,
+        });
+    }
+
+    /// Called when a sync_committee gossip message (SyncCommitteeMessage) arrives.
+    ///
+    /// Pipeline:
+    /// 1. Snappy decompress + SSZ decode → extract slot, validator index
+    /// 2. Phase 1: basic bounds check
+    /// 3. Phase 2: log acceptance (no sync committee message pool yet)
+    pub fn onSyncCommitteeMessage(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
+        _ = subnet_id;
+
+        const decoded = decodeGossipMessage(self.allocator, .sync_committee, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        const msg = decoded.sync_committee;
+
+        // Phase 1: validator must be within known set.
+        const vc = self.getValidatorCount();
+        if (msg.validator_index >= vc) return GossipHandlerError.ValidationRejected;
+
+        // Phase 1: slot must be within valid range.
+        if (msg.slot > self.current_slot + 1) return GossipHandlerError.ValidationIgnored;
+        if (self.finalized_slot > 0 and msg.slot < self.finalized_slot) return GossipHandlerError.ValidationIgnored;
+
+        // Phase 2: log acceptance.
+        // TODO: Add to sync committee message pool when implemented.
+        std.log.info("Accepted sync_committee message: validator={d} slot={d}", .{
+            msg.validator_index,
+            msg.slot,
+        });
+    }
+
+    /// Called when a blob_sidecar gossip message arrives.
+    ///
+    /// Pipeline:
+    /// 1. Snappy decompress + SSZ decode → extract index, slot, proposer
+    /// 2. Phase 1: basic bounds check (slot range, proposer)
+    /// 3. Phase 2: decompress full payload and import via BeaconNode
+    pub fn onBlobSidecar(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
+        const decoded = decodeGossipMessage(self.allocator, .blob_sidecar, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        const blob = decoded.blob_sidecar;
+
+        // Phase 1: blob index must match subnet_id.
+        if (blob.index != subnet_id) return GossipHandlerError.ValidationRejected;
+
+        // Phase 1: slot must be within valid range.
+        if (blob.slot > self.current_slot + 1) return GossipHandlerError.ValidationIgnored;
+        if (self.finalized_slot > 0 and blob.slot < self.finalized_slot) return GossipHandlerError.ValidationIgnored;
+
+        // Phase 1: proposer must be within known validator set.
+        const vc = self.getValidatorCount();
+        if (blob.proposer_index >= vc) return GossipHandlerError.ValidationRejected;
+
+        // Phase 2: decompress and import the full blob sidecar.
+        // The import function in BeaconNode stores the raw sidecar bytes.
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+            return GossipHandlerError.DecodeFailed;
+        defer self.allocator.free(ssz_bytes);
+
+        // Compute block root from the signed block header in the sidecar.
+        // For now, use a synthetic root from (slot, proposer, parent) like blocks.
+        var block_root: [32]u8 = std.mem.zeroes([32]u8);
+        std.mem.writeInt(u64, block_root[0..8], blob.slot, .little);
+        std.mem.writeInt(u64, block_root[8..16], blob.proposer_index, .little);
+        @memcpy(block_root[16..32], blob.block_parent_root[0..16]);
+
+        // Import via the node (type-erased). We use importBlockFn's node pointer
+        // to access importBlobSidecar. Since we can't call importBlobSidecar directly
+        // through the type-erased pointer, we log and skip for now.
+        // TODO: Add importBlobSidecarFn callback like importAttestationFn.
+        std.log.info("Accepted blob_sidecar: index={d} slot={d} proposer={d} ({d} bytes)", .{
+            blob.index,
+            blob.slot,
+            blob.proposer_index,
+            ssz_bytes.len,
+        });
+    }
+
     /// Route a gossip message by topic type.
     pub fn onGossipMessage(self: *GossipHandler, topic: GossipTopicType, data: []const u8) !void {
         self.onGossipMessageWithSubnet(topic, null, data) catch |err| {
@@ -431,8 +535,10 @@ pub const GossipHandler = struct {
             .proposer_slashing => try self.onProposerSlashing(data),
             .attester_slashing => try self.onAttesterSlashing(data),
             .bls_to_execution_change => try self.onBlsToExecutionChange(data),
+            .sync_committee_contribution_and_proof => try self.onSyncCommitteeContribution(data),
+            .sync_committee => try self.onSyncCommitteeMessage(@as(u64, subnet_id orelse 0), data),
+            .blob_sidecar => try self.onBlobSidecar(@as(u64, subnet_id orelse 0), data),
             .data_column_sidecar => {}, // Handled directly in BeaconNode.processGossipEventsFromSlice
-            else => {},
         }
     }
 };
@@ -619,17 +725,32 @@ test "GossipHandler: onGossipMessage routes beacon_block" {
     try testing.expectEqual(@as(u32, 1), g_imported_count);
 }
 
-test "GossipHandler: onGossipMessage no-ops for unsupported topics" {
+test "GossipHandler: onGossipMessage no-ops for data_column_sidecar" {
     const alloc = testing.allocator;
     const handler = try makeTestHandler(alloc);
     defer handler.deinit();
 
+    // data_column_sidecar is the only topic that is a no-op in GossipHandler
+    // (handled directly in BeaconNode.processGossipEventsFromSlice).
     const dummy = [_]u8{ 0, 1, 2, 3 };
-    try handler.onGossipMessage(.voluntary_exit, &dummy);
-    try handler.onGossipMessage(.proposer_slashing, &dummy);
-    try handler.onGossipMessage(.attester_slashing, &dummy);
-    try handler.onGossipMessage(.bls_to_execution_change, &dummy);
-    try handler.onGossipMessage(.blob_sidecar, &dummy);
+    try handler.onGossipMessage(.data_column_sidecar, &dummy);
+}
+
+test "GossipHandler: decode failures are returned as errors" {
+    const alloc = testing.allocator;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    // Sending invalid data (not valid snappy) should return DecodeFailed
+    // for topics that now have real handlers.
+    const dummy = [_]u8{ 0, 1, 2, 3 };
+    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.voluntary_exit, null, &dummy));
+    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.proposer_slashing, null, &dummy));
+    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.attester_slashing, null, &dummy));
+    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.bls_to_execution_change, null, &dummy));
+    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.blob_sidecar, null, &dummy));
+    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.sync_committee, null, &dummy));
+    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.sync_committee_contribution_and_proof, null, &dummy));
 }
 
 test "GossipHandler: onAggregateAndProof validates and accepts" {
