@@ -756,8 +756,8 @@ pub const HttpServer = struct {
 
     fn hGetProposerDuties(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
-        const epoch_str = dc.match.getParam("epoch") orelse return error.InvalidBlockId;
-        const epoch = std.fmt.parseInt(u64, epoch_str, 10) catch return error.InvalidBlockId;
+        const epoch_str = dc.match.getParam("epoch") orelse return error.InvalidRequest;
+        const epoch = std.fmt.parseInt(u64, epoch_str, 10) catch return error.InvalidRequest;
         const handler_res = try handlers.validator.getProposerDuties(self.api_context, epoch);
         defer alloc.free(handler_res.data);
         var buf = std.ArrayListUnmanaged(u8).empty;

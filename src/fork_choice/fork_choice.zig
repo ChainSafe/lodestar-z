@@ -250,7 +250,6 @@ pub const ForkChoice = struct {
 
     // ── Attestation queue ──
     queued_attestations: QueuedAttestationMap,
-    queued_attestations_previous_slot: u32,
 
     // ── Caches ──
     validated_attestation_datas: RootSet,
@@ -284,7 +283,6 @@ pub const ForkChoice = struct {
             .justified_proposer_boost_score = null,
             .balances = fc_store.justified.balances.acquire(),
             .queued_attestations = .empty,
-            .queued_attestations_previous_slot = 0,
             .validated_attestation_datas = .empty,
             .irrecoverable_error = null,
         };
@@ -1301,7 +1299,6 @@ pub const ForkChoice = struct {
         }
 
         // Process queued attestations after time advance.
-        self.queued_attestations_previous_slot = 0;
         try self.processAttestationQueue(allocator);
 
         // Clear validated attestation data cache.
@@ -1555,7 +1552,6 @@ pub const ForkChoice = struct {
     /// for processing due to the slot clock incrementing.
     fn processAttestationQueue(self: *ForkChoice, allocator: Allocator) !void {
         const current_slot = self.fc_store.current_slot;
-        var remove_count: u32 = 0;
 
         // Collect slots to remove: AutoArrayHashMap is insertion-ordered, NOT sorted.
         // We must iterate all entries (not break on first future slot) because a future-slot
@@ -1586,13 +1582,11 @@ pub const ForkChoice = struct {
                     }
 
                     if (att_slot == current_slot - 1) {
-                        self.queued_attestations_previous_slot += @intCast(block_entry.value_ptr.count());
                     }
                     block_entry.value_ptr.deinit(allocator);
                 }
                 entry.value_ptr.deinit(allocator);
                 try keys_to_remove.append(allocator, att_slot);
-                remove_count += 1;
             }
             // No break here: map is insertion-ordered, not sorted — must scan all entries.
         }
@@ -2349,35 +2343,15 @@ fn initTestForkChoice(
     finalized_checkpoint: CheckpointWithPayloadStatus,
     justified_balances: []const u16,
 ) !*ForkChoice {
-    const pa = try allocator.create(ProtoArray);
-    errdefer allocator.destroy(pa);
-
-    pa.* = try ProtoArray.initialize(
+    return initTestForkChoiceWithOpts(
         allocator,
         anchor_block,
-        current_slot,
-    );
-    errdefer pa.deinit(allocator);
-
-    const fc_store = try allocator.create(ForkChoiceStore);
-    errdefer allocator.destroy(fc_store);
-
-    fc_store.* = try ForkChoiceStore.init(
-        allocator,
         current_slot,
         justified_checkpoint,
         finalized_checkpoint,
         justified_balances,
-        test_balances_getter,
         .{},
     );
-    errdefer fc_store.deinit();
-
-    const fc = try allocator.create(ForkChoice);
-    errdefer allocator.destroy(fc);
-
-    try fc.init(allocator, getTestConfig(), fc_store, pa, 0, .{});
-    return fc;
 }
 
 /// Test-only: free ForkChoice + its heap-allocated ProtoArray and ForkChoiceStore.

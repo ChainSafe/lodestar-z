@@ -67,8 +67,8 @@ pub const ProcessorMetrics = struct {
         elapsed_ns: u64,
     ) void {
         const idx = @intFromEnum(wtype);
-        self.items_processed[idx] += 1;
-        self.processing_time_ns[idx] += elapsed_ns;
+        self.items_processed[idx] +|= 1;
+        self.processing_time_ns[idx] +|= elapsed_ns;
     }
 };
 
