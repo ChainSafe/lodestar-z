@@ -302,7 +302,7 @@ pub fn builderRegistrationSigningRoot(
     out: *[32]u8,
 ) !void {
     const zero_fork_version = [4]u8{ 0, 0, 0, 0 };
-    const zero_genesis_root = [32]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const zero_genesis_root = [_]u8{0} ** 32;
     var domain: [32]u8 = undefined;
     try computeDomain(constants.DOMAIN_APPLICATION_BUILDER, zero_fork_version, zero_genesis_root, &domain);
     const reg: BuilderValidatorRegistration.Type = .{

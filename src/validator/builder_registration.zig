@@ -20,6 +20,9 @@ const BeaconApiClient = api_client.BeaconApiClient;
 const ValidatorStore = @import("validator_store.zig").ValidatorStore;
 const signing_mod = @import("signing.zig");
 const SigningContext = signing_mod.SigningContext;
+const remote_signer_mod = @import("remote_signer.zig");
+const RemoteSigner = remote_signer_mod.RemoteSigner;
+const SigningType = remote_signer_mod.SigningType;
 
 const log = std.log.scoped(.builder_registration);
 
@@ -36,6 +39,8 @@ pub const BuilderRegistrationService = struct {
     fee_recipient: [20]u8,
     /// Default gas limit for all validators.
     gas_limit: u64,
+    /// Optional remote signer for builder registrations of remote validators.
+    remote_signer: ?*RemoteSigner = null,
 
     pub fn init(
         allocator: Allocator,
@@ -93,15 +98,7 @@ pub const BuilderRegistrationService = struct {
         defer registrations.deinit();
 
         for (validators) |v| {
-            if (v.is_remote) {
-                // Remote signers not yet supported for builder registrations.
-                log.warn("skipping builder registration for remote key {}", .{
-                    std.fmt.fmtSliceHexLower(&v.pubkey),
-                });
-                continue;
-            }
-
-            // Compute signing root.
+            // Compute signing root (same path for local and remote).
             var signing_root: [32]u8 = undefined;
             signing_mod.builderRegistrationSigningRoot(
                 self.fee_recipient,
@@ -117,15 +114,34 @@ pub const BuilderRegistrationService = struct {
                 continue;
             };
 
-            // Sign.
-            const sig = v.secret_key.sign(&signing_root, @import("bls").DST, null) catch |err| {
-                log.warn("failed to sign builder registration for {}: {s}", .{
-                    std.fmt.fmtSliceHexLower(&v.pubkey),
-                    @errorName(err),
-                });
-                continue;
+            // Sign: delegate to remote signer if this is a remote validator.
+            const sig_bytes = blk: {
+                if (v.is_remote) {
+                    const rs = self.remote_signer orelse {
+                        log.warn("skipping builder registration for remote key {} — no remote signer configured", .{
+                            std.fmt.fmtSliceHexLower(&v.pubkey),
+                        });
+                        continue;
+                    };
+                    const sig = rs.sign(io, v.pubkey, signing_root, .VALIDATOR_REGISTRATION) catch |err| {
+                        log.warn("remote signer failed builder registration for {}: {s}", .{
+                            std.fmt.fmtSliceHexLower(&v.pubkey),
+                            @errorName(err),
+                        });
+                        continue;
+                    };
+                    break :blk sig.compress();
+                } else {
+                    const sig = v.secret_key.sign(&signing_root, @import("bls").DST, null) catch |err| {
+                        log.warn("failed to sign builder registration for {}: {s}", .{
+                            std.fmt.fmtSliceHexLower(&v.pubkey),
+                            @errorName(err),
+                        });
+                        continue;
+                    };
+                    break :blk sig.compress();
+                }
             };
-            const sig_bytes = sig.compress();
 
             try registrations.append(.{
                 .pubkey = v.pubkey,
