@@ -123,3 +123,9 @@ pub const DaConfig = data_availability.DaConfig;
 pub const aggregated_attestation_pool = @import("aggregated_attestation_pool.zig");
 pub const AggregatedAttestationPool = aggregated_attestation_pool.AggregatedAttestationPool;
 pub const AttestationGroup = aggregated_attestation_pool.AttestationGroup;
+
+// Gossip block input assembly — async data waiting layer
+pub const gossip_block_input = @import("block_input.zig");
+pub const GossipBlockInput = gossip_block_input.GossipBlockInput;
+pub const AvailableBlockInput = gossip_block_input.AvailableBlockInput;
+pub const WaitResult = gossip_block_input.WaitResult;
