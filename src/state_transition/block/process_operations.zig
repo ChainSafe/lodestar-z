@@ -79,7 +79,7 @@ pub fn processOperations(
     if (comptime fork.gte(.electra) and fork.lt(.gloas)) {
         const execution_requests = &body.inner.execution_requests;
         for (execution_requests.deposits.items) |*deposit_request| {
-            try processDepositRequest(fork, state, deposit_request);
+            try processDepositRequest(fork, allocator, config, epoch_cache, state, deposit_request);
         }
 
         for (execution_requests.withdrawals.items) |*withdrawal_request| {

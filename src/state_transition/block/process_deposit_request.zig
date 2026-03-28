@@ -11,15 +11,51 @@ const BLSPubkey = types.primitive.BLSPubkey.Type;
 const BLSSignature = types.primitive.BLSSignature.Type;
 const c = @import("constants");
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
-const findBuilderIndexByPubkey = @import("../utils/gloas.zig").findBuilderIndexByPubkey;
+const gloas_utils = @import("../utils/gloas.zig");
+const findBuilderIndexByPubkey = gloas_utils.findBuilderIndexByPubkey;
+const isBuilderWithdrawalCredential = gloas_utils.isBuilderWithdrawalCredential;
 const isValidDepositSignature = @import("./process_deposit.zig").isValidDepositSignature;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 
-pub fn processDepositRequest(comptime fork: ForkSeq, state: *BeaconState(fork), deposit_request: *const DepositRequest) !void {
-    const deposit_requests_start_index = try state.depositRequestsStartIndex();
-    if (deposit_requests_start_index == c.UNSET_DEPOSIT_REQUESTS_START_INDEX) {
-        try state.setDepositRequestsStartIndex(deposit_request.index);
+pub fn processDepositRequest(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *BeaconState(fork),
+    deposit_request: *const DepositRequest,
+) !void {
+    const pubkey = &deposit_request.pubkey;
+    const withdrawal_credentials = &deposit_request.withdrawal_credentials;
+    const amount = deposit_request.amount;
+    const signature = deposit_request.signature;
+
+    // Check if this is a builder or validator deposit
+    if (fork.gte(.gloas)) {
+        const builder_index = try findBuilderIndexByPubkey(allocator, state, pubkey);
+        const validator_index = epoch_cache.getValidatorIndex(pubkey);
+
+        const is_builder = builder_index != null;
+        const is_validator = validator_index != null;
+        const is_builder_prefix = isBuilderWithdrawalCredential(withdrawal_credentials);
+
+        // Route to builder if it's an existing builder OR has builder prefix and is not a validator
+        if (is_builder or (is_builder_prefix and !is_validator)) {
+            // Apply builder deposits immediately
+            try applyDepositForBuilder(allocator, config, state, pubkey, withdrawal_credentials, amount, signature, try state.slot());
+            return;
+        }
     }
 
+    // Only set deposit_requests_start_index in Electra fork, not after EIP-7732
+    if (comptime fork.lt(.gloas)) {
+        const deposit_requests_start_index = try state.depositRequestsStartIndex();
+        if (deposit_requests_start_index == c.UNSET_DEPOSIT_REQUESTS_START_INDEX) {
+            try state.setDepositRequestsStartIndex(deposit_request.index);
+        }
+    }
+
+    // Add validator deposits to the queue
     const pending_deposit = PendingDeposit{
         .pubkey = deposit_request.pubkey,
         .withdrawal_credentials = deposit_request.withdrawal_credentials,
