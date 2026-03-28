@@ -248,6 +248,47 @@ pub const SimController = struct {
 
         try self.checker.checkTick(target_slot, self.nodes_processed);
 
+        // Produce attestations from each node's validators and feed to fork choice.
+        // Attestations for slot N are produced after the block for slot N is processed.
+        if (!skip) {
+            for (0..self.num_nodes) |i| {
+                const head_state = self.nodes[i].getHeadState() orelse continue;
+                var attestations = try self.validators[i].produceAttestations(
+                    self.allocator,
+                    head_state,
+                    target_slot,
+                );
+                defer attestations.deinit(self.allocator);
+
+                // Feed each attestation to this node's fork choice.
+                if (self.beacon_nodes[i].chain.fork_choice) |fc| {
+                    for (attestations.attestations.items) |*att| {
+                        // Apply each attesting validator's vote to fork choice.
+                        // In the real client, getAttestingIndices resolves committee → validators.
+                        // Here we know the attester from SimValidator's committee walk.
+                        const att_data = &att.data;
+                        const committee = head_state.epoch_cache.getBeaconCommittee(
+                            att_data.slot,
+                            att_data.index,
+                        ) catch continue;
+
+                        for (committee, 0..) |vi, pos| {
+                            // Check if this validator actually attested (bit set in aggregation_bits).
+                            const is_set = att.aggregation_bits.get(pos) catch false;
+                            if (is_set) {
+                                fc.onSingleVote(
+                                    self.allocator,
+                                    @intCast(vi),
+                                    att_data.target.root,
+                                    att_data.target.epoch,
+                                ) catch {};
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         self.current_slot = target_slot;
         self.total_slots += 1;
         if (!skip) self.total_blocks += 1;
