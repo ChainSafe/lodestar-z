@@ -39,7 +39,6 @@ const BeaconDB = db_mod.BeaconDB;
 const block_import_mod = @import("block_import.zig");
 const HeadTracker = block_import_mod.HeadTracker;
 const ImportError = block_import_mod.ImportError;
-const verifySanity = block_import_mod.verifySanity;
 
 const blocks_mod = @import("blocks/root.zig");
 const PipelineContext = blocks_mod.PipelineContext;
@@ -365,7 +364,7 @@ pub const Chain = struct {
     pub fn onSlot(self: *Chain, slot: u64) void {
         // Update fork choice time (removes proposer boost from previous slot).
         if (self.fork_choice) |fc| {
-            fc.updateTime(self.allocator, slot) catch {};
+            fc.updateTime(self.allocator, slot) catch |err| log_mod.logger(.chain).err("fork choice updateTime failed at slot {d}: {}", .{ slot, err });
         }
 
         // Prune seen blocks older than 2 epochs.
@@ -716,7 +715,7 @@ pub const Chain = struct {
         // onSlot already calls updateTime, but advanceSlot can be called independently
         // (e.g., from tests, batch sync). Both paths must call updateTime.
         if (self.fork_choice) |fc| {
-            fc.updateTime(self.allocator, target_slot) catch {};
+            fc.updateTime(self.allocator, target_slot) catch |err| log_mod.logger(.chain).err("fork choice updateTime failed at slot {d}: {}", .{ target_slot, err });
         }
 
         self.head_tracker.head_state_root = new_state_root;

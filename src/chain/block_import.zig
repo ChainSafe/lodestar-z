@@ -132,41 +132,6 @@ pub const HeadTracker = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Sanity checks — cheap pre-STFN validation.
-// ---------------------------------------------------------------------------
-
-/// Run pre-STFN sanity checks on a block.
-///
-/// Checks:
-/// - Not genesis (slot 0)
-/// - Not already finalized
-/// - Not a duplicate (block_root already in known_roots)
-/// - Parent is known
-///
-/// Returns `ImportError` if the block should be rejected/ignored.
-pub fn verifySanity(
-    block_slot: u64,
-    parent_root: [32]u8,
-    block_root: [32]u8,
-    finalized_epoch: u64,
-    known_roots: *const std.AutoArrayHashMap([32]u8, [32]u8),
-) ImportError!void {
-    // Not genesis block.
-    if (block_slot == 0) return ImportError.GenesisBlock;
-
-    // Not already finalized.
-    const finalized_slot = finalized_epoch * preset.SLOTS_PER_EPOCH;
-    // C-finalized fix: spec says reject slot < finalized_slot (not <=).
-    // Using <= would incorrectly reject the finalized block itself during checkpoint sync.
-    if (block_slot < finalized_slot) return ImportError.BlockAlreadyFinalized;
-
-    // Not a duplicate.
-    if (known_roots.contains(block_root)) return ImportError.BlockAlreadyKnown;
-
-    // Parent must be known.
-    if (!known_roots.contains(parent_root)) return ImportError.UnknownParentBlock;
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -212,42 +177,3 @@ test "HeadTracker: slot roots lookup" {
     try std.testing.expect(tracker.getBlockRoot(6) == null);
 }
 
-test "verifySanity: rejects genesis block" {
-    var known = std.AutoArrayHashMap([32]u8, [32]u8).init(std.testing.allocator);
-    defer known.deinit();
-    const err = verifySanity(0, [_]u8{0} ** 32, [_]u8{1} ** 32, 0, &known);
-    try std.testing.expectError(ImportError.GenesisBlock, err);
-}
-
-test "verifySanity: rejects finalized block" {
-    var known = std.AutoArrayHashMap([32]u8, [32]u8).init(std.testing.allocator);
-    defer known.deinit();
-    // finalized_epoch=1 → finalized_slot=32, block at slot 30 is finalized.
-    const err = verifySanity(30, [_]u8{0} ** 32, [_]u8{1} ** 32, 1, &known);
-    try std.testing.expectError(ImportError.BlockAlreadyFinalized, err);
-}
-
-test "verifySanity: rejects duplicate block" {
-    var known = std.AutoArrayHashMap([32]u8, [32]u8).init(std.testing.allocator);
-    defer known.deinit();
-    const root = [_]u8{0xAA} ** 32;
-    try known.put(root, [_]u8{0xBB} ** 32);
-    const err = verifySanity(33, [_]u8{0} ** 32, root, 0, &known);
-    try std.testing.expectError(ImportError.BlockAlreadyKnown, err);
-}
-
-test "verifySanity: rejects unknown parent" {
-    var known = std.AutoArrayHashMap([32]u8, [32]u8).init(std.testing.allocator);
-    defer known.deinit();
-    const err = verifySanity(33, [_]u8{0xCC} ** 32, [_]u8{0xDD} ** 32, 0, &known);
-    try std.testing.expectError(ImportError.UnknownParentBlock, err);
-}
-
-test "verifySanity: accepts valid block" {
-    var known = std.AutoArrayHashMap([32]u8, [32]u8).init(std.testing.allocator);
-    defer known.deinit();
-    const parent = [_]u8{0xAA} ** 32;
-    try known.put(parent, [_]u8{0xBB} ** 32);
-    // Valid: slot 33, known parent, not duplicate, not finalized.
-    try verifySanity(33, parent, [_]u8{0xCC} ** 32, 0, &known);
-}

@@ -224,6 +224,7 @@ pub fn importVerifiedBlock(
                 switch (any_atts) {
                     .phase0 => |atts| {
                         for (atts.items) |*att| {
+                            const att_slot = att.data.slot;
                             const att_target_epoch = att.data.target.epoch;
                             const att_block_root = att.data.beacon_block_root;
                             var indices = post_state.epoch_cache.getAttestingIndicesPhase0(att) catch continue;
@@ -232,6 +233,7 @@ pub fn importVerifiedBlock(
                                 fc.onSingleVote(
                                     ctx.allocator,
                                     validator_index,
+                                    att_slot,
                                     att_block_root,
                                     att_target_epoch,
                                 ) catch {};
@@ -240,6 +242,7 @@ pub fn importVerifiedBlock(
                     },
                     .electra => |atts| {
                         for (atts.items) |*att| {
+                            const att_slot = att.data.slot;
                             const att_target_epoch = att.data.target.epoch;
                             const att_block_root = att.data.beacon_block_root;
                             var indices = post_state.epoch_cache.getAttestingIndicesElectra(att) catch continue;
@@ -248,6 +251,7 @@ pub fn importVerifiedBlock(
                                 fc.onSingleVote(
                                     ctx.allocator,
                                     validator_index,
+                                    att_slot,
                                     att_block_root,
                                     att_target_epoch,
                                 ) catch {};
@@ -259,25 +263,19 @@ pub fn importVerifiedBlock(
 
             // 3b. Wire attester slashings into fork choice.
             // Mark equivocating validators so their weight is excluded from future head computation.
+            // Delegate to fc.onAttesterSlashing() which encapsulates the sorted-intersection logic.
             const any_slashings = block_input.block.beaconBlock().beaconBlockBody().attesterSlashings();
             switch (any_slashings) {
-                inline else => |slashings| {
+                .phase0 => |slashings| {
                     for (slashings.items) |*slashing| {
-                        const a = slashing.attestation_1.attesting_indices.items;
-                        const b = slashing.attestation_2.attesting_indices.items;
-                        var i: usize = 0;
-                        var j: usize = 0;
-                        while (i < a.len and j < b.len) {
-                            if (a[i] == b[j]) {
-                                fc.onEquivocation(a[i]) catch {};
-                                i += 1;
-                                j += 1;
-                            } else if (a[i] < b[j]) {
-                                i += 1;
-                            } else {
-                                j += 1;
-                            }
-                        }
+                        const any_slashing = fork_types.AnyAttesterSlashing{ .phase0 = slashing.* };
+                        fc.onAttesterSlashing(&any_slashing) catch {};
+                    }
+                },
+                .electra => |slashings| {
+                    for (slashings.items) |*slashing| {
+                        const any_slashing = fork_types.AnyAttesterSlashing{ .electra = slashing.* };
+                        fc.onAttesterSlashing(&any_slashing) catch {};
                     }
                 },
             }
