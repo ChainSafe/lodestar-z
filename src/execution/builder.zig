@@ -256,7 +256,7 @@ pub const HttpBuilder = struct {
         const header_count = buildHeaders(&headers_buf);
 
         // GET with empty body
-        const response = self.transport.send(url, headers_buf[0..header_count], "") catch |err| {
+        const response = self.transport.send(.GET, url, headers_buf[0..header_count], "") catch |err| {
             std.log.warn("Builder: status check failed: {}", .{err});
             self.current_status = .unavailable;
             return .unavailable;
@@ -285,7 +285,7 @@ pub const HttpBuilder = struct {
         var headers_buf: [2]Header = undefined;
         const header_count = buildHeaders(&headers_buf);
 
-        const response = self.transport.send(url, headers_buf[0..header_count], body) catch |err| {
+        const response = self.transport.send(.POST, url, headers_buf[0..header_count], body) catch |err| {
             std.log.warn("Builder: registerValidators failed: {}", .{err});
             return err;
         };
@@ -319,7 +319,7 @@ pub const HttpBuilder = struct {
         var headers_buf: [2]Header = undefined;
         const header_count = buildHeaders(&headers_buf);
 
-        const response = self.transport.send(url, headers_buf[0..header_count], "") catch |err| {
+        const response = self.transport.send(.GET, url, headers_buf[0..header_count], "") catch |err| {
             std.log.warn("Builder: getHeader failed (slot={d}): {} — falling back to local execution", .{ slot, err });
             return null;
         };
@@ -354,7 +354,7 @@ pub const HttpBuilder = struct {
         var headers_buf: [2]Header = undefined;
         const header_count = buildHeaders(&headers_buf);
 
-        const response = self.transport.send(url, headers_buf[0..header_count], body) catch |err| {
+        const response = self.transport.send(.POST, url, headers_buf[0..header_count], body) catch |err| {
             std.log.err("Builder: submitBlindedBlock failed: {}", .{err});
             return err;
         };
@@ -379,10 +379,6 @@ pub const HttpBuilder = struct {
 };
 
 // ── JSON encoding ─────────────────────────────────────────────────────────────
-
-fn hexEncodeBytes(allocator: Allocator, bytes: []const u8) ![]const u8 {
-    return http_engine.hexEncode(allocator, bytes);
-}
 
 fn encodeRegistrations(
     allocator: Allocator,
@@ -684,6 +680,27 @@ fn parseExecutionPayload(allocator: Allocator, json_bytes: []const u8) !types.Ex
     };
 }
 
+/// Free the heap-allocated fields of a SignedBuilderBid produced by parseSignedBuilderBid.
+///
+/// Ownership: parseSignedBuilderBid allocates header.extra_data and
+/// message.blob_kzg_commitments. Callers must call freeBid when done.
+pub fn freeBid(allocator: Allocator, bid: *SignedBuilderBid) void {
+    allocator.free(bid.message.header.extra_data);
+    allocator.free(bid.message.blob_kzg_commitments);
+}
+
+/// Free the heap-allocated fields of an ExecutionPayloadV3 produced by parseExecutionPayload.
+///
+/// Ownership: parseExecutionPayload allocates extra_data, transactions (each
+/// element and the slice), and withdrawals. Callers must call freeExecutionPayload
+/// when done with the returned payload.
+pub fn freeExecutionPayload(allocator: Allocator, payload: *types.ExecutionPayloadV3) void {
+    allocator.free(payload.extra_data);
+    for (payload.transactions) |tx| allocator.free(tx);
+    allocator.free(payload.transactions);
+    allocator.free(payload.withdrawals);
+}
+
 // ── MockBuilderTransport ──────────────────────────────────────────────────────
 
 /// Mock HTTP transport for testing the builder client.
@@ -728,6 +745,7 @@ pub const MockBuilderTransport = struct {
 
     fn send(
         self: *MockBuilderTransport,
+        _: http_engine.HttpMethod,
         url: []const u8,
         _: []const Header,
         body: []const u8,
