@@ -765,10 +765,12 @@ pub const BeaconNode = struct {
             fork_choice_mod.destroyFromAnchor(allocator, fc);
         }
 
-        // W5/W6/W-pool: deinit callback contexts BEFORE destroying api_context (UAF fix)
+        // W5/W6/W-pool/vm: deinit callback contexts BEFORE destroying api_context (UAF fix)
         if (self.api_context.produce_block) |cb| allocator.destroy(@as(*ProduceBlockCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
         if (self.api_context.attestation_data) |cb| allocator.destroy(@as(*AttestationDataCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
         if (self.api_context.pool_submit) |cb| allocator.destroy(@as(*PoolSubmitCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
+        // Free vm_cb_ctx (heap-allocated in init, never freed before this fix).
+        if (self.api_context.validator_monitor) |cb| allocator.destroy(@as(*ValidatorMonitorCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
 
         // api_regen was allocated but stored in api_context.regen
         allocator.destroy(self.api_context.regen);
@@ -1007,6 +1009,7 @@ pub const BeaconNode = struct {
         // Set up clock
         const genesis_time = try genesis_state.state.genesisTime();
         self.clock = SlotClock.fromGenesis(genesis_time, self.config.chain);
+        self.chain.genesis_time_s = genesis_time;
 
         // Initialize fork choice with genesis anchor block.
         // Get justified/finalized checkpoints from genesis state.
@@ -1143,6 +1146,7 @@ pub const BeaconNode = struct {
         // Set up clock from genesis_time.
         const genesis_time = try checkpoint_state.state.genesisTime();
         self.clock = SlotClock.fromGenesis(genesis_time, self.config.chain);
+        self.chain.genesis_time_s = genesis_time;
 
         // Initialize fork choice with checkpoint as anchor.
         var justified_cp: types.phase0.Checkpoint.Type = undefined;
@@ -2093,55 +2097,6 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         return result.toOwnedSlice(self.allocator);
     }
 
-    /// Poll gossipsub for beacon_block messages and import them.
-    ///
-    /// Extracted from the inline loop to be callable from the sync-driven
-    /// maintenance loop.
-    fn pollGossipBlocks(self: *BeaconNode) void {
-        if (self.p2p_service) |p2p| {
-            const gossip_decoding = networking.gossip_decoding;
-            const events = p2p.gossipsub.drainEvents() catch return;
-            defer self.allocator.free(events);
-            for (events) |event| {
-                switch (event) {
-                    .message => |msg| {
-                        if (std.mem.indexOf(u8, msg.topic, "beacon_block") == null) continue;
-                        const ssz_bytes = gossip_decoding.decompressGossipPayload(
-                            self.allocator, msg.data,
-                            gossip_decoding.MAX_GOSSIP_SIZE_BEACON_BLOCK,
-                        ) catch continue;
-                        defer self.allocator.free(ssz_bytes);
-
-                        const fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
-                        const any_signed = AnySignedBeaconBlock.deserialize(
-                            self.allocator, .full, fork_seq, ssz_bytes,
-                        ) catch |err| {
-                            std.log.warn("Gossip block deserialize: {}", .{err});
-                            continue;
-                        };
-                        defer any_signed.deinit(self.allocator);
-
-                        const result = self.importBlock(any_signed, .gossip) catch |err| {
-                            if (err == error.UnknownParentBlock) {
-                                self.queueOrphanBlock(any_signed, ssz_bytes);
-                            } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
-                                std.log.warn("Gossip block import: {}", .{err});
-                            }
-                            continue;
-                        };
-                        self.processPendingChildren(result.block_root);
-                        std.log.info("GOSSIP BLOCK IMPORTED slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                            result.slot,
-                            result.block_root[0], result.block_root[1],
-                            result.block_root[2], result.block_root[3],
-                        });
-                    },
-                    else => {},
-                }
-            }
-        }
-    }
-
     /// Update the API sync status from the sync service state machine.
     fn updateApiSyncStatus(self: *BeaconNode) void {
         if (self.sync_service_inst) |svc| {
@@ -2268,41 +2223,6 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             }
 
             return peer_status;
-        }
-
-        /// Poll gossipsub for all gossip messages and import them.
-        ///
-        /// Runs after range sync to stay at the head of the chain.
-        /// Polls the gossipsub service for events, parses topics, and
-        /// routes to the appropriate handler (blocks, attestations, aggregates).
-        fn gossipBlockLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) !void {
-            _ = svc;
-            const gossipsub = self.p2p_service.?.gossipsub;
-
-            while (!self.shutdown_requested.load(.acquire)) {
-                // Poll gossipsub for raw events
-                const events = gossipsub.drainEvents() catch |err| {
-                    std.log.warn("Gossip drain error: {}", .{err});
-                    const t: std.Io.Timeout = .{ .duration = .{
-                        .raw = std.Io.Duration.fromMilliseconds(1000),
-                        .clock = .awake,
-                    } };
-                    t.sleep(io) catch return;
-                    continue;
-                };
-                defer self.allocator.free(events);
-
-                if (events.len == 0) {
-                    const t: std.Io.Timeout = .{ .duration = .{
-                        .raw = std.Io.Duration.fromMilliseconds(500),
-                        .clock = .awake,
-                    } };
-                    t.sleep(io) catch return;
-                    continue;
-                }
-
-                self.processGossipEventsFromSlice(events);
-            }
         }
 
         /// Initialize the GossipHandler for attestation/aggregate/operation validation.
@@ -2496,8 +2416,13 @@ fn parseIp4(s: []const u8) ?[4]u8 {
 
             const column_index = std.mem.readInt(u64, ssz_bytes[0..8], .little);
 
-            // Use a synthetic block root for now (slot-based).
-            // Full HTR would require decoding the signed_block_header.
+            // TODO: Extract the real block root from DataColumnSidecar.signed_block_header
+            // via hashTreeRoot. The current synthetic root (first 8 bytes = column_index)
+            // causes all columns with the same index to collide, since column_index is the
+            // same across different blocks with identical indices.
+            // Full fix: decode the signed_block_header (a fixed-size 112-byte BeaconBlockHeader
+            // prefixed by a BLS signature), then call hashTreeRoot on the header.
+            // For now this is a known limitation; data column validation is not yet critical path.
             var block_root: [32]u8 = std.mem.zeroes([32]u8);
             @memcpy(block_root[0..8], ssz_bytes[0..8]);
 

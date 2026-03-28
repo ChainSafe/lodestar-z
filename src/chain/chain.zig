@@ -142,6 +142,10 @@ pub const Chain = struct {
 
     // --- Genesis info ---
     genesis_validators_root: [32]u8,
+    /// Genesis time in seconds since the Unix epoch. Used to compute
+    /// the wall-clock slot for sync distance calculation. Set during
+    /// initFromGenesis / initFromCheckpoint; zero until genesis is known.
+    genesis_time_s: u64,
 
     /// Initialize a Chain with pointers to all components.
     ///
@@ -177,6 +181,7 @@ pub const Chain = struct {
             .block_to_state = std.AutoArrayHashMap([32]u8, [32]u8).init(allocator),
             .event_callback = null,
             .genesis_validators_root = [_]u8{0} ** 32,
+            .genesis_time_s = 0,
         };
     }
 
@@ -511,13 +516,35 @@ pub const Chain = struct {
         };
     }
 
+    /// Threshold: if head is more than this many slots behind the wall-clock
+    /// slot, we report is_syncing = true.
+    const SYNC_DISTANCE_THRESHOLD: u64 = 32;
+
     /// Get current sync status.
+    ///
+    /// Computes sync_distance by comparing the head slot to the wall-clock slot
+    /// derived from the genesis time. Reports is_syncing when the distance
+    /// exceeds SYNC_DISTANCE_THRESHOLD slots.
     pub fn getSyncStatus(self: *const Chain) SyncStatus {
         const head_slot = if (self.fork_choice) |fc| fc.head.slot else self.head_tracker.head_slot;
+
+        // Compute wall-clock slot from genesis_time_s.
+        // Falls back to head_slot (distance = 0) when genesis is not yet known.
+        const wall_slot: u64 = blk: {
+            const gt = self.genesis_time_s;
+            if (gt == 0) break :blk head_slot;
+            const sps = self.config.chain.SECONDS_PER_SLOT;
+            if (sps == 0) break :blk head_slot;
+            const now_s: u64 = @intCast(@max(0, std.time.timestamp()));
+            if (now_s < gt) break :blk head_slot;
+            break :blk (now_s - gt) / sps;
+        };
+
+        const sync_distance = if (wall_slot > head_slot) wall_slot - head_slot else 0;
         return .{
             .head_slot = head_slot,
-            .sync_distance = 0,
-            .is_syncing = false,
+            .sync_distance = sync_distance,
+            .is_syncing = sync_distance > SYNC_DISTANCE_THRESHOLD,
             .is_optimistic = false,
             .el_offline = false,
         };

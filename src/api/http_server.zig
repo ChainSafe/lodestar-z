@@ -203,17 +203,23 @@ pub const HttpServer = struct {
 
         // CORS preflight.
         if (request.head.method == .OPTIONS) {
+            // Only send CORS headers for non-keymanager paths; keymanager
+            // paths require authentication and must not expose CORS headers.
             if (self.cors_origin) |origin| {
-                const preflight_headers: []const http.Header = &.{
-                    .{ .name = "Access-Control-Allow-Origin", .value = origin },
-                    .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, DELETE, OPTIONS" },
-                    .{ .name = "Access-Control-Allow-Headers", .value = "Content-Type, Authorization" },
-                    .{ .name = "Access-Control-Max-Age", .value = "3600" },
-                };
-                try request.respond("", .{
-                    .status = .no_content,
-                    .extra_headers = preflight_headers,
-                });
+                if (!isKeymanagerPath(path)) {
+                    const preflight_headers: []const http.Header = &.{
+                        .{ .name = "Access-Control-Allow-Origin", .value = origin },
+                        .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, DELETE, OPTIONS" },
+                        .{ .name = "Access-Control-Allow-Headers", .value = "Content-Type, Authorization" },
+                        .{ .name = "Access-Control-Max-Age", .value = "3600" },
+                    };
+                    try request.respond("", .{
+                        .status = .no_content,
+                        .extra_headers = preflight_headers,
+                    });
+                } else {
+                    try request.respond("", .{ .status = .no_content });
+                }
             } else {
                 try request.respond("", .{ .status = .no_content });
             }
@@ -736,7 +742,9 @@ pub const HttpServer = struct {
 
     fn hGetEvents(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
-        handlers.events.getEvents(self.api_context, dc.match.getParam("topics") orelse "") catch |err| return err;
+        // /eth/v1/events?topics=head,block — topics come from query params, not path params.
+        const topics = dc.getQuery("topics") orelse "";
+        handlers.events.getEvents(self.api_context, topics) catch |err| return err;
         const body = try alloc.dupe(u8, "{}");
         return .{ .status = 200, .content_type = "application/json", .body = body };
     }
@@ -773,12 +781,83 @@ pub const HttpServer = struct {
         return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc), .meta = handler_res.meta };
     }
 
-    fn hGetAttesterDuties(_: *HttpServer, _: DispatchContext) !HandlerResult {
-        return error.NotImplemented;
+    fn hGetAttesterDuties(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const alloc = self.allocator;
+        const epoch_str = dc.match.getParam("epoch") orelse return error.InvalidRequest;
+        const epoch = std.fmt.parseInt(u64, epoch_str, 10) catch return error.InvalidRequest;
+        var validator_indices = std.ArrayListUnmanaged(u64).empty;
+        defer validator_indices.deinit(alloc);
+        if (dc.body.len > 2) {
+            const parsed = std.json.parseFromSlice([]u64, alloc, dc.body, .{}) catch return error.InvalidRequest;
+            defer parsed.deinit();
+            for (parsed.value) |idx| try validator_indices.append(alloc, idx);
+        }
+        const handler_res = try handlers.validator.getAttesterDuties(self.api_context, epoch, validator_indices.items);
+        defer alloc.free(handler_res.data);
+        var buf = std.ArrayListUnmanaged(u8).empty;
+        errdefer buf.deinit(alloc);
+        try buf.appendSlice(alloc, "{\"data\":[");
+        for (handler_res.data, 0..) |d, i| {
+            if (i > 0) try buf.appendSlice(alloc, ",");
+            const entry = try std.fmt.allocPrint(alloc,
+                "{{\"pubkey\":\"0x{s}\",\"validator_index\":\"{d}\",\"committee_index\":\"{d}\",\"committee_length\":\"{d}\",\"committees_at_slot\":\"{d}\",\"validator_committee_index\":\"{d}\",\"slot\":\"{d}\"}}",
+                .{ std.fmt.bytesToHex(d.pubkey, .lower), d.validator_index, d.committee_index, d.committee_length, d.committees_at_slot, d.validator_committee_index, d.slot });
+            defer alloc.free(entry);
+            try buf.appendSlice(alloc, entry);
+        }
+        try buf.appendSlice(alloc, "]");
+        const meta = handler_res.meta;
+        const opt = meta.execution_optimistic;
+        if (meta.dependent_root) |root| {
+            const hex = std.fmt.bytesToHex(&root, .lower);
+            const dep_root = try std.fmt.allocPrint(alloc, ",\"dependent_root\":\"0x{s}\"", .{hex});
+            defer alloc.free(dep_root);
+            try buf.appendSlice(alloc, dep_root);
+        }
+        try buf.appendSlice(alloc, if (opt) ",\"execution_optimistic\":true" else ",\"execution_optimistic\":false");
+        try buf.appendSlice(alloc, "}");
+        return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc) };
     }
 
-    fn hGetSyncDuties(_: *HttpServer, _: DispatchContext) !HandlerResult {
-        return error.NotImplemented;
+    fn hGetSyncDuties(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const alloc = self.allocator;
+        const epoch_str = dc.match.getParam("epoch") orelse return error.InvalidRequest;
+        const epoch = std.fmt.parseInt(u64, epoch_str, 10) catch return error.InvalidRequest;
+        var validator_indices = std.ArrayListUnmanaged(u64).empty;
+        defer validator_indices.deinit(alloc);
+        if (dc.body.len > 2) {
+            const parsed = std.json.parseFromSlice([]u64, alloc, dc.body, .{}) catch return error.InvalidRequest;
+            defer parsed.deinit();
+            for (parsed.value) |idx| try validator_indices.append(alloc, idx);
+        }
+        const handler_res = try handlers.validator.getSyncDuties(self.api_context, epoch, validator_indices.items);
+        defer {
+            for (handler_res.data) |d| alloc.free(d.validator_sync_committee_indices);
+            alloc.free(handler_res.data);
+        }
+        var buf = std.ArrayListUnmanaged(u8).empty;
+        errdefer buf.deinit(alloc);
+        try buf.appendSlice(alloc, "{\"data\":[");
+        for (handler_res.data, 0..) |d, i| {
+            if (i > 0) try buf.appendSlice(alloc, ",");
+            var indices_buf = std.ArrayListUnmanaged(u8).empty;
+            defer indices_buf.deinit(alloc);
+            for (d.validator_sync_committee_indices, 0..) |idx, j| {
+                if (j > 0) try indices_buf.appendSlice(alloc, ",");
+                const s = try std.fmt.allocPrint(alloc, "{d}", .{idx});
+                defer alloc.free(s);
+                try indices_buf.appendSlice(alloc, s);
+            }
+            const entry = try std.fmt.allocPrint(alloc,
+                "{{\"pubkey\":\"0x{s}\",\"validator_index\":\"{d}\",\"validator_sync_committee_indices\":[{s}]}}",
+                .{ std.fmt.bytesToHex(d.pubkey, .lower), d.validator_index, indices_buf.items });
+            defer alloc.free(entry);
+            try buf.appendSlice(alloc, entry);
+        }
+        const meta = handler_res.meta;
+        const opt = meta.execution_optimistic;
+        try buf.appendSlice(alloc, if (opt) "],\"execution_optimistic\":true}" else "],\"execution_optimistic\":false}");
+        return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc) };
     }
 
     fn hGetSpec(self: *HttpServer, _: DispatchContext) !HandlerResult {
