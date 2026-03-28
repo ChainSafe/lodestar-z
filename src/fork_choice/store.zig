@@ -197,6 +197,22 @@ pub const ForkChoiceStore = struct {
         if (self.events.on_finalized) |cb| cb.call(checkpoint);
     }
 
+    /// Prune equivocating_indices that are no longer relevant after finalization.
+    ///
+    /// TODO: The FC store only tracks validator indices (not their exit epochs).
+    /// To properly prune, we would need access to validator exit_epoch from the state,
+    /// which is not currently available inside ForkChoiceStore. A future improvement
+    /// would be to pass exit_epoch alongside the validator index when recording
+    /// equivocators (e.g. store a map from ValidatorIndex to exit_epoch), then
+    /// remove entries where exit_epoch < finalized_epoch here.
+    /// For now this is a no-op placeholder so callers can hook in without a breaking
+    /// change when the information becomes available.
+    pub fn pruneEquivocating(self: *ForkChoiceStore, finalized_epoch: u64) void {
+        _ = self;
+        _ = finalized_epoch;
+        // TODO: prune equivocating_indices by exit_epoch once exit info is available.
+    }
+
     pub fn deinit(self: *ForkChoiceStore) void {
         self.equivocating_indices.deinit();
         self.justified.balances.release();

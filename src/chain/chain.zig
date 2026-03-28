@@ -419,6 +419,8 @@ pub const Chain = struct {
             _ = fc.prune(self.allocator, finalized_root) catch |err| {
                 log_mod.logger(.chain).warn("onFinalized: fork choice prune failed: {}", .{err});
             };
+            // Prune equivocating_indices that are no longer relevant after finalization.
+            fc.fc_store.pruneEquivocating(finalized_epoch);
         }
 
         // Prune seen cache — remove entries older than 2 epochs before finalization.
@@ -444,6 +446,17 @@ pub const Chain = struct {
         // evicted pre-finalized entries from slot_roots, we iterate block_to_state
         // and remove roots that are no longer tracked by slot_roots (i.e., pre-fin).
         {
+            // Build a HashSet of live roots from slot_roots in O(n) first, then
+            // check membership in O(1) per block_to_state entry — avoids O(n²).
+            var live_roots = std.AutoArrayHashMap([32]u8, void).init(self.allocator);
+            defer live_roots.deinit();
+            {
+                var sr_it = self.head_tracker.slot_roots.iterator();
+                while (sr_it.next()) |sr_entry| {
+                    live_roots.put(sr_entry.value_ptr.*, {}) catch {};
+                }
+            }
+
             var roots_to_remove = std.ArrayList([32]u8).init(self.allocator);
             defer roots_to_remove.deinit();
 
@@ -455,15 +468,7 @@ pub const Chain = struct {
                 // Never evict the finalized root itself — needed for SSE event above.
                 if (std.mem.eql(u8, &root, &finalized_root)) continue;
                 // Keep entries still referenced by slot_roots (post-finalization blocks).
-                var found = false;
-                var sr_it = self.head_tracker.slot_roots.iterator();
-                while (sr_it.next()) |sr_entry| {
-                    if (std.mem.eql(u8, sr_entry.value_ptr, &root)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
+                if (!live_roots.contains(root)) {
                     roots_to_remove.append(root) catch {};
                 }
             }
@@ -713,6 +718,10 @@ pub const Chain = struct {
 
         const new_state_root = if (self.queued_regen) |qr| try qr.onNewBlock(post_state, true) else try self.state_regen.onNewBlock(post_state, true);
 
+        // Store the advanced state root for this block root. Note: this records the
+        // "latest known" state root for the head root (i.e. the post-slot-processing
+        // state), NOT the post-block state root. When a block is later imported at
+        // this slot, the entry will be overwritten with the actual post-block state root.
         try self.block_to_state.put(
             self.head_tracker.head_root,
             new_state_root,

@@ -1497,10 +1497,10 @@ pub const ForkChoice = struct {
         // Update store time.
         self.fc_store.current_slot = time;
 
-        // Reset proposer boost if this is a new slot.
-        if (self.proposer_boost_root != null) {
-            self.proposer_boost_root = null;
-        }
+        // Always clear proposer boost when advancing to the next slot. The boost
+        // only applies within a single slot, so it must be cleared unconditionally
+        // on every tick regardless of whether proposer_boost_root is set.
+        self.proposer_boost_root = null;
 
         // Not a new epoch, return.
         if (computeSlotsSinceEpochStart(time) != 0) {
@@ -1566,9 +1566,11 @@ pub const ForkChoice = struct {
             // No break here: map is insertion-ordered, not sorted — must scan all entries.
         }
 
-        // Remove processed slots.
+        // Remove processed slots. swapRemove is O(1) per removal (vs orderedRemove
+        // which is O(n) due to shifting). Order doesn't matter here — the map is
+        // iterated with a full scan on every call, not assumed to be sorted.
         for (keys_to_remove.items) |key| {
-            _ = self.queued_attestations.orderedRemove(key);
+            _ = self.queued_attestations.swapRemove(key);
         }
     }
 
