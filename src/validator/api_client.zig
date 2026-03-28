@@ -208,6 +208,88 @@ pub const BeaconApiClient = struct {
         };
     }
 
+
+    /// Perform a GET request with Accept: application/octet-stream.
+    /// Returns the raw SSZ bytes and parsed response headers.
+    /// Caller must free the returned SszGetResponse.body.
+    fn getSsz(self: *BeaconApiClient, io: Io, path: []const u8) !SszGetResponse {
+        const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.activeUrl(), path });
+        defer self.allocator.free(url);
+
+        var client: std.http.Client = .{ .allocator = self.allocator, .io = io };
+        defer client.deinit();
+
+        const uri = try std.Uri.parse(url);
+        var req = client.request(.GET, uri, .{
+            .keep_alive = false,
+            .extra_headers = &.{
+                .{ .name = "Accept", .value = "application/octet-stream" },
+            },
+        }) catch |err| {
+            self.recordFailure();
+            return err;
+        };
+        defer req.deinit();
+
+        req.sendBodiless() catch |err| {
+            self.recordFailure();
+            return err;
+        };
+
+        var redirect_buf: [1024]u8 = undefined;
+        var response = req.receiveHead(&redirect_buf) catch |err| {
+            self.recordFailure();
+            return err;
+        };
+
+        if (response.head.status != .ok) {
+            log.warn("GET(ssz) {s} → HTTP {d}", .{ path, @intFromEnum(response.head.status) });
+            self.recordFailure();
+            return error.HttpError;
+        }
+
+        self.recordSuccess();
+
+        // Extract Eth-Consensus-Version header before reading body
+        // (response.reader() invalidates head string pointers).
+        var fork_name_buf: [32]u8 = [_]u8{0} ** 32;
+        var fork_name_len: u8 = 0;
+        var is_blinded = false;
+        {
+            var it = response.head.iterateHeaders();
+            while (it.next()) |hdr| {
+                if (std.ascii.eqlIgnoreCase(hdr.name, "Eth-Consensus-Version")) {
+                    const len: u8 = @intCast(@min(hdr.value.len, fork_name_buf.len));
+                    @memcpy(fork_name_buf[0..len], hdr.value[0..len]);
+                    fork_name_len = len;
+                } else if (std.ascii.eqlIgnoreCase(hdr.name, "Eth-Execution-Payload-Blinded")) {
+                    is_blinded = std.mem.eql(u8, hdr.value, "true");
+                }
+            }
+        }
+
+        var transfer_buf: [8192]u8 = undefined;
+        const reader = response.reader(&transfer_buf);
+        const ssz_body = reader.allocRemaining(self.allocator, Io.Limit.limited(MAX_RESPONSE_BYTES)) catch |err| switch (err) {
+            error.ReadFailed => return response.bodyErr().?,
+            else => |e| return e,
+        };
+
+        return .{
+            .body = ssz_body,
+            .fork_name = fork_name_buf,
+            .fork_name_len = fork_name_len,
+            .is_blinded = is_blinded,
+        };
+    }
+
+    const SszGetResponse = struct {
+        body: []const u8,
+        fork_name: [32]u8,
+        fork_name_len: u8,
+        is_blinded: bool,
+    };
+
     /// Perform a POST request with JSON body and return the response body (caller frees).
     ///
     /// Pass an empty body (`""`) for POST endpoints that don't require a body.
@@ -273,6 +355,52 @@ pub const BeaconApiClient = struct {
     fn postNoResponse(self: *BeaconApiClient, io: Io, path: []const u8, body: []const u8) !void {
         const resp = try self.post(io, path, body);
         self.allocator.free(resp);
+    }
+
+
+    /// Perform a POST request with SSZ body (Content-Type: application/octet-stream).
+    /// The Eth-Consensus-Version header is included for fork context.
+    /// Returns void on success; errors on non-2xx status.
+    fn postSsz(self: *BeaconApiClient, io: Io, path: []const u8, body: []const u8, fork_name: []const u8) !void {
+        const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.activeUrl(), path });
+        defer self.allocator.free(url);
+
+        var client: std.http.Client = .{ .allocator = self.allocator, .io = io };
+        defer client.deinit();
+
+        const uri = try std.Uri.parse(url);
+        var req = client.request(.POST, uri, .{
+            .keep_alive = false,
+            .extra_headers = &.{
+                .{ .name = "Content-Type", .value = "application/octet-stream" },
+                .{ .name = "Eth-Consensus-Version", .value = fork_name },
+            },
+        }) catch |err| {
+            self.recordFailure();
+            return err;
+        };
+        defer req.deinit();
+
+        req.transfer_encoding = .{ .content_length = body.len };
+        req.sendBodyComplete(@constCast(body)) catch |err| {
+            self.recordFailure();
+            return err;
+        };
+
+        var redirect_buf: [1024]u8 = undefined;
+        const response = req.receiveHead(&redirect_buf) catch |err| {
+            self.recordFailure();
+            return err;
+        };
+
+        const status = response.head.status;
+        if (@intFromEnum(status) < 200 or @intFromEnum(status) >= 300) {
+            log.warn("POST(ssz) {s} → HTTP {d}", .{ path, @intFromEnum(status) });
+            self.recordFailure();
+            return error.HttpError;
+        }
+
+        self.recordSuccess();
     }
 
     // -----------------------------------------------------------------------
@@ -543,6 +671,50 @@ pub const BeaconApiClient = struct {
     ) !void {
         try self.postNoResponse(io, "/eth/v2/beacon/blocks", signed_block_ssz);
     }
+
+    /// GET /eth/v3/validator/blocks/{slot} with SSZ response.
+    ///
+    /// Requests the unsigned BeaconBlock as SSZ (Accept: application/octet-stream).
+    /// The fork is determined from the Eth-Consensus-Version response header.
+    /// Returns raw SSZ bytes of the unsigned BeaconBlock + fork metadata.
+    pub fn produceBlockSsz(
+        self: *BeaconApiClient,
+        io: Io,
+        slot: u64,
+        randao_reveal: [96]u8,
+        graffiti: [32]u8,
+    ) !ProduceBlockSszResponse {
+        const randao_hex = std.fmt.bytesToHex(&randao_reveal, .lower);
+        const graffiti_hex = std.fmt.bytesToHex(&graffiti, .lower);
+        const path = try std.fmt.allocPrint(
+            self.allocator,
+            "/eth/v3/validator/blocks/{d}?randao_reveal=0x{s}&graffiti=0x{s}",
+            .{ slot, randao_hex, graffiti_hex },
+        );
+        defer self.allocator.free(path);
+
+        const resp = try self.getSsz(io, path);
+        return .{
+            .block_ssz = resp.body,
+            .fork_name = resp.fork_name,
+            .fork_name_len = resp.fork_name_len,
+            .blinded = resp.is_blinded,
+        };
+    }
+
+    /// POST /eth/v2/beacon/blocks with SSZ body.
+    ///
+    /// Publishes a SignedBeaconBlock as SSZ (Content-Type: application/octet-stream).
+    /// The Eth-Consensus-Version header is set to the fork name.
+    pub fn publishBlockSsz(
+        self: *BeaconApiClient,
+        io: Io,
+        signed_block_ssz: []const u8,
+        fork_name: []const u8,
+    ) !void {
+        try self.postSsz(io, "/eth/v2/beacon/blocks", signed_block_ssz, fork_name);
+    }
+
 
     // -----------------------------------------------------------------------
     // Attestation
@@ -951,6 +1123,22 @@ pub const ProduceBlockResponse = struct {
     /// Whether the block is blinded (MEV relay path).
     blinded: bool,
 };
+
+pub const ProduceBlockSszResponse = struct {
+    /// Raw SSZ bytes of the unsigned BeaconBlock (caller must free).
+    block_ssz: []const u8,
+    /// Fork name from Eth-Consensus-Version header (e.g. "electra").
+    /// Stored in fixed buffer — does not require freeing.
+    fork_name: [32]u8,
+    fork_name_len: u8,
+    /// Whether the block is blinded (from response headers).
+    blinded: bool,
+
+    pub fn forkNameStr(self: *const ProduceBlockSszResponse) []const u8 {
+        return self.fork_name[0..self.fork_name_len];
+    }
+};
+
 
 pub const AttestationDataResponse = struct {
     slot: u64,

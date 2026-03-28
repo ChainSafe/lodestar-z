@@ -247,6 +247,7 @@ pub fn build(b: *std.Build) void {
     module_validator.addImport("constants", module_constants);
     module_validator.addImport("state_transition", module_state_transition);
     module_validator.addImport("log", module_log);
+    module_validator.addImport("fork_types", module_fork_types);
 
 
     const module_processor = b.createModule(.{
