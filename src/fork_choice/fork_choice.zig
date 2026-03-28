@@ -24,6 +24,7 @@ const ProtoNode = proto_node.ProtoNode;
 const LVHExecResponse = proto_node.LVHExecResponse;
 const ForkChoiceError = proto_node.ForkChoiceError;
 const PayloadStatus = proto_node.PayloadStatus;
+const BlockExtraMeta = proto_node.BlockExtraMeta;
 
 const vote_tracker = @import("vote_tracker.zig");
 const Votes = vote_tracker.Votes;
@@ -35,6 +36,8 @@ const DeltasCache = compute_deltas_mod.DeltasCache;
 const EquivocatingIndices = compute_deltas_mod.EquivocatingIndices;
 
 const ZERO_HASH = constants.ZERO_HASH;
+const preset_mod = @import("preset");
+const preset = preset_mod.preset;
 
 /// Checkpoint with root, matching Lodestar TS CheckpointWithHex.
 pub const Checkpoint = struct {
@@ -472,6 +475,37 @@ pub const ForkChoice = struct {
         return self.proto_array.isFinalizedRootOrDescendant(block_root);
     }
 
+    // ── Safe blocks (EIP-3675) ──
+
+    /// Get the safe beacon block root.
+    ///
+    /// The "safe" block is the most recent block that 2/3+ of validators have
+    /// attested to. Lodestar simplification:
+    ///   safe = justified checkpoint block root
+    ///
+    /// Spec: https://github.com/ethereum/consensus-specs/blob/v1.6.0/fork_choice/safe-block.md#get_safe_beacon_block_root
+    pub fn getSafeBlockRoot(self: *const ForkChoice) Root {
+        return self.justified_checkpoint.root;
+    }
+
+    /// Get the block node for the justified (safe) checkpoint.
+    /// Returns null if the justified checkpoint block is not in the DAG.
+    pub fn getJustifiedBlock(self: *const ForkChoice) ?*const ProtoNode {
+        const idx = self.proto_array.getDefaultNodeIndex(self.justified_checkpoint.root) orelse return null;
+        return &self.proto_array.nodes.items[idx];
+    }
+
+    /// Get the execution payload block hash for the safe block.
+    ///
+    /// Returns the execution payload block hash of the justified checkpoint block,
+    /// or ZERO_HASH if the block is pre-merge or not found.
+    ///
+    /// Spec: https://github.com/ethereum/consensus-specs/blob/v1.6.0/fork_choice/safe-block.md#get_safe_execution_block_hash
+    pub fn getSafeExecutionBlockHash(self: *const ForkChoice) [32]u8 {
+        const node = self.getJustifiedBlock() orelse return ZERO_HASH;
+        return node.extra_meta.executionPayloadBlockHash() orelse ZERO_HASH;
+    }
+
     // ── Gloas (ePBS) ──
 
     /// Process an execution payload for a Gloas block (creates FULL variant).
@@ -812,4 +846,69 @@ test "isDescendant checks ancestry" {
     try testing.expect(try fc.isDescendant(genesis_root, .full, block_b_root, .full));
     try testing.expect(try fc.isDescendant(block_a_root, .full, block_b_root, .full));
     try testing.expect(!try fc.isDescendant(block_b_root, .full, block_a_root, .full));
+}
+
+test "getSafeBlockRoot returns justified checkpoint root" {
+    const genesis_root = hashFromByte(0x01);
+    const justified_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &.{},
+    }, genesis_block, 10);
+    defer fc.deinit(testing.allocator);
+
+    // Initially returns genesis (justified = genesis at epoch 0).
+    try testing.expectEqual(genesis_root, fc.getSafeBlockRoot());
+
+    // After justified checkpoint update, returns the new justified root.
+    try fc.updateJustifiedCheckpoint(testing.allocator, makeTestCheckpoint(1, justified_root), &.{});
+    try testing.expectEqual(justified_root, fc.getSafeBlockRoot());
+}
+
+test "getSafeExecutionBlockHash returns ZERO_HASH for pre-merge block" {
+    const genesis_root = hashFromByte(0x01);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &.{},
+    }, genesis_block, 0);
+    defer fc.deinit(testing.allocator);
+
+    // Genesis is pre-merge → no execution payload → ZERO_HASH.
+    try testing.expectEqual(ZERO_HASH, fc.getSafeExecutionBlockHash());
+}
+
+test "getSafeExecutionBlockHash returns execution block hash for post-merge justified block" {
+    const genesis_root = hashFromByte(0x01);
+    const justified_root = hashFromByte(0x02);
+    const exec_hash = hashFromByte(0xAA);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &.{},
+    }, genesis_block, 10);
+    defer fc.deinit(testing.allocator);
+
+    // Add a post-merge block as the justified checkpoint block.
+    var post_merge_block = makeTestBlock(1, justified_root, genesis_root);
+    post_merge_block.extra_meta = .{
+        .post_merge = BlockExtraMeta.PostMergeMeta.init(
+            exec_hash,
+            1,
+            .valid,
+            .available,
+        ),
+    };
+    try fc.onBlock(testing.allocator, post_merge_block, 10);
+
+    // Update justified to the post-merge block.
+    try fc.updateJustifiedCheckpoint(testing.allocator, makeTestCheckpoint(1, justified_root), &.{});
+    try testing.expectEqual(exec_hash, fc.getSafeExecutionBlockHash());
 }
