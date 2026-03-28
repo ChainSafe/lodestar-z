@@ -58,6 +58,7 @@ const produceBlockBody = produce_block_mod.produceBlockBody;
 const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
 const ProtoBlock = fork_choice_mod.ProtoBlock;
+const HeadResult = fork_choice_mod.HeadResult;
 
 const networking = @import("networking");
 const StatusMessage = networking.messages.StatusMessage;
@@ -365,19 +366,17 @@ pub const Chain = struct {
             .epoch_transition = is_epoch_transition,
         };
 
-        // Stage 5: Emit SSE events.
+        // Stage 5: Emit block event and recompute head.
         if (self.event_callback) |cb| {
             cb.emit(.{ .block = .{
                 .slot = block_slot,
                 .block_root = stfn_result.block_root,
             } });
-            cb.emit(.{ .head = .{
-                .slot = block_slot,
-                .block_root = stfn_result.block_root,
-                .state_root = stfn_result.state_root,
-                .epoch_transition = is_epoch_transition,
-            } });
         }
+
+        // Recompute fork choice head after attestation/block weight changes.
+        // This detects reorgs and emits head/chain_reorg SSE events.
+        self.recomputeHead();
 
         return result;
     }
@@ -612,6 +611,125 @@ pub const Chain = struct {
             .head_root = self.head_tracker.head_root,
             .head_slot = self.head_tracker.head_slot,
         };
+    }
+
+    // -----------------------------------------------------------------------
+    // Head recomputation
+    // -----------------------------------------------------------------------
+
+    /// Recompute the fork choice head after attestation weight changes.
+    ///
+    /// Called after importing attestations or a new block to ensure
+    /// the head reflects the latest LMD-GHOST weights.
+    ///
+    /// Steps:
+    /// 1. Save old head root
+    /// 2. Call fork_choice.getHead() (recomputes from latest weights)
+    /// 3. Compare old vs new head
+    /// 4. If changed → detect possible reorg and emit events
+    pub fn recomputeHead(self: *Chain) void {
+        const fc = self.fork_choice orelse return;
+
+        const old_head_root = fc.head.block_root;
+        const old_head_slot = fc.head.slot;
+        const old_head_state_root = fc.head.state_root;
+
+        // Get effective balance increments from current head state, if available.
+        // If unavailable, pass empty slice — fork choice uses cached balances.
+        const head_state_root = self.block_to_state.get(old_head_root) orelse old_head_state_root;
+        const new_balances: []const u16 = if (self.block_state_cache.get(head_state_root)) |cached|
+            cached.epoch_cache.getEffectiveBalanceIncrements().items
+        else
+            &.{};
+
+        const new_head = fc.getHead(self.allocator, new_balances) catch |err| {
+            std.log.warn("recomputeHead: getHead failed: {}", .{err});
+            return;
+        };
+
+        // No change — nothing to do.
+        if (std.mem.eql(u8, &new_head.block_root, &old_head_root)) return;
+
+        std.log.info("head updated: slot={d} root={s}...", .{
+            new_head.slot,
+            &std.fmt.bytesToHex(new_head.block_root[0..4], .lower),
+        });
+
+        // Detect reorg: if old head not in proto_array (pruned), just emit head event.
+        if (fc.proto_array.getNode(old_head_root, .full) == null and
+            fc.proto_array.getNode(old_head_root, .pending) == null)
+        {
+            // Old head not in proto_array (already pruned?) — no reorg detection.
+            self.emitHeadEvent(new_head, false);
+            return;
+        }
+
+        self.detectAndEmitReorg(
+            old_head_root,
+            old_head_slot,
+            old_head_state_root,
+            new_head,
+        );
+    }
+
+    /// Detect reorg between old head and new head, emit events.
+    fn detectAndEmitReorg(
+        self: *Chain,
+        old_head_root: [32]u8,
+        old_head_slot: u64,
+        old_head_state_root: [32]u8,
+        new_head: HeadResult,
+    ) void {
+        const fc = self.fork_choice orelse return;
+
+        // Find old and new head nodes in proto_array.
+        const old_node = fc.proto_array.getNode(old_head_root, .full) orelse
+            fc.proto_array.getNode(old_head_root, .pending);
+        const new_node = fc.proto_array.getNode(new_head.block_root, .full) orelse
+            fc.proto_array.getNode(new_head.block_root, .pending);
+
+        if (old_node != null and new_node != null) {
+            const ancestor = fc.proto_array.getCommonAncestor(old_node.?, new_node.?);
+            if (ancestor) |anc| {
+                const reorg_depth = if (old_head_slot > anc.slot) old_head_slot - anc.slot else 0;
+
+                if (reorg_depth > 0) {
+                    std.log.warn("chain reorg detected depth={d} old={s}... new={s}...", .{
+                        reorg_depth,
+                        &std.fmt.bytesToHex(old_head_root[0..4], .lower),
+                        &std.fmt.bytesToHex(new_head.block_root[0..4], .lower),
+                    });
+
+                    if (self.event_callback) |cb| {
+                        cb.emit(.{ .chain_reorg = .{
+                            .slot = new_head.slot,
+                            .depth = reorg_depth,
+                            .old_head_root = old_head_root,
+                            .new_head_root = new_head.block_root,
+                            .old_state_root = old_head_state_root,
+                            .new_state_root = new_head.state_root,
+                            .epoch = computeEpochAtSlot(new_head.slot),
+                        } });
+                    }
+                    return;
+                }
+            }
+        }
+
+        self.emitHeadEvent(new_head, false);
+    }
+
+    /// Emit head SSE event for a given HeadResult.
+    fn emitHeadEvent(self: *Chain, head: HeadResult, epoch_transition: bool) void {
+        if (self.event_callback) |cb| {
+            cb.emit(.{ .head = .{
+                .slot = head.slot,
+                .block_root = head.block_root,
+                .state_root = head.state_root,
+                .epoch_transition = epoch_transition,
+                .execution_optimistic = head.execution_optimistic,
+            } });
+        }
     }
 
     // -----------------------------------------------------------------------

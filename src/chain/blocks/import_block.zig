@@ -26,6 +26,8 @@ const fork_types = @import("fork_types");
 const state_transition = @import("state_transition");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
+const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
+const HeadResult = fork_choice_mod.HeadResult;
 const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
 const ProtoBlock = fork_choice_mod.ProtoBlock;
@@ -272,30 +274,53 @@ pub fn importVerifiedBlock(
             return BlockImportError.InternalError;
     }
 
-    // 6. Update head via fork choice (if requested).
-    if (opts.update_head) {
-        if (ctx.fork_choice) |fc| {
-            // Access the current head from fork choice.
-            // Note: getHead() requires balances for full recompute. The head is
-            // updated via applyScoreChanges + findHead in the main loop. Here we
-            // just read the current head to check for finality updates.
-            const head = fc.head;
-            _ = head;
+    // 6. Recompute fork choice head and detect reorgs (if requested).
+    head_recompute: {
+        if (!opts.update_head) break :head_recompute;
+        const fc = ctx.fork_choice orelse break :head_recompute;
 
-            // Check finality changes.
-            const new_finalized = fc.getFinalizedCheckpoint();
-            if (new_finalized.epoch > ctx.head_tracker.finalized_epoch) {
-                // New finalized checkpoint — emit event and prune.
-                if (ctx.event_callback) |cb| {
-                    const fin_state_root = ctx.block_to_state.get(new_finalized.root) orelse
-                        [_]u8{0} ** 32;
-                    cb.emit(.{ .finalized_checkpoint = .{
-                        .epoch = new_finalized.epoch,
-                        .root = new_finalized.root,
-                        .state_root = fin_state_root,
-                    } });
-                }
+        // Save the old head before recomputation.
+        const old_head_root = fc.head.block_root;
+        const old_head_slot = fc.head.slot;
+        const old_head_state_root = fc.head.state_root;
+
+        // Recompute head: computeDeltas → applyScoreChanges → findHead.
+        // Use effective balance increments from post-state when available.
+        const ebi_slice: []const u16 = blk: {
+            if (ctx.block_state_cache.get(state_root)) |cached| {
+                break :blk cached.epoch_cache.getEffectiveBalanceIncrements().items;
             }
+            break :blk &.{};
+        };
+        const new_head = fc.getHead(ctx.allocator, ebi_slice) catch |err| {
+            std.log.warn("importBlock: getHead failed: {}", .{err});
+            break :head_recompute;
+        };
+
+        // Check finality changes.
+        const new_finalized = fc.getFinalizedCheckpoint();
+        if (new_finalized.epoch > ctx.head_tracker.finalized_epoch) {
+            if (ctx.event_callback) |cb| {
+                const fin_state_root = ctx.block_to_state.get(new_finalized.root) orelse
+                    [_]u8{0} ** 32;
+                cb.emit(.{ .finalized_checkpoint = .{
+                    .epoch = new_finalized.epoch,
+                    .root = new_finalized.root,
+                    .state_root = fin_state_root,
+                } });
+            }
+        }
+
+        // If head changed, detect reorg.
+        if (!std.mem.eql(u8, &new_head.block_root, &old_head_root)) {
+            detectAndEmitReorg(
+                ctx,
+                old_head_root,
+                old_head_slot,
+                old_head_state_root,
+                new_head,
+                is_epoch_transition,
+            );
         }
     }
 
@@ -327,6 +352,120 @@ pub fn importVerifiedBlock(
 }
 
 // ---------------------------------------------------------------------------
+// Head recomputation helpers
+// ---------------------------------------------------------------------------
+
+/// Detect and emit a chain reorg event when head switches branches.
+///
+/// Walks the proto_array to find the common ancestor of old and new head,
+/// computes reorg depth, and emits a `chain_reorg` SSE event.
+fn detectAndEmitReorg(
+    ctx: ImportContext,
+    old_head_root: [32]u8,
+    old_head_slot: u64,
+    old_head_state_root: [32]u8,
+    new_head: HeadResult,
+    is_epoch_transition: bool,
+) void {
+    const fc = ctx.fork_choice orelse return;
+
+    std.log.info("head changed: old={s}... new={s}...", .{
+        &std.fmt.bytesToHex(old_head_root[0..4], .lower),
+        &std.fmt.bytesToHex(new_head.block_root[0..4], .lower),
+    });
+
+    // Find old and new head nodes in proto_array.
+    const old_node = fc.proto_array.getNode(old_head_root, .full) orelse
+        fc.proto_array.getNode(old_head_root, .pending);
+    const new_node = fc.proto_array.getNode(new_head.block_root, .full) orelse
+        fc.proto_array.getNode(new_head.block_root, .pending);
+
+    if (old_node != null and new_node != null) {
+        const ancestor = fc.proto_array.getCommonAncestor(old_node.?, new_node.?);
+        if (ancestor) |anc| {
+            const reorg_depth = if (old_head_slot > anc.slot) old_head_slot - anc.slot else 0;
+
+            if (reorg_depth > 0) {
+                std.log.warn("chain reorg detected depth={d} old={s}... new={s}...", .{
+                    reorg_depth,
+                    &std.fmt.bytesToHex(old_head_root[0..4], .lower),
+                    &std.fmt.bytesToHex(new_head.block_root[0..4], .lower),
+                });
+
+                if (ctx.event_callback) |cb| {
+                    cb.emit(.{ .chain_reorg = .{
+                        .slot = new_head.slot,
+                        .depth = reorg_depth,
+                        .old_head_root = old_head_root,
+                        .new_head_root = new_head.block_root,
+                        .old_state_root = old_head_state_root,
+                        .new_state_root = new_head.state_root,
+                        .epoch = computeEpochAtSlot(new_head.slot),
+                    } });
+                }
+                return;
+            }
+        }
+    }
+
+    // No reorg (or ancestor not found) — emit head event.
+    if (ctx.event_callback) |cb| {
+        cb.emit(.{ .head = .{
+            .slot = new_head.slot,
+            .block_root = new_head.block_root,
+            .state_root = new_head.state_root,
+            .epoch_transition = is_epoch_transition,
+            .execution_optimistic = new_head.execution_optimistic,
+        } });
+    }
+}
+
+/// Compute the dependent root for a given epoch.
+///
+/// Returns the block root at the slot just before the start of `epoch`.
+/// Used for validator duty computation — when this root changes, duties
+/// for `epoch` must be recomputed.
+///
+/// Reference: Lodestar chain/reorg.ts getDependentRoot()
+pub fn getDependentRoot(
+    ctx: ImportContext,
+    epoch: u64,
+) ?[32]u8 {
+    const fc = ctx.fork_choice orelse return null;
+    if (epoch == 0) return null;
+
+    // dependent slot = computeStartSlotAtEpoch(epoch) - 1
+    const epoch_start = computeStartSlotAtEpoch(epoch);
+    if (epoch_start == 0) return null;
+    const dependent_slot = epoch_start - 1;
+
+    // Find ancestor of current head at dependent_slot.
+    const head_root = fc.head.block_root;
+    const ancestor = fc.proto_array.getAncestorNodeAtSlot(head_root, dependent_slot);
+    if (ancestor) |anc| return anc.block_root;
+    return null;
+}
+
+/// Compute previous and current duty dependent roots for SSE head events.
+///
+/// Returns a struct with:
+/// - previous_duty_dependent_root: root at start of (epoch-1) - 1
+/// - current_duty_dependent_root: root at start of epoch - 1
+///
+/// Returns null roots when not computable (genesis, missing nodes).
+pub fn getDutyDependentRoots(
+    ctx: ImportContext,
+    slot: u64,
+) struct { previous: [32]u8, current: [32]u8 } {
+    const epoch = computeEpochAtSlot(slot);
+    const zero = [_]u8{0} ** 32;
+    return .{
+        .previous = if (epoch > 0) getDependentRoot(ctx, epoch - 1) orelse zero else zero,
+        .current = getDependentRoot(ctx, epoch) orelse zero,
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -341,4 +480,13 @@ test "EVENTSTREAM_EMIT_RECENT_BLOCK_SLOTS constant" {
 
 test "FORK_CHOICE_ATT_EPOCH_LIMIT constant" {
     try std.testing.expectEqual(@as(u64, 1), FORK_CHOICE_ATT_EPOCH_LIMIT);
+}
+
+test "getDependentRoot and getDutyDependentRoots: compile-check exported signatures" {
+    // Type-level check only — full test requires a live proto_array.
+    // Verifies that the function signatures are stable and exported.
+    const info = @typeInfo(@TypeOf(getDependentRoot));
+    _ = info;
+    const info2 = @typeInfo(@TypeOf(getDutyDependentRoots));
+    _ = info2;
 }
