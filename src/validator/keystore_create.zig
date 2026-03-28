@@ -57,11 +57,12 @@ pub fn createKeystore(allocator: Allocator, password: []const u8, params: Scrypt
     std.crypto.random.bytes(&sk_bytes);
 
     // Create BLS secret key. Retry if we happen to generate zero (astronomically rare).
-    const secret_key = SecretKey.fromBytes(sk_bytes) catch {
+    const secret_key: SecretKey = sk: {
         // Extremely unlikely — just increment byte 31 and try again.
-        sk_bytes[31] +%= 1;
-        try SecretKey.fromBytes(sk_bytes);
-        unreachable;
+        break :sk SecretKey.fromBytes(sk_bytes) catch {
+            sk_bytes[31] +%= 1;
+            break :sk SecretKey.fromBytes(sk_bytes) catch return error.InvalidBLSSecretKey;
+        };
     };
 
     const pubkey = secret_key.toPublicKey().compress();

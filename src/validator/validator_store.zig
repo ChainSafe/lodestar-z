@@ -312,6 +312,7 @@ pub const ValidatorStore = struct {
         defer self.mutex.unlock();
 
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
+        if (validator.is_remote) return error.RemoteSignerRequired;
 
         // Slashing protection: double-proposal check (persistent DB).
         const block_allowed = try self.slashing_db.checkAndInsertBlock(pubkey, slot);
@@ -338,6 +339,7 @@ pub const ValidatorStore = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
+        if (validator.is_remote) return error.RemoteSignerRequired;
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
 
@@ -366,6 +368,7 @@ pub const ValidatorStore = struct {
         defer self.mutex.unlock();
 
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
+        if (validator.is_remote) return error.RemoteSignerRequired;
 
         // Slashing protection: double-vote / surround vote check (persistent DB).
         const attest_allowed = try self.slashing_db.checkAndInsertAttestation(pubkey, source_epoch, target_epoch);
@@ -392,6 +395,7 @@ pub const ValidatorStore = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
+        if (validator.is_remote) return error.RemoteSignerRequired;
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
 
@@ -406,6 +410,7 @@ pub const ValidatorStore = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
+        if (validator.is_remote) return error.RemoteSignerRequired;
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
 
@@ -420,6 +425,7 @@ pub const ValidatorStore = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
+        if (validator.is_remote) return error.RemoteSignerRequired;
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
 
@@ -434,6 +440,7 @@ pub const ValidatorStore = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
+        if (validator.is_remote) return error.RemoteSignerRequired;
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
 

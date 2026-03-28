@@ -443,6 +443,9 @@ pub const SyncCommitteeService = struct {
                 const subcommittee_size = SYNC_COMMITTEE_SIZE / SYNC_COMMITTEE_SUBNET_COUNT;
                 const bit_index = sc_idx % subcommittee_size; // position within subcommittee
                 var agg_bits = [_]u8{0} ** @divTrunc(512, 4 * 8); // 16 bytes = 128 bits
+                // Copy BN's aggregated bits (all validators' bits), then set ours.
+                const copy_len = @min(contrib.aggregation_bits.len, 16);
+                @memcpy(agg_bits[0..copy_len], contrib.aggregation_bits[0..copy_len]);
                 agg_bits[bit_index / 8] |= @as(u8, 1) << @intCast(bit_index % 8);
 
                 const contribution_and_proof = consensus_types.altair.ContributionAndProof.Type{
