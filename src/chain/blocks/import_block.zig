@@ -412,3 +412,12 @@ test "EVENTSTREAM_EMIT_RECENT_BLOCK_SLOTS constant" {
 test "FORK_CHOICE_ATT_EPOCH_LIMIT constant" {
     try std.testing.expectEqual(@as(u64, 1), FORK_CHOICE_ATT_EPOCH_LIMIT);
 }
+
+test "getDependentRoot and getDutyDependentRoots: compile-check exported signatures" {
+    // Type-level check only — full test requires a live proto_array.
+    // Verifies that the function signatures are stable and exported.
+    const info = @typeInfo(@TypeOf(getDependentRoot));
+    _ = info;
+    const info2 = @typeInfo(@TypeOf(getDutyDependentRoots));
+    _ = info2;
+}
