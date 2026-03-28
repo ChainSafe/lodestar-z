@@ -136,6 +136,12 @@ pub const EpochCache = struct {
 
     epoch: Epoch,
 
+    /// PTC for current epoch, computed eagerly at epoch transition.
+    payload_timeliness_committees: ?[preset.SLOTS_PER_EPOCH][preset.PTC_SIZE]ValidatorIndex,
+
+    /// PTC for previous epoch, required for slot N block validating slot N-1 attestations.
+    previous_payload_timeliness_committees: ?[preset.SLOTS_PER_EPOCH][preset.PTC_SIZE]ValidatorIndex,
+
     fn initEffectiveBalanceIncrementsRc(allocator: Allocator, validator_count: usize) !*EffectiveBalanceIncrementsRc {
         var effective_balance_increments = try effectiveBalanceIncrementsInit(allocator, validator_count);
         errdefer effective_balance_increments.deinit();
@@ -878,5 +884,60 @@ pub const EpochCache = struct {
 
     pub fn isPostElectra(self: *const EpochCache) bool {
         return self.epoch >= self.config.chain.ELECTRA_FORK_EPOCH;
+    }
+
+    /// Convert a PayloadAttestation into an IndexedPayloadAttestation by resolving
+    /// aggregation bits against the Payload Timeliness Committee for the attestation's slot.
+    pub fn getPayloadTimelinessCommittee(self: *const EpochCache, slot: Slot) ![]const ValidatorIndex {
+        const epoch = computeEpochAtSlot(slot);
+
+        if (epoch < self.config.GLOAS_FORK_EPOCH) {
+            return error.PtcNotAvailableBeforeGloas;
+        }
+
+        if (epoch == self.epoch) {
+            if (self.payload_timeliness_committees) |*committees| {
+                return &committees[slot % preset.SLOTS_PER_EPOCH];
+            }
+        }
+
+        if (epoch == self.epoch -| 1) {
+            if (self.previous_payload_timeliness_committees) |*committees| {
+                return &committees[slot % preset.SLOTS_PER_EPOCH];
+            }
+        }
+
+        return error.PtcNotAvailableForSlot;
+    }
+
+    pub fn getIndexedPayloadAttestation(
+        self: *const EpochCache,
+        allocator: Allocator,
+        slot: Slot,
+        payload_attestation: *const types.gloas.PayloadAttestation.Type,
+    ) !types.gloas.IndexedPayloadAttestation.Type {
+        const payload_timeliness_committee = try self.getPayloadTimelinessCommittee(slot);
+
+        var attesting_indices = std.ArrayList(ValidatorIndex).init(allocator);
+        errdefer attesting_indices.deinit();
+
+        for (0..payload_timeliness_committee.len) |i| {
+            if (try payload_attestation.aggregation_bits.get(i)) {
+                try attesting_indices.append(payload_timeliness_committee[i]);
+            }
+        }
+
+        const sortFn = struct {
+            pub fn sort(_: void, a: ValidatorIndex, b: ValidatorIndex) bool {
+                return a < b;
+            }
+        }.sort;
+        std.mem.sort(ValidatorIndex, attesting_indices.items, {}, sortFn);
+
+        return .{
+            .attesting_indices = attesting_indices.moveToUnmanaged(),
+            .data = payload_attestation.data,
+            .signature = payload_attestation.signature,
+        };
     }
 };
