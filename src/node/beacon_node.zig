@@ -291,6 +291,10 @@ pub const BeaconNode = struct {
     // Optional: nil until initialized (e.g. when running without P2P).
     // sync_controller removed — SyncService is the direct entry point.
 
+    // Last known active fork digest — used to detect fork transitions
+    // so we can resubscribe gossip topics under the new fork digest.
+    last_active_fork_digest: [4]u8 = [4]u8{ 0, 0, 0, 0 },
+
     // Sync subsystem components (lazily initialized when P2P starts).
 
     sync_service_inst: ?*SyncService = null,
@@ -1639,8 +1643,35 @@ pub const BeaconNode = struct {
                 };
             }
 
+            // Detect fork transitions: if the active fork digest changed since
+            // the last tick, resubscribe gossip topics under the new digest.
+            {
+                const head_slot = self.head_tracker.head_slot;
+                const current_digest = self.config.forkDigestAtSlot(
+                    head_slot,
+                    self.genesis_validators_root,
+                );
+                if (!std.mem.eql(u8, &current_digest, &self.last_active_fork_digest)) {
+                    if (!std.mem.eql(u8, &self.last_active_fork_digest, &[4]u8{ 0, 0, 0, 0 })) {
+                        // Genuine fork transition — old digest was non-zero.
+                        std.log.info("Fork transition detected at slot {d}: {x:0>8} → {x:0>8}", .{
+                            head_slot,
+                            std.fmt.fmtSliceHexLower(&self.last_active_fork_digest),
+                            std.fmt.fmtSliceHexLower(&current_digest),
+                        });
+                        svc.onForkTransition(current_digest) catch |err| {
+                            std.log.warn("onForkTransition failed: {}", .{err});
+                        };
+                    }
+                    self.last_active_fork_digest = current_digest;
+                }
+            }
+
             // Drain any batch requests queued by the sync tick.
             self.processSyncBatches(io, svc);
+
+            // Drain any by-root requests queued by unknown block sync.
+            self.processSyncByRootRequests(io, svc);
 
             // Update API sync status from the sync service.
             self.updateApiSyncStatus();
@@ -1826,6 +1857,103 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                 req.batch_id, blocks.len,
             });
         }
+    }
+
+    /// Drain pending by-root requests queued by unknown block sync.
+    ///
+    /// For each queued root, dials BeaconBlocksByRoot/2, fetches the block,
+    /// and delivers it to unknown_block_sync.onParentFetched() which triggers
+    /// import and resolution of any waiting orphan children.
+    fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
+        const cb_ctx = self.sync_callback_ctx orelse return;
+
+        while (cb_ctx.pending_by_root_count > 0) {
+            const req = cb_ctx.pending_by_root_requests[0];
+            cb_ctx.pending_by_root_count -= 1;
+            var j: u8 = 0;
+            while (j < cb_ctx.pending_by_root_count) : (j += 1) {
+                cb_ctx.pending_by_root_requests[j] = cb_ctx.pending_by_root_requests[j + 1];
+            }
+
+            const peer_id = req.peerId();
+            const root = req.root;
+            std.log.info("processSyncByRoot: fetching root {x:0>2}{x:0>2}{x:0>2}{x:0>2}... from peer {s}", .{
+                root[0], root[1], root[2], root[3], peer_id,
+            });
+
+            const block_ssz = self.fetchBlockByRoot(io, svc, peer_id, root) catch |err| {
+                std.log.warn("processSyncByRoot: fetch failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
+                    root[0], root[1], root[2], root[3], err,
+                });
+                self.unknown_block_sync.onFetchFailed(root);
+                continue;
+            };
+            defer self.allocator.free(block_ssz);
+
+            self.unknown_block_sync.onParentFetched(root, block_ssz) catch |err| {
+                std.log.warn("processSyncByRoot: onParentFetched error: {}", .{err});
+            };
+        }
+    }
+
+    /// Fetch a single block by root from a peer via BeaconBlocksByRoot/2.
+    ///
+    /// Returns caller-owned SSZ bytes on success.
+    fn fetchBlockByRoot(
+        self: *BeaconNode,
+        io: std.Io,
+        svc: *networking.P2pService,
+        peer_id: []const u8,
+        root: [32]u8,
+    ) ![]u8 {
+        const protocol_id = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
+        const req_resp_encoding = networking.req_resp_encoding;
+
+        var stream = try svc.dialProtocol(io, peer_id, protocol_id);
+
+        // Encode request: one 32-byte root.
+        const wire_request = try req_resp_encoding.encodeRequest(self.allocator, &root);
+        defer self.allocator.free(wire_request);
+
+        var written: usize = 0;
+        while (written < wire_request.len) {
+            written += stream.write(io, wire_request[written..]) catch |err| {
+                std.log.warn("fetchBlockByRoot: write error: {}", .{err});
+                return err;
+            };
+        }
+
+        // Read the first (and only) response chunk.
+        var buf: [1024 * 1024]u8 = undefined;
+        var buf_len: usize = 0;
+
+        while (true) {
+            const n = stream.read(io, buf[buf_len..]) catch |err| {
+                if (buf_len > 0) break;
+                return err;
+            };
+            if (n == 0) break;
+            buf_len += n;
+
+            const decoded = req_resp_encoding.decodeResponseChunk(
+                self.allocator,
+                buf[0..buf_len],
+                true,
+            ) catch |err| {
+                if (err == error.InsufficientData) continue;
+                return err;
+            };
+
+            if (decoded.result != .success) {
+                self.allocator.free(decoded.ssz_bytes);
+                return error.ErrorResponse;
+            }
+
+            // Return the SSZ bytes; caller owns.
+            return decoded.ssz_bytes;
+        }
+
+        return error.NoBlockReturned;
     }
 
     /// Fetch raw blocks by range from a peer, returning BatchBlock slices.
@@ -2416,12 +2544,33 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                     // Import block
                     {
                         defer self.allocator.free(decoded.ssz_bytes);
-                        if (decoded.context_bytes) |ctx| {
-                            std.log.info("BlocksByRange: block {d} ({d} bytes, fork={x:0>2}{x:0>2}{x:0>2}{x:0>2})", .{
-                                blocks_received + 1, decoded.ssz_bytes.len, ctx[0], ctx[1], ctx[2], ctx[3],
-                            });
-                        }
-                        const fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
+                        // Derive fork from context bytes (4-byte fork digest per chunk).
+                        // Fall back to head slot's fork if context bytes are absent.
+                        const fork_seq = blk: {
+                            if (decoded.context_bytes) |ctx| {
+                                std.log.info("BlocksByRange: block {d} ({d} bytes, fork={x:0>2}{x:0>2}{x:0>2}{x:0>2})", .{
+                                    blocks_received + 1, decoded.ssz_bytes.len, ctx[0], ctx[1], ctx[2], ctx[3],
+                                });
+                                // Walk fork list to find which ForkSeq matches this digest.
+                                const gvr = self.genesis_validators_root;
+                                var matched: ?config_mod.ForkSeq = null;
+                                for (self.config.forks_ascending_epoch_order) |fi| {
+                                    const digest = BeaconConfig.computeForkDigest(fi.version, gvr);
+                                    if (std.mem.eql(u8, &digest, &ctx)) {
+                                        matched = fi.fork_seq;
+                                        break;
+                                    }
+                                }
+                                if (matched) |fs| {
+                                    break :blk fs;
+                                } else {
+                                    std.log.warn("BlocksByRange: unknown fork digest {x:0>2}{x:0>2}{x:0>2}{x:0>2}, falling back to head fork", .{ ctx[0], ctx[1], ctx[2], ctx[3] });
+                                    break :blk self.config.forkSeq(self.head_tracker.head_slot);
+                                }
+                            } else {
+                                break :blk self.config.forkSeq(self.head_tracker.head_slot);
+                            }
+                        };
                         const any_signed = AnySignedBeaconBlock.deserialize(
                             self.allocator, .full, fork_seq, decoded.ssz_bytes,
                         ) catch |err| {

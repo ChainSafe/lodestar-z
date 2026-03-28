@@ -24,6 +24,16 @@ pub const PendingBatchRequest = struct {
     }
 };
 
+pub const PendingByRootRequest = struct {
+    root: [32]u8,
+    peer_id_buf: [128]u8,
+    peer_id_len: u8,
+
+    pub fn peerId(self: *const PendingByRootRequest) []const u8 {
+        return self.peer_id_buf[0..self.peer_id_len];
+    }
+};
+
 pub const SyncCallbackCtx = struct {
     // *BeaconNode stored as *anyopaque to avoid circular dependency.
     node: *anyopaque,
@@ -32,6 +42,14 @@ pub const SyncCallbackCtx = struct {
     /// Drained by processSyncBatches() in the main loop.
     pending_requests: [32]PendingBatchRequest = undefined,
     pending_count: u8 = 0,
+
+    /// Pending by-root requests queued by unknown block sync.
+    /// Drained by processSyncBatches() in the main loop.
+    pending_by_root_requests: [32]PendingByRootRequest = undefined,
+    pending_by_root_count: u8 = 0,
+
+    /// Scratch buffer for connected peer IDs (avoids allocation in hot path).
+    peer_id_scratch: [64][]const u8 = undefined,
 
     /// Create a SyncServiceCallbacks that bridges to this context.
     pub fn syncServiceCallbacks(self: *SyncCallbackCtx) SyncServiceCallbacks {
@@ -101,17 +119,49 @@ pub const SyncCallbackCtx = struct {
         });
     }
 
-    fn syncRequestBlockByRoot(_: *anyopaque, _: [32]u8, _: []const u8) void {
-        // TODO: implement block-by-root request via P2P
+    fn syncRequestBlockByRoot(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) void {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        if (ctx.pending_by_root_count >= 32) {
+            std.log.warn("SyncCallbackCtx: by-root queue full, dropping root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                root[0], root[1], root[2], root[3],
+            });
+            return;
+        }
+        var req = PendingByRootRequest{
+            .root = root,
+            .peer_id_buf = undefined,
+            .peer_id_len = @intCast(@min(peer_id.len, 128)),
+        };
+        @memcpy(req.peer_id_buf[0..req.peer_id_len], peer_id[0..req.peer_id_len]);
+        ctx.pending_by_root_requests[ctx.pending_by_root_count] = req;
+        ctx.pending_by_root_count += 1;
+        std.log.debug("SyncCallbackCtx: queued by-root {x:0>2}{x:0>2}{x:0>2}{x:0>2}... for peer {s}", .{
+            root[0], root[1], root[2], root[3], peer_id,
+        });
     }
 
-    fn syncReportPeer(_: *anyopaque, _: []const u8) void {
-        // TODO: integrate with networking peer scoring
+    fn syncReportPeer(ptr: *anyopaque, peer_id: []const u8) void {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
+        const pm = node.peer_manager orelse return;
+        const now_ms: u64 = @intCast(@divFloor(std.time.nanoTimestamp(), std.time.ns_per_ms));
+        _ = pm.reportPeer(peer_id, .mid_tolerance, .sync, now_ms);
+        std.log.debug("SyncCallbackCtx: reported peer {s} for sync misbehavior", .{peer_id});
     }
 
-    fn syncGetConnectedPeers(_: *anyopaque) []const []const u8 {
-        // TODO: return connected peer IDs from networking PeerManager
-        return &.{};
+    fn syncGetConnectedPeers(ptr: *anyopaque) []const []const u8 {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
+        const pm = node.peer_manager orelse return &.{};
+        // getBestPeers may fail (OOM); on failure return empty slice.
+        const peers = pm.getBestPeers(64) catch return &.{};
+        // Extract peer_id strings into the pre-allocated peer_id_scratch buffer.
+        const n = @min(peers.len, ctx.peer_id_scratch.len);
+        for (peers[0..n], 0..) |cp, i| {
+            ctx.peer_id_scratch[i] = cp.peer_id;
+        }
+        node.allocator.free(peers);
+        return ctx.peer_id_scratch[0..n];
     }
 
     fn syncSetGossipEnabled(_: *anyopaque, enabled: bool) void {

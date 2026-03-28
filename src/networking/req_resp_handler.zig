@@ -292,11 +292,17 @@ fn handleBeaconBlocksByRange(
         const payload = try allocator.alloc(u8, block_ssz.len);
         @memcpy(payload, block_ssz);
 
-        // Get fork digest for this block's slot.
-        const slot = request.start_slot + i;
+        // Get fork digest for this block's actual slot.
+        // Blocks may not be at sequential slots (skip slots), so we extract
+        // the actual slot from the SSZ bytes: first 8 bytes of SignedBeaconBlock
+        // are the slot field of the inner BeaconBlock (little-endian u64).
+        const actual_slot = if (block_ssz.len >= 8)
+            std.mem.readInt(u64, block_ssz[0..8], .little)
+        else
+            request.start_slot + i;
         chunks[i] = .{
             .result = .success,
-            .context_bytes = context.getForkDigest(context.ptr, slot),
+            .context_bytes = context.getForkDigest(context.ptr, actual_slot),
             .ssz_payload = payload,
         };
     }
