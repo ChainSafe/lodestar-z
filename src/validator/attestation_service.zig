@@ -394,12 +394,34 @@ pub const AttestationService = struct {
             const src_root_hex = std.fmt.bytesToHex(&att_data_resp.source_root, .lower);
             const tgt_root_hex = std.fmt.bytesToHex(&att_data_resp.target_root, .lower);
 
-            // Encode as SingleAttestation JSON (post-Electra format).
-            // Falls back to aggregation_bits = 1-bit set if committee_length known.
+            // Compute proper SSZ bitlist encoding for aggregation_bits.
+            // SSZ bitlist: data bytes with validator bit set + sentinel bit.
+            const committee_length = dp.duty.committee_length;
+            const validator_committee_index = dp.duty.validator_committee_index;
+            // data_byte_count covers bits 0..committee_length-1
+            const data_byte_count: usize = (committee_length + 7) / 8;
+            // If committee_length is a multiple of 8, sentinel needs an extra byte
+            const ssz_byte_count: usize = if (committee_length % 8 == 0) data_byte_count + 1 else data_byte_count;
+            var agg_bits_buf = [_]u8{0} ** 257; // max committee_length=2048 -> 256+1 bytes
+            const agg_bits = agg_bits_buf[0..ssz_byte_count];
+            // Set the validator's bit position within the committee
+            agg_bits[validator_committee_index / 8] |= @as(u8, 1) << @intCast(validator_committee_index % 8);
+            // Set the SSZ sentinel bit: bit at index committee_length
+            agg_bits[committee_length / 8] |= @as(u8, 1) << @intCast(committee_length % 8);
+            // Hex-encode agg_bits_buf[0..ssz_byte_count] at runtime.
+            var agg_bits_hex_buf = [_]u8{0} ** (257 * 2);
+            for (agg_bits[0..ssz_byte_count], 0..) |byte, i| {
+                const nibbles = "0123456789abcdef";
+                agg_bits_hex_buf[i * 2] = nibbles[(byte >> 4) & 0xF];
+                agg_bits_hex_buf[i * 2 + 1] = nibbles[byte & 0xF];
+            }
+            const agg_bits_hex_slice = agg_bits_hex_buf[0 .. ssz_byte_count * 2];
+
             if (signed_count > 0) try attestations_json.append(',');
             try attestations_json.writer().print(
-                "{{\"aggregation_bits\":\"0x01\",\"data\":{{\"slot\":\"{d}\",\"index\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}},\"signature\":\"0x{s}\"}}",
+                "{{\"aggregation_bits\":\"0x{s}\",\"data\":{{\"slot\":\"{d}\",\"index\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}},\"signature\":\"0x{s}\"}}",
                 .{
+                    agg_bits_hex_slice,
                     slot, dp.duty.committee_index,
                     bbr_hex,
                     att_data_resp.source_epoch, src_root_hex,
@@ -503,10 +525,38 @@ pub const AttestationService = struct {
             const agg_sig_hex = std.fmt.bytesToHex(&aggregate_and_proof.aggregate.signature, .lower);
             var agg_json = std.ArrayList(u8).init(self.allocator);
             defer agg_json.deinit();
+            // Serialize actual aggregation_bits from BN aggregate response (SSZ bitlist).
+            // data.items contains raw data bytes without sentinel; add sentinel byte.
+            var agg_agg_bits_buf: [258]u8 = undefined; // enough for MAX_VALIDATORS_PER_COMMITTEE
+            const agg_bits_bl = &aggregate_attestation.aggregation_bits;
+            const agg_data_bytes = agg_bits_bl.data.items;
+            const agg_bl_bit_len = agg_bits_bl.bit_len;
+            const agg_bl_data_byte_count = (agg_bl_bit_len + 7) / 8;
+            const agg_bl_ssz_byte_count = if (agg_bl_bit_len % 8 == 0) agg_bl_data_byte_count + 1 else agg_bl_data_byte_count;
+            @memset(&agg_agg_bits_buf, 0);
+            if (agg_data_bytes.len > 0) {
+                const copy_len = @min(agg_data_bytes.len, agg_agg_bits_buf.len);
+                @memcpy(agg_agg_bits_buf[0..copy_len], agg_data_bytes[0..copy_len]);
+            }
+            // Set sentinel bit at position agg_bl_bit_len
+            if (agg_bl_ssz_byte_count <= agg_agg_bits_buf.len) {
+                agg_agg_bits_buf[agg_bl_bit_len / 8] |= @as(u8, 1) << @intCast(agg_bl_bit_len % 8);
+            }
+            const agg_agg_bits_ssz = agg_agg_bits_buf[0..agg_bl_ssz_byte_count];
+            // Hex-encode at runtime (bytesToHex requires comptime-known size).
+            var agg_agg_bits_hex_buf = [_]u8{0} ** (258 * 2);
+            for (agg_agg_bits_ssz, 0..) |byte, i| {
+                const nibbles = "0123456789abcdef";
+                agg_agg_bits_hex_buf[i * 2] = nibbles[(byte >> 4) & 0xF];
+                agg_agg_bits_hex_buf[i * 2 + 1] = nibbles[byte & 0xF];
+            }
+            const agg_agg_bits_hex = agg_agg_bits_hex_buf[0 .. agg_bl_ssz_byte_count * 2];
+
             try agg_json.writer().print(
-                "[{{\"message\":{{\"aggregator_index\":\"{d}\",\"aggregate\":{{\"aggregation_bits\":\"0x01\",\"data\":{{\"slot\":\"{d}\",\"index\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}},\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}]",
+                "[{{\"message\":{{\"aggregator_index\":\"{d}\",\"aggregate\":{{\"aggregation_bits\":\"0x{s}\",\"data\":{{\"slot\":\"{d}\",\"index\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}},\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}]",
                 .{
                     dp.duty.validator_index,
+                    agg_agg_bits_hex,
                     agg_data.slot,
                     agg_data.index,
                     agg_bbr_hex,
