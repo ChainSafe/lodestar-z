@@ -72,6 +72,8 @@ pub const SseEvent = chain_types.SseEvent;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 
 const da_mod = @import("data_availability.zig");
+const validator_monitor_mod = @import("validator_monitor.zig");
+const ValidatorMonitor = validator_monitor_mod.ValidatorMonitor;
 const DataAvailabilityManager = da_mod.DataAvailabilityManager;
 
 
@@ -112,6 +114,9 @@ pub const Chain = struct {
 
     // --- SSE event callback (optional, set by BeaconNode) ---
     event_callback: ?EventCallback,
+
+    // --- Validator monitor (optional, set by BeaconNode) ---
+    validator_monitor: ?*ValidatorMonitor = null,
 
     // --- Genesis info ---
     genesis_validators_root: [32]u8,

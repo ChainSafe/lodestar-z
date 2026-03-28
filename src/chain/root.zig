@@ -129,3 +129,8 @@ pub const gossip_block_input = @import("block_input.zig");
 pub const GossipBlockInput = gossip_block_input.GossipBlockInput;
 pub const AvailableBlockInput = gossip_block_input.AvailableBlockInput;
 pub const WaitResult = gossip_block_input.WaitResult;
+// Validator monitor — per-validator on-chain performance tracking
+pub const validator_monitor = @import("validator_monitor.zig");
+pub const ValidatorMonitor = validator_monitor.ValidatorMonitor;
+pub const MonitoredValidator = validator_monitor.MonitoredValidator;
+pub const ValidatorSummary = validator_monitor.ValidatorSummary;

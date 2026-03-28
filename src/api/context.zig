@@ -326,4 +326,17 @@ pub const ApiContext = struct {
     state_regen_callback: ?StateRegenCallback = null,
     /// Optional keymanager callback.
     keymanager: ?KeymanagerCallback = null,
+    /// Optional validator monitor callback. Nil until wired by BeaconNode.init.
+    validator_monitor: ?ValidatorMonitorCallback = null,
+};
+
+// ---------------------------------------------------------------------------
+// Validator monitor callback
+// ---------------------------------------------------------------------------
+
+/// Type-erased callback for querying the validator monitor.
+pub const ValidatorMonitorCallback = struct {
+    ptr: *anyopaque,
+    /// Returns JSON bytes of all monitored validators' summaries. Caller owns.
+    getMonitorStatusFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]const u8,
 };
