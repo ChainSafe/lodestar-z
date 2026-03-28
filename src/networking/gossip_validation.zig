@@ -16,17 +16,16 @@ const consensus_types = @import("consensus_types");
 const phase0 = consensus_types.phase0;
 const preset = @import("preset").preset;
 
-/// Result of validating a gossip message.
+// Import canonical gossip action enum from chain module.
+const chain_gossip = @import("chain").gossip_validation;
+
+/// Type alias for the canonical GossipAction from chain/gossip_validation.zig.
 ///
 /// These correspond to the libp2p gossipsub validation outcomes:
 /// - `accept`: Valid message, propagate to mesh peers.
 /// - `reject`: Invalid message, penalize the sender peer.
 /// - `ignore`: Not invalid but don't propagate (e.g., already seen, not timely).
-pub const ValidationResult = enum {
-    accept,
-    reject,
-    ignore,
-};
+pub const ValidationResult = chain_gossip.GossipAction;
 
 /// An opaque set for tracking already-seen items, keyed by a fixed-size byte array.
 ///

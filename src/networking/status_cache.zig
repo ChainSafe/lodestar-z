@@ -41,7 +41,7 @@ pub const CachedStatus = struct {
 };
 
 /// Chain head information provided when updating the cache.
-pub const ChainHeadInfo = struct {
+pub const StatusInfo = struct {
     fork_digest: ForkDigest,
     finalized_root: Root,
     finalized_epoch: Epoch,
@@ -83,7 +83,7 @@ pub const StatusCache = struct {
     /// Update the cached status from a new chain head.
     ///
     /// Called on each new-head event from the fork choice / chain subsystem.
-    pub fn update(self: *StatusCache, info: ChainHeadInfo) void {
+    pub fn update(self: *StatusCache, info: StatusInfo) void {
         self.acquire();
         defer self.mutex.unlock();
 
@@ -164,7 +164,7 @@ test "StatusCache: initially empty" {
 test "StatusCache: update populates cache" {
     var cache = StatusCache.init();
 
-    const info = ChainHeadInfo{
+    const info = StatusInfo{
         .fork_digest = .{ 0xde, 0xad, 0xbe, 0xef },
         .finalized_root = [_]u8{0xaa} ** 32,
         .finalized_epoch = 100,

@@ -35,12 +35,8 @@ const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const HeadTracker = @import("head_tracker.zig").HeadTracker;
 
-pub const ImportResult = struct {
-    block_root: [32]u8,
-    state_root: [32]u8,
-    slot: u64,
-    epoch_transition: bool,
-};
+const chain_blocks = @import("chain").blocks;
+pub const ImportResult = chain_blocks.ImportResult;
 
 pub const BlockImporter = struct {
     allocator: Allocator,
@@ -148,6 +144,7 @@ pub const BlockImporter = struct {
             .state_root = stfn_result.state_root,
             .slot = block_slot,
             .epoch_transition = is_epoch_transition,
+            .execution_optimistic = false,
         };
     }
 

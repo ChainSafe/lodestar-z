@@ -9,6 +9,9 @@
 
 pub const types = @import("types.zig");
 pub const clock = @import("clock.zig");
+const config_mod = @import("config");
+/// Shared SlotClock (from config) — for simple time queries.
+pub const SlotClock = config_mod.SlotClock;
 pub const api_client = @import("api_client.zig");
 pub const validator_store = @import("validator_store.zig");
 pub const block_service = @import("block_service.zig");
@@ -20,7 +23,7 @@ pub const validator = @import("validator.zig");
 // Convenience re-exports.
 pub const ValidatorClient = validator.ValidatorClient;
 pub const ValidatorConfig = types.ValidatorConfig;
-pub const SlotClock = clock.SlotClock;
+pub const ValidatorSlotTicker = clock.ValidatorSlotTicker;
 pub const BeaconApiClient = api_client.BeaconApiClient;
 pub const ValidatorStore = validator_store.ValidatorStore;
 pub const BlockService = block_service.BlockService;
