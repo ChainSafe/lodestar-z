@@ -316,6 +316,18 @@ pub const P2pService = struct {
         try self.gossip_adapter.subscribeSubnet(topic_type, subnet_id);
     }
 
+    /// Handle a fork transition: migrate all gossip topic subscriptions to the new fork.
+    ///
+    /// Unsubscribes from old fork topics, updates fork digest, and resubscribes to
+    /// all global topics under the new fork digest. The beacon node should call this
+    /// when a fork activates (e.g., at the Electra activation epoch).
+    ///
+    /// After calling this, also resubscribe to active attestation/sync subnets
+    /// via `subscribeSubnet` — those are not handled here.
+    pub fn onForkTransition(self: *Self, new_fork_digest: [4]u8) !void {
+        try self.gossip_adapter.onForkTransition(new_fork_digest);
+    }
+
     /// Gracefully shut down (cancel background fibers, close QUIC engines).
     pub fn stop(self: *Self, io: Io) void {
         self.network.close(io);

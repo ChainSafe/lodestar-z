@@ -77,6 +77,15 @@ pub const SubnetQuery = struct {
 
 // ── Discovery Service ───────────────────────────────────────────────────────
 
+/// ENR cache entry for subnet-targeted queries.
+pub const CachedEnr = struct {
+    node_id: [32]u8,
+    ip: [4]u8,
+    port: u16,
+    attnets: [8]u8,
+    fork_digest: [4]u8,
+};
+
 pub const DiscoveryService = struct {
     allocator: Allocator,
     config: DiscoveryConfig,
@@ -85,6 +94,9 @@ pub const DiscoveryService = struct {
     current_fork_digest: [4]u8,
     discovered_peers: std.ArrayList(DiscoveredPeer),
     pending_subnet_queries: std.ArrayList(SubnetQuery),
+    /// ENR cache for subnet-targeted queries.
+    /// Stores parsed ENR records indexed by node ID (hex string ownership).
+    enr_cache: std.StringHashMap(CachedEnr),
     connected_peers: u32,
     total_lookups: u64,
     total_discovered: u64,
@@ -112,6 +124,7 @@ pub const DiscoveryService = struct {
             .current_fork_digest = config.fork_digest,
             .discovered_peers = .empty,
             .pending_subnet_queries = .empty,
+            .enr_cache = std.StringHashMap(CachedEnr).init(allocator),
             .connected_peers = 0,
             .total_lookups = 0,
             .total_discovered = 0,
@@ -122,6 +135,12 @@ pub const DiscoveryService = struct {
     pub fn deinit(self: *DiscoveryService) void {
         self.discovered_peers.deinit(self.allocator);
         self.pending_subnet_queries.deinit(self.allocator);
+        // Free ENR cache (keys are owned string copies).
+        var iter = self.enr_cache.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.enr_cache.deinit();
         self.protocol.deinit();
     }
 
@@ -228,13 +247,84 @@ pub const DiscoveryService = struct {
         const queries = self.pending_subnet_queries.items;
         if (queries.len == 0) return;
         for (queries) |query| {
-            // TODO: Implement subnet-targeted discovery with ENR attnets filtering.
-            // For now, random lookups provide general peer diversity.
-            log.debug("Subnet query for subnet {d} (min_peers={d}, table scan not yet implemented)", .{
-                query.subnet_id, query.min_peers,
-            });
+            self.findSubnetPeers(query.subnet_id, query.min_peers);
         }
         self.pending_subnet_queries.clearRetainingCapacity();
+    }
+
+    /// Find peers advertising a specific attestation subnet via ENR cache scan.
+    ///
+    /// Scans the ENR cache for nodes that advertise `subnet_id` in their attnets
+    /// field. Advertises when a node has the corresponding bit set in the 8-byte
+    /// attnets bitvector.
+    ///
+    /// If fewer than `min_peers` are found in cache, falls back to a random lookup
+    /// to populate the cache with fresh candidates.
+    fn findSubnetPeers(self: *DiscoveryService, subnet_id: u6, min_peers: u32) void {
+        var found: u32 = 0;
+
+        // Scan ENR cache for nodes with this subnet bit set.
+        // attnets is an 8-byte bitvector; use the helper from enr_mod.
+        var iter = self.enr_cache.iterator();
+        while (iter.next()) |entry| {
+            const cached = entry.value_ptr.*;
+            // Only consider peers on our fork.
+            if (!std.mem.eql(u8, &cached.fork_digest, &self.current_fork_digest)) continue;
+            if (!enr_mod.isSubnetSet(cached.attnets, subnet_id)) continue;
+
+            // This peer advertises our subnet — queue for dialing.
+            self.evaluateCandidate(cached.node_id, blk: {
+                var addr: [6]u8 = undefined;
+                @memcpy(addr[0..4], &cached.ip);
+                addr[4] = @intCast(cached.port >> 8);
+                addr[5] = @intCast(cached.port & 0xff);
+                break :blk addr;
+            }, .subnet_query);
+            found += 1;
+            if (found >= min_peers) break;
+        }
+
+        if (found < min_peers) {
+            log.debug("Subnet {d}: found {d}/{d} peers in cache, falling back to random lookup", .{
+                subnet_id, found, min_peers,
+            });
+            // Do a random lookup to populate the cache with fresh candidates.
+            self.randomLookup();
+        } else {
+            log.debug("Subnet {d}: found {d} candidate peer(s) in ENR cache", .{ subnet_id, found });
+        }
+    }
+
+    /// Record an ENR in the cache for future subnet-targeted queries.
+    ///
+    /// Called when we receive an ENR response from a peer during discovery.
+    /// The ENR is parsed for fork digest and attnets fields.
+    pub fn recordEnr(self: *DiscoveryService, node_id: [32]u8, enr: *const Enr) void {
+        // Only cache ENRs on our fork.
+        const fd = enr.eth2_fork_digest orelse return;
+        if (!std.mem.eql(u8, &fd, &self.current_fork_digest)) return;
+
+        const attnets = enr.attnets orelse [_]u8{0} ** 8;
+        const ip = enr.ip orelse return;
+        const port = enr.quic orelse enr.udp orelse enr.tcp orelse return;
+
+        // Generate a string key from node_id (hex).
+        const key = std.fmt.allocPrint(self.allocator, "{}", .{std.fmt.fmtSliceHexLower(&node_id)}) catch return;
+
+        const gop = self.enr_cache.getOrPut(key) catch {
+            self.allocator.free(key);
+            return;
+        };
+        if (gop.found_existing) {
+            self.allocator.free(key);
+        }
+        gop.value_ptr.* = .{
+            .node_id = node_id,
+            .ip = ip,
+            .port = port,
+            .attnets = attnets,
+            .fork_digest = fd,
+        };
     }
 
     fn evaluateCandidate(self: *DiscoveryService, node_id: NodeId, addr: [6]u8, source: DiscoverySource) void {
@@ -316,6 +406,7 @@ pub const DiscoveryService = struct {
             .total_filtered_out = self.total_filtered_out,
             .queued_peers = self.discovered_peers.items.len,
             .pending_subnet_queries = self.pending_subnet_queries.items.len,
+            .enr_cache_size = self.enr_cache.count(),
             .enr_seq = self.enr_seq,
         };
     }
@@ -329,6 +420,8 @@ pub const DiscoveryStats = struct {
     total_filtered_out: u64,
     queued_peers: usize,
     pending_subnet_queries: usize,
+    /// Number of ENRs cached for subnet-targeted queries.
+    enr_cache_size: usize,
     enr_seq: u64,
 };
 

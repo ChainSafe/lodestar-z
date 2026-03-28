@@ -132,6 +132,48 @@ pub const EthGossipAdapter = struct {
         }
     }
 
+    /// Handle a fork transition by migrating subscriptions to the new fork digest.
+    ///
+    /// When a fork activates, gossip topic strings change because the fork digest
+    /// embedded in each topic string changes. This function:
+    /// 1. Unsubscribes from all topics under the old fork digest
+    /// 2. Updates self.fork_digest to the new value
+    /// 3. Resubscribes to all global topics under the new fork digest
+    ///
+    /// Subnet subscriptions (attestation/sync) are NOT re-subscribed here —
+    /// the subnet service should call subscribeSubnet() for each active subnet
+    /// after the fork transition.
+    ///
+    /// This must be called when the chain transitions to a new fork
+    /// (e.g., Capella → Deneb, Deneb → Electra).
+    pub fn onForkTransition(self: *Self, new_fork_digest: [4]u8) !void {
+        // Unsubscribe from all current topics (old fork digest).
+        for (self.subscribed_topics.items) |topic| {
+            self.gossipsub.unsubscribe(topic) catch |err| {
+                log.warn("Failed to unsubscribe from {s} during fork transition: {}", .{ topic, err });
+            };
+            self.allocator.free(topic);
+        }
+        self.subscribed_topics.clearRetainingCapacity();
+
+        // Update to new fork digest.
+        const old_digest = self.fork_digest;
+        self.fork_digest = new_fork_digest;
+        log.info("Fork transition: {x:0>8} → {x:0>8}", .{
+            std.fmt.fmtSliceHexLower(&old_digest),
+            std.fmt.fmtSliceHexLower(&new_fork_digest),
+        });
+
+        // Resubscribe to global topics under the new fork digest.
+        for (&global_topic_types) |topic_type| {
+            self.subscribeTopicType(topic_type, null) catch |err| {
+                log.warn("Failed to resubscribe to {s} after fork transition: {}", .{
+                    topic_type.topicName(), err,
+                });
+            };
+        }
+    }
+
     /// Subscribe to a specific subnet-indexed topic.
     pub fn subscribeSubnet(
         self: *Self,
