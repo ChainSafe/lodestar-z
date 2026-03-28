@@ -53,6 +53,8 @@ pub const SyncCommitteeService = struct {
     epochs_per_sync_committee_period: u64,
     /// Seconds per slot for sub-slot timing.
     seconds_per_slot: u64,
+    /// Genesis time (Unix seconds) — for correct sub-slot timing (BUG-5 fix).
+    genesis_time_unix_secs: u64,
 
     /// Duties keyed by validator index (valid for the current sync period).
     duties: std.ArrayList(SyncCommitteeDutyWithProofs),
@@ -71,6 +73,7 @@ pub const SyncCommitteeService = struct {
         slots_per_epoch: u64,
         epochs_per_sync_committee_period: u64,
         seconds_per_slot: u64,
+        genesis_time_unix_secs: u64,
     ) SyncCommitteeService {
         return .{
             .allocator = allocator,
@@ -81,6 +84,7 @@ pub const SyncCommitteeService = struct {
             .slots_per_epoch = slots_per_epoch,
             .epochs_per_sync_committee_period = epochs_per_sync_committee_period,
             .seconds_per_slot = seconds_per_slot,
+            .genesis_time_unix_secs = genesis_time_unix_secs,
             .duties = std.ArrayList(SyncCommitteeDutyWithProofs).init(allocator),
             .duties_period = null,
             .doppelganger = null,
@@ -235,33 +239,13 @@ pub const SyncCommitteeService = struct {
             const sc_indices = try self.allocator.dupe(u64, duty.validator_sync_committee_indices);
             errdefer self.allocator.free(sc_indices);
 
-            // Allocate and compute selection proofs for each subcommittee slot.
+            // BUG-8 Fix: Selection proofs must be computed per-slot, not per-epoch.
+            // Store null placeholders here; proofs are computed on-demand in
+            // produceAndPublishContributions() using the actual current slot.
             const proofs = try self.allocator.alloc(?[96]u8, sc_indices.len);
             errdefer self.allocator.free(proofs);
-
-            for (sc_indices, proofs) |sc_idx, *proof| {
-                const subcommittee_index = sc_idx / (SYNC_COMMITTEE_SIZE / SYNC_COMMITTEE_SUBNET_COUNT);
-                // Selection proof: sign(SyncAggregatorSelectionData{slot, subcommittee_index}).
-                // We use epoch start slot as representative; full impl uses the actual slot.
-                const slot = epoch * self.slots_per_epoch;
-                var sel_root: [32]u8 = undefined;
-                signing_mod.syncCommitteeSelectionProofSigningRoot(
-                    self.signing_ctx,
-                    slot,
-                    subcommittee_index,
-                    &sel_root,
-                ) catch |err| {
-                    log.warn("sync selection proof signing root error: {s}", .{@errorName(err)});
-                    proof.* = null;
-                    continue;
-                };
-
-                if (self.validator_store.signSelectionProof(duty.pubkey, sel_root)) |sig| {
-                    proof.* = sig.compress();
-                } else |_| {
-                    proof.* = null;
-                }
-            }
+            @memset(proofs, null); // Will be filled on demand at signing time.
+            // BUG-8 fix: epoch not used here — proofs computed per-slot in produceAndPublishContributions.
 
             try self.duties.append(.{
                 .duty = .{
@@ -296,12 +280,15 @@ pub const SyncCommitteeService = struct {
         const one_third_ns = slot_duration_ns / 3;
         const two_thirds_ns = slot_duration_ns * 2 / 3;
 
+        // BUG-5 Fix: Compute timing using genesis-relative slot start.
+        const genesis_time_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
+        const slot_start_ns = genesis_time_ns + slot * slot_duration_ns;
+
         // Step 1: sign and submit sync committee messages (~1/3 slot).
         {
             const now_ns: u64 = @intCast(std.time.nanoTimestamp());
-            const elapsed_in_slot_ns = now_ns % slot_duration_ns;
-            if (elapsed_in_slot_ns < one_third_ns) {
-                std.Thread.sleep(one_third_ns - elapsed_in_slot_ns);
+            if (now_ns < slot_start_ns + one_third_ns) {
+                std.Thread.sleep(slot_start_ns + one_third_ns - now_ns);
             }
         }
         try self.produceAndPublishMessages(io, slot, &beacon_block_root);
@@ -309,9 +296,8 @@ pub const SyncCommitteeService = struct {
         // Step 2: produce contributions for subcommittees we aggregate (~2/3 slot).
         {
             const now_ns: u64 = @intCast(std.time.nanoTimestamp());
-            const elapsed_in_slot_ns = now_ns % slot_duration_ns;
-            if (elapsed_in_slot_ns < two_thirds_ns) {
-                std.Thread.sleep(two_thirds_ns - elapsed_in_slot_ns);
+            if (now_ns < slot_start_ns + two_thirds_ns) {
+                std.Thread.sleep(slot_start_ns + two_thirds_ns - now_ns);
             }
         }
         try self.produceAndPublishContributions(io, slot, &beacon_block_root);
@@ -332,7 +318,8 @@ pub const SyncCommitteeService = struct {
         for (self.duties.items) |*d| {
             // Compute signing root: sign(beacon_block_root) with DOMAIN_SYNC_COMMITTEE.
             var signing_root: [32]u8 = undefined;
-            signing_mod.syncCommitteeSigningRoot(self.signing_ctx, beacon_block_root, &signing_root) catch |err| {
+            // BUG-6 fix: Pass slot for dynamic fork_version lookup.
+            signing_mod.syncCommitteeSigningRoot(self.signing_ctx, slot, beacon_block_root, &signing_root) catch |err| {
                 log.warn("syncCommitteeSigningRoot error: {s}", .{@errorName(err)});
                 continue;
             };
@@ -376,11 +363,29 @@ pub const SyncCommitteeService = struct {
         beacon_block_root: *const [32]u8,
     ) !void {
         for (self.duties.items) |*dp| {
-            for (dp.duty.validator_sync_committee_indices, dp.selection_proofs) |sc_idx, maybe_proof| {
-                const sel_proof = maybe_proof orelse continue;
-                _ = sel_proof;
-
+            for (dp.duty.validator_sync_committee_indices, dp.selection_proofs) |sc_idx, *cached_proof| {
                 const subcommittee_index = sc_idx / (SYNC_COMMITTEE_SIZE / SYNC_COMMITTEE_SUBNET_COUNT);
+
+                // BUG-8 Fix: Compute selection proof with the ACTUAL current slot (not epoch start).
+                // The spec requires SyncAggregatorSelectionData{slot=current_slot, subcommittee_index}.
+                if (cached_proof.* == null) {
+                    var sel_root: [32]u8 = undefined;
+                    signing_mod.syncCommitteeSelectionProofSigningRoot(
+                        self.signing_ctx,
+                        slot, // use actual slot, not epoch start
+                        subcommittee_index,
+                        &sel_root,
+                    ) catch |err| {
+                        log.warn("sync selection proof signing root error slot={d}: {s}", .{ slot, @errorName(err) });
+                        continue;
+                    };
+                    if (self.validator_store.signSelectionProof(dp.duty.pubkey, sel_root)) |sig| {
+                        cached_proof.* = sig.compress();
+                    } else |_| {
+                        continue;
+                    }
+                }
+                const sel_proof = cached_proof.* orelse continue;
 
                 // 1. Fetch contribution from BN.
                 const contrib = try self.api.produceSyncCommitteeContribution(
@@ -409,7 +414,7 @@ pub const SyncCommitteeService = struct {
                         .aggregation_bits = .{ .data = agg_bits },
                         .signature = contrib.signature,
                     },
-                    .selection_proof = maybe_proof orelse [_]u8{0} ** 96,
+                    .selection_proof = sel_proof,
                 };
 
                 var signing_root: [32]u8 = undefined;
@@ -434,7 +439,7 @@ pub const SyncCommitteeService = struct {
                 };
                 const sig_bytes = sig.compress();
                 const sig_hex = std.fmt.bytesToHex(&sig_bytes, .lower);
-                const sel_hex = std.fmt.bytesToHex(&maybe_proof.?, .lower);
+                const sel_hex = std.fmt.bytesToHex(&sel_proof, .lower);
                 const bbr_hex2 = std.fmt.bytesToHex(beacon_block_root, .lower);
                 const contrib_sig_hex = std.fmt.bytesToHex(&contrib.signature, .lower);
 

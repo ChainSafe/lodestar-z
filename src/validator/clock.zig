@@ -50,6 +50,9 @@ pub const SlotClock = struct {
     epoch_callbacks: [MAX_CALLBACKS]EpochCallback,
     epoch_callback_count: usize,
 
+    /// Shutdown flag — set by requestShutdown(), checked in run() each iteration.
+    shutdown_requested: std.atomic.Value(bool),
+
     pub fn init(
         genesis_time_unix_secs: u64,
         seconds_per_slot: u64,
@@ -63,6 +66,7 @@ pub const SlotClock = struct {
             .slot_callback_count = 0,
             .epoch_callbacks = undefined,
             .epoch_callback_count = 0,
+            .shutdown_requested = std.atomic.Value(bool).init(false),
         };
     }
 
@@ -80,6 +84,13 @@ pub const SlotClock = struct {
     pub fn onEpoch(self: *SlotClock, cb: EpochCallback) void {
         self.epoch_callbacks[self.epoch_callback_count] = cb;
         self.epoch_callback_count += 1;
+    }
+
+    /// Request the run() loop to stop at the next iteration.
+    ///
+    /// Safe to call from any thread (uses atomic store).
+    pub fn requestShutdown(self: *SlotClock) void {
+        self.shutdown_requested.store(true, .seq_cst);
     }
 
     /// Return the current slot number (0-based from genesis).
@@ -129,7 +140,7 @@ pub const SlotClock = struct {
     pub fn run(self: *SlotClock, io: Io) !void {
         var last_slot: u64 = 0;
 
-        while (true) {
+        while (!self.shutdown_requested.load(.seq_cst)) {
             const slot = self.currentSlot();
 
             if (slot > last_slot) {
