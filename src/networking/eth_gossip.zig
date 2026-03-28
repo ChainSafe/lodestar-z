@@ -58,6 +58,17 @@ pub const EthGossipAdapter = struct {
     fork_digest: [4]u8,
     /// Optional peer scorer for tracking validation outcomes.
     peer_scorer: ?*PeerScorer,
+    /// Optional callback invoked for each ACCEPT-validated gossip message.
+    ///
+    /// This is the gossip → beacon node pipeline entry point. When wired, the beacon
+    /// node (or BeaconProcessor) receives validated messages for import/processing.
+    ///
+    /// Signature: fn (ctx: *anyopaque, msg: DecodedGossipMessage) void
+    /// The `ctx` pointer is passed through opaquely; cast it to the concrete type.
+    on_validated_message: ?struct {
+        ctx: *anyopaque,
+        callback: *const fn (ctx: *anyopaque, msg: DecodedGossipMessage) void,
+    },
     /// Tracks which topics we have subscribed to (for cleanup).
     subscribed_topics: std.ArrayListUnmanaged([]const u8),
 
@@ -73,6 +84,7 @@ pub const EthGossipAdapter = struct {
             .validator = validator,
             .fork_digest = fork_digest,
             .peer_scorer = null,
+            .on_validated_message = null,
             .subscribed_topics = .empty,
         };
     }
@@ -80,6 +92,27 @@ pub const EthGossipAdapter = struct {
     /// Attach a peer scorer for tracking validation outcomes.
     pub fn setPeerScorer(self: *Self, scorer: *PeerScorer) void {
         self.peer_scorer = scorer;
+    }
+
+    /// Wire a callback for delivering validated gossip messages to the beacon node.
+    ///
+    /// The callback is called for every ACCEPT-validated message, passing the typed
+    /// `DecodedGossipMessage` to the beacon node for processing (import block,
+    /// enqueue attestation, process exit, etc.).
+    ///
+    /// This is the gossip → beacon node pipeline. Without this, validated messages
+    /// are dropped after validation (correct for mesh scoring, wrong for sync).
+    ///
+    /// Usage (from beacon_node.zig):
+    /// ```zig
+    /// gossip_adapter.setMessageHandler(@ptrCast(self), &beaconNode_onGossipMessage);
+    /// ```
+    pub fn setMessageHandler(
+        self: *Self,
+        ctx: *anyopaque,
+        callback: *const fn (ctx: *anyopaque, msg: DecodedGossipMessage) void,
+    ) void {
+        self.on_validated_message = .{ .ctx = ctx, .callback = callback };
     }
 
     pub fn deinit(self: *Self) void {
@@ -126,11 +159,15 @@ pub const EthGossipAdapter = struct {
     /// 3. Dispatch to per-topic validation
     /// 4. Return validation result + decoded message
     ///
+    /// `from_peer` is the peer that sent this message (for gossipsub scoring feedback).
+    /// Pass null if the sender peer ID is unavailable.
+    ///
     /// Called when gossipsub's `drainEvents()` yields a `message` event.
     pub fn handleMessage(
         self: *Self,
         topic: []const u8,
         data: []const u8,
+        from_peer: ?[]const u8,
     ) HandleMessageResult {
         // 1. Parse the topic string.
         const parsed_topic = gossip_topics.parseTopic(topic) orelse {
@@ -151,22 +188,57 @@ pub const EthGossipAdapter = struct {
         };
 
         // 3. Dispatch to per-topic validation.
-        const validation = self.validateDecoded(parsed_topic, decoded);
+        const validation = self.validateDecoded(parsed_topic, decoded, from_peer);
 
         return .{ .validation = validation, .decoded = decoded };
     }
 
     /// Validate a decoded gossip message using the per-topic validators.
+    ///
+    /// `from_peer` is used to report validation results back to gossipsub for
+    /// mesh scoring — rejected messages penalize the originating peer.
     fn validateDecoded(
         self: *Self,
         parsed_topic: GossipTopic,
         decoded: DecodedGossipMessage,
+        from_peer: ?[]const u8,
     ) ValidationResult {
         const result = self.dispatchValidation(parsed_topic, decoded);
 
-        // Update peer scoring if a scorer is wired.
+        // Update legacy peer scoring if a scorer is wired.
         if (self.peer_scorer) |scorer| {
             scorer.recordValidation(result);
+        }
+
+        // Feed validation result back to gossipsub for mesh scoring.
+        // This is the gossipsub ACCEPT/REJECT feedback loop. Without it, gossipsub
+        // cannot penalize peers who send invalid messages, which is critical for
+        // spam resistance and mesh health.
+        if (from_peer) |peer| {
+            switch (result) {
+                .reject => {
+                    // recordInvalidMessage increments invalid_message_deliveries
+                    // for this peer on this topic, which reduces their P4 score.
+                    var topic_buf: [gossip_topics.MAX_TOPIC_LENGTH]u8 = undefined;
+                    const topic_str = gossip_topics.formatTopic(
+                        &topic_buf,
+                        self.fork_digest,
+                        parsed_topic.topic_type,
+                        parsed_topic.subnet_id,
+                    );
+                    self.gossipsub.router.recordInvalidMessage(peer, topic_str);
+                },
+                .accept, .ignore => {},
+            }
+        }
+
+        // Deliver accepted messages to the beacon node processing pipeline.
+        // This is the gossip → BN handoff. Without this, validated messages are
+        // silently discarded and never imported into the chain.
+        if (result == .accept) {
+            if (self.on_validated_message) |handler| {
+                handler.callback(handler.ctx, decoded);
+            }
         }
 
         return result;
@@ -286,7 +358,7 @@ pub const EthGossipAdapter = struct {
         for (events) |event| {
             switch (event) {
                 .message => |msg| {
-                    const handle_result = self.handleMessage(msg.topic, msg.data);
+                    const handle_result = self.handleMessage(msg.topic, msg.data, msg.from);
                     const topic_copy = try self.allocator.dupe(u8, msg.topic);
                     try results.append(self.allocator, .{
                         .topic = topic_copy,

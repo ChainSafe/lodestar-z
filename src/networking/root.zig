@@ -29,6 +29,9 @@ pub const formatProtocolId = protocol.formatProtocolId;
 pub const decodeRequest = req_resp_encoding.decodeRequest;
 pub const encodeResponseChunk = req_resp_encoding.encodeResponseChunk;
 pub const decodeResponseChunk = req_resp_encoding.decodeResponseChunk;
+pub const decodeResponseChunks = req_resp_encoding.decodeResponseChunks;
+pub const freeDecodedResponseChunks = req_resp_encoding.freeDecodedResponseChunks;
+pub const DecodedResponseChunk = req_resp_encoding.DecodedResponseChunk;
 
 // Req/resp handler re-exports.
 pub const ReqRespContext = req_resp_handler.ReqRespContext;

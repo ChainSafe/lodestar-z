@@ -487,3 +487,53 @@ test "response chunk roundtrip with context bytes and BeaconBlocksByRange" {
     try testing.expectEqual(request.count, decoded_req.count);
     try testing.expectEqual(request.step, decoded_req.step);
 }
+
+/// Decode all response chunks from a complete response wire buffer.
+///
+/// Iterates through the wire bytes, decoding one chunk at a time until all
+/// bytes are consumed. Stops early on the first non-success chunk.
+///
+/// Caller owns the returned slice and each `ssz_bytes` field within it.
+/// Use `freeResponseChunks` to release all memory.
+///
+/// This is used by the outbound request API to parse responses from peers.
+pub fn decodeResponseChunks(
+    allocator: std.mem.Allocator,
+    wire_bytes: []const u8,
+    has_context_bytes: bool,
+    has_multiple_responses: bool,
+) ![]DecodedResponseChunk {
+    var chunks: std.ArrayListUnmanaged(DecodedResponseChunk) = .empty;
+    errdefer {
+        for (chunks.items) |chunk| {
+            allocator.free(chunk.ssz_bytes);
+        }
+        chunks.deinit(allocator);
+    }
+
+    var offset: usize = 0;
+    while (offset < wire_bytes.len) {
+        const chunk = try decodeResponseChunk(allocator, wire_bytes[offset..], has_context_bytes);
+        offset += chunk.bytes_consumed;
+        try chunks.append(allocator, chunk);
+
+        // Single-response protocols (Status, Goodbye, Ping, Metadata) return
+        // exactly one chunk. Stop after reading it.
+        if (!has_multiple_responses) break;
+
+        // Error responses terminate the stream.
+        if (!chunk.result.isSuccess()) break;
+    }
+
+    return chunks.toOwnedSlice(allocator);
+}
+
+/// Free a slice of response chunks allocated by `decodeResponseChunks`.
+///
+/// Frees both the ssz_bytes within each chunk and the slice itself.
+pub fn freeDecodedResponseChunks(allocator: std.mem.Allocator, chunks: []DecodedResponseChunk) void {
+    for (chunks) |chunk| {
+        allocator.free(chunk.ssz_bytes);
+    }
+    allocator.free(chunks);
+}

@@ -142,9 +142,15 @@ fn makeProtocolHandler(
             };
         }
 
-        /// Handle an outbound request: encode SSZ and write to stream.
+        /// Handle an outbound request: encode SSZ, write to stream, decode response.
         ///
-        /// Expects `ctx` to have `ssz_payload: []const u8` (use `&.{}` for zero-body methods).
+        /// Expects `ctx` to optionally have:
+        /// - `ssz_payload: []const u8` — the request body (use `&.{}` for zero-body methods)
+        /// - `on_response: ?struct { ctx: *anyopaque, callback: *const fn(*anyopaque, []const ResponseChunk) void }`
+        ///   — called with parsed response chunks if present. This is how sync gets data back.
+        ///
+        /// The callback (if present) is invoked synchronously before `handleOutbound` returns.
+        /// Chunks are freed after the callback returns; the callback must copy what it needs.
         pub fn handleOutbound(self: *Self, io: Io, stream: anytype, ctx: anytype) !void {
             const ssz_bytes: []const u8 = if (@hasField(@TypeOf(ctx), "ssz_payload"))
                 ctx.ssz_payload
@@ -162,13 +168,38 @@ fn makeProtocolHandler(
                 return err;
             };
 
-            // Read response from peer (for request-response protocols).
+            // Read response from peer.
             const response_wire = readAllFromStream(self.allocator, io, stream, max_request_wire_bytes) catch |err| {
                 log.warn("{s} handleOutbound read response error: {}", .{ id, err });
                 return;
             };
             defer self.allocator.free(response_wire);
-            log.info("{s} handleOutbound: received {d} byte response", .{ id, response_wire.len });
+
+            // Decode the response wire bytes into typed response chunks.
+            // This makes the parsed data available to the caller (sync service, etc.)
+            // rather than silently discarding the response.
+            const chunks = req_resp_encoding.decodeResponseChunks(
+                self.allocator,
+                response_wire,
+                method.hasContextBytes(),
+                method.hasMultipleResponses(),
+            ) catch |err| {
+                log.warn("{s} handleOutbound decode response error: {}", .{ id, err });
+                return;
+            };
+            defer req_resp_encoding.freeDecodedResponseChunks(self.allocator, chunks);
+
+            log.info("{s} handleOutbound: received {d} byte response, {d} chunks", .{
+                id, response_wire.len, chunks.len,
+            });
+
+            // Deliver parsed chunks to the caller via on_response callback if provided.
+            // This is the outbound req/resp API — how sync service gets block/blob data.
+            if (@hasField(@TypeOf(ctx), "on_response")) {
+                if (ctx.on_response) |handler| {
+                    handler.callback(handler.ctx, chunks);
+                }
+            }
         }
 
         // Store method for diagnostics.
