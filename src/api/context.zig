@@ -352,6 +352,23 @@ pub const ApiContext = struct {
     keymanager: ?KeymanagerCallback = null,
     /// Optional validator monitor callback. Nil until wired by BeaconNode.init.
     validator_monitor: ?ValidatorMonitorCallback = null,
+    /// Optional builder relay callback. Nil when builder is not configured.
+    builder: ?BuilderCallback = null,
+};
+
+// ---------------------------------------------------------------------------
+// Builder relay callback
+// ---------------------------------------------------------------------------
+
+/// Type-erased callback for forwarding validator registrations to the builder relay.
+pub const BuilderCallback = struct {
+    ptr: *anyopaque,
+    /// Forward signed validator registrations to the relay. Raw JSON bytes.
+    registerValidatorsFn: *const fn (ptr: *anyopaque, registrations_json: []const u8) anyerror!void,
+
+    pub fn registerValidators(self: *const BuilderCallback, registrations_json: []const u8) !void {
+        return self.registerValidatorsFn(self.ptr, registrations_json);
+    }
 };
 
 // ---------------------------------------------------------------------------

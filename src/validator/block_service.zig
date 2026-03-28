@@ -63,6 +63,9 @@ pub const BlockService = struct {
     syncing_tracker: ?*SyncingTracker,
     /// Slots per epoch (from chain config).
     slots_per_epoch: u64,
+    /// Builder boost factor (from ValidatorConfig). Null = builder disabled.
+    /// When set, the BN is asked for a blinded block; if blinded, use blinded signing path.
+    builder_boost_factor: ?u64,
 
     pub fn init(
         allocator: Allocator,
@@ -70,6 +73,7 @@ pub const BlockService = struct {
         validator_store: *ValidatorStore,
         signing_ctx: SigningContext,
         slots_per_epoch: u64,
+        builder_boost_factor: ?u64,
     ) BlockService {
         return .{
             .allocator = allocator,
@@ -85,6 +89,7 @@ pub const BlockService = struct {
             .doppelganger = null,
             .syncing_tracker = null,
             .slots_per_epoch = slots_per_epoch,
+            .builder_boost_factor = builder_boost_factor,
         };
     }
 
@@ -234,8 +239,10 @@ pub const BlockService = struct {
         const randao_reveal = try self.produceRandaoReveal(duty.pubkey, epoch);
 
         // 2. Request unsigned block from BN as SSZ.
-        //    Using SSZ avoids JSON body_root computation entirely — we deserialize
-        //    the block, compute body_root via hashTreeRoot, and publish as SSZ.
+        //    The v3 endpoint returns an unsigned BeaconBlock as SSZ.
+        //    When builder is enabled, the BN may return a blinded block
+        //    (Eth-Execution-Payload-Blinded: true header) if the builder relay
+        //    provided a better bid than the local execution payload.
         const graffiti: [32]u8 = std.mem.zeroes([32]u8);
         const block_resp = try self.api.produceBlockSsz(io, slot, randao_reveal, graffiti);
         defer self.allocator.free(block_resp.block_ssz);
@@ -296,13 +303,26 @@ pub const BlockService = struct {
         const block_sig = try self.validator_store.signBlock(duty.pubkey, signing_root, slot);
         const sig_bytes = block_sig.compress();
 
-        // 6. Stamp the real signature into the SSZ buffer and publish.
+        // 6. Stamp the real signature into the SSZ buffer.
         //    The signature occupies bytes [4..100) in the SignedBeaconBlock SSZ.
         @memcpy(signed_ssz[4..100], &sig_bytes);
 
-        // 7. Publish as SSZ.
-        try self.api.publishBlockSsz(io, signed_ssz, fork_name);
-        log.info("published block slot={d} validator_index={d} fork={s}", .{ slot, duty.validator_index, fork_name });
+        // 7. Publish: blinded blocks go to /eth/v2/beacon/blinded_blocks;
+        //    full blocks go to /eth/v2/beacon/blocks.
+        if (block_resp.blinded) {
+            // Builder path: submit the signed blinded block.
+            // The BN (or relay) unblunds it and broadcasts.
+            log.info("publishing blinded block slot={d} validator_index={d} fork={s}", .{
+                slot, duty.validator_index, fork_name,
+            });
+            try self.api.publishBlindedBlockSsz(io, signed_ssz, fork_name);
+        } else {
+            // Local execution path: publish the full signed block.
+            try self.api.publishBlockSsz(io, signed_ssz, fork_name);
+        }
+        log.info("published block slot={d} validator_index={d} fork={s} blinded={}", .{
+            slot, duty.validator_index, fork_name, block_resp.blinded,
+        });
 
         // Mark this slot as successfully produced.
         if (self.duties_epoch) |ep| {

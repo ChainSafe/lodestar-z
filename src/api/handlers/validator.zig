@@ -580,9 +580,51 @@ pub fn prepareBeaconProposer(
 ///
 /// MEV-boost validator registration. Forward to builder API if wired.
 pub fn registerValidator(
-    _: *ApiContext,
-    _: []const types.SignedValidatorRegistrationV1,
+    ctx: *ApiContext,
+    registrations: []const types.SignedValidatorRegistrationV1,
 ) !HandlerResult(void) {
-    // TODO: forward to builder API callback when wired.
+    if (ctx.builder) |*builder_cb| {
+        // Serialize registrations to JSON and forward to the relay.
+        const json = serializeRegistrationsToJson(ctx.allocator, registrations) catch |err| {
+            std.log.warn("registerValidator: failed to serialize registrations: {s}", .{@errorName(err)});
+            return .{ .data = {} };
+        };
+        defer ctx.allocator.free(json);
+        builder_cb.registerValidators(json) catch |err| {
+            std.log.warn("registerValidator: builder relay error: {s}", .{@errorName(err)});
+        };
+    }
     return .{ .data = {} };
+}
+
+fn serializeRegistrationsToJson(
+    allocator: std.mem.Allocator,
+    registrations: []const types.SignedValidatorRegistrationV1,
+) ![]const u8 {
+    var buf = std.ArrayList(u8).init(allocator);
+    errdefer buf.deinit();
+    var writer = buf.writer();
+    try writer.writeByte('[');
+    for (registrations, 0..) |r, i| {
+        if (i > 0) try writer.writeByte(',');
+        const fee_hex = std.fmt.bytesToHex(&r.message.fee_recipient, .lower);
+        const pk_hex = std.fmt.bytesToHex(&r.message.pubkey, .lower);
+        const sig_hex = std.fmt.bytesToHex(&r.signature, .lower);
+        const entry = try std.fmt.allocPrint(
+            allocator,
+            "{{\"{s}\":{{\"{s}\":\"0x{s}\",\"{s}\":\"{d}\",\"{s}\":\"{d}\",\"{s}\":\"0x{s}\"}},\"{s}\":\"0x{s}\"}}",
+            .{
+                "message",
+                "fee_recipient", fee_hex,
+                "gas_limit", r.message.gas_limit,
+                "timestamp", r.message.timestamp,
+                "pubkey", pk_hex,
+                "signature", sig_hex,
+            },
+        );
+        defer allocator.free(entry);
+        try writer.writeAll(entry);
+    }
+    try writer.writeByte(']');
+    return buf.toOwnedSlice();
 }

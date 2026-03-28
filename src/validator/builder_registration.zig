@@ -1,0 +1,186 @@
+//! Builder registration service for the Validator Client.
+//!
+//! Sends signed validator registrations to the builder relay once per epoch.
+//! Each registration tells the relay the validator's fee_recipient and gas_limit
+//! preference so it can construct suitable blinded blocks.
+//!
+//! Per the builder spec:
+//!   POST /eth/v1/builder/validators (on the relay directly) OR
+//!   POST /eth/v1/validator/register_validator (on the BN, which forwards)
+//!
+//! TS equivalent: packages/validator/src/services/prepareBeaconProposer.ts
+//!               pollBuilderValidatorRegistration()
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+
+const api_client = @import("api_client.zig");
+const BeaconApiClient = api_client.BeaconApiClient;
+const ValidatorStore = @import("validator_store.zig").ValidatorStore;
+const signing_mod = @import("signing.zig");
+const SigningContext = signing_mod.SigningContext;
+
+const log = std.log.scoped(.builder_registration);
+
+// ---------------------------------------------------------------------------
+// BuilderRegistrationService
+// ---------------------------------------------------------------------------
+
+pub const BuilderRegistrationService = struct {
+    allocator: Allocator,
+    api: *BeaconApiClient,
+    validator_store: *ValidatorStore,
+
+    /// Suggested fee recipient (20 bytes). Set from ValidatorConfig.
+    fee_recipient: [20]u8,
+    /// Default gas limit for all validators.
+    gas_limit: u64,
+
+    pub fn init(
+        allocator: Allocator,
+        api: *BeaconApiClient,
+        validator_store: *ValidatorStore,
+        fee_recipient: [20]u8,
+        gas_limit: u64,
+    ) BuilderRegistrationService {
+        return .{
+            .allocator = allocator,
+            .api = api,
+            .validator_store = validator_store,
+            .fee_recipient = fee_recipient,
+            .gas_limit = gas_limit,
+        };
+    }
+
+    pub fn deinit(_: *BuilderRegistrationService) void {}
+
+    // -----------------------------------------------------------------------
+    // Clock callback
+    // -----------------------------------------------------------------------
+
+    /// Called once per epoch to register validators with the builder relay.
+    ///
+    /// Errors are caught and logged — builder failure must not interrupt
+    /// normal validator operation.
+    pub fn onEpoch(self: *BuilderRegistrationService, io: Io, epoch: u64) void {
+        self.registerValidators(io, epoch) catch |err| {
+            log.err("registerValidators epoch={d} error={s}", .{ epoch, @errorName(err) });
+        };
+    }
+
+    // -----------------------------------------------------------------------
+    // Implementation
+    // -----------------------------------------------------------------------
+
+    fn registerValidators(self: *BuilderRegistrationService, io: Io, epoch: u64) !void {
+        _ = epoch;
+
+        const validators = self.validator_store.validators.items;
+        if (validators.len == 0) {
+            log.debug("no validators — skipping builder registration", .{});
+            return;
+        }
+
+        // Current Unix timestamp (seconds).
+        const timestamp: u64 = @intCast(@max(0, std.time.timestamp()));
+
+        // Build signed registrations.
+        var registrations = try std.ArrayList(RegistrationEntry).initCapacity(
+            self.allocator,
+            validators.len,
+        );
+        defer registrations.deinit();
+
+        for (validators) |v| {
+            if (v.is_remote) {
+                // Remote signers not yet supported for builder registrations.
+                log.warn("skipping builder registration for remote key {}", .{
+                    std.fmt.fmtSliceHexLower(&v.pubkey),
+                });
+                continue;
+            }
+
+            // Compute signing root.
+            var signing_root: [32]u8 = undefined;
+            signing_mod.builderRegistrationSigningRoot(
+                self.fee_recipient,
+                self.gas_limit,
+                timestamp,
+                v.pubkey,
+                &signing_root,
+            ) catch |err| {
+                log.warn("failed to compute builder registration signing root for {}: {s}", .{
+                    std.fmt.fmtSliceHexLower(&v.pubkey),
+                    @errorName(err),
+                });
+                continue;
+            };
+
+            // Sign.
+            const sig = v.secret_key.sign(&signing_root, @import("bls").DST, null) catch |err| {
+                log.warn("failed to sign builder registration for {}: {s}", .{
+                    std.fmt.fmtSliceHexLower(&v.pubkey),
+                    @errorName(err),
+                });
+                continue;
+            };
+            const sig_bytes = sig.compress();
+
+            try registrations.append(.{
+                .pubkey = v.pubkey,
+                .fee_recipient = self.fee_recipient,
+                .gas_limit = self.gas_limit,
+                .timestamp = timestamp,
+                .signature = sig_bytes,
+            });
+        }
+
+        if (registrations.items.len == 0) return;
+
+        // Serialize and POST to BN.
+        const json_body = try serializeRegistrations(self.allocator, registrations.items);
+        defer self.allocator.free(json_body);
+
+        log.debug("registering {d} validators with builder relay", .{registrations.items.len});
+        try self.api.registerValidators(io, json_body);
+        log.info("builder registrations sent: {d} validators", .{registrations.items.len});
+    }
+
+    // -----------------------------------------------------------------------
+    // Serialization
+    // -----------------------------------------------------------------------
+
+    fn serializeRegistrations(allocator: Allocator, entries: []const RegistrationEntry) ![]const u8 {
+        var buf = std.ArrayList(u8).init(allocator);
+        errdefer buf.deinit();
+        var writer = buf.writer();
+
+        try writer.writeByte('[');
+        for (entries, 0..) |e, i| {
+            if (i > 0) try writer.writeByte(',');
+            const fee_hex = std.fmt.bytesToHex(&e.fee_recipient, .lower);
+            const pk_hex = std.fmt.bytesToHex(&e.pubkey, .lower);
+            const sig_hex = std.fmt.bytesToHex(&e.signature, .lower);
+            try writer.print(
+                "{{\"message\":{{\"fee_recipient\":\"0x{s}\",\"gas_limit\":\"{d}\",\"timestamp\":\"{d}\",\"pubkey\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}",
+                .{ fee_hex, e.gas_limit, e.timestamp, pk_hex, sig_hex },
+            );
+        }
+        try writer.writeByte(']');
+
+        return buf.toOwnedSlice();
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Internal types
+// ---------------------------------------------------------------------------
+
+const RegistrationEntry = struct {
+    pubkey: [48]u8,
+    fee_recipient: [20]u8,
+    gas_limit: u64,
+    timestamp: u64,
+    signature: [96]u8,
+};

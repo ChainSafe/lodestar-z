@@ -266,3 +266,50 @@ pub fn attestationSelectionProofSigningRoot(
     try computeDomain(constants.DOMAIN_SELECTION_PROOF, fork_version, ctx.genesis_validators_root, &domain);
     try computeSigningRoot(consensus_types.primitive.Slot, &slot, &domain, out);
 }
+
+// ---------------------------------------------------------------------------
+// Builder registration: sign(ValidatorRegistration)
+// ---------------------------------------------------------------------------
+
+/// SSZ type for ValidatorRegistration (builder spec).
+///
+/// Fields match the builder-spec ValidatorRegistrationV1:
+///   fee_recipient: ExecutionAddress (20 bytes)
+///   gas_limit:     uint64
+///   timestamp:     uint64
+///   pubkey:        BLSPubkey (48 bytes)
+const BuilderValidatorRegistration = @import("ssz").FixedContainerType(struct {
+    fee_recipient: consensus_types.primitive.ExecutionAddress,
+    gas_limit: consensus_types.primitive.Uint64,
+    timestamp: consensus_types.primitive.Uint64,
+    pubkey: consensus_types.primitive.BLSPubkey,
+});
+
+/// Compute the signing root for a ValidatorRegistration (MEV-boost builder API).
+///
+/// Per the builder spec (https://ethereum.github.io/builder-specs/#section/Message-signing):
+///   domain = compute_domain(DOMAIN_APPLICATION_BUILDER, genesis_fork_version=0x00000000,
+///                           genesis_validators_root=0x00...00)
+/// The genesis fork version and genesis validators root are explicitly zero for all chains.
+/// This ensures registrations are portable across forks without confusion.
+///
+/// TS: computeBuilderSigningRoot in packages/validator/src/util/signing.ts
+pub fn builderRegistrationSigningRoot(
+    fee_recipient: [20]u8,
+    gas_limit: u64,
+    timestamp: u64,
+    pubkey: [48]u8,
+    out: *[32]u8,
+) !void {
+    const zero_fork_version = [4]u8{ 0, 0, 0, 0 };
+    const zero_genesis_root = [32]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    var domain: [32]u8 = undefined;
+    try computeDomain(constants.DOMAIN_APPLICATION_BUILDER, zero_fork_version, zero_genesis_root, &domain);
+    const reg: BuilderValidatorRegistration.Type = .{
+        .fee_recipient = fee_recipient,
+        .gas_limit = gas_limit,
+        .timestamp = timestamp,
+        .pubkey = pubkey,
+    };
+    try computeSigningRoot(BuilderValidatorRegistration, &reg, &domain, out);
+}

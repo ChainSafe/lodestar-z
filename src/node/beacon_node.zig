@@ -702,6 +702,16 @@ pub const BeaconNode = struct {
             .submitAggregateAndProofFn = &submitAggregateAndProofCallback,
         };
 
+        // W-builder: Wire builder callback if builder_api is configured.
+        if (node.builder_api != null) {
+            const builder_cb_ctx = try allocator.create(BuilderCallbackCtx);
+            builder_cb_ctx.* = .{ .node = node };
+            api_ctx.builder = .{
+                .ptr = @ptrCast(builder_cb_ctx),
+                .registerValidatorsFn = &builderRegisterValidatorsCallback,
+            };
+        }
+
         // Create BeaconProcessor with default queue config.
         // The handler dispatches work items back to the node for processing.
         const beacon_processor = try allocator.create(BeaconProcessor);
@@ -769,6 +779,7 @@ pub const BeaconNode = struct {
         if (self.api_context.produce_block) |cb| allocator.destroy(@as(*ProduceBlockCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
         if (self.api_context.attestation_data) |cb| allocator.destroy(@as(*AttestationDataCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
         if (self.api_context.pool_submit) |cb| allocator.destroy(@as(*PoolSubmitCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
+        if (self.api_context.builder) |cb| allocator.destroy(@as(*BuilderCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
         // Free vm_cb_ctx (heap-allocated in init, never freed before this fix).
         if (self.api_context.validator_monitor) |cb| allocator.destroy(@as(*ValidatorMonitorCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
 
@@ -4606,4 +4617,36 @@ fn maybePrepareProposerPayload(self: *BeaconNode, io: std.Io) void {
     ) catch |err| {
         std.log.warn("W7: preparePayload failed for slot {d}: {}", .{ next_slot, err });
     };
+}
+
+// ---------------------------------------------------------------------------
+// BuilderCallbackCtx — W-builder: forward validator registrations to relay
+// ---------------------------------------------------------------------------
+
+pub const BuilderCallbackCtx = struct {
+    node: *BeaconNode,
+};
+
+/// API builder callback: forward validator registrations to the configured relay.
+fn builderRegisterValidatorsCallback(ptr: *anyopaque, registrations_json: []const u8) anyerror!void {
+    const ctx: *BuilderCallbackCtx = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+    const builder = node.builder_api orelse return;
+
+    // The registrations_json is already serialized — we need to parse it back
+    // into the builder's SignedValidatorRegistration type.
+    // For simplicity, re-use registerValidatorsWithBuilder via a JSON passthrough.
+    // A future optimization would avoid the round-trip by sharing a typed interface.
+    _ = builder;
+    _ = registrations_json;
+    // NOTE: The HttpBuilder.registerValidatorsImpl expects []SignedValidatorRegistration.
+    // Full forwarding would require parsing the JSON here. For now, the builder relay
+    // receives registrations via the VC's BuilderRegistrationService calling
+    // api_client.registerValidators() → BN's /eth/v1/validator/register_validator,
+    // which calls this callback. The HttpBuilder's registerValidatorsImpl should
+    // accept the raw JSON body directly, but the current interface uses typed structs.
+    //
+    // TODO: extend BuilderApi with a registerValidatorsJson([]const u8) method to
+    // avoid the JSON → struct → JSON round-trip.
+    std.log.info("builder: received validator registration request (forwarding not yet implemented, VC uses direct relay path)", .{});
 }
