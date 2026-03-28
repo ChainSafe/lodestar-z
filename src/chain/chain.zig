@@ -328,19 +328,22 @@ pub const Chain = struct {
         self: *Chain,
         attestation_slot: u64,
         committee_index: u64,
+        beacon_block_root: [32]u8,
         target_root: [32]u8,
         target_epoch: u64,
         validator_index: u64,
         attestation: consensus_types.phase0.Attestation.Type,
     ) !void {
         _ = committee_index;
+        _ = target_root;
 
         // Apply vote weight to fork choice.
         if (self.fork_choice) |fc| {
             fc.onSingleVote(
                 self.allocator,
                 @intCast(validator_index),
-                target_root,
+                attestation_slot,
+                beacon_block_root,
                 target_epoch,
             ) catch |err| {
                 log_mod.logger(.chain).warn("FC onAttestation failed for validator {d} slot {d}: {}", .{

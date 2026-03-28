@@ -115,6 +115,7 @@ pub fn importAttestation(
     try node.chain.importAttestation(
         attestation_slot,
         committee_index,
+        beacon_block_root,
         target_root,
         target_epoch,
         validator_index,
