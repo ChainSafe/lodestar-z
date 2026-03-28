@@ -200,9 +200,13 @@ pub const PingProtocol = makeProtocolHandler(
 );
 
 /// Metadata request (no request body).
+///
+/// Uses /metadata/2/ssz_snappy — post-Altair, peers negotiate v2 which returns
+/// MetadataV2 (includes syncnets field). Using v1 while returning v2 bytes
+/// confuses other clients.
 pub const MetadataProtocol = makeProtocolHandler(
     .metadata,
-    "/eth2/beacon_chain/req/metadata/1/ssz_snappy",
+    "/eth2/beacon_chain/req/metadata/2/ssz_snappy",
 );
 
 /// BeaconBlocksByRange v2 (includes fork-digest context bytes).
@@ -247,7 +251,7 @@ test "eth2_protocols: protocol IDs match spec" {
         PingProtocol.id,
     );
     try testing.expectEqualStrings(
-        "/eth2/beacon_chain/req/metadata/1/ssz_snappy",
+        "/eth2/beacon_chain/req/metadata/2/ssz_snappy",
         MetadataProtocol.id,
     );
     try testing.expectEqualStrings(

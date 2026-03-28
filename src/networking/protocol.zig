@@ -94,6 +94,7 @@ pub const Method = enum {
         return switch (self) {
             .beacon_blocks_by_range => 2,
             .beacon_blocks_by_root => 2,
+            .metadata => 2, // post-Altair: MetadataV2 includes syncnets field
             .data_column_sidecars_by_root => 1,
             .data_column_sidecars_by_range => 1,
             else => 1,

@@ -81,6 +81,9 @@ pub const ReqRespContext = struct {
     getDataColumnByRoot: ?*const fn (ptr: *anyopaque, root: [32]u8, index: u64) ?[]const u8 = null,
     /// Returns data column sidecars for a contiguous slot range. Each element is SSZ bytes.
     getDataColumnsByRange: ?*const fn (ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8 = null,
+    /// Looks up the slot for a block root (for correct fork digest computation).
+    /// Returns null if the root is unknown; callers should use a fallback slot or skip.
+    getSlotByRoot: ?*const fn (ptr: *anyopaque, root: [32]u8) ?u64 = null,
     /// Returns the fork digest (4 bytes) for the given slot.
     getForkDigest: *const fn (ptr: *anyopaque, slot: u64) [4]u8,
     /// Called when a peer sends Goodbye. The reason code indicates why they are disconnecting.
@@ -328,10 +331,13 @@ fn handleBeaconBlocksByRoot(
             const payload = try allocator.alloc(u8, block_ssz.len);
             @memcpy(payload, block_ssz);
 
-            // Use slot 0 as a placeholder — in production, the block's slot would be
-            // extracted from the SSZ to compute the correct fork digest. For now,
-            // we pass the root's first 8 bytes interpreted as a slot hint.
-            const slot = std.mem.readInt(u64, root[0..8], .little);
+            // Look up the block's actual slot for correct fork digest computation.
+            // Falls back to slot 0 (genesis fork) if the context doesn't implement
+            // getSlotByRoot or the root is not found.
+            const slot: u64 = if (context.getSlotByRoot) |get_slot|
+                get_slot(context.ptr, root) orelse 0
+            else
+                0;
             try found.append(allocator, .{
                 .result = .success,
                 .context_bytes = context.getForkDigest(context.ptr, slot),
@@ -430,7 +436,11 @@ fn handleBlobSidecarsByRoot(
             const payload = try allocator.alloc(u8, blob_ssz.len);
             @memcpy(payload, blob_ssz);
 
-            const slot = std.mem.readInt(u64, root[0..8], .little);
+            // Look up the blob's block slot for correct fork digest computation.
+            const slot: u64 = if (context.getSlotByRoot) |get_slot|
+                get_slot(context.ptr, root) orelse 0
+            else
+                0;
             try found.append(allocator, .{
                 .result = .success,
                 .context_bytes = context.getForkDigest(context.ptr, slot),
@@ -481,7 +491,11 @@ fn handleDataColumnSidecarsByRoot(
             const payload = try allocator.alloc(u8, sidecar_ssz.len);
             @memcpy(payload, sidecar_ssz);
 
-            const slot = std.mem.readInt(u64, root[0..8], .little);
+            // Look up the block's actual slot for correct fork digest computation.
+            const slot: u64 = if (context.getSlotByRoot) |get_slot|
+                get_slot(context.ptr, root) orelse 0
+            else
+                0;
             try found.append(allocator, .{
                 .result = .success,
                 .context_bytes = context.getForkDigest(context.ptr, slot),

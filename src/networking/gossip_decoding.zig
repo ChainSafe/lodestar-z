@@ -293,18 +293,53 @@ pub fn decodeFromSszBytes(
         .blob_sidecar => {
             // BlobSidecar is a large container (>128 KB due to the blob field).
             // Extract only the fixed-offset header fields we need for validation.
-            // Layout: index(8) + blob(131072) + kzg_commitment(48) + kzg_proof(48) +
-            //         signed_block_header { signature(96) + header { slot(8) + proposer_index(8) + parent_root(32) + ... } }
-            // signed_block_header offset: 8 + 131072 + 48 + 48 = 131176
-            // header starts after signature: 131176 + 96 = 131272
-            // slot @ 131272, proposer_index @ 131280, parent_root @ 131288
-            const min_size = 131288 + 32; // need through parent_root
+            //
+            // BlobSidecar SSZ layout (Deneb, FIELD_ELEMENTS_PER_BLOB=4096):
+            //   index:              8 bytes  @ offset 0
+            //   blob:          131072 bytes  @ offset 8    (4096 * 32 bytes per field element)
+            //   kzg_commitment:    48 bytes  @ offset 131080
+            //   kzg_proof:         48 bytes  @ offset 131128
+            //   signed_block_header:         @ offset 131176
+            //     BLSSignature:    96 bytes  @ offset 131176 (signature)
+            //     BeaconBlockHeader:          @ offset 131272
+            //       slot:           8 bytes  @ offset 131272
+            //       proposer_index: 8 bytes  @ offset 131280
+            //       parent_root:   32 bytes  @ offset 131288
+            //       state_root:    32 bytes  @ offset 131320
+            //       body_root:     32 bytes  @ offset 131352
+            //
+            // These offsets are derived from SSZ fixed-size field layout.
+            // IMPORTANT: If FIELD_ELEMENTS_PER_BLOB changes (e.g. in future forks),
+            // these offsets must be updated. A compile-time assert guards this.
+            const FIELD_ELEMENTS_PER_BLOB: usize = 4096;
+            const BYTES_PER_FIELD_ELEMENT: usize = 32;
+            const blob_size = FIELD_ELEMENTS_PER_BLOB * BYTES_PER_FIELD_ELEMENT; // 131072
+            const kzg_commitment_size: usize = 48;
+            const kzg_proof_size: usize = 48;
+            const bls_signature_size: usize = 96;
+
+            const signed_block_header_offset = 8 + blob_size + kzg_commitment_size + kzg_proof_size;
+            const beacon_block_header_offset = signed_block_header_offset + bls_signature_size;
+            const slot_offset = beacon_block_header_offset; // slot is first field
+            const proposer_index_offset = slot_offset + 8;
+            const parent_root_offset = proposer_index_offset + 8;
+
+            // Compile-time assertion: verify our computed offsets match what we hardcoded.
+            comptime {
+                std.debug.assert(signed_block_header_offset == 131176);
+                std.debug.assert(beacon_block_header_offset == 131272);
+                std.debug.assert(slot_offset == 131272);
+                std.debug.assert(proposer_index_offset == 131280);
+                std.debug.assert(parent_root_offset == 131288);
+            }
+
+            const min_size = parent_root_offset + 32; // need through parent_root
             if (ssz_bytes.len < min_size) return error.SszDeserializationFailed;
             const index = std.mem.readInt(u64, ssz_bytes[0..8], .little);
-            const slot = std.mem.readInt(u64, ssz_bytes[131272..131280], .little);
-            const proposer_index = std.mem.readInt(u64, ssz_bytes[131280..131288], .little);
+            const slot = std.mem.readInt(u64, ssz_bytes[slot_offset..][0..8], .little);
+            const proposer_index = std.mem.readInt(u64, ssz_bytes[proposer_index_offset..][0..8], .little);
             var parent_root: [32]u8 = undefined;
-            @memcpy(&parent_root, ssz_bytes[131288..131320]);
+            @memcpy(&parent_root, ssz_bytes[parent_root_offset..][0..32]);
             return .{ .blob_sidecar = .{
                 .index = index,
                 .slot = slot,
