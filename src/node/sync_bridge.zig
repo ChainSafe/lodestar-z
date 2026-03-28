@@ -35,8 +35,9 @@ pub const PendingByRootRequest = struct {
 };
 
 pub const SyncCallbackCtx = struct {
-    // *BeaconNode stored as *anyopaque to avoid circular dependency.
-    node: *anyopaque,
+    /// Typed reference to the beacon node. The circular dependency is resolved
+    /// by the lazy import of BeaconNode at the bottom of this file.
+    node: *BeaconNode,
 
     /// Pending batch requests queued by the sync state machine.
     /// Drained by processSyncBatches() in the main loop.
@@ -66,7 +67,7 @@ pub const SyncCallbackCtx = struct {
 
     fn syncImportBlock(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
-        const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
+        const node = ctx.node;
         const allocator = node.allocator;
 
         const fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
@@ -169,7 +170,9 @@ pub const SyncCallbackCtx = struct {
     }
 };
 
-// Imported lazily here to avoid circular dependency — BeaconNode imports
-// sync_bridge.zig, and sync_bridge.zig needs BeaconNode for callbacks.
+// BeaconNode is imported at the bottom to avoid circular dependency:
+// beacon_node.zig imports sync_bridge.zig; sync_bridge.zig needs BeaconNode.
+// Using a forward-reference struct pointer is not yet idiomatic in Zig, so
+// we resolve it lazily via the bottom-of-file import.
 const beacon_node_mod = @import("beacon_node.zig");
 const BeaconNode = beacon_node_mod.BeaconNode;
