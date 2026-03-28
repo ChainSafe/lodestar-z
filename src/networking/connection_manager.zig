@@ -1,6 +1,22 @@
 //! Connection manager: tracks peer connections and enforces limits.
 //!
-//! Responsibilities:
+//! ## DEPRECATED — Use PeerManager (peer_manager.zig) for new code
+//!
+//! This module predates the `PeerManager`/`PeerDB`/`PeerScoreService` rewrite
+//! and uses a simpler model with numeric peer IDs and `PeerScorer` (legacy).
+//!
+//! ## Relationship to PeerManager
+//!
+//! - **ConnectionManager** (this file): legacy system, numeric u64 IDs, uses
+//!   `PeerScorer` (peer_scoring.zig bottom half). Used only by its own tests.
+//! - **PeerManager** (peer_manager.zig): primary system, string peer IDs, uses
+//!   `PeerDB` + `PeerScoreService` + `PeerPrioritization`. This is the correct
+//!   entry point for new beacon node integration.
+//!
+//! ConnectionManager is retained for reference and backward compatibility.
+//! It will be removed once PeerManager is fully wired into the beacon node.
+//!
+//! Responsibilities (legacy):
 //! - Track peer connection states (connecting, connected, disconnecting)
 //! - Enforce maximum peer limit (from --target-peers)
 //! - Prune excess peers (lowest-scored first via PeerScorer)

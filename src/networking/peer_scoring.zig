@@ -600,15 +600,34 @@ test "PeerScoreService: integrated scoring flow" {
     try testing.expectEqual(@as(u64, 1), stats.reqresp_timeout_count);
 }
 
-// ── Legacy PeerScorer (compatibility) ───────────────────────────────────────
+// ── Legacy PeerScorer (DEPRECATED) ────────────────────────────────────────
+//
+// ## Migration path
+//
+// PeerScorer (this section) is the **legacy** scoring system:
+//   - Numeric u64 peer IDs (incompatible with libp2p string peer IDs)
+//   - Simple accept/reject/ignore weights only
+//   - Used by: ConnectionManager (deprecated), EthGossipAdapter (via optional field)
+//
+// PeerScoreService (top of this file) is the **current** scoring system:
+//   - String peer IDs matching PeerDB and PeerManager
+//   - Rich reject reasons (FuturSlot, ParentUnknown, etc.)
+//   - Req/resp outcome tracking with per-protocol severity
+//   - Decay with configurable half-life
+//   - Used by: PeerManager, PeerDB
+//
+// EthGossipAdapter holds an optional `*PeerScorer` field (`peer_scorer`).
+// Once gossip scoring is wired through PeerManager, this field should be
+// removed and EthGossipAdapter should call PeerScoreService via a callback.
+//
+// ConnectionManager also uses PeerScorer. When ConnectionManager is removed,
+// PeerScorer can be removed too.
 
 /// Legacy per-peer scorer using numeric peer IDs.
 ///
-/// Retained for backward compatibility with EthGossipAdapter and ConnectionManager,
-/// which use numeric peer IDs and simple accept/reject/ignore tracking.
-///
-/// New code should use PeerScoreService instead, which provides richer
-/// scoring with reject reasons and req/resp integration.
+/// @deprecated Use PeerScoreService (top of this file) for new code.
+/// This type will be removed once ConnectionManager and the EthGossipAdapter
+/// legacy scorer path are deleted.
 pub const PeerScorer = struct {
     allocator: Allocator,
     scores: std.AutoHashMap(u64, LegacyPeerScore),
