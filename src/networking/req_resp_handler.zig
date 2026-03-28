@@ -294,12 +294,20 @@ fn handleBeaconBlocksByRange(
 
         // Get fork digest for this block's actual slot.
         // Blocks may not be at sequential slots (skip slots), so we extract
-        // the actual slot from the SSZ bytes: first 8 bytes of SignedBeaconBlock
-        // are the slot field of the inner BeaconBlock (little-endian u64).
-        const actual_slot = if (block_ssz.len >= 8)
-            std.mem.readInt(u64, block_ssz[0..8], .little)
-        else
-            request.start_slot + i;
+        // the actual slot from the SSZ bytes.
+        //
+        // SignedBeaconBlock SSZ layout (variable-length container):
+        //   bytes 0..4:   offset to `message` field (u32 LE)
+        //   bytes 4..100: BLS signature (96 bytes)
+        //   bytes offset..: BeaconBlock starts here; slot is first 8 bytes (u64 LE)
+        const actual_slot = blk: {
+            if (block_ssz.len < 4) break :blk request.start_slot + i;
+            const msg_offset = std.mem.readInt(u32, block_ssz[0..4], .little);
+            if (block_ssz.len >= @as(usize, msg_offset) + 8) {
+                break :blk std.mem.readInt(u64, block_ssz[msg_offset..][0..8], .little);
+            }
+            break :blk request.start_slot + i;
+        };
         chunks[i] = .{
             .result = .success,
             .context_bytes = context.getForkDigest(context.ptr, actual_slot),
