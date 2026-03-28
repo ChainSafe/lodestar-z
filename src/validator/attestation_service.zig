@@ -688,7 +688,16 @@ pub const AttestationService = struct {
                     const sentinel_bit = @as(u3, @intCast(7 - @clz(last_byte)));
                     const bit_len = (byte_len - 1) * 8 + sentinel_bit;
                     result.aggregation_bits = try @TypeOf(result.aggregation_bits).fromBitLen(self.allocator, bit_len);
-                    if (byte_len > 1) {
+                    // Copy all data bytes. When byte_len == 1 the single byte holds
+                    // both validator bits and the sentinel; mask out the sentinel bit
+                    // so the bitvector only contains the actual committee bits.
+                    if (byte_len == 1) {
+                        // sentinel_bit tells us which bit is the sentinel; clear it.
+                        const data_byte = last_byte & ~(@as(u8, 1) << sentinel_bit);
+                        if (result.aggregation_bits.data.items.len > 0) {
+                            result.aggregation_bits.data.items[0] = data_byte;
+                        }
+                    } else {
                         @memcpy(result.aggregation_bits.data.items, bytes[0 .. byte_len - 1]);
                     }
                 }

@@ -126,6 +126,9 @@ pub const ValidatorClient = struct {
     // Session stats.
     session_start_ns: u64,
 
+    /// Heap-allocated remote signer (web3signer). Null if not configured.
+    remote_signer: ?*RemoteSigner = null,
+
     // ---------------------------------------------------------------------------
     // Lifecycle
     // ---------------------------------------------------------------------------
@@ -315,6 +318,8 @@ pub const ValidatorClient = struct {
         self.liveness_tracker.deinit();
         self.validator_store.deinit();
         self.api.deinit();
+        // Free the heap-allocated RemoteSigner if web3signer was configured.
+        if (self.remote_signer) |rs| self.allocator.destroy(rs);
     }
 
     /// Request graceful shutdown of the validator client.

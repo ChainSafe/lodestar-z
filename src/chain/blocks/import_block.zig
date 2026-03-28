@@ -194,7 +194,7 @@ pub fn importVerifiedBlock(
             // Sync/API/regen blocks use delay=5 (> ATTESTATION_DUE threshold of 4s)
             // so they do NOT receive proposer boost.
             // TODO: replace with actual wall-clock arrival time tracking.
-            const block_delay_sec: u64 = switch (block_input.source) {
+            const block_delay_sec: u32 = switch (block_input.source) {
                 .gossip => 0, // timely — proposer boost applies
                 else => 5, // late — no proposer boost (threshold is >4s)
             };

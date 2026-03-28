@@ -322,15 +322,9 @@ pub const ValidatorStore = struct {
         defer self.mutex.unlock();
 
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        if (validator.is_remote) {
-            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
-            return rs.sign(io, pubkey, signing_root, .BLOCK_V2) catch |err| {
-                log.warn("remote signer signBlock error={s}", .{@errorName(err)});
-                return err;
-            };
-        }
 
-        // Slashing protection: double-proposal check (persistent DB).
+        // Slashing protection FIRST: applies to both local and remote validators.
+        // Remote signers must not be allowed to bypass the slashing DB.
         const block_allowed = try self.slashing_db.checkAndInsertBlock(pubkey, slot);
         if (!block_allowed) {
             log.warn("slashing protection: refusing to sign block at slot {d}", .{slot});
@@ -340,7 +334,15 @@ pub const ValidatorStore = struct {
         // Also update the in-memory SlashingProtectionRecord for quick reference.
         validator.slashing.last_signed_block_slot = slot;
 
-        // Sign the root.
+        if (validator.is_remote) {
+            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
+            return rs.sign(io, pubkey, signing_root, .BLOCK_V2) catch |err| {
+                log.warn("remote signer signBlock error={s}", .{@errorName(err)});
+                return err;
+            };
+        }
+
+        // Sign the root locally.
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
 
@@ -392,15 +394,9 @@ pub const ValidatorStore = struct {
         defer self.mutex.unlock();
 
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        if (validator.is_remote) {
-            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
-            return rs.sign(io, pubkey, signing_root, .ATTESTATION) catch |err| {
-                log.warn("remote signer signAttestation error={s}", .{@errorName(err)});
-                return err;
-            };
-        }
 
-        // Slashing protection: double-vote / surround vote check (persistent DB).
+        // Slashing protection FIRST: applies to both local and remote validators.
+        // Remote signers must not be allowed to bypass the slashing DB.
         const attest_allowed = try self.slashing_db.checkAndInsertAttestation(pubkey, source_epoch, target_epoch);
         if (!attest_allowed) {
             log.warn("slashing protection: refusing attestation source={d} target={d}", .{ source_epoch, target_epoch });
@@ -410,6 +406,14 @@ pub const ValidatorStore = struct {
         // Also update the in-memory SlashingProtectionRecord for quick reference.
         validator.slashing.last_signed_attestation_source_epoch = source_epoch;
         validator.slashing.last_signed_attestation_target_epoch = target_epoch;
+
+        if (validator.is_remote) {
+            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
+            return rs.sign(io, pubkey, signing_root, .ATTESTATION) catch |err| {
+                log.warn("remote signer signAttestation error={s}", .{@errorName(err)});
+                return err;
+            };
+        }
 
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
