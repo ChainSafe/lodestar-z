@@ -80,12 +80,17 @@ pub const DecodeError = snappy.UncompressError || error{
 };
 
 /// Result of decoding a beacon_block gossip message.
-/// Contains the extracted fields needed for validation without
-/// retaining the full deserialized block.
+/// Contains the extracted fields needed for validation.
+///
+/// `raw_ssz` carries the raw decompressed SSZ bytes of the SignedBeaconBlock.
+/// Ownership is transferred to the recipient: the caller must free `raw_ssz`
+/// when it is no longer needed.  Set to null for non-beacon_block messages.
 pub const DecodedBeaconBlock = struct {
     slot: u64,
     proposer_index: u64,
     parent_root: [32]u8,
+    /// Raw decompressed SSZ bytes.  Caller owns this allocation.
+    raw_ssz: []const u8,
 };
 
 /// Result of decoding a beacon_aggregate_and_proof gossip message.
@@ -242,9 +247,16 @@ pub fn decodeGossipMessage(
 ) DecodeError!DecodedGossipMessage {
     // Step 1: Snappy decompress with per-topic size limit.
     const ssz_bytes = try decompressGossipPayload(allocator, raw_data, maxGossipSize(topic_type));
-    defer allocator.free(ssz_bytes);
 
     // Step 2: Deserialize based on topic type and active fork.
+    // For beacon_block, ownership of ssz_bytes transfers into the returned
+    // DecodedBeaconBlock.raw_ssz field — do NOT free here.
+    // For all other topic types, free after decoding.
+    if (topic_type != .beacon_block) {
+        defer allocator.free(ssz_bytes);
+        return decodeFromSszBytes(allocator, topic_type, ssz_bytes, fork_seq);
+    }
+    // beacon_block: ssz_bytes ownership transferred into raw_ssz — caller frees.
     return decodeFromSszBytes(allocator, topic_type, ssz_bytes, fork_seq);
 }
 
@@ -290,6 +302,9 @@ pub fn decodeFromSszBytes(
                 .slot = slot,
                 .proposer_index = proposer_index,
                 .parent_root = parent_root,
+                // raw_ssz is filled in by decodeGossipMessage after ownership transfer.
+                // When called directly (e.g. from tests), callers must set raw_ssz themselves.
+                .raw_ssz = ssz_bytes,
             } };
         },
         .beacon_aggregate_and_proof => {
@@ -538,10 +553,13 @@ test "decode beacon_block from SSZ bytes" {
     _ = phase0.SignedBeaconBlock.serializeIntoBytes(&block, ssz_buf);
 
     // Decode.
+    // Note: decodeFromSszBytes for beacon_block sets raw_ssz = ssz_bytes (the input slice).
+    // ssz_buf is already freed by the defer above, so we must NOT free raw_ssz separately here.
     const decoded = try decodeFromSszBytes(testing.allocator, .beacon_block, ssz_buf, .phase0);
     try testing.expectEqual(@as(u64, 42), decoded.beacon_block.slot);
     try testing.expectEqual(@as(u64, 7), decoded.beacon_block.proposer_index);
     try testing.expectEqualSlices(u8, &([_]u8{0xAA} ** 32), &decoded.beacon_block.parent_root);
+    // raw_ssz points into ssz_buf which is freed by the defer above — no extra free needed.
 }
 
 test "decode voluntary_exit from SSZ bytes" {
@@ -658,7 +676,9 @@ test "end-to-end: snappy compress then decode beacon_block" {
     defer testing.allocator.free(compressed);
 
     // Full decode pipeline.
+    // raw_ssz is a fresh allocation from decompressGossipPayload — caller must free.
     const decoded = try decodeGossipMessage(testing.allocator, .beacon_block, compressed, .phase0);
+    defer testing.allocator.free(decoded.beacon_block.raw_ssz);
     try testing.expectEqual(@as(u64, 99), decoded.beacon_block.slot);
     try testing.expectEqual(@as(u64, 3), decoded.beacon_block.proposer_index);
 }
