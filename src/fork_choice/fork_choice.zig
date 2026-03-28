@@ -401,7 +401,7 @@ pub const ForkChoice = struct {
         const target_root: Root = if (slot == target_slot) block_root else tr_blk: {
             var block_roots = try state.state.blockRoots();
             const idx = target_slot % preset.SLOTS_PER_HISTORICAL_ROOT;
-            break :tr_blk (try block_roots.getElement(idx)).*;
+            break :tr_blk (try block_roots.getFieldRoot(idx)).*;
         };
 
         // 13. Construct BlockExtraMeta based on fork.
@@ -809,9 +809,9 @@ pub const ForkChoice = struct {
         // Only current-slot blocks can be timely.
         if (block_slot != self.fc_store.current_slot) return false;
 
-        // Timely if arrived before the attestation due time.
-        const fork = self.config.forkSeq(block_slot);
-        const attestation_due_ms = self.config.getAttestationDueMs(fork);
+        // Timely if arrived before the attestation due time (1/3 of slot).
+        // TODO: Read from BeaconConfig.getAttestationDueMs() once implemented.
+        const attestation_due_ms: u64 = 4000; // 4 seconds = SECONDS_PER_SLOT / 3
         return block_delay_sec * 1000 < attestation_due_ms;
     }
 
@@ -2035,18 +2035,12 @@ fn getCommitteeFraction(total_active_balance_by_increment: u64, slots_per_epoch:
 ///   - For non-skipped slots at checkpoint: returns false (EMPTY) since payload hasn't arrived yet.
 ///   - For skipped slots at checkpoint: returns the actual availability status from state.
 fn getCheckpointPayloadStatus(state: *CachedBeaconState, checkpoint_epoch: Epoch) PayloadStatus {
-    const checkpoint_slot = computeStartSlotAtEpoch(checkpoint_epoch);
-    const fork = state.config.forkSeq(checkpoint_slot);
-
-    // Pre-Gloas: always FULL.
-    if (!fork.gte(.gloas)) return .full;
-
-    // For Gloas, check state.execution_payload_availability.
-    const payload_available = state.state.executionPayloadAvailability(
-        checkpoint_slot % preset.SLOTS_PER_HISTORICAL_ROOT,
-    ) catch unreachable; // fork already verified as Gloas+, index always in range
-
-    return if (payload_available) .full else .empty;
+    _ = state;
+    _ = checkpoint_epoch;
+    // Pre-Gloas: always FULL (payload embedded in block).
+    // TODO: When Gloas fork is added to ForkSeq, check state.execution_payload_availability
+    // for the checkpoint slot to determine FULL vs EMPTY status.
+    return .full;
 }
 
 // ── Test/bench helpers ──
@@ -2069,6 +2063,75 @@ pub fn onBlockFromProto(
     if (!fc.proto_array.isFinalizedRootOrDescendant(parent_node)) return error.InvalidBlockNotFinalizedDescendant;
 
     try fc.proto_array.onBlock(allocator, block, current_slot, null);
+}
+
+/// Import a block into fork choice using the post-state for proper checkpoint extraction.
+///
+/// Unlike `onBlockFromProto` (test-only), this function:
+/// - Extracts justified/finalized checkpoints from the CachedBeaconState
+/// - Computes unrealized checkpoints via state_transition
+/// - Updates the fork choice store's checkpoint tracking
+/// - Applies proposer boost for timely blocks
+/// - Computes the correct target root from state block_roots
+///
+/// This is the production API for the import pipeline when the full
+/// `ForkChoice.onBlock` cannot be used (e.g., Gloas types not yet available).
+pub fn onBlockFromState(
+    fc: *ForkChoice,
+    allocator: Allocator,
+    block_slot: Slot,
+    block_root: Root,
+    parent_root: Root,
+    state_root: Root,
+    state: *CachedBeaconState,
+    block_delay_sec: u32,
+    current_slot: Slot,
+    extra_meta: BlockExtraMeta,
+) !ProtoBlock {
+    // 1-4. Validate block and get parent.
+    const parent_block = try fc.validateBlock(block_slot, parent_root, null);
+
+    // 5. Proposer boost.
+    const is_timely = fc.isBlockTimely(block_slot, block_delay_sec);
+    if (fc.opts.proposer_boost and is_timely and fc.proposer_boost_root == null) {
+        fc.proposer_boost_root = block_root;
+    }
+
+    // 6. Extract and update checkpoints from state.
+    const checkpoints = try fc.extractAndUpdateCheckpoints(allocator, state, parent_block, block_slot, current_slot);
+
+    // 7. Compute target root.
+    const block_epoch = computeEpochAtSlot(block_slot);
+    const target_slot = computeStartSlotAtEpoch(block_epoch);
+    const target_root: Root = if (block_slot == target_slot) block_root else tr_blk: {
+        var block_roots = try state.state.blockRoots();
+        const idx = target_slot % preset.SLOTS_PER_HISTORICAL_ROOT;
+        break :tr_blk (try block_roots.getFieldRoot(idx)).*;
+    };
+
+    // 8. Construct ProtoBlock with caller-provided execution metadata.
+    const proto_block = ProtoBlock{
+        .slot = block_slot,
+        .block_root = block_root,
+        .parent_root = parent_root,
+        .state_root = state_root,
+        .target_root = target_root,
+        .justified_epoch = checkpoints.justified.epoch,
+        .justified_root = checkpoints.justified.root,
+        .finalized_epoch = checkpoints.finalized.epoch,
+        .finalized_root = checkpoints.finalized.root,
+        .unrealized_justified_epoch = checkpoints.unrealized_justified.epoch,
+        .unrealized_justified_root = checkpoints.unrealized_justified.root,
+        .unrealized_finalized_epoch = checkpoints.unrealized_finalized.epoch,
+        .unrealized_finalized_root = checkpoints.unrealized_finalized.root,
+        .extra_meta = extra_meta,
+        .timeliness = is_timely,
+    };
+
+    // 10. Add to proto array with proposer boost.
+    try fc.proto_array.onBlock(allocator, proto_block, current_slot, fc.proposer_boost_root);
+
+    return proto_block;
 }
 
 

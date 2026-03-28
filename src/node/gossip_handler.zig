@@ -53,6 +53,20 @@ pub const GossipHandlerError = error{
 /// 1. `create` — allocate and wire callbacks
 /// 2. `onGossipMessage` (or topic-specific methods)
 /// 3. `deinit` — release SeenCache and struct
+/// Heap-allocated attestation data for processor batch processing.
+/// Allocated by gossip handler, freed by processor handler after BLS verification.
+pub const QueuedAttestation = struct {
+    att: gossip_decoding.DecodedAttestation,
+    /// Owned copy of decompressed SSZ bytes for BLS signature verification.
+    ssz_bytes: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *QueuedAttestation) void {
+        self.allocator.free(self.ssz_bytes);
+        self.allocator.destroy(self);
+    }
+};
+
 pub const GossipHandler = struct {
     allocator: Allocator,
 
@@ -308,28 +322,38 @@ pub const GossipHandler = struct {
         );
         try checkAction(action);
 
-        // Phase 1c: BLS signature verification.
+        // Phase 2: Import to fork choice + attestation pool.
+        // When processor is available, defer BLS to batch verification.
+        // Attestations are LIFO-queued and batched for efficient BLS verification.
+        if (self.beacon_processor) |bp| {
+            // Allocate owned copy of decoded attestation + SSZ bytes for the processor.
+            const queued = self.allocator.create(QueuedAttestation) catch return;
+            const ssz_copy = self.allocator.dupe(u8, ssz_bytes) catch {
+                self.allocator.destroy(queued);
+                return;
+            };
+            queued.* = .{
+                .att = att,
+                .ssz_bytes = ssz_copy,
+                .allocator = self.allocator,
+            };
+            bp.ingest(.{ .attestation = .{
+                .peer_id = 0, // TODO: wire real peer_id
+                .message_id = 0,
+                .data = @ptrCast(queued),
+                .subnet_id = 0,
+                .seen_timestamp_ns = 0,
+            } });
+            return;
+        }
+
+        // Phase 1c: BLS signature verification (only for inline processing path).
         // [REJECT] The attestation signature is valid.
         if (self.verifyAttestationSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
                 std.log.warn("Gossip attestation rejected: invalid signature slot={d}", .{att.slot});
                 return GossipHandlerError.ValidationRejected;
             }
-        }
-
-        // Phase 2: Import to fork choice + attestation pool.
-        // When processor is available, enqueue for priority-ordered batch processing.
-        // Attestations are LIFO-queued and batched for BLS verification.
-        if (self.beacon_processor) |bp| {
-            const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
-            bp.ingest(.{ .attestation = .{
-                .peer_id = 0, // TODO: wire real peer_id
-                .message_id = 0,
-                .data = dummy_handle, // TODO: allocate owned copy of decoded attestation
-                .subnet_id = 0,
-                .seen_timestamp_ns = 0,
-            } });
-            return;
         }
 
         // Fallback: inline processing.
