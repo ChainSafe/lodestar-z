@@ -289,9 +289,10 @@ pub fn getPeer(ctx: *ApiContext, peer_id: []const u8) !HandlerResult(types.PeerD
 
     for (entries) |entry| {
         if (std.mem.eql(u8, entry.peer_id, peer_id)) {
+            const owned_peer_id = try ctx.allocator.dupe(u8, entry.peer_id);
             return .{
                 .data = .{
-                    .peer_id = entry.peer_id,
+                    .peer_id = owned_peer_id,
                     .enr = null,
                     .last_seen_p2p_address = "",
                     .state = entry.state,
