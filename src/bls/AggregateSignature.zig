@@ -91,10 +91,7 @@ test aggregateWithRandomness {
     defer allocator.free(scratch);
 
     var prng = std.Random.DefaultPrng.init(blk: {
-        var seed: u64 = undefined;
-        var stack_dummy: u8 = 0;
-        seed = @truncate(@intFromPtr(&stack_dummy));
-        break :blk seed;
+        break :blk 0xDEADBEEF_CAFEBABE;
     });
     const rand = prng.random();
     std.Random.bytes(rand, &msgs[0]);

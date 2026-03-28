@@ -286,11 +286,13 @@ pub const GlobalLogger = struct {
     fn writeJson(w: *std.Io.Writer, level: Level, module: Module, comptime fmt: []const u8, args: anytype) void {
         w.writeAll("{") catch {};
         writeTimestampJson(w);
-        w.print(",\"level\":\"{s}\",\"module\":\"{s}\",\"msg\":\"{s}\"", .{
+        w.print(",\"level\":\"{s}\",\"module\":\"{s}\",\"msg\":\"", .{
             level.asJsonText(),
             module.asText(),
-            fmt,
         }) catch {};
+        // fmt is comptime but may contain backslashes/quotes; escape for valid JSON
+        writeJsonEscaped(w, fmt);
+        w.writeAll("\"") catch {};
         writeContextJson(w, args);
         w.writeAll("}\n") catch {};
     }
@@ -303,7 +305,10 @@ pub const GlobalLogger = struct {
             level.asJsonText(),
             module.asText(),
         }) catch {};
-        w.print(fmt, args) catch {};
+        // Format msg into temporary buffer, then escape for valid JSON
+        var msg_buf: [4096]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, fmt, args) catch fmt;
+        writeJsonEscaped(w, msg);
         w.writeAll("\"}\n") catch {};
     }
 
@@ -461,6 +466,21 @@ pub const GlobalLogger = struct {
         }
     }
 
+    /// Write a string with JSON escaping for special characters.
+    fn writeJsonEscaped(w: *std.Io.Writer, s: []const u8) void {
+        for (s) |c| switch (c) {
+            '"' => w.writeAll("\\\"") catch {},
+            '\\' => w.writeAll("\\\\") catch {},
+            '\n' => w.writeAll("\\n") catch {},
+            '\r' => w.writeAll("\\r") catch {},
+            '\t' => w.writeAll("\\t") catch {},
+            else => if (c < 0x20)
+                w.print("\\u{x:0>4}", .{c}) catch {}
+            else
+                w.writeByte(c) catch {},
+        };
+    }
+
     /// Write a byte slice as 0x-prefixed hex, truncated to first 4 bytes (8 hex chars).
     fn writeHexTruncated(w: *std.Io.Writer, bytes: []const u8) void {
         w.writeAll("0x") catch {};
@@ -544,8 +564,8 @@ pub const FileTransport = struct {
     pub fn init(path: []const u8, level: Level, rotation: RotationConfig) !FileTransport {
         const fd = try openLogFd(path);
         // Seek to end to get current size
-        const size = std.os.linux.lseek(fd, 0, std.os.linux.SEEK.END);
-        const bytes_written: u64 = if (@as(isize, @bitCast(size)) >= 0) @bitCast(size) else 0;
+        const size = std.posix.lseek_END_get(fd, 0) catch 0;
+        const bytes_written: u64 = @intCast(@max(0, size));
 
         return .{
             .fd = fd,
@@ -574,7 +594,7 @@ pub const FileTransport = struct {
         w.writeAll("\n") catch {};
 
         const written = w.getWritten();
-        _ = std.os.linux.write(@intCast(self.fd), written.ptr, written.len);
+        _ = std.posix.write(self.fd, written) catch {};
         self.bytes_written += written.len;
     }
 
@@ -594,7 +614,7 @@ pub const FileTransport = struct {
         w.writeAll("\n") catch {};
 
         const written = w.getWritten();
-        _ = std.os.linux.write(@intCast(self.fd), written.ptr, written.len);
+        _ = std.posix.write(self.fd, written) catch {};
         self.bytes_written += written.len;
     }
 
@@ -614,7 +634,7 @@ pub const FileTransport = struct {
 
     fn performRotation(self: *FileTransport, now: Date) void {
         // Close current fd
-        _ = std.os.linux.close(@intCast(self.fd));
+        std.posix.close(self.fd);
 
         // Build dated name: path.YYYY-MM-DD
         var dated_buf: [512]u8 = undefined;
@@ -638,57 +658,31 @@ pub const FileTransport = struct {
     }
 
     fn cleanOldFiles(self: *FileTransport) void {
-
         const dir_path = std.fs.path.dirname(self.path) orelse ".";
         const base_name = std.fs.path.basename(self.path);
 
-        // Open directory using raw Linux syscall
-        var dir_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-        if (dir_path.len >= dir_path_buf.len) return;
-        @memcpy(dir_path_buf[0..dir_path.len], dir_path);
-        dir_path_buf[dir_path.len] = 0;
-        const dir_path_z: [*:0]const u8 = dir_path_buf[0..dir_path.len :0];
+        // Open directory using std.fs
+        var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
+        defer dir.close();
 
-        const O = std.os.linux.O;
-        const dir_fd_raw = std.os.linux.openat(
-            std.os.linux.AT.FDCWD,
-            dir_path_z,
-            @bitCast(O{ .ACCMODE = .RDONLY, .DIRECTORY = true }),
-            0,
-        );
-        const dir_fd_signed: isize = @bitCast(dir_fd_raw);
-        if (dir_fd_signed < 0) return;
-        const dir_fd: std.posix.fd_t = @intCast(dir_fd_raw);
-        defer _ = std.os.linux.close(dir_fd);
-
-        // Read directory entries using getdents64
+        // Collect matching rotated log filenames
         var names: [256][256]u8 = undefined;
         var name_lens: [256]usize = undefined;
         var name_count: usize = 0;
 
-        var getdents_buf: [4096]u8 = undefined;
-        while (true) {
-            const nread = std.os.linux.getdents64(dir_fd, &getdents_buf, getdents_buf.len);
-            const nread_signed: isize = @bitCast(nread);
-            if (nread_signed <= 0) break;
-
-            var offset: usize = 0;
-            while (offset < nread) {
-                const entry: *align(1) const std.os.linux.dirent64 = @ptrCast(&getdents_buf[offset]);
-                offset += entry.reclen;
-
-                const entry_name = std.mem.sliceTo(&entry.name, 0);
-                if (!std.mem.startsWith(u8, entry_name, base_name)) continue;
-                if (entry_name.len <= base_name.len + 1) continue;
-                if (entry_name[base_name.len] != '.') continue;
-                const suffix = entry_name[base_name.len + 1 ..];
-                if (suffix.len == 10 and suffix[4] == '-' and suffix[7] == '-') {
-                    if (name_count < 256) {
-                        const copy_len = @min(entry_name.len, 256);
-                        @memcpy(names[name_count][0..copy_len], entry_name[0..copy_len]);
-                        name_lens[name_count] = copy_len;
-                        name_count += 1;
-                    }
+        var iter = dir.iterate();
+        while (iter.next() catch null) |entry| {
+            const entry_name = entry.name;
+            if (!std.mem.startsWith(u8, entry_name, base_name)) continue;
+            if (entry_name.len <= base_name.len + 1) continue;
+            if (entry_name[base_name.len] != '.') continue;
+            const suffix = entry_name[base_name.len + 1 ..];
+            if (suffix.len == 10 and suffix[4] == '-' and suffix[7] == '-') {
+                if (name_count < 256) {
+                    const copy_len = @min(entry_name.len, 256);
+                    @memcpy(names[name_count][0..copy_len], entry_name[0..copy_len]);
+                    name_lens[name_count] = copy_len;
+                    name_count += 1;
                 }
             }
         }
@@ -714,18 +708,13 @@ pub const FileTransport = struct {
         // Delete oldest files exceeding max_files
         const to_delete = name_count - self.rotation.max_files;
         for (0..to_delete) |i| {
-            var fname_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-            const fname_len = name_lens[i];
-            if (fname_len >= fname_buf.len) continue;
-            @memcpy(fname_buf[0..fname_len], names[i][0..fname_len]);
-            fname_buf[fname_len] = 0;
-            const fname_z: [*:0]const u8 = fname_buf[0..fname_len :0];
-            _ = std.os.linux.unlinkat(dir_fd, fname_z, 0);
+            const fname = names[i][0..name_lens[i]];
+            dir.deleteFile(fname) catch {};
         }
     }
 
     pub fn close(self: *FileTransport) void {
-        _ = std.os.linux.close(@intCast(self.fd));
+        std.posix.close(self.fd);
     }
 };
 
@@ -736,7 +725,7 @@ pub const RotationConfig = struct {
 };
 
 
-/// Rename a file using raw Linux renameat2.
+/// Rename a file using std.posix.renameat.
 fn renamePath(old_path: []const u8, new_path: []const u8) void {
     var old_buf: [std.fs.max_path_bytes:0]u8 = undefined;
     var new_buf: [std.fs.max_path_bytes:0]u8 = undefined;
@@ -747,31 +736,23 @@ fn renamePath(old_path: []const u8, new_path: []const u8) void {
     new_buf[new_path.len] = 0;
     const old_z: [*:0]const u8 = old_buf[0..old_path.len :0];
     const new_z: [*:0]const u8 = new_buf[0..new_path.len :0];
-    _ = std.os.linux.renameat(
-        std.os.linux.AT.FDCWD, old_z,
-        std.os.linux.AT.FDCWD, new_z,
-    );
+    std.posix.renameatZ(std.posix.AT.FDCWD, old_z, std.posix.AT.FDCWD, new_z) catch {};
 }
 
-/// Open a log file for append using raw Linux syscalls.
+/// Open a log file for append using std.posix.
 fn openLogFd(path: []const u8) !std.posix.fd_t {
-    const O = std.os.linux.O;
-    // Need null-terminated path for openat
     var path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
     if (path.len >= path_buf.len) return error.NameTooLong;
     @memcpy(path_buf[0..path.len], path);
     path_buf[path.len] = 0;
     const path_z: [*:0]const u8 = path_buf[0..path.len :0];
 
-    const fd = std.os.linux.openat(
-        std.os.linux.AT.FDCWD,
-        path_z,
-        @bitCast(O{ .ACCMODE = .WRONLY, .APPEND = true, .CREAT = true }),
-        0o644,
-    );
-    const fd_signed: isize = @bitCast(fd);
-    if (fd_signed < 0) return error.OpenFailed;
-    return @intCast(fd);
+    const flags: std.posix.O = .{
+        .ACCMODE = .WRONLY,
+        .APPEND = true,
+        .CREAT = true,
+    };
+    return std.posix.openatZ(std.posix.AT.FDCWD, path_z, flags, 0o644);
 }
 
 
@@ -1068,13 +1049,8 @@ test "FileTransport basic write" {
 
 test "FileTransport size-based rotation" {
     const tmp_dir = "/tmp/lodestar-z-test-rotation";
-    // Create dir and clean up via raw Linux syscalls
-    {
-        var dir_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-        @memcpy(dir_buf[0..tmp_dir.len], tmp_dir);
-        dir_buf[tmp_dir.len] = 0;
-        _ = std.os.linux.mkdir(dir_buf[0..tmp_dir.len :0], 0o755);
-    }
+    // Create dir (ignore error if already exists)
+    std.fs.makeDirAbsolute(tmp_dir) catch {};
 
     const log_path = tmp_dir ++ "/test.log";
 
@@ -1092,38 +1068,15 @@ test "FileTransport size-based rotation" {
 
     ft.close();
 
-    // Count files using raw Linux getdents64
+    // Count files using std.fs
     var file_count: u32 = 0;
     {
-        var dir_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-        @memcpy(dir_buf[0..tmp_dir.len], tmp_dir);
-        dir_buf[tmp_dir.len] = 0;
-        const O = std.os.linux.O;
-        const dir_fd_raw = std.os.linux.openat(
-            std.os.linux.AT.FDCWD,
-            dir_buf[0..tmp_dir.len :0],
-            @bitCast(O{ .ACCMODE = .RDONLY, .DIRECTORY = true }),
-            0,
-        );
-        const dir_fd_signed: isize = @bitCast(dir_fd_raw);
-        if (dir_fd_signed >= 0) {
-            const dir_fd: std.posix.fd_t = @intCast(dir_fd_raw);
-            defer _ = std.os.linux.close(dir_fd);
-
-            var getdents_buf: [4096]u8 = undefined;
-            while (true) {
-                const nread = std.os.linux.getdents64(dir_fd, &getdents_buf, getdents_buf.len);
-                const nread_s: isize = @bitCast(nread);
-                if (nread_s <= 0) break;
-                var offset: usize = 0;
-                while (offset < nread) {
-                    const entry: *align(1) const std.os.linux.dirent64 = @ptrCast(&getdents_buf[offset]);
-                    offset += entry.reclen;
-                    const name = std.mem.sliceTo(&entry.name, 0);
-                    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-                    file_count += 1;
-                }
-            }
+        var dir = try std.fs.openDirAbsolute(tmp_dir, .{ .iterate = true });
+        defer dir.close();
+        var iter = dir.iterate();
+        while (try iter.next()) |entry| {
+            if (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, "..")) continue;
+            file_count += 1;
         }
     }
     // Should have current file + at least 1 rotated file
@@ -1132,13 +1085,8 @@ test "FileTransport size-based rotation" {
 
 /// Get current wall-clock time as epoch seconds.
 fn getRealtimeSeconds() struct { secs: u64 } {
-    if (@hasDecl(std.os, "linux")) {
-        var ts: std.os.linux.timespec = undefined;
-        const rc = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
-        if (rc == 0) {
-            return .{ .secs = @intCast(ts.sec) };
-        }
-    }
+    const ts = std.time.timestamp();
+    if (ts >= 0) return .{ .secs = @intCast(ts) };
     return .{ .secs = 0 };
 }
 
