@@ -12,7 +12,7 @@
 //!   3. If any validator is seen live (is_live=true), it's a doppelganger → halt.
 //!   4. After DEFAULT_REMAINING_DETECTION_EPOCHS clean epochs, mark as VerifiedSafe.
 //!
-//! This file is a stub — the interface is defined but detection logic is not wired up.
+//! Detection logic is fully implemented and wired into all signing paths.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

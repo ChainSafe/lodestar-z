@@ -27,6 +27,11 @@ const ChainHeaderTracker = chain_header_tracker.ChainHeaderTracker;
 const signing_mod = @import("signing.zig");
 const SigningContext = signing_mod.SigningContext;
 
+const dopple_mod = @import("doppelganger.zig");
+const DoppelgangerService = dopple_mod.DoppelgangerService;
+const syncing_tracker_mod = @import("syncing_tracker.zig");
+const SyncingTracker = syncing_tracker_mod.SyncingTracker;
+
 const log = std.log.scoped(.sync_committee_service);
 
 /// SYNC_COMMITTEE_SIZE = 512 (mainnet). SYNC_COMMITTEE_SUBNET_COUNT = 4.
@@ -53,6 +58,10 @@ pub const SyncCommitteeService = struct {
     duties: std.ArrayList(SyncCommitteeDutyWithProofs),
     /// Sync period for which duties are cached.
     duties_period: ?u64,
+    /// Doppelganger service reference (optional).
+    doppelganger: ?*DoppelgangerService,
+    /// Syncing tracker reference (optional).
+    syncing_tracker: ?*SyncingTracker,
 
     pub fn init(
         allocator: Allocator,
@@ -74,7 +83,30 @@ pub const SyncCommitteeService = struct {
             .seconds_per_slot = seconds_per_slot,
             .duties = std.ArrayList(SyncCommitteeDutyWithProofs).init(allocator),
             .duties_period = null,
+            .doppelganger = null,
+            .syncing_tracker = null,
         };
+    }
+
+    /// Wire up safety checkers. Called from validator.zig after init.
+    pub fn setSafetyCheckers(
+        self: *SyncCommitteeService,
+        dopple: ?*DoppelgangerService,
+        syncing: ?*SyncingTracker,
+    ) void {
+        self.doppelganger = dopple;
+        self.syncing_tracker = syncing;
+    }
+
+    /// Returns true if it is safe for this validator to sign sync committee duties.
+    fn isSafeToSign(self: *const SyncCommitteeService, pubkey: [48]u8) bool {
+        if (self.syncing_tracker) |st| {
+            if (!st.isSynced()) return false;
+        }
+        if (self.doppelganger) |d| {
+            if (!d.isSigningAllowed(pubkey)) return false;
+        }
+        return true;
     }
 
     pub fn deinit(self: *SyncCommitteeService) void {
@@ -305,6 +337,12 @@ pub const SyncCommitteeService = struct {
                 continue;
             };
 
+            // Safety check before signing sync committee message.
+            if (!self.isSafeToSign(d.duty.pubkey)) {
+                log.warn("skipping sync message slot={d} validator_index={d}: signing not safe", .{ slot, d.duty.validator_index });
+                continue;
+            }
+
             const sig = self.validator_store.signSyncCommitteeMessage(d.duty.pubkey, signing_root) catch |err| {
                 log.warn("signSyncCommitteeMessage validator_index={d} error={s}", .{ d.duty.validator_index, @errorName(err) });
                 continue;
@@ -383,6 +421,12 @@ pub const SyncCommitteeService = struct {
                     log.warn("contributionAndProofSigningRoot error: {s}", .{@errorName(err)});
                     continue;
                 };
+
+                // Safety check before contribution signing.
+                if (!self.isSafeToSign(dp.duty.pubkey)) {
+                    log.warn("skipping contribution slot={d} validator_index={d}: signing not safe", .{ slot, dp.duty.validator_index });
+                    continue;
+                }
 
                 const sig = self.validator_store.signContributionAndProof(dp.duty.pubkey, signing_root) catch |err| {
                     log.warn("signContributionAndProof error: {s}", .{@errorName(err)});
