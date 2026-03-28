@@ -54,6 +54,9 @@ const ChainHeaderTracker = chain_header_mod.ChainHeaderTracker;
 const prepare_mod = @import("prepare_beacon_proposer.zig");
 const PrepareBeaconProposerService = prepare_mod.PrepareBeaconProposerService;
 
+const builder_reg_mod = @import("builder_registration.zig");
+const BuilderRegistrationService = builder_reg_mod.BuilderRegistrationService;
+
 const signing_mod = @import("signing.zig");
 const SigningContext = signing_mod.SigningContext;
 
@@ -100,6 +103,8 @@ pub const ValidatorClient = struct {
     attestation_service: AttestationService,
     sync_committee_service: SyncCommitteeService,
     prepare_proposer: PrepareBeaconProposerService,
+    /// Builder registration service — null when builder is not configured.
+    builder_registration: ?BuilderRegistrationService,
     doppelganger: ?DoppelgangerService,
 
     // I/O context — stored so clock callbacks can make HTTP calls.
@@ -162,7 +167,7 @@ pub const ValidatorClient = struct {
         //       These fields must not move after init; the client must be stable.
         //       Pass &vc.api / &vc.validator_store after heap-allocating if needed.
 
-        const block_service = BlockService.init(allocator, &api, &validator_store, signing_ctx, config.slots_per_epoch);
+        const block_service = BlockService.init(allocator, &api, &validator_store, signing_ctx, config.slots_per_epoch, config.builder_boost_factor);
         const attestation_service = AttestationService.init(
             allocator,
             &api,
@@ -190,6 +195,18 @@ pub const ValidatorClient = struct {
             &validator_store,
             ZERO_FEE_RECIPIENT,
         );
+
+        // Initialize builder registration service if builder is configured.
+        const builder_registration: ?BuilderRegistrationService = if (config.builder_url != null)
+            BuilderRegistrationService.init(
+                allocator,
+                &api,
+                &validator_store,
+                config.suggested_fee_recipient,
+                config.gas_limit,
+            )
+        else
+            null;
 
         const doppelganger: ?DoppelgangerService = if (config.doppelganger_protection)
             DoppelgangerService.init(allocator, &api)
@@ -277,6 +294,7 @@ pub const ValidatorClient = struct {
             .attestation_service = attestation_service,
             .sync_committee_service = sync_committee_service,
             .prepare_proposer = prepare_proposer,
+            .builder_registration = builder_registration,
             .doppelganger = doppelganger,
             .io = null,
             .index_tracker = idx_tracker,
@@ -291,6 +309,7 @@ pub const ValidatorClient = struct {
         self.block_service.deinit();
         self.attestation_service.deinit();
         self.sync_committee_service.deinit();
+        if (self.builder_registration) |*br| br.deinit();
         if (self.doppelganger) |*d| d.deinit();
         self.index_tracker.deinit();
         self.liveness_tracker.deinit();
@@ -349,6 +368,10 @@ pub const ValidatorClient = struct {
         self.header_tracker.api = &self.api;
         self.prepare_proposer.api = &self.api;
         self.prepare_proposer.validator_store = &self.validator_store;
+        if (self.builder_registration) |*br| {
+            br.api = &self.api;
+            br.validator_store = &self.validator_store;
+        }
         if (self.doppelganger) |*d| {
             d.api = &self.api;
         }
@@ -395,6 +418,10 @@ pub const ValidatorClient = struct {
         self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochSyncCommitteeService });
 
         self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochPrepareProposer });
+
+        if (self.builder_registration != null) {
+            self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochBuilderRegistration });
+        }
 
         if (self.doppelganger != null) {
             self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochDoppelganger });
@@ -592,6 +619,14 @@ pub const ValidatorClient = struct {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
         const io = self.io orelse return;
         self.prepare_proposer.onEpoch(io, epoch);
+    }
+
+    fn onEpochBuilderRegistration(ctx: *anyopaque, epoch: u64) void {
+        const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
+        const io = self.io orelse return;
+        if (self.builder_registration) |*br| {
+            br.onEpoch(io, epoch);
+        }
     }
 
     fn onEpochDoppelganger(ctx: *anyopaque, epoch: u64) void {

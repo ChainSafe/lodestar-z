@@ -84,3 +84,7 @@ pub const importInterchangeVerified = interchange.importInterchangeVerified;
 // Syncing status tracker — pauses duties when BN is out of sync.
 pub const syncing_tracker = @import("syncing_tracker.zig");
 pub const SyncingTracker = syncing_tracker.SyncingTracker;
+
+// Builder registration service — sends signed validator registrations to the builder relay.
+pub const builder_registration = @import("builder_registration.zig");
+pub const BuilderRegistrationService = builder_registration.BuilderRegistrationService;

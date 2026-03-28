@@ -904,6 +904,36 @@ pub const BeaconApiClient = struct {
         try self.postNoResponse(io, "/eth/v1/validator/prepare_beacon_proposer", registrations_json);
     }
 
+
+    // -----------------------------------------------------------------------
+    // Builder API (forwarded through BN)
+    // -----------------------------------------------------------------------
+
+    /// POST /eth/v1/validator/register_validator
+    ///
+    /// Sends signed validator registrations to the BN, which forwards them
+    /// to the configured MEV-boost relay.
+    pub fn registerValidators(
+        self: *BeaconApiClient,
+        io: Io,
+        registrations_json: []const u8,
+    ) !void {
+        try self.postNoResponse(io, "/eth/v1/validator/register_validator", registrations_json);
+    }
+
+    /// POST /eth/v2/beacon/blinded_blocks with SSZ body.
+    ///
+    /// Publishes a SignedBlindedBeaconBlock as SSZ.
+    /// The builder relay will unblind the block and broadcast it.
+    pub fn publishBlindedBlockSsz(
+        self: *BeaconApiClient,
+        io: Io,
+        signed_block_ssz: []const u8,
+        fork_name: []const u8,
+    ) !void {
+        try self.postSsz(io, "/eth/v2/beacon/blinded_blocks", signed_block_ssz, fork_name);
+    }
+
     // -----------------------------------------------------------------------
     // SSE event stream
     // -----------------------------------------------------------------------

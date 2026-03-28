@@ -150,4 +150,18 @@ pub const ValidatorConfig = struct {
     /// TS: --importKeystores / --slashingProtection flag that feeds into
     ///     SlashingProtectionInterchange.importInterchange().
     interchange_import_path: ?[]const u8 = null,
+    /// Builder relay URL for MEV-boost (null = disabled).
+    /// When set, the VC will register validators and use blinded blocks.
+    /// Example: "http://localhost:18550"
+    builder_url: ?[]const u8 = null,
+    /// Suggested fee recipient address (20 bytes, hex).
+    /// Used when building SignedValidatorRegistration messages.
+    /// Defaults to zero address — operator must override.
+    suggested_fee_recipient: [20]u8 = [_]u8{0} ** 20,
+    /// Default gas limit for builder registrations (default: 30_000_000).
+    gas_limit: u64 = 30_000_000,
+    /// Builder boost factor: percentage advantage given to builder bids.
+    /// 100 = neutral (builder wins if bid >= local). 200 = builder needs 2x.
+    /// Per-spec default is 100. Set null to disable builder path.
+    builder_boost_factor: ?u64 = 100,
 };
