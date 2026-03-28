@@ -186,7 +186,7 @@ const app_spec = cli.app(.{
                     .description = "CORS Access-Control-Allow-Origin header value",
                     .env = "LODESTAR_Z_API_CORS",
                     .group = "api",
-                }, null), // TODO: wire to API server
+                }, null),
 
                 .api_swagger = cli.flag(.{
                     .long = "api-swagger",
@@ -721,6 +721,7 @@ const RunContext = struct {
     node: *BeaconNode,
     api_port: u16,
     api_address: []const u8,
+    api_cors_origin: ?[]const u8,
     p2p_port: u16,
     p2p_host: []const u8,
 };
@@ -762,7 +763,7 @@ fn slotClockLoop(io: Io, node: *BeaconNode) !void {
 }
 
 fn runApiServer(io: Io, ctx: *RunContext) void {
-    ctx.node.startApi(io, ctx.api_address, ctx.api_port) catch |err| {
+    ctx.node.startApi(io, ctx.api_address, ctx.api_port, ctx.api_cors_origin) catch |err| {
         std.log.err("API server failed: {}", .{err});
     };
 }
@@ -908,6 +909,7 @@ fn runBeacon(
         .rest_enabled = opts.rest,
         .rest_port = opts.api_port,
         .rest_address = opts.api_address,
+        .rest_cors_origin = opts.api_cors,
         .execution_urls = &.{opts.execution_urls},
         .jwt_secret_path = opts.jwt_secret,
         .engine_mock = opts.engine_mock,
@@ -1157,6 +1159,7 @@ fn runBeacon(
         .node = node,
         .api_port = opts.api_port,
         .api_address = opts.api_address,
+        .api_cors_origin = opts.api_cors,
         .p2p_port = opts.p2p_port,
         .p2p_host = opts.p2p_host,
     };

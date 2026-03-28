@@ -1396,8 +1396,8 @@ pub const BeaconNode = struct {
     ///
     /// Listens on the configured address:port and dispatches requests
     /// to the Beacon API handlers.
-    pub fn startApi(self: *BeaconNode, io: std.Io, address: []const u8, port: u16) !void {
-        self.http_server = api_mod.HttpServer.init(self.allocator, self.api_context, address, port);
+    pub fn startApi(self: *BeaconNode, io: std.Io, address: []const u8, port: u16, cors_origin: ?[]const u8) !void {
+        self.http_server = api_mod.HttpServer.initWithCors(self.allocator, self.api_context, address, port, cors_origin);
         log.logger(.rest).info("REST API listening", .{});
         try self.http_server.?.serve(io);
     }
