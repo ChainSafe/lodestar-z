@@ -443,3 +443,154 @@ pub const PoolCounts = struct {
     attester_slashings: usize,
     bls_to_execution_changes: usize,
 };
+
+// ---------------------------------------------------------------------------
+// Committee types
+// ---------------------------------------------------------------------------
+
+/// A single beacon committee assignment.
+pub const CommitteeData = struct {
+    /// Committee index within the slot.
+    index: u64,
+    /// Slot the committee is assigned to.
+    slot: u64,
+    /// Sorted list of validator indices in the committee.
+    validators: []const u64,
+};
+
+// ---------------------------------------------------------------------------
+// Sync committee types
+// ---------------------------------------------------------------------------
+
+/// Sync committee composition for a state.
+pub const SyncCommitteeData = struct {
+    /// All validator indices in the sync committee (512 entries).
+    validators: []const u64,
+    /// Subcommittee aggregates (4 groups of 128 validators each).
+    validator_aggregates: []const []const u64,
+};
+
+// ---------------------------------------------------------------------------
+// RANDAO types
+// ---------------------------------------------------------------------------
+
+/// RANDAO mix for a state/epoch.
+pub const RandaoData = struct {
+    randao: [32]u8,
+};
+
+// ---------------------------------------------------------------------------
+// Rewards types
+// ---------------------------------------------------------------------------
+
+/// Proposer reward breakdown for a block.
+pub const BlockRewards = struct {
+    proposer_index: u64,
+    total: u64,
+    attestations: u64,
+    sync_aggregate: u64,
+    proposer_slashings: u64,
+    attester_slashings: u64,
+};
+
+/// Ideal attestation rewards (what a perfect validator would earn).
+pub const IdealAttestationReward = struct {
+    effective_balance: u64,
+    head: u64,
+    target: u64,
+    source: u64,
+    inclusion_delay: u64,
+    inactivity: u64,
+};
+
+/// Total attestation rewards for a single validator.
+pub const TotalAttestationReward = struct {
+    validator_index: u64,
+    head: i64,
+    target: i64,
+    source: i64,
+    inclusion_delay: u64,
+    inactivity: i64,
+};
+
+/// Response for attestation rewards.
+pub const AttestationRewardsData = struct {
+    ideal_rewards: []const IdealAttestationReward,
+    total_rewards: []const TotalAttestationReward,
+};
+
+/// Sync committee reward per validator.
+pub const SyncCommitteeReward = struct {
+    validator_index: u64,
+    reward: i64,
+};
+
+// ---------------------------------------------------------------------------
+// Validator liveness types
+// ---------------------------------------------------------------------------
+
+/// Liveness status for a single validator.
+pub const ValidatorLiveness = struct {
+    index: u64,
+    epoch: u64,
+    is_live: bool,
+};
+
+// ---------------------------------------------------------------------------
+// Fork choice debug types
+// ---------------------------------------------------------------------------
+
+/// A single node in the fork choice tree.
+pub const ForkChoiceNode = struct {
+    slot: u64,
+    block_root: [32]u8,
+    parent_root: ?[32]u8,
+    justified_epoch: u64,
+    finalized_epoch: u64,
+    weight: u64,
+    validity: []const u8,
+    execution_block_hash: [32]u8,
+};
+
+/// Full fork choice dump.
+pub const ForkChoiceDump = struct {
+    justified_checkpoint: CheckpointData,
+    finalized_checkpoint: CheckpointData,
+    fork_choice_nodes: []const ForkChoiceNode,
+};
+
+// ---------------------------------------------------------------------------
+// Peer (individual lookup)
+// ---------------------------------------------------------------------------
+
+/// Extended peer info for GET /eth/v1/node/peers/{peer_id}
+pub const PeerDetail = struct {
+    peer_id: []const u8,
+    enr: ?[]const u8,
+    last_seen_p2p_address: []const u8,
+    state: PeerState,
+    direction: PeerDirection,
+};
+
+// ---------------------------------------------------------------------------
+// Validator registration types (MEV-boost)
+// ---------------------------------------------------------------------------
+
+/// Fee recipient registration.
+pub const ProposerPreparation = struct {
+    validator_index: u64,
+    fee_recipient: [20]u8,
+};
+
+/// Validator registration for MEV-boost.
+pub const ValidatorRegistrationV1 = struct {
+    fee_recipient: [20]u8,
+    gas_limit: u64,
+    timestamp: u64,
+    pubkey: [48]u8,
+};
+
+pub const SignedValidatorRegistrationV1 = struct {
+    message: ValidatorRegistrationV1,
+    signature: [96]u8,
+};

@@ -165,3 +165,45 @@ test "getHeads returns single head entry" {
     try std.testing.expectEqual(tc.ctx.head_tracker.head_slot, result.data[0].slot);
     try std.testing.expectEqual(tc.ctx.head_tracker.head_root, result.data[0].root);
 }
+
+// ---------------------------------------------------------------------------
+// Fork choice debug endpoint
+// ---------------------------------------------------------------------------
+
+/// GET /eth/v1/debug/fork_choice
+///
+/// Returns the full fork choice tree for debugging.
+/// Stub until the fork-choice store is wired into the API context.
+pub fn getForkChoice(ctx: *ApiContext) !HandlerResult(types.ForkChoiceDump) {
+    // TODO: query fork-choice store via a callback.
+    // For now return a single-node tree representing the current head.
+    const nodes = try ctx.allocator.alloc(types.ForkChoiceNode, 1);
+    nodes[0] = .{
+        .slot = ctx.head_tracker.head_slot,
+        .block_root = ctx.head_tracker.head_root,
+        .parent_root = null,
+        .justified_epoch = ctx.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
+        .finalized_epoch = ctx.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH,
+        .weight = 0,
+        .validity = "valid",
+        .execution_block_hash = [_]u8{0} ** 32,
+    };
+
+    const justified_epoch = ctx.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH;
+    const finalized_epoch = ctx.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH;
+
+    return .{
+        .data = .{
+            .justified_checkpoint = .{
+                .epoch = justified_epoch,
+                .root = ctx.head_tracker.justified_root,
+            },
+            .finalized_checkpoint = .{
+                .epoch = finalized_epoch,
+                .root = ctx.head_tracker.finalized_root,
+            },
+            .fork_choice_nodes = nodes,
+        },
+        .meta = .{},
+    };
+}

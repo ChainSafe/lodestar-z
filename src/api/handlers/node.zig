@@ -271,3 +271,30 @@ test "getPeerCount returns real counts from callback" {
     try std.testing.expectEqual(@as(u64, 3), resp.data.disconnected);
     try std.testing.expectEqual(@as(u64, 1), resp.data.connecting);
 }
+
+/// GET /eth/v1/node/peers/{peer_id}
+///
+/// Returns info about a specific peer.
+pub fn getPeer(ctx: *ApiContext, peer_id: []const u8) !HandlerResult(types.PeerDetail) {
+    const cb = ctx.peer_db orelse return error.PeerNotFound;
+
+    const entries = try cb.getConnectedPeersFn(cb.ptr, ctx.allocator);
+    defer ctx.allocator.free(entries);
+
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.peer_id, peer_id)) {
+            return .{
+                .data = .{
+                    .peer_id = entry.peer_id,
+                    .enr = null,
+                    .last_seen_p2p_address = "",
+                    .state = entry.state,
+                    .direction = entry.direction,
+                },
+                .meta = .{},
+            };
+        }
+    }
+
+    return error.PeerNotFound;
+}

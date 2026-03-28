@@ -1213,3 +1213,318 @@ fn parsePubkey(hex: []const u8) ![48]u8 {
 fn parseAddress(hex: []const u8) ![20]u8 {
     return parseHexBytes(20, hex);
 }
+
+// ---------------------------------------------------------------------------
+// State committee endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /eth/v1/beacon/states/{state_id}/committees
+///
+/// Returns beacon committee assignments for an epoch.
+/// Query params: epoch (optional), index (optional), slot (optional).
+pub fn getStateCommittees(
+    ctx: *ApiContext,
+    state_id: types.StateId,
+    epoch_opt: ?u64,
+    slot_opt: ?u64,
+    index_opt: ?u64,
+) !HandlerResult([]const types.CommitteeData) {
+    _ = state_id; // TODO: support non-head state ids via state regen
+
+    // Try head state.
+    const cb = ctx.head_state orelse return error.StateNotAvailable;
+    const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
+    const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+
+    const current_slot = try state.state.slot();
+    const current_epoch = current_slot / preset.SLOTS_PER_EPOCH;
+    const epoch = epoch_opt orelse current_epoch;
+
+    const epoch_cache = state.epoch_cache;
+
+    // Determine which slots to enumerate.
+    const epoch_start_slot = epoch * preset.SLOTS_PER_EPOCH;
+
+    var result = std.ArrayList(types.CommitteeData).empty;
+    errdefer {
+        for (result.items) |item| ctx.allocator.free(item.validators);
+        result.deinit(ctx.allocator);
+    }
+
+    for (0..preset.SLOTS_PER_EPOCH) |slot_offset| {
+        const slot = epoch_start_slot + slot_offset;
+
+        // Filter by slot if provided.
+        if (slot_opt) |filter_slot| {
+            if (slot != filter_slot) continue;
+        }
+
+        // Get committee count for this slot.
+        const committees_per_slot = epoch_cache.getCommitteeCountPerSlot(epoch) catch continue;
+
+        for (0..committees_per_slot) |committee_idx| {
+            // Filter by index if provided.
+            if (index_opt) |filter_index| {
+                if (committee_idx != filter_index) continue;
+            }
+
+            const committee = epoch_cache.getBeaconCommittee(slot, @intCast(committee_idx)) catch continue;
+
+            // Copy validator indices.
+            const validators = try ctx.allocator.alloc(u64, committee.len);
+            for (committee, 0..) |vi, i| {
+                validators[i] = @intCast(vi);
+            }
+
+            try result.append(ctx.allocator, .{
+                .index = committee_idx,
+                .slot = slot,
+                .validators = validators,
+            });
+        }
+    }
+
+    return .{
+        .data = try result.toOwnedSlice(ctx.allocator),
+        .meta = .{
+            .execution_optimistic = false,
+            .finalized = false,
+        },
+    };
+}
+
+/// GET /eth/v1/beacon/states/{state_id}/sync_committees
+///
+/// Returns the sync committee for a given state and optional epoch.
+pub fn getStateSyncCommittees(
+    ctx: *ApiContext,
+    state_id: types.StateId,
+    epoch_param: ?u64,
+) !HandlerResult(types.SyncCommitteeData) {
+    _ = state_id;
+    _ = epoch_param;
+
+    const cb = ctx.head_state orelse return error.StateNotAvailable;
+    const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
+    const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+
+    const epoch_cache = state.epoch_cache;
+    const sync_cache = epoch_cache.current_sync_committee_indexed;
+    const sc = sync_cache.get();
+
+    const sync_indices = sc.getValidatorIndices();
+    if (sync_indices.len == 0) {
+        // Pre-Altair fork or empty sync committee
+        const validators = try ctx.allocator.alloc(u64, 0);
+        const aggs = try ctx.allocator.alloc([]const u64, 0);
+        return .{
+            .data = .{
+                .validators = validators,
+                .validator_aggregates = aggs,
+            },
+            .meta = .{ .execution_optimistic = false, .finalized = false },
+        };
+    }
+
+    // Build flat validators list.
+    const validators = try ctx.allocator.alloc(u64, sync_indices.len);
+    for (sync_indices, 0..) |vi, i| {
+        validators[i] = @intCast(vi);
+    }
+
+    // Build subcommittee aggregates: 4 groups of SYNC_COMMITTEE_SIZE/4.
+    const subcommittee_size = sync_indices.len / 4;
+    const aggregates = try ctx.allocator.alloc([]const u64, 4);
+    for (0..4) |sub| {
+        const start = sub * subcommittee_size;
+        const end = start + subcommittee_size;
+        const sub_validators = try ctx.allocator.alloc(u64, subcommittee_size);
+        for (sync_indices[start..end], 0..) |vi, i| {
+            sub_validators[i] = @intCast(vi);
+        }
+        aggregates[sub] = sub_validators;
+    }
+
+    return .{
+        .data = .{
+            .validators = validators,
+            .validator_aggregates = aggregates,
+        },
+        .meta = .{ .execution_optimistic = false, .finalized = false },
+    };
+}
+
+/// GET /eth/v1/beacon/states/{state_id}/randao
+///
+/// Returns RANDAO mix for a state and optional epoch.
+pub fn getStateRandao(
+    ctx: *ApiContext,
+    state_id: types.StateId,
+    epoch_opt: ?u64,
+) !HandlerResult(types.RandaoData) {
+    _ = state_id;
+
+    const cb = ctx.head_state orelse return error.StateNotAvailable;
+    const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
+    const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+
+    const current_slot = try state.state.slot();
+    const current_epoch = current_slot / preset.SLOTS_PER_EPOCH;
+    const epoch = epoch_opt orelse current_epoch;
+
+    // Read randao_mixes from the state.
+    var randao_mixes = try state.state.randaoMixes();
+    const mix_ptr = try randao_mixes.getFieldRoot(epoch % preset.EPOCHS_PER_HISTORICAL_VECTOR);
+    const mix: [32]u8 = mix_ptr.*;
+
+    return .{
+        .data = .{ .randao = mix },
+        .meta = .{ .execution_optimistic = false, .finalized = false },
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Block headers (all)
+// ---------------------------------------------------------------------------
+
+/// GET /eth/v1/beacon/headers
+///
+/// Returns block headers matching optional slot and parent_root filters.
+pub fn getBlockHeaders(
+    ctx: *ApiContext,
+    slot_opt: ?u64,
+    _: ?[32]u8,
+) !HandlerResult([]const types.BlockHeaderData) {
+    // Return single head header or filtered set.
+    // Full implementation requires a slot→root index in the DB.
+    // For now, return the head header (or the requested slot's header).
+    var headers = std.ArrayList(types.BlockHeaderData).empty;
+    errdefer headers.deinit(ctx.allocator);
+
+    const target_block_id: types.BlockId = if (slot_opt) |slot|
+        .{ .slot = slot }
+    else
+        .head;
+
+    const header_result = resolveBlockHeader(ctx, target_block_id) catch return .{
+        .data = try headers.toOwnedSlice(ctx.allocator),
+        .meta = .{},
+    };
+
+    try headers.append(ctx.allocator, header_result.header);
+
+    return .{
+        .data = try headers.toOwnedSlice(ctx.allocator),
+        .meta = .{
+            .execution_optimistic = header_result.execution_optimistic,
+            .finalized = header_result.finalized,
+        },
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Blob sidecars endpoint (stub — requires Deneb+ DB)
+// ---------------------------------------------------------------------------
+
+/// GET /eth/v1/beacon/blob_sidecars/{block_id}
+///
+/// Returns blob sidecars for a block. Stubs empty list until
+/// Deneb blob storage is wired into BeaconDB.
+pub fn getBlobSidecars(
+    _: *ApiContext,
+    _: types.BlockId,
+    _: ?[]const u64,
+) !HandlerResult([]const u8) {
+    // Return empty list — Deneb blob DB not yet wired.
+    // When available: query ctx.db.getBlobSidecars(block_root)
+    // and filter by requested indices.
+    return error.NotImplemented;
+}
+
+// ---------------------------------------------------------------------------
+// Blinded blocks endpoint (stub)
+// ---------------------------------------------------------------------------
+
+/// GET /eth/v1/beacon/blinded_blocks/{block_id}
+///
+/// Returns the blinded block for the given block identifier.
+/// For blocks without an execution payload, this is identical to the full block.
+pub fn getBlindedBlock(
+    ctx: *ApiContext,
+    block_id: types.BlockId,
+) !HandlerResult([]const u8) {
+    // Reuse getBlock — actual blinding (replacing execution payload with header)
+    // requires fork-specific code. For phase0/altair blocks this is identical.
+    const block_result = try getBlock(ctx, block_id);
+    return .{
+        .data = block_result.data,
+        .meta = .{
+            .version = block_result.fork_name,
+            .execution_optimistic = block_result.execution_optimistic,
+            .finalized = block_result.finalized,
+        },
+        .ssz_bytes = block_result.data,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Rewards endpoints (stubs pending RewardCache)
+// ---------------------------------------------------------------------------
+
+/// GET /eth/v1/beacon/rewards/blocks/{block_id}
+///
+/// Returns proposer reward breakdown for the given block.
+/// Stub until reward computation is wired to the block processor.
+pub fn getBlockRewards(
+    _: *ApiContext,
+    _: types.BlockId,
+) !HandlerResult(types.BlockRewards) {
+    // TODO: wire reward computation from block processor.
+    return .{
+        .data = .{
+            .proposer_index = 0,
+            .total = 0,
+            .attestations = 0,
+            .sync_aggregate = 0,
+            .proposer_slashings = 0,
+            .attester_slashings = 0,
+        },
+        .meta = .{ .execution_optimistic = false, .finalized = false },
+    };
+}
+
+/// POST /eth/v1/beacon/rewards/attestations/{epoch}
+///
+/// Returns per-validator attestation rewards for the epoch.
+/// Stub until reward computation is wired.
+pub fn getAttestationRewards(
+    ctx: *ApiContext,
+    _: u64,
+    _: []const u64,
+) !HandlerResult(types.AttestationRewardsData) {
+    const ideal = try ctx.allocator.alloc(types.IdealAttestationReward, 0);
+    const total = try ctx.allocator.alloc(types.TotalAttestationReward, 0);
+    return .{
+        .data = .{
+            .ideal_rewards = ideal,
+            .total_rewards = total,
+        },
+        .meta = .{ .execution_optimistic = false, .finalized = false },
+    };
+}
+
+/// POST /eth/v1/beacon/rewards/sync_committee/{block_id}
+///
+/// Returns sync committee rewards per validator for the given block.
+/// Stub until reward computation is wired.
+pub fn getSyncCommitteeRewards(
+    ctx: *ApiContext,
+    _: types.BlockId,
+    _: []const u64,
+) !HandlerResult([]const types.SyncCommitteeReward) {
+    const rewards = try ctx.allocator.alloc(types.SyncCommitteeReward, 0);
+    return .{
+        .data = rewards,
+        .meta = .{ .execution_optimistic = false, .finalized = false },
+    };
+}
