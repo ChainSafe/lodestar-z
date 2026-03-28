@@ -29,6 +29,11 @@ const HeadInfo = chain_header_tracker.HeadInfo;
 
 const state_transition = @import("state_transition");
 
+const dopple_mod = @import("doppelganger.zig");
+const DoppelgangerService = dopple_mod.DoppelgangerService;
+const syncing_tracker_mod = @import("syncing_tracker.zig");
+const SyncingTracker = syncing_tracker_mod.SyncingTracker;
+
 const log = std.log.scoped(.attestation_service);
 
 /// Target aggregators per committee (from consensus spec).
@@ -49,6 +54,9 @@ pub const AttestationService = struct {
     duties: std.ArrayList(AttesterDutyWithProof),
     /// Epoch for which duties are currently cached.
     duties_epoch: ?u64,
+    /// Pre-fetched duties for next epoch.
+    next_duties: std.ArrayList(AttesterDutyWithProof),
+    next_duties_epoch: ?u64,
     /// Optional chain header tracker for reorg detection.
     header_tracker: ?*ChainHeaderTracker,
     /// Last known previous_duty_dependent_root — used to detect reorgs.
@@ -58,6 +66,10 @@ pub const AttestationService = struct {
     last_previous_dependent_root: [32]u8,
     /// Last known current_duty_dependent_root — used to detect reorgs.
     last_current_dependent_root: [32]u8,
+    /// Doppelganger service reference (optional).
+    doppelganger: ?*DoppelgangerService,
+    /// Syncing tracker reference (optional).
+    syncing_tracker: ?*SyncingTracker,
 
     pub fn init(
         allocator: Allocator,
@@ -74,14 +86,40 @@ pub const AttestationService = struct {
             .seconds_per_slot = seconds_per_slot,
             .duties = std.ArrayList(AttesterDutyWithProof).init(allocator),
             .duties_epoch = null,
+            .next_duties = std.ArrayList(AttesterDutyWithProof).init(allocator),
+            .next_duties_epoch = null,
             .header_tracker = null,
             .last_previous_dependent_root = [_]u8{0} ** 32,
             .last_current_dependent_root = [_]u8{0} ** 32,
+            .doppelganger = null,
+            .syncing_tracker = null,
         };
+    }
+
+    /// Wire up safety checkers. Called from validator.zig after init.
+    pub fn setSafetyCheckers(
+        self: *AttestationService,
+        dopple: ?*DoppelgangerService,
+        syncing: ?*SyncingTracker,
+    ) void {
+        self.doppelganger = dopple;
+        self.syncing_tracker = syncing;
+    }
+
+    /// Returns true if it is safe for this validator to sign attestations.
+    fn isSafeToSign(self: *const AttestationService, pubkey: [48]u8) bool {
+        if (self.syncing_tracker) |st| {
+            if (!st.isSynced()) return false;
+        }
+        if (self.doppelganger) |d| {
+            if (!d.isSigningAllowed(pubkey)) return false;
+        }
+        return true;
     }
 
     pub fn deinit(self: *AttestationService) void {
         self.duties.deinit();
+        self.next_duties.deinit();
     }
 
     /// Attach a chain header tracker for reorg detection.
@@ -131,9 +169,28 @@ pub const AttestationService = struct {
 
     /// Called at each epoch boundary to refresh attester duties.
     pub fn onEpoch(self: *AttestationService, io: Io, epoch: u64) void {
+        // Swap in pre-fetched next epoch duties if available.
+        if (self.next_duties_epoch) |ne| {
+            if (ne == epoch) {
+                // Move next → current.
+                self.duties.clearRetainingCapacity();
+                for (self.next_duties.items) |d| {
+                    self.duties.append(d) catch {};
+                }
+                self.duties_epoch = ne;
+                self.next_duties.clearRetainingCapacity();
+                self.next_duties_epoch = null;
+                log.debug("swapped pre-fetched attester duties into epoch={d}", .{epoch});
+                // Pre-fetch for epoch+1 now.
+                self.prefetchNextEpochDuties(io, epoch + 1);
+                return;
+            }
+        }
         self.refreshDuties(io, epoch) catch |err| {
             log.err("refreshDuties epoch={d} error={s}", .{ epoch, @errorName(err) });
         };
+        // Pre-fetch next epoch duties.
+        self.prefetchNextEpochDuties(io, epoch + 1);
     }
 
     /// Called at each slot to produce and publish attestations + aggregates.
@@ -178,6 +235,36 @@ pub const AttestationService = struct {
         }
 
         log.debug("cached {d} attester duties epoch={d}", .{ fetched.len, epoch });
+    }
+
+    /// Pre-fetch attester duties for next epoch to avoid latency at epoch boundaries.
+    ///
+    /// TS: AttestationDutiesService fetches N+1 at end of epoch N.
+    fn prefetchNextEpochDuties(self: *AttestationService, io: Io, next_epoch: u64) void {
+        const indices = self.validator_store.allIndices(self.allocator) catch return;
+        defer self.allocator.free(indices);
+        if (indices.len == 0) return;
+
+        log.debug("pre-fetching attester duties epoch={d}", .{next_epoch});
+        const fetched = self.api.getAttesterDuties(io, next_epoch, indices) catch |err| {
+            log.warn("prefetch attester duties epoch={d} error={s}", .{ next_epoch, @errorName(err) });
+            return;
+        };
+        defer self.allocator.free(fetched);
+
+        self.next_duties.clearRetainingCapacity();
+        self.next_duties_epoch = next_epoch;
+
+        for (fetched) |duty| {
+            var sel_proof: ?[96]u8 = null;
+            var sel_root: [32]u8 = undefined;
+            signing_mod.attestationSelectionProofSigningRoot(self.signing_ctx, duty.slot, &sel_root) catch {};
+            if (self.validator_store.signSelectionProof(duty.pubkey, sel_root)) |sig| {
+                sel_proof = sig.compress();
+            } else |_| {}
+            self.next_duties.append(.{ .duty = duty, .selection_proof = sel_proof }) catch {};
+        }
+        log.debug("pre-fetched {d} attester duties epoch={d}", .{ fetched.len, next_epoch });
     }
 
     // -----------------------------------------------------------------------
@@ -275,6 +362,12 @@ pub const AttestationService = struct {
         for (duties) |dp| {
             if (dp.duty.slot != slot) continue;
 
+            // Safety check before signing.
+            if (!self.isSafeToSign(dp.duty.pubkey)) {
+                log.warn("skipping attestation slot={d} validator_index={d}: signing not safe", .{ slot, dp.duty.validator_index });
+                continue;
+            }
+
             const sig = self.validator_store.signAttestation(
                 dp.duty.pubkey,
                 signing_root,
@@ -347,6 +440,12 @@ pub const AttestationService = struct {
             if (hash_val % modulo != 0) continue; // not selected as aggregator this slot
 
             log.debug("selected as aggregator slot={d} validator_index={d}", .{ slot, dp.duty.validator_index });
+
+            // Safety check before aggregate signing.
+            if (!self.isSafeToSign(dp.duty.pubkey)) {
+                log.warn("skipping aggregate slot={d} validator_index={d}: signing not safe", .{ slot, dp.duty.validator_index });
+                continue;
+            }
 
             // 1. Use the real AttestationData hash_tree_root (SSZ-computed).
             const agg_data_root: [32]u8 = att_data_root;

@@ -23,6 +23,11 @@ const ValidatorStore = @import("validator_store.zig").ValidatorStore;
 const signing_mod = @import("signing.zig");
 const SigningContext = signing_mod.SigningContext;
 
+const dopple_mod = @import("doppelganger.zig");
+const DoppelgangerService = dopple_mod.DoppelgangerService;
+const syncing_tracker_mod = @import("syncing_tracker.zig");
+const SyncingTracker = syncing_tracker_mod.SyncingTracker;
+
 const log = std.log.scoped(.block_service);
 
 /// Maximum duties cached per epoch.
@@ -41,10 +46,17 @@ pub const BlockService = struct {
     /// Duties for the current epoch.
     duties: [MAX_DUTIES_PER_EPOCH]?ProposerDuty,
     duties_epoch: ?u64,
+    /// Pre-fetched duties for the next epoch (swap at epoch boundary).
+    next_duties: [MAX_DUTIES_PER_EPOCH]?ProposerDuty,
+    next_duties_epoch: ?u64,
     /// Slots for which we had a duty and produced a block (bitmask per epoch).
     produced_slots: [MAX_DUTIES_PER_EPOCH]bool,
     /// Count of missed block proposals this session.
     missed_block_count: u64,
+    /// Doppelganger service reference (optional).
+    doppelganger: ?*DoppelgangerService,
+    /// Syncing tracker reference (optional).
+    syncing_tracker: ?*SyncingTracker,
 
     pub fn init(
         allocator: Allocator,
@@ -59,9 +71,34 @@ pub const BlockService = struct {
             .signing_ctx = signing_ctx,
             .duties = [_]?ProposerDuty{null} ** MAX_DUTIES_PER_EPOCH,
             .duties_epoch = null,
+            .next_duties = [_]?ProposerDuty{null} ** MAX_DUTIES_PER_EPOCH,
+            .next_duties_epoch = null,
             .produced_slots = [_]bool{false} ** MAX_DUTIES_PER_EPOCH,
             .missed_block_count = 0,
+            .doppelganger = null,
+            .syncing_tracker = null,
         };
+    }
+
+    /// Wire up safety checkers. Called from validator.zig after init.
+    pub fn setSafetyCheckers(
+        self: *BlockService,
+        dopple: ?*DoppelgangerService,
+        syncing: ?*SyncingTracker,
+    ) void {
+        self.doppelganger = dopple;
+        self.syncing_tracker = syncing;
+    }
+
+    /// Returns true if it is safe for this validator to sign a block.
+    fn isSafeToSign(self: *const BlockService, pubkey: [48]u8) bool {
+        if (self.syncing_tracker) |st| {
+            if (!st.isSynced()) return false;
+        }
+        if (self.doppelganger) |d| {
+            if (!d.isSigningAllowed(pubkey)) return false;
+        }
+        return true;
     }
 
     pub fn deinit(self: *BlockService) void {
@@ -76,9 +113,25 @@ pub const BlockService = struct {
     ///
     /// TS: BlockDutiesService.pollBeaconProposers (runEveryEpoch)
     pub fn onEpoch(self: *BlockService, io: Io, epoch: u64) void {
+        // If next epoch duties were pre-fetched, swap them in.
+        if (self.next_duties_epoch) |ne| {
+            if (ne == epoch) {
+                self.duties = self.next_duties;
+                self.duties_epoch = ne;
+                self.next_duties = [_]?ProposerDuty{null} ** MAX_DUTIES_PER_EPOCH;
+                self.next_duties_epoch = null;
+                for (&self.produced_slots) |*p| p.* = false;
+                log.debug("swapped pre-fetched proposer duties into epoch={d}", .{epoch});
+                // Still pre-fetch for epoch+1.
+                self.prefetchNextEpochDuties(io, epoch + 1);
+                return;
+            }
+        }
         self.refreshDuties(io, epoch) catch |err| {
             log.err("refreshDuties epoch={d} error={s}", .{ epoch, @errorName(err) });
         };
+        // Pre-fetch next epoch duties immediately.
+        self.prefetchNextEpochDuties(io, epoch + 1);
     }
 
     /// Called at each slot to check for a block proposal duty.
@@ -127,12 +180,44 @@ pub const BlockService = struct {
         log.debug("cached {d} proposer duties for epoch {d}", .{ fetched.len, epoch });
     }
 
+    /// Pre-fetch proposer duties for the next epoch to reduce latency at epoch boundaries.
+    ///
+    /// TS: BlockDutiesService fetches N+1 at end of epoch N.
+    fn prefetchNextEpochDuties(self: *BlockService, io: Io, next_epoch: u64) void {
+        log.debug("pre-fetching proposer duties for epoch {d}", .{next_epoch});
+        const fetched = self.api.getProposerDuties(io, next_epoch) catch |err| {
+            log.warn("prefetch proposer duties epoch={d} error={s}", .{ next_epoch, @errorName(err) });
+            return;
+        };
+        defer self.allocator.free(fetched);
+
+        for (&self.next_duties) |*d| d.* = null;
+        self.next_duties_epoch = next_epoch;
+
+        const epoch_start = next_epoch * MAX_DUTIES_PER_EPOCH;
+        for (fetched) |duty| {
+            if (duty.slot >= epoch_start and duty.slot < epoch_start + MAX_DUTIES_PER_EPOCH) {
+                const offset = duty.slot - epoch_start;
+                if (offset < MAX_DUTIES_PER_EPOCH) {
+                    self.next_duties[offset] = duty;
+                }
+            }
+        }
+        log.debug("pre-fetched {d} proposer duties for epoch {d}", .{ fetched.len, next_epoch });
+    }
+
     // -----------------------------------------------------------------------
     // Block proposal
     // -----------------------------------------------------------------------
 
     fn maybePropose(self: *BlockService, io: Io, slot: u64) !void {
         const duty = self.getDutyAtSlot(slot) orelse return; // nothing to do
+
+        // Safety checks: syncing status and doppelganger protection.
+        if (!self.isSafeToSign(duty.pubkey)) {
+            log.warn("skipping block proposal slot={d} validator_index={d}: signing not safe (syncing or doppelganger check pending)", .{ slot, duty.validator_index });
+            return;
+        }
 
         log.info("proposing block slot={d} validator_index={d}", .{ slot, duty.validator_index });
 

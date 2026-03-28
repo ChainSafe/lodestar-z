@@ -65,6 +65,9 @@ const KeyDiscovery = key_discovery_mod.KeyDiscovery;
 const remote_signer_mod = @import("remote_signer.zig");
 const RemoteSigner = remote_signer_mod.RemoteSigner;
 
+const syncing_tracker_mod = @import("syncing_tracker.zig");
+const SyncingTracker = syncing_tracker_mod.SyncingTracker;
+
 const index_tracker_mod = @import("index_tracker.zig");
 const IndexTracker = index_tracker_mod.IndexTracker;
 
@@ -107,6 +110,9 @@ pub const ValidatorClient = struct {
     // Liveness tracker — records per-validator duty outcomes.
     liveness_tracker: LivenessTracker,
 
+    // Syncing tracker — pauses duties when BN sync distance is too large.
+    syncing_tracker: SyncingTracker,
+
     // Shutdown requested flag — set on signal, stops the clock loop.
     shutdown_requested: std.atomic.Value(bool),
 
@@ -125,7 +131,20 @@ pub const ValidatorClient = struct {
     ///
     /// TS: Validator.init(opts, genesis)
     pub fn init(allocator: Allocator, config: ValidatorConfig, signing_ctx: SigningContext) !ValidatorClient {
-        var api = BeaconApiClient.init(allocator, config.beacon_node_url);
+        // Initialize API client — use multi-BN if fallback URLs provided.
+        var api = if (config.beacon_node_fallback_urls.len > 0) blk: {
+            // Build combined URL slice: [primary] ++ fallbacks.
+            // NOTE: caller owns config memory; we borrow the slices.
+            break :blk BeaconApiClient{
+                .allocator = allocator,
+                .base_url = config.beacon_node_url,
+                .fallback_urls = config.beacon_node_fallback_urls,
+                .active_url_idx = 0,
+                .consecutive_failures = 0,
+                .was_unreachable = false,
+                .unreachable_since_ns = 0,
+            };
+        } else BeaconApiClient.init(allocator, config.beacon_node_url);
         var validator_store = try ValidatorStore.init(allocator, config.slashing_protection_path);
         errdefer validator_store.deinit();
 
@@ -217,6 +236,7 @@ pub const ValidatorClient = struct {
             .io = null,
             .index_tracker = idx_tracker,
             .liveness_tracker = live_tracker,
+            .syncing_tracker = SyncingTracker.init(allocator, &api),
             .shutdown_requested = std.atomic.Value(bool).init(false),
             .session_start_ns = @intCast(std.time.nanoTimestamp()),
         };
@@ -276,6 +296,13 @@ pub const ValidatorClient = struct {
         self.sync_committee_service.setHeaderTracker(&self.header_tracker);
         self.attestation_service.setHeaderTracker(&self.header_tracker);
 
+        // Wire safety checkers (doppelganger + syncing) into all signing services.
+        const dopple_ptr: ?*@import("doppelganger.zig").DoppelgangerService = if (self.doppelganger != null) &self.doppelganger.? else null;
+        const syncing_ptr: ?*@import("syncing_tracker.zig").SyncingTracker = &self.syncing_tracker;
+        self.block_service.setSafetyCheckers(dopple_ptr, syncing_ptr);
+        self.attestation_service.setSafetyCheckers(dopple_ptr, syncing_ptr);
+        self.sync_committee_service.setSafetyCheckers(dopple_ptr, syncing_ptr);
+
         // Register clock callbacks.
         self.clock.onSlot(.{ .ctx = self, .fn_ptr = onSlotBlockService });
         self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochBlockService });
@@ -291,6 +318,9 @@ pub const ValidatorClient = struct {
         if (self.doppelganger != null) {
             self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochDoppelganger });
         }
+
+        // Syncing status tracker — poll every slot, gate signing when BN is behind.
+        self.clock.onSlot(.{ .ctx = self, .fn_ptr = onSlotSyncingTracker });
 
         // Store io so clock callbacks can perform HTTP requests.
         self.io = io;
@@ -455,5 +485,33 @@ pub const ValidatorClient = struct {
                 self.validator_store.updateIndex(e.pubkey, idx, .active_ongoing);
             }
         }
+
+        // Emit epoch effectiveness summary.
+        self.liveness_tracker.logEpochSummary(
+            epoch,
+            self.validator_store.validators.items.len,
+            self.block_service.missed_block_count,
+        );
+    }
+
+    fn onSlotSyncingTracker(ctx: *anyopaque, slot: u64) void {
+        const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
+        const io = self.io orelse return;
+        self.syncing_tracker.onSlot(io, slot);
+    }
+
+    /// Returns true if it is safe to sign for the given pubkey.
+    ///
+    /// Checks both:
+    ///   1. Syncing status — BN is synced enough.
+    ///   2. Doppelganger protection — no duplicate detected.
+    ///
+    /// Called by all services before signing operations.
+    pub fn isSafeToSign(self: *const ValidatorClient, pubkey: [48]u8) bool {
+        if (!self.syncing_tracker.isSynced()) return false;
+        if (self.doppelganger) |*d| {
+            if (!d.isSigningAllowed(pubkey)) return false;
+        }
+        return true;
     }
 };

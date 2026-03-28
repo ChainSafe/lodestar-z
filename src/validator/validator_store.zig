@@ -8,8 +8,9 @@
 //! Key differences from TS:
 //!   - No class hierarchy — flat struct with explicit methods.
 //!   - Explicit allocator for key storage.
-//!   - Slashing protection is checked in-process (no external DB yet — stub).
-//!   - No "remote signer" support in this stub (TS has SignerRemote via web3signer).
+//!   - Slashing protection is checked in-process via SQLite-backed SlashingProtectionDb.
+//!   - Remote signer support is provided via Web3Signer HTTP client (remote_signer.zig).
+//!     Signing root computation stays in the VC; only the BLS sign call goes to the signer.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
