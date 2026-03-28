@@ -238,7 +238,7 @@ pub const AttestationService = struct {
             signing_mod.attestationSelectionProofSigningRoot(self.signing_ctx, duty.slot, &sel_root) catch |err| {
                 log.warn("selection proof signing root error: {s}", .{@errorName(err)});
             };
-            if (self.validator_store.signSelectionProof(duty.pubkey, sel_root)) |sig| {
+            if (self.validator_store.signSelectionProof(io, duty.pubkey, sel_root)) |sig| {
                 sel_proof = sig.compress();
             } else |_| {}
 
@@ -273,7 +273,7 @@ pub const AttestationService = struct {
             var sel_proof: ?[96]u8 = null;
             var sel_root: [32]u8 = undefined;
             signing_mod.attestationSelectionProofSigningRoot(self.signing_ctx, duty.slot, &sel_root) catch {};
-            if (self.validator_store.signSelectionProof(duty.pubkey, sel_root)) |sig| {
+            if (self.validator_store.signSelectionProof(io, duty.pubkey, sel_root)) |sig| {
                 sel_proof = sig.compress();
             } else |_| {}
             self.next_duties.append(.{ .duty = duty, .selection_proof = sel_proof }) catch {};
@@ -421,6 +421,7 @@ pub const AttestationService = struct {
             try signing_mod.attestationSigningRoot(self.signing_ctx, &att_data, &signing_root);
 
             const sig = self.validator_store.signAttestation(
+                io,
                 dp.duty.pubkey,
                 signing_root,
                 att_data_resp.source_epoch,
@@ -570,7 +571,7 @@ pub const AttestationService = struct {
                 continue;
             };
 
-            const sig = self.validator_store.signAggregateAndProof(dp.duty.pubkey, agg_signing_root) catch |err| {
+            const sig = self.validator_store.signAggregateAndProof(io, dp.duty.pubkey, agg_signing_root) catch |err| {
                 log.warn("signAggregateAndProof error: {s}", .{@errorName(err)});
                 continue;
             };

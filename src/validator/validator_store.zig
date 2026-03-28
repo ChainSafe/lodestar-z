@@ -26,6 +26,12 @@ const ValidatorStatus = types.ValidatorStatus;
 
 const SlashingProtectionDb = @import("slashing_protection_db.zig").SlashingProtectionDb;
 
+const remote_signer_mod = @import("remote_signer.zig");
+const RemoteSigner = remote_signer_mod.RemoteSigner;
+const SigningType = remote_signer_mod.SigningType;
+
+const Io = std.Io;
+
 const log = std.log.scoped(.validator_store);
 
 // ---------------------------------------------------------------------------
@@ -64,6 +70,9 @@ pub const ValidatorStore = struct {
     slashing_db: SlashingProtectionDb,
     /// Mutex protecting validators list for concurrent add/remove.
     mutex: std.Thread.Mutex,
+    /// Remote signer client (Web3Signer). Non-null when web3signer_url is configured.
+    /// Used by signing methods when `validator.is_remote == true`.
+    remote_signer: ?*RemoteSigner = null,
 
     /// Initialize the ValidatorStore with an optional persistent slashing protection DB.
     ///
@@ -302,6 +311,7 @@ pub const ValidatorStore = struct {
     /// TS: validatorStore.signBlock(block, slot, currentFork, genesisValidatorsRoot)
     pub fn signBlock(
         self: *ValidatorStore,
+        io: Io,
         pubkey: [48]u8,
         signing_root: [32]u8,
         slot: u64,
@@ -312,7 +322,13 @@ pub const ValidatorStore = struct {
         defer self.mutex.unlock();
 
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        if (validator.is_remote) return error.RemoteSignerRequired;
+        if (validator.is_remote) {
+            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
+            return rs.sign(io, pubkey, signing_root, .BLOCK_V2) catch |err| {
+                log.warn("remote signer signBlock error={s}", .{@errorName(err)});
+                return err;
+            };
+        }
 
         // Slashing protection: double-proposal check (persistent DB).
         const block_allowed = try self.slashing_db.checkAndInsertBlock(pubkey, slot);
@@ -333,13 +349,20 @@ pub const ValidatorStore = struct {
     /// TS: validatorStore.signRandao(epoch, currentFork, genesisValidatorsRoot)
     pub fn signRandao(
         self: *ValidatorStore,
+        io: Io,
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        if (validator.is_remote) return error.RemoteSignerRequired;
+        if (validator.is_remote) {
+            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
+            return rs.sign(io, pubkey, signing_root, .RANDAO_REVEAL) catch |err| {
+                log.warn("remote signer signRandao error={s}", .{@errorName(err)});
+                return err;
+            };
+        }
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
 
@@ -357,6 +380,7 @@ pub const ValidatorStore = struct {
     /// TS: validatorStore.signAttestation(duty, attestationData, currentEpoch, fork, ...)
     pub fn signAttestation(
         self: *ValidatorStore,
+        io: Io,
         pubkey: [48]u8,
         signing_root: [32]u8,
         source_epoch: u64,
@@ -368,7 +392,13 @@ pub const ValidatorStore = struct {
         defer self.mutex.unlock();
 
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        if (validator.is_remote) return error.RemoteSignerRequired;
+        if (validator.is_remote) {
+            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
+            return rs.sign(io, pubkey, signing_root, .ATTESTATION) catch |err| {
+                log.warn("remote signer signAttestation error={s}", .{@errorName(err)});
+                return err;
+            };
+        }
 
         // Slashing protection: double-vote / surround vote check (persistent DB).
         const attest_allowed = try self.slashing_db.checkAndInsertAttestation(pubkey, source_epoch, target_epoch);
@@ -389,13 +419,20 @@ pub const ValidatorStore = struct {
     /// TS: validatorStore.signSyncCommitteeSignature(pubkey, slot, beaconBlockRoot, fork, ...)
     pub fn signSyncCommitteeMessage(
         self: *ValidatorStore,
+        io: Io,
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        if (validator.is_remote) return error.RemoteSignerRequired;
+        if (validator.is_remote) {
+            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
+            return rs.sign(io, pubkey, signing_root, .SYNC_COMMITTEE_MESSAGE) catch |err| {
+                log.warn("remote signer signSyncCommitteeMessage error={s}", .{@errorName(err)});
+                return err;
+            };
+        }
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
 
@@ -404,13 +441,20 @@ pub const ValidatorStore = struct {
     /// TS: validatorStore.signAttestationSelectionProof(pubkey, slot, fork, ...)
     pub fn signSelectionProof(
         self: *ValidatorStore,
+        io: Io,
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        if (validator.is_remote) return error.RemoteSignerRequired;
+        if (validator.is_remote) {
+            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
+            return rs.sign(io, pubkey, signing_root, .AGGREGATION_SLOT) catch |err| {
+                log.warn("remote signer signSelectionProof error={s}", .{@errorName(err)});
+                return err;
+            };
+        }
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
 
@@ -419,13 +463,20 @@ pub const ValidatorStore = struct {
     /// TS: validatorStore.signAggregateAndProof(aggregateAndProof, pubkey, fork, ...)
     pub fn signAggregateAndProof(
         self: *ValidatorStore,
+        io: Io,
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        if (validator.is_remote) return error.RemoteSignerRequired;
+        if (validator.is_remote) {
+            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
+            return rs.sign(io, pubkey, signing_root, .AGGREGATE_AND_PROOF) catch |err| {
+                log.warn("remote signer signAggregateAndProof error={s}", .{@errorName(err)});
+                return err;
+            };
+        }
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
 
@@ -434,13 +485,20 @@ pub const ValidatorStore = struct {
     /// TS: validatorStore.signContributionAndProof(contribution, pubkey, fork, ...)
     pub fn signContributionAndProof(
         self: *ValidatorStore,
+        io: Io,
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        if (validator.is_remote) return error.RemoteSignerRequired;
+        if (validator.is_remote) {
+            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
+            return rs.sign(io, pubkey, signing_root, .SYNC_COMMITTEE_CONTRIBUTION_AND_PROOF) catch |err| {
+                log.warn("remote signer signContributionAndProof error={s}", .{@errorName(err)});
+                return err;
+            };
+        }
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
 
@@ -503,16 +561,16 @@ test "ValidatorStore: slashing protection — block double proposal" {
     const root = [_]u8{0} ** 32;
 
     // First signature at slot 10 — should succeed.
-    _ = try store.signBlock(pubkey, root, 10);
+    _ = try store.signBlock(undefined, pubkey, root, 10);
 
     // Second signature at slot 10 — should be rejected (same slot).
-    try testing.expectError(error.SlashingProtectionTriggered, store.signBlock(pubkey, root, 10));
+    try testing.expectError(error.SlashingProtectionTriggered, store.signBlock(undefined, pubkey, root, 10));
 
     // Signature at slot 9 — should be rejected (earlier slot).
-    try testing.expectError(error.SlashingProtectionTriggered, store.signBlock(pubkey, root, 9));
+    try testing.expectError(error.SlashingProtectionTriggered, store.signBlock(undefined, pubkey, root, 9));
 
     // Signature at slot 11 — should succeed (new slot).
-    _ = try store.signBlock(pubkey, root, 11);
+    _ = try store.signBlock(undefined, pubkey, root, 11);
 }
 
 test "ValidatorStore: slashing protection — attestation double vote" {
@@ -526,19 +584,19 @@ test "ValidatorStore: slashing protection — attestation double vote" {
     const root = [_]u8{0} ** 32;
 
     // First attestation source=1, target=5 — should succeed.
-    _ = try store.signAttestation(pubkey, root, 1, 5);
+    _ = try store.signAttestation(undefined, pubkey, root, 1, 5);
 
     // Same target epoch — double vote — should be rejected.
-    try testing.expectError(error.SlashingProtectionTriggered, store.signAttestation(pubkey, root, 2, 5));
+    try testing.expectError(error.SlashingProtectionTriggered, store.signAttestation(undefined, pubkey, root, 2, 5));
 
     // Earlier target — should be rejected.
-    try testing.expectError(error.SlashingProtectionTriggered, store.signAttestation(pubkey, root, 2, 4));
+    try testing.expectError(error.SlashingProtectionTriggered, store.signAttestation(undefined, pubkey, root, 2, 4));
 
     // New target but source goes backward — surround vote risk — should be rejected.
-    try testing.expectError(error.SlashingProtectionTriggered, store.signAttestation(pubkey, root, 0, 6));
+    try testing.expectError(error.SlashingProtectionTriggered, store.signAttestation(undefined, pubkey, root, 0, 6));
 
     // Valid next attestation source=1, target=6.
-    _ = try store.signAttestation(pubkey, root, 1, 6);
+    _ = try store.signAttestation(undefined, pubkey, root, 1, 6);
 }
 
 test "ValidatorStore: allPubkeys" {

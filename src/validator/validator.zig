@@ -452,10 +452,19 @@ pub const ValidatorClient = struct {
         }
 
         // Fetch remote signer keys if web3signer is configured.
+        // Create a heap-allocated RemoteSigner so the pointer remains stable after
+        // ValidatorClient may be moved. Wire it into ValidatorStore for signing delegation.
         if (self.config.web3signer_url) |url| {
             log.info("fetching remote keys from web3signer url={s}", .{url});
-            var remote = RemoteSigner.init(self.allocator, url);
-            const remote_pubkeys = remote.listKeys(io) catch |err| blk: {
+
+            // Heap-allocate so the pointer is stable for the lifetime of ValidatorClient.
+            const rs = try self.allocator.create(RemoteSigner);
+            rs.* = RemoteSigner.init(self.allocator, url);
+            self.remote_signer = rs;
+            // Wire into validator_store so signing methods can delegate.
+            self.validator_store.remote_signer = rs;
+
+            const remote_pubkeys = rs.listKeys(io) catch |err| blk: {
                 log.warn("failed to fetch remote keys: {s}", .{@errorName(err)});
                 break :blk &[_][48]u8{};
             };
@@ -463,10 +472,8 @@ pub const ValidatorClient = struct {
             var remote_registered: usize = 0;
             for (remote_pubkeys) |pk| {
                 // Register the pubkey in the validator store as remote-only.
-                // This enables duty tracking (indices, attestation duties, etc.)
-                // without requiring the secret key locally.
-                // TODO(remote-signing): actual signing path must check isRemote()
-                // and delegate to RemoteSigner.sign() instead of validator_store.signXxx().
+                // Duty tracking (indices, attestation duties, etc.) works without
+                // the secret key locally. Signing is delegated via remote_signer.
                 self.validator_store.addRemotePubkey(pk) catch |err| {
                     log.warn("addRemotePubkey failed pubkey=0x{s}: {s}", .{
                         std.fmt.bytesToHex(pk, .lower), @errorName(err),

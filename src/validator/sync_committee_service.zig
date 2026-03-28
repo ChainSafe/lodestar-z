@@ -353,7 +353,7 @@ pub const SyncCommitteeService = struct {
                 continue;
             }
 
-            const sig = self.validator_store.signSyncCommitteeMessage(d.duty.pubkey, signing_root) catch |err| {
+            const sig = self.validator_store.signSyncCommitteeMessage(io, d.duty.pubkey, signing_root) catch |err| {
                 log.warn("signSyncCommitteeMessage validator_index={d} error={s}", .{ d.duty.validator_index, @errorName(err) });
                 continue;
             };
@@ -420,7 +420,7 @@ pub const SyncCommitteeService = struct {
                         log.warn("sync selection proof signing root error slot={d}: {s}", .{ slot, @errorName(err) });
                         continue;
                     };
-                    if (self.validator_store.signSelectionProof(dp.duty.pubkey, sel_root)) |sig| {
+                    if (self.validator_store.signSelectionProof(io, dp.duty.pubkey, sel_root)) |sig| {
                         cached_proof.* = sig.compress();
                     } else |_| {
                         continue;
@@ -477,7 +477,7 @@ pub const SyncCommitteeService = struct {
                     continue;
                 }
 
-                const sig = self.validator_store.signContributionAndProof(dp.duty.pubkey, signing_root) catch |err| {
+                const sig = self.validator_store.signContributionAndProof(io, dp.duty.pubkey, signing_root) catch |err| {
                     log.warn("signContributionAndProof error: {s}", .{@errorName(err)});
                     continue;
                 };

@@ -231,7 +231,7 @@ pub const BlockService = struct {
 
         // 1. Compute RANDAO reveal: sign(epoch) with DOMAIN_RANDAO.
         const epoch = slot / self.slots_per_epoch;
-        const randao_reveal = try self.produceRandaoReveal(duty.pubkey, epoch);
+        const randao_reveal = try self.produceRandaoReveal(io, duty.pubkey, epoch);
 
         // 2. Request unsigned block from BN as SSZ.
         //    Using SSZ avoids JSON body_root computation entirely — we deserialize
@@ -293,7 +293,7 @@ pub const BlockService = struct {
         try signing_mod.blockHeaderSigningRoot(self.signing_ctx, &block_header, &signing_root);
 
         // 5. Sign block.
-        const block_sig = try self.validator_store.signBlock(duty.pubkey, signing_root, slot);
+        const block_sig = try self.validator_store.signBlock(io, duty.pubkey, signing_root, slot);
         const sig_bytes = block_sig.compress();
 
         // 6. Stamp the real signature into the SSZ buffer and publish.
@@ -349,10 +349,10 @@ pub const BlockService = struct {
         return null;
     }
 
-    fn produceRandaoReveal(self: *BlockService, pubkey: [48]u8, epoch: u64) ![96]u8 {
+    fn produceRandaoReveal(self: *BlockService, io: Io, pubkey: [48]u8, epoch: u64) ![96]u8 {
         var signing_root: [32]u8 = undefined;
         try signing_mod.randaoSigningRoot(self.signing_ctx, epoch, &signing_root);
-        const sig = try self.validator_store.signRandao(pubkey, signing_root);
+        const sig = try self.validator_store.signRandao(io, pubkey, signing_root);
         return sig.compress();
     }
 };
