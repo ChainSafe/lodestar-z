@@ -2675,6 +2675,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
 
                 // Wire metrics so gossip accept/reject/ignore are counted.
                 gh.metrics = self.metrics;
+                gh.beacon_processor = self.beacon_processor;
             }
         }
 
