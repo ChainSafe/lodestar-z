@@ -1262,13 +1262,13 @@ pub fn generateJwt(allocator: Allocator, secret: [32]u8, iat: u64) ![]const u8 {
 // ── Engine API JSON encoding ──────────────────────────────────────────────────
 
 fn encodeWithdrawal(allocator: Allocator, w: Withdrawal) ![]const u8 {
-    const index_hex = try hexEncodeU64(allocator, w.index);
+    const index_hex = try hexEncodeQuantity(allocator, w.index);
     defer allocator.free(index_hex);
-    const vi_hex = try hexEncodeU64(allocator, w.validator_index);
+    const vi_hex = try hexEncodeQuantity(allocator, w.validator_index);
     defer allocator.free(vi_hex);
     const addr_hex = try hexEncodeFixed(allocator, &w.address);
     defer allocator.free(addr_hex);
-    const amt_hex = try hexEncodeU64(allocator, w.amount);
+    const amt_hex = try hexEncodeQuantity(allocator, w.amount);
     defer allocator.free(amt_hex);
 
     return std.fmt.allocPrint(
@@ -1352,7 +1352,7 @@ fn encodeVersionedHashes(allocator: Allocator, hashes: []const [32]u8) ![]const 
 }
 
 fn encodePayloadAttributesV1(allocator: Allocator, attrs: PayloadAttributesV1) ![]const u8 {
-    const timestamp = try hexEncodeU64(allocator, attrs.timestamp);
+    const timestamp = try hexEncodeQuantity(allocator, attrs.timestamp);
     defer allocator.free(timestamp);
     const prev_randao = try hexEncodeFixed(allocator, &attrs.prev_randao);
     defer allocator.free(prev_randao);
@@ -1367,7 +1367,7 @@ fn encodePayloadAttributesV1(allocator: Allocator, attrs: PayloadAttributesV1) !
 }
 
 fn encodePayloadAttributesV2(allocator: Allocator, attrs: PayloadAttributesV2) ![]const u8 {
-    const timestamp = try hexEncodeU64(allocator, attrs.timestamp);
+    const timestamp = try hexEncodeQuantity(allocator, attrs.timestamp);
     defer allocator.free(timestamp);
     const prev_randao = try hexEncodeFixed(allocator, &attrs.prev_randao);
     defer allocator.free(prev_randao);
@@ -1396,17 +1396,17 @@ fn encodeExecutionPayloadV1(allocator: Allocator, p: ExecutionPayloadV1) ![]cons
     defer allocator.free(logs_bloom);
     const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
     defer allocator.free(prev_randao);
-    const block_number = try hexEncodeU64(allocator, p.block_number);
+    const block_number = try hexEncodeQuantity(allocator, p.block_number);
     defer allocator.free(block_number);
-    const gas_limit = try hexEncodeU64(allocator, p.gas_limit);
+    const gas_limit = try hexEncodeQuantity(allocator, p.gas_limit);
     defer allocator.free(gas_limit);
-    const gas_used = try hexEncodeU64(allocator, p.gas_used);
+    const gas_used = try hexEncodeQuantity(allocator, p.gas_used);
     defer allocator.free(gas_used);
-    const timestamp = try hexEncodeU64(allocator, p.timestamp);
+    const timestamp = try hexEncodeQuantity(allocator, p.timestamp);
     defer allocator.free(timestamp);
     const extra_data = try hexEncode(allocator, p.extra_data);
     defer allocator.free(extra_data);
-    const base_fee = try hexEncodeU256(allocator, p.base_fee_per_gas);
+    const base_fee = try hexEncodeQuantityU256(allocator, p.base_fee_per_gas);
     defer allocator.free(base_fee);
     const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
     defer allocator.free(block_hash);
@@ -1451,17 +1451,17 @@ fn encodeExecutionPayloadV2(allocator: Allocator, p: ExecutionPayloadV2) ![]cons
     defer allocator.free(logs_bloom);
     const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
     defer allocator.free(prev_randao);
-    const block_number = try hexEncodeU64(allocator, p.block_number);
+    const block_number = try hexEncodeQuantity(allocator, p.block_number);
     defer allocator.free(block_number);
-    const gas_limit = try hexEncodeU64(allocator, p.gas_limit);
+    const gas_limit = try hexEncodeQuantity(allocator, p.gas_limit);
     defer allocator.free(gas_limit);
-    const gas_used = try hexEncodeU64(allocator, p.gas_used);
+    const gas_used = try hexEncodeQuantity(allocator, p.gas_used);
     defer allocator.free(gas_used);
-    const timestamp = try hexEncodeU64(allocator, p.timestamp);
+    const timestamp = try hexEncodeQuantity(allocator, p.timestamp);
     defer allocator.free(timestamp);
     const extra_data = try hexEncode(allocator, p.extra_data);
     defer allocator.free(extra_data);
-    const base_fee = try hexEncodeU256(allocator, p.base_fee_per_gas);
+    const base_fee = try hexEncodeQuantityU256(allocator, p.base_fee_per_gas);
     defer allocator.free(base_fee);
     const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
     defer allocator.free(block_hash);
@@ -1501,11 +1501,11 @@ fn encodeDepositRequest(allocator: Allocator, dr: DepositRequest) ![]const u8 {
     defer allocator.free(pubkey);
     const wc = try hexEncodeFixed(allocator, &dr.withdrawal_credentials);
     defer allocator.free(wc);
-    const amount = try hexEncodeU64(allocator, dr.amount);
+    const amount = try hexEncodeQuantity(allocator, dr.amount);
     defer allocator.free(amount);
     const sig = try hexEncodeFixed(allocator, &dr.signature);
     defer allocator.free(sig);
-    const index = try hexEncodeU64(allocator, dr.index);
+    const index = try hexEncodeQuantity(allocator, dr.index);
     defer allocator.free(index);
     return std.fmt.allocPrint(
         allocator,
@@ -1519,7 +1519,7 @@ fn encodeWithdrawalRequest(allocator: Allocator, wr: WithdrawalRequest) ![]const
     defer allocator.free(src);
     const vpk = try hexEncodeFixed(allocator, &wr.validator_pubkey);
     defer allocator.free(vpk);
-    const amt = try hexEncodeU64(allocator, wr.amount);
+    const amt = try hexEncodeQuantity(allocator, wr.amount);
     defer allocator.free(amt);
     return std.fmt.allocPrint(
         allocator,
@@ -1591,17 +1591,17 @@ fn encodeExecutionPayloadV4(allocator: Allocator, p: ExecutionPayloadV4) ![]cons
     defer allocator.free(logs_bloom);
     const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
     defer allocator.free(prev_randao);
-    const block_number = try hexEncodeU64(allocator, p.block_number);
+    const block_number = try hexEncodeQuantity(allocator, p.block_number);
     defer allocator.free(block_number);
-    const gas_limit = try hexEncodeU64(allocator, p.gas_limit);
+    const gas_limit = try hexEncodeQuantity(allocator, p.gas_limit);
     defer allocator.free(gas_limit);
-    const gas_used = try hexEncodeU64(allocator, p.gas_used);
+    const gas_used = try hexEncodeQuantity(allocator, p.gas_used);
     defer allocator.free(gas_used);
-    const timestamp = try hexEncodeU64(allocator, p.timestamp);
+    const timestamp = try hexEncodeQuantity(allocator, p.timestamp);
     defer allocator.free(timestamp);
     const extra_data = try hexEncode(allocator, p.extra_data);
     defer allocator.free(extra_data);
-    const base_fee = try hexEncodeU256(allocator, p.base_fee_per_gas);
+    const base_fee = try hexEncodeQuantityU256(allocator, p.base_fee_per_gas);
     defer allocator.free(base_fee);
     const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
     defer allocator.free(block_hash);
@@ -1609,9 +1609,9 @@ fn encodeExecutionPayloadV4(allocator: Allocator, p: ExecutionPayloadV4) ![]cons
     defer allocator.free(transactions);
     const withdrawals = try encodeWithdrawals(allocator, p.withdrawals);
     defer allocator.free(withdrawals);
-    const blob_gas_used = try hexEncodeU64(allocator, p.blob_gas_used);
+    const blob_gas_used = try hexEncodeQuantity(allocator, p.blob_gas_used);
     defer allocator.free(blob_gas_used);
-    const excess_blob_gas = try hexEncodeU64(allocator, p.excess_blob_gas);
+    const excess_blob_gas = try hexEncodeQuantity(allocator, p.excess_blob_gas);
     defer allocator.free(excess_blob_gas);
     const deposit_requests = try encodeDepositRequests(allocator, p.deposit_requests);
     defer allocator.free(deposit_requests);
@@ -1665,17 +1665,17 @@ fn encodeExecutionPayloadV3(allocator: Allocator, p: ExecutionPayloadV3) ![]cons
     defer allocator.free(logs_bloom);
     const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
     defer allocator.free(prev_randao);
-    const block_number = try hexEncodeU64(allocator, p.block_number);
+    const block_number = try hexEncodeQuantity(allocator, p.block_number);
     defer allocator.free(block_number);
-    const gas_limit = try hexEncodeU64(allocator, p.gas_limit);
+    const gas_limit = try hexEncodeQuantity(allocator, p.gas_limit);
     defer allocator.free(gas_limit);
-    const gas_used = try hexEncodeU64(allocator, p.gas_used);
+    const gas_used = try hexEncodeQuantity(allocator, p.gas_used);
     defer allocator.free(gas_used);
-    const timestamp = try hexEncodeU64(allocator, p.timestamp);
+    const timestamp = try hexEncodeQuantity(allocator, p.timestamp);
     defer allocator.free(timestamp);
     const extra_data = try hexEncode(allocator, p.extra_data);
     defer allocator.free(extra_data);
-    const base_fee = try hexEncodeU256(allocator, p.base_fee_per_gas);
+    const base_fee = try hexEncodeQuantityU256(allocator, p.base_fee_per_gas);
     defer allocator.free(base_fee);
     const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
     defer allocator.free(block_hash);
@@ -1683,9 +1683,9 @@ fn encodeExecutionPayloadV3(allocator: Allocator, p: ExecutionPayloadV3) ![]cons
     defer allocator.free(transactions);
     const withdrawals = try encodeWithdrawals(allocator, p.withdrawals);
     defer allocator.free(withdrawals);
-    const blob_gas_used = try hexEncodeU64(allocator, p.blob_gas_used);
+    const blob_gas_used = try hexEncodeQuantity(allocator, p.blob_gas_used);
     defer allocator.free(blob_gas_used);
-    const excess_blob_gas = try hexEncodeU64(allocator, p.excess_blob_gas);
+    const excess_blob_gas = try hexEncodeQuantity(allocator, p.excess_blob_gas);
     defer allocator.free(excess_blob_gas);
 
     return std.fmt.allocPrint(allocator,
@@ -1733,7 +1733,7 @@ fn encodeForkchoiceState(allocator: Allocator, state: ForkchoiceStateV1) ![]cons
 }
 
 fn encodePayloadAttributes(allocator: Allocator, attrs: PayloadAttributesV3) ![]const u8 {
-    const timestamp = try hexEncodeU64(allocator, attrs.timestamp);
+    const timestamp = try hexEncodeQuantity(allocator, attrs.timestamp);
     defer allocator.free(timestamp);
     const prev_randao = try hexEncodeFixed(allocator, &attrs.prev_randao);
     defer allocator.free(prev_randao);
