@@ -196,11 +196,7 @@ pub fn verifyMultipleAggregateSignatures(
         return BlstError.VerifyFail;
 
     // Acquire dispatch lock — serializes concurrent verification requests.
-    // Uses tryLock+spinloop because std.atomic.Mutex (Zig 0.16) has no blocking lock().
-    // Contention is expected to be rare (typically one caller at a time).
-    while (!pool.dispatch_mutex.tryLock()) {
-        std.atomic.spinLoopHint();
-    }
+    pool.dispatch_mutex.lock();
     defer pool.dispatch_mutex.unlock();
 
     // Single-threaded fallback for small inputs or single worker
@@ -303,9 +299,7 @@ pub fn aggregateVerify(
     if (n_elems == 0 or msgs.len != n_elems) return BlstError.VerifyFail;
 
     // Acquire dispatch lock (see comment in verifyMultipleAggregateSignatures).
-    while (!pool.dispatch_mutex.tryLock()) {
-        std.atomic.spinLoopHint();
-    }
+    pool.dispatch_mutex.lock();
     defer pool.dispatch_mutex.unlock();
 
     // Single-threaded fallback
@@ -391,10 +385,7 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
     var sig_ptrs: [num_sigs]*Signature = undefined;
 
     var prng = std.Random.DefaultPrng.init(blk: {
-        var seed: u64 = undefined;
-        var stack_dummy: u8 = 0;
-        seed = @truncate(@intFromPtr(&stack_dummy));
-        break :blk seed;
+        break :blk 0xDEADBEEF_CAFEBABE;
     });
     const rand = prng.random();
 
@@ -447,10 +438,7 @@ test "aggregateVerify multi-threaded" {
     var pk_ptrs: [num_sigs]*PublicKey = undefined;
 
     var prng = std.Random.DefaultPrng.init(blk: {
-        var seed: u64 = undefined;
-        var stack_dummy: u8 = 0;
-        seed = @truncate(@intFromPtr(&stack_dummy));
-        break :blk seed;
+        break :blk 0xDEADBEEF_CAFEBABE;
     });
     const rand = prng.random();
 
