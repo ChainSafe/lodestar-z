@@ -260,3 +260,28 @@ pub const dst_audit = @import("dst_audit.zig");
 comptime {
     _ = dst_audit;
 }
+
+// ── Simulation Framework V2: SimValidator, SimController, Scenario, Fuzzer ──
+pub const sim_validator = @import("sim_validator.zig");
+pub const sim_controller = @import("sim_controller.zig");
+pub const scenario_mod = @import("scenario.zig");
+pub const sim_fuzzer = @import("sim_fuzzer.zig");
+
+pub const SimValidator = sim_validator.SimValidator;
+pub const SimController = sim_controller.SimController;
+pub const Scenario = scenario_mod.Scenario;
+pub const SimFuzzer = sim_fuzzer.SimFuzzer;
+
+pub const sim_validator_test = @import("sim_validator_test.zig");
+pub const sim_scenario_test = @import("sim_scenario_test.zig");
+pub const sim_fuzzer_test = @import("sim_fuzzer_test.zig");
+
+comptime {
+    _ = sim_validator;
+    _ = sim_controller;
+    _ = scenario_mod;
+    _ = sim_fuzzer;
+    _ = sim_validator_test;
+    _ = sim_scenario_test;
+    _ = sim_fuzzer_test;
+}
