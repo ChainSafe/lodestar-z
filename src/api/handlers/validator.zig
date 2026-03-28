@@ -343,6 +343,14 @@ pub fn getAttestationData(
     }
 
     // Stub: return attestation data based on current head.
+    // W6: target_root is the block root at the START of the target epoch,
+    // not the current head root. Use justified_root as an approximation
+    // when no callback is wired (justified checkpoint root is at epoch start).
+    const target_epoch = slot / preset.SLOTS_PER_EPOCH;
+    const target_root = if (target_epoch == ctx.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH)
+        ctx.head_tracker.justified_root
+    else
+        ctx.head_tracker.head_root; // best effort when no state available
     return .{
         .data = .{
             .slot = slot,
@@ -350,8 +358,8 @@ pub fn getAttestationData(
             .beacon_block_root = ctx.head_tracker.head_root,
             .source_epoch = ctx.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
             .source_root = ctx.head_tracker.justified_root,
-            .target_epoch = slot / preset.SLOTS_PER_EPOCH,
-            .target_root = ctx.head_tracker.head_root,
+            .target_epoch = target_epoch,
+            .target_root = target_root,
         },
         .meta = .{},
     };

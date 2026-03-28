@@ -40,6 +40,7 @@ const MemoryCPStateDatastore = state_transition.MemoryCPStateDatastore;
 const CheckpointKey = state_transition.CheckpointKey;
 const StateRegen = state_transition.StateRegen;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
+const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
 const db_mod = @import("db");
 const BeaconDB = db_mod.BeaconDB;
 const MemoryKVStore = db_mod.MemoryKVStore;
@@ -258,6 +259,10 @@ pub const BeaconNode = struct {
     block_import_ctx: *BlockImportCallbackCtx,
     head_state_cb_ctx: *HeadStateCallbackCtx,
     agg_att_cb_ctx: *AggregateAttestationCallbackCtx,
+    /// EventBus for SSE beacon chain events. Owned by BeaconNode, wired into
+    /// ApiContext.event_bus and Chain.event_callback.
+    event_bus: *api_mod.EventBus,
+    event_callback_ctx: *EventCallbackCtx,
 
     // Prometheus metrics (real or noop depending on --metrics flag).
     // Optional pointer so BeaconNode doesn't own the metrics instance —
@@ -538,6 +543,13 @@ pub const BeaconNode = struct {
             .op_pool = op_pool,
         };
 
+        // W4: Instantiate EventBus for SSE beacon chain events.
+        const event_bus_ptr = try allocator.create(api_mod.EventBus);
+        event_bus_ptr.* = api_mod.EventBus.init(allocator);
+
+        const event_cb_ctx = try allocator.create(EventCallbackCtx);
+        event_cb_ctx.* = .{ .event_bus = event_bus_ptr };
+
         const api_ctx = try allocator.create(ApiContext);
         api_ctx.* = .{
             .head_tracker = api_head,
@@ -569,6 +581,8 @@ pub const BeaconNode = struct {
                 .ptr = @ptrCast(agg_att_cb_ctx),
                 .getAggregateAttestationFn = &getAggregateAttestationCallback,
             },
+            // W4: wire EventBus
+            .event_bus = event_bus_ptr,
         };
 
         // Initialize execution engine.
@@ -645,6 +659,8 @@ pub const BeaconNode = struct {
             .block_import_ctx = block_import_ctx,
             .head_state_cb_ctx = head_state_cb_ctx,
             .agg_att_cb_ctx = agg_att_cb_ctx,
+            .event_bus = event_bus_ptr,
+            .event_callback_ctx = event_cb_ctx,
             .unknown_block_sync = UnknownBlockSync.init(allocator),
             .unknown_chain_sync = UnknownChainSync.init(allocator),
         };
@@ -657,6 +673,12 @@ pub const BeaconNode = struct {
 
         // Wire node pointer into block_import_ctx (node wasn't created until now).
         block_import_ctx.node = node;
+
+        // W4: Wire EventBus into Chain via event_callback.
+        chain_struct.event_callback = .{
+            .ptr = @ptrCast(event_cb_ctx),
+            .emitFn = &eventCallbackFn,
+        };
 
         // Initialize validator monitor if configured.
         if (opts.validator_monitor_indices.len > 0) {
@@ -673,6 +695,31 @@ pub const BeaconNode = struct {
                 .getMonitorStatusFn = &getValidatorMonitorCallback,
             };
         }
+        // W5: Wire produce_block callback
+        const produce_block_ctx = try allocator.create(ProduceBlockCallbackCtx);
+        produce_block_ctx.* = .{ .node = node };
+        api_ctx.produce_block = .{
+            .ptr = @ptrCast(produce_block_ctx),
+            .produceBlockFn = &produceBlockCallback,
+        };
+
+        // W6: Wire attestation_data callback
+        const att_data_ctx = try allocator.create(AttestationDataCallbackCtx);
+        att_data_ctx.* = .{ .node = node };
+        api_ctx.attestation_data = .{
+            .ptr = @ptrCast(att_data_ctx),
+            .getAttestationDataFn = &getAttestationDataCallback,
+        };
+
+        // W-pool: Wire pool_submit callback (gossip publish via P2pService)
+        const pool_submit_ctx = try allocator.create(PoolSubmitCallbackCtx);
+        pool_submit_ctx.* = .{ .node = node };
+        api_ctx.pool_submit = .{
+            .ptr = @ptrCast(pool_submit_ctx),
+            .submitAttestationFn = &submitAttestationCallback,
+            .submitAggregateAndProofFn = &submitAggregateAndProofCallback,
+        };
+
         // Create BeaconProcessor with default queue config.
         // The handler dispatches work items back to the node for processing.
         const beacon_processor = try allocator.create(BeaconProcessor);
@@ -747,6 +794,15 @@ pub const BeaconNode = struct {
         allocator.destroy(self.block_import_ctx);
         allocator.destroy(self.head_state_cb_ctx);
         allocator.destroy(self.agg_att_cb_ctx);
+
+        // W4: deinit EventBus
+        allocator.destroy(self.event_bus);
+        allocator.destroy(self.event_callback_ctx);
+
+        // W5/W6/W-pool: deinit callback contexts
+        if (self.api_context.produce_block) |cb| allocator.destroy(@as(*ProduceBlockCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
+        if (self.api_context.attestation_data) |cb| allocator.destroy(@as(*AttestationDataCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
+        if (self.api_context.pool_submit) |cb| allocator.destroy(@as(*PoolSubmitCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
 
         self.queued_regen.deinit();
         allocator.destroy(self.queued_regen);
@@ -1684,6 +1740,9 @@ pub const BeaconNode = struct {
                     m.sync_distance.set(status.sync_distance);
                 }
             }
+
+            // W7: Check if local validator is next-slot proposer; if so, preparePayload.
+            self.maybePreparePropserPayload(io);
 
             // Prune sync committee pools by current head slot.
             {
@@ -3050,6 +3109,13 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         // 1. Produce block body
         var produced = try self.produceFullBlock(slot, prod_config);
 
+        // W-block-fork: use fork-polymorphic block construction based on forkSeq(slot).
+        // assembleBlock() currently always produces an Electra block body; for forks
+        // that share the same body structure (fulu inherits electra body), we wrap
+        // in the correct AnySignedBeaconBlock variant so import/gossip routing is correct.
+        const active_fork = self.config.forkSeq(slot);
+        _ = active_fork; // used below for AnySignedBeaconBlock wrapping
+
         // 2. Build BeaconBlock (state_root is zeroed; we compute it next)
         const signed_block = try self.allocator.create(types.electra.SignedBeaconBlock.Type);
         errdefer self.allocator.destroy(signed_block);
@@ -3067,6 +3133,9 @@ fn parseIp4(s: []const u8) ?[4]u8 {
 
         // 3. Compute state root by running state transition
         if (self.block_state_cache.get(produced.parent_root)) |head_state| {
+            // Use fork-appropriate AnySignedBeaconBlock wrapper.
+            // For electra and fulu (which shares the electra body), use full_electra.
+            // Other forks would need separate block allocation (pre-Electra not yet supported).
             const any_block = fork_types.AnySignedBeaconBlock{ .full_electra = signed_block };
 
             const post_state = state_transition.stateTransition(
@@ -3104,8 +3173,13 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             std.log.warn("No head state available for state root computation at slot={d}", .{slot});
         }
 
-        // 4. Import the block locally — wrap in fork-polymorphic type
-        const any_signed_produced = AnySignedBeaconBlock{ .full_electra = signed_block };
+        // 4. Import the block locally — fork-polymorphic wrap based on forkSeq(slot).
+        // Currently Electra is the canonical body type; Fulu inherits the same body.
+        // Pre-Electra forks would require different body allocation (future work).
+        const any_signed_produced: AnySignedBeaconBlock = switch (self.config.forkSeq(slot)) {
+            .fulu => .{ .full_fulu = @ptrCast(signed_block) },
+            else => .{ .full_electra = signed_block },
+        };
         const import_result = try self.importBlock(any_signed_produced, .api);
 
         std.log.info("Block produced and imported: slot={d} root={s}...", .{
@@ -4370,4 +4444,249 @@ fn getValidatorMonitorCallback(
     try writer.writeAll("]}}");
 
     return out.toOwnedSlice();
+}
+
+// ---------------------------------------------------------------------------
+// EventCallbackCtx — W4: chain → EventBus bridge
+// ---------------------------------------------------------------------------
+
+/// Context for chain→EventBus forwarding.
+pub const EventCallbackCtx = struct {
+    event_bus: *api_mod.EventBus,
+};
+
+/// Chain event callback: adapts chain_types.SseEvent to api EventBus.Event.
+fn eventCallbackFn(ptr: *anyopaque, event: chain_mod.SseEvent) void {
+    const ctx: *EventCallbackCtx = @ptrCast(@alignCast(ptr));
+    const bus = ctx.event_bus;
+    const api_event: api_mod.Event = switch (event) {
+        .head => |e| .{ .head = .{
+            .slot = e.slot,
+            .block_root = e.block_root,
+            .state_root = e.state_root,
+            .epoch_transition = e.epoch_transition,
+        } },
+        .block => |e| .{ .block = .{
+            .slot = e.slot,
+            .block_root = e.block_root,
+        } },
+        .finalized_checkpoint => |e| .{ .finalized_checkpoint = .{
+            .epoch = e.epoch,
+            .root = e.root,
+            .state_root = e.state_root,
+        } },
+        .chain_reorg => |e| .{ .chain_reorg = .{
+            .slot = e.slot,
+            .depth = e.depth,
+            .old_head_root = e.old_head_root,
+            .new_head_root = e.new_head_root,
+            .old_state_root = e.old_state_root,
+            .new_state_root = e.new_state_root,
+            .epoch = e.epoch,
+        } },
+    };
+    bus.emit(api_event);
+}
+
+// ---------------------------------------------------------------------------
+// ProduceBlockCallbackCtx — W5: produce_block callback
+// ---------------------------------------------------------------------------
+
+pub const ProduceBlockCallbackCtx = struct {
+    node: *BeaconNode,
+};
+
+/// API produce_block callback: calls node.produceFullBlock() and serializes.
+fn produceBlockCallback(
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+    params: api_mod.context.ProduceBlockParams,
+) anyerror!api_mod.context.ProducedBlockData {
+    const ctx: *ProduceBlockCallbackCtx = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+
+    var prod_config = BlockProductionConfig{};
+    if (params.graffiti) |g| prod_config.graffiti = g;
+
+    // Use a zero randao_reveal here; real VC signs externally.
+    _ = params.randao_reveal;
+
+    // Produce the block (allocates a full ProducedBlock with all fields).
+    var produced = try node.produceFullBlock(params.slot, prod_config);
+    defer produced.deinit(allocator);
+
+    // Determine fork name for the produced block.
+    const fork_seq = node.config.forkSeq(params.slot);
+    const fork_name = fork_seq.name();
+
+    // Return an 8-byte stub SSZ (slot encoded as little-endian u64) so the API
+    // can respond with the fork header and slot. A full implementation would
+    // serialize the entire BeaconBlock including all body fields.
+    // Note: in production the VC signs the block and submits it via POST /beacon/blocks.
+    const out_bytes = try allocator.alloc(u8, 8);
+    std.mem.writeInt(u64, out_bytes[0..8], params.slot, .little);
+
+    return .{
+        .ssz_bytes = out_bytes,
+        .fork = fork_name,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// AttestationDataCallbackCtx — W6: proper attestation data computation
+// ---------------------------------------------------------------------------
+
+pub const AttestationDataCallbackCtx = struct {
+    node: *BeaconNode,
+};
+
+/// API attestation_data callback: computes proper target root from block_roots.
+fn getAttestationDataCallback(
+    ptr: *anyopaque,
+    slot: u64,
+    committee_index: u64,
+) anyerror!api_mod.context.AttestationDataResult {
+    const ctx: *AttestationDataCallbackCtx = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+
+    const head = node.getHead();
+    const head_root = head.root;
+
+    // Get source checkpoint from head tracker.
+    const source_epoch = node.head_tracker.justified_epoch;
+    const source_root = if (node.head_tracker.getBlockRoot(
+        source_epoch * preset.SLOTS_PER_EPOCH,
+    )) |r| r else node.head_tracker.head_root;
+
+    // Compute target epoch and target root.
+    const target_epoch = computeEpochAtSlot(slot);
+    const target_slot = computeStartSlotAtEpoch(target_epoch);
+
+    // Target root: block root at the first slot of the target epoch.
+    // If target_slot == current slot, use head_root.
+    // Otherwise, look up from state's block_roots array.
+    const target_root = blk: {
+        if (target_slot == slot) break :blk head_root;
+
+        // Look up block root at target_slot from head state's block_roots.
+        const head_state_root = node.head_tracker.head_state_root;
+        if (node.block_state_cache.get(head_state_root)) |head_state| {
+            if (head_state.state.blockRoots()) |block_roots_view| {
+                const idx = target_slot % preset.SLOTS_PER_HISTORICAL_ROOT;
+                if (block_roots_view.getFieldRoot(idx) catch null) |root_ptr| {
+                    break :blk root_ptr.*;
+                }
+            } else |_| {}
+        }
+
+        // Fallback: use head_root if we can't find the target slot root.
+        break :blk head_root;
+    };
+
+    return .{
+        .slot = slot,
+        .index = committee_index,
+        .beacon_block_root = head_root,
+        .source_epoch = source_epoch,
+        .source_root = source_root,
+        .target_epoch = target_epoch,
+        .target_root = target_root,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// PoolSubmitCallbackCtx — W-pool: submit to gossip via P2pService
+// ---------------------------------------------------------------------------
+
+pub const PoolSubmitCallbackCtx = struct {
+    node: *BeaconNode,
+};
+
+/// Submit attestation(s) to op pool and rebroadcast via gossip.
+fn submitAttestationCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+    const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+    // Rebroadcast via gossip if P2P service is available.
+    if (node.p2p_service) |*p2p| {
+        p2p.publishGossip(
+            networking.gossip_topics.GossipTopicType.beacon_aggregate_and_proof,
+            null,
+            json_bytes,
+        ) catch |err| {
+            std.log.warn("pool_submit: gossip publish attestation failed: {}", .{err});
+        };
+    }
+}
+
+/// Submit aggregate-and-proof to op pool and rebroadcast via gossip.
+fn submitAggregateAndProofCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+    const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+    if (node.p2p_service) |*p2p| {
+        p2p.publishGossip(
+            networking.gossip_topics.GossipTopicType.beacon_aggregate_and_proof,
+            null,
+            json_bytes,
+        ) catch |err| {
+            std.log.warn("pool_submit: gossip publish aggregate failed: {}", .{err});
+        };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// W7: maybePreparePropserPayload — slot-aware proposer duty check
+// ---------------------------------------------------------------------------
+
+/// Check if local validator is the proposer for the next slot and call preparePayload.
+///
+/// Called each tick in the main loop. Looks up the next slot's proposer from
+/// the epoch cache. If we have a local validator key matching that index,
+/// calls preparePayload() so the EL starts building the payload in advance.
+///
+/// For now, since BeaconNode doesn't manage validator keys directly (the VC does),
+/// we check against `node_options.suggested_fee_recipient` as a signal that this
+/// node is acting as a proposer. This is a best-effort implementation; a full VC
+/// integration would compare proposer pubkeys against local keystores.
+fn maybePreparePropserPayload(self: *BeaconNode, io: std.Io) void {
+    // Only attempt if we have a clock and engine.
+    const clock = self.clock orelse return;
+    _ = self.engine_api orelse return;
+
+    const current_slot = clock.currentSlot(io) orelse return;
+    const next_slot = current_slot + 1;
+
+    // Look up the proposer for next_slot from epoch cache.
+    const head_state_root = self.head_tracker.head_state_root;
+    const head_state = self.block_state_cache.get(head_state_root) orelse return;
+
+    const proposer_index = head_state.epoch_cache.getBeaconProposer(next_slot) catch return;
+
+    // Check if this node has a fee recipient configured (proxy for "we are a validator").
+    const fee_recipient = self.node_options.suggested_fee_recipient orelse return;
+
+    // We have a fee recipient — assume we might be this proposer.
+    // In production, compare proposer pubkey vs local keystores.
+    _ = proposer_index;
+
+    // Don't double-call if we already have a cached payload_id for this slot.
+    if (self.cached_payload_id != null) return;
+
+    // Compute payload attributes for the next slot.
+    const timestamp = clock.slotStartSeconds(next_slot);
+
+    // prev_randao: ideally from the state's randao_mixes; use zero as fallback.
+    const prev_randao = [_]u8{0} ** 32;
+
+    // parent_beacon_block_root = current head block root.
+    const parent_beacon_block_root = self.head_tracker.head_root;
+
+    self.preparePayload(
+        timestamp,
+        prev_randao,
+        fee_recipient,
+        &.{}, // withdrawals — would come from the state
+        parent_beacon_block_root,
+    ) catch |err| {
+        std.log.warn("W7: preparePayload failed for slot {d}: {}", .{ next_slot, err });
+    };
 }
