@@ -120,7 +120,7 @@ pub const LmdbKVStore = struct {
         if (self.closed) return error.StoreClosed;
 
         var txn = try self.env.beginTxn(.{});
-        txn.delFromDbi(self.getDbi(db_id), key) catch |err| {
+        _ = txn.delFromDbi(self.getDbi(db_id), key) catch |err| {
             txn.abort();
             return err;
         };

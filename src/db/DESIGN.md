@@ -22,33 +22,33 @@ named databases per environment, sharing a single memory map with zero extra ove
 
 | DBI Name | Key | Value | Access Pattern | Hot/Cold | LMDB Flags |
 |---|---|---|---|---|---|
-| `state_archive` | Slot (8B LE) | SSZ BeaconState | Range scan (ascending) | Cold | — |
+| `state_archive` | Slot (8B BE) | SSZ BeaconState | Range scan (ascending) | Cold | — |
 | `block` | Root (32B) | SSZ SignedBeaconBlock | Point lookup | Hot | — |
-| `block_archive` | Slot (8B LE) | SSZ SignedBeaconBlock | Range scan (ascending) | Cold | — |
-| `idx_block_parent_root` | Root (32B) | Slot (8B LE) | Point lookup | Cold | — |
-| `idx_block_root` | Root (32B) | Slot (8B LE) | Point lookup | Cold | — |
-| `idx_main_chain` | Slot (8B LE) | Root (32B) | Point lookup, range | Cold | — |
+| `block_archive` | Slot (8B BE) | SSZ SignedBeaconBlock | Range scan (ascending) | Cold | — |
+| `idx_block_parent_root` | Root (32B) | Slot (8B BE) | Point lookup | Cold | — |
+| `idx_block_root` | Root (32B) | Slot (8B BE) | Point lookup | Cold | — |
+| `idx_main_chain` | Slot (8B BE) | Root (32B) | Point lookup, range | Cold | — |
 | `chain_info` | Short string | Variable | Point lookup | Hot | — |
-| `exit` | ValidatorIndex (8B LE) | SSZ VoluntaryExit | Point lookup, iteration | Hot | — |
-| `proposer_slashing` | ValidatorIndex (8B LE) | SSZ ProposerSlashing | Point lookup | Hot | — |
+| `exit` | ValidatorIndex (8B BE) | SSZ VoluntaryExit | Point lookup, iteration | Hot | — |
+| `proposer_slashing` | ValidatorIndex (8B BE) | SSZ ProposerSlashing | Point lookup | Hot | — |
 | `attester_slashing` | Root (32B) | SSZ AttesterSlashing | Point lookup, iteration | Hot | — |
-| `bls_change` | ValidatorIndex (8B LE) | SSZ SignedBLSToExecChange | Point lookup | Hot | — |
+| `bls_change` | ValidatorIndex (8B BE) | SSZ SignedBLSToExecChange | Point lookup | Hot | — |
 | `checkpoint_state` | Root (32B) | SSZ BeaconState | Point lookup | Hot | — |
-| `idx_state_root` | Root (32B) | Slot (8B LE) | Point lookup | Cold | — |
+| `idx_state_root` | Root (32B) | Slot (8B BE) | Point lookup | Cold | — |
 | `blob_sidecar` | Root (32B) | SSZ BlobSidecars | Point lookup | Hot | — |
-| `blob_sidecar_archive` | Slot (8B LE) | SSZ BlobSidecars | Range scan | Cold | — |
-| `backfill_ranges` | From (8B LE) | To (8B LE) | Range scan | Cold | — |
+| `blob_sidecar_archive` | Slot (8B BE) | SSZ BlobSidecars | Range scan | Cold | — |
+| `backfill_ranges` | From (8B BE) | To (8B BE) | Range scan | Cold | — |
 | `lc_sync_witness` | Root (32B) | SyncCommitteeWitness | Point lookup | Warm | — |
 | `lc_sync_committee` | Root (32B) | SSZ SyncCommittee | Point lookup | Warm | — |
 | `lc_checkpoint_header` | Root (32B) | SSZ BeaconBlockHeader | Point lookup | Warm | — |
-| `lc_best_update` | SyncPeriod (8B LE) | [Slot, LightClientUpdate] | Point lookup | Warm | — |
+| `lc_best_update` | SyncPeriod (8B BE) | [Slot, LightClientUpdate] | Point lookup | Warm | — |
 | `data_column` | Root (32B) | SSZ DataColumnSidecars | Point lookup | Hot | — |
-| `data_column_archive` | Slot (8B LE) | SSZ DataColumnSidecars | Range scan | Cold | — |
-| `data_column_single` | Root(32B) ++ ColIdx(8B LE) | Single DataColumnSidecar | Point lookup | Hot | — |
+| `data_column_archive` | Slot (8B BE) | SSZ DataColumnSidecars | Range scan | Cold | — |
+| `data_column_single` | Root(32B) ++ ColIdx(8B BE) | Single DataColumnSidecar | Point lookup | Hot | — |
 | `epbs_payload` | Root (32B) | SSZ SignedExecPayloadEnvelope | Point lookup | Hot | — |
-| `epbs_payload_archive` | Slot (8B LE) | SSZ SignedExecPayloadEnvelope | Range scan | Cold | — |
+| `epbs_payload_archive` | Slot (8B BE) | SSZ SignedExecPayloadEnvelope | Range scan | Cold | — |
 | `fork_choice` | Short string | Serialized fork choice | Point lookup (single entry) | Hot | — |
-| `validator_index` | Pubkey (48B) | ValidatorIndex (8B LE) | Point lookup | Hot | — |
+| `validator_index` | Pubkey (48B) | ValidatorIndex (8B BE) | Point lookup | Hot | — |
 
 **Total: 26 named databases** (well within LMDB's 128 limit).
 
