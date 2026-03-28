@@ -166,7 +166,7 @@ pub const ValidatorStore = struct {
         var zeroed_sk_bytes = [_]u8{0} ** 32;
         // BLS scalar must be non-zero; use 1 as a safe placeholder.
         zeroed_sk_bytes[31] = 1;
-        const placeholder_sk = SecretKey.fromBytes(zeroed_sk_bytes) catch return error.InvalidPubkey;
+        const placeholder_sk = SecretKey.deserialize(&zeroed_sk_bytes) catch return error.InvalidPubkey;
 
         try self.validators.append(.{
             .pubkey = pubkey,
@@ -528,7 +528,7 @@ fn makeDummyKey() SecretKey {
     // Generate a deterministic test key from a fixed scalar.
     var scalar: [32]u8 = [_]u8{0} ** 32;
     scalar[31] = 1; // minimal non-zero scalar
-    return SecretKey.fromBytes(scalar) catch unreachable;
+    return SecretKey.deserialize(&scalar) catch unreachable;
 }
 
 test "ValidatorStore: addKey and allIndices" {

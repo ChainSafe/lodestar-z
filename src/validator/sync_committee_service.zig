@@ -415,6 +415,12 @@ pub const SyncCommitteeService = struct {
             for (dp.duty.validator_sync_committee_indices, dp.selection_proofs) |sc_idx, *cached_proof| {
                 const subcommittee_index = sc_idx / (self.sync_committee_size / self.sync_committee_subnet_count);
 
+                // Safety check before any signing.
+                if (!self.isSafeToSign(dp.duty.pubkey)) {
+                    log.warn("skipping contribution slot={d} validator_index={d}: signing not safe", .{ slot, dp.duty.validator_index });
+                    continue;
+                }
+
                 // BUG-8 Fix: Compute selection proof with the ACTUAL current slot (not epoch start).
                 // The spec requires SyncAggregatorSelectionData{slot=current_slot, subcommittee_index}.
                 if (cached_proof.* == null) {
@@ -481,12 +487,6 @@ pub const SyncCommitteeService = struct {
                     continue;
                 };
 
-                // Safety check before contribution signing.
-                if (!self.isSafeToSign(dp.duty.pubkey)) {
-                    log.warn("skipping contribution slot={d} validator_index={d}: signing not safe", .{ slot, dp.duty.validator_index });
-                    continue;
-                }
-
                 const sig = self.validator_store.signContributionAndProof(io, dp.duty.pubkey, signing_root) catch |err| {
                     log.warn("signContributionAndProof error: {s}", .{@errorName(err)});
                     continue;
@@ -500,12 +500,11 @@ pub const SyncCommitteeService = struct {
                 // 3. Build SignedContributionAndProof JSON and publish.
                 // Fix 4: Hex-encode the actual agg_bits instead of hardcoded "0x00".
                 // agg_bits is a BitVector(128) — 16 bytes, no sentinel needed (fixed-size).
-                const agg_bits_hex = std.fmt.bytesToHex(&agg_bits, .lower);
                 var contrib_json = std.ArrayList(u8).init(self.allocator);
                 defer contrib_json.deinit();
                 try contrib_json.writer().print(
-                    "[{{\"message\":{{\"aggregator_index\":\"{d}\",\"contribution\":{{\"slot\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"subcommittee_index\":\"{d}\",\"aggregation_bits\":\"0x{s}\",\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}]",
-                    .{ dp.duty.validator_index, slot, bbr_hex2, subcommittee_index, agg_bits_hex, contrib_sig_hex, sel_hex, sig_hex },
+                    "[{{\"message\":{{\"aggregator_index\":\"{d}\",\"contribution\":{{\"slot\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"subcommittee_index\":\"{d}\",\"aggregation_bits\":\"0x{}\",\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}]",
+                    .{ dp.duty.validator_index, slot, bbr_hex2, subcommittee_index, std.fmt.fmtSliceHexLower(agg_bits), contrib_sig_hex, sel_hex, sig_hex },
                 );
 
                 self.api.publishContributionAndProofs(io, contrib_json.items) catch |err| {

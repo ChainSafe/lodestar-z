@@ -59,9 +59,9 @@ pub fn createKeystore(allocator: Allocator, password: []const u8, params: Scrypt
     // Create BLS secret key. Retry if we happen to generate zero (astronomically rare).
     const secret_key: SecretKey = sk: {
         // Extremely unlikely — just increment byte 31 and try again.
-        break :sk SecretKey.fromBytes(sk_bytes) catch {
+        break :sk SecretKey.deserialize(&sk_bytes) catch {
             sk_bytes[31] +%= 1;
-            break :sk SecretKey.fromBytes(sk_bytes) catch return error.InvalidBLSSecretKey;
+            break :sk SecretKey.deserialize(&sk_bytes) catch return error.InvalidBLSSecretKey;
         };
     };
 
@@ -294,7 +294,7 @@ test "encryptKeystore: known key roundtrip" {
     const params = ScryptParams{ .n = 2, .r = 1, .p = 1 };
     var sk_bytes: [32]u8 = [_]u8{0} ** 32;
     sk_bytes[31] = 1;
-    const sk = try SecretKey.fromBytes(sk_bytes);
+    const sk = try SecretKey.deserialize(&sk_bytes);
 
     const json = try encryptKeystore(testing.allocator, sk, "mypassword", params);
     defer testing.allocator.free(json);
