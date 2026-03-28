@@ -75,6 +75,10 @@ pub const ValidatorStore = struct {
     }
 
     pub fn deinit(self: *ValidatorStore) void {
+        // Zero all BLS secret keys before freeing the list.
+        for (self.validators.items) |*v| {
+            std.crypto.utils.secureZero(u8, &v.secret_key.value.b);
+        }
         self.validators.deinit();
         self.pubkeys_cache.deinit();
         self.slashing_db.close();
@@ -140,6 +144,8 @@ pub const ValidatorStore = struct {
 
         for (self.validators.items, 0..) |v, i| {
             if (std.mem.eql(u8, &v.pubkey, &pubkey)) {
+                // Zero secret key memory before removing the entry.
+                std.crypto.utils.secureZero(u8, &self.validators.items[i].secret_key.value.b);
                 _ = self.validators.swapRemove(i);
                 // Keep pubkeys_cache in sync.
                 _ = self.pubkeys_cache.swapRemove(i);
