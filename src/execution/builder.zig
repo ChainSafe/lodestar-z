@@ -596,6 +596,7 @@ fn parseSignedBuilderBid(allocator: Allocator, json_bytes: []const u8) !SignedBu
             .blob_kzg_commitments = blk: {
                 // Fix 5: parse blob_kzg_commitments array from JSON.
                 const kzg_val = message_obj.get("blob_kzg_commitments") orelse break :blk &([_][48]u8{});
+                if (kzg_val != .array) return error.InvalidBlobKzgCommitmentsType;
                 const kzg_arr = kzg_val.array.items;
                 if (kzg_arr.len == 0) break :blk &([_][48]u8{});
                 const commitments = try allocator.alloc([48]u8, kzg_arr.len);

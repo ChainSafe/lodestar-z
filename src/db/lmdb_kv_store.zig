@@ -108,8 +108,10 @@ pub const LmdbKVStore = struct {
         if (self.closed) return error.StoreClosed;
 
         var txn = try self.env.beginTxn(.{});
-        errdefer txn.abort();
-        try txn.putToDbi(self.getDbi(db_id), key, value);
+        txn.putToDbi(self.getDbi(db_id), key, value) catch |err| {
+            txn.abort();
+            return err;
+        };
         try txn.commit();
     }
 
@@ -118,8 +120,10 @@ pub const LmdbKVStore = struct {
         if (self.closed) return error.StoreClosed;
 
         var txn = try self.env.beginTxn(.{});
-        errdefer txn.abort();
-        _ = try txn.delFromDbi(self.getDbi(db_id), key);
+        txn.delFromDbi(self.getDbi(db_id), key) catch |err| {
+            txn.abort();
+            return err;
+        };
         try txn.commit();
     }
 
@@ -128,12 +132,19 @@ pub const LmdbKVStore = struct {
         if (self.closed) return error.StoreClosed;
 
         var txn = try self.env.beginTxn(.{});
-        errdefer txn.abort();
 
         for (ops) |op| {
             switch (op) {
-                .put => |p| try txn.putToDbi(self.getDbi(p.db), p.key, p.value),
-                .delete => |d| _ = try txn.delFromDbi(self.getDbi(d.db), d.key),
+                .put => |p| txn.putToDbi(self.getDbi(p.db), p.key, p.value) catch |err| {
+                    txn.abort();
+                    return err;
+                },
+                .delete => |d| {
+                    _ = txn.delFromDbi(self.getDbi(d.db), d.key) catch |err| {
+                        txn.abort();
+                        return err;
+                    };
+                },
             }
         }
 
