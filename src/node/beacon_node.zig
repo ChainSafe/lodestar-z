@@ -1473,6 +1473,13 @@ pub const BeaconNode = struct {
         // Get effective balances from genesis epoch cache.
         const genesis_balances = genesis_state.epoch_cache.getEffectiveBalanceIncrements();
 
+        // At genesis, the anchor block is both the justified and finalized block.
+        // Override checkpoint roots to genesis_block_root regardless of what the
+        // genesis state says — the state's checkpoint may reference a root that
+        // doesn't exist in proto_array yet. Matches Lodestar TS anchor init.
+        const justified_root = genesis_block_root;
+        const finalized_root = genesis_block_root;
+
         const fc_anchor = ProtoBlock{
             .slot = 0,
             .block_root = genesis_block_root,
@@ -1480,13 +1487,13 @@ pub const BeaconNode = struct {
             .state_root = state_root,
             .target_root = genesis_block_root,
             .justified_epoch = genesis_justified_cp.epoch,
-            .justified_root = genesis_justified_cp.root,
+            .justified_root = justified_root,
             .finalized_epoch = genesis_finalized_cp.epoch,
-            .finalized_root = genesis_finalized_cp.root,
+            .finalized_root = finalized_root,
             .unrealized_justified_epoch = genesis_justified_cp.epoch,
-            .unrealized_justified_root = genesis_justified_cp.root,
+            .unrealized_justified_root = justified_root,
             .unrealized_finalized_epoch = genesis_finalized_cp.epoch,
-            .unrealized_finalized_root = genesis_finalized_cp.root,
+            .unrealized_finalized_root = finalized_root,
             .extra_meta = .{ .pre_merge = {} },
             .timeliness = true,
         };
@@ -1498,11 +1505,11 @@ pub const BeaconNode = struct {
             genesis_slot,
             CheckpointWithPayloadStatus.fromCheckpoint(.{
                 .epoch = genesis_justified_cp.epoch,
-                .root = genesis_justified_cp.root,
+                .root = justified_root,
             }, .full),
             CheckpointWithPayloadStatus.fromCheckpoint(.{
                 .epoch = genesis_finalized_cp.epoch,
-                .root = genesis_finalized_cp.root,
+                .root = finalized_root,
             }, .full),
             genesis_balances.items,
             .{ .getFn = dummyBalancesGetterFn },
@@ -1602,6 +1609,12 @@ pub const BeaconNode = struct {
 
         const balances = checkpoint_state.epoch_cache.getEffectiveBalanceIncrements();
 
+        // The anchor block is the only block known to proto_array at init time.
+        // Force checkpoint roots to anchor_block_root so findHead can locate them.
+        // The state's checkpoint roots may reference blocks not yet in the DAG.
+        const cp_justified_root = anchor_block_root;
+        const cp_finalized_root = anchor_block_root;
+
         const fc_anchor = ProtoBlock{
             .slot = cp_slot,
             .block_root = anchor_block_root,
@@ -1609,13 +1622,13 @@ pub const BeaconNode = struct {
             .state_root = cached_state_root,
             .target_root = anchor_block_root,
             .justified_epoch = justified_cp.epoch,
-            .justified_root = justified_cp.root,
+            .justified_root = cp_justified_root,
             .finalized_epoch = finalized_cp.epoch,
-            .finalized_root = finalized_cp.root,
+            .finalized_root = cp_finalized_root,
             .unrealized_justified_epoch = justified_cp.epoch,
-            .unrealized_justified_root = justified_cp.root,
+            .unrealized_justified_root = cp_justified_root,
             .unrealized_finalized_epoch = finalized_cp.epoch,
-            .unrealized_finalized_root = finalized_cp.root,
+            .unrealized_finalized_root = cp_finalized_root,
             .extra_meta = .{ .pre_merge = {} },
             .timeliness = true,
         };
@@ -1627,11 +1640,11 @@ pub const BeaconNode = struct {
             cp_slot,
             CheckpointWithPayloadStatus.fromCheckpoint(.{
                 .epoch = justified_cp.epoch,
-                .root = justified_cp.root,
+                .root = cp_justified_root,
             }, .full),
             CheckpointWithPayloadStatus.fromCheckpoint(.{
                 .epoch = finalized_cp.epoch,
-                .root = finalized_cp.root,
+                .root = cp_finalized_root,
             }, .full),
             balances.items,
             .{ .getFn = dummyBalancesGetterFn },
