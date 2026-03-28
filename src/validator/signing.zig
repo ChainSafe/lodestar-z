@@ -228,7 +228,20 @@ pub fn voluntaryExitSigningRoot(
     // valid after the upgrade, and that validators can exit at any time post-Deneb.
     // Mirror of BeaconConfig.getDomainForVoluntaryExit on the state-transition side.
     // Pre-Deneb chains (deneb_fork_epoch == maxInt) fall back to epoch-derived version.
-    const fork_version = if (ctx.deneb_fork_epoch != std.math.maxInt(u64))
+    //
+    // EIP-7044 fix: check if Deneb has been *reached*, not just *scheduled*.
+    // The old check (deneb_fork_epoch != maxInt) would apply CAPELLA_FORK_VERSION even
+    // before the fork activates, causing exits on pre-Deneb chains with Deneb scheduled
+    // to use the wrong fork version.
+    const current_epoch = blk: {
+        const now_secs: u64 = @intCast(std.time.timestamp());
+        if (now_secs < ctx.genesis_time_unix_secs) break :blk @as(u64, 0);
+        const elapsed = now_secs - ctx.genesis_time_unix_secs;
+        break :blk elapsed / (ctx.seconds_per_slot * ctx.slots_per_epoch);
+    };
+    const deneb_reached = ctx.deneb_fork_epoch != std.math.maxInt(u64) and
+        current_epoch >= ctx.deneb_fork_epoch;
+    const fork_version = if (deneb_reached)
         ctx.capella_fork_version
     else
         ctx.forkVersionAtEpoch(voluntary_exit.epoch);
@@ -250,9 +263,8 @@ pub fn attestationSelectionProofSigningRoot(
     out: *[32]u8,
 ) !void {
     var domain: [32]u8 = undefined;
-    // DOMAIN_SELECTION_PROOF = 0x05
-    const DOMAIN_SELECTION_PROOF = [4]u8{ 0x05, 0x00, 0x00, 0x00 };
+    // Use DOMAIN_SELECTION_PROOF from constants (removed inline duplicate; fix #9).
     const fork_version = ctx.forkVersionAtSlot(slot);
-    try computeDomain(DOMAIN_SELECTION_PROOF, fork_version, ctx.genesis_validators_root, &domain);
+    try computeDomain(constants.DOMAIN_SELECTION_PROOF, fork_version, ctx.genesis_validators_root, &domain);
     try computeSigningRoot(consensus_types.primitive.Slot, &slot, &domain, out);
 }

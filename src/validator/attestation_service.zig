@@ -33,6 +33,8 @@ const dopple_mod = @import("doppelganger.zig");
 const DoppelgangerService = dopple_mod.DoppelgangerService;
 const syncing_tracker_mod = @import("syncing_tracker.zig");
 const SyncingTracker = syncing_tracker_mod.SyncingTracker;
+const liveness_mod = @import("liveness.zig");
+const LivenessTracker = liveness_mod.LivenessTracker;
 
 const log = std.log.scoped(.attestation_service);
 
@@ -72,6 +74,8 @@ pub const AttestationService = struct {
     doppelganger: ?*DoppelgangerService,
     /// Syncing tracker reference (optional).
     syncing_tracker: ?*SyncingTracker,
+    /// Liveness tracker — records per-validator duty outcomes.
+    liveness_tracker: ?*LivenessTracker,
 
     pub fn init(
         allocator: Allocator,
@@ -97,6 +101,7 @@ pub const AttestationService = struct {
             .last_current_dependent_root = [_]u8{0} ** 32,
             .doppelganger = null,
             .syncing_tracker = null,
+            .liveness_tracker = null,
         };
     }
 
@@ -108,6 +113,11 @@ pub const AttestationService = struct {
     ) void {
         self.doppelganger = dopple;
         self.syncing_tracker = syncing;
+    }
+
+    /// Wire up liveness tracker. Called from validator.zig after init.
+    pub fn setLivenessTracker(self: *AttestationService, tracker: *LivenessTracker) void {
+        self.liveness_tracker = tracker;
     }
 
     /// Returns true if it is safe for this validator to sign attestations.
@@ -358,6 +368,35 @@ pub const AttestationService = struct {
             },
         };
 
+        // Malicious BN protection: validate attestation data bounds before signing.
+        // A compromised BN could return maxInt(u64) epochs to permanently burn
+        // attestation capability via slashing protection monotonicity.
+        // Spec allows at most current_epoch+1 for target (lookahead attestations).
+        const current_epoch_for_check = blk: {
+            const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+            const genesis_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
+            if (now_ns < genesis_ns) break :blk @as(u64, 0);
+            const slot_dur_ns = self.seconds_per_slot * std.time.ns_per_s;
+            const current_slot = (now_ns - genesis_ns) / slot_dur_ns;
+            break :blk current_slot / self.signing_ctx.slots_per_epoch;
+        };
+        if (att_data_resp.target_epoch > current_epoch_for_check + 1) {
+            log.err("BN returned target_epoch={d} > current_epoch+1={d}: refusing to sign (possible BN compromise)", .{
+                att_data_resp.target_epoch, current_epoch_for_check + 1,
+            });
+            return std.mem.zeroes([32]u8);
+        }
+        if (att_data_resp.source_epoch > att_data_resp.target_epoch) {
+            log.err("BN returned source_epoch={d} > target_epoch={d}: refusing to sign (invalid attestation data)", .{
+                att_data_resp.source_epoch, att_data_resp.target_epoch,
+            });
+            return std.mem.zeroes([32]u8);
+        }
+        if (slot > current_epoch_for_check * self.signing_ctx.slots_per_epoch + self.signing_ctx.slots_per_epoch + 1) {
+            log.err("BN returned slot={d} far in the future: refusing to sign (possible BN compromise)", .{slot});
+            return std.mem.zeroes([32]u8);
+        }
+
         // Compute attestation signing root once (same data for all validators this slot).
         var signing_root: [32]u8 = undefined;
         try signing_mod.attestationSigningRoot(self.signing_ctx, &att_data, &signing_root);
@@ -366,6 +405,9 @@ pub const AttestationService = struct {
         var attestations_json = std.ArrayList(u8).init(self.allocator);
         defer attestations_json.deinit();
         var signed_count: u32 = 0;
+        // Track signed pubkeys for liveness recording.
+        var signed_pubkeys = std.ArrayList([48]u8).init(self.allocator);
+        defer signed_pubkeys.deinit();
 
         try attestations_json.append('[');
 
@@ -429,16 +471,36 @@ pub const AttestationService = struct {
                     sig_hex,
                 },
             );
+            signed_pubkeys.append(dp.duty.pubkey) catch {};
             signed_count += 1;
         }
 
         try attestations_json.append(']');
 
+        var publish_ok = false;
         if (signed_count > 0) {
             self.api.publishAttestations(io, attestations_json.items) catch |err| {
                 log.warn("publishAttestations failed slot={d} error={s}", .{ slot, @errorName(err) });
             };
+            publish_ok = true;
             log.info("attested slot={d} count={d}", .{ slot, signed_count });
+        }
+
+        // Record liveness outcomes for all validators that had duties this slot.
+        if (self.liveness_tracker) |lt| {
+            const epoch = slot / self.signing_ctx.slots_per_epoch;
+            for (duties) |dp| {
+                if (dp.duty.slot != slot) continue;
+                // Find if this validator signed successfully.
+                var did_sign = false;
+                for (signed_pubkeys.items) |pk| {
+                    if (std.mem.eql(u8, &pk, &dp.duty.pubkey)) {
+                        did_sign = true;
+                        break;
+                    }
+                }
+                lt.recordAttestationDuty(dp.duty.pubkey, epoch, did_sign and publish_ok);
+            }
         }
 
         // Compute and return the AttestationData hash_tree_root for aggregation.

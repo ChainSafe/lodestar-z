@@ -138,13 +138,17 @@ pub const ValidatorSlotTicker = struct {
     ///
     /// TS: clock.start(signal) which calls runAtMostEvery in a loop.
     pub fn run(self: *ValidatorSlotTicker, io: Io) !void {
-        var last_slot: u64 = 0;
+        const start_slot = self.currentSlot();
+        var last_slot: u64 = if (start_slot > 0) start_slot - 1 else 0;
+        var first_iteration = true;
 
         while (!self.shutdown_requested.load(.seq_cst)) {
             const slot = self.currentSlot();
 
-            if (slot > last_slot) {
-                last_slot = slot;
+            if (slot > last_slot or first_iteration) {
+                if (!first_iteration or slot > last_slot) {
+                    last_slot = slot;
+                }
                 log.debug("slot {d}", .{slot});
 
                 // Fire per-slot callbacks.
@@ -152,13 +156,19 @@ pub const ValidatorSlotTicker = struct {
                     cb.call(slot);
                 }
 
-                // Fire per-epoch callbacks at epoch boundary (slot 0 of epoch).
-                if (slot % self.slots_per_epoch == 0) {
+                // Fire per-epoch callbacks:
+                //   - At epoch boundary (slot % slots_per_epoch == 0), OR
+                //   - On the very first iteration regardless of slot position.
+                //     Mid-epoch startup must still fire epoch callbacks so duties
+                //     are fetched immediately rather than waiting for the next epoch.
+                if (first_iteration or slot % self.slots_per_epoch == 0) {
                     const epoch = slot / self.slots_per_epoch;
                     for (self.epoch_callbacks[0..self.epoch_callback_count]) |cb| {
                         cb.call(epoch);
                     }
                 }
+
+                first_iteration = false;
             }
 
             // Sleep until the next slot boundary.

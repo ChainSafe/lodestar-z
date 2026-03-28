@@ -31,6 +31,8 @@ const dopple_mod = @import("doppelganger.zig");
 const DoppelgangerService = dopple_mod.DoppelgangerService;
 const syncing_tracker_mod = @import("syncing_tracker.zig");
 const SyncingTracker = syncing_tracker_mod.SyncingTracker;
+const liveness_mod = @import("liveness.zig");
+const LivenessTracker = liveness_mod.LivenessTracker;
 
 const log = std.log.scoped(.sync_committee_service);
 
@@ -64,6 +66,8 @@ pub const SyncCommitteeService = struct {
     doppelganger: ?*DoppelgangerService,
     /// Syncing tracker reference (optional).
     syncing_tracker: ?*SyncingTracker,
+    /// Liveness tracker — records per-validator duty outcomes.
+    liveness_tracker: ?*LivenessTracker,
 
     pub fn init(
         allocator: Allocator,
@@ -89,6 +93,7 @@ pub const SyncCommitteeService = struct {
             .duties_period = null,
             .doppelganger = null,
             .syncing_tracker = null,
+            .liveness_tracker = null,
         };
     }
 
@@ -100,6 +105,11 @@ pub const SyncCommitteeService = struct {
     ) void {
         self.doppelganger = dopple;
         self.syncing_tracker = syncing;
+    }
+
+    /// Wire up liveness tracker. Called from validator.zig after init.
+    pub fn setLivenessTracker(self: *SyncCommitteeService, tracker: *LivenessTracker) void {
+        self.liveness_tracker = tracker;
     }
 
     /// Returns true if it is safe for this validator to sign sync committee duties.
@@ -320,6 +330,8 @@ pub const SyncCommitteeService = struct {
         beacon_block_root: *const [32]u8,
     ) !void {
         var count: u32 = 0;
+        var signed_pubkeys = std.ArrayList([48]u8).init(self.allocator);
+        defer signed_pubkeys.deinit();
 
         var messages_json = std.ArrayList(u8).init(self.allocator);
         defer messages_json.deinit();
@@ -353,16 +365,34 @@ pub const SyncCommitteeService = struct {
                 "{{\"slot\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"validator_index\":\"{d}\",\"signature\":\"0x{s}\"}}",
                 .{ slot, bbr_hex, d.duty.validator_index, sig_hex },
             );
+            signed_pubkeys.append(d.duty.pubkey) catch {};
             count += 1;
         }
 
         try messages_json.append(']');
 
+        var publish_ok = false;
         if (count > 0) {
             self.api.publishSyncCommitteeMessages(io, messages_json.items) catch |err| {
                 log.warn("publishSyncCommitteeMessages slot={d} error={s}", .{ slot, @errorName(err) });
             };
+            publish_ok = true;
             log.info("sync committee messages slot={d} count={d}", .{ slot, count });
+        }
+
+        // Record liveness outcomes for all validators with sync committee duties this slot.
+        if (self.liveness_tracker) |lt| {
+            const epoch = slot / self.slots_per_epoch;
+            for (self.duties.items) |*d| {
+                var did_sign = false;
+                for (signed_pubkeys.items) |pk| {
+                    if (std.mem.eql(u8, &pk, &d.duty.pubkey)) {
+                        did_sign = true;
+                        break;
+                    }
+                }
+                lt.recordSyncDuty(d.duty.pubkey, epoch, did_sign and publish_ok);
+            }
         }
     }
 
