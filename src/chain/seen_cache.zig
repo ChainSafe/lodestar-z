@@ -32,8 +32,8 @@ pub const SeenCache = struct {
     seen_blocks: std.AutoHashMap([32]u8, Slot),
 
     /// Seen aggregate attestation selection proofs.
-    /// Key: aggregator_index << 32 | (epoch & 0xFFFF_FFFF)
-    seen_aggregators: std.AutoHashMap(u64, void),
+    /// Key: { index: u64, epoch: u64 } — struct avoids truncation for index > 2^32.
+    seen_aggregators: std.AutoHashMap(AggregatorKey, void),
 
     /// Seen voluntary exits, keyed by validator index.
     seen_exits: std.AutoHashMap(ValidatorIndex, void),
@@ -55,7 +55,7 @@ pub const SeenCache = struct {
         return .{
             .allocator = allocator,
             .seen_blocks = std.AutoHashMap([32]u8, Slot).init(allocator),
-            .seen_aggregators = std.AutoHashMap(u64, void).init(allocator),
+            .seen_aggregators = std.AutoHashMap(AggregatorKey, void).init(allocator),
             .seen_exits = std.AutoHashMap(ValidatorIndex, void).init(allocator),
             .seen_proposer_slashings = std.AutoHashMap(ValidatorIndex, void).init(allocator),
             .seen_attester_slashings = std.AutoHashMap([32]u8, void).init(allocator),
@@ -105,8 +105,10 @@ pub const SeenCache = struct {
     // -- Aggregators ----------------------------------------------------------
 
     /// Encode an aggregator key from validator index and epoch.
-    fn aggregatorKey(aggregator_index: ValidatorIndex, epoch: Epoch) u64 {
-        return (aggregator_index << 32) | (epoch & 0xFFFF_FFFF);
+    const AggregatorKey = struct { index: u64, epoch: u64 };
+
+    fn aggregatorKey(aggregator_index: ValidatorIndex, epoch: Epoch) AggregatorKey {
+        return .{ .index = aggregator_index, .epoch = epoch };
     }
 
     pub fn hasSeenAggregator(self: *const SeenCache, aggregator_index: ValidatorIndex, epoch: Epoch) bool {

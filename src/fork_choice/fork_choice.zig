@@ -1139,13 +1139,13 @@ pub const ForkChoice = struct {
         const head_node_idx = self.proto_array.getNodeIndexByRootAndStatus(head_block.block_root, head_block.payload_status) orelse {
             return .{ .head = head_block.*, .is_head_timely = is_head_timely, .not_reorged_reason = .head_block_not_weak };
         };
-        if (self.proto_array.nodes.items[head_node_idx].weight >= reorg_threshold) {
+        if (self.proto_array.nodes.items[head_node_idx].weight >= @as(i64, @intCast(reorg_threshold))) {
             return .{ .head = head_block.*, .is_head_timely = is_head_timely, .not_reorged_reason = .head_block_not_weak };
         }
 
         // No reorg if parentBlock is "not strong" — weight is <= REORG_PARENT_WEIGHT_THRESHOLD% of committee
         const parent_threshold = getCommitteeFraction(self.fc_store.justified.total_balance, preset.SLOTS_PER_EPOCH, self.config.chain.REORG_PARENT_WEIGHT_THRESHOLD);
-        if (self.proto_array.nodes.items[parent_idx].weight <= parent_threshold) {
+        if (self.proto_array.nodes.items[parent_idx].weight <= @as(i64, @intCast(parent_threshold))) {
             return .{ .head = head_block.*, .is_head_timely = is_head_timely, .not_reorged_reason = .parent_block_not_strong };
         }
 
