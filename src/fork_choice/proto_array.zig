@@ -1482,6 +1482,17 @@ pub const ProtoArray = struct {
         return self.getAncestor(block_root, ancestor_slot) catch null;
     }
 
+    /// Public wrapper around getAncestorOrNull for use by chain-level code.
+    /// Returns the ancestor node at `ancestor_slot` for the chain rooted at `block_root`,
+    /// or null if not found or if `block_root` is unknown.
+    pub fn getAncestorNodeAtSlot(
+        self: *const ProtoArray,
+        block_root: Root,
+        ancestor_slot: Slot,
+    ) ?*const ProtoNode {
+        return self.getAncestorOrNull(block_root, ancestor_slot);
+    }
+
     // ── Execution status propagation ──
 
     /// Propagate valid execution status up the ancestor chain.
