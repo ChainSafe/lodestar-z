@@ -311,7 +311,7 @@ pub const BlockService = struct {
         //    full blocks go to /eth/v2/beacon/blocks.
         if (block_resp.blinded) {
             // Builder path: submit the signed blinded block.
-            // The BN (or relay) unblunds it and broadcasts.
+            // The BN (or relay) unblinds it and broadcasts.
             log.info("publishing blinded block slot={d} validator_index={d} fork={s}", .{
                 slot, duty.validator_index, fork_name,
             });

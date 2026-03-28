@@ -441,6 +441,13 @@ pub const AttestationService = struct {
             // SSZ bitlist: data bytes with validator bit set + sentinel bit.
             const committee_length = dp.duty.committee_length;
             const validator_committee_index = dp.duty.validator_committee_index;
+            // Guard: validator_committee_index must be within the committee.
+            if (validator_committee_index >= committee_length) {
+                log.warn("validator_committee_index {d} >= committee_length {d}, skipping", .{
+                    validator_committee_index, committee_length,
+                });
+                continue;
+            }
             // data_byte_count covers bits 0..committee_length-1
             const data_byte_count: usize = (committee_length + 7) / 8;
             // If committee_length is a multiple of 8, sentinel needs an extra byte
@@ -546,12 +553,12 @@ pub const AttestationService = struct {
             // BUG-2 fix: att_data_root is already computed from the real attestation data
             // in produceAndPublishAttestations() and passed in here (not zeroed).
             const agg = try self.api.getAggregatedAttestation(io, slot, att_data_root);
-            defer self.allocator.free(agg.attestation_ssz);
+            defer self.allocator.free(agg.attestation_json);
 
             // 2. Build AggregateAndProof by parsing the aggregate from the BN response.
             // BUG-2 fix: Parse the actual aggregate attestation from the BN JSON response
             // instead of using a zeroed Attestation struct.
-            var aggregate_attestation = try self.parseAggregateAttestation(agg.attestation_ssz);
+            var aggregate_attestation = try self.parseAggregateAttestation(agg.attestation_json);
             defer aggregate_attestation.aggregation_bits.data.deinit(self.allocator);
 
             const aggregate_and_proof = consensus_types.phase0.AggregateAndProof.Type{

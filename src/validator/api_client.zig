@@ -800,7 +800,7 @@ pub const BeaconApiClient = struct {
         defer self.allocator.free(path);
 
         const body = try self.get(io, path);
-        return .{ .attestation_ssz = body };
+        return .{ .attestation_json = body };
     }
 
     /// POST /eth/v2/validator/aggregate_and_proofs
@@ -1182,7 +1182,7 @@ pub const AttestationDataResponse = struct {
 
 pub const AggregatedAttestationResponse = struct {
     /// Raw JSON body of the aggregated attestation (caller must free).
-    attestation_ssz: []const u8,
+    attestation_json: []const u8,
 };
 
 pub const SyncCommitteeContributionResponse = struct {

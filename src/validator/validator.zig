@@ -376,6 +376,7 @@ pub const ValidatorClient = struct {
         if (self.builder_registration) |*br| {
             br.api = &self.api;
             br.validator_store = &self.validator_store;
+            br.remote_signer = self.remote_signer;
         }
         if (self.doppelganger) |*d| {
             d.api = &self.api;
@@ -428,8 +429,18 @@ pub const ValidatorClient = struct {
             self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochBuilderRegistration });
         }
 
-        if (self.doppelganger != null) {
+        if (self.doppelganger) |*d| {
             self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochDoppelganger });
+            // Wire shutdown callback: when doppelganger is detected, trigger VC shutdown.
+            d.setShutdownCallback(.{
+                .ctx = self,
+                .fn_ptr = struct {
+                    fn cb(ctx: *anyopaque) void {
+                        const vc: *ValidatorClient = @ptrCast(@alignCast(ctx));
+                        vc.requestShutdown();
+                    }
+                }.cb,
+            });
         }
 
         // Syncing status tracker — poll every slot, gate signing when BN is behind.

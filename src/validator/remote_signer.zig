@@ -65,6 +65,8 @@ pub const SigningType = enum {
     VOLUNTARY_EXIT,
     /// BLS-to-execution change (EIP-4895).
     BLS_TO_EXECUTION_CHANGE,
+    /// Builder registration (MEV-boost).
+    VALIDATOR_REGISTRATION,
 
     /// Return the string literal used in Web3Signer JSON requests.
     pub fn asStr(self: SigningType) []const u8 {
@@ -79,6 +81,7 @@ pub const SigningType = enum {
             .AGGREGATION_SLOT => "AGGREGATION_SLOT",
             .VOLUNTARY_EXIT => "VOLUNTARY_EXIT",
             .BLS_TO_EXECUTION_CHANGE => "BLS_TO_EXECUTION_CHANGE",
+            .VALIDATOR_REGISTRATION => "VALIDATOR_REGISTRATION",
         };
     }
 };
