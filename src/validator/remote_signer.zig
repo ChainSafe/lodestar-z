@@ -1,4 +1,4 @@
-//! Web3Signer remote signer HTTP API client stub.
+//! Web3Signer remote signer HTTP API client.
 //!
 //! Allows validators to use external signing devices (HSMs, cloud KMS, YubiKey)
 //! via the Web3Signer API instead of keeping BLS secret keys locally.
@@ -7,8 +7,15 @@
 //!   https://docs.web3signer.consensys.net/reference/api/
 //!
 //! Endpoints used:
-//!   GET  /api/v1/eth2/publicKeys
-//!   POST /api/v1/eth2/sign/{identifier}
+//!   GET  /api/v1/eth2/publicKeys         — list all managed public keys
+//!   POST /api/v1/eth2/sign/{identifier}  — sign a root with slashing protection
+//!
+//! Error handling:
+//!   404 — key not found on this signer
+//!   412 — slashing protection triggered (would produce slashable signature)
+//!   500 — internal signer error
+//!
+//! TLS: pass https:// URL; std.http.Client handles TLS via bundled certs.
 //!
 //! TS equivalent: packages/validator/src/signers/web3signer.ts (getSignerFromKeystore)
 //!               packages/validator/src/util/externalSignerClient.ts (ExternalSignerClient)
@@ -220,8 +227,14 @@ pub const RemoteSigner = struct {
         var response = try req.receiveHead(&redirect_buf);
 
         const status = response.head.status;
-        if (@intFromEnum(status) < 200 or @intFromEnum(status) >= 300) {
-            log.warn("POST {s} → HTTP {d}", .{ path, @intFromEnum(status) });
+        const status_code = @intFromEnum(status);
+        if (status_code == 404) {
+            return error.HttpNotFound;
+        } else if (status_code == 412) {
+            // Web3Signer returns 412 when slashing protection is triggered.
+            return error.HttpSlashingProtection;
+        } else if (status_code < 200 or status_code >= 300) {
+            log.warn("POST {s} → HTTP {d}", .{ path, status_code });
             return error.HttpError;
         }
 
