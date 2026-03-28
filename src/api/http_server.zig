@@ -1484,3 +1484,108 @@ test "DispatchContext.getQuery parses query params" {
     try std.testing.expectEqualStrings("0xaabb", dc.getQuery("beacon_block_root").?);
     try std.testing.expect(dc.getQuery("missing") == null);
 }
+
+test "handleRequest GET /eth/v1/beacon/states/head/committees returns error without head state" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("GET", "/eth/v1/beacon/states/head/committees", null);
+    // Error responses are stack-allocated, do not free the body.
+
+    // Without a head state, should return an error (StateNotAvailable -> 500)
+    try std.testing.expect(resp.status >= 400);
+}
+
+test "handleRequest GET /eth/v1/beacon/headers returns 200" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("GET", "/eth/v1/beacon/headers", null);
+    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "data") != null);
+}
+
+test "handleRequest GET /eth/v1/beacon/rewards/blocks/head returns 200" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("GET", "/eth/v1/beacon/rewards/blocks/head", null);
+    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "proposer_index") != null);
+}
+
+test "handleRequest POST /eth/v1/beacon/rewards/attestations/1 returns 200" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("POST", "/eth/v1/beacon/rewards/attestations/1", "[]");
+    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+}
+
+test "handleRequest POST /eth/v1/validator/prepare_beacon_proposer returns 204" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("POST", "/eth/v1/validator/prepare_beacon_proposer", "[]");
+    defer std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 204), resp.status);
+}
+
+test "handleRequest POST /eth/v1/validator/register_validator returns 204" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("POST", "/eth/v1/validator/register_validator", "[]");
+    defer std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 204), resp.status);
+}
+
+test "handleRequest POST /eth/v1/validator/liveness/1 returns 200" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("POST", "/eth/v1/validator/liveness/1", "[0,1,2]");
+    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "is_live") != null);
+}
+
+test "handleRequest GET /eth/v1/debug/fork_choice returns 200" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("GET", "/eth/v1/debug/fork_choice", null);
+    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "fork_choice_nodes") != null);
+}
+
+test "handleRequest GET /eth/v1/node/peer_count returns 200" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("GET", "/eth/v1/node/peer_count", null);
+    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "connected") != null);
+}
