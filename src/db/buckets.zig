@@ -138,16 +138,23 @@ pub const DatabaseId = enum {
     pub const count = all.len;
 };
 
-/// Encode a u64 as 8 bytes little-endian. Returns a stack-allocated array.
+/// Encode a u64 as 8 bytes big-endian. Returns a stack-allocated array.
+///
+/// Big-endian (network byte order) is used explicitly to:
+/// 1. Ensure portability across architectures (no implicit native-endian dependency)
+/// 2. Preserve LMDB's lexicographic sort order as slot ascending (BE integers sort
+///    correctly by value under bytewise comparison)
 pub fn slotKey(slot: u64) [8]u8 {
-    return std.mem.toBytes(slot);
+    var buf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &buf, slot, .big);
+    return buf;
 }
 
 /// Encode a composite key: root(32) ++ column_index(8 LE).
 pub fn rootColumnKey(root: [32]u8, column_index: u64) [40]u8 {
     var key: [40]u8 = undefined;
     @memcpy(key[0..32], &root);
-    @memcpy(key[32..40], &std.mem.toBytes(column_index));
+    std.mem.writeInt(u64, key[32..40], column_index, .big);
     return key;
 }
 
@@ -179,16 +186,19 @@ test "DatabaseId: count is reasonable" {
     try std.testing.expect(DatabaseId.count <= 128);
 }
 
-test "slotKey: encodes u64 as LE" {
+test "slotKey: encodes u64 as BE" {
     const key = slotKey(0x1234);
-    try std.testing.expectEqual(@as(u8, 0x34), key[0]);
-    try std.testing.expectEqual(@as(u8, 0x12), key[1]);
-    for (key[2..]) |b| try std.testing.expectEqual(@as(u8, 0), b);
+    // Big-endian: most significant byte first
+    for (key[0..6]) |b| try std.testing.expectEqual(@as(u8, 0), b);
+    try std.testing.expectEqual(@as(u8, 0x12), key[6]);
+    try std.testing.expectEqual(@as(u8, 0x34), key[7]);
 }
 
 test "rootColumnKey: 40-byte composite key" {
     const root = [_]u8{0xaa} ** 32;
     const key = rootColumnKey(root, 5);
     try std.testing.expectEqualSlices(u8, &root, key[0..32]);
-    try std.testing.expectEqual(@as(u8, 5), key[32]);
+    // Big-endian: value 5 is at the last byte
+    try std.testing.expectEqual(@as(u8, 0), key[32]); // leading zeros in BE
+    try std.testing.expectEqual(@as(u8, 5), key[39]); // least-significant byte last
 }

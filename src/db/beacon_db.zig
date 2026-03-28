@@ -89,7 +89,7 @@ pub const BeaconDB = struct {
         const slot_key = buckets.slotKey(slot);
         const ops = [_]BatchOp{
             .{ .put = .{ .db = .block_archive, .key = &slot_key, .value = data } },
-            .{ .put = .{ .db = .idx_block_root, .key = &root, .value = std.mem.asBytes(&slot) } },
+            .{ .put = .{ .db = .idx_block_root, .key = &root, .value = &buckets.slotKey(slot) } },
             .{ .put = .{ .db = .idx_main_chain, .key = &slot_key, .value = &root } },
         };
         try self.kv.writeBatch(&ops);
@@ -105,7 +105,7 @@ pub const BeaconDB = struct {
         defer self.allocator.free(slot_bytes);
 
         if (slot_bytes.len != 8) return error.CorruptedIndex;
-        const slot = std.mem.readInt(u64, slot_bytes[0..8], .little);
+        const slot = std.mem.readInt(u64, slot_bytes[0..8], .big);
         return self.getBlockArchive(slot);
     }
 
@@ -128,7 +128,7 @@ pub const BeaconDB = struct {
         const slot_key = buckets.slotKey(slot);
         const ops = [_]BatchOp{
             .{ .put = .{ .db = .state_archive, .key = &slot_key, .value = data } },
-            .{ .put = .{ .db = .idx_state_root, .key = &state_root, .value = std.mem.asBytes(&slot) } },
+            .{ .put = .{ .db = .idx_state_root, .key = &state_root, .value = &buckets.slotKey(slot) } },
         };
         try self.kv.writeBatch(&ops);
     }
@@ -143,7 +143,7 @@ pub const BeaconDB = struct {
         defer self.allocator.free(slot_bytes);
 
         if (slot_bytes.len != 8) return error.CorruptedIndex;
-        return std.mem.readInt(u64, slot_bytes[0..8], .little);
+        return std.mem.readInt(u64, slot_bytes[0..8], .big);
     }
 
     pub fn getStateArchiveByRoot(self: *BeaconDB, state_root: [32]u8) !?[]const u8 {
@@ -157,7 +157,7 @@ pub const BeaconDB = struct {
         const last = try self.state_archive_db.lastKey() orelse return null;
         defer self.allocator.free(last);
         if (last.len != 8) return error.InvalidKeyLength;
-        return std.mem.readInt(u64, last[0..8], .little);
+        return std.mem.readInt(u64, last[0..8], .big);
     }
 
     // ---------------------------------------------------------------
@@ -248,7 +248,7 @@ pub const BeaconDB = struct {
     // ---------------------------------------------------------------
 
     pub fn putValidatorIndex(self: *BeaconDB, pubkey: [48]u8, index: u64) !void {
-        try self.validator_index_db.put(&pubkey, std.mem.asBytes(&index));
+        try self.validator_index_db.put(&pubkey, &buckets.slotKey(index));
     }
 
     pub fn getValidatorIndex(self: *BeaconDB, pubkey: [48]u8) !?u64 {
@@ -256,7 +256,7 @@ pub const BeaconDB = struct {
         defer self.allocator.free(idx_bytes);
 
         if (idx_bytes.len != 8) return error.CorruptedIndex;
-        return std.mem.readInt(u64, idx_bytes[0..8], .little);
+        return std.mem.readInt(u64, idx_bytes[0..8], .big);
     }
 
     // ---------------------------------------------------------------
