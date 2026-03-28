@@ -8,6 +8,8 @@ const packet = @import("packet.zig");
 const session_mod = @import("session.zig");
 const messages = @import("messages.zig");
 const transport_mod = @import("transport.zig");
+const secp = @import("secp256k1.zig");
+const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 
 pub const CHALLENGE_DATA_SIZE = 63;
 
@@ -27,10 +29,32 @@ pub const Session = struct {
     next_nonce: [12]u8,
 };
 
+/// A pending outgoing request awaiting a WHOAREYOU challenge.
+/// When we send an ordinary message to a node without a session, the remote
+/// responds with WHOAREYOU. We store the original message here so we can
+/// re-send it inside the handshake response.
+pub const PendingRequest = struct {
+    nonce: [12]u8,
+    dest_node_id: NodeId,
+    dest_pubkey: [33]u8,
+    dest_addr: transport_mod.Address,
+    message_plaintext: []u8,
+    alloc: Allocator,
+
+    fn deinit(self: *PendingRequest) void {
+        self.alloc.free(self.message_plaintext);
+    }
+};
+
 pub const Config = struct {
     local_secret_key: [32]u8,
     local_node_id: NodeId,
     listen_addr: transport_mod.Address,
+    /// Pre-encoded local ENR (RLP bytes). Included in handshake when remote
+    /// has a stale enr-seq.
+    local_enr: ?[]const u8 = null,
+    /// Sequence number of our local ENR.
+    local_enr_seq: u64 = 0,
 };
 
 pub const Protocol = struct {
@@ -38,6 +62,7 @@ pub const Protocol = struct {
     config: Config,
     routing_table: kbucket.RoutingTable,
     sessions: std.AutoHashMap(NodeId, Session),
+    pending_requests: std.ArrayList(PendingRequest),
     rng: std.Random.DefaultPrng,
 
     pub fn init(alloc: Allocator, config: Config) !Protocol {
@@ -48,11 +73,14 @@ pub const Protocol = struct {
             .config = config,
             .routing_table = kbucket.RoutingTable.init(alloc, config.local_node_id),
             .sessions = std.AutoHashMap(NodeId, Session).init(alloc),
+            .pending_requests = .empty,
             .rng = std.Random.DefaultPrng.init(seed),
         };
     }
 
     pub fn deinit(self: *Protocol) void {
+        for (self.pending_requests.items) |*p| p.deinit();
+        self.pending_requests.deinit(self.alloc);
         self.routing_table.deinit();
         self.sessions.deinit();
     }
@@ -67,6 +95,73 @@ pub const Protocol = struct {
         var id: messages.ReqId = .{ .bytes = undefined, .len = 4 };
         self.rng.random().bytes(id.bytes[0..4]);
         return id;
+    }
+
+    /// Send a request to a remote node. If we have an established session,
+    /// the message is encrypted and sent immediately. Otherwise, we send an
+    /// ordinary message (which will likely be challenged with WHOAREYOU) and
+    /// store the request as pending so we can re-send it in the handshake.
+    pub fn sendRequest(
+        self: *Protocol,
+        dest_node_id: *const NodeId,
+        dest_pubkey: *const [33]u8,
+        dest_addr: transport_mod.Address,
+        msg_bytes: []const u8,
+        t: transport_mod.Transport,
+    ) !void {
+        if (self.sessions.get(dest_node_id.*)) |s| {
+            if (s.state == .established) {
+                try self.sendOrdinaryMessage(dest_node_id, &s.initiator_key, dest_addr, msg_bytes, t);
+                return;
+            }
+        }
+
+        // No established session — send ordinary message and store as pending.
+        const nonce = self.randomNonce();
+        var masking_iv: [16]u8 = undefined;
+        self.rng.random().bytes(&masking_iv);
+        const authdata: [32]u8 = self.config.local_node_id;
+
+        // Use a zeroed key for the initial message (will be challenged).
+        const zero_key = [_]u8{0} ** 16;
+
+        const header_raw = try buildHeaderRaw(self.alloc, packet.FLAG_MESSAGE, &nonce, &authdata);
+        defer self.alloc.free(header_raw);
+
+        const ct = try packet.encryptMessage(
+            self.alloc,
+            &zero_key,
+            &nonce,
+            msg_bytes,
+            &masking_iv,
+            header_raw,
+        );
+        defer self.alloc.free(ct);
+
+        const pkt = try packet.encode(
+            self.alloc,
+            &masking_iv,
+            dest_node_id,
+            packet.FLAG_MESSAGE,
+            &nonce,
+            &authdata,
+            ct,
+        );
+        defer self.alloc.free(pkt);
+
+        try t.send(dest_addr, pkt);
+
+        // Store the pending request so handleWhoareyou can find it.
+        const pt_copy = try self.alloc.dupe(u8, msg_bytes);
+        errdefer self.alloc.free(pt_copy);
+        try self.pending_requests.append(self.alloc, .{
+            .nonce = nonce,
+            .dest_node_id = dest_node_id.*,
+            .dest_pubkey = dest_pubkey.*,
+            .dest_addr = dest_addr,
+            .message_plaintext = pt_copy,
+            .alloc = self.alloc,
+        });
     }
 
     /// Handle an incoming raw UDP packet
@@ -122,51 +217,159 @@ pub const Protocol = struct {
     /// Handle a WHOAREYOU challenge from a remote node.
     ///
     /// When we send an ordinary message to a node that has no session with us,
-    /// it responds with WHOAREYOU. We must respond with a Handshake packet that
-    /// contains:
+    /// it responds with WHOAREYOU. We respond with a Handshake packet containing:
     ///
-    ///   1. `id-signature` — ECDSA-secp256k1 signature over:
-    ///        sha256("discovery v5 identity" || challenge_data || eph_pubkey || dest_node_id)
+    ///   1. `id-signature` over SHA256(prefix || challenge_data || eph_pubkey || dest_node_id)
     ///   2. `eph-pubkey` — an ephemeral secp256k1 public key
     ///   3. Optional ENR if the remote's `enr-seq` field is stale
-    ///
-    /// Key derivation (session keys) uses HKDF-SHA256 over the ECDH secret from
-    /// eph-privkey × src-pubkey, with the challenge data as IKM salt.
-    ///
-    /// TODO: This requires:
-    ///   - secp256k1 ECDH + ephemeral key generation (libssl or zig-secp256k1)
-    ///   - HKDF-SHA256 key derivation matching discv5 spec §5.1
-    ///   - Session key storage for the established session
-    ///   - Replay protection via the id-nonce
-    ///
-    /// Without this, discovery cannot establish sessions with nodes that don't
-    /// have an existing session with us. Peers that already have a session (e.g.
-    /// bootnodes after first handshake) continue to work. Discovery beyond the
-    /// initial bootstrap is broken until this is implemented.
+    ///   4. The original message, encrypted with newly derived session keys
     fn handleWhoareyou(
         self: *Protocol,
         parsed: *packet.ParsedPacket,
         from: transport_mod.Address,
         t: transport_mod.Transport,
     ) !void {
-        _ = t;
-        // Extract source node ID from authdata if available for logging.
         const authdata = parsed.authdata_raw;
-        const src_id_hex: []const u8 = if (authdata.len >= 32) blk: {
-            const id: *const [32]u8 = authdata[0..32];
-            _ = id;
-            break :blk "<node>";
-        } else "<unknown>";
-        _ = src_id_hex;
-        _ = from;
-        _ = self;
+        // WHOAREYOU authdata = id_nonce (16) || enr_seq (8) = 24 bytes
+        if (authdata.len < 24) return;
 
-        std.log.warn(
-            "discv5: received WHOAREYOU challenge — handshake response not yet implemented. " ++
-            "Discovery beyond bootnodes is limited until this is implemented. " ++
-            "See handleWhoareyou() in protocol.zig for required implementation steps.",
-            .{},
+        // The nonce in the WHOAREYOU static header is the nonce of the message
+        // packet that triggered the challenge — use it to find our pending request.
+        const request_nonce = parsed.static_header.nonce;
+
+        // Look up the pending request by matching the nonce.
+        var pending_idx: ?usize = null;
+        for (self.pending_requests.items, 0..) |pr, i| {
+            if (std.mem.eql(u8, &pr.nonce, &request_nonce)) {
+                pending_idx = i;
+                break;
+            }
+        }
+
+        const idx = pending_idx orelse {
+            std.log.warn("discv5: WHOAREYOU for unknown nonce, ignoring", .{});
+            return;
+        };
+
+        // Extract id_nonce and enr_seq from authdata.
+        const enr_seq = std.mem.readInt(u64, authdata[16..24], .big);
+
+        // Build challenge_data = masking_iv || static_header || authdata
+        // This is the raw header data of the WHOAREYOU packet (before masking).
+        // The packet module decodes header_raw as static_header || authdata.
+        // challenge_data = packet[0 .. 16 + header_len], but we reconstruct
+        // from the parsed components: masking_iv(16) || header_raw.
+        const challenge_data_len = 16 + parsed.header_raw.len;
+        const challenge_data = try self.alloc.alloc(u8, challenge_data_len);
+        defer self.alloc.free(challenge_data);
+        @memcpy(challenge_data[0..16], &parsed.masking_iv);
+        @memcpy(challenge_data[16..], parsed.header_raw);
+
+        // Retrieve the pending request.
+        var pending = self.pending_requests.orderedRemove(idx);
+        defer pending.deinit();
+
+        // Generate ephemeral keypair.
+        var eph_seckey: [32]u8 = undefined;
+        self.rng.random().bytes(&eph_seckey);
+        // Ensure the secret key is valid for secp256k1 (non-zero, less than order).
+        // Simple: set high bit to 0 and ensure at least one bit is set.
+        eph_seckey[0] &= 0x7f;
+        if (std.mem.eql(u8, &eph_seckey, &([_]u8{0} ** 32))) {
+            eph_seckey[31] = 1;
+        }
+
+        const eph_pubkey = secp.pubkeyFromSecret(&eph_seckey) catch return;
+
+        // Derive session keys: ECDH(eph_seckey, dest_pubkey) -> HKDF
+        // node_id_a = our node_id (initiator), node_id_b = dest_node_id
+        const keys = session_mod.deriveKeys(
+            &eph_seckey,
+            &pending.dest_pubkey,
+            &self.config.local_node_id,
+            &pending.dest_node_id,
+            challenge_data,
+        ) catch return;
+
+        // Compute id-nonce signature.
+        const id_sig = session_mod.signIdNonce(
+            &self.config.local_secret_key,
+            challenge_data,
+            &eph_pubkey,
+            &pending.dest_node_id,
+        ) catch return;
+
+        // Build authdata for handshake packet:
+        //   authdata-head = src-id (32) || sig-size (1) || eph-key-size (1)
+        //   authdata = authdata-head || id-signature (64) || eph-pubkey (33) || [record]
+        const sig_size: u8 = 64;
+        const eph_key_size: u8 = 33;
+
+        // Determine if we need to include our ENR.
+        const include_enr = (enr_seq < self.config.local_enr_seq) and (self.config.local_enr != null);
+        const enr_bytes: []const u8 = if (include_enr) self.config.local_enr.? else &[_]u8{};
+
+        const authdata_total: usize = 34 + sig_size + eph_key_size + enr_bytes.len;
+        const handshake_authdata = try self.alloc.alloc(u8, authdata_total);
+        defer self.alloc.free(handshake_authdata);
+
+        // authdata-head
+        @memcpy(handshake_authdata[0..32], &self.config.local_node_id);
+        handshake_authdata[32] = sig_size;
+        handshake_authdata[33] = eph_key_size;
+        // id-signature
+        @memcpy(handshake_authdata[34 .. 34 + sig_size], &id_sig);
+        // eph-pubkey
+        @memcpy(handshake_authdata[34 + sig_size .. 34 + sig_size + eph_key_size], &eph_pubkey);
+        // optional ENR
+        if (enr_bytes.len > 0) {
+            @memcpy(handshake_authdata[34 + sig_size + eph_key_size ..], enr_bytes);
+        }
+
+        // Build the header for AES-GCM additional data.
+        const nonce = self.randomNonce();
+        var masking_iv: [16]u8 = undefined;
+        self.rng.random().bytes(&masking_iv);
+
+        const header_raw = try buildHeaderRaw(self.alloc, packet.FLAG_HANDSHAKE, &nonce, handshake_authdata);
+        defer self.alloc.free(header_raw);
+
+        // Encrypt the original pending message with the new initiator key.
+        const ct = try packet.encryptMessage(
+            self.alloc,
+            &keys.initiator_key,
+            &nonce,
+            pending.message_plaintext,
+            &masking_iv,
+            header_raw,
         );
+        defer self.alloc.free(ct);
+
+        // Encode the full handshake packet.
+        const handshake_pkt = try packet.encode(
+            self.alloc,
+            &masking_iv,
+            &pending.dest_node_id,
+            packet.FLAG_HANDSHAKE,
+            &nonce,
+            handshake_authdata,
+            ct,
+        );
+        defer self.alloc.free(handshake_pkt);
+
+        // Send the handshake packet.
+        try t.send(from, handshake_pkt);
+
+        // Store the new session.
+        try self.sessions.put(pending.dest_node_id, .{
+            .node_id = pending.dest_node_id,
+            .state = .established,
+            .challenge_data = undefined,
+            .challenge_data_len = 0,
+            .initiator_key = keys.initiator_key,
+            .recipient_key = keys.recipient_key,
+            .next_nonce = nonce,
+        });
     }
 
     fn handleHandshake(
@@ -254,6 +457,46 @@ pub const Protocol = struct {
         try self.sessions.put(src_id, s);
 
         try t.send(dest, whoareyou_packet);
+    }
+
+    fn sendOrdinaryMessage(
+        self: *Protocol,
+        dest_node_id: *const NodeId,
+        write_key: *const [16]u8,
+        dest_addr: transport_mod.Address,
+        msg_bytes: []const u8,
+        t: transport_mod.Transport,
+    ) !void {
+        const nonce = self.randomNonce();
+        var masking_iv: [16]u8 = undefined;
+        self.rng.random().bytes(&masking_iv);
+        const authdata: [32]u8 = self.config.local_node_id;
+
+        const header_raw = try buildHeaderRaw(self.alloc, packet.FLAG_MESSAGE, &nonce, &authdata);
+        defer self.alloc.free(header_raw);
+
+        const ct = try packet.encryptMessage(
+            self.alloc,
+            write_key,
+            &nonce,
+            msg_bytes,
+            &masking_iv,
+            header_raw,
+        );
+        defer self.alloc.free(ct);
+
+        const pkt = try packet.encode(
+            self.alloc,
+            &masking_iv,
+            dest_node_id,
+            packet.FLAG_MESSAGE,
+            &nonce,
+            &authdata,
+            ct,
+        );
+        defer self.alloc.free(pkt);
+
+        try t.send(dest_addr, pkt);
     }
 
     fn dispatchMessage(
@@ -412,7 +655,6 @@ fn buildHeaderRaw(
 
 test "discv5 protocol: basic init" {
     const alloc = std.testing.allocator;
-    const secp = @import("secp256k1.zig");
     const hex = @import("hex.zig");
 
     const sk = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
@@ -432,4 +674,98 @@ test "discv5 protocol: basic init" {
     node_id2[31] = 0x01;
     proto.addNode(node_id2, .{ .ip = [4]u8{ 192, 168, 1, 1 }, .port = 30303 });
     try std.testing.expectEqual(@as(usize, 1), proto.routing_table.nodeCount());
+}
+
+test "discv5 protocol: WHOAREYOU handshake round-trip" {
+    // Simulate: node A sends request -> node B responds WHOAREYOU -> node A
+    //           builds handshake -> node B receives and establishes session.
+    const alloc = std.testing.allocator;
+    const hex = @import("hex.zig");
+    const enr_mod = @import("enr.zig");
+
+    // Node A keys
+    const sk_a = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
+    const pk_a = try secp.pubkeyFromSecret(&sk_a);
+    const node_id_a = enr_mod.nodeIdFromCompressedPubkey(&pk_a);
+
+    // Node B keys
+    const sk_b = hex.hexToBytesComptime(32, "66fb62bfbd66b9177a138c1e5cddbe4f7c30c343e94e68df8769459cb14571f7");
+    const pk_b = try secp.pubkeyFromSecret(&sk_b);
+    const node_id_b = enr_mod.nodeIdFromCompressedPubkey(&pk_b);
+
+    const addr_a = transport_mod.Address{ .ip = [4]u8{ 127, 0, 0, 1 }, .port = 9000 };
+    const addr_b = transport_mod.Address{ .ip = [4]u8{ 127, 0, 0, 1 }, .port = 9001 };
+
+    // Set up node A's protocol
+    var proto_a = try Protocol.init(alloc, .{
+        .local_secret_key = sk_a,
+        .local_node_id = node_id_a,
+        .listen_addr = addr_a,
+    });
+    defer proto_a.deinit();
+
+    // Set up node B's protocol
+    var proto_b = try Protocol.init(alloc, .{
+        .local_secret_key = sk_b,
+        .local_node_id = node_id_b,
+        .listen_addr = addr_b,
+    });
+    defer proto_b.deinit();
+
+    // Transport mocks
+    var mock_a = transport_mod.MockTransport.init(alloc, addr_a);
+    defer mock_a.deinit();
+    var mock_b = transport_mod.MockTransport.init(alloc, addr_b);
+    defer mock_b.deinit();
+
+    const t_a = mock_a.transport();
+    const t_b = mock_b.transport();
+
+    // Step 1: Node A sends a PING to node B (no session exists).
+    const ping = messages.Ping{
+        .req_id = try messages.ReqId.fromSlice(&[_]u8{ 0x00, 0x00, 0x00, 0x01 }),
+        .enr_seq = 1,
+    };
+    const ping_bytes = try ping.encode(alloc);
+    defer alloc.free(ping_bytes);
+
+    try proto_a.sendRequest(&node_id_b, &pk_b, addr_b, ping_bytes, t_a);
+
+    // Verify node A sent one packet and stored a pending request.
+    try std.testing.expectEqual(@as(usize, 1), mock_a.sent.items.len);
+    try std.testing.expectEqual(@as(usize, 1), proto_a.pending_requests.items.len);
+
+    // Step 2: Node B receives the packet. Since no session exists, it responds
+    // with WHOAREYOU.
+    const pkt1 = mock_a.sent.items[0].data;
+    try proto_b.handlePacket(pkt1, addr_a, t_b);
+
+    // Node B should have sent a WHOAREYOU back.
+    try std.testing.expectEqual(@as(usize, 1), mock_b.sent.items.len);
+
+    // Node B should now have a session in whoareyou_sent state.
+    const session_b = proto_b.sessions.get(node_id_a) orelse return error.NoSession;
+    try std.testing.expectEqual(SessionState.whoareyou_sent, session_b.state);
+
+    // Step 3: Node A receives the WHOAREYOU and responds with a handshake.
+    const whoareyou_pkt = mock_b.sent.items[0].data;
+    try proto_a.handlePacket(whoareyou_pkt, addr_b, t_a);
+
+    // Node A should have sent a handshake packet.
+    try std.testing.expectEqual(@as(usize, 2), mock_a.sent.items.len);
+
+    // Node A should now have an established session.
+    const session_a = proto_a.sessions.get(node_id_b) orelse return error.NoSession;
+    try std.testing.expectEqual(SessionState.established, session_a.state);
+
+    // The pending request should be consumed.
+    try std.testing.expectEqual(@as(usize, 0), proto_a.pending_requests.items.len);
+
+    // Step 4: Node B receives the handshake.
+    const handshake_pkt = mock_a.sent.items[1].data;
+    try proto_b.handlePacket(handshake_pkt, addr_a, t_b);
+
+    // Node B should now have an established session.
+    const session_b2 = proto_b.sessions.get(node_id_a) orelse return error.NoSession;
+    try std.testing.expectEqual(SessionState.established, session_b2.state);
 }
