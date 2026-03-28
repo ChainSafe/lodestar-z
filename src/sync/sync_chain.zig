@@ -352,12 +352,25 @@ pub const SyncChain = struct {
     }
 
     /// Drain validated/completed batches from the front.
+    ///
+    /// Previous implementation used `orderedRemove(0)` in a loop, which is O(n)
+    /// per removal (shifts the entire slice each time), yielding O(n²) total for
+    /// a run of n validated batches.
+    ///
+    /// This version counts validated batches first, then removes them in a single
+    /// bulk `replaceRange` call — O(n) total regardless of how many are drained.
     fn drainValidated(self: *SyncChain) void {
-        while (self.batches.items.len > 0) {
-            const front = self.batches.items[0];
-            if (front.status != .awaiting_validation) break;
-            self.validated_epochs += front.count / 32;
-            _ = self.batches.orderedRemove(0);
+        // Count how many leading batches are validated.
+        var drain_count: usize = 0;
+        for (self.batches.items) |batch| {
+            if (batch.status != .awaiting_validation) break;
+            self.validated_epochs += batch.count / 32;
+            drain_count += 1;
+        }
+
+        // Bulk-remove the first drain_count elements in one shift (O(n)).
+        if (drain_count > 0) {
+            self.batches.replaceRangeAssumeCapacity(0, drain_count, &.{});
         }
 
         // Check if we're done after draining.

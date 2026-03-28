@@ -376,6 +376,13 @@ pub const Chain = struct {
         if (slot > 0 and slot % preset.SLOTS_PER_EPOCH == 0) {
             self.seen_cache.pruneAggregators();
         }
+
+        // Prune op_pool attestations — keeps only current + previous epoch.
+        // AggregatedAttestationPool and AttestationPool grow with every incoming
+        // attestation and have no self-eviction; pruneBySlot / prune must be
+        // called every slot to bound memory.
+        self.op_pool.agg_attestation_pool.pruneBySlot(slot);
+        self.op_pool.attestation_pool.prune(slot);
     }
 
     // -----------------------------------------------------------------------
