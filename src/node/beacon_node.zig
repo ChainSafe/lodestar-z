@@ -2088,8 +2088,8 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                 // Infer slot from the SSZ bytes if possible (first 8 bytes of message = slot).
                 // For BatchBlock we store raw SSZ + slot.
                 // Slot is at offset 8 of the SignedBeaconBlock message (after signature).
-                const slot = if (decoded.ssz_bytes.len >= 104)
-                    std.mem.readInt(u64, decoded.ssz_bytes[96..104], .little)
+                const slot = if (decoded.ssz_bytes.len >= 108)
+                    std.mem.readInt(u64, decoded.ssz_bytes[100..108], .little)
                 else
                     start_slot + blocks_received;
 

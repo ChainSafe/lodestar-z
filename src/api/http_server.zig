@@ -1369,7 +1369,9 @@ pub const HttpServer = struct {
             var err_buf: [256]u8 = undefined;
             const err_json = api_err.formatJson(&err_buf);
             // Dupe onto heap — err_buf is stack-local and would dangle after return.
-            const err_json_heap = self.allocator.dupe(u8, err_json) catch err_json;
+            // On OOM, fall back to a static string literal (safe to return by reference).
+            const err_json_heap = self.allocator.dupe(u8, err_json) catch
+                "{\"code\":500,\"message\":\"internal server error\"}";
             return .{
                 .status = api_err.code.statusCode(),
                 .status_text = api_err.code.phrase(),

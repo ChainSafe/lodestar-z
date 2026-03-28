@@ -66,24 +66,20 @@ pub const SpecData = struct {
 /// The returned slice is heap-allocated and must be freed by the caller.
 pub fn getForkSchedule(ctx: *ApiContext) HandlerResult([]const types.ForkScheduleEntry) {
     // Build entries from the config's ascending fork order.
-    // Allocate on ctx.allocator so concurrent requests don't share a mutable buffer.
+    // Use ArrayList + toOwnedSlice so the returned slice retains the full base pointer.
     const forks = ctx.beacon_config.forks_ascending_epoch_order;
-    const schedule = ctx.allocator.alloc(types.ForkScheduleEntry, ForkSeq.count) catch {
-        return .{ .data = &[_]types.ForkScheduleEntry{} };
-    };
-    var count: usize = 0;
+    var list = std.ArrayList(types.ForkScheduleEntry).init(ctx.allocator);
     for (forks) |fork| {
         if (fork.epoch < std.math.maxInt(u64)) {
-            schedule[count] = .{
+            list.append(.{
                 .previous_version = fork.prev_version,
                 .current_version = fork.version,
                 .epoch = fork.epoch,
-            };
-            count += 1;
+            }) catch return .{ .data = &[_]types.ForkScheduleEntry{} };
         }
     }
     return .{
-        .data = schedule[0..count],
+        .data = list.toOwnedSlice() catch &[_]types.ForkScheduleEntry{},
     };
 }
 
