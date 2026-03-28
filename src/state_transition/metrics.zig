@@ -35,6 +35,7 @@ pub const EpochTransitionStepKind = enum {
     process_sync_committee_updates,
     process_pending_deposits,
     process_pending_consolidations,
+    process_builder_pending_payments,
     process_proposer_lookahead,
 };
 

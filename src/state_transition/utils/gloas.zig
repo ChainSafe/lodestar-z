@@ -7,6 +7,7 @@ const c = @import("constants");
 const getBlockRootAtSlot = @import("./block_root.zig").getBlockRootAtSlot;
 const computeEpochAtSlot = @import("./epoch.zig").computeEpochAtSlot;
 const RootCache = @import("../cache/root_cache.zig").RootCache;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 
 const BLSPubkey = ct.primitive.BLSPubkey.Type;
 
@@ -14,8 +15,8 @@ pub fn isBuilderWithdrawalCredential(withdrawal_credentials: *const [32]u8) bool
     return withdrawal_credentials[0] == c.BUILDER_WITHDRAWAL_PREFIX;
 }
 
-pub fn getBuilderPaymentQuorumThreshold(total_active_balance_increments: u64) u64 {
-    const quorum = (total_active_balance_increments * preset.EFFECTIVE_BALANCE_INCREMENT / preset.SLOTS_PER_EPOCH) *
+pub fn getBuilderPaymentQuorumThreshold(epoch_cache: *const EpochCache) u64 {
+    const quorum = (epoch_cache.total_active_balance_increments * preset.EFFECTIVE_BALANCE_INCREMENT / preset.SLOTS_PER_EPOCH) *
         c.BUILDER_PAYMENT_THRESHOLD_NUMERATOR;
     return quorum / c.BUILDER_PAYMENT_THRESHOLD_DENOMINATOR;
 }

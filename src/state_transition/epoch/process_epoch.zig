@@ -72,7 +72,7 @@ pub fn processEpoch(
 
     if (comptime fork.gte(.gloas)) {
         timer = try Timer.start();
-        try processBuilderPendingPayments(allocator, state, epoch_cache.total_active_balance_increments);
+        try processBuilderPendingPayments(allocator, state, epoch_cache);
         try observeEpochTransitionStep(.{ .step = .process_builder_pending_payments }, timer.read());
     }
 

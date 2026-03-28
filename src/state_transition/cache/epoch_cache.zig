@@ -445,6 +445,8 @@ pub const EpochCache = struct {
             .next_sync_committee_indexed = next_sync_committee_indexed,
             .sync_period = computeSyncPeriodAtEpoch(current_epoch),
             .epoch = current_epoch,
+            .payload_timeliness_committees = null,
+            .previous_payload_timeliness_committees = null,
         };
 
         return epoch_cache_ptr;
@@ -504,6 +506,8 @@ pub const EpochCache = struct {
             .next_sync_committee_indexed = self.next_sync_committee_indexed.acquire(),
             .sync_period = self.sync_period,
             .epoch = self.epoch,
+            .payload_timeliness_committees = self.payload_timeliness_committees,
+            .previous_payload_timeliness_committees = self.previous_payload_timeliness_committees,
         };
 
         const epoch_cache_ptr = try allocator.create(EpochCache);
