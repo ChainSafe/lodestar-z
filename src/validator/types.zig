@@ -84,22 +84,12 @@ pub const ValidatorStatus = enum {
 };
 
 // ---------------------------------------------------------------------------
-// Signing domains
+// Signing domains (removed — use constants module directly)
 // ---------------------------------------------------------------------------
-
-/// BLS domain type bytes (4 bytes, big-endian).
-pub const DomainType = [4]u8;
-
-pub const DOMAIN_BEACON_PROPOSER: DomainType = .{ 0x00, 0x00, 0x00, 0x00 };
-pub const DOMAIN_BEACON_ATTESTER: DomainType = .{ 0x01, 0x00, 0x00, 0x00 };
-pub const DOMAIN_RANDAO: DomainType = .{ 0x02, 0x00, 0x00, 0x00 };
-pub const DOMAIN_DEPOSIT: DomainType = .{ 0x03, 0x00, 0x00, 0x00 };
-pub const DOMAIN_VOLUNTARY_EXIT: DomainType = .{ 0x04, 0x00, 0x00, 0x00 };
-pub const DOMAIN_SELECTION_PROOF: DomainType = .{ 0x05, 0x00, 0x00, 0x00 };
-pub const DOMAIN_AGGREGATE_AND_PROOF: DomainType = .{ 0x06, 0x00, 0x00, 0x00 };
-pub const DOMAIN_SYNC_COMMITTEE: DomainType = .{ 0x07, 0x00, 0x00, 0x00 };
-pub const DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF: DomainType = .{ 0x08, 0x00, 0x00, 0x00 };
-pub const DOMAIN_CONTRIBUTION_AND_PROOF: DomainType = .{ 0x09, 0x00, 0x00, 0x00 };
+// Domain type constants were duplicated here and in signing.zig. They have been
+// removed. All callers should import from the `constants` module:
+//   const constants = @import("constants");
+//   const DOMAIN_BEACON_PROPOSER = constants.DOMAIN_BEACON_PROPOSER;
 
 // ---------------------------------------------------------------------------
 // Slashing protection
@@ -151,4 +141,13 @@ pub const ValidatorConfig = struct {
     /// When set, api_client will try these URLs if the primary fails.
     /// TS: --beaconNodes flag (array of BN URLs).
     beacon_node_fallback_urls: []const []const u8 = &.{},
+    /// Path to an EIP-3076 slashing protection interchange file to import at startup.
+    ///
+    /// When set, `ValidatorClient.init()` imports the interchange records into the
+    /// slashing protection DB before starting. This ensures validators cannot sign
+    /// anything that would conflict with their history on a previous client.
+    ///
+    /// TS: --importKeystores / --slashingProtection flag that feeds into
+    ///     SlashingProtectionInterchange.importInterchange().
+    interchange_import_path: ?[]const u8 = null,
 };

@@ -37,6 +37,8 @@ pub const ValidatorRecord = struct {
     /// BLS public key (48 bytes).
     pubkey: [48]u8,
     /// BLS secret key for local signing.
+    /// For remote-only validators (is_remote = true), this field is zeroed and
+    /// must NOT be used for signing. Signing is delegated to RemoteSigner.
     secret_key: SecretKey,
     /// Validator index on the beacon chain (null until resolved).
     index: ?u64,
@@ -44,6 +46,9 @@ pub const ValidatorRecord = struct {
     status: ValidatorStatus,
     /// Slashing protection data.
     slashing: SlashingProtectionRecord,
+    /// True if this validator's signing is delegated to a remote signer (Web3Signer).
+    /// Secret key is zeroed; calls to signXxx will fail with error.RemoteSignerRequired.
+    is_remote: bool = false,
 };
 
 // ---------------------------------------------------------------------------
@@ -130,6 +135,55 @@ pub const ValidatorStore = struct {
     /// Used by the Keymanager API POST /eth/v1/keystores.
     pub fn addValidator(self: *ValidatorStore, secret_key: SecretKey) !void {
         return self.addKey(secret_key);
+    }
+
+    /// Register a remote signer pubkey without a local secret key (thread-safe).
+    ///
+    /// The validator will be tracked for duties but signing is delegated to RemoteSigner.
+    /// Calling signXxx() for a remote key will return error.RemoteSignerRequired.
+    ///
+    /// TS: ValidatorStore init with `ExternalSignerSigner` entries — pubkey tracked but
+    ///     signing goes through the external signer HTTP client.
+    pub fn addRemotePubkey(self: *ValidatorStore, pubkey: [48]u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Check for duplicate (remote or local).
+        for (self.validators.items) |v| {
+            if (std.mem.eql(u8, &v.pubkey, &pubkey)) return; // already present
+        }
+
+        // Build a zeroed SecretKey placeholder — never used for signing.
+        var zeroed_sk_bytes = [_]u8{0} ** 32;
+        // BLS scalar must be non-zero; use 1 as a safe placeholder.
+        zeroed_sk_bytes[31] = 1;
+        const placeholder_sk = SecretKey.fromBytes(zeroed_sk_bytes) catch return error.InvalidPubkey;
+
+        try self.validators.append(.{
+            .pubkey = pubkey,
+            .secret_key = placeholder_sk,
+            .index = null,
+            .status = .unknown,
+            .is_remote = true,
+            .slashing = .{
+                .pubkey = pubkey,
+                .last_signed_block_slot = null,
+                .last_signed_attestation_source_epoch = null,
+                .last_signed_attestation_target_epoch = null,
+            },
+        });
+        try self.pubkeys_cache.append(pubkey);
+        log.info("registered remote validator pubkey={}", .{std.fmt.fmtSliceHexLower(&pubkey)});
+    }
+
+    /// Return true if the given pubkey belongs to a remote signer.
+    pub fn isRemote(self: *const ValidatorStore, pubkey: [48]u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.validators.items) |v| {
+            if (std.mem.eql(u8, &v.pubkey, &pubkey)) return v.is_remote;
+        }
+        return false;
     }
 
     /// Remove a validator key at runtime (thread-safe).

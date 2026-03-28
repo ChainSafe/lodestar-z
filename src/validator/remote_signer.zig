@@ -33,6 +33,57 @@ const log = std.log.scoped(.remote_signer);
 const MAX_RESPONSE_BYTES: usize = 4 * 1024;
 
 // ---------------------------------------------------------------------------
+// SigningType enum (Web3Signer API)
+// ---------------------------------------------------------------------------
+
+/// Signing type as required by the Web3Signer API.
+///
+/// The `type` field in the POST /api/v1/eth2/sign/{pubkey} request body identifies
+/// the signing domain so the remote signer can apply slashing protection and
+/// construct the correct signing domain.
+///
+/// Reference: https://docs.web3signer.consensys.net/reference/api/
+/// TS: ExternalSignerClient.signWeakHeadAttestation etc. — each passes a specific type.
+pub const SigningType = enum {
+    /// RANDAO reveal (epoch signature).
+    RANDAO_REVEAL,
+    /// Block proposal.
+    BLOCK_V2,
+    /// Attestation.
+    ATTESTATION,
+    /// Aggregate and proof.
+    AGGREGATE_AND_PROOF,
+    /// Sync committee message.
+    SYNC_COMMITTEE_MESSAGE,
+    /// Sync committee selection proof.
+    SYNC_COMMITTEE_SELECTION_PROOF,
+    /// Sync committee contribution and proof.
+    SYNC_COMMITTEE_CONTRIBUTION_AND_PROOF,
+    /// Attestation selection proof (aggregator selection).
+    AGGREGATION_SLOT,
+    /// Voluntary exit.
+    VOLUNTARY_EXIT,
+    /// BLS-to-execution change (EIP-4895).
+    BLS_TO_EXECUTION_CHANGE,
+
+    /// Return the string literal used in Web3Signer JSON requests.
+    pub fn asStr(self: SigningType) []const u8 {
+        return switch (self) {
+            .RANDAO_REVEAL => "RANDAO_REVEAL",
+            .BLOCK_V2 => "BLOCK_V2",
+            .ATTESTATION => "ATTESTATION",
+            .AGGREGATE_AND_PROOF => "AGGREGATE_AND_PROOF",
+            .SYNC_COMMITTEE_MESSAGE => "SYNC_COMMITTEE_MESSAGE",
+            .SYNC_COMMITTEE_SELECTION_PROOF => "SYNC_COMMITTEE_SELECTION_PROOF",
+            .SYNC_COMMITTEE_CONTRIBUTION_AND_PROOF => "SYNC_COMMITTEE_CONTRIBUTION_AND_PROOF",
+            .AGGREGATION_SLOT => "AGGREGATION_SLOT",
+            .VOLUNTARY_EXIT => "VOLUNTARY_EXIT",
+            .BLS_TO_EXECUTION_CHANGE => "BLS_TO_EXECUTION_CHANGE",
+        };
+    }
+};
+
+// ---------------------------------------------------------------------------
 // RemoteSigner
 // ---------------------------------------------------------------------------
 
@@ -109,7 +160,13 @@ pub const RemoteSigner = struct {
     ///
     /// The signing_root is passed as the `signingRoot` field in the JSON body.
     /// Returns the BLS signature.
-    pub fn sign(self: *RemoteSigner, io: Io, pubkey: [48]u8, signing_root: [32]u8) !Signature {
+    pub fn sign(
+        self: *RemoteSigner,
+        io: Io,
+        pubkey: [48]u8,
+        signing_root: [32]u8,
+        signing_type: SigningType,
+    ) !Signature {
         const pk_hex = std.fmt.bytesToHex(&pubkey, .lower);
         const sr_hex = std.fmt.bytesToHex(&signing_root, .lower);
 
@@ -123,11 +180,11 @@ pub const RemoteSigner = struct {
         // Build request body.
         // Web3Signer expects: {"type": "...", "signingRoot": "0x..."}
         // The "type" field identifies the signing domain (e.g. "BLOCK_V2", "ATTESTATION").
-        // For generic signing root operations we use a generic payload.
+        // Web3Signer requires specific type for correct slashing protection per duty.
         const req_body = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"type\":\"UNKNOWN\",\"signingRoot\":\"0x{s}\"}}",
-            .{sr_hex},
+            "{{\"type\":\"{s}\",\"signingRoot\":\"0x{s}\"}}",
+            .{ signing_type.asStr(), sr_hex },
         );
         defer self.allocator.free(req_body);
 
@@ -259,15 +316,23 @@ test "RemoteSigner: init does not crash" {
 }
 
 test "RemoteSigner: sign request body format" {
-    // Test that the JSON request body is formatted correctly.
+    // Test that the JSON request body is formatted correctly with proper signing type.
     var buf: [256]u8 = undefined;
     const signing_root = [_]u8{0xAB} ** 32;
     const sr_hex = std.fmt.bytesToHex(&signing_root, .lower);
     const result = try std.fmt.bufPrint(
         &buf,
-        "{{\"type\":\"UNKNOWN\",\"signingRoot\":\"0x{s}\"}}",
-        .{sr_hex},
+        "{{\"type\":\"{s}\",\"signingRoot\":\"0x{s}\"}}",
+        .{ SigningType.ATTESTATION.asStr(), sr_hex },
     );
-    const expected = "{\"type\":\"UNKNOWN\",\"signingRoot\":\"0x" ++ "ab" ** 32 ++ "\"}";
+    const expected = "{\"type\":\"ATTESTATION\",\"signingRoot\":\"0x" ++ "ab" ** 32 ++ "\"}";
     try testing.expectEqualStrings(expected, result);
+}
+
+test "RemoteSigner: SigningType.asStr returns correct strings" {
+    try testing.expectEqualStrings("BLOCK_V2", SigningType.BLOCK_V2.asStr());
+    try testing.expectEqualStrings("ATTESTATION", SigningType.ATTESTATION.asStr());
+    try testing.expectEqualStrings("RANDAO_REVEAL", SigningType.RANDAO_REVEAL.asStr());
+    try testing.expectEqualStrings("VOLUNTARY_EXIT", SigningType.VOLUNTARY_EXIT.asStr());
+    try testing.expectEqualStrings("SYNC_COMMITTEE_MESSAGE", SigningType.SYNC_COMMITTEE_MESSAGE.asStr());
 }

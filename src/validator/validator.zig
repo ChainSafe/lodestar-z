@@ -74,6 +74,8 @@ const IndexTracker = index_tracker_mod.IndexTracker;
 const liveness_mod = @import("liveness.zig");
 const LivenessTracker = liveness_mod.LivenessTracker;
 
+const interchange_mod = @import("interchange.zig");
+
 const log = std.log.scoped(.validator_client);
 
 /// Default fee recipient (zero address) — operator should override.
@@ -214,6 +216,47 @@ pub const ValidatorClient = struct {
         }
         log.info("validator keys loaded from disk: {d}", .{loaded_count});
 
+        // Import EIP-3076 slashing protection interchange if configured.
+        // This must happen before any signing, so we do it during init().
+        // TS: equivalent to --slashingProtection flag feeding importInterchange().
+        if (config.interchange_import_path) |ipath| {
+            const interchange_data = std.fs.cwd().readFileAlloc(allocator, ipath, 16 * 1024 * 1024) catch |err| blk: {
+                log.err("failed to read interchange file {s}: {s}", .{ ipath, @errorName(err) });
+                break :blk null;
+            };
+            if (interchange_data) |data| {
+                defer allocator.free(data);
+                const records = interchange_mod.importInterchangeVerified(
+                    allocator,
+                    data,
+                    config.genesis_validators_root,
+                ) catch |err| blk: {
+                    log.err("interchange import failed: {s}", .{@errorName(err)});
+                    break :blk null;
+                };
+                if (records) |recs| {
+                    defer allocator.free(recs);
+                    var imported_count: usize = 0;
+                    for (recs) |rec| {
+                        // Feed highest signed block slot into slashing DB.
+                        if (rec.last_signed_block_slot) |slot| {
+                            _ = validator_store.slashing_db.checkAndInsertBlock(rec.pubkey, slot) catch {};
+                            imported_count += 1;
+                        }
+                        // Feed highest signed attestation epochs into slashing DB.
+                        if (rec.last_signed_attestation_source_epoch) |src| {
+                            if (rec.last_signed_attestation_target_epoch) |tgt| {
+                                _ = validator_store.slashing_db.checkAndInsertAttestation(
+                                    rec.pubkey, src, tgt,
+                                ) catch {};
+                            }
+                        }
+                    }
+                    log.info("imported interchange: {d} validator records from {s}", .{ imported_count, ipath });
+                }
+            }
+        }
+
         var idx_tracker = IndexTracker.init(allocator, &api);
         var live_tracker = LivenessTracker.init(allocator);
 
@@ -337,6 +380,10 @@ pub const ValidatorClient = struct {
         self.attestation_service.setSafetyCheckers(dopple_ptr, syncing_ptr);
         self.sync_committee_service.setSafetyCheckers(dopple_ptr, syncing_ptr);
 
+        // Wire liveness tracker into services that record duty outcomes.
+        self.attestation_service.setLivenessTracker(&self.liveness_tracker);
+        self.sync_committee_service.setLivenessTracker(&self.liveness_tracker);
+
         // Register clock callbacks.
         self.clock.onSlot(.{ .ctx = self, .fn_ptr = onSlotBlockService });
         self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochBlockService });
@@ -413,23 +460,63 @@ pub const ValidatorClient = struct {
                 break :blk &[_][48]u8{};
             };
             defer if (remote_pubkeys.len > 0) self.allocator.free(remote_pubkeys);
+            var remote_registered: usize = 0;
             for (remote_pubkeys) |pk| {
-                // For remote signers, we don't have the secret key locally.
-                // We track the pubkey in the validator store by registering it.
-                // The actual signing will go through RemoteSigner when implemented.
+                // Register the pubkey in the validator store as remote-only.
+                // This enables duty tracking (indices, attestation duties, etc.)
+                // without requiring the secret key locally.
+                // TODO(remote-signing): actual signing path must check isRemote()
+                // and delegate to RemoteSigner.sign() instead of validator_store.signXxx().
+                self.validator_store.addRemotePubkey(pk) catch |err| {
+                    log.warn("addRemotePubkey failed pubkey=0x{s}: {s}", .{
+                        std.fmt.bytesToHex(pk, .lower), @errorName(err),
+                    });
+                    continue;
+                };
+                if (self.doppelganger) |*d| {
+                    d.registerValidator(pk) catch {};
+                }
+                self.index_tracker.trackPubkey(pk);
+                self.liveness_tracker.register(pk);
+                remote_registered += 1;
                 log.info("registered remote validator pubkey=0x{s}", .{std.fmt.bytesToHex(pk, .lower)});
             }
-            log.info("fetched {d} remote validator keys from web3signer", .{remote_pubkeys.len});
+            log.info("fetched {d} remote validator keys from web3signer ({d} registered)", .{
+                remote_pubkeys.len, remote_registered,
+            });
         }
 
-        // Note: ChainHeaderTracker SSE subscription would ideally run in a background fiber.
-        // In Zig 0.16 with full evented I/O (io_uring/GCD), we could do:
-        //   var sse_task = try io.spawn(ChainHeaderTracker.start, .{&self.header_tracker, io});
-        //   defer sse_task.cancel();
-        // For now, it is the operator's responsibility to call header_tracker.start(io)
-        // in a separate thread if SSE events are desired. The validator runs correctly
-        // without it (sync committee service uses zero block root as fallback).
-        log.info("note: ChainHeaderTracker SSE subscription not started (requires separate thread/fiber)", .{});
+        // Start ChainHeaderTracker SSE subscription in a background thread.
+        // The SSE stream provides head events for reorg detection and sync committee
+        // block root tracking. We start it here so it runs concurrently with the clock loop.
+        //
+        // The thread receives a copy of io (std.Io is a pointer/handle, safe to copy).
+        // If the SSE stream fails, the thread logs the error and exits — the VC
+        // continues without head tracking (using fallback zero block root for sync committee).
+        //
+        // TODO(fix-8): For Zig 0.16 full evented I/O, migrate to io.spawn() once
+        //     the evented fiber API stabilises. For now, std.Thread is sufficient.
+        const SseThreadCtx = struct {
+            tracker: *chain_header_mod.ChainHeaderTracker,
+            io: Io,
+        };
+        const sse_ctx = try self.allocator.create(SseThreadCtx);
+        sse_ctx.* = .{ .tracker = &self.header_tracker, .io = io };
+        const sse_thread = std.Thread.spawn(.{}, struct {
+            fn run(ctx: *SseThreadCtx) void {
+                ctx.tracker.start(ctx.io) catch |err| {
+                    log.warn("ChainHeaderTracker SSE stream ended: {s}", .{@errorName(err)});
+                };
+            }
+        }.run, .{sse_ctx}) catch |err| blk: {
+            log.warn("failed to start ChainHeaderTracker SSE thread: {s}", .{@errorName(err)});
+            self.allocator.destroy(sse_ctx);
+            break :blk null;
+        };
+        if (sse_thread) |t| {
+            t.detach(); // Let it run independently; VC shutdown will kill the process.
+            log.info("ChainHeaderTracker SSE subscription started in background thread", .{});
+        }
 
         // Run the clock loop (blocking until shutdown or error).
         try self.clock.run(io);
