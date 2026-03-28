@@ -249,7 +249,7 @@ pub const GossipHandler = struct {
     /// 3. Phase 2: queue full import as a work item
     pub fn onBeaconBlock(self: *GossipHandler, message_data: []const u8) !void {
         // Decompress once — reused for decode, BLS verify, and import.
-        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_BEACON_BLOCK) catch
             return GossipHandlerError.DecodeFailed;
         defer self.allocator.free(ssz_bytes);
 
@@ -303,7 +303,7 @@ pub const GossipHandler = struct {
         _ = subnet_id;
 
         // Decompress once — reused for decode, BLS verify, and import.
-        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_ATTESTATION) catch
             return GossipHandlerError.DecodeFailed;
         defer self.allocator.free(ssz_bytes);
 
@@ -383,7 +383,7 @@ pub const GossipHandler = struct {
     /// 3. Phase 2: import to fork choice + attestation pool
     pub fn onAggregateAndProof(self: *GossipHandler, message_data: []const u8) !void {
         // Decompress once — reused for decode, BLS verify, and import.
-        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
             return GossipHandlerError.DecodeFailed;
         defer self.allocator.free(ssz_bytes);
 
@@ -441,7 +441,7 @@ pub const GossipHandler = struct {
     /// 3. Phase 2: import to op pool
     pub fn onVoluntaryExit(self: *GossipHandler, message_data: []const u8) !void {
         // Decompress once — reused for decode, BLS verify, and import.
-        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
             return GossipHandlerError.DecodeFailed;
         defer self.allocator.free(ssz_bytes);
 
@@ -500,7 +500,7 @@ pub const GossipHandler = struct {
     /// 3. Phase 2: import to op pool
     pub fn onProposerSlashing(self: *GossipHandler, message_data: []const u8) !void {
         // Decompress once — reused for decode, BLS verify, and import.
-        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
             return GossipHandlerError.DecodeFailed;
         defer self.allocator.free(ssz_bytes);
 
@@ -562,7 +562,7 @@ pub const GossipHandler = struct {
     /// 3. Phase 2: import raw SSZ to op pool (full deserialization happens at pool layer)
     pub fn onAttesterSlashing(self: *GossipHandler, message_data: []const u8) !void {
         // Decompress once — reused for decode, BLS verify, and import.
-        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
             return GossipHandlerError.DecodeFailed;
         defer self.allocator.free(ssz_bytes);
 
@@ -623,7 +623,7 @@ pub const GossipHandler = struct {
     /// 3. Phase 2: import to op pool
     pub fn onBlsToExecutionChange(self: *GossipHandler, message_data: []const u8) !void {
         // Decompress once — reused for decode, BLS verify, and import.
-        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
             return GossipHandlerError.DecodeFailed;
         defer self.allocator.free(ssz_bytes);
 
@@ -681,7 +681,7 @@ pub const GossipHandler = struct {
     /// 3. Phase 2: log acceptance (no sync contribution pool yet)
     pub fn onSyncCommitteeContribution(self: *GossipHandler, message_data: []const u8) !void {
         // Decompress once — reused for decode and import.
-        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
             return GossipHandlerError.DecodeFailed;
         defer self.allocator.free(ssz_bytes);
 
@@ -732,7 +732,7 @@ pub const GossipHandler = struct {
     /// 3. Phase 2: log acceptance (no sync committee message pool yet)
     pub fn onSyncCommitteeMessage(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
         // Decompress once — reused for decode, BLS verify, and import.
-        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
             return GossipHandlerError.DecodeFailed;
         defer self.allocator.free(ssz_bytes);
 
@@ -793,7 +793,7 @@ pub const GossipHandler = struct {
     /// 3. Phase 2: decompress full payload and import via BeaconNode
     pub fn onBlobSidecar(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
         // Decompress once — reused for decode and import.
-        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data) catch
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_BLOB_SIDECAR) catch
             return GossipHandlerError.DecodeFailed;
         defer self.allocator.free(ssz_bytes);
 

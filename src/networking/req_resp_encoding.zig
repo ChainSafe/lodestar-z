@@ -27,6 +27,12 @@ const ResponseCode = protocol.ResponseCode;
 
 pub const EncodeError = snappy.CompressError;
 
+/// Maximum allowed uncompressed size for a single req/resp message (10 MiB).
+/// The consensus spec defines MAX_CHUNK_SIZE = 10 * 2^20.  We reject any
+/// message whose declared SSZ length exceeds this limit, and we verify that
+/// the decompressed output matches the declared length exactly.
+pub const MAX_REQ_RESP_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
+
 pub const DecodeError = varint.DecodeError || snappy.UncompressError || error{
     /// The result byte is not a known response code.
     InvalidResponseCode,
@@ -34,6 +40,12 @@ pub const DecodeError = varint.DecodeError || snappy.UncompressError || error{
     InsufficientData,
     /// Snappy decompression returned null (empty payload where data was expected).
     EmptyPayload,
+    /// The declared SSZ length exceeds MAX_REQ_RESP_SIZE (10 MiB).
+    /// Reject before decompressing to prevent memory exhaustion.
+    PayloadTooLarge,
+    /// The decompressed payload length does not match the declared SSZ length.
+    /// Per spec, these must be equal (varint is an exact-size prefix).
+    LengthMismatch,
 };
 
 /// Result of decoding a request from the wire.
@@ -88,7 +100,9 @@ pub fn decodeRequest(
     // Decode the varint length prefix.
     const varint_result = try varint.decode(wire_bytes);
     const ssz_length = varint_result.value;
-    _ = ssz_length; // Used for validation; the snappy decompressor handles actual length.
+
+    // Reject obviously-oversized payloads before decompressing (decompression-bomb guard).
+    if (ssz_length > MAX_REQ_RESP_SIZE) return DecodeError.PayloadTooLarge;
 
     const payload_start = varint_result.bytes_consumed;
     if (payload_start >= wire_bytes.len) {
@@ -98,6 +112,12 @@ pub fn decodeRequest(
     // Decompress the Snappy-framed payload.
     const decompressed = try snappy.uncompress(allocator, wire_bytes[payload_start..]);
     const ssz_bytes = decompressed orelse return DecodeError.EmptyPayload;
+
+    // Per spec, the varint is an exact-size prefix: decompressed length must equal ssz_length.
+    if (ssz_bytes.len != ssz_length) {
+        allocator.free(ssz_bytes);
+        return DecodeError.LengthMismatch;
+    }
 
     return .{
         .ssz_bytes = ssz_bytes,
@@ -203,6 +223,9 @@ pub fn decodeResponseChunk(
     const snappy_start = offset;
     const snappy_data = wire_bytes[snappy_start..];
 
+    // Reject payloads that declare an oversized SSZ length before any decompression.
+    if (varint_result.value > MAX_REQ_RESP_SIZE) return DecodeError.PayloadTooLarge;
+
     // Calculate snappy frame boundaries: identifier (10 bytes) + data chunks
     // Each chunk: type(1) + length(3) + payload(length)
     const snappy_consumed = calcSnappyFrameSize(snappy_data, varint_result.value) catch
@@ -210,6 +233,12 @@ pub fn decodeResponseChunk(
 
     const decompressed = try snappy.uncompress(allocator, snappy_data[0..snappy_consumed]);
     const ssz_bytes = decompressed orelse return DecodeError.EmptyPayload;
+
+    // Per spec, the varint is an exact-size prefix: decompressed length must equal declared length.
+    if (ssz_bytes.len != varint_result.value) {
+        allocator.free(ssz_bytes);
+        return DecodeError.LengthMismatch;
+    }
 
     return .{
         .result = result_code,
@@ -536,4 +565,45 @@ pub fn freeDecodedResponseChunks(allocator: std.mem.Allocator, chunks: []Decoded
         allocator.free(chunk.ssz_bytes);
     }
     allocator.free(chunks);
+}
+
+test "decodeRequest rejects declared length > MAX_REQ_RESP_SIZE" {
+    const allocator = testing.allocator;
+
+    // Craft a varint that declares MAX_REQ_RESP_SIZE + 1 bytes, followed by a minimal
+    // valid snappy stream (the actual content doesn't matter — we reject before decompressing).
+    var varint_buf: [varint.max_length]u8 = undefined;
+    const varint_len = varint.encode(MAX_REQ_RESP_SIZE + 1, &varint_buf);
+
+    // We need some placeholder bytes after the varint so `payload_start < wire_bytes.len`.
+    // Use a dummy byte; decodeRequest rejects on length before calling snappy.
+    var wire: [varint.max_length + 1]u8 = undefined;
+    @memcpy(wire[0..varint_len], varint_buf[0..varint_len]);
+    wire[varint_len] = 0xFF; // padding — never reached
+
+    const result = decodeRequest(allocator, wire[0 .. varint_len + 1]);
+    try testing.expectError(DecodeError.PayloadTooLarge, result);
+}
+
+test "decodeRequest detects length mismatch" {
+    const allocator = testing.allocator;
+
+    // Encode a 4-byte payload but declare 8 bytes in the varint.
+    const real_payload = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+
+    // Compress the 4-byte payload.
+    const compressed = try snappy.compress(allocator, &real_payload);
+    defer allocator.free(compressed);
+
+    // Build wire bytes: varint(8) + snappy(4 bytes of real data).
+    var varint_buf: [varint.max_length]u8 = undefined;
+    const varint_len = varint.encode(8, &varint_buf); // declares 8 bytes
+
+    const wire = try allocator.alloc(u8, varint_len + compressed.len);
+    defer allocator.free(wire);
+    @memcpy(wire[0..varint_len], varint_buf[0..varint_len]);
+    @memcpy(wire[varint_len..], compressed);
+
+    const result = decodeRequest(allocator, wire);
+    try testing.expectError(DecodeError.LengthMismatch, result);
 }

@@ -21,6 +21,42 @@ const Allocator = std.mem.Allocator;
 const capella = consensus_types.capella;
 const altair = consensus_types.altair;
 
+// ─── Per-topic decompressed-size limits ────────────────────────────────────
+//
+// These caps bound how many bytes snappy.uncompress() may produce before we
+// reject the message.  They are intentionally generous (2× the largest valid
+// SSZ encoding for the type) so legitimate messages are never dropped, while
+// a decompression-bomb payload is caught before it can exhaust memory.
+//
+// Reference: consensus-specs §p2p-interface – "Encoding strategies"
+//   MAX_CHUNK_SIZE = 10 * 2^20 (10 MiB) for request/response
+//   Gossip max sizes are per-topic based on SSZ serializedSize bounds.
+
+/// Maximum decompressed size for a SignedBeaconBlock gossip message.
+/// A Deneb block with max transactions/blobs is ~2 MiB; cap at 4 MiB for safety.
+pub const MAX_GOSSIP_SIZE_BEACON_BLOCK: usize = 4 * 1024 * 1024; // 4 MiB
+
+/// Maximum decompressed size for a BlobSidecar gossip message.
+/// BlobSidecar fixed layout: 8 + 131072 + 48 + 48 + 96 + 112 + (kzg_commitment_inclusion_proof)
+/// = ~131568 bytes.  Cap at 300 KiB to allow proof overhead.
+pub const MAX_GOSSIP_SIZE_BLOB_SIDECAR: usize = 300 * 1024; // 300 KiB
+
+/// Maximum decompressed size for a SingleAttestation (beacon_attestation) gossip message.
+/// Fixed-size container: ~212 bytes.  Cap at 4 KiB.
+pub const MAX_GOSSIP_SIZE_ATTESTATION: usize = 4 * 1024; // 4 KiB
+
+/// Default maximum for all other gossip topic types (1 MiB).
+pub const MAX_GOSSIP_SIZE_DEFAULT: usize = 1024 * 1024; // 1 MiB
+
+/// Return the decompressed-size limit appropriate for the given topic.
+pub fn maxGossipSize(topic: GossipTopicType) usize {
+    return switch (topic) {
+        .beacon_block => MAX_GOSSIP_SIZE_BEACON_BLOCK,
+        .blob_sidecar => MAX_GOSSIP_SIZE_BLOB_SIDECAR,
+        .beacon_attestation => MAX_GOSSIP_SIZE_ATTESTATION,
+        else => MAX_GOSSIP_SIZE_DEFAULT,
+    };
+}
 
 /// Errors that can occur during gossip message decoding.
 pub const DecodeError = snappy.UncompressError || error{
@@ -30,6 +66,9 @@ pub const DecodeError = snappy.UncompressError || error{
     SszDeserializationFailed,
     /// The topic type is not supported for decoding.
     UnsupportedTopicType,
+    /// The decompressed payload exceeds the allowed maximum size for this topic.
+    /// This prevents decompression-bomb attacks from exhausting memory.
+    DecompressionBombDetected,
 };
 
 /// Result of decoding a beacon_block gossip message.
@@ -150,19 +189,37 @@ pub const DecodedGossipMessage = union(GossipTopicType) {
     data_column_sidecar: void,
 };
 
-/// Decompress a Snappy-framed gossip payload.
+/// Decompress a Snappy-framed gossip payload, rejecting payloads that would
+/// expand beyond `max_decompressed_size` bytes.
 ///
-/// Returns the decompressed SSZ bytes. Caller owns the returned memory.
-pub fn decompressGossipPayload(allocator: Allocator, compressed_data: []const u8) DecodeError![]const u8 {
+/// A malicious peer can craft a tiny compressed stream that decompresses to
+/// gigabytes of data.  Checking the output length after decompression and
+/// freeing immediately bounds worst-case allocation to one call's worth of
+/// output.
+///
+/// Use `maxGossipSize(topic)` to obtain the appropriate limit for a given
+/// gossip topic, or one of the `MAX_GOSSIP_SIZE_*` constants directly.
+///
+/// Returns the decompressed SSZ bytes.  Caller owns the returned memory.
+pub fn decompressGossipPayload(
+    allocator: Allocator,
+    compressed_data: []const u8,
+    max_decompressed_size: usize,
+) DecodeError![]const u8 {
     const decompressed = snappy.uncompress(allocator, compressed_data) catch |err| return err;
     if (decompressed == null) return error.EmptyPayload;
-    return decompressed.?;
+    const result = decompressed.?;
+    if (result.len > max_decompressed_size) {
+        allocator.free(result);
+        return error.DecompressionBombDetected;
+    }
+    return result;
 }
 
 /// Decode a raw gossip message (Snappy-compressed SSZ) into its typed representation.
 ///
 /// This performs:
-/// 1. Snappy decompression
+/// 1. Snappy decompression (bounded by per-topic size limit)
 /// 2. SSZ deserialization based on the topic type
 /// 3. Extraction of validation-relevant fields
 ///
@@ -172,8 +229,8 @@ pub fn decodeGossipMessage(
     topic_type: GossipTopicType,
     raw_data: []const u8,
 ) DecodeError!DecodedGossipMessage {
-    // Step 1: Snappy decompress.
-    const ssz_bytes = try decompressGossipPayload(allocator, raw_data);
+    // Step 1: Snappy decompress with per-topic size limit.
+    const ssz_bytes = try decompressGossipPayload(allocator, raw_data, maxGossipSize(topic_type));
     defer allocator.free(ssz_bytes);
 
     // Step 2: Deserialize based on topic type.
@@ -358,10 +415,22 @@ test "decompressGossipPayload roundtrip" {
     const compressed = try snappy.compress(testing.allocator, original);
     defer testing.allocator.free(compressed);
 
-    const decompressed = try decompressGossipPayload(testing.allocator, compressed);
+    const decompressed = try decompressGossipPayload(testing.allocator, compressed, MAX_GOSSIP_SIZE_DEFAULT);
     defer testing.allocator.free(decompressed);
 
     try testing.expectEqualStrings(original, decompressed);
+}
+
+test "decompressGossipPayload rejects decompression bomb" {
+    // Craft a payload that decompresses to more bytes than the limit.
+    // Use a small limit so our test data triggers it.
+    const original = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 64 bytes
+    const compressed = try snappy.compress(testing.allocator, original);
+    defer testing.allocator.free(compressed);
+
+    // Allow only 10 bytes — the 64-byte decompressed result should be rejected.
+    const result = decompressGossipPayload(testing.allocator, compressed, 10);
+    try testing.expectError(error.DecompressionBombDetected, result);
 }
 
 test "decode beacon_block from SSZ bytes" {

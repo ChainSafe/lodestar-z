@@ -2103,6 +2103,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                         if (std.mem.indexOf(u8, msg.topic, "beacon_block") == null) continue;
                         const ssz_bytes = gossip_decoding.decompressGossipPayload(
                             self.allocator, msg.data,
+                            gossip_decoding.MAX_GOSSIP_SIZE_BEACON_BLOCK,
                         ) catch continue;
                         defer self.allocator.free(ssz_bytes);
 
@@ -2412,6 +2413,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         fn handleGossipBlock(self: *BeaconNode, gossip_decoding: anytype, data: []const u8) void {
             const ssz_bytes = gossip_decoding.decompressGossipPayload(
                 self.allocator, data,
+                gossip_decoding.MAX_GOSSIP_SIZE_BEACON_BLOCK,
             ) catch {
                 std.log.warn("Gossip: failed to decompress block", .{});
                 return;
@@ -2469,6 +2471,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             _ = subnet_id;
             const ssz_bytes = gossip_decoding_mod.decompressGossipPayload(
                 self.allocator, data,
+                gossip_decoding_mod.MAX_GOSSIP_SIZE_DEFAULT,
             ) catch {
                 std.log.warn("Gossip: failed to decompress data column sidecar", .{});
                 return;
