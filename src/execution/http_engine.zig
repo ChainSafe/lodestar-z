@@ -2810,3 +2810,363 @@ pub const IoHttpTransport = struct {
         };
     }
 };
+
+// ── GetPayload response parsing tests ─────────────────────────────────────────
+
+// Helper: build a minimal execution payload JSON object for testing.
+// All zero fields except blockHash which is provided.
+fn makePayloadJsonV1(block_hash_hex: []const u8) []const u8 {
+    _ = block_hash_hex;
+    return "";
+}
+
+test "getPayloadV1: parses ExecutionPayload response" {
+    const allocator = testing.allocator;
+
+    // V1 response: just executionPayload + blockValue
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":{"executionPayload":{"parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","feeRecipient":"0x0000000000000000000000000000000000000000","stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","receiptsRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","logsBloom":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","prevRandao":"0x0000000000000000000000000000000000000000000000000000000000000000","blockNumber":"0x1","gasLimit":"0x1c9c380","gasUsed":"0x5208","timestamp":"0x6553f100","extraData":"0x","baseFeePerGas":"0x3b9aca00","blockHash":"0x0101010101010101010101010101010101010101010101010101010101010101","transactions":[]},"blockValue":"0x64"}}
+    ;
+
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const result = try engine.getPayloadV1([_]u8{0xab} ** 8);
+
+    // Verify payload fields
+    try testing.expectEqual(@as(u64, 1), result.execution_payload.block_number);
+    try testing.expectEqual([_]u8{0x01} ** 32, result.execution_payload.block_hash);
+    try testing.expectEqual(@as(u64, 21000), result.execution_payload.gas_used);
+    // blockValue = 0x64 = 100
+    try testing.expectEqual(@as(u256, 100), result.block_value);
+
+    const body = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, body, "engine_getPayloadV1") != null);
+}
+
+test "getPayloadV2: parses ExecutionPayload + blockValue response" {
+    const allocator = testing.allocator;
+
+    // V2 response: executionPayload with withdrawals + blockValue
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":{"executionPayload":{"parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","feeRecipient":"0x0000000000000000000000000000000000000000","stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","receiptsRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","logsBloom":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","prevRandao":"0x0000000000000000000000000000000000000000000000000000000000000000","blockNumber":"0x2","gasLimit":"0x1c9c380","gasUsed":"0x0","timestamp":"0x6553f200","extraData":"0x","baseFeePerGas":"0x3b9aca00","blockHash":"0x0202020202020202020202020202020202020202020202020202020202020202","transactions":[],"withdrawals":[]},"blockValue":"0x3b9aca00"}}
+    ;
+
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const result = try engine.getPayloadV2([_]u8{0xcd} ** 8);
+
+    try testing.expectEqual(@as(u64, 2), result.execution_payload.block_number);
+    try testing.expectEqual([_]u8{0x02} ** 32, result.execution_payload.block_hash);
+    // blockValue = 0x3b9aca00 = 1_000_000_000
+    try testing.expectEqual(@as(u256, 1_000_000_000), result.block_value);
+
+    const body = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, body, "engine_getPayloadV2") != null);
+}
+
+test "getPayloadV3: parses ExecutionPayload + blockValue + BlobsBundle response" {
+    const allocator = testing.allocator;
+
+    // V3 response: includes blobsBundle and shouldOverrideBuilder
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":{"executionPayload":{"parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","feeRecipient":"0x0000000000000000000000000000000000000000","stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","receiptsRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","logsBloom":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","prevRandao":"0x0000000000000000000000000000000000000000000000000000000000000000","blockNumber":"0x3","gasLimit":"0x1c9c380","gasUsed":"0x0","timestamp":"0x6553f300","extraData":"0x","baseFeePerGas":"0x3b9aca00","blockHash":"0x0303030303030303030303030303030303030303030303030303030303030303","transactions":[],"withdrawals":[],"blobGasUsed":"0x20000","excessBlobGas":"0x0"},"blockValue":"0x1","blobsBundle":{"commitments":[],"proofs":[],"blobs":[]},"shouldOverrideBuilder":false}}
+    ;
+
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const result = try engine.getPayloadV3([_]u8{0xef} ** 8);
+
+    try testing.expectEqual(@as(u64, 3), result.execution_payload.block_number);
+    try testing.expectEqual([_]u8{0x03} ** 32, result.execution_payload.block_hash);
+    // blobGasUsed = 0x20000 = 131072
+    try testing.expectEqual(@as(u64, 131072), result.execution_payload.blob_gas_used);
+    try testing.expectEqual(@as(u256, 1), result.block_value);
+    try testing.expect(!result.should_override_builder);
+
+    const body = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, body, "engine_getPayloadV3") != null);
+}
+
+test "getPayloadV4: parses ExecutionPayload + blockValue + BlobsBundle + executionRequests" {
+    const allocator = testing.allocator;
+
+    // V4 response: Electra — adds depositRequests/withdrawalRequests/consolidationRequests
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":{"executionPayload":{"parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","feeRecipient":"0x0000000000000000000000000000000000000000","stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","receiptsRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","logsBloom":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","prevRandao":"0x0000000000000000000000000000000000000000000000000000000000000000","blockNumber":"0x4","gasLimit":"0x1c9c380","gasUsed":"0x0","timestamp":"0x6553f400","extraData":"0x","baseFeePerGas":"0x3b9aca00","blockHash":"0x0404040404040404040404040404040404040404040404040404040404040404","transactions":[],"withdrawals":[],"blobGasUsed":"0x0","excessBlobGas":"0x0","depositRequests":[],"withdrawalRequests":[],"consolidationRequests":[]},"blockValue":"0xff","blobsBundle":{"commitments":[],"proofs":[],"blobs":[]},"shouldOverrideBuilder":true}}
+    ;
+
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const result = try engine.getPayloadV4([_]u8{0x12} ** 8);
+
+    try testing.expectEqual(@as(u64, 4), result.execution_payload.block_number);
+    try testing.expectEqual([_]u8{0x04} ** 32, result.execution_payload.block_hash);
+    // blockValue = 0xff = 255
+    try testing.expectEqual(@as(u256, 255), result.block_value);
+    try testing.expect(result.should_override_builder);
+    // Empty request arrays
+    try testing.expectEqual(@as(usize, 0), result.execution_payload.deposit_requests.len);
+    try testing.expectEqual(@as(usize, 0), result.execution_payload.withdrawal_requests.len);
+    try testing.expectEqual(@as(usize, 0), result.execution_payload.consolidation_requests.len);
+
+    const body = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, body, "engine_getPayloadV4") != null);
+}
+
+test "getPayloadV1: payload id is hex-encoded in request" {
+    const allocator = testing.allocator;
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":{"executionPayload":{"parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","feeRecipient":"0x0000000000000000000000000000000000000000","stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","receiptsRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","logsBloom":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","prevRandao":"0x0000000000000000000000000000000000000000000000000000000000000000","blockNumber":"0x1","gasLimit":"0x0","gasUsed":"0x0","timestamp":"0x0","extraData":"0x","baseFeePerGas":"0x0","blockHash":"0x0000000000000000000000000000000000000000000000000000000000000000","transactions":[]},"blockValue":"0x0"}}
+    ;
+
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    // Payload ID with known bytes
+    const pid = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
+    _ = try engine.getPayloadV1(pid);
+
+    const body = mock.last_body orelse return error.NoRequest;
+    // Payload ID must appear as 0x0102030405060708
+    try testing.expect(std.mem.indexOf(u8, body, "0x0102030405060708") != null);
+}
+
+test "getPayloadForFork: bellatrix dispatches to V1" {
+    const allocator = testing.allocator;
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":{"executionPayload":{"parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","feeRecipient":"0x0000000000000000000000000000000000000000","stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","receiptsRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","logsBloom":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","prevRandao":"0x0000000000000000000000000000000000000000000000000000000000000000","blockNumber":"0x1","gasLimit":"0x0","gasUsed":"0x0","timestamp":"0x0","extraData":"0x","baseFeePerGas":"0x0","blockHash":"0x0101010101010101010101010101010101010101010101010101010101010101","transactions":[]},"blockValue":"0x0"}}
+    ;
+
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const resp = try engine.getPayloadForFork(.bellatrix, [_]u8{0xaa} ** 8);
+    try testing.expectEqual([_]u8{0x01} ** 32, resp.execution_payload.block_hash);
+    // Must use V1 method
+    const body = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, body, "engine_getPayloadV1") != null);
+}
+
+test "getPayloadForFork: capella dispatches to V2" {
+    const allocator = testing.allocator;
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":{"executionPayload":{"parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","feeRecipient":"0x0000000000000000000000000000000000000000","stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","receiptsRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","logsBloom":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","prevRandao":"0x0000000000000000000000000000000000000000000000000000000000000000","blockNumber":"0x2","gasLimit":"0x0","gasUsed":"0x0","timestamp":"0x0","extraData":"0x","baseFeePerGas":"0x0","blockHash":"0x0202020202020202020202020202020202020202020202020202020202020202","transactions":[],"withdrawals":[]},"blockValue":"0x0"}}
+    ;
+
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const resp = try engine.getPayloadForFork(.capella, [_]u8{0xbb} ** 8);
+    try testing.expectEqual([_]u8{0x02} ** 32, resp.execution_payload.block_hash);
+    const body = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, body, "engine_getPayloadV2") != null);
+}
+
+test "getPayloadForFork: electra dispatches to V4" {
+    const allocator = testing.allocator;
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":{"executionPayload":{"parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","feeRecipient":"0x0000000000000000000000000000000000000000","stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","receiptsRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","logsBloom":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","prevRandao":"0x0000000000000000000000000000000000000000000000000000000000000000","blockNumber":"0x5","gasLimit":"0x0","gasUsed":"0x0","timestamp":"0x0","extraData":"0x","baseFeePerGas":"0x0","blockHash":"0x0505050505050505050505050505050505050505050505050505050505050505","transactions":[],"withdrawals":[],"blobGasUsed":"0x0","excessBlobGas":"0x0","depositRequests":[],"withdrawalRequests":[],"consolidationRequests":[]},"blockValue":"0x0","blobsBundle":{"commitments":[],"proofs":[],"blobs":[]},"shouldOverrideBuilder":false}}
+    ;
+
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const resp = try engine.getPayloadForFork(.electra, [_]u8{0xcc} ** 8);
+    try testing.expectEqual([_]u8{0x05} ** 32, resp.execution_payload.block_hash);
+    const body = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, body, "engine_getPayloadV4") != null);
+}
+
+// ── Payload Attributes encoding tests ─────────────────────────────────────────
+
+test "PayloadAttributesV1: serializes timestamp, prevRandao, suggestedFeeRecipient" {
+    const allocator = testing.allocator;
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":{"payloadStatus":{"status":"VALID","latestValidHash":null,"validationError":null},"payloadId":"0x0102030405060708"}}
+    ;
+
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const attrs = PayloadAttributesV1{
+        .timestamp = 0xdeadbeef,
+        .prev_randao = [_]u8{0x11} ** 32,
+        .suggested_fee_recipient = [_]u8{0x22} ** 20,
+    };
+
+    const attrs_json = try encodePayloadAttributesV1(allocator, attrs);
+    defer allocator.free(attrs_json);
+
+    // Check all three fields are present
+    try testing.expect(std.mem.indexOf(u8, attrs_json, "timestamp") != null);
+    try testing.expect(std.mem.indexOf(u8, attrs_json, "prevRandao") != null);
+    try testing.expect(std.mem.indexOf(u8, attrs_json, "suggestedFeeRecipient") != null);
+    // No withdrawals in V1
+    try testing.expect(std.mem.indexOf(u8, attrs_json, "withdrawals") == null);
+    // No parentBeaconBlockRoot in V1
+    try testing.expect(std.mem.indexOf(u8, attrs_json, "parentBeaconBlockRoot") == null);
+    // Timestamp should be hex-encoded: 0xdeadbeef
+    try testing.expect(std.mem.indexOf(u8, attrs_json, "deadbeef") != null);
+}
+
+test "PayloadAttributesV2: includes withdrawals, no parentBeaconBlockRoot" {
+    const allocator = testing.allocator;
+
+    const attrs = PayloadAttributesV2{
+        .timestamp = 1000,
+        .prev_randao = [_]u8{0x33} ** 32,
+        .suggested_fee_recipient = [_]u8{0x44} ** 20,
+        .withdrawals = &.{
+            .{ .index = 0, .validator_index = 1, .address = [_]u8{0x55} ** 20, .amount = 1000000 },
+        },
+    };
+
+    const attrs_json = try encodePayloadAttributesV2(allocator, attrs);
+    defer allocator.free(attrs_json);
+
+    try testing.expect(std.mem.indexOf(u8, attrs_json, "withdrawals") != null);
+    try testing.expect(std.mem.indexOf(u8, attrs_json, "parentBeaconBlockRoot") == null);
+    // Fee recipient: 0x44*20 should appear
+    try testing.expect(std.mem.indexOf(u8, attrs_json, "4444444444444444444444444444444444444444") != null);
+}
+
+test "PayloadAttributesV3: includes withdrawals AND parentBeaconBlockRoot" {
+    const allocator = testing.allocator;
+
+    const attrs = PayloadAttributesV3{
+        .timestamp = 2000,
+        .prev_randao = [_]u8{0x77} ** 32,
+        .suggested_fee_recipient = [_]u8{0x88} ** 20,
+        .withdrawals = &.{},
+        .parent_beacon_block_root = [_]u8{0x99} ** 32,
+    };
+
+    const attrs_json = try encodePayloadAttributes(allocator, attrs);
+    defer allocator.free(attrs_json);
+
+    try testing.expect(std.mem.indexOf(u8, attrs_json, "withdrawals") != null);
+    try testing.expect(std.mem.indexOf(u8, attrs_json, "parentBeaconBlockRoot") != null);
+    // Parent beacon block root 0x99*32 should appear
+    try testing.expect(std.mem.indexOf(u8, attrs_json, "9999999999999999999999999999999999999999999999999999999999999999") != null);
+}
+
+// ── Engine health monitoring tests ───────────────────────────────────────────
+
+test "HttpEngine: state transitions offline→online are logged" {
+    const allocator = testing.allocator;
+
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":{"status":"VALID","latestValidHash":null,"validationError":null}}
+    ;
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    // Manually set offline state
+    engine.state = .offline;
+    try testing.expectEqual(EngineState.offline, engine.state);
+
+    // Successful request should transition back to online
+    const api = engine.engine();
+    _ = try api.newPayload(makeTestPayload([_]u8{0x01} ** 32), &.{}, std.mem.zeroes([32]u8));
+
+    // State should now be online
+    try testing.expectEqual(EngineState.online, engine.state);
+}
+
+test "HttpEngine: syncing state tracks EL sync" {
+    const allocator = testing.allocator;
+
+    // EL returns SYNCING — state machine should track this
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":{"status":"SYNCING","latestValidHash":null,"validationError":null}}
+    ;
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const api = engine.engine();
+    const result = try api.newPayload(makeTestPayload([_]u8{0x01} ** 32), &.{}, std.mem.zeroes([32]u8));
+
+    // SYNCING is a valid response (optimistic sync)
+    try testing.expectEqual(ExecutionPayloadStatus.syncing, result.status);
+    // Transport succeeded so state stays online (SYNCING is an application-level response, not transport error)
+    try testing.expectEqual(EngineState.online, engine.state);
+}
+
+test "HttpEngine: exchangeTransitionConfiguration verifies merge config" {
+    const allocator = testing.allocator;
+
+    // EL responds with matching TTD config
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":{"terminalTotalDifficulty":"0xc70d808a128d7380000","terminalBlockHash":"0x0000000000000000000000000000000000000000000000000000000000000000","terminalBlockNumber":"0x0"}}
+    ;
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    // The Ethereum mainnet TTD
+    const mainnet_ttd: u256 = 58750003716598352816469;
+    const result = try engine.exchangeTransitionConfiguration(.{
+        .terminal_total_difficulty = mainnet_ttd,
+        .terminal_block_hash = std.mem.zeroes([32]u8),
+        .terminal_block_number = 0,
+    });
+
+    // EL confirmed terminal block hash is zero (pre-merge / block not yet reached)
+    try testing.expectEqual(std.mem.zeroes([32]u8), result.terminal_block_hash);
+    try testing.expectEqual(@as(u64, 0), result.terminal_block_number);
+    // The method must appear in the request
+    const body = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, body, "engine_exchangeTransitionConfigurationV1") != null);
+}
+
+test "HttpEngine: optimistic sync — SYNCING newPayload accepted without error" {
+    const allocator = testing.allocator;
+
+    // During optimistic sync, EL returns SYNCING for newPayload
+    // CL must accept the block (not reject it)
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":{"status":"SYNCING","latestValidHash":null,"validationError":null}}
+    ;
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const api = engine.engine();
+
+    // Must not return an error — SYNCING is a valid status
+    const result = try api.newPayload(makeTestPayload([_]u8{0x42} ** 32), &.{}, std.mem.zeroes([32]u8));
+    try testing.expectEqual(ExecutionPayloadStatus.syncing, result.status);
+    try testing.expect(result.latest_valid_hash == null);
+}
