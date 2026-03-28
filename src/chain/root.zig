@@ -113,3 +113,6 @@ pub const DataAvailabilityManager = data_availability.DataAvailabilityManager;
 pub const DaStatus = data_availability.DaStatus;
 pub const DaCheckResult = data_availability.DaCheckResult;
 pub const DaConfig = data_availability.DaConfig;
+pub const aggregated_attestation_pool = @import("aggregated_attestation_pool.zig");
+pub const AggregatedAttestationPool = aggregated_attestation_pool.AggregatedAttestationPool;
+pub const AttestationGroup = aggregated_attestation_pool.AttestationGroup;

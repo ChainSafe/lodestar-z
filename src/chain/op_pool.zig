@@ -16,6 +16,8 @@ const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 
+pub const AggregatedAttestationPool = @import("aggregated_attestation_pool.zig").AggregatedAttestationPool;
+
 const Slot = types.primitive.Slot.Type;
 const Epoch = types.primitive.Epoch.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
@@ -445,7 +447,12 @@ pub const BlsChangePool = struct {
 pub const OpPool = struct {
     allocator: Allocator,
 
+    /// Legacy simple attestation pool (kept for backwards compat / fallback).
     attestation_pool: AttestationPool,
+    /// Optimized aggregated attestation pool for block production.
+    /// Groups by AttestationData root, pre-aggregates non-overlapping bitlists,
+    /// and uses greedy selection to maximize validator coverage per block.
+    agg_attestation_pool: AggregatedAttestationPool,
     voluntary_exit_pool: VoluntaryExitPool,
     proposer_slashing_pool: ProposerSlashingPool,
     attester_slashing_pool: AttesterSlashingPool,
@@ -455,6 +462,7 @@ pub const OpPool = struct {
         return .{
             .allocator = allocator,
             .attestation_pool = AttestationPool.init(allocator),
+            .agg_attestation_pool = AggregatedAttestationPool.init(allocator),
             .voluntary_exit_pool = VoluntaryExitPool.init(allocator),
             .proposer_slashing_pool = ProposerSlashingPool.init(allocator),
             .attester_slashing_pool = AttesterSlashingPool.init(allocator),
@@ -464,6 +472,7 @@ pub const OpPool = struct {
 
     pub fn deinit(self: *OpPool) void {
         self.attestation_pool.deinit();
+        self.agg_attestation_pool.deinit();
         self.voluntary_exit_pool.deinit();
         self.proposer_slashing_pool.deinit();
         self.attester_slashing_pool.deinit();
