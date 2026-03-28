@@ -320,54 +320,53 @@ pub const BlockImporter = struct {
             try self.head_tracker.onEpochTransition(post_state);
         }
 
-        // Wire block into fork choice DAG.
-        var justified_cp: types.phase0.Checkpoint.Type = undefined;
-        try post_state.state.currentJustifiedCheckpoint(&justified_cp);
-        var finalized_cp: types.phase0.Checkpoint.Type = undefined;
-        try post_state.state.finalizedCheckpoint(&finalized_cp);
+        // Use onBlockFromState for proper checkpoint extraction,
+        // unrealized checkpoint computation, proposer boost, and target root.
+        if (self.fork_choice) |fc| {
+            // Map execution status to fork choice types.
+            const fc_exec_status: fork_choice_mod.ExecutionStatus = switch (execution_status) {
+                .valid => .valid,
+                .syncing, .accepted => .syncing,
+                .invalid, .invalid_block_hash => .invalid,
+            };
+            const fc_da_status: fork_choice_mod.DataAvailabilityStatus = if (self.isDataAvailableFn != null)
+                (if (self.isDataAvailableFn.?(stfn_result.block_root)) .available else .pre_data)
+            else
+                .pre_data;
 
-        // Build execution metadata for fork choice.
-        const extra_meta: BlockExtraMeta = switch (execution_status) {
-            .valid, .syncing, .accepted => .{
-                .post_merge = BlockExtraMeta.PostMergeMeta.init(
-                    signed_block.message.body.execution_payload.block_hash,
-                    signed_block.message.body.execution_payload.block_number,
-                    switch (execution_status) {
-                        .valid => .valid,
-                        .syncing, .accepted => .syncing,
-                        else => unreachable,
-                    },
-                    if (self.isDataAvailableFn) |check_da|
-                        (if (check_da(stfn_result.block_root)) .available else .pre_data)
-                    else
-                        .available,
-                ),
-            },
-            else => .{ .pre_merge = {} },
-        };
+            // Build execution metadata.
+            const extra_meta: BlockExtraMeta = switch (execution_status) {
+                .valid, .syncing, .accepted => .{
+                    .post_merge = BlockExtraMeta.PostMergeMeta.init(
+                        signed_block.message.body.execution_payload.block_hash,
+                        signed_block.message.body.execution_payload.block_number,
+                        fc_exec_status,
+                        fc_da_status,
+                    ),
+                },
+                else => .{ .pre_merge = {} },
+            };
 
-        const fc_block = ProtoBlock{
-            .slot = block_slot,
-            .block_root = stfn_result.block_root,
-            .parent_root = parent_root,
-            .state_root = stfn_result.state_root,
-            .target_root = stfn_result.block_root,
-            .justified_epoch = justified_cp.epoch,
-            .justified_root = justified_cp.root,
-            .finalized_epoch = finalized_cp.epoch,
-            .finalized_root = finalized_cp.root,
-            .unrealized_justified_epoch = justified_cp.epoch,
-            .unrealized_justified_root = justified_cp.root,
-            .unrealized_finalized_epoch = finalized_cp.epoch,
-            .unrealized_finalized_root = finalized_cp.root,
-            .extra_meta = extra_meta,
-            .timeliness = true,
-        };
+            // Advance fork choice clock to at least the block's slot.
+            if (block_slot > fc.getTime()) {
+                fc.updateTime(self.allocator, block_slot) catch {};
+            }
 
-        if (self.fork_choice) |fc| fork_choice_mod.onBlockFromProto(fc, self.allocator, fc_block, block_slot) catch |err| switch (err) {
-            error.InvalidBlock => {},
-            else => return err,
-        };
+            _ = fork_choice_mod.onBlockFromState(
+                fc,
+                self.allocator,
+                block_slot,
+                stfn_result.block_root,
+                parent_root,
+                stfn_result.state_root,
+                post_state,
+                0, // block_delay_sec: 0 = timely (real delay tracking is TODO)
+                fc.getTime(),
+                extra_meta,
+            ) catch |err| {
+                std.log.warn("ForkChoice.onBlockFromState failed for slot {d}: {}", .{ block_slot, err });
+            };
+        }
 
         return .{
             .block_root = stfn_result.block_root,

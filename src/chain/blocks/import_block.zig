@@ -31,6 +31,8 @@ const HeadResult = fork_choice_mod.HeadResult;
 const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
 const ProtoBlock = fork_choice_mod.ProtoBlock;
+const FcExecutionStatus = fork_choice_mod.ExecutionStatus;
+const FcDataAvailabilityStatus = fork_choice_mod.DataAvailabilityStatus;
 const db_mod = @import("db");
 const BeaconDB = db_mod.BeaconDB;
 
@@ -139,40 +141,52 @@ pub fn importVerifiedBlock(
                 fc.updateTime(ctx.allocator, block_slot) catch {};
             }
 
-            // Extract justified and finalized checkpoints from post-state.
-            var justified_cp: consensus_types.phase0.Checkpoint.Type = undefined;
-            post_state.state.currentJustifiedCheckpoint(&justified_cp) catch
-                return BlockImportError.InternalError;
-            var finalized_cp: consensus_types.phase0.Checkpoint.Type = undefined;
-            post_state.state.finalizedCheckpoint(&finalized_cp) catch
-                return BlockImportError.InternalError;
-
-            const fc_block = ProtoBlock{
-                .slot = block_slot,
-                .block_root = block_root,
-                .parent_root = verified.block_input.block.beaconBlock().parentRoot().*,
-                .state_root = state_root,
-                .target_root = block_root,
-                .justified_epoch = justified_cp.epoch,
-                .justified_root = justified_cp.root,
-                .finalized_epoch = finalized_cp.epoch,
-                .finalized_root = finalized_cp.root,
-                .unrealized_justified_epoch = justified_cp.epoch,
-                .unrealized_justified_root = justified_cp.root,
-                .unrealized_finalized_epoch = finalized_cp.epoch,
-                .unrealized_finalized_root = finalized_cp.root,
-                .extra_meta = .{ .pre_merge = {} },
-                .timeliness = true,
+            // Map pipeline execution/DA status to fork choice BlockExtraMeta.
+            const fc_exec_status: FcExecutionStatus = switch (verified.execution_status) {
+                .valid => .valid,
+                .syncing => .syncing,
+                .pre_merge => .pre_merge,
+                .invalid => .invalid,
+            };
+            const fc_da_status: FcDataAvailabilityStatus = switch (verified.data_availability_status) {
+                .not_required, .pre_data => .pre_data,
+                .available => .available,
+                .out_of_range => .out_of_range,
+                .pending => .pre_data,
             };
 
-            fork_choice_mod.onBlockFromProto(fc, ctx.allocator, fc_block, block_slot) catch |err| switch (err) {
-                error.InvalidBlockUnknownParent,
-                error.InvalidBlockFutureSlot,
-                error.InvalidBlockFinalizedSlot,
-                error.InvalidBlockNotFinalizedDescendant,
-                error.InvalidBlockExecutionStatus,
-                => {},
-                else => return BlockImportError.ForkChoiceError,
+            // Build execution metadata for fork choice.
+            // For post-merge blocks, extract block_hash and block_number from the block.
+            const extra_meta: fork_choice_mod.BlockExtraMeta = if (fc_exec_status != .pre_merge) blk: {
+                const block_body = block_input.block.beaconBlock().beaconBlockBody();
+                const exec_payload = block_body.executionPayload() catch
+                    break :blk fork_choice_mod.BlockExtraMeta{ .pre_merge = {} };
+                break :blk .{ .post_merge = fork_choice_mod.BlockExtraMeta.PostMergeMeta.init(
+                    exec_payload.blockHash().*,
+                    exec_payload.blockNumber(),
+                    fc_exec_status,
+                    fc_da_status,
+                ) };
+            } else .{ .pre_merge = {} };
+
+            // Use onBlockFromState which handles:
+            // - Checkpoint extraction and store updates
+            // - Unrealized checkpoint computation
+            // - Proposer boost assignment
+            // - Target root computation from state
+            _ = fork_choice_mod.onBlockFromState(
+                fc,
+                ctx.allocator,
+                block_slot,
+                block_root,
+                verified.block_input.block.beaconBlock().parentRoot().*,
+                state_root,
+                post_state,
+                0, // block_delay_sec: 0 = timely (real delay tracking is TODO)
+                fc.getTime(),
+                extra_meta,
+            ) catch |err| {
+                std.log.warn("ForkChoice.onBlockFromState failed for slot {d}: {}", .{ block_slot, err });
             };
 
             // 3a. Wire attestations from the imported block into fork choice.

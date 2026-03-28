@@ -67,6 +67,7 @@ pub const UpdateAndGetHeadResult = fork_choice.UpdateAndGetHeadResult;
 pub const CheckpointWithPayloadAndBalance = fork_choice.CheckpointWithPayloadAndBalance;
 pub const CheckpointWithPayloadAndTotalBalance = fork_choice.CheckpointWithPayloadAndTotalBalance;
 pub const onBlockFromProto = fork_choice.onBlockFromProto;
+pub const onBlockFromState = fork_choice.onBlockFromState;
 pub const HeadResult = fork_choice.HeadResult;
 pub const initFromAnchor = fork_choice.initFromAnchor;
 pub const destroyFromAnchor = fork_choice.destroyFromAnchor;
