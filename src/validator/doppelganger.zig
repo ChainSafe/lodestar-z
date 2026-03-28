@@ -23,7 +23,7 @@ const BeaconApiClient = @import("api_client.zig").BeaconApiClient;
 const log = std.log.scoped(.doppelganger);
 
 /// Number of clean epochs before we allow signing.
-const DEFAULT_REMAINING_DETECTION_EPOCHS: u64 = 1;
+pub const DEFAULT_REMAINING_DETECTION_EPOCHS: u64 = 1;
 
 // ---------------------------------------------------------------------------
 // Doppelganger status
