@@ -99,8 +99,9 @@ fn reqRespGetBlocksByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const
 
     var results: std.ArrayList([]const u8) = .empty;
 
+    const end_slot = std.math.add(u64, start_slot, count) catch return &.{};
     var slot: u64 = start_slot;
-    while (slot < start_slot + count) : (slot += 1) {
+    while (slot < end_slot) : (slot += 1) {
         const root = node.head_tracker.getBlockRoot(slot) orelse continue;
         const maybe_bytes = node.db.getBlock(root) catch continue;
         const bytes = maybe_bytes orelse continue;
@@ -151,8 +152,9 @@ fn reqRespGetDataColumnsByRange(ptr: *anyopaque, start_slot: u64, count: u64) []
 
     var results: std.ArrayList([]const u8) = .empty;
 
+    const end_slot = std.math.add(u64, start_slot, count) catch return &.{};
     var slot: u64 = start_slot;
-    while (slot < start_slot + count) : (slot += 1) {
+    while (slot < end_slot) : (slot += 1) {
         const root = node.head_tracker.getBlockRoot(slot) orelse continue;
         var col_idx: u64 = 0;
         while (col_idx < 128) : (col_idx += 1) {
@@ -176,8 +178,9 @@ fn reqRespGetBlobsByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const 
     var results: std.ArrayList([]const u8) = .empty;
     const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
 
+    const end_slot = std.math.add(u64, start_slot, count) catch return &.{};
     var slot: u64 = start_slot;
-    while (slot < start_slot + count) : (slot += 1) {
+    while (slot < end_slot) : (slot += 1) {
         const root = node.head_tracker.getBlockRoot(slot) orelse continue;
         const maybe_bytes = node.db.getBlobSidecars(root) catch continue;
         const bytes = maybe_bytes orelse continue;
