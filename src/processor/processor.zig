@@ -153,6 +153,23 @@ pub const BeaconProcessor = struct {
         return count;
     }
 
+    /// Process up to `max_items` work items in priority order.
+    ///
+    /// Returns the number of items dispatched. Designed for cooperative
+    /// scheduling: call once per main-loop tick to process queued work
+    /// without monopolizing the event loop.
+    ///
+    /// Recommended: max_items = 128 (matches TS Lodestar's MAX_JOBS_SUBMITTED_PER_TICK).
+    pub fn tick(self: *BeaconProcessor, max_items: u32) u64 {
+        var count: u64 = 0;
+        while (count < max_items) {
+            if (!self.dispatchOne()) break;
+            count += 1;
+        }
+        self.metrics.loop_iterations += 1;
+        return count;
+    }
+
     /// Update the sync state (affects sync-aware dropping).
     pub fn setSyncState(self: *BeaconProcessor, state: SyncState) void {
         self.queues.sync_state = state;
@@ -166,6 +183,40 @@ pub const BeaconProcessor = struct {
     /// Returns true if all queues are empty.
     pub fn allQueuesEmpty(self: *const BeaconProcessor) bool {
         return self.queues.allQueuesEmpty();
+    }
+
+    /// Returns the number of items dropped due to full queues.
+    pub fn itemsDroppedFull(self: *const BeaconProcessor) u64 {
+        return self.queues.items_dropped_full;
+    }
+
+    /// Returns the number of items dropped during initial sync.
+    pub fn itemsDroppedSync(self: *const BeaconProcessor) u64 {
+        return self.queues.items_dropped_sync;
+    }
+
+    /// Returns a summary of queue depths for monitoring.
+    pub const QueueDepths = struct {
+        total: u64,
+        gossip_blocks: u32,
+        attestations: u32,
+        aggregates: u32,
+        sync_messages: u32,
+        pool_objects: u64,
+    };
+
+    pub fn getQueueDepths(self: *const BeaconProcessor) QueueDepths {
+        return .{
+            .total = self.queues.totalQueued(),
+            .gossip_blocks = self.queues.gossip_block.len,
+            .attestations = self.queues.attestation.len,
+            .aggregates = self.queues.aggregate.len,
+            .sync_messages = self.queues.sync_message.len,
+            .pool_objects = self.queues.gossip_voluntary_exit.len +
+                self.queues.gossip_proposer_slashing.len +
+                self.queues.gossip_attester_slashing.len +
+                self.queues.gossip_bls_to_exec.len,
+        };
     }
 };
 
@@ -381,4 +432,228 @@ fn testConfig() QueueConfig {
         .lc_optimistic_update = 4,
         .lc_updates_by_range = 4,
     };
+}
+
+test "BeaconProcessor: tick processes limited items" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var ctx = TestContext.init();
+    const config = testConfig();
+
+    var proc = try BeaconProcessor.init(
+        allocator,
+        config,
+        &TestContext.handler,
+        @ptrCast(&ctx),
+    );
+
+    // Ingest 4 items (testConfig capacity is 4 per queue).
+    var i: u32 = 0;
+    while (i < 4) : (i += 1) {
+        proc.ingest(.{ .api_request_p1 = .{
+            .response_handle = i,
+            .seen_timestamp_ns = @as(i64, i) * 100,
+        } });
+    }
+
+    try testing.expectEqual(@as(u64, 4), proc.totalQueued());
+
+    // tick(2) should process exactly 2 items.
+    const dispatched = proc.tick(2);
+    try testing.expectEqual(@as(u64, 2), dispatched);
+    try testing.expectEqual(@as(u64, 2), proc.totalQueued());
+    try testing.expectEqual(@as(u32, 2), ctx.count);
+    try testing.expectEqual(@as(u64, 1), proc.metrics.loop_iterations);
+
+    // tick(10) should process remaining 2 items (not 10).
+    const dispatched2 = proc.tick(10);
+    try testing.expectEqual(@as(u64, 2), dispatched2);
+    try testing.expect(proc.allQueuesEmpty());
+    try testing.expectEqual(@as(u32, 4), ctx.count);
+}
+
+test "BeaconProcessor: getQueueDepths" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var ctx = TestContext.init();
+    const config = testConfig();
+
+    var proc = try BeaconProcessor.init(
+        allocator,
+        config,
+        &TestContext.handler,
+        @ptrCast(&ctx),
+    );
+
+    // Ingest different types.
+    proc.ingest(.{ .status = .{
+        .peer_id = 1,
+        .request_context = 1,
+        .seen_timestamp_ns = 100,
+    } });
+
+    const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+    proc.ingest(.{ .attestation = .{
+        .peer_id = 1,
+        .message_id = 1,
+        .data = dummy_handle,
+        .subnet_id = 0,
+        .seen_timestamp_ns = 100,
+    } });
+
+    proc.ingest(.{ .gossip_voluntary_exit = .{
+        .peer_id = 1,
+        .message_id = 1,
+        .data = dummy_handle,
+        .seen_timestamp_ns = 100,
+    } });
+
+    const depths = proc.getQueueDepths();
+    try testing.expectEqual(@as(u64, 3), depths.total);
+    try testing.expectEqual(@as(u32, 1), depths.attestations);
+    try testing.expectEqual(@as(u64, 1), depths.pool_objects);
+}
+
+test "BeaconProcessor: attestation batching" {
+    // Verify that multiple attestations are formed into a batch by the
+    // priority queue system, and that the batch is dispatched as a single
+    // attestation_batch work item.
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var ctx = TestContext.init();
+    const config = testConfig();
+
+    var proc = try BeaconProcessor.init(
+        allocator,
+        config,
+        &TestContext.handler,
+        @ptrCast(&ctx),
+    );
+
+    // Ingest 3 attestations. The LIFO queue should batch them when popped.
+    const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+    proc.ingest(.{ .attestation = .{
+        .peer_id = 1,
+        .message_id = 1,
+        .data = dummy_handle,
+        .subnet_id = 0,
+        .seen_timestamp_ns = 100,
+    } });
+    proc.ingest(.{ .attestation = .{
+        .peer_id = 2,
+        .message_id = 2,
+        .data = dummy_handle,
+        .subnet_id = 1,
+        .seen_timestamp_ns = 200,
+    } });
+    proc.ingest(.{ .attestation = .{
+        .peer_id = 3,
+        .message_id = 3,
+        .data = dummy_handle,
+        .subnet_id = 2,
+        .seen_timestamp_ns = 300,
+    } });
+
+    try testing.expectEqual(@as(u64, 3), proc.totalQueued());
+
+    // Dispatch once — should get a batch, not individual items.
+    try testing.expect(proc.dispatchOne());
+    try testing.expectEqual(@as(u32, 1), ctx.count);
+
+    // The dispatched item should be attestation_batch (3 items batched).
+    try testing.expectEqual(WorkType.attestation_batch, ctx.processed_types[0]);
+
+    // Queue should be empty after batch dispatch.
+    try testing.expect(proc.allQueuesEmpty());
+}
+
+test "BeaconProcessor: single attestation not batched" {
+    // A single attestation should come out as a plain attestation,
+    // not a batch.
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var ctx = TestContext.init();
+    const config = testConfig();
+
+    var proc = try BeaconProcessor.init(
+        allocator,
+        config,
+        &TestContext.handler,
+        @ptrCast(&ctx),
+    );
+
+    const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+    proc.ingest(.{ .attestation = .{
+        .peer_id = 1,
+        .message_id = 1,
+        .data = dummy_handle,
+        .subnet_id = 0,
+        .seen_timestamp_ns = 100,
+    } });
+
+    try testing.expect(proc.dispatchOne());
+    try testing.expectEqual(@as(u32, 1), ctx.count);
+
+    // Single attestation — NOT batched.
+    try testing.expectEqual(WorkType.attestation, ctx.processed_types[0]);
+    try testing.expect(proc.allQueuesEmpty());
+}
+
+test "BeaconProcessor: blocks dispatched before attestations" {
+    // Verify strict priority: gossip_block (priority 5) should be
+    // dispatched before attestation (priority 12), even if attestations
+    // were enqueued first.
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var ctx = TestContext.init();
+    const config = testConfig();
+
+    var proc = try BeaconProcessor.init(
+        allocator,
+        config,
+        &TestContext.handler,
+        @ptrCast(&ctx),
+    );
+
+    const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+
+    // Enqueue attestation first, then block.
+    proc.ingest(.{ .attestation = .{
+        .peer_id = 1,
+        .message_id = 1,
+        .data = dummy_handle,
+        .subnet_id = 0,
+        .seen_timestamp_ns = 100,
+    } });
+
+    const fork_types = @import("fork_types");
+    proc.ingest(.{ .gossip_block = .{
+        .peer_id = 2,
+        .message_id = 2,
+        .block = fork_types.AnySignedBeaconBlock{ .phase0 = undefined },
+        .seen_timestamp_ns = 200,
+    } });
+
+    // First dispatch: should be the block (higher priority).
+    try testing.expect(proc.dispatchOne());
+    try testing.expectEqual(WorkType.gossip_block, ctx.processed_types[0]);
+
+    // Second dispatch: attestation.
+    try testing.expect(proc.dispatchOne());
+    try testing.expectEqual(WorkType.attestation, ctx.processed_types[1]);
+
+    try testing.expect(proc.allQueuesEmpty());
 }
