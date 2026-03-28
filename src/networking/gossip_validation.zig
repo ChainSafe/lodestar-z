@@ -39,8 +39,13 @@ pub const SeenSet = struct {
     const Map = std.AutoHashMap(Key, void);
 
     map: Map,
-    /// Insertion-order ring buffer for eviction (oldest entry at front).
-    order: std.ArrayListUnmanaged(Key),
+    /// Ring buffer for O(1) FIFO eviction. `ring` is a fixed-size slice allocated
+    /// once at init. `head` is the index of the oldest entry; `tail` is the next
+    /// write slot. When full, the entry at `head` is evicted before insertion.
+    ring: []Key,
+    head: usize,
+    tail: usize,
+    ring_len: usize,
     /// Maximum number of entries before the oldest is evicted.
     max_capacity: u32,
 
@@ -49,16 +54,21 @@ pub const SeenSet = struct {
     }
 
     pub fn initWithCapacity(allocator: std.mem.Allocator, max_capacity: u32) SeenSet {
+        const cap: usize = @intCast(max_capacity);
+        const ring = allocator.alloc(Key, cap) catch &[_]Key{};
         return .{
             .map = Map.init(allocator),
-            .order = .empty,
+            .ring = ring,
+            .head = 0,
+            .tail = 0,
+            .ring_len = 0,
             .max_capacity = max_capacity,
         };
     }
 
     pub fn deinit(self: *SeenSet) void {
         const alloc = self.map.allocator;
-        self.order.deinit(alloc);
+        alloc.free(self.ring);
         self.map.deinit();
     }
 
@@ -68,17 +78,23 @@ pub const SeenSet = struct {
     }
 
     /// Insert a key. Returns true if the key was newly inserted (not already present).
-    /// When the set is at capacity, evicts the oldest entry first.
+    /// When the set is at capacity, evicts the oldest entry in O(1) using the ring buffer.
     pub fn insert(self: *SeenSet, key: Key) !bool {
-        const alloc = self.map.allocator;
-        // Evict oldest entries until below capacity.
-        while (self.map.count() >= self.max_capacity and self.order.items.len > 0) {
-            const oldest = self.order.orderedRemove(0);
+        const cap = self.ring.len;
+        // Evict oldest if at capacity.
+        if (cap > 0 and self.ring_len >= cap) {
+            const oldest = self.ring[self.head];
             _ = self.map.remove(oldest);
+            self.head = (self.head + 1) % cap;
+            self.ring_len -= 1;
         }
         const result = try self.map.getOrPut(key);
         if (!result.found_existing) {
-            try self.order.append(alloc, key);
+            if (cap > 0) {
+                self.ring[self.tail] = key;
+                self.tail = (self.tail + 1) % cap;
+                self.ring_len += 1;
+            }
         }
         return !result.found_existing;
     }
@@ -152,6 +168,9 @@ pub const GossipValidationContext = struct {
     seen_proposer_slashings: *SeenSet,
     /// Set of already-seen attester slashing keys.
     seen_attester_slashings: *SeenSet,
+    /// Set of already-seen BLS-to-execution-change validator indices.
+    /// Separate from seen_voluntary_exits to avoid cross-feature eviction coupling.
+    seen_bls_changes: *SeenSet,
 
     /// Returns the expected proposer index for a given slot, or null if unknown.
     getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
@@ -325,6 +344,25 @@ pub fn validateAttesterSlashing(
 }
 
 
+/// Validate an `AttesterSlashing` using a precomputed slashable key and is_slashable flag.
+///
+/// Used when the caller has already decoded the slashing and computed slashability
+/// (e.g., in eth_gossip.zig where only the decoded struct is available).
+pub fn validateAttesterSlashingDecoded(
+    is_slashable: bool,
+    slashable_key: [32]u8,
+    ctx: *GossipValidationContext,
+) ValidationResult {
+    // [REJECT] The attestations must be slashable (double or surround vote).
+    if (!is_slashable) return .reject;
+
+    // [IGNORE] At least one index in the intersection has not been seen in any prior attester slashing.
+    const was_new = ctx.seen_attester_slashings.insert(slashable_key) catch return .ignore;
+    if (!was_new) return .ignore;
+
+    return .accept;
+}
+
 /// Validate a single attestation received on a `beacon_attestation_{subnet}` topic.
 ///
 /// Reference: consensus-specs/specs/phase0/p2p-interface.md#beacon_attestation_subnet_id
@@ -366,11 +404,10 @@ pub fn validateBlsToExecutionChange(
     if (validator_index >= validator_count) return .reject;
 
     // [IGNORE] The BLS change is the first valid one for this validator.
-    // Use a domain-separated key (0x05) to avoid collision with voluntary exits (0x02).
     var key: [32]u8 = std.mem.zeroes([32]u8);
     std.mem.writeInt(u64, key[0..8], validator_index, .little);
     key[16] = 0x05;
-    const was_new = ctx.seen_voluntary_exits.insert(key) catch return .ignore;
+    const was_new = ctx.seen_bls_changes.insert(key) catch return .ignore;
     if (!was_new) return .ignore;
 
     return .accept;
@@ -409,6 +446,7 @@ fn createMockContext(allocator: std.mem.Allocator) !struct {
     seen_exits: SeenSet,
     seen_proposer: SeenSet,
     seen_attester: SeenSet,
+    seen_bls: SeenSet,
 } {
     return .{
         .ctx = .{
@@ -420,6 +458,7 @@ fn createMockContext(allocator: std.mem.Allocator) !struct {
             .seen_voluntary_exits = undefined,
             .seen_proposer_slashings = undefined,
             .seen_attester_slashings = undefined,
+            .seen_bls_changes = undefined,
             .ptr = @ptrFromInt(1),
             .getProposerIndex = &mockGetProposerIndex,
             .isKnownBlockRoot = &mockIsKnownBlockRoot,
@@ -431,6 +470,7 @@ fn createMockContext(allocator: std.mem.Allocator) !struct {
         .seen_exits = SeenSet.init(allocator),
         .seen_proposer = SeenSet.init(allocator),
         .seen_attester = SeenSet.init(allocator),
+        .seen_bls = SeenSet.init(allocator),
     };
 }
 
@@ -441,12 +481,14 @@ test "beacon_block: accept valid block" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const parent_root = [_]u8{0xAA} ** 32;
     const block_root = [_]u8{0xBB} ** 32;
@@ -462,12 +504,14 @@ test "beacon_block: ignore future slot" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const result = validateBeaconBlock(102, 5, [_]u8{0xAA} ** 32, [_]u8{0xBB} ** 32, &mock.ctx);
     try testing.expectEqual(ValidationResult.ignore, result);
@@ -480,12 +524,14 @@ test "beacon_block: ignore finalized slot" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const result = validateBeaconBlock(64, 5, [_]u8{0xAA} ** 32, [_]u8{0xBB} ** 32, &mock.ctx);
     try testing.expectEqual(ValidationResult.ignore, result);
@@ -498,12 +544,14 @@ test "beacon_block: ignore already seen" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const block_root = [_]u8{0xBB} ** 32;
     const parent_root = [_]u8{0xAA} ** 32;
@@ -524,12 +572,14 @@ test "beacon_block: reject wrong proposer" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     // Slot 100 expects proposer 5, but we send proposer 7.
     const result = validateBeaconBlock(100, 7, [_]u8{0xAA} ** 32, [_]u8{0xBB} ** 32, &mock.ctx);
@@ -543,12 +593,14 @@ test "beacon_block: reject invalid proposer index" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     // Proposer index 1000 >= validator count (1000).
     const result = validateBeaconBlock(100, 1000, [_]u8{0xAA} ** 32, [_]u8{0xBB} ** 32, &mock.ctx);
@@ -562,12 +614,14 @@ test "beacon_block: ignore unknown parent" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     // Zero root is "unknown" in our mock.
     const unknown_parent = [_]u8{0} ** 32;
@@ -582,12 +636,14 @@ test "aggregate_and_proof: accept valid aggregate" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     // Slot 96 = epoch 3 (current), 10 aggregation bits, target epoch 3.
     const result = validateAggregateAndProof(5, 96, 3, 10, &mock.ctx);
@@ -601,12 +657,14 @@ test "aggregate_and_proof: reject empty aggregation bits" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const result = validateAggregateAndProof(5, 96, 3, 0, &mock.ctx);
     try testing.expectEqual(ValidationResult.reject, result);
@@ -619,12 +677,14 @@ test "aggregate_and_proof: reject wrong epoch" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     // Slot 32 = epoch 1, but current epoch is 3, and 1 != 3 and 1 != 2.
     const result = validateAggregateAndProof(5, 32, 1, 10, &mock.ctx);
@@ -638,12 +698,14 @@ test "aggregate_and_proof: ignore duplicate" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const r1 = validateAggregateAndProof(5, 96, 3, 10, &mock.ctx);
     try testing.expectEqual(ValidationResult.accept, r1);
@@ -659,12 +721,14 @@ test "aggregate_and_proof: reject mismatched target epoch" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     // Slot 96 = epoch 3, but target_epoch says 2.
     const result = validateAggregateAndProof(5, 96, 2, 10, &mock.ctx);
@@ -678,12 +742,14 @@ test "voluntary_exit: accept valid exit" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const result = validateVoluntaryExit(10, 3, &mock.ctx);
     try testing.expectEqual(ValidationResult.accept, result);
@@ -696,12 +762,14 @@ test "voluntary_exit: ignore duplicate" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const r1 = validateVoluntaryExit(10, 3, &mock.ctx);
     try testing.expectEqual(ValidationResult.accept, r1);
@@ -717,12 +785,14 @@ test "voluntary_exit: reject inactive validator" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     // Validator 999 is inactive in our mock.
     const result = validateVoluntaryExit(999, 3, &mock.ctx);
@@ -736,12 +806,14 @@ test "voluntary_exit: reject future exit epoch" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     // Exit epoch 5 > current epoch 3.
     const result = validateVoluntaryExit(10, 5, &mock.ctx);
@@ -755,12 +827,14 @@ test "proposer_slashing: accept valid slashing" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const result = validateProposerSlashing(
         5,
@@ -780,12 +854,14 @@ test "proposer_slashing: reject different slots" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const result = validateProposerSlashing(
         5,
@@ -805,12 +881,14 @@ test "proposer_slashing: reject same headers" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const same_root = [_]u8{0xAA} ** 32;
     const result = validateProposerSlashing(5, 100, 100, same_root, same_root, &mock.ctx);
@@ -824,12 +902,14 @@ test "proposer_slashing: ignore duplicate" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const r1 = validateProposerSlashing(5, 100, 100, [_]u8{0xAA} ** 32, [_]u8{0xBB} ** 32, &mock.ctx);
     try testing.expectEqual(ValidationResult.accept, r1);
@@ -845,12 +925,14 @@ test "attester_slashing: accept valid slashing" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const indices = [_]u64{ 1, 2, 3 };
     const result = validateAttesterSlashing(&indices, &mock.ctx);
@@ -864,12 +946,14 @@ test "attester_slashing: reject empty indices" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const indices = [_]u64{};
     const result = validateAttesterSlashing(&indices, &mock.ctx);
@@ -883,12 +967,14 @@ test "attester_slashing: ignore duplicate" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const indices = [_]u64{ 1, 2, 3 };
     const r1 = validateAttesterSlashing(&indices, &mock.ctx);
@@ -905,12 +991,14 @@ test "attestation: accept valid attestation" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     // Slot 96 = epoch 3 (current), committee 0, target epoch 3, known root.
     const result = validateAttestation(96, 0, 3, [_]u8{0xAA} ** 32, &mock.ctx);
@@ -924,12 +1012,14 @@ test "attestation: ignore stale epoch" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     // Slot 32 = epoch 1, current is 3. Not current (3) or previous (2).
     const result = validateAttestation(32, 0, 1, [_]u8{0xAA} ** 32, &mock.ctx);
@@ -943,12 +1033,14 @@ test "attestation: reject mismatched target epoch" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     // Slot 96 = epoch 3, but target says 2.
     const result = validateAttestation(96, 0, 2, [_]u8{0xAA} ** 32, &mock.ctx);
@@ -962,12 +1054,14 @@ test "attestation: reject committee index out of bounds" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const result = validateAttestation(96, preset.MAX_COMMITTEES_PER_SLOT, 3, [_]u8{0xAA} ** 32, &mock.ctx);
     try testing.expectEqual(ValidationResult.reject, result);
@@ -980,12 +1074,14 @@ test "attestation: ignore unknown target root" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     // Zero root = unknown in our mock.
     const result = validateAttestation(96, 0, 3, [_]u8{0} ** 32, &mock.ctx);
@@ -999,12 +1095,14 @@ test "bls_to_execution_change: accept valid change" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const result = validateBlsToExecutionChange(10, &mock.ctx);
     try testing.expectEqual(ValidationResult.accept, result);
@@ -1017,12 +1115,14 @@ test "bls_to_execution_change: reject out of bounds validator" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const result = validateBlsToExecutionChange(1000, &mock.ctx);
     try testing.expectEqual(ValidationResult.reject, result);
@@ -1035,12 +1135,14 @@ test "bls_to_execution_change: ignore duplicate" {
     defer mock.seen_exits.deinit();
     defer mock.seen_proposer.deinit();
     defer mock.seen_attester.deinit();
+    defer mock.seen_bls.deinit();
 
     mock.ctx.seen_block_roots = &mock.seen_blocks;
     mock.ctx.seen_aggregators = &mock.seen_aggs;
     mock.ctx.seen_voluntary_exits = &mock.seen_exits;
     mock.ctx.seen_proposer_slashings = &mock.seen_proposer;
     mock.ctx.seen_attester_slashings = &mock.seen_attester;
+    mock.ctx.seen_bls_changes = &mock.seen_bls;
 
     const r1 = validateBlsToExecutionChange(10, &mock.ctx);
     try testing.expectEqual(ValidationResult.accept, r1);

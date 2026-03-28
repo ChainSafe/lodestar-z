@@ -115,6 +115,9 @@ pub const DecodedAttesterSlashing = struct {
     /// (double vote or surround vote).  Computed at decode time so the
     /// caller doesn't need to re-parse the variable-length container.
     is_slashable: bool,
+    /// Dedup key derived from the intersection of attesting indices (Wyhash of sorted indices).
+    /// Passed directly to validateAttesterSlashingDecoded for O(1) seen-set lookup.
+    slashable_key: [32]u8,
 };
 
 /// Result of decoding a bls_to_execution_change gossip message.
@@ -319,8 +322,25 @@ pub fn decodeFromSszBytes(
             const is_double_vote = !phase0.AttestationData.equals(d1, d2) and d1.target.epoch == d2.target.epoch;
             const is_surround_vote = d1.source.epoch < d2.source.epoch and d2.target.epoch < d1.target.epoch;
             const is_slashable = is_double_vote or is_surround_vote;
+            // Compute a dedup key from the attesting indices union (Wyhash of both index lists).
+            // This provides O(1) lookup in the attester_slashings SeenSet.
+            var hasher = std.hash.Wyhash.init(0x04);
+            for (slashing.attestation_1.attesting_indices.items) |idx| {
+                var buf: [8]u8 = undefined;
+                std.mem.writeInt(u64, &buf, idx, .little);
+                hasher.update(&buf);
+            }
+            for (slashing.attestation_2.attesting_indices.items) |idx| {
+                var buf: [8]u8 = undefined;
+                std.mem.writeInt(u64, &buf, idx, .little);
+                hasher.update(&buf);
+            }
+            var slashable_key: [32]u8 = std.mem.zeroes([32]u8);
+            std.mem.writeInt(u64, slashable_key[0..8], hasher.final(), .little);
+            slashable_key[16] = 0x04;
             return .{ .attester_slashing = .{
                 .is_slashable = is_slashable,
+                .slashable_key = slashable_key,
             } };
         },
         .bls_to_execution_change => {

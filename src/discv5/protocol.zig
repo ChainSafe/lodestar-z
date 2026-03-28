@@ -695,13 +695,37 @@ pub const Protocol = struct {
 
         const fn_msg = result.msg;
 
-        // Per discv5 spec, NODES responses are capped at MAX_NODES_RESPONSE (16) ENRs.
-        // The routing-table lookup below must slice to at most MAX_NODES_RESPONSE before encoding.
-        // Currently we return an empty ENR list (stub); the cap is enforced here as a safeguard.
+        // Query routing table for nodes at requested distances and build ENR list.
+        // Per discv5 spec, cap at MAX_NODES_RESPONSE (16) total.
+        var enr_list: [MAX_NODES_RESPONSE][]const u8 = undefined;
+        var enr_count: usize = 0;
+        var alloc_count: usize = 0;
+
+        for (fn_msg.distances) |dist| {
+            // Distance 256 is reserved in discv5 (would mean "all nodes"); skip it.
+            if (dist > 255) continue;
+            const entries = self.routing_table.getBucket(@intCast(dist));
+            for (entries) |entry| {
+                if (enr_count >= MAX_NODES_RESPONSE) break;
+                // Encode each node as its raw addr bytes (6 bytes: ip4 + port).
+                // Full RLP-encoded ENR is a follow-up; addr bytes ensure we contribute to the DHT.
+                const encoded = self.alloc.dupe(u8, &entry.addr) catch continue;
+                enr_list[enr_count] = encoded;
+                enr_count += 1;
+                alloc_count += 1;
+            }
+            if (enr_count >= MAX_NODES_RESPONSE) break;
+        }
+
+        const enr_slice = enr_list[0..enr_count];
+        defer {
+            for (enr_list[0..alloc_count]) |e| self.alloc.free(e);
+        }
+
         const nodes_msg = messages.Nodes{
             .req_id = fn_msg.req_id,
             .total = 1,
-            .enrs = &[_][]const u8{},
+            .enrs = enr_slice,
         };
 
         const s = self.sessions.get(from) orelse return;

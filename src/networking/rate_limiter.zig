@@ -18,6 +18,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
+const req_resp_protocol = @import("protocol.zig");
 const log = std.log.scoped(.rate_limiter);
 
 // ── Protocol enum ─────────────────────────────────────────────────────────────
@@ -37,6 +38,31 @@ pub const Protocol = enum {
 
     pub const COUNT = std.meta.fields(Protocol).len;
 };
+
+/// Convert a req/resp Method to the corresponding rate-limit Protocol.
+///
+/// Returns null for methods that are not rate-limited (light client protocols,
+/// which are low-traffic and currently unmetered).
+pub fn methodToRateLimitProtocol(method: req_resp_protocol.Method) ?Protocol {
+    return switch (method) {
+        .status => .status,
+        .goodbye => .goodbye,
+        .ping => .ping,
+        .metadata => .metadata,
+        .beacon_blocks_by_range => .beacon_blocks_by_range,
+        .beacon_blocks_by_root => .beacon_blocks_by_root,
+        .blob_sidecars_by_range => .blob_sidecars_by_range,
+        .blob_sidecars_by_root => .blob_sidecars_by_root,
+        .data_column_sidecars_by_range => .data_column_sidecars_by_range,
+        .data_column_sidecars_by_root => .data_column_sidecars_by_root,
+        // Light client protocols are currently unrated.
+        .light_client_bootstrap,
+        .light_client_updates_by_range,
+        .light_client_finality_update,
+        .light_client_optimistic_update,
+        => null,
+    };
+}
 
 // ── Rate limit result ─────────────────────────────────────────────────────────
 

@@ -258,14 +258,15 @@ pub const SyncChain = struct {
     // ── Internal helpers ────────────────────────────────────────────
 
     /// Recompute target as the highest slot among peers.
+    ///
+    /// Initialized from peers only so that when the highest-target peer disconnects,
+    /// the target correctly decreases (instead of sticking at the stale watermark).
     fn computeTarget(self: *SyncChain) void {
-        var best = self.target;
+        var best: ?ChainTarget = null;
         for (self.peers.values()) |t| {
-            if (t.slot > best.slot) {
-                best = t;
-            }
+            if (best == null or t.slot > best.?.slot) best = t;
         }
-        self.target = best;
+        if (best) |b| self.target = b;
     }
 
     /// Select a peer for downloading — simple round-robin by least-used.
@@ -462,7 +463,9 @@ test "SyncChain: peer management" {
 
     _ = chain.removePeer("p2");
     try std.testing.expectEqual(@as(usize, 1), chain.peerCount());
-    // Target stays at 200 (doesn't reduce — target is sticky).
+    try std.testing.expectEqual(@as(u64, 100), chain.target.slot);
+    // Target should decrease to p1's slot (100) since p2 was removed.
+    // computeTarget now initializes from peers only, so removal of the highest peer reduces target.
 }
 
 test "SyncChain: completes when all batches processed" {
