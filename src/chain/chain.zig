@@ -476,16 +476,20 @@ pub const Chain = struct {
         // authoritative, so clearing them on finalization is safe and prevents OOM.
         self.seen_cache.pruneOnFinalization();
 
-        // Emit SSE finalized_checkpoint event.
-        if (self.event_callback) |cb| {
-            // Look up the state root for the finalized block.
-            const state_root = self.block_to_state.get(finalized_root) orelse [_]u8{0} ** 32;
-            cb.emit(.{ .finalized_checkpoint = .{
-                .epoch = finalized_epoch,
-                .root = finalized_root,
-                .state_root = state_root,
-            } });
+        // Prune op_pool secondary pools — remove stale slashings/exits.
+        // The SeenCache dedup was already cleared above; now evict actual entries.
+        self.op_pool.voluntary_exit_pool.prune(finalized_epoch);
+        self.op_pool.proposer_slashing_pool.pruneFinalized(finalized_epoch);
+        self.op_pool.attester_slashing_pool.pruneAll();
+
+        // Prune ReprocessQueue — drop blocks queued for slots below finalized.
+        if (self.reprocess_queue) |rq| {
+            rq.prune(finalized_slot);
         }
+
+        // Note: finalized_checkpoint SSE event is emitted in import_block.zig
+        // (after fork choice head recomputation) with accurate state_root context.
+        // Emitting it again here would produce duplicates.
     }
 
     // -----------------------------------------------------------------------
