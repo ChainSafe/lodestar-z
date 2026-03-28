@@ -370,6 +370,9 @@ pub const WorkQueues = struct {
 
     /// Route a work item to the appropriate typed queue.
     /// Handles sync-aware dropping and queue-full metrics.
+    ///
+    /// Dispatches via explicit switch — each arm is one line: push to the
+    /// matching named field. FIFO queues check for full; LIFO queues evict.
     pub fn routeToQueue(self: *WorkQueues, item: WorkItem) void {
         const wtype = item.workType();
 
@@ -381,122 +384,39 @@ pub const WorkQueues = struct {
 
         self.items_routed += 1;
 
+        // Helper: push to a FIFO queue, count drops on overflow.
+        const pushFifo = struct {
+            fn call(dropped: *u64, queue: anytype, w: anytype) void {
+                if (!queue.push(w)) dropped.* += 1;
+            }
+        }.call;
+
         switch (item) {
-            // ── FIFO queues: push returns false on full ──
-            .chain_segment => |w| {
-                if (!self.chain_segment.push(w)) self.items_dropped_full += 1;
-            },
-            .rpc_block => |w| {
-                if (!self.rpc_block.push(w)) self.items_dropped_full += 1;
-            },
-            .rpc_blob => |w| {
-                if (!self.rpc_blob.push(w)) self.items_dropped_full += 1;
-            },
-            .rpc_custody_column => |w| {
-                if (!self.rpc_custody_column.push(w)) self.items_dropped_full += 1;
-            },
-            .delayed_block => |w| {
-                if (!self.delayed_block.push(w)) self.items_dropped_full += 1;
-            },
-            .gossip_block => |w| {
-                if (!self.gossip_block.push(w)) self.items_dropped_full += 1;
-            },
-            .gossip_execution_payload => |w| {
-                if (!self.gossip_execution_payload.push(w)) self.items_dropped_full += 1;
-            },
-            .gossip_blob => |w| {
-                if (!self.gossip_blob.push(w)) self.items_dropped_full += 1;
-            },
-            .gossip_data_column => |w| {
-                if (!self.gossip_data_column.push(w)) self.items_dropped_full += 1;
-            },
-            .api_request_p0 => |w| {
-                if (!self.api_request_p0.push(w)) self.items_dropped_full += 1;
-            },
-            .gossip_payload_attestation => |w| {
-                if (!self.gossip_payload_attestation.push(w)) self.items_dropped_full += 1;
-            },
-            .gossip_execution_payload_bid => |w| {
-                if (!self.gossip_execution_payload_bid.push(w)) self.items_dropped_full += 1;
-            },
-            .gossip_proposer_preferences => |w| {
-                if (!self.gossip_proposer_preferences.push(w)) self.items_dropped_full += 1;
-            },
-            .status => |w| {
-                if (!self.status.push(w)) self.items_dropped_full += 1;
-            },
-            .blocks_by_range => |w| {
-                if (!self.blocks_by_range.push(w)) self.items_dropped_full += 1;
-            },
-            .blocks_by_root => |w| {
-                if (!self.blocks_by_root.push(w)) self.items_dropped_full += 1;
-            },
-            .blobs_by_range => |w| {
-                if (!self.blobs_by_range.push(w)) self.items_dropped_full += 1;
-            },
-            .blobs_by_root => |w| {
-                if (!self.blobs_by_root.push(w)) self.items_dropped_full += 1;
-            },
-            .columns_by_range => |w| {
-                if (!self.columns_by_range.push(w)) self.items_dropped_full += 1;
-            },
-            .columns_by_root => |w| {
-                if (!self.columns_by_root.push(w)) self.items_dropped_full += 1;
-            },
-            .gossip_attester_slashing => |w| {
-                if (!self.gossip_attester_slashing.push(w)) self.items_dropped_full += 1;
-            },
-            .gossip_proposer_slashing => |w| {
-                if (!self.gossip_proposer_slashing.push(w)) self.items_dropped_full += 1;
-            },
-            .gossip_voluntary_exit => |w| {
-                if (!self.gossip_voluntary_exit.push(w)) self.items_dropped_full += 1;
-            },
-            .gossip_bls_to_exec => |w| {
-                if (!self.gossip_bls_to_exec.push(w)) self.items_dropped_full += 1;
-            },
-            .api_request_p1 => |w| {
-                if (!self.api_request_p1.push(w)) self.items_dropped_full += 1;
-            },
-            .backfill_segment => |w| {
-                if (!self.backfill_segment.push(w)) self.items_dropped_full += 1;
-            },
-            .lc_bootstrap => |w| {
-                if (!self.lc_bootstrap.push(w)) self.items_dropped_full += 1;
-            },
-            .lc_finality_update => |w| {
-                if (!self.lc_finality_update.push(w)) self.items_dropped_full += 1;
-            },
-            .lc_optimistic_update => |w| {
-                if (!self.lc_optimistic_update.push(w)) self.items_dropped_full += 1;
-            },
-            .lc_updates_by_range => |w| {
-                if (!self.lc_updates_by_range.push(w)) self.items_dropped_full += 1;
+            // ── FIFO queues ──
+            inline .chain_segment, .rpc_block, .rpc_blob, .rpc_custody_column,
+            .delayed_block, .gossip_block, .gossip_execution_payload, .gossip_blob,
+            .gossip_data_column, .api_request_p0, .gossip_payload_attestation,
+            .gossip_execution_payload_bid, .gossip_proposer_preferences,
+            .status, .blocks_by_range, .blocks_by_root, .blobs_by_range, .blobs_by_root,
+            .columns_by_range, .columns_by_root, .gossip_attester_slashing,
+            .gossip_proposer_slashing, .gossip_voluntary_exit, .gossip_bls_to_exec,
+            .api_request_p1, .backfill_segment, .lc_bootstrap, .lc_finality_update,
+            .lc_optimistic_update, .lc_updates_by_range => |w, tag| {
+                pushFifo(&self.items_dropped_full, &@field(self, @tagName(tag)), w);
             },
 
-            // ── LIFO queues: always accept, drop oldest ──
-            .aggregate => |w| self.aggregate.push(w),
-            .attestation => |w| self.attestation.push(w),
-            .unknown_block_aggregate => |w| self.unknown_block_aggregate.push(w),
-            .unknown_block_attestation => |w| self.unknown_block_attestation.push(w),
-            .sync_contribution => |w| self.sync_contribution.push(w),
-            .sync_message => |w| self.sync_message.push(w),
-            .column_reconstruction => |w| self.column_reconstruction.push(w),
+            // ── LIFO queues: always accept, drop oldest on overflow ──
+            inline .aggregate, .attestation, .unknown_block_aggregate,
+            .unknown_block_attestation, .sync_contribution, .sync_message,
+            .column_reconstruction => |w, tag| {
+                @field(self, @tagName(tag)).push(w);
+            },
 
             // ── Batch items are produced internally, not routed from inbound ──
-            .attestation_batch, .aggregate_batch => {
-                // These are never pushed externally — they are formed by
-                // popHighestPriority() from individual attestation/aggregate
-                // queues. Reaching here is a programming error.
-                unreachable;
-            },
+            .attestation_batch, .aggregate_batch => unreachable,
 
-            // ── Internal items ──
-            .slot_tick, .reprocess => {
-                // Slot ticks and reprocess messages are handled directly
-                // by the processor loop, not queued. If we want to queue
-                // them in the future, add queues here.
-            },
+            // ── Internal items: handled directly by the processor loop ──
+            .slot_tick, .reprocess => {},
         }
     }
 

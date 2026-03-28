@@ -373,6 +373,15 @@ pub const BeaconNode = struct {
     /// Null until loadKzgTrustedSetup() is called (or if running pre-Deneb only).
     kzg: ?Kzg = null,
 
+    /// Set to true to request graceful shutdown of all event loops.
+    shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    /// Signal all loops to stop.
+    pub fn requestShutdown(self: *BeaconNode) void {
+        self.shutdown_requested.store(true, .release);
+        if (self.http_server) |*srv| srv.shutdown();
+    }
+
     pub const KVBackend = union(enum) {
         memory: *MemoryKVStore,
         lmdb: *LmdbKVStore,
@@ -1595,7 +1604,7 @@ pub const BeaconNode = struct {
 
         // Main sync + gossip loop: tick the sync state machine and poll gossip.
         std.log.info("Starting sync-driven maintenance loop...", .{});
-        while (true) {
+        while (!self.shutdown_requested.load(.acquire)) {
             const slot_sleep: std.Io.Timeout = .{ .duration = .{
                 .raw = std.Io.Duration.fromNanoseconds(@as(i96, 6) * std.time.ns_per_s),
                 .clock = .awake,
@@ -2100,7 +2109,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             _ = svc;
             const gossipsub = self.p2p_service.?.gossipsub;
 
-            while (true) {
+            while (!self.shutdown_requested.load(.acquire)) {
                 // Poll gossipsub for raw events
                 const events = gossipsub.drainEvents() catch |err| {
                     std.log.warn("Gossip drain error: {}", .{err});

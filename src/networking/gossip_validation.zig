@@ -28,21 +28,38 @@ pub const ValidationResult = enum {
     ignore,
 };
 
+/// Default maximum number of entries in a SeenSet before eviction kicks in.
+pub const seen_set_default_capacity: u32 = 4096;
+
 /// An opaque set for tracking already-seen items, keyed by a fixed-size byte array.
 ///
-/// Uses a bounded hash map to avoid unbounded memory growth. When full, the oldest
-/// entries should be evicted (the caller manages eviction policy).
+/// Bounded by `max_capacity`. When full, the oldest inserted entry is evicted
+/// (FIFO ring-buffer order tracked by an ArrayList of insertion-order keys).
 pub const SeenSet = struct {
     const Key = [32]u8;
     const Map = std.AutoHashMap(Key, void);
 
     map: Map,
+    /// Insertion-order ring buffer for eviction (oldest entry at front).
+    order: std.ArrayListUnmanaged(Key),
+    /// Maximum number of entries before the oldest is evicted.
+    max_capacity: u32,
 
     pub fn init(allocator: std.mem.Allocator) SeenSet {
-        return .{ .map = Map.init(allocator) };
+        return initWithCapacity(allocator, seen_set_default_capacity);
+    }
+
+    pub fn initWithCapacity(allocator: std.mem.Allocator, max_capacity: u32) SeenSet {
+        return .{
+            .map = Map.init(allocator),
+            .order = .empty,
+            .max_capacity = max_capacity,
+        };
     }
 
     pub fn deinit(self: *SeenSet) void {
+        const alloc = self.map.allocator;
+        self.order.deinit(alloc);
         self.map.deinit();
     }
 
@@ -52,8 +69,18 @@ pub const SeenSet = struct {
     }
 
     /// Insert a key. Returns true if the key was newly inserted (not already present).
+    /// When the set is at capacity, evicts the oldest entry first.
     pub fn insert(self: *SeenSet, key: Key) !bool {
+        const alloc = self.map.allocator;
+        // Evict oldest entries until below capacity.
+        while (self.map.count() >= self.max_capacity and self.order.items.len > 0) {
+            const oldest = self.order.orderedRemove(0);
+            _ = self.map.remove(oldest);
+        }
         const result = try self.map.getOrPut(key);
+        if (!result.found_existing) {
+            try self.order.append(alloc, key);
+        }
         return !result.found_existing;
     }
 };

@@ -649,6 +649,42 @@ pub const HttpEngine = struct {
         return decodeForkchoiceUpdatedResponse(parsed.value);
     }
 
+
+    // ── Payload promotion helpers ─────────────────────────────────────────────
+
+    /// Promote a versioned payload (V1/V2/V4) to the unified ExecutionPayloadV3.
+    ///
+    /// Copies all fields that exist in both Src and V3 by name. Fields absent
+    /// in Src (e.g. withdrawals for V1, blob fields for V2) are zero-initialized.
+    fn promoteToV3(src: anytype) ExecutionPayloadV3 {
+        const Src = @TypeOf(src);
+        var dst: ExecutionPayloadV3 = .{
+            .parent_hash = undefined,
+            .fee_recipient = undefined,
+            .state_root = undefined,
+            .receipts_root = undefined,
+            .logs_bloom = undefined,
+            .prev_randao = undefined,
+            .block_number = undefined,
+            .gas_limit = undefined,
+            .gas_used = undefined,
+            .timestamp = undefined,
+            .extra_data = undefined,
+            .base_fee_per_gas = undefined,
+            .block_hash = undefined,
+            .transactions = undefined,
+            .withdrawals = &.{},
+            .blob_gas_used = 0,
+            .excess_blob_gas = 0,
+        };
+        inline for (std.meta.fields(ExecutionPayloadV3)) |dst_field| {
+            if (@hasField(Src, dst_field.name)) {
+                @field(dst, dst_field.name) = @field(src, dst_field.name);
+            }
+        }
+        return dst;
+    }
+
     /// Get a built payload using the fork-appropriate version.
     pub fn getPayloadForFork(
         self: *HttpEngine,
@@ -659,27 +695,8 @@ pub const HttpEngine = struct {
             .phase0, .altair => error.UnsupportedFork,
             .bellatrix => blk: {
                 const r = try self.getPayloadV1(payload_id);
-                // Promote V1 to unified GetPayloadResponse.
                 break :blk GetPayloadResponse{
-                    .execution_payload = ExecutionPayloadV3{
-                        .parent_hash = r.execution_payload.parent_hash,
-                        .fee_recipient = r.execution_payload.fee_recipient,
-                        .state_root = r.execution_payload.state_root,
-                        .receipts_root = r.execution_payload.receipts_root,
-                        .logs_bloom = r.execution_payload.logs_bloom,
-                        .prev_randao = r.execution_payload.prev_randao,
-                        .block_number = r.execution_payload.block_number,
-                        .gas_limit = r.execution_payload.gas_limit,
-                        .gas_used = r.execution_payload.gas_used,
-                        .timestamp = r.execution_payload.timestamp,
-                        .extra_data = r.execution_payload.extra_data,
-                        .base_fee_per_gas = r.execution_payload.base_fee_per_gas,
-                        .block_hash = r.execution_payload.block_hash,
-                        .transactions = r.execution_payload.transactions,
-                        .withdrawals = &.{},
-                        .blob_gas_used = 0,
-                        .excess_blob_gas = 0,
-                    },
+                    .execution_payload = promoteToV3(r.execution_payload),
                     .block_value = r.block_value,
                     .blobs_bundle = .{ .commitments = &.{}, .proofs = &.{}, .blobs = &.{} },
                     .should_override_builder = false,
@@ -688,25 +705,7 @@ pub const HttpEngine = struct {
             .capella => blk: {
                 const r = try self.getPayloadV2(payload_id);
                 break :blk GetPayloadResponse{
-                    .execution_payload = ExecutionPayloadV3{
-                        .parent_hash = r.execution_payload.parent_hash,
-                        .fee_recipient = r.execution_payload.fee_recipient,
-                        .state_root = r.execution_payload.state_root,
-                        .receipts_root = r.execution_payload.receipts_root,
-                        .logs_bloom = r.execution_payload.logs_bloom,
-                        .prev_randao = r.execution_payload.prev_randao,
-                        .block_number = r.execution_payload.block_number,
-                        .gas_limit = r.execution_payload.gas_limit,
-                        .gas_used = r.execution_payload.gas_used,
-                        .timestamp = r.execution_payload.timestamp,
-                        .extra_data = r.execution_payload.extra_data,
-                        .base_fee_per_gas = r.execution_payload.base_fee_per_gas,
-                        .block_hash = r.execution_payload.block_hash,
-                        .transactions = r.execution_payload.transactions,
-                        .withdrawals = r.execution_payload.withdrawals,
-                        .blob_gas_used = 0,
-                        .excess_blob_gas = 0,
-                    },
+                    .execution_payload = promoteToV3(r.execution_payload),
                     .block_value = r.block_value,
                     .blobs_bundle = .{ .commitments = &.{}, .proofs = &.{}, .blobs = &.{} },
                     .should_override_builder = false,
@@ -716,25 +715,7 @@ pub const HttpEngine = struct {
             .electra, .fulu => blk: {
                 const r = try self.getPayloadV4(payload_id);
                 break :blk GetPayloadResponse{
-                    .execution_payload = ExecutionPayloadV3{
-                        .parent_hash = r.execution_payload.parent_hash,
-                        .fee_recipient = r.execution_payload.fee_recipient,
-                        .state_root = r.execution_payload.state_root,
-                        .receipts_root = r.execution_payload.receipts_root,
-                        .logs_bloom = r.execution_payload.logs_bloom,
-                        .prev_randao = r.execution_payload.prev_randao,
-                        .block_number = r.execution_payload.block_number,
-                        .gas_limit = r.execution_payload.gas_limit,
-                        .gas_used = r.execution_payload.gas_used,
-                        .timestamp = r.execution_payload.timestamp,
-                        .extra_data = r.execution_payload.extra_data,
-                        .base_fee_per_gas = r.execution_payload.base_fee_per_gas,
-                        .block_hash = r.execution_payload.block_hash,
-                        .transactions = r.execution_payload.transactions,
-                        .withdrawals = r.execution_payload.withdrawals,
-                        .blob_gas_used = r.execution_payload.blob_gas_used,
-                        .excess_blob_gas = r.execution_payload.excess_blob_gas,
-                    },
+                    .execution_payload = promoteToV3(r.execution_payload),
                     .block_value = r.block_value,
                     .blobs_bundle = r.blobs_bundle,
                     .should_override_builder = r.should_override_builder,

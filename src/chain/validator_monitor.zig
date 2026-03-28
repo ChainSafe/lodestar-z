@@ -19,7 +19,7 @@ const consensus_types = @import("consensus_types");
 const preset = @import("preset").preset;
 
 /// Maximum number of epoch summaries retained in the rolling window.
-const DEFAULT_MAX_EPOCHS: usize = 64;
+const DEFAULT_MAX_EPOCHS: u32 = 64;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -170,7 +170,7 @@ pub const ValidatorMonitor = struct {
     /// Rolling epoch summaries (newest at end).
     epoch_summaries: std.ArrayList(EpochSummary) = .empty,
     /// Maximum epoch summaries to retain.
-    max_epochs: usize,
+    max_epochs: u32,
     /// Last epoch that was processed.
     last_processed_epoch: ?u64 = null,
 
@@ -395,7 +395,7 @@ pub const ValidatorMonitor = struct {
         }
 
         // Store summary (ring buffer semantics)
-        if (self.epoch_summaries.items.len >= self.max_epochs) {
+        if (self.epoch_summaries.items.len >= @as(usize, self.max_epochs)) {
             // Remove oldest
             _ = self.epoch_summaries.orderedRemove(0);
         }
@@ -733,7 +733,7 @@ test "ValidatorMonitor: epoch summary rolling window" {
     const allocator = std.testing.allocator;
     var monitor = ValidatorMonitor.init(allocator, &.{});
     defer monitor.deinit();
-    monitor.max_epochs = 3; // small window for testing
+    monitor.max_epochs = 3; // small window for testing (u32)
 
     const empty_bal = [_]u64{};
     const empty_idx = [_]u64{};
