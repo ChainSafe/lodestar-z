@@ -110,11 +110,24 @@ test "processDepositRequest - pending deposit fields match request" {
     var pending = try state.pendingDeposits();
     var deposit = try pending.get(0);
 
-    // Verify all fields were copied correctly
-    // Verify amount and slot were correctly copied from the request
+    // Verify all fields were copied correctly from the request
+    var actual_pubkey: [48]u8 = undefined;
+    var pubkey_view = try deposit.get("pubkey");
+    _ = try pubkey_view.getAllInto(actual_pubkey[0..]);
+    try testing.expectEqualSlices(u8, &request.pubkey, &actual_pubkey);
+
+    var actual_creds: [32]u8 = undefined;
+    var creds_view = try deposit.get("withdrawal_credentials");
+    _ = try creds_view.getAllInto(actual_creds[0..]);
+    try testing.expectEqualSlices(u8, &request.withdrawal_credentials, &actual_creds);
+
+    var actual_sig: [96]u8 = undefined;
+    var sig_view = try deposit.get("signature");
+    _ = try sig_view.getAllInto(actual_sig[0..]);
+    try testing.expectEqualSlices(u8, &request.signature, &actual_sig);
 
     const amount_view = try deposit.get("amount");
-    try testing.expectEqual(@as(u64, 32_000_000_000), amount_view);
+    try testing.expectEqual(request.amount, amount_view);
 
     const slot_view = try deposit.get("slot");
     const state_slot = try state.slot();
