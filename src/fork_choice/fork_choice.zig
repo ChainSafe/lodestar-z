@@ -810,8 +810,8 @@ pub const ForkChoice = struct {
         if (block_slot != self.fc_store.current_slot) return false;
 
         // Timely if arrived before the attestation due time (1/3 of slot).
-        // TODO: Read from BeaconConfig.getAttestationDueMs() once implemented.
-        const attestation_due_ms: u64 = 4000; // 4 seconds = SECONDS_PER_SLOT / 3
+        // Derive from config rather than hardcoding: SECONDS_PER_SLOT / 3 * 1000 ms.
+        const attestation_due_ms: u64 = self.config.chain.SECONDS_PER_SLOT * 1000 / 3;
         return block_delay_sec * 1000 < attestation_due_ms;
     }
 
@@ -1284,13 +1284,13 @@ pub const ForkChoice = struct {
         self: *ForkChoice,
         allocator: Allocator,
         validator_index: ValidatorIndex,
+        att_slot: Slot,
         block_root: Root,
         target_epoch: Epoch,
     ) !void {
-        const target_slot = computeStartSlotAtEpoch(target_epoch);
         if (target_epoch > computeEpochAtSlot(self.fc_store.current_slot)) return error.InvalidAttestation;
         if (self.fc_store.equivocating_indices.contains(validator_index)) return;
-        try self.addLatestMessage(allocator, validator_index, target_slot, block_root, .full);
+        try self.addLatestMessage(allocator, validator_index, att_slot, block_root, .full);
     }
 
     /// Mark a single validator as equivocating.
@@ -1494,6 +1494,8 @@ pub const ForkChoice = struct {
         // to be skipped. Collect keys to remove in a separate pass.
         var keys_to_remove = std.ArrayListUnmanaged(u64){};
         defer keys_to_remove.deinit(allocator);
+        // Pre-allocate so that append() cannot fail after votes are applied (OOM safety).
+        try keys_to_remove.ensureTotalCapacity(allocator, @intCast(self.queued_attestations.count()));
 
         var slot_iter = self.queued_attestations.iterator();
         while (slot_iter.next()) |entry| {
