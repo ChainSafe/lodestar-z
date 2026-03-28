@@ -459,12 +459,38 @@ fn encodeExecutionPayloadHeader(allocator: Allocator, h: ExecutionPayloadHeader)
     defer allocator.free(timestamp);
     const extra_data = try http_engine.hexEncode(allocator, h.extra_data);
     defer allocator.free(extra_data);
-    const base_fee = try http_engine.hexEncodeU256(allocator, h.base_fee_per_gas);
+    const base_fee = try http_engine.hexEncodeQuantityU256(allocator, h.base_fee_per_gas);
     defer allocator.free(base_fee);
     const block_hash = try http_engine.hexEncodeFixed(allocator, &h.block_hash);
     defer allocator.free(block_hash);
     const tx_root = try http_engine.hexEncodeFixed(allocator, &h.transactions_root);
     defer allocator.free(tx_root);
+
+
+    // Fix 3: conditionally include Deneb+ fields when present.
+    if (h.withdrawals_root != null or h.blob_gas_used != null or h.excess_blob_gas != null) {
+        const wr_hex = if (h.withdrawals_root) |wr|
+            try http_engine.hexEncodeFixed(allocator, &wr)
+        else
+            try allocator.dupe(u8, "0x0000000000000000000000000000000000000000000000000000000000000000");
+        defer allocator.free(wr_hex);
+
+        const bgu_hex = try http_engine.hexEncodeQuantity(allocator, h.blob_gas_used orelse 0);
+        defer allocator.free(bgu_hex);
+
+        const ebg_hex = try http_engine.hexEncodeQuantity(allocator, h.excess_blob_gas orelse 0);
+        defer allocator.free(ebg_hex);
+
+        return std.fmt.allocPrint(allocator,
+            \\{{"parent_hash":"{s}","fee_recipient":"{s}","state_root":"{s}","receipts_root":"{s}","logs_bloom":"{s}","prev_randao":"{s}","block_number":"{s}","gas_limit":"{s}","gas_used":"{s}","timestamp":"{s}","extra_data":"{s}","base_fee_per_gas":"{s}","block_hash":"{s}","transactions_root":"{s}","withdrawals_root":"{s}","blob_gas_used":"{s}","excess_blob_gas":"{s}"}}
+        , .{
+            parent_hash, fee_recipient, state_root,  receipts_root,
+            logs_bloom,  prev_randao,   block_number, gas_limit,
+            gas_used,    timestamp,     extra_data,   base_fee,
+            block_hash,  tx_root,       wr_hex,       bgu_hex,
+            ebg_hex,
+        });
+    }
 
     return std.fmt.allocPrint(allocator,
         \\{{"parent_hash":"{s}","fee_recipient":"{s}","state_root":"{s}","receipts_root":"{s}","logs_bloom":"{s}","prev_randao":"{s}","block_number":"{s}","gas_limit":"{s}","gas_used":"{s}","timestamp":"{s}","extra_data":"{s}","base_fee_per_gas":"{s}","block_hash":"{s}","transactions_root":"{s}"}}
@@ -493,61 +519,17 @@ fn encodeSignedBlindedBlock(allocator: Allocator, block: SignedBlindedBeaconBloc
 
 // ── JSON parsing ──────────────────────────────────────────────────────────────
 
-/// Parse hex string with 0x prefix to fixed-size byte array.
-fn parseHex32(hex: []const u8) ![32]u8 {
-    const s = if (std.mem.startsWith(u8, hex, "0x")) hex[2..] else hex;
-    if (s.len != 64) return error.InvalidHexLength;
-    var out: [32]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&out, s);
-    return out;
-}
+// ── Local hex parse aliases (delegate to http_engine) ─────────────────────────
+//
+// Fix 6: Remove duplicates — use http_engine's pub decode functions directly.
 
-fn parseHex20(hex: []const u8) ![20]u8 {
-    const s = if (std.mem.startsWith(u8, hex, "0x")) hex[2..] else hex;
-    if (s.len != 40) return error.InvalidHexLength;
-    var out: [20]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&out, s);
-    return out;
-}
-
-fn parseHex48(hex: []const u8) ![48]u8 {
-    const s = if (std.mem.startsWith(u8, hex, "0x")) hex[2..] else hex;
-    if (s.len != 96) return error.InvalidHexLength;
-    var out: [48]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&out, s);
-    return out;
-}
-
-fn parseHex96(hex: []const u8) ![96]u8 {
-    const s = if (std.mem.startsWith(u8, hex, "0x")) hex[2..] else hex;
-    if (s.len != 192) return error.InvalidHexLength;
-    var out: [96]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&out, s);
-    return out;
-}
-
-fn parseHex256(hex: []const u8) ![256]u8 {
-    const s = if (std.mem.startsWith(u8, hex, "0x")) hex[2..] else hex;
-    if (s.len != 512) return error.InvalidHexLength;
-    var out: [256]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&out, s);
-    return out;
-}
-
-fn parseQuantityU64(hex: []const u8) !u64 {
-    return http_engine.hexDecodeQuantity(hex);
-}
-
-fn parseQuantityU256(hex: []const u8) !u256 {
-    const s = if (std.mem.startsWith(u8, hex, "0x")) hex[2..] else hex;
-    if (s.len == 0) return error.InvalidHexLength;
-    if (s.len > 64) return error.InvalidHexLength;
-    var padded: [64]u8 = .{'0'} ** 64;
-    @memcpy(padded[64 - s.len ..], s);
-    var bytes: [32]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&bytes, &padded);
-    return std.mem.readInt(u256, &bytes, .big);
-}
+const parseHex32 = http_engine.hexDecode32;
+const parseHex20 = http_engine.hexDecode20;
+const parseHex48 = http_engine.hexDecode48;
+const parseHex96 = http_engine.hexDecode96;
+const parseHex256 = http_engine.hexDecode256;
+const parseQuantityU64 = http_engine.hexDecodeQuantity;
+const parseQuantityU256 = http_engine.hexDecodeU256;
 
 /// Parse a SignedBuilderBid from the relay's JSON response.
 ///
@@ -595,7 +577,15 @@ fn parseSignedBuilderBid(allocator: Allocator, json_bytes: []const u8) !SignedBu
         .gas_limit = try parseQuantityU64((header_obj.get("gas_limit") orelse return error.MissingField).string),
         .gas_used = try parseQuantityU64((header_obj.get("gas_used") orelse return error.MissingField).string),
         .timestamp = try parseQuantityU64((header_obj.get("timestamp") orelse return error.MissingField).string),
-        .extra_data = (header_obj.get("extra_data") orelse return error.MissingField).string,
+        .extra_data = blk: {
+            // Fix 1: decode extra_data into owned memory before arena is freed.
+            const extra_data_hex = (header_obj.get("extra_data") orelse return error.MissingField).string;
+            const stripped = if (std.mem.startsWith(u8, extra_data_hex, "0x")) extra_data_hex[2..] else extra_data_hex;
+            const owned = try allocator.alloc(u8, if (stripped.len == 0) 0 else stripped.len / 2);
+            errdefer allocator.free(owned);
+            if (owned.len > 0) _ = std.fmt.hexToBytes(owned, stripped) catch return error.InvalidHex;
+            break :blk owned;
+        },
         .base_fee_per_gas = try parseQuantityU256((header_obj.get("base_fee_per_gas") orelse return error.MissingField).string),
         .block_hash = try parseHex32((header_obj.get("block_hash") orelse return error.MissingField).string),
         .transactions_root = try parseHex32((header_obj.get("transactions_root") orelse return error.MissingField).string),
@@ -607,7 +597,18 @@ fn parseSignedBuilderBid(allocator: Allocator, json_bytes: []const u8) !SignedBu
     return SignedBuilderBid{
         .message = BuilderBid{
             .header = header,
-            .blob_kzg_commitments = &.{},
+            .blob_kzg_commitments = blk: {
+                // Fix 5: parse blob_kzg_commitments array from JSON.
+                const kzg_val = message_obj.get("blob_kzg_commitments") orelse break :blk &([_][48]u8{});
+                const kzg_arr = kzg_val.array.items;
+                if (kzg_arr.len == 0) break :blk &([_][48]u8{});
+                const commitments = try allocator.alloc([48]u8, kzg_arr.len);
+                errdefer allocator.free(commitments);
+                for (kzg_arr, 0..) |item, i| {
+                    commitments[i] = try parseHex48(item.string);
+                }
+                break :blk commitments;
+            },
             .value = value,
             .pubkey = pubkey,
         },
