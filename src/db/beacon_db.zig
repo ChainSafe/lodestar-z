@@ -152,21 +152,12 @@ pub const BeaconDB = struct {
     }
 
     pub fn getLatestStateArchiveSlot(self: *BeaconDB) !?u64 {
-        const keys = try self.state_archive_db.allKeys();
-        defer {
-            for (keys) |k| self.allocator.free(k);
-            self.allocator.free(keys);
-        }
-
-        var max_slot: ?u64 = null;
-        for (keys) |key| {
-            if (key.len != 8) continue;
-            const slot = std.mem.readInt(u64, key[0..8], .little);
-            if (max_slot == null or slot > max_slot.?) {
-                max_slot = slot;
-            }
-        }
-        return max_slot;
+        // Use cursor MDB_LAST for O(1) lookup — LMDB keys are sorted so the
+        // last key is the highest slot. This avoids loading all keys into memory.
+        const last = try self.state_archive_db.lastKey() orelse return null;
+        defer self.allocator.free(last);
+        if (last.len != 8) return error.InvalidKeyLength;
+        return std.mem.readInt(u64, last[0..8], .little);
     }
 
     // ---------------------------------------------------------------
