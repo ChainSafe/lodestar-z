@@ -358,34 +358,18 @@ pub const HttpServer = struct {
                 };
             }
             // JSON response: hex-encode the SSZ bytes as the data field.
-            const hex_len = 2 + block_result.data.len * 2;
-            const hex_buf = try alloc.alloc(u8, hex_len);
-            defer alloc.free(hex_buf);
-            hex_buf[0] = '0';
-            hex_buf[1] = 'x';
-            for (block_result.data, 0..) |byte, bi| {
-                const nibble_hi: u8 = (byte >> 4) & 0xf;
-                const nibble_lo: u8 = byte & 0xf;
-                hex_buf[2 + bi * 2] = if (nibble_hi < 10) '0' + nibble_hi else 'a' + nibble_hi - 10;
-                hex_buf[2 + bi * 2 + 1] = if (nibble_lo < 10) '0' + nibble_lo else 'a' + nibble_lo - 10;
-            }
+            // Use std.fmt.fmtSliceHexLower instead of manual nibble encoding.
             var body_buf = std.ArrayListUnmanaged(u8).empty;
             errdefer body_buf.deinit(alloc);
-            try body_buf.appendSlice(alloc, "{\"data\":\"");
-            try body_buf.appendSlice(alloc, hex_buf);
-            try body_buf.appendSlice(alloc, "\"");
+            try std.fmt.format(body_buf.writer(alloc), "{{\"data\":\"0x{s}\"", .{std.fmt.fmtSliceHexLower(block_result.data)});
             if (meta.version) |fork| {
-                try body_buf.appendSlice(alloc, ",\"version\":\"");
-                try body_buf.appendSlice(alloc, fork.toString());
-                try body_buf.appendSlice(alloc, "\"");
+                try std.fmt.format(body_buf.writer(alloc), ",\"version\":\"{s}\"", .{fork.toString()});
             }
             if (meta.execution_optimistic) |opt| {
-                try body_buf.appendSlice(alloc, ",\"execution_optimistic\":");
-                try body_buf.appendSlice(alloc, if (opt) "true" else "false");
+                try body_buf.appendSlice(alloc, if (opt) ",\"execution_optimistic\":true" else ",\"execution_optimistic\":false");
             }
             if (meta.finalized) |fin| {
-                try body_buf.appendSlice(alloc, ",\"finalized\":");
-                try body_buf.appendSlice(alloc, if (fin) "true" else "false");
+                try body_buf.appendSlice(alloc, if (fin) ",\"finalized\":true" else ",\"finalized\":false");
             }
             try body_buf.appendSlice(alloc, "}");
             return .{
@@ -862,18 +846,10 @@ pub const HttpServer = struct {
             const block_id_str = match.getParam("block_id") orelse return error.InvalidBlockId;
             const block_id = try types.BlockId.parse(block_id_str);
             const block_result = try handlers.beacon.getBlock(ctx, block_id);
-            // Runtime hex encoding of SSZ bytes
-            const hex_buf = try alloc.alloc(u8, block_result.data.len * 2);
-            defer alloc.free(hex_buf);
-            for (block_result.data, 0..) |byte, bi| {
-                const hi: u8 = (byte >> 4) & 0xf;
-                const lo: u8 = byte & 0xf;
-                hex_buf[bi * 2] = if (hi < 10) '0' + hi else 'a' + hi - 10;
-                hex_buf[bi * 2 + 1] = if (lo < 10) '0' + lo else 'a' + lo - 10;
-            }
+            // Hex-encode using std.fmt.fmtSliceHexLower.
             const body = try std.fmt.allocPrint(alloc,
                 "{{\"data\":\"0x{s}\",\"version\":\"{s}\"}}",
-                .{ hex_buf, @tagName(block_result.fork_name) });
+                .{ std.fmt.fmtSliceHexLower(block_result.data), @tagName(block_result.fork_name) });
             return .{
                 .status = 200,
                 .content_type = "application/json",
