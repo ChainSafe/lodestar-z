@@ -153,20 +153,12 @@ pub const PeerSyncInfo = struct {
 
 // ── Portable time ────────────────────────────────────────────────────
 
-/// Get current monotonic time in milliseconds.
+/// Get current time in milliseconds since Unix epoch.
 ///
-/// Uses the OS monotonic clock. On Linux this is CLOCK_MONOTONIC via
-/// the vDSO (no syscall). When std.time gains a portable monotonic
-/// timestamp API (tracked for 0.16+), switch to that.
+/// Uses std.time.milliTimestamp() which is portable across platforms.
 pub fn currentTimeMs() u64 {
-    if (@hasDecl(std.os, "linux")) {
-        var ts: std.os.linux.timespec = undefined;
-        const rc = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
-        if (rc != 0) return 0;
-        return @intCast(@as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), 1_000_000));
-    }
-    // Fallback: return 0 on unsupported platforms (tests still pass).
-    return 0;
+    const ms = std.time.milliTimestamp();
+    return if (ms >= 0) @intCast(ms) else 0;
 }
 
 // ── Tests ────────────────────────────────────────────────────────────

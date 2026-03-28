@@ -89,3 +89,17 @@ pub fn verify(msg_hash: *const [32]u8, sig_compact: *const [64]u8, pubkey_bytes:
         return Error.InvalidSignature;
     }
 }
+
+/// Decompress a 33-byte compressed public key to 65-byte uncompressed form.
+/// Returns Error.InvalidPublicKey if the key is invalid.
+pub fn uncompressedFromCompressed(compressed: *const [33]u8) Error!UncompressedPubKey {
+    const ctx = getCtx();
+    var pk: secp256k1_lib.secp256k1_pubkey = undefined;
+    if (secp256k1_lib.secp256k1_ec_pubkey_parse(ctx, &pk, compressed, 33) != 1) {
+        return Error.InvalidPublicKey;
+    }
+    var out: UncompressedPubKey = undefined;
+    var outlen: usize = 65;
+    _ = secp256k1_lib.secp256k1_ec_pubkey_serialize(ctx, &out, &outlen, &pk, secp256k1_lib.SECP256K1_EC_UNCOMPRESSED);
+    return out;
+}

@@ -66,36 +66,14 @@ pub const Enr = struct {
 
 /// Compute NodeId = keccak256(uncompressed pubkey[1..]) from compressed pubkey
 pub fn nodeIdFromCompressedPubkey(compressed: *const [33]u8) NodeId {
-    // Decompress pubkey to get uncompressed form
-    // For discv5 v4 scheme: node-id = keccak256(pubkey_uncompressed[1..65])
-    // We need to decompress. Use the secp256k1 library to get uncompressed form.
-    // Actually per spec: "The node ID of a v4 identity is the keccak256 hash of the
-    // uncompressed public key, excluding the 0x04 prefix."
-    // We'll compute from the compressed key by using the crypto library.
-
-    // Use std crypto to decompress - P256 is secp256r1, not secp256k1
-    // We must use the secp256k1 library for this.
-    // For now: derive using the raw compressed bytes approach via std.
-    // Actually, let's use the secp256k1 cImport directly.
-
-    const secp256k1_c = @cImport({
-        @cInclude("secp256k1.h");
-    });
-
-    var pk: secp256k1_c.secp256k1_pubkey = undefined;
-    const ctx = secp256k1_c.secp256k1_context_create(secp256k1_c.SECP256K1_CONTEXT_VERIFY) orelse
-        @panic("secp256k1_context_create failed");
-    defer secp256k1_c.secp256k1_context_destroy(ctx);
-
-    if (secp256k1_c.secp256k1_ec_pubkey_parse(ctx, &pk, compressed, 33) != 1) {
+    // Per discv5/v4 identity scheme:
+    //   node-id = keccak256(uncompressed_pubkey[1..65])
+    // Reuse the thread-local secp256k1 context from secp256k1.zig to avoid
+    // allocating a new context on every call.
+    const uncompressed = secp.uncompressedFromCompressed(compressed) catch {
         // Invalid key — return zeroed node id
         return [_]u8{0} ** 32;
-    }
-
-    var uncompressed: [65]u8 = undefined;
-    var uncompressed_len: usize = 65;
-    _ = secp256k1_c.secp256k1_ec_pubkey_serialize(ctx, &uncompressed, &uncompressed_len, &pk, secp256k1_c.SECP256K1_EC_UNCOMPRESSED);
-
+    };
     var node_id: NodeId = undefined;
     Keccak256.hash(uncompressed[1..65], &node_id, .{});
     return node_id;
