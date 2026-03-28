@@ -28,9 +28,11 @@ pub const HeadTracker = struct {
     head_root: [32]u8,
     head_state_root: [32]u8,
 
+    // Epoch-start slot (epoch * SLOTS_PER_EPOCH). Not the actual finalized block slot.
     finalized_slot: u64,
     finalized_root: [32]u8,
 
+    // Epoch-start slot (epoch * SLOTS_PER_EPOCH). Not the actual justified block slot.
     justified_slot: u64,
     justified_root: [32]u8,
 };

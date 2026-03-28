@@ -1272,6 +1272,7 @@ pub const BeaconNode = struct {
         self.api_head_tracker.head_state_root = result.state_root;
 
         if (result.epoch_transition) {
+            // Store epoch-start slot; see HeadTracker.finalized_slot comment.
             self.api_head_tracker.finalized_slot = self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH;
             self.api_head_tracker.justified_slot = self.head_tracker.justified_epoch * preset.SLOTS_PER_EPOCH;
             if (self.chain.fork_choice) |fc| {
@@ -2177,20 +2178,18 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                 return error.EmptyResponse;
             }
 
-            // Hex dump raw response for debugging
-            // Log raw response bytes in groups of 16
-            std.log.info("Status raw response: {d} bytes", .{resp_len});
+            std.log.debug("Status raw response: {d} bytes", .{resp_len});
             {
                 var offset: usize = 0;
                 while (offset < resp_len and offset < 112) : (offset += 8) {
                     const end = @min(offset + 8, resp_len);
                     switch (end - offset) {
-                        8 => std.log.info("  [{d:>3}]: {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{
+                        8 => std.log.debug("  [{d:>3}]: {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{
                             offset,
                             resp_buf[offset], resp_buf[offset+1], resp_buf[offset+2], resp_buf[offset+3],
                             resp_buf[offset+4], resp_buf[offset+5], resp_buf[offset+6], resp_buf[offset+7],
                         }),
-                        4 => std.log.info("  [{d:>3}]: {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{
+                        4 => std.log.debug("  [{d:>3}]: {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{
                             offset,
                             resp_buf[offset], resp_buf[offset+1], resp_buf[offset+2], resp_buf[offset+3],
                         }),

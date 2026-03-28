@@ -164,14 +164,11 @@ pub const TopicFilter = struct {
 /// async I/O and is a future enhancement; this handler provides the
 /// event bus integration foundation.
 pub fn getEvents(ctx: *ApiContext, query: []const u8) !void {
-    const bus = ctx.event_bus orelse return error.NotImplemented;
+    // Require a live event bus; fail fast if not configured.
+    if (ctx.event_bus == null) return error.NotImplemented;
 
-    const filter = TopicFilter.parse(query);
-    if (!filter.hasAny()) return error.NotImplemented;
-
-    // Poll recent events from the bus.
-    const recent = bus.getRecent(0);
-    _ = recent;
+    // Require at least one valid topic; unknown-only requests are a client error.
+    if (!TopicFilter.parse(query).hasAny()) return error.NotImplemented;
 
     // SSE streaming requires long-lived connections (async I/O).
     // The event bus is now wired and topic filtering is implemented;
