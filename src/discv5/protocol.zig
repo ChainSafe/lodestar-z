@@ -85,10 +85,14 @@ pub const Protocol = struct {
     pending_requests: std.ArrayList(PendingRequest),
     whoareyou_rate: std.AutoHashMap([4]u8, WhoareyouRateEntry),
     rng: std.Random.DefaultPrng,
+    /// Known static public keys for peers, keyed by node-id.
+    /// Required to verify id-nonce signatures in incoming handshakes.
+    node_pubkeys: std.AutoHashMap(NodeId, [33]u8),
 
     pub fn init(alloc: Allocator, config: Config) !Protocol {
-        var seed: u64 = 0;
-        seed = 0xcafebabe;
+        var seed_bytes: [8]u8 = undefined;
+        std.crypto.random.bytes(&seed_bytes);
+        const seed = std.mem.readInt(u64, &seed_bytes, .little);
         return .{
             .alloc = alloc,
             .config = config,
@@ -97,6 +101,7 @@ pub const Protocol = struct {
             .pending_requests = .empty,
             .whoareyou_rate = std.AutoHashMap([4]u8, WhoareyouRateEntry).init(alloc),
             .rng = std.Random.DefaultPrng.init(seed),
+            .node_pubkeys = std.AutoHashMap(NodeId, [33]u8).init(alloc),
         };
     }
 
@@ -106,6 +111,7 @@ pub const Protocol = struct {
         self.routing_table.deinit();
         self.sessions.deinit();
         self.whoareyou_rate.deinit();
+        self.node_pubkeys.deinit();
     }
 
     pub fn randomNonce(self: *Protocol) [12]u8 {
@@ -295,17 +301,19 @@ pub const Protocol = struct {
         var pending = self.pending_requests.orderedRemove(idx);
         defer pending.deinit();
 
-        // Generate ephemeral keypair.
+        // Generate a valid ephemeral secp256k1 keypair.
+        // secp.pubkeyFromSecret calls secp256k1_ec_pubkey_create which rejects keys
+        // that are zero or >= curve order. Retry on invalid key (extremely rare).
         var eph_seckey: [32]u8 = undefined;
-        self.rng.random().bytes(&eph_seckey);
-        // Ensure the secret key is valid for secp256k1 (non-zero, less than order).
-        // Simple: set high bit to 0 and ensure at least one bit is set.
-        eph_seckey[0] &= 0x7f;
-        if (std.mem.eql(u8, &eph_seckey, &([_]u8{0} ** 32))) {
-            eph_seckey[31] = 1;
-        }
-
-        const eph_pubkey = secp.pubkeyFromSecret(&eph_seckey) catch return;
+        const eph_pubkey = blk: {
+            var attempt: u8 = 0;
+            while (attempt < 32) : (attempt += 1) {
+                std.crypto.random.bytes(&eph_seckey);
+                if (secp.pubkeyFromSecret(&eph_seckey)) |pk| break :blk pk else |_| {}
+            }
+            // Unreachable in practice; probability of failure is ~2^{-128} after 32 attempts.
+            return error.EphemeralKeyGenFailed;
+        };
 
         // Derive session keys: ECDH(eph_seckey, dest_pubkey) -> HKDF
         // node_id_a = our node_id (initiator), node_id_b = dest_node_id
@@ -425,6 +433,43 @@ pub const Protocol = struct {
         const eph_pk: *const [33]u8 = eph_pubkey[0..33];
         const challenge = s.challenge_data[0..s.challenge_data_len];
 
+        // Resolve sender's static public key.
+        // First check our known-peer map; fall back to an optional ENR in the handshake.
+        const sender_pubkey: [33]u8 = blk: {
+            if (self.node_pubkeys.get(src_id)) |pk| break :blk pk;
+            // Try to extract pubkey from an optional ENR appended to the authdata.
+            const enr_offset = 34 + @as(usize, sig_size) + @as(usize, eph_key_size);
+            if (authdata.len > enr_offset) {
+                const enr_bytes = authdata[enr_offset..];
+                const enr_mod = @import("enr.zig");
+                var parsed_enr = enr_mod.decode(self.alloc, enr_bytes) catch {
+                    std.log.warn("discv5: handshake from unknown peer {any} has invalid ENR, rejecting", .{src_id});
+                    return;
+                };
+                defer parsed_enr.deinit();
+                const pk = parsed_enr.pubkey orelse {
+                    std.log.warn("discv5: handshake ENR from {any} has no pubkey, rejecting", .{src_id});
+                    return;
+                };
+                // Verify the ENR node-id matches the claimed src_id.
+                const derived_id = enr_mod.nodeIdFromCompressedPubkey(&pk);
+                if (!std.mem.eql(u8, &derived_id, &src_id)) {
+                    std.log.warn("discv5: handshake ENR node-id mismatch, rejecting", .{});
+                    return;
+                }
+                break :blk pk;
+            }
+            std.log.warn("discv5: handshake from unknown peer {any} with no ENR, rejecting", .{src_id});
+            return;
+        };
+
+        // Verify id-signature: SHA256("discovery v5 identity proof" || challenge_data || eph_pubkey || local_node_id)
+        const id_sig_fixed: *const [64]u8 = id_sig[0..64];
+        session_mod.verifyIdSignature(id_sig_fixed, &sender_pubkey, challenge, eph_pk, &self.config.local_node_id) catch {
+            std.log.warn("discv5: handshake id-signature verification failed for {any}, rejecting", .{src_id});
+            return;
+        };
+
         const keys = session_mod.deriveKeys(
             &self.config.local_secret_key,
             eph_pk,
@@ -438,8 +483,6 @@ pub const Protocol = struct {
         new_session.initiator_key = keys.recipient_key;
         new_session.recipient_key = keys.initiator_key;
         try self.sessions.put(src_id, new_session);
-
-        _ = id_sig;
     }
 
     fn sendWhoareyou(
@@ -672,7 +715,7 @@ pub const Protocol = struct {
         try t.send(from_addr, pkt);
     }
 
-    pub fn addNode(self: *Protocol, node_id: NodeId, addr: transport_mod.Address) void {
+    pub fn addNode(self: *Protocol, node_id: NodeId, pubkey: ?*const [33]u8, addr: transport_mod.Address) void {
         const entry = kbucket.Entry{
             .node_id = node_id,
             .addr = [6]u8{
@@ -683,6 +726,9 @@ pub const Protocol = struct {
             .status = .connected,
         };
         _ = self.routing_table.insert(entry);
+        if (pubkey) |pk| {
+            self.node_pubkeys.put(node_id, pk.*) catch {};
+        }
     }
 };
 
@@ -724,7 +770,7 @@ test "discv5 protocol: basic init" {
 
     var node_id2: NodeId = [_]u8{0xbb} ** 32;
     node_id2[31] = 0x01;
-    proto.addNode(node_id2, .{ .ip = [4]u8{ 192, 168, 1, 1 }, .port = 30303 });
+    proto.addNode(node_id2, null, .{ .ip = [4]u8{ 192, 168, 1, 1 }, .port = 30303 });
     try std.testing.expectEqual(@as(usize, 1), proto.routing_table.nodeCount());
 }
 
@@ -763,6 +809,8 @@ test "discv5 protocol: WHOAREYOU handshake round-trip" {
         .listen_addr = addr_b,
     });
     defer proto_b.deinit();
+    // Pre-register node A's static pubkey so B can verify A's id-nonce signature.
+    proto_b.addNode(node_id_a, &pk_a, addr_a);
 
     // Transport mocks
     var mock_a = transport_mod.MockTransport.init(alloc, addr_a);

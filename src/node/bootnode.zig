@@ -331,7 +331,7 @@ fn seedEnrToProtocol(allocator: Allocator, protocol_inst: *Protocol, enr_str: []
     const ip = enr.ip orelse return false;
     const port = enr.udp orelse return false;
 
-    protocol_inst.addNode(node_id, .{ .ip = ip, .port = port });
+    protocol_inst.addNode(node_id, null, .{ .ip = ip, .port = port });
     return true;
 }
 
