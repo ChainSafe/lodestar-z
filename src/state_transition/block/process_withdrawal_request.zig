@@ -108,3 +108,288 @@ fn isValidatorEligibleForWithdrawOrExit(
         exit_epoch == c.FAR_FUTURE_EPOCH and
         current_epoch >= activation_epoch + config.chain.SHARD_COMMITTEE_PERIOD);
 }
+
+// ──── Tests ────
+
+const testing = std.testing;
+const Node = @import("persistent_merkle_tree").Node;
+const TestCachedBeaconState = @import("../test_utils/generate_state.zig").TestCachedBeaconState;
+
+fn makeWithdrawalRequest(
+    source_address: [20]u8,
+    validator_pubkey: [48]u8,
+    amount: u64,
+) WithdrawalRequest {
+    return WithdrawalRequest{
+        .source_address = source_address,
+        .validator_pubkey = validator_pubkey,
+        .amount = amount,
+    };
+}
+
+fn getValidatorPubkey(state: anytype, index: u64) ![48]u8 {
+    var validators = try state.validators();
+    var validator = try validators.get(index);
+    var pubkey_view = try validator.get("pubkey");
+    var pubkey: [48]u8 = undefined;
+    _ = try pubkey_view.getAllInto(&pubkey);
+    return pubkey;
+}
+
+fn setExecutionCredentials(state: anytype, index: u64, address: [20]u8) !void {
+    var validators = try state.validators();
+    var validator = try validators.get(index);
+    var wc: [32]u8 = [_]u8{0} ** 32;
+    wc[0] = 1; // ETH1_ADDRESS_WITHDRAWAL_PREFIX
+    @memcpy(wc[12..32], &address);
+    try validator.setValue("withdrawal_credentials", &wc);
+}
+
+fn setCompoundingCredentials(state: anytype, index: u64, address: [20]u8) !void {
+    var validators = try state.validators();
+    var validator = try validators.get(index);
+    var wc: [32]u8 = [_]u8{0} ** 32;
+    wc[0] = 2; // COMPOUNDING_WITHDRAWAL_PREFIX
+    @memcpy(wc[12..32], &address);
+    try validator.setValue("withdrawal_credentials", &wc);
+}
+
+test "withdrawal request - unknown validator pubkey is no-op" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const unknown_pubkey: [48]u8 = [_]u8{0xFF} ** 48;
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    const request = makeWithdrawalRequest(source_address, unknown_pubkey, c.FULL_EXIT_REQUEST_AMOUNT);
+    try processWithdrawalRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    // No-op: pending partial withdrawals should remain empty
+    var pending = try state.pendingPartialWithdrawals();
+    try testing.expectEqual(@as(u64, 0), try pending.length());
+}
+
+test "withdrawal request - validator without execution credentials is no-op" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const pubkey = try getValidatorPubkey(state, 0);
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    // Default credentials are BLS (0x00) — not execution
+    const request = makeWithdrawalRequest(source_address, pubkey, c.FULL_EXIT_REQUEST_AMOUNT);
+    try processWithdrawalRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    var pending = try state.pendingPartialWithdrawals();
+    try testing.expectEqual(@as(u64, 0), try pending.length());
+}
+
+test "withdrawal request - mismatched source address is no-op" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const pubkey = try getValidatorPubkey(state, 0);
+    const correct_address: [20]u8 = [_]u8{0xAA} ** 20;
+    const wrong_address: [20]u8 = [_]u8{0xBB} ** 20;
+
+    try setExecutionCredentials(state, 0, correct_address);
+
+    const request = makeWithdrawalRequest(wrong_address, pubkey, c.FULL_EXIT_REQUEST_AMOUNT);
+    try processWithdrawalRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    var pending = try state.pendingPartialWithdrawals();
+    try testing.expectEqual(@as(u64, 0), try pending.length());
+}
+
+test "withdrawal request - full exit sets exit epoch" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const pubkey = try getValidatorPubkey(state, 0);
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    try setExecutionCredentials(state, 0, source_address);
+
+    const request = makeWithdrawalRequest(source_address, pubkey, c.FULL_EXIT_REQUEST_AMOUNT);
+    try processWithdrawalRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    // Validator should have exit_epoch set (no longer FAR_FUTURE_EPOCH)
+    var validators = try state.validators();
+    var validator = try validators.get(0);
+    const exit_epoch = try validator.get("exit_epoch");
+    try testing.expect(exit_epoch != c.FAR_FUTURE_EPOCH);
+
+    // No partial withdrawal added
+    var pending = try state.pendingPartialWithdrawals();
+    try testing.expectEqual(@as(u64, 0), try pending.length());
+}
+
+test "withdrawal request - already exiting validator is no-op" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const pubkey = try getValidatorPubkey(state, 0);
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    try setExecutionCredentials(state, 0, source_address);
+
+    // Set exit_epoch to something other than FAR_FUTURE_EPOCH
+    var validators = try state.validators();
+    var validator = try validators.get(0);
+    try validator.set("exit_epoch", 100);
+
+    const request = makeWithdrawalRequest(source_address, pubkey, c.FULL_EXIT_REQUEST_AMOUNT);
+    try processWithdrawalRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    // exit_epoch should remain unchanged
+    var validators2 = try state.validators();
+    var validator2 = try validators2.get(0);
+    const exit_epoch = try validator2.get("exit_epoch");
+    try testing.expectEqual(@as(u64, 100), exit_epoch);
+}
+
+test "withdrawal request - partial withdrawal with compounding credentials" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const pubkey = try getValidatorPubkey(state, 0);
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    // Set compounding credentials (0x02 prefix)
+    try setCompoundingCredentials(state, 0, source_address);
+
+    // Give the validator excess balance
+    var balances = try state.balances();
+    try balances.set(0, preset.MIN_ACTIVATION_BALANCE + 5_000_000_000);
+
+    const request_amount: u64 = 1_000_000_000;
+    const request = makeWithdrawalRequest(source_address, pubkey, request_amount);
+    try processWithdrawalRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    // Should have added a pending partial withdrawal
+    var pending = try state.pendingPartialWithdrawals();
+    try testing.expectEqual(@as(u64, 1), try pending.length());
+
+    // Validator should NOT be exiting
+    var validators = try state.validators();
+    var validator = try validators.get(0);
+    const exit_epoch = try validator.get("exit_epoch");
+    try testing.expectEqual(@as(u64, c.FAR_FUTURE_EPOCH), exit_epoch);
+}
+
+test "withdrawal request - partial withdrawal with eth1 credentials is no-op" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const pubkey = try getValidatorPubkey(state, 0);
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    // ETH1 credentials (0x01) — NOT compounding, so partial withdrawal should be rejected
+    try setExecutionCredentials(state, 0, source_address);
+
+    var balances = try state.balances();
+    try balances.set(0, preset.MIN_ACTIVATION_BALANCE + 5_000_000_000);
+
+    const request_amount: u64 = 1_000_000_000;
+    const request = makeWithdrawalRequest(source_address, pubkey, request_amount);
+    try processWithdrawalRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    // No partial withdrawal should be added (ETH1 creds, not compounding)
+    var pending = try state.pendingPartialWithdrawals();
+    try testing.expectEqual(@as(u64, 0), try pending.length());
+}
+
+test "withdrawal request - partial withdrawal capped at excess balance" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const pubkey = try getValidatorPubkey(state, 0);
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    try setCompoundingCredentials(state, 0, source_address);
+
+    // Set balance to MIN_ACTIVATION_BALANCE + 2 gwei excess
+    const excess: u64 = 2_000_000_000;
+    var balances = try state.balances();
+    try balances.set(0, preset.MIN_ACTIVATION_BALANCE + excess);
+
+    // Request more than the excess
+    const request_amount: u64 = 10_000_000_000;
+    const request = makeWithdrawalRequest(source_address, pubkey, request_amount);
+    try processWithdrawalRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    // Should be added but capped at the excess
+    var pending = try state.pendingPartialWithdrawals();
+    try testing.expectEqual(@as(u64, 1), try pending.length());
+    var ppw = try pending.get(0);
+    try testing.expectEqual(excess, try ppw.get("amount"));
+}
+
+test "withdrawal request - insufficient effective balance for partial is no-op" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const pubkey = try getValidatorPubkey(state, 0);
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    try setCompoundingCredentials(state, 0, source_address);
+
+    // Set effective_balance below MIN_ACTIVATION_BALANCE
+    var validators = try state.validators();
+    var validator = try validators.get(0);
+    try validator.set("effective_balance", preset.MIN_ACTIVATION_BALANCE - 1);
+
+    var balances = try state.balances();
+    try balances.set(0, preset.MIN_ACTIVATION_BALANCE + 5_000_000_000);
+
+    const request = makeWithdrawalRequest(source_address, pubkey, 1_000_000_000);
+    try processWithdrawalRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    var pending = try state.pendingPartialWithdrawals();
+    try testing.expectEqual(@as(u64, 0), try pending.length());
+}
