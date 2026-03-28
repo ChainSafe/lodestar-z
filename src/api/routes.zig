@@ -281,6 +281,12 @@ pub const routes = [_]Route{
         .path = "/eth/v1/config/fork_schedule",
         .operation_id = "getForkSchedule",
     },
+    // -- Lodestar custom --
+    .{
+        .method = .GET,
+        .path = "/eth/v1/lodestar/validator_monitor",
+        .operation_id = "getValidatorMonitor",
+    },
 };
 
 /// Path segment — either a literal string or a named parameter.
@@ -474,5 +480,5 @@ test "findRoute wrong method" {
 
 test "route count" {
     // Verify we defined all expected routes
-    try std.testing.expectEqual(@as(usize, 40), routes.len);
+    try std.testing.expectEqual(@as(usize, 41), routes.len);
 }

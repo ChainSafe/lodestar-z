@@ -12,6 +12,7 @@ pub const debug = @import("debug.zig");
 pub const events = @import("events.zig");
 pub const validator = @import("validator.zig");
 pub const keymanager = @import("keymanager.zig");
+pub const lodestar = @import("lodestar.zig");
 
 test {
     testing.refAllDecls(node);
@@ -21,4 +22,5 @@ test {
     testing.refAllDecls(events);
     testing.refAllDecls(validator);
     testing.refAllDecls(keymanager);
+    testing.refAllDecls(lodestar);
 }

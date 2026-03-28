@@ -119,4 +119,9 @@ pub const NodeOptions = struct {
     log_rotate_max_files: u32 = 7,
     /// Enable daily rotation (default: true when --log-file set).
     log_rotate_daily: bool = true,
+
+    // ── Validator Monitor ─────────────────────────────────────
+    /// Validator indices to monitor for on-chain performance tracking.
+    /// Set via --validator-monitor-indices (comma-separated).
+    validator_monitor_indices: []const u64 = &.{},
 };

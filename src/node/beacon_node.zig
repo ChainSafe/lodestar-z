@@ -54,6 +54,7 @@ const SyncCommitteeMessagePool = chain_mod.SyncCommitteeMessagePool;
 const produceBlockBody = chain_mod.produceBlockBody;
 const ProducedBlockBody = chain_mod.ProducedBlockBody;
 const ProducedBlock = chain_mod.ProducedBlock;
+const ValidatorMonitor = chain_mod.ValidatorMonitor;
 const BlockProductionConfig = chain_mod.BlockProductionConfig;
 const assembleBlock = chain_mod.assembleBlock;
 pub const HeadTracker = chain_mod.HeadTracker;
@@ -843,6 +844,9 @@ pub const BeaconNode = struct {
     // handles extended non-finality without OOMing.
     unknown_chain_sync: UnknownChainSync,
 
+    // Validator monitor — optional on-chain performance tracker for specified validators.
+    validator_monitor: ?*ValidatorMonitor = null,
+
     // Execution Layer engine (Engine API client or mock).
     mock_engine: ?*MockEngine = null,
     http_engine: ?*HttpEngine = null,
@@ -1169,6 +1173,22 @@ pub const BeaconNode = struct {
         // Wire node pointer into block_import_ctx (node wasn't created until now).
         block_import_ctx.node = node;
 
+        // Initialize validator monitor if configured.
+        if (opts.validator_monitor_indices.len > 0) {
+            const vm = try allocator.create(ValidatorMonitor);
+            vm.* = ValidatorMonitor.init(allocator, opts.validator_monitor_indices);
+            node.validator_monitor = vm;
+            chain_struct.validator_monitor = vm;
+            std.log.info("Validator monitor: tracking {d} validators", .{opts.validator_monitor_indices.len});
+            // Wire validator monitor into API context
+            const vm_cb_ctx = try allocator.create(ValidatorMonitorCallbackCtx);
+            vm_cb_ctx.* = .{ .monitor = vm };
+            api_ctx.validator_monitor = .{
+                .ptr = @ptrCast(vm_cb_ctx),
+                .getMonitorStatusFn = &getValidatorMonitorCallback,
+            };
+        }
+
         // Wire data availability check (will be populated after node is created).
         // Note: The callback is set after BeaconNode.init returns since it needs
         // the node pointer. See the isDataAvailableCallback below.
@@ -1302,6 +1322,12 @@ pub const BeaconNode = struct {
 
         self.unknown_block_sync.deinit();
         self.unknown_chain_sync.deinit();
+
+        // Validator monitor cleanup
+        if (self.validator_monitor) |vm| {
+            vm.deinit();
+            allocator.destroy(vm);
+        }
 
         // KZG trusted setup cleanup.
         if (self.kzg) |*k| k.deinit(allocator);
@@ -5012,4 +5038,117 @@ test "BeaconNode: forkchoiceUpdated not called for pre-merge head" {
 
     // FCU should NOT have been sent — pre-merge blocks skip FCU.
     try std.testing.expect(mock.last_forkchoice_state == null);
+}
+
+// ---------------------------------------------------------------------------
+// ValidatorMonitorCallbackCtx — glue between ApiContext and ValidatorMonitor
+// ---------------------------------------------------------------------------
+
+const ValidatorMonitorCallbackCtx = struct {
+    monitor: *ValidatorMonitor,
+};
+
+/// API-layer validator monitor callback.
+///
+/// Returns JSON with all monitored validators' current status and
+/// epoch summaries.
+///
+/// GET /eth/v1/lodestar/validator_monitor
+fn getValidatorMonitorCallback(
+    ptr: *anyopaque,
+    alloc: std.mem.Allocator,
+) anyerror![]const u8 {
+    const ctx: *ValidatorMonitorCallbackCtx = @ptrCast(@alignCast(ptr));
+    const monitor = ctx.monitor;
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    const writer = &out.writer;
+
+    try writer.writeAll("{\"data\":{\"validators\":[");
+
+    var first = true;
+    const indices = try monitor.getMonitoredIndices(alloc);
+    defer alloc.free(indices);
+
+    for (indices) |idx| {
+        if (monitor.getValidatorSummary(idx)) |v| {
+            if (!first) try writer.writeAll(",");
+            first = false;
+
+            try writer.print(
+                "{{\"index\":{d},\"balance_gwei\":{d},\"effective_balance_gwei\":{d}," ++
+                    "\"balance_delta_gwei\":{d},\"effectiveness_score\":{d:.1}," ++
+                    "\"attestation_included\":{},\"attestation_delay\":",
+                .{
+                    v.index,
+                    v.balance_gwei,
+                    v.effective_balance_gwei,
+                    v.balance_delta_gwei,
+                    v.effectiveness_score,
+                    v.attestation_included,
+                },
+            );
+
+            if (v.attestation_delay) |d| {
+                try writer.print("{d}", .{d});
+            } else {
+                try writer.writeAll("null");
+            }
+
+            try writer.print(
+                ",\"head_correct\":{},\"source_correct\":{},\"target_correct\":{}," ++
+                    "\"block_proposed\":{},\"sync_participated\":{}," ++
+                    "\"cumulative_reward_gwei\":{d}," ++
+                    "\"total_attestations_included\":{d},\"total_attestations_expected\":{d}," ++
+                    "\"inclusion_delay_histogram\":[{d},{d},{d},{d}]}}",
+                .{
+                    v.head_correct,
+                    v.source_correct,
+                    v.target_correct,
+                    v.block_proposed,
+                    v.sync_participated,
+                    v.cumulative_reward_gwei,
+                    v.total_attestations_included,
+                    v.total_attestations_expected,
+                    v.inclusion_delay_histogram[0],
+                    v.inclusion_delay_histogram[1],
+                    v.inclusion_delay_histogram[2],
+                    v.inclusion_delay_histogram[3],
+                },
+            );
+        }
+    }
+
+    try writer.writeAll("],\"epoch_summaries\":[");
+
+    const summaries = monitor.getAllEpochSummaries();
+    for (summaries, 0..) |s, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.print(
+            "{{\"epoch\":{d},\"validators_monitored\":{d}," ++
+                "\"attestation_hit_rate\":{d:.4},\"head_accuracy_rate\":{d:.4}," ++
+                "\"source_accuracy_rate\":{d:.4},\"target_accuracy_rate\":{d:.4}," ++
+                "\"avg_inclusion_delay\":{d:.2},\"blocks_proposed\":{d}," ++
+                "\"blocks_expected\":{d},\"sync_participation_rate\":{d:.4}," ++
+                "\"total_balance_delta_gwei\":{d}}}",
+            .{
+                s.epoch,
+                s.validators_monitored,
+                s.attestation_hit_rate,
+                s.head_accuracy_rate,
+                s.source_accuracy_rate,
+                s.target_accuracy_rate,
+                s.avg_inclusion_delay,
+                s.blocks_proposed,
+                s.blocks_expected,
+                s.sync_participation_rate,
+                s.total_balance_delta_gwei,
+            },
+        );
+    }
+
+    try writer.writeAll("]}}");
+
+    return out.toOwnedSlice();
 }
