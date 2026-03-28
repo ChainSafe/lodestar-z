@@ -5,6 +5,7 @@
 //! without needing chain state.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const types = @import("../types.zig");
 const context = @import("../context.zig");
 const ApiContext = context.ApiContext;
@@ -22,11 +23,13 @@ pub fn getIdentity(ctx: *ApiContext) HandlerResult(types.NodeIdentity) {
 
 /// GET /eth/v1/node/version
 ///
-/// Returns the node's version string in the format: `lodestar-z/v{version}/{os}-{arch}`.
+/// Returns the node's version string in the format: `lodestar-z/v{version}/{arch}-{os}`.
+/// The platform suffix is determined at comptime so the binary is correct on all targets.
+const version_string = "lodestar-z/v0.0.1/" ++ @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag);
 pub fn getVersion(_: *ApiContext) HandlerResult(types.NodeVersion) {
     return .{
         .data = .{
-            .version = "lodestar-z/v0.0.1/zig-linux-x86_64",
+            .version = version_string,
         },
     };
 }
@@ -75,6 +78,7 @@ pub fn getPeers(ctx: *ApiContext) HandlerResult([]const types.PeerInfo) {
     const entries = cb.getConnectedPeersFn(cb.ptr, ctx.allocator) catch return .{
         .data = &[_]types.PeerInfo{},
     };
+    // Free entries AFTER we have copied all strings we need from them.
     defer ctx.allocator.free(entries);
 
     // Convert PeerEntry to PeerInfo for JSON response.
@@ -83,8 +87,10 @@ pub fn getPeers(ctx: *ApiContext) HandlerResult([]const types.PeerInfo) {
     };
 
     for (entries, 0..) |entry, i| {
+        // Dupe peer_id so it remains valid after entries is freed above.
+        const peer_id_copy = ctx.allocator.dupe(u8, entry.peer_id) catch entry.peer_id;
         infos[i] = .{
-            .peer_id = entry.peer_id,
+            .peer_id = peer_id_copy,
             .enr = null,
             .last_seen_p2p_address = "",
             .state = entry.state,

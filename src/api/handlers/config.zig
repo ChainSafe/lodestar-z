@@ -63,14 +63,18 @@ pub const SpecData = struct {
 /// GET /eth/v1/config/fork_schedule
 ///
 /// Returns the fork schedule — an ordered list of past and future forks.
+/// The returned slice is heap-allocated and must be freed by the caller.
 pub fn getForkSchedule(ctx: *ApiContext) HandlerResult([]const types.ForkScheduleEntry) {
     // Build entries from the config's ascending fork order.
-    // We store up to ForkSeq.count entries in a static buffer.
+    // Allocate on ctx.allocator so concurrent requests don't share a mutable buffer.
     const forks = ctx.beacon_config.forks_ascending_epoch_order;
+    const schedule = ctx.allocator.alloc(types.ForkScheduleEntry, ForkSeq.count) catch {
+        return .{ .data = &[_]types.ForkScheduleEntry{} };
+    };
     var count: usize = 0;
     for (forks) |fork| {
         if (fork.epoch < std.math.maxInt(u64)) {
-            schedule_buf[count] = .{
+            schedule[count] = .{
                 .previous_version = fork.prev_version,
                 .current_version = fork.version,
                 .epoch = fork.epoch,
@@ -79,12 +83,9 @@ pub fn getForkSchedule(ctx: *ApiContext) HandlerResult([]const types.ForkSchedul
         }
     }
     return .{
-        .data = schedule_buf[0..count],
+        .data = schedule[0..count],
     };
 }
-
-// Static buffer for fork schedule entries — safe because handlers are not concurrent.
-var schedule_buf: [ForkSeq.count]types.ForkScheduleEntry = undefined;
 
 // ---------------------------------------------------------------------------
 // Tests
