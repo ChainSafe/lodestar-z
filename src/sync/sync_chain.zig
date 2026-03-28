@@ -115,17 +115,14 @@ pub const SyncChain = struct {
     peers: std.StringArrayHashMap(ChainTarget),
 
     /// Global chain ID counter.
-    var next_chain_id: u32 = 0;
-
     pub fn init(
         allocator: Allocator,
+        id: u32,
         sync_type: RangeSyncType,
         start_epoch: u64,
         target: ChainTarget,
         callbacks: SyncChainCallbacks,
     ) SyncChain {
-        const id = next_chain_id;
-        next_chain_id +%= 1;
         const start_slot = start_epoch * 32;
         return .{
             .allocator = allocator,
@@ -428,6 +425,7 @@ test "SyncChain: basic batch pipeline" {
     var tc = TestSyncCallbacks{};
     var chain = SyncChain.init(
         allocator,
+        0, // chain id
         .finalized,
         0, // start epoch 0
         .{ .slot = 128, .root = [_]u8{0xFF} ** 32 },
@@ -449,6 +447,7 @@ test "SyncChain: peer management" {
     var tc = TestSyncCallbacks{};
     var chain = SyncChain.init(
         allocator,
+        0, // chain id
         .head,
         0,
         .{ .slot = 100, .root = [_]u8{0xAA} ** 32 },
@@ -472,6 +471,7 @@ test "SyncChain: completes when all batches processed" {
     // Small target — just 2 slots.
     var chain = SyncChain.init(
         allocator,
+        0, // chain id
         .finalized,
         0,
         .{ .slot = 2, .root = [_]u8{0} ** 32 },
