@@ -12,6 +12,7 @@ pub const computeSigningRootAlloc = @import("./utils/signing_root.zig").computeS
 pub const computeEpochAtSlot = @import("./utils/epoch.zig").computeEpochAtSlot;
 pub const CachedBeaconState = @import("./cache/state_cache.zig").CachedBeaconState;
 pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
+pub const EffectiveBalanceIncrementsRc = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrementsRc;
 pub const buildSlashingsCacheFromStateIfNeeded = @import("./cache/slashings_cache.zig").buildFromStateIfNeeded;
 
 pub const EpochCacheImmutableData = @import("./cache/epoch_cache.zig").EpochCacheImmutableData;

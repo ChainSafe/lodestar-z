@@ -100,11 +100,17 @@ const BatchId = sync_mod.BatchId;
 
 const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
-const ForkChoiceInit = fork_choice_mod.fork_choice.InitOpts;
 const ProtoBlock = fork_choice_mod.ProtoBlock;
 const BlockExtraMeta = fork_choice_mod.BlockExtraMeta;
 const ForkChoiceCheckpoint = fork_choice_mod.Checkpoint;
 const LVHExecResponse = fork_choice_mod.LVHExecResponse;
+const ForkChoiceStore = fork_choice_mod.ForkChoiceStore;
+const ProtoArrayStruct = fork_choice_mod.ProtoArrayStruct;
+const CheckpointWithPayloadStatus = fork_choice_mod.CheckpointWithPayloadStatus;
+const ForkChoiceOpts = fork_choice_mod.ForkChoiceOpts;
+const JustifiedBalancesGetter = fork_choice_mod.JustifiedBalancesGetter;
+const JustifiedBalances = fork_choice_mod.JustifiedBalances;
+const ForkChoiceStoreEvents = fork_choice_mod.ForkChoiceStoreEvents;
 
 const execution_mod = @import("execution");
 const EngineApi = execution_mod.EngineApi;
@@ -138,6 +144,14 @@ const QueueConfig = processor_mod.QueueConfig;
 const WorkItem = processor_mod.WorkItem;
 const WorkQueues = processor_mod.WorkQueues;
 // HeadTracker, ImportResult, ImportError are in chain_mod (src/chain/block_import.zig).
+
+/// Dummy JustifiedBalancesGetter for fork choice initialization.
+/// Returns an empty balances list. Will be replaced with a real getter
+/// that queries the state regen cache once that integration is complete.
+fn dummyBalancesGetterFn(_: ?*anyopaque, _: CheckpointWithPayloadStatus, _: *CachedBeaconState) JustifiedBalances {
+    return JustifiedBalances.init(std.heap.page_allocator);
+}
+
 // BlockImporter lives here because it depends on db, fork_choice, and state_transition
 // directly — extracting it would require either circular deps or vtable indirection.
 
@@ -350,7 +364,7 @@ pub const BlockImporter = struct {
             .timeliness = true,
         };
 
-        if (self.fork_choice) |fc| fc.onBlock(self.allocator, fc_block, block_slot) catch |err| switch (err) {
+        if (self.fork_choice) |fc| fork_choice_mod.onBlockFromProto(fc, self.allocator, fc_block, block_slot) catch |err| switch (err) {
             error.InvalidBlock => {},
             else => return err,
         };
@@ -460,9 +474,7 @@ pub const BlockImporter = struct {
                         .invalidate_from_parent_block_root = signed_block.message.parent_root,
                     },
                 };
-                fc.validateLatestHash(self.allocator, lvh_response, signed_block.message.slot) catch |err| {
-                    std.log.warn("fc.validateLatestHash failed for invalid block: {}", .{err});
-                };
+                fc.validateLatestHash(self.allocator, lvh_response, signed_block.message.slot);
                 std.log.warn("Marked fork choice branch as INVALID: block_root={s}... lvh={s}", .{
                     &std.fmt.bytesToHex(block_root[0..4], .lower),
                     if (result.latest_valid_hash) |h| &std.fmt.bytesToHex(h[0..4], .lower) else "null",
@@ -1275,8 +1287,7 @@ pub const BeaconNode = struct {
         }
 
         if (self.fork_choice) |fc| {
-            fc.deinit(allocator);
-            allocator.destroy(fc);
+            fork_choice_mod.destroyFromAnchor(allocator, fc);
         }
 
         // api_regen was allocated but stored in api_context.regen
@@ -1526,6 +1537,13 @@ pub const BeaconNode = struct {
         // Get effective balances from genesis epoch cache.
         const genesis_balances = genesis_state.epoch_cache.getEffectiveBalanceIncrements();
 
+        // At genesis, the anchor block is both the justified and finalized block.
+        // Override checkpoint roots to genesis_block_root regardless of what the
+        // genesis state says — the state's checkpoint may reference a root that
+        // doesn't exist in proto_array yet. Matches Lodestar TS anchor init.
+        const justified_root = genesis_block_root;
+        const finalized_root = genesis_block_root;
+
         const fc_anchor = ProtoBlock{
             .slot = 0,
             .block_root = genesis_block_root,
@@ -1533,40 +1551,39 @@ pub const BeaconNode = struct {
             .state_root = state_root,
             .target_root = genesis_block_root,
             .justified_epoch = genesis_justified_cp.epoch,
-            .justified_root = genesis_justified_cp.root,
+            .justified_root = justified_root,
             .finalized_epoch = genesis_finalized_cp.epoch,
-            .finalized_root = genesis_finalized_cp.root,
+            .finalized_root = finalized_root,
             .unrealized_justified_epoch = genesis_justified_cp.epoch,
-            .unrealized_justified_root = genesis_justified_cp.root,
+            .unrealized_justified_root = justified_root,
             .unrealized_finalized_epoch = genesis_finalized_cp.epoch,
-            .unrealized_finalized_root = genesis_finalized_cp.root,
+            .unrealized_finalized_root = finalized_root,
             .extra_meta = .{ .pre_merge = {} },
             .timeliness = true,
         };
 
-        const fc = try self.allocator.create(ForkChoice);
-        errdefer self.allocator.destroy(fc);
-        fc.* = try ForkChoice.init(
+        const fc = try fork_choice_mod.initFromAnchor(
             self.allocator,
-            .{
-                .justified_checkpoint = .{
-                    .epoch = genesis_justified_cp.epoch,
-                    .root = genesis_justified_cp.root,
-                },
-                .finalized_checkpoint = .{
-                    .epoch = genesis_finalized_cp.epoch,
-                    .root = genesis_finalized_cp.root,
-                },
-                .justified_balances = genesis_balances.items,
-            },
+            self.config,
             fc_anchor,
-            genesis_slot, // current_slot = genesis_slot (non-zero for checkpoint states)
+            genesis_slot,
+            CheckpointWithPayloadStatus.fromCheckpoint(.{
+                .epoch = genesis_justified_cp.epoch,
+                .root = justified_root,
+            }, .full),
+            CheckpointWithPayloadStatus.fromCheckpoint(.{
+                .epoch = genesis_finalized_cp.epoch,
+                .root = finalized_root,
+            }, .full),
+            genesis_balances.items,
+            .{ .getFn = dummyBalancesGetterFn },
+            .{},
+            .{},
         );
 
         // Clean up any previous fork choice (re-genesis case).
         if (self.fork_choice) |old_fc| {
-            old_fc.deinit(self.allocator);
-            self.allocator.destroy(old_fc);
+            fork_choice_mod.destroyFromAnchor(self.allocator, old_fc);
         }
         self.fork_choice = fc;
         self.block_importer.fork_choice = fc;
@@ -1656,6 +1673,12 @@ pub const BeaconNode = struct {
 
         const balances = checkpoint_state.epoch_cache.getEffectiveBalanceIncrements();
 
+        // The anchor block is the only block known to proto_array at init time.
+        // Force checkpoint roots to anchor_block_root so findHead can locate them.
+        // The state's checkpoint roots may reference blocks not yet in the DAG.
+        const cp_justified_root = anchor_block_root;
+        const cp_finalized_root = anchor_block_root;
+
         const fc_anchor = ProtoBlock{
             .slot = cp_slot,
             .block_root = anchor_block_root,
@@ -1663,40 +1686,39 @@ pub const BeaconNode = struct {
             .state_root = cached_state_root,
             .target_root = anchor_block_root,
             .justified_epoch = justified_cp.epoch,
-            .justified_root = justified_cp.root,
+            .justified_root = cp_justified_root,
             .finalized_epoch = finalized_cp.epoch,
-            .finalized_root = finalized_cp.root,
+            .finalized_root = cp_finalized_root,
             .unrealized_justified_epoch = justified_cp.epoch,
-            .unrealized_justified_root = justified_cp.root,
+            .unrealized_justified_root = cp_justified_root,
             .unrealized_finalized_epoch = finalized_cp.epoch,
-            .unrealized_finalized_root = finalized_cp.root,
+            .unrealized_finalized_root = cp_finalized_root,
             .extra_meta = .{ .pre_merge = {} },
             .timeliness = true,
         };
 
-        const fc = try self.allocator.create(ForkChoice);
-        errdefer self.allocator.destroy(fc);
-        fc.* = try ForkChoice.init(
+        const fc = try fork_choice_mod.initFromAnchor(
             self.allocator,
-            .{
-                .justified_checkpoint = .{
-                    .epoch = justified_cp.epoch,
-                    .root = justified_cp.root,
-                },
-                .finalized_checkpoint = .{
-                    .epoch = finalized_cp.epoch,
-                    .root = finalized_cp.root,
-                },
-                .justified_balances = balances.items,
-            },
+            self.config,
             fc_anchor,
             cp_slot,
+            CheckpointWithPayloadStatus.fromCheckpoint(.{
+                .epoch = justified_cp.epoch,
+                .root = cp_justified_root,
+            }, .full),
+            CheckpointWithPayloadStatus.fromCheckpoint(.{
+                .epoch = finalized_cp.epoch,
+                .root = cp_finalized_root,
+            }, .full),
+            balances.items,
+            .{ .getFn = dummyBalancesGetterFn },
+            .{},
+            .{},
         );
 
         // Clean up any previous fork choice.
         if (self.fork_choice) |old_fc| {
-            old_fc.deinit(self.allocator);
-            self.allocator.destroy(old_fc);
+            fork_choice_mod.destroyFromAnchor(self.allocator, old_fc);
         }
         self.fork_choice = fc;
         self.block_importer.fork_choice = fc;
@@ -3075,7 +3097,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         const fc = self.fork_choice orelse return;
 
         // Head block hash: from the imported block's execution payload.
-        const head_node = fc.getBlock(new_head_root);
+        const head_node = fc.getBlockDefaultStatus(new_head_root);
         const head_block_hash = if (head_node) |node|
             node.extra_meta.executionPayloadBlockHash() orelse return
         else
@@ -3083,14 +3105,14 @@ fn parseIp4(s: []const u8) ?[4]u8 {
 
         // Safe block hash: from the justified checkpoint's block.
         const justified_cp = fc.getJustifiedCheckpoint();
-        const safe_block_hash = if (fc.getBlock(justified_cp.root)) |node|
+        const safe_block_hash = if (fc.getBlockDefaultStatus(justified_cp.root)) |node|
             node.extra_meta.executionPayloadBlockHash() orelse std.mem.zeroes([32]u8)
         else
             std.mem.zeroes([32]u8);
 
         // Finalized block hash: from the finalized checkpoint's block.
         const finalized_cp = fc.getFinalizedCheckpoint();
-        const finalized_block_hash = if (fc.getBlock(finalized_cp.root)) |node|
+        const finalized_block_hash = if (fc.getBlockDefaultStatus(finalized_cp.root)) |node|
             node.extra_meta.executionPayloadBlockHash() orelse std.mem.zeroes([32]u8)
         else
             std.mem.zeroes([32]u8);
@@ -5215,7 +5237,7 @@ test "BeaconNode: forkchoiceUpdated called after block import for post-merge hea
         .timeliness = true,
     };
 
-    try fc.onBlock(allocator, post_merge_block, current_test_slot);
+    try fork_choice_mod.onBlockFromProto(fc, allocator, post_merge_block, current_test_slot);
 
     // Before FCU: mock has not received any forkchoice state.
     try std.testing.expect(mock.last_forkchoice_state == null);

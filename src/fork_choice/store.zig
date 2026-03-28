@@ -5,6 +5,8 @@ const consensus_types = @import("consensus_types");
 const primitives = consensus_types.primitive;
 const state_transition = @import("state_transition");
 
+const CachedBeaconState = state_transition.CachedBeaconState;
+
 const proto_array_mod = @import("proto_array.zig");
 const PayloadStatus = proto_array_mod.PayloadStatus;
 
@@ -46,7 +48,7 @@ pub const CheckpointWithPayloadStatus = struct {
 };
 
 /// Reference-counted effective balance increments.
-pub const EffectiveBalanceIncrementsRc = state_transition.EffectiveBalanceIncrementsRc;
+pub const JustifiedBalancesRc = state_transition.EffectiveBalanceIncrementsRc;
 
 /// Effective balance increments (1 increment = 1 ETH effective balance).
 pub const JustifiedBalances = state_transition.EffectiveBalanceIncrements;
@@ -65,10 +67,10 @@ pub fn computeTotalBalance(balances: []const u16) u64 {
 /// or approximate from a close state.
 pub const JustifiedBalancesGetter = struct {
     context: ?*anyopaque = null,
-    getFn: *const fn (context: ?*anyopaque, checkpoint: CheckpointWithPayloadStatus) JustifiedBalances,
+    getFn: *const fn (context: ?*anyopaque, checkpoint: CheckpointWithPayloadStatus, state: *CachedBeaconState) JustifiedBalances,
 
-    pub fn get(self: JustifiedBalancesGetter, checkpoint: CheckpointWithPayloadStatus) JustifiedBalances {
-        return self.getFn(self.context, checkpoint);
+    pub fn get(self: JustifiedBalancesGetter, checkpoint: CheckpointWithPayloadStatus, state: *CachedBeaconState) JustifiedBalances {
+        return self.getFn(self.context, checkpoint, state);
     }
 };
 
@@ -122,7 +124,7 @@ pub const ForkChoiceStore = struct {
     /// Balances are reference-counted: justified and unrealized_justified may share
     pub const JustifiedState = struct {
         checkpoint: CheckpointWithPayloadStatus,
-        balances: *EffectiveBalanceIncrementsRc,
+        balances: *JustifiedBalancesRc,
         total_balance: u64,
     };
 
@@ -140,7 +142,7 @@ pub const ForkChoiceStore = struct {
 
         try balances_list.appendSlice(justified_balances);
 
-        const balances_rc = try EffectiveBalanceIncrementsRc.init(allocator, balances_list);
+        const balances_rc = try JustifiedBalancesRc.init(allocator, balances_list);
         errdefer balances_rc.release();
 
         const total = computeTotalBalance(justified_balances);
@@ -177,7 +179,7 @@ pub const ForkChoiceStore = struct {
 
         try balances_list.appendSlice(balances);
 
-        const balances_rc = try EffectiveBalanceIncrementsRc.init(allocator, balances_list);
+        const balances_rc = try JustifiedBalancesRc.init(allocator, balances_list);
 
         self.justified.balances.release();
         self.justified = .{
@@ -218,7 +220,7 @@ fn makeCheckpoint(epoch: Epoch, root: Root) CheckpointWithPayloadStatus {
     return .{ .epoch = epoch, .root = root };
 }
 
-fn dummyBalancesGetter(_: ?*anyopaque, _: CheckpointWithPayloadStatus) JustifiedBalances {
+fn dummyBalancesGetter(_: ?*anyopaque, _: CheckpointWithPayloadStatus, _: *CachedBeaconState) JustifiedBalances {
     return JustifiedBalances.init(testing.allocator);
 }
 

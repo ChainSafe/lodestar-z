@@ -115,7 +115,7 @@ pub fn verifySanity(
     // Try fork choice first (authoritative). If the parent isn't in fork choice yet
     // (e.g., early in sync or for test states where FC is newly initialized),
     // fall back to block_to_state map which tracks all known parent block roots.
-    const parent_node_opt = fork_choice.getBlock(parent_root);
+    const parent_node_opt = fork_choice.getBlockDefaultStatus(parent_root);
     const parent_known_in_map = block_to_state.contains(parent_root);
 
     if (parent_node_opt == null and !parent_known_in_map) {
