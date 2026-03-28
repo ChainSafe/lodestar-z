@@ -477,7 +477,12 @@ pub const Chain = struct {
 
     /// Advance the head state by one empty slot (no block).
     ///
-    /// Used for testing skip slots.
+    /// Used for testing skip slots and by onSlot for empty slots.
+    ///
+    /// P0-5 fix: Also calls fork_choice.updateTime(target_slot) so that fork choice
+    /// time stays in sync with the head tracker. Without this, fork choice would reject
+    /// blocks at the current slot as "future" if onSlot was called but advanceSlot was
+    /// not (or vice versa).
     pub fn advanceSlot(self: *Chain, target_slot: u64) !void {
         const head_state_root = self.head_tracker.head_state_root;
         const pre_state = self.block_state_cache.get(head_state_root) orelse
@@ -498,6 +503,13 @@ pub const Chain = struct {
             self.head_tracker.head_root,
             new_state_root,
         );
+
+        // Update fork choice time to keep it in sync with head tracker (P0-5 fix).
+        // onSlot already calls updateTime, but advanceSlot can be called independently
+        // (e.g., from tests, batch sync). Both paths must call updateTime.
+        if (self.fork_choice) |fc| {
+            fc.updateTime(self.allocator, target_slot) catch {};
+        }
 
         self.head_tracker.head_state_root = new_state_root;
         self.head_tracker.head_slot = target_slot;

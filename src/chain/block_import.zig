@@ -79,12 +79,24 @@ pub const HeadTracker = struct {
     }
 
     pub fn onBlock(self: *HeadTracker, block_root: [32]u8, slot: u64, state_root: [32]u8) !void {
+        // Record slot → block_root mapping for lookups (e.g. getStatus).
+        // NOTE: Do NOT update head_root/head_slot/head_state_root here.
+        // Head is authoritative only when set by fork choice (setHead).
+        // Naive slot comparison (slot >= head_slot) fails during forks where a
+        // lower-slot block on a heavier branch should become the new head.
+        // See: P0-3 fix — head is set only by fork choice updateAndGetHead results.
         try self.slot_roots.put(slot, block_root);
-        if (slot >= self.head_slot) {
-            self.head_root = block_root;
-            self.head_slot = slot;
-            self.head_state_root = state_root;
-        }
+        _ = state_root; // state_root stored by fork choice / block_to_state map
+    }
+
+    /// Update the head based on fork choice's authoritative head result.
+    ///
+    /// Called by importVerifiedBlock after updateAndGetHead succeeds.
+    /// This is the ONLY place that should update head_root/head_slot.
+    pub fn setHead(self: *HeadTracker, block_root: [32]u8, slot: u64, state_root: [32]u8) void {
+        self.head_root = block_root;
+        self.head_slot = slot;
+        self.head_state_root = state_root;
     }
 
     pub fn onEpochTransition(self: *HeadTracker, state: *CachedBeaconState) !void {
@@ -140,7 +152,9 @@ pub fn verifySanity(
 // Tests
 // ---------------------------------------------------------------------------
 
-test "HeadTracker: basic tracking" {
+test "HeadTracker: basic tracking — onBlock records slots, setHead updates head" {
+    // P0-3 fix: onBlock no longer updates head_root/head_slot.
+    // Head is ONLY updated via setHead (called by fork choice recompute).
     var tracker = HeadTracker.init(std.testing.allocator, [_]u8{0x00} ** 32);
     defer tracker.deinit();
 
@@ -148,11 +162,19 @@ test "HeadTracker: basic tracking" {
 
     const root_1 = [_]u8{0x01} ** 32;
     try tracker.onBlock(root_1, 1, [_]u8{0x11} ** 32);
+    // onBlock should NOT change head_slot — still 0 (genesis).
+    try std.testing.expectEqual(@as(u64, 0), tracker.head_slot);
+
+    // setHead is the only way to update the head.
+    tracker.setHead(root_1, 1, [_]u8{0x11} ** 32);
     try std.testing.expectEqual(@as(u64, 1), tracker.head_slot);
     try std.testing.expectEqualSlices(u8, &root_1, &tracker.head_root);
 
     const root_3 = [_]u8{0x03} ** 32;
     try tracker.onBlock(root_3, 3, [_]u8{0x33} ** 32);
+    // onBlock should NOT change head_slot — still 1.
+    try std.testing.expectEqual(@as(u64, 1), tracker.head_slot);
+    tracker.setHead(root_3, 3, [_]u8{0x33} ** 32);
     try std.testing.expectEqual(@as(u64, 3), tracker.head_slot);
     try std.testing.expectEqualSlices(u8, &root_3, &tracker.head_root);
 }
