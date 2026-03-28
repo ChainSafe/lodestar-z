@@ -354,7 +354,8 @@ pub const AttestationService = struct {
         const att_data_resp = try self.api.produceAttestationData(io, slot, 0);
 
         // Build the AttestationData SSZ struct.
-        const att_data = consensus_types.phase0.AttestationData.Type{
+        // Note: index is set per-duty below since committee_index is part of the signing root pre-Electra.
+        var att_data = consensus_types.phase0.AttestationData.Type{
             .slot = slot,
             .index = 0,
             .beacon_block_root = att_data_resp.beacon_block_root,
@@ -397,10 +398,6 @@ pub const AttestationService = struct {
             return std.mem.zeroes([32]u8);
         }
 
-        // Compute attestation signing root once (same data for all validators this slot).
-        var signing_root: [32]u8 = undefined;
-        try signing_mod.attestationSigningRoot(self.signing_ctx, &att_data, &signing_root);
-
         // Sign for each validator with a duty this slot and collect JSON.
         var attestations_json = std.ArrayList(u8).init(self.allocator);
         defer attestations_json.deinit();
@@ -419,6 +416,11 @@ pub const AttestationService = struct {
                 log.warn("skipping attestation slot={d} validator_index={d}: signing not safe", .{ slot, dp.duty.validator_index });
                 continue;
             }
+
+            // Pre-Electra: committee_index is part of the signing root.
+            att_data.index = dp.duty.committee_index;
+            var signing_root: [32]u8 = undefined;
+            try signing_mod.attestationSigningRoot(self.signing_ctx, &att_data, &signing_root);
 
             const sig = self.validator_store.signAttestation(
                 dp.duty.pubkey,
