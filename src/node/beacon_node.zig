@@ -3680,25 +3680,73 @@ fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             // 1. Collect N attestation signature sets
             // 2. Batch-verify all N signatures at once (~3-10x faster than individual)
             // 3. On batch success: import all attestations to fork choice + pool
-            // 4. On batch failure: fall back to individual verification
-            //
-            // The batch is formed by WorkQueues.formAttestationBatch() which
-            // pops up to max_attestation_batch_size (64) items from the LIFO queue.
-            //
-            // TODO: When data handles carry real decoded attestation data,
-            // build signature sets and call BatchVerifier.verifyAll().
-            // For now, count items for metrics.
-            if (node.metrics) |m| {
-                _ = m; // TODO: m.attestation_batches_total.incr()
-            }
+            // 4. On batch failure: fall back to individual verification to find bad one(s)
+            const QueuedAttestation = gossip_handler_mod.QueuedAttestation;
+
             std.log.debug("Processor: attestation batch (count={d})", .{batch.count});
 
-            // Process each item in the batch individually for now.
-            // When BLS batch verify is wired, this loop only runs on batch failure.
+            // Step 1: Try batch BLS verification of all attestations.
+            var batch_valid = false;
+            if (node.gossip_handler) |gh| {
+                if (gh.verifyAttestationSignatureFn) |verifyFn| {
+                    // Attempt batch: verify each individually for now.
+                    // TODO: Collect signature sets into BatchVerifier for true batch pairing.
+                    // When real signature set extraction is implemented, this becomes:
+                    //   var bv = BatchVerifier.init(node.bls_thread_pool);
+                    //   for items: bv.addSet(extractSigSet(queued.ssz_bytes));
+                    //   batch_valid = bv.verifyAll();
+                    batch_valid = true;
+                    var j: u32 = 0;
+                    while (j < batch.count) : (j += 1) {
+                        const att_work = batch.items[j];
+                        const queued: *QueuedAttestation = @ptrCast(@alignCast(att_work.data));
+                        if (!verifyFn(gh.node, queued.ssz_bytes)) {
+                            batch_valid = false;
+                            break;
+                        }
+                    }
+                } else {
+                    // No BLS verification configured — accept all (test mode).
+                    batch_valid = true;
+                }
+            } else {
+                batch_valid = true;
+            }
+
+            // Step 2: Import valid attestations to fork choice + pool.
             var i: u32 = 0;
             while (i < batch.count) : (i += 1) {
                 const att_work = batch.items[i];
-                _ = att_work; // TODO: import individual attestation
+                const queued: *QueuedAttestation = @ptrCast(@alignCast(att_work.data));
+                defer queued.deinit();
+
+                if (!batch_valid) {
+                    // Batch failed — verify individually to find the bad one(s).
+                    if (node.gossip_handler) |gh| {
+                        if (gh.verifyAttestationSignatureFn) |verifyFn| {
+                            if (!verifyFn(gh.node, queued.ssz_bytes)) {
+                                std.log.warn("Attestation BLS failed in batch fallback slot={d}", .{queued.att.slot});
+                                continue; // Skip this invalid attestation.
+                            }
+                        }
+                    }
+                }
+
+                // Import to fork choice (apply vote weight).
+                // Op pool insertion requires a full Attestation struct — deferred to
+                // when full attestation objects are threaded through the pipeline.
+                if (node.chain.fork_choice) |fc| {
+                    fc.onSingleVote(
+                        node.allocator,
+                        @intCast(queued.att.attester_index),
+                        queued.att.target_root,
+                        queued.att.target_epoch,
+                    ) catch |err| {
+                        std.log.warn("FC onSingleVote failed validator={d} slot={d}: {}", .{
+                            queued.att.attester_index, queued.att.slot, err,
+                        });
+                    };
+                }
             }
         },
         .aggregate_batch => |batch| {
@@ -3710,6 +3758,35 @@ fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             while (i < batch.count) : (i += 1) {
                 const agg_work = batch.items[i];
                 _ = agg_work; // TODO: import individual aggregate
+            }
+        },
+        .attestation => |att_work| {
+            // Single attestation (not batched).
+            // BLS verify and import to fork choice.
+            const QueuedAttestation = gossip_handler_mod.QueuedAttestation;
+            const queued: *QueuedAttestation = @ptrCast(@alignCast(att_work.data));
+            defer queued.deinit();
+
+            // BLS signature verification.
+            if (node.gossip_handler) |gh| {
+                if (gh.verifyAttestationSignatureFn) |verifyFn| {
+                    if (!verifyFn(gh.node, queued.ssz_bytes)) {
+                        std.log.warn("Single attestation BLS failed slot={d}", .{queued.att.slot});
+                        return;
+                    }
+                }
+            }
+
+            // Import to fork choice.
+            if (node.chain.fork_choice) |fc| {
+                fc.onSingleVote(
+                    node.allocator,
+                    @intCast(queued.att.attester_index),
+                    queued.att.target_root,
+                    queued.att.target_epoch,
+                ) catch |err| {
+                    std.log.warn("FC onSingleVote failed validator={d}: {}", .{ queued.att.attester_index, err });
+                };
             }
         },
         else => {
