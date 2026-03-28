@@ -227,6 +227,85 @@ pub const LivenessTracker = struct {
             );
         }
     }
+
+    /// Log an epoch effectiveness summary line.
+    ///
+    /// Emitted at each epoch boundary by the validator's index tracker callback.
+    ///
+    /// Example output:
+    ///   [info] [validator] Epoch 12345 summary: 2 validators active,
+    ///     2/2 attestations (100.0%), 0/0 blocks proposed, 0/0 sync committee (100.0%)
+    ///
+    /// TS: ValidatorMonitor.scrapeSlot logs similar per-epoch metrics.
+    pub fn logEpochSummary(
+        self: *LivenessTracker,
+        epoch: u64,
+        total_validators: usize,
+        missed_blocks: u64,
+    ) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var total_att: u64 = 0;
+        var hit_att: u64 = 0;
+        var total_sync: u64 = 0;
+        var hit_sync: u64 = 0;
+        var missed_att_validators: u64 = 0;
+
+        for (self.entries.items) |*e| {
+            // Check if this validator had an attestation result for this epoch.
+            var att_this_epoch: ?bool = null;
+            var sync_this_epoch: ?bool = null;
+
+            // Scan history window for this epoch.
+            for (e.attestation_history) |maybe| {
+                if (maybe) |r| {
+                    if (r.epoch == epoch) {
+                        att_this_epoch = r.performed;
+                        break;
+                    }
+                }
+            }
+            for (e.sync_history) |maybe| {
+                if (maybe) |r| {
+                    if (r.epoch == epoch) {
+                        sync_this_epoch = r.performed;
+                        break;
+                    }
+                }
+            }
+
+            if (att_this_epoch) |performed| {
+                total_att += 1;
+                if (performed) hit_att += 1 else missed_att_validators += 1;
+            }
+            if (sync_this_epoch) |performed| {
+                total_sync += 1;
+                if (performed) hit_sync += 1;
+            }
+        }
+
+        const att_pct: f64 = if (total_att > 0)
+            @as(f64, @floatFromInt(hit_att)) / @as(f64, @floatFromInt(total_att)) * 100.0
+        else
+            100.0;
+        const sync_pct: f64 = if (total_sync > 0)
+            @as(f64, @floatFromInt(hit_sync)) / @as(f64, @floatFromInt(total_sync)) * 100.0
+        else
+            100.0;
+
+        log.info(
+            "Epoch {d} summary: {d} validators active, {d}/{d} attestations ({d:.1}%), " ++
+                "{d} blocks missed, {d}/{d} sync committee ({d:.1}%)",
+            .{
+                epoch,
+                total_validators,
+                hit_att, total_att, att_pct,
+                missed_blocks,
+                hit_sync, total_sync, sync_pct,
+            },
+        );
+    }
 };
 
 // ---------------------------------------------------------------------------

@@ -146,4 +146,9 @@ pub const ValidatorConfig = struct {
     /// URL of Web3Signer remote signing service (null = disabled).
     /// When set, public keys are fetched from the signer at startup.
     web3signer_url: ?[]const u8 = null,
+    /// Additional beacon node URLs for fallback (beyond beacon_node_url).
+    ///
+    /// When set, api_client will try these URLs if the primary fails.
+    /// TS: --beaconNodes flag (array of BN URLs).
+    beacon_node_fallback_urls: []const []const u8 = &.{},
 };

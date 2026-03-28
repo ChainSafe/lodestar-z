@@ -77,3 +77,7 @@ pub const DutyKind = liveness.DutyKind;
 
 // Genesis validators root verified interchange import.
 pub const importInterchangeVerified = interchange.importInterchangeVerified;
+
+// Syncing status tracker — pauses duties when BN is out of sync.
+pub const syncing_tracker = @import("syncing_tracker.zig");
+pub const SyncingTracker = syncing_tracker.SyncingTracker;
