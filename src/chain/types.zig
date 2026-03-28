@@ -139,6 +139,12 @@ pub const ChainReorgEvent = struct {
     depth: u64,
     old_head_root: Root,
     new_head_root: Root,
+    /// State root of the old head (before reorg).
+    old_state_root: Root,
+    /// State root of the new head (after reorg).
+    new_state_root: Root,
+    /// Epoch of the new head slot.
+    epoch: Epoch,
 };
 
 // ---------------------------------------------------------------------------
