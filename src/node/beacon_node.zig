@@ -2128,11 +2128,17 @@ pub const BeaconNode = struct {
                 self.processGossipEvents(p2p);
             }
 
-            // Drain the BeaconProcessor work queues.
+            // Drain the BeaconProcessor work queues (up to 128 items per tick).
             // Items were enqueued by gossip/reqresp handlers above.
             // Dispatches in strict priority order: blocks > attestations > slashings > etc.
+            // Capped at 128 to avoid monopolizing the event loop (matches TS Lodestar).
             if (self.beacon_processor) |bp| {
-                _ = bp.drainAll();
+                const dispatched = bp.tick(128);
+                if (dispatched > 0) {
+                    std.log.debug("Processor: dispatched {d} items ({d} queued)", .{
+                        dispatched, bp.totalQueued(),
+                    });
+                }
             }
 
             // Tick the sync service state machine — evaluates mode, dispatches
