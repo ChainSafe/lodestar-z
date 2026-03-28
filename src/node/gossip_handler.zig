@@ -390,12 +390,14 @@ pub const GossipHandler = struct {
             return GossipHandlerError.DecodeFailed;
         const exit = decoded.voluntary_exit;
 
-        // Phase 1: basic validation — validator index must be within known set.
-        const vc = self.getValidatorCount();
-        if (exit.validator_index >= vc) return GossipHandlerError.ValidationRejected;
-
-        // Phase 1: exit epoch must be <= current epoch (can't exit in the future).
-        if (exit.exit_epoch > self.current_epoch) return GossipHandlerError.ValidationIgnored;
+        // Phase 1: fast validation via chain gossip validation layer.
+        var chain_state = self.makeChainState();
+        const action_exit = chain_gossip.validateGossipVoluntaryExit(
+            exit.validator_index,
+            exit.exit_epoch,
+            &chain_state,
+        );
+        try checkAction(action_exit);
 
         // Phase 1c: BLS signature verification.
         // [REJECT] The voluntary exit signature is valid.
@@ -435,16 +437,17 @@ pub const GossipHandler = struct {
             return GossipHandlerError.DecodeFailed;
         const ps = decoded.proposer_slashing;
 
-        // Phase 1: proposer must be within known validator set.
-        const vc = self.getValidatorCount();
-        if (ps.proposer_index >= vc) return GossipHandlerError.ValidationRejected;
-
-        // Phase 1: headers must have the same slot (same proposer slot).
-        if (ps.header_1_slot != ps.header_2_slot) return GossipHandlerError.ValidationRejected;
-
-        // Phase 1: body roots must differ (different blocks for same slot = slashable).
-        if (std.mem.eql(u8, &ps.header_1_body_root, &ps.header_2_body_root))
-            return GossipHandlerError.ValidationRejected;
+        // Phase 1: fast validation via chain gossip validation layer.
+        var chain_state_ps = self.makeChainState();
+        const action_ps = chain_gossip.validateGossipProposerSlashing(
+            ps.proposer_index,
+            ps.header_1_slot,
+            ps.header_2_slot,
+            ps.header_1_body_root,
+            ps.header_2_body_root,
+            &chain_state_ps,
+        );
+        try checkAction(action_ps);
 
         // Phase 1c: BLS signature verification.
         // [REJECT] Both signed header signatures are valid.
@@ -484,8 +487,18 @@ pub const GossipHandler = struct {
             return GossipHandlerError.DecodeFailed;
         const as = decoded.attester_slashing;
 
-        // Phase 1: attestation data must be slashable.
-        if (!as.is_slashable) return GossipHandlerError.ValidationRejected;
+        // Phase 1: fast validation via chain gossip validation layer.
+        // Compute a dedup key from SSZ bytes (use first 32 bytes of snappy-free data as root).
+        var slashing_root: [32]u8 = std.mem.zeroes([32]u8);
+        const key_len = @min(ssz_bytes.len, 32);
+        @memcpy(slashing_root[0..key_len], ssz_bytes[0..key_len]);
+        var chain_state_as = self.makeChainState();
+        const action_as = chain_gossip.validateGossipAttesterSlashing(
+            as.is_slashable,
+            slashing_root,
+            &chain_state_as,
+        );
+        try checkAction(action_as);
 
         // Phase 1c: BLS signature verification.
         // [REJECT] Both indexed attestation signatures are valid.
@@ -523,9 +536,13 @@ pub const GossipHandler = struct {
             return GossipHandlerError.DecodeFailed;
         const change = decoded.bls_to_execution_change;
 
-        // Phase 1: validator index must be within known set.
-        const vc = self.getValidatorCount();
-        if (change.validator_index >= vc) return GossipHandlerError.ValidationRejected;
+        // Phase 1: fast validation via chain gossip validation layer.
+        var chain_state_bls = self.makeChainState();
+        const action_bls = chain_gossip.validateGossipBlsToExecutionChange(
+            change.validator_index,
+            &chain_state_bls,
+        );
+        try checkAction(action_bls);
 
         // Phase 1c: BLS signature verification.
         // [REJECT] The BLS-to-execution change signature is valid.
@@ -565,13 +582,14 @@ pub const GossipHandler = struct {
             return GossipHandlerError.DecodeFailed;
         const contrib = decoded.sync_committee_contribution_and_proof;
 
-        // Phase 1: aggregator must be within known validator set.
-        const vc = self.getValidatorCount();
-        if (contrib.aggregator_index >= vc) return GossipHandlerError.ValidationRejected;
-
-        // Phase 1: contribution slot must be within valid range.
-        if (contrib.contribution_slot > self.current_slot + 1) return GossipHandlerError.ValidationIgnored;
-        if (self.finalized_slot > 0 and contrib.contribution_slot < self.finalized_slot) return GossipHandlerError.ValidationIgnored;
+        // Phase 1: fast validation via chain gossip validation layer.
+        var chain_state_sc = self.makeChainState();
+        const action_sc = chain_gossip.validateGossipSyncContributionAndProof(
+            contrib.aggregator_index,
+            contrib.contribution_slot,
+            &chain_state_sc,
+        );
+        try checkAction(action_sc);
 
         // Phase 2: import to sync contribution pool.
         if (self.importSyncContributionFn) |importFn| {
@@ -604,13 +622,14 @@ pub const GossipHandler = struct {
             return GossipHandlerError.DecodeFailed;
         const msg = decoded.sync_committee;
 
-        // Phase 1: validator must be within known set.
-        const vc = self.getValidatorCount();
-        if (msg.validator_index >= vc) return GossipHandlerError.ValidationRejected;
-
-        // Phase 1: slot must be within valid range.
-        if (msg.slot > self.current_slot + 1) return GossipHandlerError.ValidationIgnored;
-        if (self.finalized_slot > 0 and msg.slot < self.finalized_slot) return GossipHandlerError.ValidationIgnored;
+        // Phase 1: fast validation via chain gossip validation layer.
+        var chain_state_sm = self.makeChainState();
+        const action_sm = chain_gossip.validateGossipSyncCommitteeMessage(
+            msg.validator_index,
+            msg.slot,
+            &chain_state_sm,
+        );
+        try checkAction(action_sm);
 
         // Phase 1c: BLS signature verification.
         // [REJECT] The sync committee message signature is valid.
@@ -652,27 +671,19 @@ pub const GossipHandler = struct {
             return GossipHandlerError.DecodeFailed;
         const blob = decoded.blob_sidecar;
 
-        // Phase 1: blob index must match subnet_id.
-        if (blob.index != subnet_id) return GossipHandlerError.ValidationRejected;
+        // Phase 1: fast validation via chain gossip validation layer.
+        var chain_state_blob = self.makeChainState();
+        const action_blob = chain_gossip.validateGossipBlobSidecar(
+            blob.slot,
+            blob.proposer_index,
+            blob.index,
+            subnet_id,
+            blob.block_parent_root,
+            &chain_state_blob,
+        );
+        try checkAction(action_blob);
 
-        // Phase 1: slot must be within valid range.
-        if (blob.slot > self.current_slot + 1) return GossipHandlerError.ValidationIgnored;
-        if (self.finalized_slot > 0 and blob.slot < self.finalized_slot) return GossipHandlerError.ValidationIgnored;
-
-        // Phase 1: proposer must be within known validator set.
-        const vc = self.getValidatorCount();
-        if (blob.proposer_index >= vc) return GossipHandlerError.ValidationRejected;
-
-        // Compute block root from the signed block header in the sidecar.
-        // For now, use a synthetic root from (slot, proposer, parent) like blocks.
-        var block_root: [32]u8 = std.mem.zeroes([32]u8);
-        std.mem.writeInt(u64, block_root[0..8], blob.slot, .little);
-        std.mem.writeInt(u64, block_root[8..16], blob.proposer_index, .little);
-        @memcpy(block_root[16..32], blob.block_parent_root[0..16]);
-
-        // Import via the node (type-erased). We use importBlockFn's node pointer
-        // to access importBlobSidecar. Since we can't call importBlobSidecar directly
-        // through the type-erased pointer, we log and skip for now.
+        // Phase 2: log acceptance.
         // TODO: Add importBlobSidecarFn callback like importAttestationFn.
         std.log.info("Accepted blob_sidecar: index={d} slot={d} proposer={d} ({d} bytes)", .{
             blob.index,

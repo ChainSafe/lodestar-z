@@ -526,3 +526,398 @@ test "gossip data column: reject proposer out of bounds" {
     const result = validateGossipDataColumnSidecar(100, 1000, 0, [_]u8{0xAA} ** 32, [_]u8{0xEE} ** 32, &state);
     try testing.expectEqual(GossipAction.reject, result);
 }
+
+// ── Blob sidecar validation ─────────────────────────────────────────────────
+
+/// Fast Phase 1 validation for a `BlobSidecar` on the `blob_sidecar_{subnet_id}` topic.
+///
+/// Checks (spec reference: deneb/p2p-interface.md#blob_sidecar_subnet_id):
+/// 1. [REJECT]  blob.index must match the subnet_id.
+/// 2. [IGNORE]  Not from a future slot (with clock disparity tolerance).
+/// 3. [IGNORE]  Slot is greater than the finalized slot.
+/// 4. [REJECT]  Proposer index is within the known validator set.
+/// 5. [IGNORE]  Parent block root is known in our fork choice.
+pub fn validateGossipBlobSidecar(
+    block_slot: u64,
+    proposer_index: u64,
+    blob_index: u64,
+    subnet_id: u64,
+    parent_root: [32]u8,
+    state: *const ChainState,
+) GossipAction {
+    // [REJECT] blob.index must match subnet_id.
+    if (blob_index != subnet_id) return .reject;
+
+    // [IGNORE] Not from a future slot.
+    if (block_slot > state.current_slot + MAX_FUTURE_SLOT_TOLERANCE) return .ignore;
+
+    // [IGNORE] Not already finalized.
+    if (block_slot <= state.finalized_slot) return .ignore;
+
+    // [REJECT] Proposer index within validator set bounds.
+    const validator_count = state.getValidatorCount();
+    if (proposer_index >= validator_count) return .reject;
+
+    // [IGNORE] Parent root is known in our fork choice.
+    if (!state.isKnownBlockRoot(parent_root)) return .ignore;
+
+    return .accept;
+}
+
+// ── Voluntary exit validation ───────────────────────────────────────────────
+
+/// Fast Phase 1 validation for a `SignedVoluntaryExit` on the `voluntary_exit` topic.
+///
+/// Checks (spec reference: phase0/p2p-interface.md#voluntary_exit):
+/// 1. [REJECT]  Validator index is within the known validator set.
+/// 2. [IGNORE]  Not already seen for this validator (dedup via SeenCache).
+/// 3. [IGNORE]  Exit epoch is not in the future (exit must be processable now).
+pub fn validateGossipVoluntaryExit(
+    validator_index: u64,
+    exit_epoch: u64,
+    state: *const ChainState,
+) GossipAction {
+    // [REJECT] Validator index within known set.
+    const validator_count = state.getValidatorCount();
+    if (validator_index >= validator_count) return .reject;
+
+    // [IGNORE] Deduplicate: first valid exit for this validator.
+    if (state.seen_cache.hasSeenExit(@intCast(validator_index))) return .ignore;
+    state.seen_cache.markExitSeen(@intCast(validator_index)) catch return .ignore;
+
+    // [IGNORE] Exit epoch must not be in the future (can't exit before the epoch is reached).
+    if (exit_epoch > state.current_epoch) return .ignore;
+
+    return .accept;
+}
+
+// ── Proposer slashing validation ────────────────────────────────────────────
+
+/// Fast Phase 1 validation for a `ProposerSlashing` on the `proposer_slashing` topic.
+///
+/// Checks (spec reference: phase0/p2p-interface.md#proposer_slashing):
+/// 1. [REJECT]  Proposer index is within the known validator set.
+/// 2. [IGNORE]  Not already seen for this proposer (dedup via SeenCache).
+/// 3. [REJECT]  Both headers are for the same slot (required for slashing).
+/// 4. [REJECT]  Headers differ (same body root = not slashable).
+pub fn validateGossipProposerSlashing(
+    proposer_index: u64,
+    header_1_slot: u64,
+    header_2_slot: u64,
+    header_1_body_root: [32]u8,
+    header_2_body_root: [32]u8,
+    state: *const ChainState,
+) GossipAction {
+    // [REJECT] Proposer index within known validator set.
+    const validator_count = state.getValidatorCount();
+    if (proposer_index >= validator_count) return .reject;
+
+    // [IGNORE] Deduplicate: first valid slashing for this proposer.
+    if (state.seen_cache.hasSeenProposerSlashing(@intCast(proposer_index))) return .ignore;
+    state.seen_cache.markProposerSlashingSeen(@intCast(proposer_index)) catch return .ignore;
+
+    // [REJECT] Both headers must be for the same slot.
+    if (header_1_slot != header_2_slot) return .reject;
+
+    // [REJECT] Headers must differ (otherwise not slashable).
+    if (std.mem.eql(u8, &header_1_body_root, &header_2_body_root)) return .reject;
+
+    return .accept;
+}
+
+// ── Attester slashing validation ────────────────────────────────────────────
+
+/// Fast Phase 1 validation for an `AttesterSlashing` on the `attester_slashing` topic.
+///
+/// Checks (spec reference: phase0/p2p-interface.md#attester_slashing):
+/// 1. [REJECT]  The attestation data must be slashable (double vote or surround vote).
+/// 2. [IGNORE]  Not already seen (dedup by slashing root).
+pub fn validateGossipAttesterSlashing(
+    is_slashable: bool,
+    slashing_root: [32]u8,
+    state: *const ChainState,
+) GossipAction {
+    // [REJECT] Attestation data must be slashable.
+    if (!is_slashable) return .reject;
+
+    // [IGNORE] Deduplicate by slashing root.
+    if (state.seen_cache.hasSeenAttesterSlashing(slashing_root)) return .ignore;
+    state.seen_cache.markAttesterSlashingSeen(slashing_root) catch return .ignore;
+
+    return .accept;
+}
+
+// ── BLS-to-execution change validation ─────────────────────────────────────
+
+/// Fast Phase 1 validation for a `SignedBLSToExecutionChange` on the
+/// `bls_to_execution_change` topic.
+///
+/// Checks (spec reference: capella/p2p-interface.md#bls_to_execution_change):
+/// 1. [REJECT]  Validator index is within the known validator set.
+/// 2. [IGNORE]  Not already seen for this validator (dedup via SeenCache).
+pub fn validateGossipBlsToExecutionChange(
+    validator_index: u64,
+    state: *const ChainState,
+) GossipAction {
+    // [REJECT] Validator index within known set.
+    const validator_count = state.getValidatorCount();
+    if (validator_index >= validator_count) return .reject;
+
+    // [IGNORE] Deduplicate: first valid change for this validator.
+    if (state.seen_cache.hasSeenBlsChange(@intCast(validator_index))) return .ignore;
+    state.seen_cache.markBlsChangeSeen(@intCast(validator_index)) catch return .ignore;
+
+    return .accept;
+}
+
+// ── Sync committee message validation ──────────────────────────────────────
+
+/// Fast Phase 1 validation for a `SyncCommitteeMessage` on a
+/// `sync_committee_{subnet}` topic.
+///
+/// Checks (spec reference: altair/p2p-interface.md#sync_committee_message):
+/// 1. [REJECT]  Validator index is within the known validator set.
+/// 2. [IGNORE]  Slot is not from a future slot.
+/// 3. [IGNORE]  Slot is not already finalized.
+pub fn validateGossipSyncCommitteeMessage(
+    validator_index: u64,
+    slot: u64,
+    state: *const ChainState,
+) GossipAction {
+    // [REJECT] Validator index within known set.
+    const validator_count = state.getValidatorCount();
+    if (validator_index >= validator_count) return .reject;
+
+    // [IGNORE] Not from a future slot.
+    if (slot > state.current_slot + MAX_FUTURE_SLOT_TOLERANCE) return .ignore;
+
+    // [IGNORE] Not already finalized.
+    if (state.finalized_slot > 0 and slot < state.finalized_slot) return .ignore;
+
+    return .accept;
+}
+
+// ── Sync committee contribution validation ──────────────────────────────────
+
+/// Fast Phase 1 validation for a `SignedContributionAndProof` on the
+/// `sync_committee_contribution_and_proof` topic.
+///
+/// Checks (spec reference: altair/p2p-interface.md#sync_committee_contribution_and_proof):
+/// 1. [REJECT]  Aggregator index is within the known validator set.
+/// 2. [IGNORE]  Contribution slot is not from a future slot.
+/// 3. [IGNORE]  Contribution slot is not already finalized.
+pub fn validateGossipSyncContributionAndProof(
+    aggregator_index: u64,
+    contribution_slot: u64,
+    state: *const ChainState,
+) GossipAction {
+    // [REJECT] Aggregator index within known set.
+    const validator_count = state.getValidatorCount();
+    if (aggregator_index >= validator_count) return .reject;
+
+    // [IGNORE] Not from a future slot.
+    if (contribution_slot > state.current_slot + MAX_FUTURE_SLOT_TOLERANCE) return .ignore;
+
+    // [IGNORE] Not already finalized.
+    if (state.finalized_slot > 0 and contribution_slot < state.finalized_slot) return .ignore;
+
+    return .accept;
+}
+
+// ── Tests for new validators ────────────────────────────────────────────────
+
+test "gossip blob sidecar: accept valid sidecar" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipBlobSidecar(100, 5, 0, 0, [_]u8{0xAA} ** 32, &state);
+    try testing.expectEqual(GossipAction.accept, result);
+}
+
+test "gossip blob sidecar: reject wrong subnet" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipBlobSidecar(100, 5, 2, 3, [_]u8{0xAA} ** 32, &state);
+    try testing.expectEqual(GossipAction.reject, result);
+}
+
+test "gossip blob sidecar: ignore future slot" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipBlobSidecar(102, 5, 0, 0, [_]u8{0xAA} ** 32, &state);
+    try testing.expectEqual(GossipAction.ignore, result);
+}
+
+test "gossip voluntary exit: accept valid exit" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipVoluntaryExit(10, 3, &state);
+    try testing.expectEqual(GossipAction.accept, result);
+}
+
+test "gossip voluntary exit: reject out of bounds validator" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipVoluntaryExit(1000, 3, &state);
+    try testing.expectEqual(GossipAction.reject, result);
+}
+
+test "gossip voluntary exit: ignore duplicate" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const r1 = validateGossipVoluntaryExit(10, 3, &state);
+    try testing.expectEqual(GossipAction.accept, r1);
+    const r2 = validateGossipVoluntaryExit(10, 3, &state);
+    try testing.expectEqual(GossipAction.ignore, r2);
+}
+
+test "gossip voluntary exit: ignore future exit epoch" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache); // current_epoch = 3
+    const result = validateGossipVoluntaryExit(11, 5, &state); // exit_epoch 5 > current 3
+    try testing.expectEqual(GossipAction.ignore, result);
+}
+
+test "gossip proposer slashing: accept valid slashing" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipProposerSlashing(5, 100, 100, [_]u8{0xAA} ** 32, [_]u8{0xBB} ** 32, &state);
+    try testing.expectEqual(GossipAction.accept, result);
+}
+
+test "gossip proposer slashing: reject different slots" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipProposerSlashing(5, 100, 101, [_]u8{0xAA} ** 32, [_]u8{0xBB} ** 32, &state);
+    try testing.expectEqual(GossipAction.reject, result);
+}
+
+test "gossip proposer slashing: reject identical headers" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const same = [_]u8{0xAA} ** 32;
+    const result = validateGossipProposerSlashing(5, 100, 100, same, same, &state);
+    try testing.expectEqual(GossipAction.reject, result);
+}
+
+test "gossip proposer slashing: ignore duplicate proposer" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const r1 = validateGossipProposerSlashing(5, 100, 100, [_]u8{0xAA} ** 32, [_]u8{0xBB} ** 32, &state);
+    try testing.expectEqual(GossipAction.accept, r1);
+    const r2 = validateGossipProposerSlashing(5, 100, 100, [_]u8{0xCC} ** 32, [_]u8{0xDD} ** 32, &state);
+    try testing.expectEqual(GossipAction.ignore, r2);
+}
+
+test "gossip attester slashing: accept slashable" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const root = [_]u8{0x11} ** 32;
+    const result = validateGossipAttesterSlashing(true, root, &state);
+    try testing.expectEqual(GossipAction.accept, result);
+}
+
+test "gossip attester slashing: reject not slashable" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const root = [_]u8{0x22} ** 32;
+    const result = validateGossipAttesterSlashing(false, root, &state);
+    try testing.expectEqual(GossipAction.reject, result);
+}
+
+test "gossip attester slashing: ignore duplicate" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const root = [_]u8{0x33} ** 32;
+    const r1 = validateGossipAttesterSlashing(true, root, &state);
+    try testing.expectEqual(GossipAction.accept, r1);
+    const r2 = validateGossipAttesterSlashing(true, root, &state);
+    try testing.expectEqual(GossipAction.ignore, r2);
+}
+
+test "gossip bls change: accept valid change" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipBlsToExecutionChange(42, &state);
+    try testing.expectEqual(GossipAction.accept, result);
+}
+
+test "gossip bls change: reject out of bounds validator" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipBlsToExecutionChange(1000, &state);
+    try testing.expectEqual(GossipAction.reject, result);
+}
+
+test "gossip bls change: ignore duplicate" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const r1 = validateGossipBlsToExecutionChange(42, &state);
+    try testing.expectEqual(GossipAction.accept, r1);
+    const r2 = validateGossipBlsToExecutionChange(42, &state);
+    try testing.expectEqual(GossipAction.ignore, r2);
+}
+
+test "gossip sync committee message: accept valid message" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipSyncCommitteeMessage(5, 100, &state);
+    try testing.expectEqual(GossipAction.accept, result);
+}
+
+test "gossip sync committee message: reject out of bounds validator" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipSyncCommitteeMessage(1000, 100, &state);
+    try testing.expectEqual(GossipAction.reject, result);
+}
+
+test "gossip sync committee message: ignore future slot" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipSyncCommitteeMessage(5, 110, &state);
+    try testing.expectEqual(GossipAction.ignore, result);
+}
+
+test "gossip sync contribution: accept valid contribution" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipSyncContributionAndProof(5, 100, &state);
+    try testing.expectEqual(GossipAction.accept, result);
+}
+
+test "gossip sync contribution: reject out of bounds aggregator" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipSyncContributionAndProof(1000, 100, &state);
+    try testing.expectEqual(GossipAction.reject, result);
+}
+
+test "gossip sync contribution: ignore future slot" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipSyncContributionAndProof(5, 110, &state);
+    try testing.expectEqual(GossipAction.ignore, result);
+}
