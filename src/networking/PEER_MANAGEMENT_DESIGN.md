@@ -287,29 +287,3 @@ Every 30 seconds:
 
 5. **PeerDB owns all state** — PeerManager is a thin orchestrator. This makes
    testing straightforward: inject PeerDB state, run heartbeat, assert actions.
-
----
-
-## 7. System Architecture: PeerManager vs ConnectionManager
-
-There are currently **two peer management systems** in this codebase:
-
-### PeerManager (primary — use this)
-- **Files:** `peer_manager.zig`, `peer_db.zig`, `peer_info.zig`, `peer_prioritization.zig`, `peer_relevance.zig`
-- **Peer IDs:** String (libp2p PeerId format)
-- **Scoring:** `PeerScoreService` (rich, multi-signal, with decay)
-- **Heartbeat:** Returns `HeartbeatActions` for caller to execute (clean separation)
-- **Status:** Active, ready for beacon node integration
-
-### ConnectionManager (deprecated — do not use for new code)
-- **File:** `connection_manager.zig`
-- **Peer IDs:** Numeric u64 (incompatible with libp2p string IDs)
-- **Scoring:** `PeerScorer` (legacy, simple accept/reject/ignore weights)
-- **Heartbeat:** Direct disconnect calls (no separation of policy and mechanism)
-- **Status:** Legacy, retained for reference; will be removed
-
-### Migration Plan
-1. Wire `PeerManager` into the beacon node (P2pService + BeaconNode integration)
-2. Remove `ConnectionManager` and its tests
-3. Remove `PeerScorer` (legacy scorer used only by `ConnectionManager`)
-4. Remove `peer_scorer` field from `EthGossipAdapter`; route gossip scoring through `PeerScoreService` via callback

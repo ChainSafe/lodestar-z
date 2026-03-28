@@ -63,8 +63,8 @@ const ImportError = chain_mod.ImportError;
 const networking = @import("networking");
 const DiscoveryService = networking.DiscoveryService;
 const DiscoveryConfig = networking.DiscoveryConfig;
-const ConnectionManager = networking.ConnectionManager;
-const ConnectionManagerConfig = networking.ConnectionManagerConfig;
+const PeerManager = networking.PeerManager;
+const PeerManagerConfig = networking.PeerManagerConfig;
 const eth2_protocols = networking.eth2_protocols;
 const discv5 = @import("discv5");
 const ssl = @import("ssl");
@@ -825,8 +825,8 @@ pub const BeaconNode = struct {
     // Discovery service (lazy-initialized via startP2p).
     discovery_service: ?*DiscoveryService = null,
 
-    // Connection manager — tracks peer connections and enforces limits.
-    connection_manager: ?*ConnectionManager = null,
+    // Peer manager — tracks peer connections, scoring, and lifecycle (v2).
+    peer_manager: ?*PeerManager = null,
 
     // P2P service (lazy-initialized via startP2p).
     // Owns the libp2p Switch, gossipsub service, and gossip adapter.
@@ -1332,10 +1332,10 @@ pub const BeaconNode = struct {
             allocator.destroy(ds);
         }
 
-        // Connection manager cleanup.
-        if (self.connection_manager) |cm| {
-            cm.deinit();
-            allocator.destroy(cm);
+        // Peer manager cleanup.
+        if (self.peer_manager) |pm| {
+            pm.deinit();
+            allocator.destroy(pm);
         }
 
         // P2P validator (heap-allocated to keep pointers stable; p2p_service
@@ -2017,9 +2017,9 @@ pub const BeaconNode = struct {
             std.log.warn("Failed to initialize discovery service: {}", .{err});
         };
 
-        // Initialize connection manager.
-        self.initConnectionManager() catch |err| {
-            std.log.warn("Failed to initialize connection manager: {}", .{err});
+        // Initialize peer manager.
+        self.initPeerManager() catch |err| {
+            std.log.warn("Failed to initialize peer manager: {}", .{err});
         };
 
         // Initialize GossipHandler for attestation/aggregate processing.
@@ -2173,8 +2173,8 @@ pub const BeaconNode = struct {
 
             // Run discovery tick — find new peers if below target.
             if (self.discovery_service) |ds| {
-                if (self.connection_manager) |cm| {
-                    const peer_count = cm.connectedCount();
+                if (self.peer_manager) |pm| {
+                    const peer_count = pm.peerCount();
                     ds.setConnectedPeers(peer_count);
                     // Update peer count gauge each tick.
                     if (self.metrics) |m| m.peers_connected.set(@intCast(peer_count));
@@ -2291,16 +2291,16 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         std.log.info("Discovery service initialized (known_peers={d})", .{ds.knownPeerCount()});
     }
 
-    /// Initialize the connection manager.
-    fn initConnectionManager(self: *BeaconNode) !void {
+    /// Initialize the peer manager.
+    fn initPeerManager(self: *BeaconNode) !void {
         const allocator = self.allocator;
-        const cm = try allocator.create(ConnectionManager);
-        errdefer allocator.destroy(cm);
-        cm.* = ConnectionManager.init(allocator, .{
+        const pm = try allocator.create(PeerManager);
+        errdefer allocator.destroy(pm);
+        pm.* = PeerManager.init(allocator, .{
             .target_peers = self.node_options.target_peers,
         });
-        self.connection_manager = cm;
-        std.log.info("Connection manager initialized (target_peers={d})", .{cm.config.target_peers});
+        self.peer_manager = pm;
+        std.log.info("Peer manager initialized (target_peers={d})", .{pm.config.target_peers});
     }
 
     /// Initialize the sync pipeline (SyncService — direct, no SyncController).

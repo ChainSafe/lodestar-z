@@ -99,12 +99,6 @@ pub const BanDuration = peer_info.BanDuration;
 pub const GoodbyeReason = peer_info.GoodbyeReason;
 pub const ClientKind = peer_info.ClientKind;
 
-// Connection management (DEPRECATED — use PeerManager for new code).
-// ConnectionManager uses legacy numeric IDs and PeerScorer. It will be removed
-// once PeerManager is fully wired into the beacon node.
-pub const connection_manager = @import("connection_manager.zig");
-pub const ConnectionManager = connection_manager.ConnectionManager;
-pub const ConnectionManagerConfig = connection_manager.ConnectionManagerConfig;
 
 // Subnet subscription management.
 pub const subnet_service = @import("subnet_service.zig");
