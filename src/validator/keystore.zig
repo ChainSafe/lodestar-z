@@ -172,6 +172,7 @@ pub const KeystoreDecryptor = struct {
     pub fn decrypt(self: *KeystoreDecryptor, keystore: *const Keystore, password: []const u8) !SecretKey {
         // Step 1: KDF — derive 32-byte decryption key.
         var decryption_key: [32]u8 = undefined;
+        defer std.crypto.utils.secureZero(u8, &decryption_key);
         switch (keystore.crypto.kdf.function) {
             .scrypt => {
                 const params_obj = switch (keystore.crypto.kdf.params_json) {
@@ -267,7 +268,10 @@ pub const KeystoreDecryptor = struct {
         defer self.allocator.free(cipher_bytes);
 
         var checksum_input = try self.allocator.alloc(u8, 16 + cipher_bytes.len);
-        defer self.allocator.free(checksum_input);
+        defer {
+            std.crypto.utils.secureZero(u8, checksum_input);
+            self.allocator.free(checksum_input);
+        }
         @memcpy(checksum_input[0..16], decryption_key[16..32]);
         @memcpy(checksum_input[16..], cipher_bytes);
 
@@ -289,15 +293,20 @@ pub const KeystoreDecryptor = struct {
         _ = try std.fmt.hexToBytes(&iv_bytes, iv_hex);
 
         var key_bytes: [16]u8 = undefined;
+        defer std.crypto.utils.secureZero(u8, &key_bytes);
         @memcpy(&key_bytes, decryption_key[0..16]);
 
         const plaintext = try self.allocator.alloc(u8, cipher_bytes.len);
-        defer self.allocator.free(plaintext);
+        defer {
+            std.crypto.utils.secureZero(u8, plaintext);
+            self.allocator.free(plaintext);
+        }
         aesCtr128Xor(plaintext, cipher_bytes, key_bytes, iv_bytes);
 
         // Step 4: interpret 32-byte plaintext as BLS secret key.
         if (plaintext.len < 32) return error.InvalidKeystoreSize;
         var sk_bytes: [32]u8 = undefined;
+        defer std.crypto.utils.secureZero(u8, &sk_bytes);
         @memcpy(&sk_bytes, plaintext[0..32]);
 
         log.debug("keystore decryption successful", .{});
