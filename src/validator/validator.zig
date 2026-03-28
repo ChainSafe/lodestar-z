@@ -551,14 +551,17 @@ pub const ValidatorClient = struct {
         const SseThreadCtx = struct {
             tracker: *chain_header_mod.ChainHeaderTracker,
             io: Io,
+            allocator: std.mem.Allocator,
         };
         const sse_ctx = try self.allocator.create(SseThreadCtx);
-        sse_ctx.* = .{ .tracker = &self.header_tracker, .io = io };
+        sse_ctx.* = .{ .tracker = &self.header_tracker, .io = io, .allocator = self.allocator };
         const sse_thread = std.Thread.spawn(.{}, struct {
             fn run(ctx: *SseThreadCtx) void {
+                const alloc = ctx.allocator;
                 ctx.tracker.start(ctx.io) catch |err| {
                     log.warn("ChainHeaderTracker SSE stream ended: {s}", .{@errorName(err)});
                 };
+                alloc.destroy(ctx);
             }
         }.run, .{sse_ctx}) catch |err| blk: {
             log.warn("failed to start ChainHeaderTracker SSE thread: {s}", .{@errorName(err)});
