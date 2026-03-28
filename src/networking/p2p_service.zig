@@ -263,9 +263,7 @@ pub const P2pService = struct {
     pub fn start(self: *Self, io: Io, listen_addr: Multiaddr) !void {
         // Set initial time for gossipsub router (PRUNE backoff, scoring).
         {
-            var ts: std.os.linux.timespec = undefined;
-            _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
-            const ms: u64 = @intCast(@as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), 1_000_000));
+            const ms: u64 = @intCast(@divFloor(std.time.nanoTimestamp(), std.time.ns_per_ms));
             self.gossipsub.setTime(ms);
         }
         try self.network.listen(io, listen_addr);
@@ -301,9 +299,16 @@ pub const P2pService = struct {
         return self.network.dialProtocol(io, peer_id, protocol_id);
     }
 
-    /// Publish a Snappy-compressed SSZ message to a gossip topic.
-    pub fn publishGossip(self: *Self, topic: []const u8, data: []const u8) !u32 {
-        return self.gossip_adapter.publish(topic, data);
+    /// Publish an SSZ message to a gossip topic.
+    ///
+    /// The message is Snappy-compressed internally by `EthGossipAdapter.publish`.
+    pub fn publishGossip(
+        self: *Self,
+        topic_type: GossipTopicType,
+        subnet_id: ?u8,
+        ssz_bytes: []const u8,
+    ) !void {
+        return self.gossip_adapter.publish(topic_type, subnet_id, ssz_bytes);
     }
 
     /// Subscribe to a gossip subnet topic (e.g., attestation subnets).
@@ -340,9 +345,7 @@ pub const P2pService = struct {
             // Without this, PRUNE backoff timers and other time-based logic
             // see time_ms=0 and malfunction (backoff always expired, etc.).
             {
-                var ts: std.os.linux.timespec = undefined;
-                _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
-                const ms: u64 = @intCast(@as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), 1_000_000));
+                const ms: u64 = @intCast(@divFloor(std.time.nanoTimestamp(), std.time.ns_per_ms));
                 gs.setTime(ms);
             }
             gs.heartbeat() catch {};

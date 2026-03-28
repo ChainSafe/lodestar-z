@@ -135,8 +135,6 @@ pub const Method = enum {
             .data_column_sidecars_by_root,
             .data_column_sidecars_by_range,
             .light_client_updates_by_range,
-            .data_column_sidecars_by_root,
-            .data_column_sidecars_by_range,
             => true,
             .status,
             .goodbye,
