@@ -27,6 +27,40 @@ pub const MAX_WHOAREYOU_PER_SEC: u32 = 5;
 /// Maximum ENRs returned in a single NODES response per the discv5 spec.
 pub const MAX_NODES_RESPONSE: usize = 16;
 
+/// Bounded ring buffer of recently seen nonces per session.
+/// Provides replay protection without heap allocation (CL-2020-nonce).
+/// Capacity of 32 is sufficient for typical burst rates; older entries are
+/// evicted silently (a 96-byte nonce window per session).
+pub const SEEN_NONCES_CAP: usize = 32;
+
+pub const SeenNonces = struct {
+    buf: [SEEN_NONCES_CAP][12]u8,
+    len: usize,
+    head: usize,
+
+    pub fn init() SeenNonces {
+        return .{ .buf = undefined, .len = 0, .head = 0 };
+    }
+
+    /// Returns true if nonce was already seen (replay).
+    pub fn contains(self: *const SeenNonces, nonce: *const [12]u8) bool {
+        var i: usize = 0;
+        while (i < self.len) : (i += 1) {
+            const idx = (self.head + SEEN_NONCES_CAP - self.len + i) % SEEN_NONCES_CAP;
+            if (std.mem.eql(u8, &self.buf[idx], nonce)) return true;
+        }
+        return false;
+    }
+
+    /// Record a nonce. Evicts the oldest entry when the buffer is full.
+    pub fn insert(self: *SeenNonces, nonce: *const [12]u8) void {
+        self.buf[self.head] = nonce.*;
+        self.head = (self.head + 1) % SEEN_NONCES_CAP;
+        if (self.len < SEEN_NONCES_CAP) self.len += 1;
+    }
+};
+
+
 pub const SessionState = enum {
     unknown,
     whoareyou_sent,
@@ -41,6 +75,8 @@ pub const Session = struct {
     initiator_key: [16]u8,
     recipient_key: [16]u8,
     next_nonce: [12]u8,
+    /// Ring buffer of seen nonces — replay protection (CL-2020-nonce).
+    seen_nonces: SeenNonces,
 };
 
 /// A pending outgoing request awaiting a WHOAREYOU challenge.
@@ -125,8 +161,9 @@ pub const Protocol = struct {
         const now_ns = std.time.nanoTimestamp();
         const max_age_ns: i128 = 60 * std.time.ns_per_s;
 
-        var to_remove = std.ArrayList([4]u8).init(self.alloc);
-        defer to_remove.deinit();
+        // Use a stack-bounded array to avoid heap allocation while iterating.
+        // 256 entries is well above any realistic prune batch size.
+        var to_remove = std.BoundedArray([4]u8, 256){};
 
         var it = self.whoareyou_rate.iterator();
         while (it.next()) |entry| {
@@ -249,8 +286,10 @@ pub const Protocol = struct {
         if (authdata.len < 32) return;
         const src_id: NodeId = authdata[0..32].*;
 
-        if (self.sessions.get(src_id)) |s| {
+        if (self.sessions.getPtr(src_id)) |s| {
             if (s.state == .established) {
+                // Replay protection: drop packets with a nonce we've already processed.
+                if (s.seen_nonces.contains(&parsed.static_header.nonce)) return;
                 const pt = packet.decryptMessage(
                     self.alloc,
                     &s.recipient_key,
@@ -263,6 +302,8 @@ pub const Protocol = struct {
                     return;
                 };
                 defer self.alloc.free(pt);
+                // Record nonce only after successful decryption.
+                s.seen_nonces.insert(&parsed.static_header.nonce);
                 try self.dispatchMessage(pt, src_id, from, t);
                 return;
             }
@@ -428,6 +469,7 @@ pub const Protocol = struct {
             .initiator_key = keys.initiator_key,
             .recipient_key = keys.recipient_key,
             .next_nonce = nonce,
+            .seen_nonces = SeenNonces.init(),
         });
     }
 
@@ -507,6 +549,7 @@ pub const Protocol = struct {
         new_session.state = .established;
         new_session.initiator_key = keys.recipient_key;
         new_session.recipient_key = keys.initiator_key;
+        new_session.seen_nonces = SeenNonces.init();
         try self.sessions.put(src_id, new_session);
     }
 
@@ -589,6 +632,7 @@ pub const Protocol = struct {
             .initiator_key = undefined,
             .recipient_key = undefined,
             .next_nonce = undefined,
+            .seen_nonces = SeenNonces.init(),
         };
         @memcpy(s.challenge_data[0..16], &masking_iv);
         @memcpy(s.challenge_data[16..s.challenge_data_len], header_raw_cd[0 .. s.challenge_data_len - 16]);
