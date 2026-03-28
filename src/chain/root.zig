@@ -123,3 +123,9 @@ pub const DaConfig = data_availability.DaConfig;
 pub const aggregated_attestation_pool = @import("aggregated_attestation_pool.zig");
 pub const AggregatedAttestationPool = aggregated_attestation_pool.AggregatedAttestationPool;
 pub const AttestationGroup = aggregated_attestation_pool.AttestationGroup;
+
+// Validator monitor — per-validator on-chain performance tracking
+pub const validator_monitor = @import("validator_monitor.zig");
+pub const ValidatorMonitor = validator_monitor.ValidatorMonitor;
+pub const MonitoredValidator = validator_monitor.MonitoredValidator;
+pub const ValidatorSummary = validator_monitor.ValidatorSummary;
