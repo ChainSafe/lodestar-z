@@ -482,6 +482,26 @@ pub const HttpEngine = struct {
     }
 
 
+    /// Free all allocator-owned fields of a GetPayloadResponse.
+    ///
+    /// Frees: extra_data, each transaction bytes, transactions slice,
+    /// withdrawals slice, blobs_bundle commitments/proofs/blobs,
+    /// and any Electra execution request slices.
+    pub fn freeGetPayloadResponse(self: *HttpEngine, resp: GetPayloadResponse) void {
+        const ep = resp.execution_payload;
+        self.allocator.free(ep.extra_data);
+        for (ep.transactions) |tx| self.allocator.free(tx);
+        self.allocator.free(ep.transactions);
+        self.allocator.free(ep.withdrawals);
+        self.allocator.free(resp.blobs_bundle.commitments);
+        self.allocator.free(resp.blobs_bundle.proofs);
+        self.allocator.free(resp.blobs_bundle.blobs);
+        // Electra execution requests (empty slices are safe to free).
+        if (resp.deposit_requests.len > 0) self.allocator.free(resp.deposit_requests);
+        if (resp.withdrawal_requests.len > 0) self.allocator.free(resp.withdrawal_requests);
+        if (resp.consolidation_requests.len > 0) self.allocator.free(resp.consolidation_requests);
+    }
+
     // ── Health monitoring ─────────────────────────────────────────────────────
 
     /// EL syncing result from eth_syncing.
