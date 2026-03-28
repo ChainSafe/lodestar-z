@@ -248,7 +248,8 @@ pub const HttpBuilder = struct {
 
     // ── REST method implementations ───────────────────────────────────────────
 
-    fn statusImpl(self: *HttpBuilder) anyerror!BuilderStatus {
+    fn statusImpl(ptr: *anyopaque) anyerror!BuilderStatus {
+        const self: *HttpBuilder = @ptrCast(@alignCast(ptr));
         const url = try self.buildUrl("/eth/v1/builder/status");
         defer self.allocator.free(url);
 
@@ -270,9 +271,10 @@ pub const HttpBuilder = struct {
     }
 
     fn registerValidatorsImpl(
-        self: *HttpBuilder,
+        ptr: *anyopaque,
         registrations: []const SignedValidatorRegistration,
     ) anyerror!void {
+        const self: *HttpBuilder = @ptrCast(@alignCast(ptr));
         if (registrations.len == 0) return;
 
         const url = try self.buildUrl("/eth/v1/builder/validators");
@@ -295,11 +297,12 @@ pub const HttpBuilder = struct {
     }
 
     fn getHeaderImpl(
-        self: *HttpBuilder,
+        ptr: *anyopaque,
         slot: u64,
         parent_hash: [32]u8,
         pubkey: [48]u8,
     ) anyerror!?SignedBuilderBid {
+        const self: *HttpBuilder = @ptrCast(@alignCast(ptr));
         // Build path: /eth/v1/builder/header/{slot}/{parent_hash}/{pubkey}
         const parent_hash_hex = try http_engine.hexEncodeFixed(self.allocator, &parent_hash);
         defer self.allocator.free(parent_hash_hex);
@@ -342,9 +345,10 @@ pub const HttpBuilder = struct {
     }
 
     fn submitBlindedBlockImpl(
-        self: *HttpBuilder,
+        ptr: *anyopaque,
         block: SignedBlindedBeaconBlock,
     ) anyerror!types.ExecutionPayloadV3 {
+        const self: *HttpBuilder = @ptrCast(@alignCast(ptr));
         const url = try self.buildUrl("/eth/v1/builder/blinded_blocks");
         defer self.allocator.free(url);
 
@@ -371,10 +375,10 @@ pub const HttpBuilder = struct {
     // ── vtable ────────────────────────────────────────────────────────────────
 
     const vtable = BuilderApi.VTable{
-        .registerValidators = @ptrCast(&registerValidatorsImpl),
-        .getHeader = @ptrCast(&getHeaderImpl),
-        .submitBlindedBlock = @ptrCast(&submitBlindedBlockImpl),
-        .status = @ptrCast(&statusImpl),
+        .registerValidators = &registerValidatorsImpl,
+        .getHeader = &getHeaderImpl,
+        .submitBlindedBlock = &submitBlindedBlockImpl,
+        .status = &statusImpl,
     };
 };
 
@@ -562,6 +566,15 @@ fn parseSignedBuilderBid(allocator: Allocator, json_bytes: []const u8) !SignedBu
     const header_val = message_obj.get("header") orelse return error.MissingField;
     const header_obj = header_val.object;
 
+    // Allocate extra_data with a function-scoped errdefer so it is freed on
+    // any error that occurs after this point (including later header fields or
+    // the blob_kzg_commitments allocation below).
+    const extra_data_hex = (header_obj.get("extra_data") orelse return error.MissingField).string;
+    const extra_data_stripped = if (std.mem.startsWith(u8, extra_data_hex, "0x")) extra_data_hex[2..] else extra_data_hex;
+    const extra_data = try allocator.alloc(u8, if (extra_data_stripped.len == 0) 0 else extra_data_stripped.len / 2);
+    errdefer allocator.free(extra_data);
+    if (extra_data.len > 0) _ = std.fmt.hexToBytes(extra_data, extra_data_stripped) catch return error.InvalidHex;
+
     const header = ExecutionPayloadHeader{
         .parent_hash = try parseHex32((header_obj.get("parent_hash") orelse return error.MissingField).string),
         .fee_recipient = try parseHex20((header_obj.get("fee_recipient") orelse return error.MissingField).string),
@@ -573,15 +586,7 @@ fn parseSignedBuilderBid(allocator: Allocator, json_bytes: []const u8) !SignedBu
         .gas_limit = try parseQuantityU64((header_obj.get("gas_limit") orelse return error.MissingField).string),
         .gas_used = try parseQuantityU64((header_obj.get("gas_used") orelse return error.MissingField).string),
         .timestamp = try parseQuantityU64((header_obj.get("timestamp") orelse return error.MissingField).string),
-        .extra_data = blk: {
-            // Fix 1: decode extra_data into owned memory before arena is freed.
-            const extra_data_hex = (header_obj.get("extra_data") orelse return error.MissingField).string;
-            const stripped = if (std.mem.startsWith(u8, extra_data_hex, "0x")) extra_data_hex[2..] else extra_data_hex;
-            const owned = try allocator.alloc(u8, if (stripped.len == 0) 0 else stripped.len / 2);
-            errdefer allocator.free(owned);
-            if (owned.len > 0) _ = std.fmt.hexToBytes(owned, stripped) catch return error.InvalidHex;
-            break :blk owned;
-        },
+        .extra_data = extra_data,
         .base_fee_per_gas = try parseQuantityU256((header_obj.get("base_fee_per_gas") orelse return error.MissingField).string),
         .block_hash = try parseHex32((header_obj.get("block_hash") orelse return error.MissingField).string),
         .transactions_root = try parseHex32((header_obj.get("transactions_root") orelse return error.MissingField).string),
@@ -590,22 +595,26 @@ fn parseSignedBuilderBid(allocator: Allocator, json_bytes: []const u8) !SignedBu
         .excess_blob_gas = if (header_obj.get("excess_blob_gas")) |v| try parseQuantityU64(v.string) else null,
     };
 
+    // Allocate blob_kzg_commitments with a function-scoped errdefer so it is
+    // freed if the return itself cannot complete.
+    const blob_kzg_commitments: []const [48]u8 = blk: {
+        const kzg_val = message_obj.get("blob_kzg_commitments") orelse break :blk &([_][48]u8{});
+        if (kzg_val != .array) return error.InvalidBlobKzgCommitmentsType;
+        const kzg_arr = kzg_val.array.items;
+        if (kzg_arr.len == 0) break :blk &([_][48]u8{});
+        const commitments = try allocator.alloc([48]u8, kzg_arr.len);
+        for (kzg_arr, 0..) |item, i| {
+            commitments[i] = try parseHex48(item.string);
+        }
+        break :blk commitments;
+    };
+    // If commitments was heap-allocated (len > 0), free it on any subsequent error.
+    errdefer if (blob_kzg_commitments.len > 0) allocator.free(blob_kzg_commitments);
+
     return SignedBuilderBid{
         .message = BuilderBid{
             .header = header,
-            .blob_kzg_commitments = blk: {
-                // Fix 5: parse blob_kzg_commitments array from JSON.
-                const kzg_val = message_obj.get("blob_kzg_commitments") orelse break :blk &([_][48]u8{});
-                if (kzg_val != .array) return error.InvalidBlobKzgCommitmentsType;
-                const kzg_arr = kzg_val.array.items;
-                if (kzg_arr.len == 0) break :blk &([_][48]u8{});
-                const commitments = try allocator.alloc([48]u8, kzg_arr.len);
-                errdefer allocator.free(commitments);
-                for (kzg_arr, 0..) |item, i| {
-                    commitments[i] = try parseHex48(item.string);
-                }
-                break :blk commitments;
-            },
+            .blob_kzg_commitments = blob_kzg_commitments,
             .value = value,
             .pubkey = pubkey,
         },
@@ -740,17 +749,18 @@ pub const MockBuilderTransport = struct {
     pub fn transport(self: *MockBuilderTransport) Transport {
         return .{
             .ptr = @ptrCast(self),
-            .sendFn = @ptrCast(&MockBuilderTransport.send),
+            .sendFn = &MockBuilderTransport.send,
         };
     }
 
     fn send(
-        self: *MockBuilderTransport,
+        ptr: *anyopaque,
         _: http_engine.HttpMethod,
         url: []const u8,
         _: []const Header,
         body: []const u8,
     ) anyerror![]const u8 {
+        const self: *MockBuilderTransport = @ptrCast(@alignCast(ptr));
         if (self.last_url) |u| self.allocator.free(u);
         if (self.last_body) |b| self.allocator.free(b);
         self.last_url = try self.allocator.dupe(u8, url);
@@ -783,21 +793,21 @@ pub const StubBuilder = struct {
     }
 
     const vtable = BuilderApi.VTable{
-        .registerValidators = @ptrCast(&registerValidatorsImpl),
-        .getHeader = @ptrCast(&getHeaderImpl),
-        .submitBlindedBlock = @ptrCast(&submitBlindedBlockImpl),
-        .status = @ptrCast(&statusImpl),
+        .registerValidators = &registerValidatorsImpl,
+        .getHeader = &getHeaderImpl,
+        .submitBlindedBlock = &submitBlindedBlockImpl,
+        .status = &statusImpl,
     };
 
     fn registerValidatorsImpl(
-        _: *StubBuilder,
+        _: *anyopaque,
         _: []const SignedValidatorRegistration,
     ) anyerror!void {
         return error.NotImplemented;
     }
 
     fn getHeaderImpl(
-        _: *StubBuilder,
+        _: *anyopaque,
         _: u64,
         _: [32]u8,
         _: [48]u8,
@@ -806,13 +816,13 @@ pub const StubBuilder = struct {
     }
 
     fn submitBlindedBlockImpl(
-        _: *StubBuilder,
+        _: *anyopaque,
         _: SignedBlindedBeaconBlock,
     ) anyerror!types.ExecutionPayloadV3 {
         return error.NotImplemented;
     }
 
-    fn statusImpl(_: *StubBuilder) anyerror!BuilderStatus {
+    fn statusImpl(_: *anyopaque) anyerror!BuilderStatus {
         return .unavailable;
     }
 };

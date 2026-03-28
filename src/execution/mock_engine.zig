@@ -141,25 +141,26 @@ pub const MockEngine = struct {
     // ── vtable ────────────────────────────────────────────────────────────────
 
     const vtable = EngineApi.VTable{
-        .newPayloadV1 = @ptrCast(&newPayloadV1Impl),
-        .newPayloadV2 = @ptrCast(&newPayloadV2Impl),
-        .newPayloadV3 = @ptrCast(&newPayloadV3Impl),
-        .newPayloadV4 = @ptrCast(&newPayloadV4Impl),
-        .forkchoiceUpdatedV1 = @ptrCast(&forkchoiceUpdatedV1Impl),
-        .forkchoiceUpdatedV2 = @ptrCast(&forkchoiceUpdatedV2Impl),
-        .forkchoiceUpdatedV3 = @ptrCast(&forkchoiceUpdatedV3Impl),
-        .getPayloadV1 = @ptrCast(&getPayloadV1Impl),
-        .getPayloadV2 = @ptrCast(&getPayloadV2Impl),
-        .getPayloadV3 = @ptrCast(&getPayloadV3Impl),
-        .getPayloadV4 = @ptrCast(&getPayloadV4Impl),
+        .newPayloadV1 = &newPayloadV1Impl,
+        .newPayloadV2 = &newPayloadV2Impl,
+        .newPayloadV3 = &newPayloadV3Impl,
+        .newPayloadV4 = &newPayloadV4Impl,
+        .forkchoiceUpdatedV1 = &forkchoiceUpdatedV1Impl,
+        .forkchoiceUpdatedV2 = &forkchoiceUpdatedV2Impl,
+        .forkchoiceUpdatedV3 = &forkchoiceUpdatedV3Impl,
+        .getPayloadV1 = &getPayloadV1Impl,
+        .getPayloadV2 = &getPayloadV2Impl,
+        .getPayloadV3 = &getPayloadV3Impl,
+        .getPayloadV4 = &getPayloadV4Impl,
     };
 
     // ── newPayload implementations ────────────────────────────────────────────
 
     fn newPayloadV1Impl(
-        self: *MockEngine,
+        ptr: *anyopaque,
         payload: ExecutionPayloadV1,
     ) anyerror!PayloadStatusV1 {
+        const self: *MockEngine = @ptrCast(@alignCast(ptr));
         // Promote to V3 for storage (fill missing fields with zero).
         const v3 = ExecutionPayloadV3{
             .parent_hash = payload.parent_hash,
@@ -185,9 +186,10 @@ pub const MockEngine = struct {
     }
 
     fn newPayloadV2Impl(
-        self: *MockEngine,
+        ptr: *anyopaque,
         payload: ExecutionPayloadV2,
     ) anyerror!PayloadStatusV1 {
+        const self: *MockEngine = @ptrCast(@alignCast(ptr));
         const v3 = ExecutionPayloadV3{
             .parent_hash = payload.parent_hash,
             .fee_recipient = payload.fee_recipient,
@@ -212,21 +214,23 @@ pub const MockEngine = struct {
     }
 
     fn newPayloadV3Impl(
-        self: *MockEngine,
+        ptr: *anyopaque,
         payload: ExecutionPayloadV3,
         _: []const [32]u8,
         _: [32]u8,
     ) anyerror!PayloadStatusV1 {
+        const self: *MockEngine = @ptrCast(@alignCast(ptr));
         try self.payloads.put(payload.block_hash, .{ .payload = payload });
         return self.payloadStatusResponse(payload.block_hash);
     }
 
     fn newPayloadV4Impl(
-        self: *MockEngine,
+        ptr: *anyopaque,
         payload: ExecutionPayloadV4,
         _: []const [32]u8,
         _: [32]u8,
     ) anyerror!PayloadStatusV1 {
+        const self: *MockEngine = @ptrCast(@alignCast(ptr));
         // Demote to V3 for storage (V4-specific fields are dropped).
         const v3 = ExecutionPayloadV3{
             .parent_hash = payload.parent_hash,
@@ -254,10 +258,11 @@ pub const MockEngine = struct {
     // ── forkchoiceUpdated implementations ─────────────────────────────────────
 
     fn forkchoiceUpdatedV1Impl(
-        self: *MockEngine,
+        ptr: *anyopaque,
         state: ForkchoiceStateV1,
         attrs: ?PayloadAttributesV1,
     ) anyerror!ForkchoiceUpdatedResponse {
+        const self: *MockEngine = @ptrCast(@alignCast(ptr));
         self.last_forkchoice_state = state;
 
         var payload_id: ?[8]u8 = null;
@@ -272,10 +277,11 @@ pub const MockEngine = struct {
     }
 
     fn forkchoiceUpdatedV2Impl(
-        self: *MockEngine,
+        ptr: *anyopaque,
         state: ForkchoiceStateV1,
         attrs: ?PayloadAttributesV2,
     ) anyerror!ForkchoiceUpdatedResponse {
+        const self: *MockEngine = @ptrCast(@alignCast(ptr));
         self.last_forkchoice_state = state;
 
         var payload_id: ?[8]u8 = null;
@@ -290,10 +296,11 @@ pub const MockEngine = struct {
     }
 
     fn forkchoiceUpdatedV3Impl(
-        self: *MockEngine,
+        ptr: *anyopaque,
         state: ForkchoiceStateV1,
         attrs: ?PayloadAttributesV3,
     ) anyerror!ForkchoiceUpdatedResponse {
+        const self: *MockEngine = @ptrCast(@alignCast(ptr));
         self.last_forkchoice_state = state;
 
         var payload_id: ?[8]u8 = null;
@@ -329,9 +336,10 @@ pub const MockEngine = struct {
     // ── getPayload implementations ────────────────────────────────────────────
 
     fn getPayloadV1Impl(
-        self: *MockEngine,
+        ptr: *anyopaque,
         payload_id: [8]u8,
     ) anyerror!GetPayloadResponseV1 {
+        const self: *MockEngine = @ptrCast(@alignCast(ptr));
         const stored = self.built_payloads.get(payload_id) orelse
             return error.UnknownPayload;
         const p = stored.payload;
@@ -357,9 +365,10 @@ pub const MockEngine = struct {
     }
 
     fn getPayloadV2Impl(
-        self: *MockEngine,
+        ptr: *anyopaque,
         payload_id: [8]u8,
     ) anyerror!GetPayloadResponseV2 {
+        const self: *MockEngine = @ptrCast(@alignCast(ptr));
         const stored = self.built_payloads.get(payload_id) orelse
             return error.UnknownPayload;
         const p = stored.payload;
@@ -386,9 +395,10 @@ pub const MockEngine = struct {
     }
 
     fn getPayloadV3Impl(
-        self: *MockEngine,
+        ptr: *anyopaque,
         payload_id: [8]u8,
     ) anyerror!GetPayloadResponse {
+        const self: *MockEngine = @ptrCast(@alignCast(ptr));
         const stored = self.built_payloads.get(payload_id) orelse
             return error.UnknownPayload;
 
@@ -405,9 +415,10 @@ pub const MockEngine = struct {
     }
 
     fn getPayloadV4Impl(
-        self: *MockEngine,
+        ptr: *anyopaque,
         payload_id: [8]u8,
     ) anyerror!GetPayloadResponseV4 {
+        const self: *MockEngine = @ptrCast(@alignCast(ptr));
         const stored = self.built_payloads.get(payload_id) orelse
             return error.UnknownPayload;
         const p = stored.payload;

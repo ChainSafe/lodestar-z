@@ -757,25 +757,26 @@ pub const HttpEngine = struct {
     // ── vtable ────────────────────────────────────────────────────────────────
 
     const vtable = EngineApi.VTable{
-        .newPayloadV1 = @ptrCast(&newPayloadV1),
-        .newPayloadV2 = @ptrCast(&newPayloadV2),
-        .newPayloadV3 = @ptrCast(&newPayloadV3),
-        .newPayloadV4 = @ptrCast(&newPayloadV4),
-        .forkchoiceUpdatedV1 = @ptrCast(&forkchoiceUpdatedV1),
-        .forkchoiceUpdatedV2 = @ptrCast(&forkchoiceUpdatedV2),
-        .forkchoiceUpdatedV3 = @ptrCast(&forkchoiceUpdatedV3),
-        .getPayloadV1 = @ptrCast(&getPayloadV1),
-        .getPayloadV2 = @ptrCast(&getPayloadV2),
-        .getPayloadV3 = @ptrCast(&getPayloadV3),
-        .getPayloadV4 = @ptrCast(&getPayloadV4),
+        .newPayloadV1 = &newPayloadV1,
+        .newPayloadV2 = &newPayloadV2,
+        .newPayloadV3 = &newPayloadV3,
+        .newPayloadV4 = &newPayloadV4,
+        .forkchoiceUpdatedV1 = &forkchoiceUpdatedV1,
+        .forkchoiceUpdatedV2 = &forkchoiceUpdatedV2,
+        .forkchoiceUpdatedV3 = &forkchoiceUpdatedV3,
+        .getPayloadV1 = &getPayloadV1,
+        .getPayloadV2 = &getPayloadV2,
+        .getPayloadV3 = &getPayloadV3,
+        .getPayloadV4 = &getPayloadV4,
     };
 
     fn newPayloadV3(
-        self: *HttpEngine,
+        ptr: *anyopaque,
         payload: ExecutionPayloadV3,
         versioned_hashes: []const [32]u8,
         parent_beacon_root: [32]u8,
     ) anyerror!PayloadStatusV1 {
+        const self: *HttpEngine = @ptrCast(@alignCast(ptr));
         const id = self.nextId();
 
         // Encode the payload as Engine API JSON object.
@@ -811,10 +812,11 @@ pub const HttpEngine = struct {
     }
 
     fn forkchoiceUpdatedV3(
-        self: *HttpEngine,
+        ptr: *anyopaque,
         state: ForkchoiceStateV1,
         attrs: ?PayloadAttributesV3,
     ) anyerror!ForkchoiceUpdatedResponse {
+        const self: *HttpEngine = @ptrCast(@alignCast(ptr));
         const id = self.nextId();
 
         const state_json = try encodeForkchoiceState(self.allocator, state);
@@ -849,9 +851,10 @@ pub const HttpEngine = struct {
     }
 
     fn getPayloadV3(
-        self: *HttpEngine,
+        ptr: *anyopaque,
         payload_id: [8]u8,
     ) anyerror!GetPayloadResponse {
+        const self: *HttpEngine = @ptrCast(@alignCast(ptr));
         const id = self.nextId();
 
         const pid_hex = try hexEncodeFixed(self.allocator, &payload_id);
@@ -879,9 +882,10 @@ pub const HttpEngine = struct {
     // ── newPayload V1 / V2 / V4 ───────────────────────────────────────────────
 
     fn newPayloadV1(
-        self: *HttpEngine,
+        ptr: *anyopaque,
         payload: ExecutionPayloadV1,
     ) anyerror!PayloadStatusV1 {
+        const self: *HttpEngine = @ptrCast(@alignCast(ptr));
         const id = self.nextId();
 
         const payload_json = try encodeExecutionPayloadV1(self.allocator, payload);
@@ -907,9 +911,10 @@ pub const HttpEngine = struct {
     }
 
     fn newPayloadV2(
-        self: *HttpEngine,
+        ptr: *anyopaque,
         payload: ExecutionPayloadV2,
     ) anyerror!PayloadStatusV1 {
+        const self: *HttpEngine = @ptrCast(@alignCast(ptr));
         const id = self.nextId();
 
         const payload_json = try encodeExecutionPayloadV2(self.allocator, payload);
@@ -935,11 +940,12 @@ pub const HttpEngine = struct {
     }
 
     fn newPayloadV4(
-        self: *HttpEngine,
+        ptr: *anyopaque,
         payload: ExecutionPayloadV4,
         versioned_hashes: []const [32]u8,
         parent_beacon_root: [32]u8,
     ) anyerror!PayloadStatusV1 {
+        const self: *HttpEngine = @ptrCast(@alignCast(ptr));
         const id = self.nextId();
 
         const payload_json = try encodeExecutionPayloadV4(self.allocator, payload);
@@ -973,10 +979,11 @@ pub const HttpEngine = struct {
     // ── forkchoiceUpdated V1 / V2 ─────────────────────────────────────────────
 
     fn forkchoiceUpdatedV1(
-        self: *HttpEngine,
+        ptr: *anyopaque,
         state: ForkchoiceStateV1,
         attrs: ?PayloadAttributesV1,
     ) anyerror!ForkchoiceUpdatedResponse {
+        const self: *HttpEngine = @ptrCast(@alignCast(ptr));
         const id = self.nextId();
 
         const state_json = try encodeForkchoiceState(self.allocator, state);
@@ -1009,10 +1016,11 @@ pub const HttpEngine = struct {
     }
 
     fn forkchoiceUpdatedV2(
-        self: *HttpEngine,
+        ptr: *anyopaque,
         state: ForkchoiceStateV1,
         attrs: ?PayloadAttributesV2,
     ) anyerror!ForkchoiceUpdatedResponse {
+        const self: *HttpEngine = @ptrCast(@alignCast(ptr));
         const id = self.nextId();
 
         const state_json = try encodeForkchoiceState(self.allocator, state);
@@ -1047,9 +1055,10 @@ pub const HttpEngine = struct {
     // ── getPayload V1 / V2 / V4 ──────────────────────────────────────────────
 
     fn getPayloadV1(
-        self: *HttpEngine,
+        ptr: *anyopaque,
         payload_id: [8]u8,
     ) anyerror!GetPayloadResponseV1 {
+        const self: *HttpEngine = @ptrCast(@alignCast(ptr));
         const id = self.nextId();
 
         const pid_hex = try hexEncodeFixed(self.allocator, &payload_id);
@@ -1075,9 +1084,10 @@ pub const HttpEngine = struct {
     }
 
     fn getPayloadV2(
-        self: *HttpEngine,
+        ptr: *anyopaque,
         payload_id: [8]u8,
     ) anyerror!GetPayloadResponseV2 {
+        const self: *HttpEngine = @ptrCast(@alignCast(ptr));
         const id = self.nextId();
 
         const pid_hex = try hexEncodeFixed(self.allocator, &payload_id);
@@ -1103,9 +1113,10 @@ pub const HttpEngine = struct {
     }
 
     fn getPayloadV4(
-        self: *HttpEngine,
+        ptr: *anyopaque,
         payload_id: [8]u8,
     ) anyerror!GetPayloadResponseV4 {
+        const self: *HttpEngine = @ptrCast(@alignCast(ptr));
         const id = self.nextId();
 
         const pid_hex = try hexEncodeFixed(self.allocator, &payload_id);
@@ -2333,17 +2344,18 @@ pub const MockTransport = struct {
     pub fn transport(self: *MockTransport) Transport {
         return .{
             .ptr = @ptrCast(self),
-            .sendFn = @ptrCast(&MockTransport.send),
+            .sendFn = &MockTransport.send,
         };
     }
 
     fn send(
-        self: *MockTransport,
+        ptr: *anyopaque,
         method: HttpMethod,
         url: []const u8,
         headers: []const Header,
         body: []const u8,
     ) anyerror![]const u8 {
+        const self: *MockTransport = @ptrCast(@alignCast(ptr));
         // Free previous recorded values.
         if (self.last_body) |b| {
             self.allocator.free(b);
@@ -2971,7 +2983,7 @@ pub const IoHttpTransport = struct {
     pub fn transport(self: *IoHttpTransport) Transport {
         return .{
             .ptr = @ptrCast(self),
-            .sendFn = @ptrCast(&IoHttpTransport.send),
+            .sendFn = &IoHttpTransport.send,
         };
     }
 
@@ -2986,12 +2998,13 @@ pub const IoHttpTransport = struct {
     }
 
     fn send(
-        self: *IoHttpTransport,
+        ptr: *anyopaque,
         method: HttpMethod,
         url: []const u8,
         headers: []const Header,
         body: []const u8,
     ) anyerror![]const u8 {
+        const self: *IoHttpTransport = @ptrCast(@alignCast(ptr));
         const io = self.io orelse return error.IoNotInitialized;
         const client = self.ensureClient(io);
 
