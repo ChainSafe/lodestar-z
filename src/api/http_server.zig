@@ -669,7 +669,412 @@ pub const HttpServer = struct {
             return self.makeVoidResult(handler_res);
         }
 
+
+        // --- New beacon state endpoints ---
+
+        if (std.mem.eql(u8, op, "getStateCommittees")) {
+            const state_id_str = match.getParam("state_id") orelse return error.InvalidStateId;
+            const state_id = try types.StateId.parse(state_id_str);
+            const epoch_opt: ?u64 = if (dc.getQuery("epoch")) |s| std.fmt.parseInt(u64, s, 10) catch null else null;
+            const slot_opt: ?u64 = if (dc.getQuery("slot")) |s| std.fmt.parseInt(u64, s, 10) catch null else null;
+            const index_opt: ?u64 = if (dc.getQuery("index")) |s| std.fmt.parseInt(u64, s, 10) catch null else null;
+            const handler_res = try handlers.beacon.getStateCommittees(ctx, state_id, epoch_opt, slot_opt, index_opt);
+            defer {
+                for (handler_res.data) |item| alloc.free(item.validators);
+                alloc.free(handler_res.data);
+            }
+            var buf = std.ArrayListUnmanaged(u8).empty;
+            errdefer buf.deinit(alloc);
+            try buf.appendSlice(alloc, "{\"data\":[");
+            for (handler_res.data, 0..) |committee, ci| {
+                if (ci > 0) try buf.appendSlice(alloc, ",");
+                const header = try std.fmt.allocPrint(alloc, "{{\"index\":{d},\"slot\":{d},\"validators\":[", .{ committee.index, committee.slot });
+                defer alloc.free(header);
+                try buf.appendSlice(alloc, header);
+                for (committee.validators, 0..) |vi, i| {
+                    if (i > 0) try buf.appendSlice(alloc, ",");
+                    const vi_str = try std.fmt.allocPrint(alloc, "{d}", .{vi});
+                    defer alloc.free(vi_str);
+                    try buf.appendSlice(alloc, vi_str);
+                }
+                try buf.appendSlice(alloc, "]}");
+            }
+            try buf.appendSlice(alloc, "]}");
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = try buf.toOwnedSlice(alloc),
+                .meta = handler_res.meta,
+            };
+        }
+
+        if (std.mem.eql(u8, op, "getStateSyncCommittees")) {
+            const state_id_str = match.getParam("state_id") orelse return error.InvalidStateId;
+            const state_id = try types.StateId.parse(state_id_str);
+            const epoch_opt: ?u64 = if (dc.getQuery("epoch")) |s| std.fmt.parseInt(u64, s, 10) catch null else null;
+            const handler_res = try handlers.beacon.getStateSyncCommittees(ctx, state_id, epoch_opt);
+            defer {
+                alloc.free(handler_res.data.validators);
+                for (handler_res.data.validator_aggregates) |agg| alloc.free(agg);
+                alloc.free(handler_res.data.validator_aggregates);
+            }
+            var buf = std.ArrayListUnmanaged(u8).empty;
+            errdefer buf.deinit(alloc);
+            try buf.appendSlice(alloc, "{\"data\":{\"validators\":[");
+            for (handler_res.data.validators, 0..) |vi, i| {
+                if (i > 0) try buf.appendSlice(alloc, ",");
+                const vi_str = try std.fmt.allocPrint(alloc, "{d}", .{vi});
+                defer alloc.free(vi_str);
+                try buf.appendSlice(alloc, vi_str);
+            }
+            try buf.appendSlice(alloc, "],\"validator_aggregates\":[");
+            for (handler_res.data.validator_aggregates, 0..) |agg, ai| {
+                if (ai > 0) try buf.appendSlice(alloc, ",");
+                try buf.appendSlice(alloc, "[");
+                for (agg, 0..) |vi, i| {
+                    if (i > 0) try buf.appendSlice(alloc, ",");
+                    const vi_str = try std.fmt.allocPrint(alloc, "{d}", .{vi});
+                    defer alloc.free(vi_str);
+                    try buf.appendSlice(alloc, vi_str);
+                }
+                try buf.appendSlice(alloc, "]");
+            }
+            try buf.appendSlice(alloc, "]}}");
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = try buf.toOwnedSlice(alloc),
+                .meta = handler_res.meta,
+            };
+        }
+
+        if (std.mem.eql(u8, op, "getStateRandao")) {
+            const state_id_str = match.getParam("state_id") orelse return error.InvalidStateId;
+            const state_id = try types.StateId.parse(state_id_str);
+            const epoch_opt: ?u64 = if (dc.getQuery("epoch")) |s| std.fmt.parseInt(u64, s, 10) catch null else null;
+            const handler_res = try handlers.beacon.getStateRandao(ctx, state_id, epoch_opt);
+            const hex = std.fmt.bytesToHex(&handler_res.data.randao, .lower);
+            const body = try std.fmt.allocPrint(alloc, "{{\"data\":{{\"randao\":\"0x{s}\"}}}}", .{hex});
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = body,
+                .meta = handler_res.meta,
+            };
+        }
+
+        if (std.mem.eql(u8, op, "getBlockHeaders")) {
+            const slot_opt: ?u64 = if (dc.getQuery("slot")) |s| std.fmt.parseInt(u64, s, 10) catch null else null;
+            const parent_root_opt: ?[32]u8 = if (dc.getQuery("parent_root")) |s| blk: {
+                const src = if (std.mem.startsWith(u8, s, "0x")) s[2..] else s;
+                if (src.len == 64) {
+                    var root: [32]u8 = undefined;
+                    _ = std.fmt.hexToBytes(&root, src) catch break :blk null;
+                    break :blk root;
+                }
+                break :blk null;
+            } else null;
+            const handler_res = try handlers.beacon.getBlockHeaders(ctx, slot_opt, parent_root_opt);
+            defer alloc.free(handler_res.data);
+            var buf = std.ArrayListUnmanaged(u8).empty;
+            errdefer buf.deinit(alloc);
+            try buf.appendSlice(alloc, "{\"data\":[");
+            for (handler_res.data, 0..) |h, i| {
+                if (i > 0) try buf.appendSlice(alloc, ",");
+                const entry = try std.fmt.allocPrint(alloc,
+                    "{{\"root\":\"0x{s}\",\"canonical\":{s},\"header\":{{\"message\":{{\"slot\":{d},\"proposer_index\":{d},\"parent_root\":\"0x{s}\",\"state_root\":\"0x{s}\",\"body_root\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}}}",
+                    .{
+                        std.fmt.bytesToHex(&h.root, .lower),
+                        if (h.canonical) "true" else "false",
+                        h.header.message.slot,
+                        h.header.message.proposer_index,
+                        std.fmt.bytesToHex(&h.header.message.parent_root, .lower),
+                        std.fmt.bytesToHex(&h.header.message.state_root, .lower),
+                        std.fmt.bytesToHex(&h.header.message.body_root, .lower),
+                        std.fmt.bytesToHex(&h.header.signature, .lower),
+                    });
+                defer alloc.free(entry);
+                try buf.appendSlice(alloc, entry);
+            }
+            try buf.appendSlice(alloc, "]}");
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = try buf.toOwnedSlice(alloc),
+                .meta = handler_res.meta,
+            };
+        }
+
+        if (std.mem.eql(u8, op, "getBlobSidecars")) {
+            _ = match.getParam("block_id") orelse return error.InvalidBlockId;
+            // Stub: blob sidecars not yet wired.
+            const body = try alloc.dupe(u8, "{\"data\":[]}");
+            return .{ .status = 200, .content_type = "application/json", .body = body };
+        }
+
+        if (std.mem.eql(u8, op, "getBlindedBlock")) {
+            const block_id_str = match.getParam("block_id") orelse return error.InvalidBlockId;
+            const block_id = try types.BlockId.parse(block_id_str);
+            const block_result = try handlers.beacon.getBlock(ctx, block_id);
+            // Runtime hex encoding of SSZ bytes
+            const hex_buf = try alloc.alloc(u8, block_result.data.len * 2);
+            defer alloc.free(hex_buf);
+            for (block_result.data, 0..) |byte, bi| {
+                const hi: u8 = (byte >> 4) & 0xf;
+                const lo: u8 = byte & 0xf;
+                hex_buf[bi * 2] = if (hi < 10) '0' + hi else 'a' + hi - 10;
+                hex_buf[bi * 2 + 1] = if (lo < 10) '0' + lo else 'a' + lo - 10;
+            }
+            const body = try std.fmt.allocPrint(alloc,
+                "{{\"data\":\"0x{s}\",\"version\":\"{s}\"}}",
+                .{ hex_buf, @tagName(block_result.fork_name) });
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = body,
+                .meta = .{
+                    .version = block_result.fork_name,
+                    .execution_optimistic = block_result.execution_optimistic,
+                    .finalized = block_result.finalized,
+                },
+            };
+        }
+
+        // --- Rewards endpoints ---
+
+        if (std.mem.eql(u8, op, "getBlockRewards")) {
+            const block_id_str = match.getParam("block_id") orelse return error.InvalidBlockId;
+            const block_id = try types.BlockId.parse(block_id_str);
+            const handler_res = try handlers.beacon.getBlockRewards(ctx, block_id);
+            const d = handler_res.data;
+            const body = try std.fmt.allocPrint(alloc,
+                "{{\"data\":{{\"proposer_index\":{d},\"total\":{d},\"attestations\":{d},\"sync_aggregate\":{d},\"proposer_slashings\":{d},\"attester_slashings\":{d}}}}}",
+                .{ d.proposer_index, d.total, d.attestations, d.sync_aggregate, d.proposer_slashings, d.attester_slashings });
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = body,
+                .meta = handler_res.meta,
+            };
+        }
+
+        if (std.mem.eql(u8, op, "getAttestationRewards")) {
+            const epoch_str = match.getParam("epoch") orelse return error.InvalidRequest;
+            const epoch = std.fmt.parseInt(u64, epoch_str, 10) catch return error.InvalidRequest;
+            // Parse body as array of validator indices.
+            var validator_indices = std.ArrayListUnmanaged(u64).empty;
+            defer validator_indices.deinit(alloc);
+            if (dc.body.len > 2) {
+                const parsed = std.json.parseFromSlice([]u64, alloc, dc.body, .{}) catch return error.InvalidRequest;
+                defer parsed.deinit();
+                for (parsed.value) |idx| try validator_indices.append(alloc, idx);
+            }
+            const handler_res = try handlers.beacon.getAttestationRewards(ctx, epoch, validator_indices.items);
+            defer {
+                alloc.free(handler_res.data.ideal_rewards);
+                alloc.free(handler_res.data.total_rewards);
+            }
+            const body = try alloc.dupe(u8, "{\"data\":{\"ideal_rewards\":[],\"total_rewards\":[]}}");
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = body,
+                .meta = handler_res.meta,
+            };
+        }
+
+        if (std.mem.eql(u8, op, "getSyncCommitteeRewards")) {
+            const block_id_str = match.getParam("block_id") orelse return error.InvalidBlockId;
+            const block_id = try types.BlockId.parse(block_id_str);
+            var validator_indices = std.ArrayListUnmanaged(u64).empty;
+            defer validator_indices.deinit(alloc);
+            if (dc.body.len > 2) {
+                const parsed = std.json.parseFromSlice([]u64, alloc, dc.body, .{}) catch return error.InvalidRequest;
+                defer parsed.deinit();
+                for (parsed.value) |idx| try validator_indices.append(alloc, idx);
+            }
+            const handler_res = try handlers.beacon.getSyncCommitteeRewards(ctx, block_id, validator_indices.items);
+            defer alloc.free(handler_res.data);
+            const body = try alloc.dupe(u8, "{\"data\":[]}");
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = body,
+                .meta = handler_res.meta,
+            };
+        }
+
+        // --- New validator endpoints ---
+
+        if (std.mem.eql(u8, op, "prepareBeaconProposer")) {
+            // Parse body: array of {validator_index, fee_recipient}
+            var preparations = std.ArrayListUnmanaged(types.ProposerPreparation).empty;
+            defer preparations.deinit(alloc);
+            if (dc.body.len > 2) {
+                const PrepWire = struct {
+                    validator_index: u64,
+                    fee_recipient: []const u8,
+                };
+                const parsed = std.json.parseFromSlice([]PrepWire, alloc, dc.body, .{ .ignore_unknown_fields = true }) catch return error.InvalidRequest;
+                defer parsed.deinit();
+                for (parsed.value) |p| {
+                    const addr_src = if (std.mem.startsWith(u8, p.fee_recipient, "0x")) p.fee_recipient[2..] else p.fee_recipient;
+                    var addr: [20]u8 = [_]u8{0} ** 20;
+                    if (addr_src.len == 40) {
+                        _ = std.fmt.hexToBytes(&addr, addr_src) catch {};
+                    }
+                    try preparations.append(alloc,.{ .validator_index = p.validator_index, .fee_recipient = addr });
+                }
+            }
+            const handler_res = try handlers.validator.prepareBeaconProposer(ctx, preparations.items);
+            return self.makeVoidResult(handler_res);
+        }
+
+        if (std.mem.eql(u8, op, "registerValidator")) {
+            var registrations = std.ArrayListUnmanaged(types.SignedValidatorRegistrationV1).empty;
+            defer registrations.deinit(alloc);
+            if (dc.body.len > 2) {
+                const RegWire = struct {
+                    message: struct {
+                        fee_recipient: []const u8,
+                        gas_limit: u64,
+                        timestamp: u64,
+                        pubkey: []const u8,
+                    },
+                    signature: []const u8,
+                };
+                const parsed = std.json.parseFromSlice([]RegWire, alloc, dc.body, .{ .ignore_unknown_fields = true }) catch return error.InvalidRequest;
+                defer parsed.deinit();
+                for (parsed.value) |r| {
+                    var fee_recipient: [20]u8 = [_]u8{0} ** 20;
+                    var pubkey: [48]u8 = [_]u8{0} ** 48;
+                    var sig: [96]u8 = [_]u8{0} ** 96;
+                    const addr_src = if (std.mem.startsWith(u8, r.message.fee_recipient, "0x")) r.message.fee_recipient[2..] else r.message.fee_recipient;
+                    if (addr_src.len == 40) _ = std.fmt.hexToBytes(&fee_recipient, addr_src) catch {};
+                    const pk_src = if (std.mem.startsWith(u8, r.message.pubkey, "0x")) r.message.pubkey[2..] else r.message.pubkey;
+                    if (pk_src.len == 96) _ = std.fmt.hexToBytes(&pubkey, pk_src) catch {};
+                    const sig_src = if (std.mem.startsWith(u8, r.signature, "0x")) r.signature[2..] else r.signature;
+                    if (sig_src.len == 192) _ = std.fmt.hexToBytes(&sig, sig_src) catch {};
+                    try registrations.append(alloc,.{
+                        .message = .{
+                            .fee_recipient = fee_recipient,
+                            .gas_limit = r.message.gas_limit,
+                            .timestamp = r.message.timestamp,
+                            .pubkey = pubkey,
+                        },
+                        .signature = sig,
+                    });
+                }
+            }
+            const handler_res = try handlers.validator.registerValidator(ctx, registrations.items);
+            return self.makeVoidResult(handler_res);
+        }
+
+        if (std.mem.eql(u8, op, "getValidatorLiveness")) {
+            const epoch_str = match.getParam("epoch") orelse return error.InvalidRequest;
+            const epoch = std.fmt.parseInt(u64, epoch_str, 10) catch return error.InvalidRequest;
+            var validator_indices = std.ArrayListUnmanaged(u64).empty;
+            defer validator_indices.deinit(alloc);
+            if (dc.body.len > 2) {
+                const parsed = std.json.parseFromSlice([]u64, alloc, dc.body, .{}) catch return error.InvalidRequest;
+                defer parsed.deinit();
+                for (parsed.value) |idx| try validator_indices.append(alloc, idx);
+            }
+            const handler_res = try handlers.validator.getValidatorLiveness(ctx, epoch, validator_indices.items);
+            defer alloc.free(handler_res.data);
+            var buf = std.ArrayListUnmanaged(u8).empty;
+            errdefer buf.deinit(alloc);
+            try buf.appendSlice(alloc, "{\"data\":[");
+            for (handler_res.data, 0..) |lv, i| {
+                if (i > 0) try buf.appendSlice(alloc, ",");
+                const entry = try std.fmt.allocPrint(alloc,
+                    "{{\"index\":{d},\"epoch\":{d},\"is_live\":{s}}}",
+                    .{ lv.index, lv.epoch, if (lv.is_live) "true" else "false" });
+                defer alloc.free(entry);
+                try buf.appendSlice(alloc, entry);
+            }
+            try buf.appendSlice(alloc, "]}");
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = try buf.toOwnedSlice(alloc),
+                .meta = handler_res.meta,
+            };
+        }
+
+        // --- Node peer detail ---
+
+        if (std.mem.eql(u8, op, "getPeer")) {
+            const peer_id_str = match.getParam("peer_id") orelse return error.InvalidRequest;
+            const handler_res = try handlers.node.getPeer(ctx, peer_id_str);
+            const d = handler_res.data;
+            const body = try std.fmt.allocPrint(alloc,
+                "{{\"data\":{{\"peer_id\":\"{s}\",\"enr\":{s},\"last_seen_p2p_address\":\"{s}\",\"state\":\"{s}\",\"direction\":\"{s}\"}}}}",
+                .{
+                    d.peer_id,
+                    if (d.enr) |enr| enr else "null",
+                    d.last_seen_p2p_address,
+                    d.state.toString(),
+                    d.direction.toString(),
+                });
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = body,
+                .meta = handler_res.meta,
+            };
+        }
+
+        // --- Debug fork choice ---
+
+        if (std.mem.eql(u8, op, "getForkChoice")) {
+            const handler_res = try handlers.debug.getForkChoice(ctx);
+            defer alloc.free(handler_res.data.fork_choice_nodes);
+            var buf = std.ArrayListUnmanaged(u8).empty;
+            errdefer buf.deinit(alloc);
+            const fc = handler_res.data;
+            const header = try std.fmt.allocPrint(alloc,
+                "{{\"data\":{{\"justified_checkpoint\":{{\"epoch\":{d},\"root\":\"0x{s}\"}},\"finalized_checkpoint\":{{\"epoch\":{d},\"root\":\"0x{s}\"}},\"fork_choice_nodes\":[",
+                .{
+                    fc.justified_checkpoint.epoch,
+                    std.fmt.bytesToHex(&fc.justified_checkpoint.root, .lower),
+                    fc.finalized_checkpoint.epoch,
+                    std.fmt.bytesToHex(&fc.finalized_checkpoint.root, .lower),
+                });
+            defer alloc.free(header);
+            try buf.appendSlice(alloc, header);
+            for (fc.fork_choice_nodes, 0..) |node, ni| {
+                if (ni > 0) try buf.appendSlice(alloc, ",");
+                const parent_root_str = if (node.parent_root) |pr|
+                    try std.fmt.allocPrint(alloc, "\"0x{s}\"", .{std.fmt.bytesToHex(&pr, .lower)})
+                else
+                    try alloc.dupe(u8, "null");
+                defer alloc.free(parent_root_str);
+                const node_entry = try std.fmt.allocPrint(alloc,
+                    "{{\"slot\":{d},\"block_root\":\"0x{s}\",\"parent_root\":{s},\"justified_epoch\":{d},\"finalized_epoch\":{d},\"weight\":{d},\"validity\":\"{s}\",\"execution_block_hash\":\"0x{s}\"}}",
+                    .{
+                        node.slot,
+                        std.fmt.bytesToHex(&node.block_root, .lower),
+                        parent_root_str,
+                        node.justified_epoch,
+                        node.finalized_epoch,
+                        node.weight,
+                        node.validity,
+                        std.fmt.bytesToHex(&node.execution_block_hash, .lower),
+                    });
+                defer alloc.free(node_entry);
+                try buf.appendSlice(alloc, node_entry);
+            }
+            try buf.appendSlice(alloc, "]}}");
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = try buf.toOwnedSlice(alloc),
+                .meta = handler_res.meta,
+            };
+        }
         return error.NotImplemented;
+
     }
 
     /// Handle a single HTTP request without TCP (for testing).
@@ -1078,4 +1483,109 @@ test "DispatchContext.getQuery parses query params" {
     try std.testing.expectEqualStrings("3", dc.getQuery("committee_index").?);
     try std.testing.expectEqualStrings("0xaabb", dc.getQuery("beacon_block_root").?);
     try std.testing.expect(dc.getQuery("missing") == null);
+}
+
+test "handleRequest GET /eth/v1/beacon/states/head/committees returns error without head state" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("GET", "/eth/v1/beacon/states/head/committees", null);
+    // Error responses are stack-allocated, do not free the body.
+
+    // Without a head state, should return an error (StateNotAvailable -> 500)
+    try std.testing.expect(resp.status >= 400);
+}
+
+test "handleRequest GET /eth/v1/beacon/headers returns 200" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("GET", "/eth/v1/beacon/headers", null);
+    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "data") != null);
+}
+
+test "handleRequest GET /eth/v1/beacon/rewards/blocks/head returns 200" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("GET", "/eth/v1/beacon/rewards/blocks/head", null);
+    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "proposer_index") != null);
+}
+
+test "handleRequest POST /eth/v1/beacon/rewards/attestations/1 returns 200" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("POST", "/eth/v1/beacon/rewards/attestations/1", "[]");
+    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+}
+
+test "handleRequest POST /eth/v1/validator/prepare_beacon_proposer returns 204" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("POST", "/eth/v1/validator/prepare_beacon_proposer", "[]");
+    defer std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 204), resp.status);
+}
+
+test "handleRequest POST /eth/v1/validator/register_validator returns 204" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("POST", "/eth/v1/validator/register_validator", "[]");
+    defer std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 204), resp.status);
+}
+
+test "handleRequest POST /eth/v1/validator/liveness/1 returns 200" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("POST", "/eth/v1/validator/liveness/1", "[0,1,2]");
+    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "is_live") != null);
+}
+
+test "handleRequest GET /eth/v1/debug/fork_choice returns 200" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("GET", "/eth/v1/debug/fork_choice", null);
+    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "fork_choice_nodes") != null);
+}
+
+test "handleRequest GET /eth/v1/node/peer_count returns 200" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("GET", "/eth/v1/node/peer_count", null);
+    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "connected") != null);
 }

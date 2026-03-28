@@ -271,6 +271,97 @@ pub const routes = [_]Route{
         .operation_id = "getPeerCount",
     },
     // -- Config --
+    // -- Beacon state (additional) --
+    .{
+        .method = .GET,
+        .path = "/eth/v1/beacon/states/{state_id}/committees",
+        .operation_id = "getStateCommittees",
+        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/beacon/states/{state_id}/sync_committees",
+        .operation_id = "getStateSyncCommittees",
+        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/beacon/states/{state_id}/randao",
+        .operation_id = "getStateRandao",
+        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/beacon/headers",
+        .operation_id = "getBlockHeaders",
+        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/beacon/blob_sidecars/{block_id}",
+        .operation_id = "getBlobSidecars",
+        .supports_ssz = true,
+        .meta_flags = .{ .version = true, .execution_optimistic = true, .finalized = true },
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/beacon/blinded_blocks/{block_id}",
+        .operation_id = "getBlindedBlock",
+        .supports_ssz = true,
+        .meta_flags = .{ .version = true, .execution_optimistic = true, .finalized = true },
+    },
+
+    // -- Rewards --
+    .{
+        .method = .GET,
+        .path = "/eth/v1/beacon/rewards/blocks/{block_id}",
+        .operation_id = "getBlockRewards",
+        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/beacon/rewards/attestations/{epoch}",
+        .operation_id = "getAttestationRewards",
+        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/beacon/rewards/sync_committee/{block_id}",
+        .operation_id = "getSyncCommitteeRewards",
+        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
+    },
+
+    // -- Validator (additional) --
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/prepare_beacon_proposer",
+        .operation_id = "prepareBeaconProposer",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/register_validator",
+        .operation_id = "registerValidator",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/liveness/{epoch}",
+        .operation_id = "getValidatorLiveness",
+        .meta_flags = .{ .execution_optimistic = true },
+    },
+
+    // -- Node (peer by id) --
+    .{
+        .method = .GET,
+        .path = "/eth/v1/node/peers/{peer_id}",
+        .operation_id = "getPeer",
+    },
+
+    // -- Debug (fork choice) --
+    .{
+        .method = .GET,
+        .path = "/eth/v1/debug/fork_choice",
+        .operation_id = "getForkChoice",
+    },
     .{
         .method = .GET,
         .path = "/eth/v1/config/spec",
@@ -474,5 +565,5 @@ test "findRoute wrong method" {
 
 test "route count" {
     // Verify we defined all expected routes
-    try std.testing.expectEqual(@as(usize, 40), routes.len);
+    try std.testing.expectEqual(@as(usize, 54), routes.len);
 }

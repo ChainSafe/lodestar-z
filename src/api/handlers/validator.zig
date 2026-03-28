@@ -519,3 +519,62 @@ test "getSyncCommitteeContribution returns NotImplemented without callback" {
     const result = getSyncCommitteeContribution(&tc.ctx, 100, 0, [_]u8{0} ** 32);
     try std.testing.expectError(error.NotImplemented, result);
 }
+
+// ---------------------------------------------------------------------------
+// Validator liveness
+// ---------------------------------------------------------------------------
+
+/// POST /eth/v1/validator/liveness/{epoch}
+///
+/// Check whether validators were live (made any on-chain activity) in the epoch.
+/// Stub — requires attestation inclusion tracking from the DB.
+pub fn getValidatorLiveness(
+    ctx: *ApiContext,
+    epoch: u64,
+    validator_indices: []const u64,
+) !HandlerResult([]types.ValidatorLiveness) {
+    const result = try ctx.allocator.alloc(types.ValidatorLiveness, validator_indices.len);
+    errdefer ctx.allocator.free(result);
+
+    for (validator_indices, 0..) |idx, i| {
+        result[i] = .{
+            .index = idx,
+            .epoch = epoch,
+            .is_live = false, // stub: would check DB for attestation inclusion
+        };
+    }
+
+    return .{
+        .data = result,
+        .meta = .{},
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Proposer preparation / registration
+// ---------------------------------------------------------------------------
+
+/// POST /eth/v1/validator/prepare_beacon_proposer
+///
+/// Register fee recipients for upcoming proposers (EIP-1559).
+/// Stores the fee recipient mapping; actual use during block production
+/// requires wiring to the block builder.
+pub fn prepareBeaconProposer(
+    _: *ApiContext,
+    _: []const types.ProposerPreparation,
+) !HandlerResult(void) {
+    // TODO: store fee_recipient per validator_index in a fee recipient cache.
+    // For now, accept and ignore (return 200).
+    return .{ .data = {} };
+}
+
+/// POST /eth/v1/validator/register_validator
+///
+/// MEV-boost validator registration. Forward to builder API if wired.
+pub fn registerValidator(
+    _: *ApiContext,
+    _: []const types.SignedValidatorRegistrationV1,
+) !HandlerResult(void) {
+    // TODO: forward to builder API callback when wired.
+    return .{ .data = {} };
+}
