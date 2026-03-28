@@ -779,6 +779,7 @@ pub const BeaconNode = struct {
     api_sync_status: *api_mod.context.SyncStatus,
     block_import_ctx: *BlockImportCallbackCtx,
     head_state_cb_ctx: *HeadStateCallbackCtx,
+    agg_att_cb_ctx: *AggregateAttestationCallbackCtx,
 
     // Prometheus metrics (real or noop depending on --metrics flag).
     // Optional pointer so BeaconNode doesn't own the metrics instance —
@@ -1030,6 +1031,11 @@ pub const BeaconNode = struct {
             .head_tracker = head_tracker,
         };
 
+        const agg_att_cb_ctx = try allocator.create(AggregateAttestationCallbackCtx);
+        agg_att_cb_ctx.* = .{
+            .op_pool = op_pool,
+        };
+
         const api_ctx = try allocator.create(ApiContext);
         api_ctx.* = .{
             .head_tracker = api_head,
@@ -1056,6 +1062,10 @@ pub const BeaconNode = struct {
             .head_state = .{
                 .ptr = @ptrCast(head_state_cb_ctx),
                 .getHeadStateFn = &getHeadStateCallback,
+            },
+            .aggregate_attestation = .{
+                .ptr = @ptrCast(agg_att_cb_ctx),
+                .getAggregateAttestationFn = &getAggregateAttestationCallback,
             },
         };
 
@@ -1132,6 +1142,7 @@ pub const BeaconNode = struct {
             .api_sync_status = api_sync,
             .block_import_ctx = block_import_ctx,
             .head_state_cb_ctx = head_state_cb_ctx,
+            .agg_att_cb_ctx = agg_att_cb_ctx,
             .unknown_block_sync = UnknownBlockSync.init(allocator),
             .unknown_chain_sync = UnknownChainSync.init(allocator),
         };
@@ -1205,6 +1216,7 @@ pub const BeaconNode = struct {
         allocator.destroy(self.api_sync_status);
         allocator.destroy(self.block_import_ctx);
         allocator.destroy(self.head_state_cb_ctx);
+        allocator.destroy(self.agg_att_cb_ctx);
 
         self.queued_regen.deinit();
         allocator.destroy(self.queued_regen);
@@ -4256,6 +4268,67 @@ pub const HeadStateCallbackCtx = struct {
 fn getHeadStateCallback(ptr: *anyopaque) ?*CachedBeaconState {
     const ctx: *HeadStateCallbackCtx = @ptrCast(@alignCast(ptr));
     return ctx.block_state_cache.get(ctx.head_tracker.head_state_root);
+}
+
+// ---------------------------------------------------------------------------
+// AggregateAttestationCallbackCtx + getAggregateAttestationCallback
+// — glue between ApiContext.AggregateAttestationCallback and AggregatedAttestationPool
+// ---------------------------------------------------------------------------
+
+/// Context for the aggregate_attestation API callback.
+pub const AggregateAttestationCallbackCtx = struct {
+    op_pool: *OpPool,
+};
+
+/// API-layer aggregate attestation callback.
+///
+/// Looks up the best aggregate for the given (slot, data_root) from the
+/// aggregated attestation pool and returns it as JSON.
+///
+/// GET /eth/v1/validator/aggregate_attestation?slot=...&attestation_data_root=0x...
+fn getAggregateAttestationCallback(
+    ptr: *anyopaque,
+    alloc: std.mem.Allocator,
+    slot: u64,
+    attestation_data_root: [32]u8,
+) anyerror![]const u8 {
+    const ctx: *AggregateAttestationCallbackCtx = @ptrCast(@alignCast(ptr));
+    const agg_pool = &ctx.op_pool.agg_attestation_pool;
+
+    const best = agg_pool.getAggregate(@intCast(slot), attestation_data_root) orelse
+        return error.NotFound;
+
+    // Serialize to JSON.
+    // Format: {"data": { attestation fields }}
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    const writer = &out.writer;
+
+    try writer.writeAll("{\"data\":{");
+    try writer.print("\"aggregation_bits\":\"0x", .{});
+    for (best.aggregation_bits.data.items) |byte| {
+        try writer.print("{x:0>2}", .{byte});
+    }
+    try writer.writeAll("\",");
+    try writer.print("\"data\":{{\"slot\":{d},\"index\":{d},", .{
+        best.data.slot,
+        best.data.index,
+    });
+    try writer.writeAll("\"beacon_block_root\":\"0x");
+    for (best.data.beacon_block_root) |byte| try writer.print("{x:0>2}", .{byte});
+    try writer.writeAll("\",");
+    try writer.print("\"source\":{{\"epoch\":{d},\"root\":\"0x", .{best.data.source.epoch});
+    for (best.data.source.root) |byte| try writer.print("{x:0>2}", .{byte});
+    try writer.writeAll("\"}},");
+    try writer.print("\"target\":{{\"epoch\":{d},\"root\":\"0x", .{best.data.target.epoch});
+    for (best.data.target.root) |byte| try writer.print("{x:0>2}", .{byte});
+    try writer.writeAll("\"}}},");
+    try writer.writeAll("\"signature\":\"0x");
+    for (best.signature) |byte| try writer.print("{x:0>2}", .{byte});
+    try writer.writeAll("\"");
+    try writer.writeAll("}}");
+
+    return out.toOwnedSlice();
 }
 
 /// API-layer block import callback.

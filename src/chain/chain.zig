@@ -417,8 +417,11 @@ pub const Chain = struct {
             };
         }
 
-        // Insert into attestation pool for block production.
+        // Insert into both attestation pools for block production.
+        // The aggregated pool provides optimized greedy selection;
+        // the legacy pool is kept as fallback.
         try self.op_pool.attestation_pool.add(attestation);
+        _ = try self.op_pool.agg_attestation_pool.add(attestation);
     }
 
     // -----------------------------------------------------------------------
@@ -440,6 +443,10 @@ pub const Chain = struct {
         else
             0;
         self.seen_cache.pruneBlocks(min_slot);
+
+        // Prune attestation pools: remove attestations older than 2 epochs.
+        self.op_pool.attestation_pool.prune(slot);
+        self.op_pool.agg_attestation_pool.pruneBySlot(slot);
     }
 
     // -----------------------------------------------------------------------

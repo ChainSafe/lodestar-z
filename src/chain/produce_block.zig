@@ -135,10 +135,15 @@ pub const BlockProductionConfig = struct {
 /// The caller must call `deinit` on the result when done.
 pub fn produceBlockBody(
     allocator: Allocator,
-    _: Slot, // slot — reserved for fork-aware logic
+    slot: Slot,
     op_pool: *OpPool,
 ) !ProducedBlockBody {
-    const attestations = try op_pool.attestation_pool.getForBlock(allocator, MAX_ATTESTATIONS);
+    // Use the aggregated pool for greedy maximum-coverage attestation selection.
+    // Falls back to the legacy pool if the aggregated pool is empty.
+    const attestations = if (op_pool.agg_attestation_pool.entryCount() > 0)
+        try op_pool.agg_attestation_pool.getAttestationsForBlock(allocator, slot, MAX_ATTESTATIONS)
+    else
+        try op_pool.attestation_pool.getForBlock(allocator, MAX_ATTESTATIONS);
     errdefer allocator.free(attestations);
 
     const voluntary_exits = try op_pool.voluntary_exit_pool.getForBlock(allocator, MAX_VOLUNTARY_EXITS);
