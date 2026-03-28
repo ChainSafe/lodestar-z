@@ -177,7 +177,7 @@ pub const ValidatorStore = struct {
     }
 
     /// Return true if the given pubkey belongs to a remote signer.
-    pub fn isRemote(self: *const ValidatorStore, pubkey: [48]u8) bool {
+    pub fn isRemote(self: *ValidatorStore, pubkey: [48]u8) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
         for (self.validators.items) |v| {

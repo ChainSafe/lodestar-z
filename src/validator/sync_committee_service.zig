@@ -36,9 +36,10 @@ const LivenessTracker = liveness_mod.LivenessTracker;
 
 const log = std.log.scoped(.sync_committee_service);
 
-/// SYNC_COMMITTEE_SIZE = 512 (mainnet). SYNC_COMMITTEE_SUBNET_COUNT = 4.
-const SYNC_COMMITTEE_SUBNET_COUNT: u64 = 4;
-const SYNC_COMMITTEE_SIZE: u64 = 512;
+/// Mainnet preset values. Minimal preset uses SYNC_COMMITTEE_SIZE=32, SYNC_COMMITTEE_SUBNET_COUNT=4.
+/// TODO: pass these from ValidatorConfig/SigningContext so minimal devnets work correctly.
+const SYNC_COMMITTEE_SUBNET_COUNT: u64 = 4; // mainnet; minimal = 4 (same)
+const SYNC_COMMITTEE_SIZE: u64 = 512; // mainnet; minimal = 32
 
 // ---------------------------------------------------------------------------
 // SyncCommitteeService
