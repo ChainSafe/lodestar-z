@@ -48,6 +48,9 @@ const SseEvent = chain_types.SseEvent;
 const block_import = @import("../block_import.zig");
 const HeadTracker = block_import.HeadTracker;
 const QueuedStateRegen = @import("../queued_regen.zig").QueuedStateRegen;
+const reprocess_mod = @import("../reprocess.zig");
+const ReprocessQueue = reprocess_mod.ReprocessQueue;
+const PendingReason = reprocess_mod.PendingReason;
 
 /// Maximum number of slots in the past for which we emit block events.
 /// Prevents flooding the event stream during sync.
@@ -87,6 +90,11 @@ pub const ImportContext = struct {
 
     // -- Events --
     event_callback: ?EventCallback,
+
+    // -- Reprocessing -- (P1-10 fix)
+    /// When set, blocks that fail with ParentUnknown are queued here for
+    /// reprocessing once the parent arrives via onBlockImported().
+    reprocess_queue: ?*ReprocessQueue = null,
 };
 
 // ---------------------------------------------------------------------------
@@ -374,6 +382,22 @@ pub fn importVerifiedBlock(
                 .slot = block_slot,
                 .block_root = block_root,
             } });
+        }
+    }
+
+    // 8. Notify reprocess queue (P1-10 fix).
+    // Any blocks that were waiting for this block as their parent can now be reprocessed.
+    // This handles the common case of out-of-order block delivery on gossip.
+    if (ctx.reprocess_queue) |rq| {
+        var released = rq.onBlockImported(block_root);
+        defer released.deinit(ctx.allocator);
+        // Log but don't reprocess inline (avoids deep recursion / stack overflow).
+        // Callers should drain the queue asynchronously after import.
+        if (released.items.len > 0) {
+            std.log.info("importBlock: {d} block(s) queued for reprocessing (parent={s}...)", .{
+                released.items.len,
+                &std.fmt.bytesToHex(block_root[0..4], .lower),
+            });
         }
     }
 

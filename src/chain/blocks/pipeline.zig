@@ -51,6 +51,7 @@ const ImportContext = import_block.ImportContext;
 
 const QueuedStateRegen = @import("../queued_regen.zig").QueuedStateRegen;
 const HeadTracker = @import("../block_import.zig").HeadTracker;
+const ReprocessQueue = @import("../reprocess.zig").ReprocessQueue;
 
 const Slot = consensus_types.primitive.Slot.Type;
 
@@ -62,6 +63,17 @@ const Slot = consensus_types.primitive.Slot.Type;
 ///
 /// Created once by the Chain and reused for each block import.
 /// Contains references to all chain components needed by the pipeline.
+///
+/// Relationship to ImportContext (P1-9 note):
+/// `ImportContext` is a strict subset of `PipelineContext`. The import stage
+/// (import_block.zig) only needs the fields that appear in ImportContext —
+/// it doesn't need `execution_verifier` (handled before import) or
+/// `current_slot` (used only for sanity/DA checks). The conversion via
+/// `toImportContext()` is intentional: it gives the import stage a focused
+/// interface and avoids import_block.zig depending on the full pipeline type
+/// (which would create a circular import). If import_block gains new deps,
+/// they should be added to ImportContext and toImportContext(), not to the
+/// full PipelineContext.
 pub const PipelineContext = struct {
     allocator: Allocator,
 
@@ -91,6 +103,10 @@ pub const PipelineContext = struct {
     // -- Clock --
     current_slot: Slot,
 
+    // -- Reprocessing -- (P1-10 fix)
+    /// When set, blocks pending reprocessing are notified after successful import.
+    reprocess_queue: ?*ReprocessQueue = null,
+
     /// Convert to ImportContext for the import stage.
     pub fn toImportContext(self: PipelineContext) ImportContext {
         return .{
@@ -103,6 +119,7 @@ pub const PipelineContext = struct {
             .head_tracker = self.head_tracker,
             .block_to_state = self.block_to_state,
             .event_callback = self.event_callback,
+            .reprocess_queue = self.reprocess_queue,
         };
     }
 };

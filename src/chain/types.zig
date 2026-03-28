@@ -12,56 +12,24 @@ const Epoch = consensus_types.primitive.Epoch.Type;
 const Root = [32]u8;
 
 // ---------------------------------------------------------------------------
-// BlockInput — the atomic unit entering the block import pipeline.
+// BlockInput — re-export from blocks/types.zig (P1-7 consolidation fix).
+//
+// The pipeline's BlockInput (blocks/types.zig) is the single canonical type.
+// This alias keeps backward compatibility for callers using chain-level types.
 // ---------------------------------------------------------------------------
 
-pub const BlockInput = struct {
-    /// The signed beacon block (any fork).
-    block: fork_types.AnySignedBeaconBlock,
-    /// Where the block came from.
-    source: Source,
-    /// Data availability status.
-    da_status: DataAvailabilityStatus,
-
-    pub const Source = enum {
-        /// Received via gossipsub.
-        gossip,
-        /// Received via req/resp range sync.
-        range_sync,
-        /// Received via req/resp unknown block sync.
-        unknown_block_sync,
-        /// Submitted via REST API.
-        api,
-        /// From checkpoint sync.
-        checkpoint_sync,
-    };
-
-    pub const DataAvailabilityStatus = enum {
-        /// Pre-Deneb: no DA required.
-        not_required,
-        /// All blobs/columns present and KZG-verified.
-        available,
-        /// Waiting for blobs/columns — block is quarantined.
-        pending,
-    };
-};
+const blocks_types = @import("blocks/types.zig");
+pub const BlockInput = blocks_types.BlockInput;
+pub const BlockSource = blocks_types.BlockSource;
 
 // ---------------------------------------------------------------------------
-// ImportResult — outcome of a successful block import.
+// ImportResult — re-export from blocks/types.zig (P1-8 consolidation fix).
+//
+// The pipeline's ImportResult (blocks/types.zig) is the single canonical type.
+// This alias keeps backward compatibility for callers using chain-level types.
 // ---------------------------------------------------------------------------
 
-pub const ImportResult = struct {
-    /// Hash-tree-root of the imported block.
-    block_root: Root,
-    /// State root of the post-state.
-    state_root: Root,
-    /// Slot of the imported block.
-    slot: Slot,
-    /// Whether this block crossed an epoch boundary.
-    epoch_transition: bool,
-    /// Whether the block was imported with optimistic execution status.
-    execution_optimistic: bool = false,
-};
+pub const ImportResult = blocks_types.ImportResult;
 
 // ---------------------------------------------------------------------------
 // HeadInfo — current chain head summary.
