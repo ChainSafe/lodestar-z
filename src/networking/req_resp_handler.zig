@@ -210,8 +210,7 @@ fn handleGoodbye(
     context.onGoodbye(context.ptr, reason);
 
     // Return empty response — Goodbye has no response body per spec.
-    const chunks = try allocator.alloc(ResponseChunk, 0);
-    return chunks;
+    return &.{};
 }
 
 /// Handle a Ping request.
@@ -359,6 +358,10 @@ fn handleBeaconBlocksByRoot(
 
     // Collect found blocks into a dynamic list.
     var found: std.ArrayList(ResponseChunk) = .empty;
+    errdefer {
+        for (found.items) |chunk| allocator.free(chunk.ssz_payload);
+        found.deinit(allocator);
+    }
 
     for (0..num_roots) |i| {
         const root: [32]u8 = request_bytes[i * 32 ..][0..32].*;
@@ -385,8 +388,7 @@ fn handleBeaconBlocksByRoot(
     // Transfer ownership of the backing array to the caller.
     if (found.items.len == 0) {
         found.deinit(allocator);
-        const chunks = try allocator.alloc(ResponseChunk, 0);
-        return chunks;
+        return &.{};
     }
     return try found.toOwnedSlice(allocator);
 }
@@ -424,18 +426,38 @@ fn handleBlobSidecarsByRange(
 
     // Build response chunks with context bytes.
     const chunks = try allocator.alloc(ResponseChunk, blobs.len);
+    var filled: usize = 0;
+    errdefer {
+        for (chunks[0..filled]) |c| allocator.free(c.ssz_payload);
+        allocator.free(chunks);
+    }
     for (blobs, 0..) |blob_ssz, i| {
         const payload = try allocator.alloc(u8, blob_ssz.len);
         @memcpy(payload, blob_ssz);
 
-        // Each blob's slot is approximated from the range start.
-        // In production, the actual slot would be extracted from the blob sidecar SSZ.
-        const slot = request.start_slot + i;
+        // Extract the actual slot from the BlobSidecar SSZ bytes.
+        //
+        // BlobSidecar is a fixed container (Deneb/Electra, FIELD_ELEMENTS_PER_BLOB=4096):
+        //   index:               8 bytes  @ offset 0
+        //   blob:           131072 bytes  @ offset 8       (4096 * 32 bytes per field element)
+        //   kzg_commitment:     48 bytes  @ offset 131080
+        //   kzg_proof:          48 bytes  @ offset 131128
+        //   signed_block_header:          @ offset 131176
+        //     message (BeaconBlockHeader):
+        //       slot:            8 bytes  @ offset 131176  (first field of message)
+        //
+        // Falls back to range-start + index if the SSZ is too short.
+        const BLOB_SIDECAR_SLOT_OFFSET = 8 + (4096 * 32) + 48 + 48; // 131176
+        const actual_slot = if (blob_ssz.len >= BLOB_SIDECAR_SLOT_OFFSET + 8)
+            std.mem.readInt(u64, blob_ssz[BLOB_SIDECAR_SLOT_OFFSET..][0..8], .little)
+        else
+            request.start_slot + i;
         chunks[i] = .{
             .result = .success,
-            .context_bytes = context.getForkDigest(context.ptr, slot),
+            .context_bytes = context.getForkDigest(context.ptr, actual_slot),
             .ssz_payload = payload,
         };
+        filled += 1;
     }
     return chunks;
 }
@@ -461,6 +483,10 @@ fn handleBlobSidecarsByRoot(
     }
 
     var found: std.ArrayList(ResponseChunk) = .empty;
+    errdefer {
+        for (found.items) |chunk| allocator.free(chunk.ssz_payload);
+        found.deinit(allocator);
+    }
 
     for (0..num_ids) |i| {
         const offset = i * blob_id_size;
@@ -486,8 +512,7 @@ fn handleBlobSidecarsByRoot(
 
     if (found.items.len == 0) {
         found.deinit(allocator);
-        const chunks = try allocator.alloc(ResponseChunk, 0);
-        return chunks;
+        return &.{};
     }
     return try found.toOwnedSlice(allocator);
 }
@@ -516,6 +541,10 @@ fn handleDataColumnSidecarsByRoot(
     }
 
     var found: std.ArrayList(ResponseChunk) = .empty;
+    errdefer {
+        for (found.items) |chunk| allocator.free(chunk.ssz_payload);
+        found.deinit(allocator);
+    }
 
     for (0..num_ids) |i| {
         const offset = i * id_size;
@@ -541,8 +570,7 @@ fn handleDataColumnSidecarsByRoot(
 
     if (found.items.len == 0) {
         found.deinit(allocator);
-        const chunks = try allocator.alloc(ResponseChunk, 0);
-        return chunks;
+        return &.{};
     }
     return try found.toOwnedSlice(allocator);
 }
@@ -580,16 +608,38 @@ fn handleDataColumnSidecarsByRange(
     }
 
     const chunks = try allocator.alloc(ResponseChunk, data_columns.len);
+    var filled: usize = 0;
+    errdefer {
+        for (chunks[0..filled]) |c| allocator.free(c.ssz_payload);
+        allocator.free(chunks);
+    }
     for (data_columns, 0..) |dc_ssz, i| {
         const payload = try allocator.alloc(u8, dc_ssz.len);
         @memcpy(payload, dc_ssz);
 
-        const slot = start_slot + i;
+        // Extract the actual slot from the DataColumnSidecar SSZ bytes.
+        //
+        // DataColumnSidecar is a variable container (Fulu):
+        //   index:                    8 bytes  @ offset 0     (u64, fixed inline)
+        //   column offset:            4 bytes  @ offset 8     (variable-field offset)
+        //   kzg_commitments offset:   4 bytes  @ offset 12    (variable-field offset)
+        //   kzg_proofs offset:        4 bytes  @ offset 16    (variable-field offset)
+        //   signed_block_header:    208 bytes  @ offset 20    (fixed inline)
+        //     message (BeaconBlockHeader):
+        //       slot:                 8 bytes  @ offset 20    (first field of message)
+        //
+        // Falls back to range-start + index if the SSZ is too short.
+        const DC_SIDECAR_SLOT_OFFSET = 8 + 4 + 4 + 4; // 20
+        const actual_slot = if (dc_ssz.len >= DC_SIDECAR_SLOT_OFFSET + 8)
+            std.mem.readInt(u64, dc_ssz[DC_SIDECAR_SLOT_OFFSET..][0..8], .little)
+        else
+            start_slot + i;
         chunks[i] = .{
             .result = .success,
-            .context_bytes = context.getForkDigest(context.ptr, slot),
+            .context_bytes = context.getForkDigest(context.ptr, actual_slot),
             .ssz_payload = payload,
         };
+        filled += 1;
     }
     return chunks;
 }
