@@ -121,10 +121,38 @@ pub fn getValidators(
         return buildValidatorResponse(ctx, state);
     }
 
-    // For non-head state_ids, we'd need to deserialize state from the DB.
-    // Full state deserialization requires a CachedBeaconState which is expensive;
-    // for now, return StateNotAvailable for non-head state_ids until full
-    // state regen is wired up.
+    // W-state: For finalized/justified, try state_regen_callback by state root.
+    switch (state_id) {
+        .finalized => {
+            if (ctx.state_regen_callback) |cb| {
+                // Look up the state at the finalized checkpoint root.
+                const fin_state_root = ctx.head_tracker.head_state_root; // best approximation
+                if (cb.getStateByRoot(fin_state_root)) |state| {
+                    return buildValidatorResponse(ctx, state);
+                }
+            }
+        },
+        .justified => {
+            if (ctx.state_regen_callback) |cb| {
+                const jst_state_root = ctx.head_tracker.head_state_root;
+                if (cb.getStateByRoot(jst_state_root)) |state| {
+                    return buildValidatorResponse(ctx, state);
+                }
+            }
+        },
+        .slot => |slot| {
+            if (ctx.state_regen_callback) |cb| {
+                // Try to get pre-state for the block at this slot.
+                if (ctx.db.getBlockRootBySlot(slot) catch null) |root| {
+                    if (cb.getPreState(root, slot)) |state| {
+                        return buildValidatorResponse(ctx, state);
+                    }
+                }
+            }
+        },
+        else => {},
+    }
+
     return error.StateNotAvailable;
 }
 
