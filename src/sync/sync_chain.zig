@@ -145,20 +145,36 @@ pub const SyncChain = struct {
 
     pub fn deinit(self: *SyncChain) void {
         self.batches.deinit(self.allocator);
+        // Free owned peer_id keys before deiniting the map.
+        for (self.peers.keys()) |k| self.allocator.free(k);
         self.peers.deinit();
     }
 
     /// Add a peer and update the chain target.
+    ///
+    /// The peer_id string is deep-copied into owned memory so the caller's
+    /// buffer can be freed or reused after this call.
     pub fn addPeer(self: *SyncChain, peer_id: []const u8, target: ChainTarget) !void {
-        try self.peers.put(peer_id, target);
+        // If the key already exists, reuse the owned copy.
+        if (self.peers.contains(peer_id)) {
+            try self.peers.put(peer_id, target);
+            self.computeTarget();
+            return;
+        }
+        const owned_id = try self.allocator.dupe(u8, peer_id);
+        errdefer self.allocator.free(owned_id);
+        try self.peers.put(owned_id, target);
         self.computeTarget();
     }
 
     /// Remove a peer and recompute the chain target.
     pub fn removePeer(self: *SyncChain, peer_id: []const u8) bool {
-        const removed = self.peers.swapRemove(peer_id);
-        if (removed) self.computeTarget();
-        return removed;
+        // Free the owned key before removing.
+        const idx = self.peers.getIndex(peer_id) orelse return false;
+        self.allocator.free(self.peers.keys()[idx]);
+        self.peers.swapRemoveAt(idx);
+        self.computeTarget();
+        return true;
     }
 
     /// Number of peers on this chain.
