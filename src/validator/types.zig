@@ -62,7 +62,7 @@ pub const SyncCommitteeDuty = struct {
 pub const SyncCommitteeDutyWithProofs = struct {
     duty: SyncCommitteeDuty,
     /// One selection proof per subcommittee index.
-    selection_proofs: []const ?[96]u8,
+    selection_proofs: []?[96]u8,
 };
 
 // ---------------------------------------------------------------------------

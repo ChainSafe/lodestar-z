@@ -160,7 +160,7 @@ pub const ValidatorClient = struct {
         //       These fields must not move after init; the client must be stable.
         //       Pass &vc.api / &vc.validator_store after heap-allocating if needed.
 
-        const block_service = BlockService.init(allocator, &api, &validator_store, signing_ctx);
+        const block_service = BlockService.init(allocator, &api, &validator_store, signing_ctx, config.slots_per_epoch);
         const attestation_service = AttestationService.init(
             allocator,
             &api,

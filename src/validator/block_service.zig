@@ -34,8 +34,8 @@ const SyncingTracker = syncing_tracker_mod.SyncingTracker;
 
 const log = std.log.scoped(.block_service);
 
-/// Maximum duties cached per epoch.
-const MAX_DUTIES_PER_EPOCH: usize = 32; // SLOTS_PER_EPOCH
+/// Maximum duties cached per epoch (upper bound; runtime value from slots_per_epoch).
+const MAX_DUTIES_PER_EPOCH: usize = 64; // upper bound; actual value from config.slots_per_epoch
 
 // ---------------------------------------------------------------------------
 // BlockService
@@ -61,12 +61,15 @@ pub const BlockService = struct {
     doppelganger: ?*DoppelgangerService,
     /// Syncing tracker reference (optional).
     syncing_tracker: ?*SyncingTracker,
+    /// Slots per epoch (from chain config).
+    slots_per_epoch: u64,
 
     pub fn init(
         allocator: Allocator,
         api: *BeaconApiClient,
         validator_store: *ValidatorStore,
         signing_ctx: SigningContext,
+        slots_per_epoch: u64,
     ) BlockService {
         return .{
             .allocator = allocator,
@@ -81,6 +84,7 @@ pub const BlockService = struct {
             .missed_block_count = 0,
             .doppelganger = null,
             .syncing_tracker = null,
+            .slots_per_epoch = slots_per_epoch,
         };
     }
 
@@ -171,9 +175,9 @@ pub const BlockService = struct {
         self.duties_epoch = epoch;
 
         // Index duties by slot (within-epoch offset).
-        const epoch_start = epoch * MAX_DUTIES_PER_EPOCH;
+        const epoch_start = epoch * self.slots_per_epoch;
         for (fetched) |duty| {
-            if (duty.slot >= epoch_start and duty.slot < epoch_start + MAX_DUTIES_PER_EPOCH) {
+            if (duty.slot >= epoch_start and duty.slot < epoch_start + self.slots_per_epoch) {
                 const offset = duty.slot - epoch_start;
                 if (offset < MAX_DUTIES_PER_EPOCH) {
                     self.duties[offset] = duty;
@@ -198,9 +202,9 @@ pub const BlockService = struct {
         for (&self.next_duties) |*d| d.* = null;
         self.next_duties_epoch = next_epoch;
 
-        const epoch_start = next_epoch * MAX_DUTIES_PER_EPOCH;
+        const epoch_start = next_epoch * self.slots_per_epoch;
         for (fetched) |duty| {
-            if (duty.slot >= epoch_start and duty.slot < epoch_start + MAX_DUTIES_PER_EPOCH) {
+            if (duty.slot >= epoch_start and duty.slot < epoch_start + self.slots_per_epoch) {
                 const offset = duty.slot - epoch_start;
                 if (offset < MAX_DUTIES_PER_EPOCH) {
                     self.next_duties[offset] = duty;
@@ -226,7 +230,7 @@ pub const BlockService = struct {
         log.info("proposing block slot={d} validator_index={d}", .{ slot, duty.validator_index });
 
         // 1. Compute RANDAO reveal: sign(epoch) with DOMAIN_RANDAO.
-        const epoch = slot / MAX_DUTIES_PER_EPOCH;
+        const epoch = slot / self.slots_per_epoch;
         const randao_reveal = try self.produceRandaoReveal(duty.pubkey, epoch);
 
         // 2. Get unsigned block from BN.
@@ -289,7 +293,8 @@ pub const BlockService = struct {
                     break :blk2 switch (v) { .string => |s| s, else => "phase0" };
                 };
                 computeBodyRoot(arena.allocator(), version_str, body_val, &body_root) catch |err| {
-                    log.warn("computeBodyRoot failed: {s} — body_root will be zero (signing root will be wrong)", .{@errorName(err)});
+                    log.err("computeBodyRoot failed: {s} — aborting block proposal to avoid signing with wrong body_root", .{@errorName(err)});
+                    return error.BodyRootComputationFailed;
                 };
             }
         }
@@ -347,8 +352,8 @@ pub const BlockService = struct {
 
         // Mark this slot as successfully produced.
         if (self.duties_epoch) |ep| {
-            const ep_start = ep * MAX_DUTIES_PER_EPOCH;
-            if (slot >= ep_start and slot < ep_start + MAX_DUTIES_PER_EPOCH) {
+            const ep_start = ep * self.slots_per_epoch;
+            if (slot >= ep_start and slot < ep_start + self.slots_per_epoch) {
                 self.produced_slots[slot - ep_start] = true;
             }
         }
@@ -360,7 +365,7 @@ pub const BlockService = struct {
     ///
     /// TS: BlockDutiesService marks missed blocks via blockDuties tracking.
     fn checkMissedSlots(self: *BlockService, epoch: u64) void {
-        const epoch_start = epoch * MAX_DUTIES_PER_EPOCH;
+        const epoch_start = epoch * self.slots_per_epoch;
         for (self.duties, self.produced_slots, 0..) |maybe_duty, produced, i| {
             if (maybe_duty) |duty| {
                 if (!produced) {
@@ -378,7 +383,7 @@ pub const BlockService = struct {
 
     fn getDutyAtSlot(self: *const BlockService, slot: u64) ?ProposerDuty {
         const epoch = self.duties_epoch orelse return null;
-        const epoch_start = epoch * MAX_DUTIES_PER_EPOCH;
+        const epoch_start = epoch * self.slots_per_epoch;
         if (slot < epoch_start or slot >= epoch_start + MAX_DUTIES_PER_EPOCH) return null;
         const offset = slot - epoch_start;
         const duty = self.duties[offset] orelse return null;

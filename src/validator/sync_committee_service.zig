@@ -267,6 +267,13 @@ pub const SyncCommitteeService = struct {
     fn runSyncTasks(self: *SyncCommitteeService, io: Io, slot: u64) !void {
         if (self.duties.items.len == 0) return;
 
+        // Reset all selection_proofs to null at the start of each slot.
+        // Selection proofs are slot-specific (SyncAggregatorSelectionData{slot, subcommittee_index})
+        // so they must be recomputed for every slot.
+        for (self.duties.items) |*d| {
+            @memset(d.selection_proofs, null);
+        }
+
         // Get current head root from tracker (or zero if unknown).
         const beacon_block_root: [32]u8 = if (self.header_tracker) |ht|
             ht.getHeadInfo().block_root
@@ -447,11 +454,14 @@ pub const SyncCommitteeService = struct {
                 const contrib_sig_hex = std.fmt.bytesToHex(&contrib.signature, .lower);
 
                 // 3. Build SignedContributionAndProof JSON and publish.
+                // Fix 4: Hex-encode the actual agg_bits instead of hardcoded "0x00".
+                // agg_bits is a BitVector(128) — 16 bytes, no sentinel needed (fixed-size).
+                const agg_bits_hex = std.fmt.bytesToHex(&agg_bits, .lower);
                 var contrib_json = std.ArrayList(u8).init(self.allocator);
                 defer contrib_json.deinit();
                 try contrib_json.writer().print(
-                    "[{{\"message\":{{\"aggregator_index\":\"{d}\",\"contribution\":{{\"slot\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"subcommittee_index\":\"{d}\",\"aggregation_bits\":\"0x00\",\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}]",
-                    .{ dp.duty.validator_index, slot, bbr_hex2, subcommittee_index, contrib_sig_hex, sel_hex, sig_hex },
+                    "[{{\"message\":{{\"aggregator_index\":\"{d}\",\"contribution\":{{\"slot\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"subcommittee_index\":\"{d}\",\"aggregation_bits\":\"0x{s}\",\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}]",
+                    .{ dp.duty.validator_index, slot, bbr_hex2, subcommittee_index, agg_bits_hex, contrib_sig_hex, sel_hex, sig_hex },
                 );
 
                 self.api.publishContributionAndProofs(io, contrib_json.items) catch |err| {
