@@ -17,7 +17,6 @@ pub const NodeIdentity = identity.NodeIdentity;
 
 pub const BeaconNode = beacon_node.BeaconNode;
 pub const HeadTracker = beacon_node.HeadTracker;
-pub const BlockImporter = beacon_node.BlockImporter;
 pub const ImportResult = beacon_node.ImportResult;
 pub const HeadInfo = beacon_node.HeadInfo;
 pub const SyncStatus = beacon_node.SyncStatus;

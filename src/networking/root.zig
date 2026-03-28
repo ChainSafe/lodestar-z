@@ -128,7 +128,7 @@ pub const TokenBucket = rate_limiter.TokenBucket;
 pub const status_cache = @import("status_cache.zig");
 pub const StatusCache = status_cache.StatusCache;
 pub const CachedStatus = status_cache.CachedStatus;
-pub const ChainHeadInfo = status_cache.ChainHeadInfo;
+pub const StatusInfo = status_cache.StatusInfo;
 
 // Multi-component peer scoring (v2).
 pub const PeerScoreService = peer_scoring.PeerScoreService;

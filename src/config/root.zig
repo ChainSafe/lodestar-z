@@ -4,6 +4,8 @@ const testing = std.testing;
 pub const BeaconConfig = @import("./BeaconConfig.zig");
 pub const ChainConfig = @import("./ChainConfig.zig");
 pub const ForkSeq = @import("./fork_seq.zig").ForkSeq;
+pub const clock = @import("./clock.zig");
+pub const SlotClock = clock.SlotClock;
 
 pub const mainnet = @import("./networks/mainnet.zig");
 pub const minimal = @import("./networks/minimal.zig");

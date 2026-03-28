@@ -40,7 +40,7 @@ pub const EpochCallback = struct {
 };
 
 /// Slot clock: computes slots from wall time and drives the duty scheduling loop.
-pub const SlotClock = struct {
+pub const ValidatorSlotTicker = struct {
     genesis_time_ns: u64,
     seconds_per_slot: u64,
     slots_per_epoch: u64,
@@ -57,7 +57,7 @@ pub const SlotClock = struct {
         genesis_time_unix_secs: u64,
         seconds_per_slot: u64,
         slots_per_epoch: u64,
-    ) SlotClock {
+    ) ValidatorSlotTicker {
         return .{
             .genesis_time_ns = genesis_time_unix_secs * std.time.ns_per_s,
             .seconds_per_slot = seconds_per_slot,
@@ -73,7 +73,7 @@ pub const SlotClock = struct {
     /// Register a callback to run at every slot boundary.
     ///
     /// TS: clock.runEverySlot(fn)
-    pub fn onSlot(self: *SlotClock, cb: SlotCallback) void {
+    pub fn onSlot(self: *ValidatorSlotTicker, cb: SlotCallback) void {
         self.slot_callbacks[self.slot_callback_count] = cb;
         self.slot_callback_count += 1;
     }
@@ -81,7 +81,7 @@ pub const SlotClock = struct {
     /// Register a callback to run at every epoch boundary.
     ///
     /// TS: clock.runEveryEpoch(fn)
-    pub fn onEpoch(self: *SlotClock, cb: EpochCallback) void {
+    pub fn onEpoch(self: *ValidatorSlotTicker, cb: EpochCallback) void {
         self.epoch_callbacks[self.epoch_callback_count] = cb;
         self.epoch_callback_count += 1;
     }
@@ -89,14 +89,14 @@ pub const SlotClock = struct {
     /// Request the run() loop to stop at the next iteration.
     ///
     /// Safe to call from any thread (uses atomic store).
-    pub fn requestShutdown(self: *SlotClock) void {
+    pub fn requestShutdown(self: *ValidatorSlotTicker) void {
         self.shutdown_requested.store(true, .seq_cst);
     }
 
     /// Return the current slot number (0-based from genesis).
     ///
     /// TS: clock.getCurrentSlot()
-    pub fn currentSlot(self: *const SlotClock) u64 {
+    pub fn currentSlot(self: *const ValidatorSlotTicker) u64 {
         const now_ns: u64 = @intCast(std.time.nanoTimestamp());
         if (now_ns < self.genesis_time_ns) return 0;
         const elapsed_ns = now_ns - self.genesis_time_ns;
@@ -105,7 +105,7 @@ pub const SlotClock = struct {
     }
 
     /// Return the current epoch (slot / slots_per_epoch).
-    pub fn currentEpoch(self: *const SlotClock) u64 {
+    pub fn currentEpoch(self: *const ValidatorSlotTicker) u64 {
         return self.currentSlot() / self.slots_per_epoch;
     }
 
@@ -114,7 +114,7 @@ pub const SlotClock = struct {
     /// Returns 0 if the slot has already started.
     ///
     /// TS: clock.msToSlot(slot) (we use nanoseconds)
-    pub fn nsUntilSlot(self: *const SlotClock, slot: u64) u64 {
+    pub fn nsUntilSlot(self: *const ValidatorSlotTicker, slot: u64) u64 {
         const slot_start_ns = self.genesis_time_ns + slot * self.seconds_per_slot * std.time.ns_per_s;
         const now_ns: u64 = @intCast(std.time.nanoTimestamp());
         if (now_ns >= slot_start_ns) return 0;
@@ -124,7 +124,7 @@ pub const SlotClock = struct {
     /// Nanoseconds elapsed since the start of `slot`.
     ///
     /// TS: clock.msFromSlot(slot) (we use nanoseconds)
-    pub fn nsFromSlot(self: *const SlotClock, slot: u64) u64 {
+    pub fn nsFromSlot(self: *const ValidatorSlotTicker, slot: u64) u64 {
         const slot_start_ns = self.genesis_time_ns + slot * self.seconds_per_slot * std.time.ns_per_s;
         const now_ns: u64 = @intCast(std.time.nanoTimestamp());
         if (now_ns <= slot_start_ns) return 0;
@@ -137,7 +137,7 @@ pub const SlotClock = struct {
     /// boundaries fires epoch callbacks too.
     ///
     /// TS: clock.start(signal) which calls runAtMostEvery in a loop.
-    pub fn run(self: *SlotClock, io: Io) !void {
+    pub fn run(self: *ValidatorSlotTicker, io: Io) !void {
         var last_slot: u64 = 0;
 
         while (!self.shutdown_requested.load(.seq_cst)) {
@@ -186,18 +186,18 @@ pub const SlotClock = struct {
 
 const testing = std.testing;
 
-test "SlotClock.currentSlot before genesis" {
+test "ValidatorSlotTicker.currentSlot before genesis" {
     // Genesis in the far future → slot 0.
     const future = @as(u64, @intCast(std.time.timestamp())) + 9999;
-    const clock = SlotClock.init(future, 12, 32);
+    const clock = ValidatorSlotTicker.init(future, 12, 32);
     try testing.expectEqual(@as(u64, 0), clock.currentSlot());
 }
 
-test "SlotClock.currentEpoch" {
+test "ValidatorSlotTicker.currentEpoch" {
     // Genesis 100 slots ago at 12 s/slot.
     const now_secs: u64 = @intCast(std.time.timestamp());
     const genesis = now_secs -| (100 * 12);
-    const clock = SlotClock.init(genesis, 12, 32);
+    const clock = ValidatorSlotTicker.init(genesis, 12, 32);
     const slot = clock.currentSlot();
     const epoch = clock.currentEpoch();
     try testing.expectEqual(slot / 32, epoch);

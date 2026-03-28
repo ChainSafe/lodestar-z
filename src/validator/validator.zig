@@ -28,7 +28,7 @@ const types = @import("types.zig");
 const ValidatorConfig = types.ValidatorConfig;
 
 const clock_mod = @import("clock.zig");
-const SlotClock = clock_mod.SlotClock;
+const ValidatorSlotTicker = clock_mod.ValidatorSlotTicker;
 
 const api_mod = @import("api_client.zig");
 const BeaconApiClient = api_mod.BeaconApiClient;
@@ -88,7 +88,7 @@ pub const ValidatorClient = struct {
     config: ValidatorConfig,
 
     // Core components.
-    clock: SlotClock,
+    clock: ValidatorSlotTicker,
     api: BeaconApiClient,
     validator_store: ValidatorStore,
     header_tracker: ChainHeaderTracker,
@@ -148,7 +148,7 @@ pub const ValidatorClient = struct {
         var validator_store = try ValidatorStore.init(allocator, config.slashing_protection_path);
         errdefer validator_store.deinit();
 
-        const clock = SlotClock.init(
+        const clock = ValidatorSlotTicker.init(
             config.genesis_time,
             config.seconds_per_slot,
             config.slots_per_epoch,

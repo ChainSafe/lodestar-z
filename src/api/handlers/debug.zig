@@ -16,9 +16,10 @@ const handler_result = @import("../handler_result.zig");
 const HandlerResult = handler_result.HandlerResult;
 const ResponseMeta = handler_result.ResponseMeta;
 
-/// A beacon chain head: the pair (slot, root) of a chain tip visible to
-/// fork-choice.
-pub const HeadInfo = struct {
+/// A beacon chain head for the debug API response: (slot, root) of a chain tip
+/// visible to fork-choice. This is the API response shape, not to be confused
+/// with chain.HeadInfo which includes additional chain state.
+pub const DebugChainHead = struct {
     slot: u64,
     root: [32]u8,
 };
@@ -83,10 +84,10 @@ pub fn getState(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([]cons
 /// Note: A full implementation would query the fork-choice store for all
 /// known tips. Currently the head tracker exposes only the canonical head,
 /// so we return that single entry.
-pub fn getHeads(ctx: *ApiContext) !HandlerResult([]const HeadInfo) {
+pub fn getHeads(ctx: *ApiContext) !HandlerResult([]const DebugChainHead) {
     // Allocate a single-element slice on ctx.allocator so the caller can
     // free it uniformly.
-    const heads = try ctx.allocator.alloc(HeadInfo, 1);
+    const heads = try ctx.allocator.alloc(DebugChainHead, 1);
     heads[0] = .{
         .slot = ctx.head_tracker.head_slot,
         .root = ctx.head_tracker.head_root,

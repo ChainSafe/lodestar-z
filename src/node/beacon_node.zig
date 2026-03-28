@@ -148,10 +148,9 @@ const BeaconProcessor = processor_mod.BeaconProcessor;
 const QueueConfig = processor_mod.QueueConfig;
 const WorkItem = processor_mod.WorkItem;
 const WorkQueues = processor_mod.WorkQueues;
-// HeadTracker, ImportResult, ImportError are in chain_mod (src/chain/block_import.zig).
+// HeadTracker, ImportResult, ImportError are in chain_mod (src/chain).
 
-// BlockImporter and dummyBalancesGetterFn are defined in block_import.zig.
-pub const BlockImporter = block_import_mod.BlockImporter;
+// dummyBalancesGetterFn is defined in block_import.zig.
 pub const dummyBalancesGetterFn = block_import_mod.dummyBalancesGetterFn;
 
 // ---------------------------------------------------------------------------
@@ -175,16 +174,10 @@ pub const SyncStatus = struct {
 };
 
 // ---------------------------------------------------------------------------
-// HeadInfo
+// HeadInfo — canonical version from chain/types.zig.
 // ---------------------------------------------------------------------------
 
-pub const HeadInfo = struct {
-    slot: u64,
-    root: [32]u8,
-    state_root: [32]u8,
-    finalized_epoch: u64,
-    justified_epoch: u64,
-};
+pub const HeadInfo = chain_mod.HeadInfo;
 
 // ---------------------------------------------------------------------------
 // loadJwtSecret
@@ -236,7 +229,6 @@ pub const BeaconNode = struct {
     // Chain components (owned by BeaconNode, pointers held by chain)
     op_pool: *OpPool,
     seen_cache: *SeenCache,
-    block_importer: *BlockImporter,
 
     // Sync committee pools — collect contributions for SyncAggregate production.
     sync_contribution_pool: ?*SyncContributionAndProofPool,
@@ -463,18 +455,6 @@ pub const BeaconNode = struct {
         const seen_cache = try allocator.create(SeenCache);
         seen_cache.* = SeenCache.init(allocator);
 
-        // BlockImporter
-        const block_importer = try allocator.create(BlockImporter);
-        block_importer.* = BlockImporter.init(
-            allocator,
-            block_cache,
-            cp_cache,
-            regen,
-            db,
-            head_tracker,
-        );
-        block_importer.verify_signatures = opts.verify_signatures;
-
         // Chain coordinator — wraps all chain components behind a single interface.
         const chain_struct = try allocator.create(Chain);
         chain_struct.* = Chain.init(
@@ -624,7 +604,6 @@ pub const BeaconNode = struct {
             .sync_contribution_pool = sync_contrib_pool,
             .sync_committee_message_pool = sync_msg_pool,
             .seen_cache = seen_cache,
-            .block_importer = block_importer,
             .chain = chain_struct,
             .clock = null,
             .mock_engine = mock_engine_ptr,
@@ -644,12 +623,6 @@ pub const BeaconNode = struct {
             .unknown_block_sync = UnknownBlockSync.init(allocator),
             .unknown_chain_sync = UnknownChainSync.init(allocator),
         };
-
-        // Wire engine API into block importer for execution payload verification.
-        block_importer.engine_api = engine;
-
-        // Wire metrics into block importer for EL timing.
-        block_importer.metrics = node.metrics;
 
         // Wire node pointer into block_import_ctx (node wasn't created until now).
         block_import_ctx.node = node;
@@ -694,9 +667,6 @@ pub const BeaconNode = struct {
 
         self.chain.deinit();
         allocator.destroy(self.chain);
-
-        self.block_importer.deinit();
-        allocator.destroy(self.block_importer);
 
         self.seen_cache.deinit();
         allocator.destroy(self.seen_cache);
@@ -868,8 +838,6 @@ pub const BeaconNode = struct {
                 break :blk null;
             };
             if (self.bls_thread_pool) |pool| {
-                // Wire pool into the block importer for batch BLS verification.
-                self.block_importer.bls_thread_pool = pool;
                 std.log.info("BLS thread pool initialized with {d} workers", .{pool.n_workers});
             }
         }
@@ -954,7 +922,6 @@ pub const BeaconNode = struct {
         // Register genesis block_root → state_root mapping for block importer.
         // Incoming blocks reference parent_root = genesis_block_root, so the
         // importer needs to resolve that to find the pre-state.
-        try self.block_importer.registerGenesisRoot(genesis_block_root, state_root);
         try self.chain.registerGenesisRoot(genesis_block_root, state_root);
 
         // Set head at the genesis state's slot (may be non-zero for checkpoint states).
@@ -1031,7 +998,6 @@ pub const BeaconNode = struct {
             fork_choice_mod.destroyFromAnchor(self.allocator, old_fc);
         }
         self.fork_choice = fc;
-        self.block_importer.fork_choice = fc;
         self.chain.fork_choice = fc;
         self.chain.genesis_validators_root = self.genesis_validators_root;
 
@@ -1093,7 +1059,6 @@ pub const BeaconNode = struct {
         const cached_state_root = try self.queued_regen.onNewBlock(checkpoint_state, true);
 
         // Register block_root → state_root mapping.
-        try self.block_importer.registerGenesisRoot(anchor_block_root, cached_state_root);
         try self.chain.registerGenesisRoot(anchor_block_root, cached_state_root);
 
         // Set head at the checkpoint slot.
@@ -1166,7 +1131,6 @@ pub const BeaconNode = struct {
             fork_choice_mod.destroyFromAnchor(self.allocator, old_fc);
         }
         self.fork_choice = fc;
-        self.block_importer.fork_choice = fc;
         self.chain.fork_choice = fc;
         self.chain.genesis_validators_root = self.genesis_validators_root;
 
@@ -1340,9 +1304,9 @@ pub const BeaconNode = struct {
         // Cache the new state as the head.
         const new_state_root = try self.queued_regen.onNewBlock(post_state, true);
 
-        // Update block_importer's block_root -> state_root mapping so the
+        // Update chain's block_root -> state_root mapping so the
         // next block import can find this state as parent.
-        try self.block_importer.block_to_state.put(
+        try self.chain.block_to_state.put(
             self.head_tracker.head_root,
             new_state_root,
         );

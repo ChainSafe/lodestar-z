@@ -22,15 +22,11 @@ const CachedBeaconState = state_transition.CachedBeaconState;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 
 // ---------------------------------------------------------------------------
-// Import result
+// Import result — re-exported from chain/blocks/types.zig (canonical version).
 // ---------------------------------------------------------------------------
 
-pub const ImportResult = struct {
-    block_root: [32]u8,
-    state_root: [32]u8,
-    slot: u64,
-    epoch_transition: bool,
-};
+const blocks_types = @import("blocks/types.zig");
+pub const ImportResult = blocks_types.ImportResult;
 
 // ---------------------------------------------------------------------------
 // Import errors — expected operational errors, not assertions.
