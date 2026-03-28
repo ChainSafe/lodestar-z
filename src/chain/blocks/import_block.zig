@@ -135,8 +135,8 @@ pub fn importVerifiedBlock(
             // This prevents blocks from being rejected as "from the future" when
             // the chain has advanced faster than the fork choice clock (e.g., range sync,
             // test replay, or blocks imported before the first onSlot tick).
-            if (block_slot > fc.current_slot) {
-                fc.updateTime(block_slot);
+            if (block_slot > fc.getTime()) {
+                fc.updateTime(ctx.allocator, block_slot) catch {};
             }
 
             // Extract justified and finalized checkpoints from post-state.
@@ -165,8 +165,13 @@ pub fn importVerifiedBlock(
                 .timeliness = true,
             };
 
-            fc.onBlock(ctx.allocator, fc_block, block_slot) catch |err| switch (err) {
-                error.InvalidBlock => {},
+            fork_choice_mod.onBlockFromProto(fc, ctx.allocator, fc_block, block_slot) catch |err| switch (err) {
+                error.InvalidBlockUnknownParent,
+                error.InvalidBlockFutureSlot,
+                error.InvalidBlockFinalizedSlot,
+                error.InvalidBlockNotFinalizedDescendant,
+                error.InvalidBlockExecutionStatus,
+                => {},
                 else => return BlockImportError.ForkChoiceError,
             };
 
@@ -174,7 +179,7 @@ pub fn importVerifiedBlock(
             // Only process attestations when block epoch is recent enough:
             // blocks older than current_epoch - FORK_CHOICE_ATT_EPOCH_LIMIT have no
             // effect on fork choice head selection.
-            const current_epoch = computeEpochAtSlot(fc.current_slot);
+            const current_epoch = computeEpochAtSlot(fc.getTime());
             if (block_epoch + FORK_CHOICE_ATT_EPOCH_LIMIT >= current_epoch) {
                 const block_body = block_input.block.beaconBlock().beaconBlockBody();
                 const any_atts = block_body.attestations();
@@ -186,7 +191,7 @@ pub fn importVerifiedBlock(
                             var indices = post_state.epoch_cache.getAttestingIndicesPhase0(att) catch continue;
                             defer indices.deinit();
                             for (indices.items) |validator_index| {
-                                fc.onAttestation(
+                                fc.onSingleVote(
                                     ctx.allocator,
                                     validator_index,
                                     att_block_root,
@@ -202,7 +207,7 @@ pub fn importVerifiedBlock(
                             var indices = post_state.epoch_cache.getAttestingIndicesElectra(att) catch continue;
                             defer indices.deinit();
                             for (indices.items) |validator_index| {
-                                fc.onAttestation(
+                                fc.onSingleVote(
                                     ctx.allocator,
                                     validator_index,
                                     att_block_root,
@@ -226,7 +231,7 @@ pub fn importVerifiedBlock(
                         var j: usize = 0;
                         while (i < a.len and j < b.len) {
                             if (a[i] == b[j]) {
-                                fc.onAttesterSlashing(&[_]u64{a[i]}) catch {};
+                                fc.onEquivocation(a[i]) catch {};
                                 i += 1;
                                 j += 1;
                             } else if (a[i] < b[j]) {
@@ -293,16 +298,15 @@ pub fn importVerifiedBlock(
         const old_head_state_root = fc.head.state_root;
 
         // Recompute head: computeDeltas → applyScoreChanges → findHead.
-        // Use effective balance increments from post-state when available.
-        const ebi_slice: []const u16 = blk: {
-            if (ctx.block_state_cache.get(state_root)) |cached| {
-                break :blk cached.epoch_cache.getEffectiveBalanceIncrements().items;
-            }
-            break :blk &.{};
-        };
-        const new_head = fc.getHead(ctx.allocator, ebi_slice) catch |err| {
+        const uagh_result = fc.updateAndGetHead(ctx.allocator, .get_canonical_head) catch |err| {
             std.log.warn("importBlock: getHead failed: {}", .{err});
             break :head_recompute;
+        };
+        const new_head = HeadResult{
+            .block_root = uagh_result.head.block_root,
+            .slot = uagh_result.head.slot,
+            .state_root = uagh_result.head.state_root,
+            .execution_optimistic = false,
         };
 
         // Check finality changes.
@@ -337,7 +341,7 @@ pub fn importVerifiedBlock(
     // before updateTime is called). This avoids integer overflow in the subtraction.
     const current_slot = blk: {
         if (ctx.fork_choice) |fc| {
-            if (fc.current_slot >= block_slot) break :blk fc.current_slot;
+            if (fc.getTime() >= block_slot) break :blk fc.getTime();
         }
         break :blk block_slot;
     };
@@ -456,9 +460,8 @@ pub fn getDependentRoot(
 
     // Find ancestor of current head at dependent_slot.
     const head_root = fc.head.block_root;
-    const ancestor = fc.proto_array.getAncestorNodeAtSlot(head_root, dependent_slot);
-    if (ancestor) |anc| return anc.block_root;
-    return null;
+    const ancestor = fc.getAncestor(head_root, dependent_slot) catch return null;
+    return ancestor.block_root;
 }
 
 /// Compute previous and current duty dependent roots for SSE head events.

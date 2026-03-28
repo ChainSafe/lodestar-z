@@ -31,7 +31,6 @@ pub const RootContext = proto_array.RootContext;
 pub const VoteTracker = vote_tracker.VoteTracker;
 pub const Votes = vote_tracker.Votes;
 pub const NULL_VOTE_INDEX = vote_tracker.NULL_VOTE_INDEX;
-pub const INIT_VOTE_SLOT = vote_tracker.INIT_VOTE_SLOT;
 
 pub const computeDeltas = compute_deltas.computeDeltas;
 pub const ComputeDeltasResult = compute_deltas.ComputeDeltasResult;
@@ -40,36 +39,17 @@ pub const EquivocatingIndices = compute_deltas.EquivocatingIndices;
 pub const VoteIndex = compute_deltas.VoteIndex;
 
 pub const ForkChoiceStruct = fork_choice.ForkChoice;
-pub const ValidatorVoteMap = fork_choice.ValidatorVoteMap;
-pub const BlockAttestationMap = fork_choice.BlockAttestationMap;
-pub const QueuedAttestationMap = fork_choice.QueuedAttestationMap;
-pub const RootSet = fork_choice.RootSet;
+pub const HeadResult = fork_choice.HeadResult;
 
 pub const ForkChoiceStore = store.ForkChoiceStore;
 pub const Checkpoint = store.Checkpoint;
 pub const CheckpointWithPayloadStatus = store.CheckpointWithPayloadStatus;
-pub const EffectiveBalanceIncrementsRc = store.JustifiedBalancesRc;
+pub const EffectiveBalanceIncrementsRc = store.EffectiveBalanceIncrementsRc;
 pub const JustifiedBalances = store.JustifiedBalances;
 pub const JustifiedBalancesGetter = store.JustifiedBalancesGetter;
 pub const EventCallback = store.EventCallback;
 pub const ForkChoiceStoreEvents = store.ForkChoiceStoreEvents;
 pub const computeTotalBalance = store.computeTotalBalance;
-
-pub const EpochDifference = fork_choice.EpochDifference;
-pub const AncestorStatus = fork_choice.AncestorStatus;
-pub const AncestorResult = fork_choice.AncestorResult;
-pub const NotReorgedReason = fork_choice.NotReorgedReason;
-pub const ShouldOverrideForkChoiceUpdateResult = fork_choice.ShouldOverrideForkChoiceUpdateResult;
-pub const ForkChoiceOpts = fork_choice.ForkChoiceOpts;
-pub const UpdateHeadOpt = fork_choice.UpdateHeadOpt;
-pub const UpdateAndGetHeadOpt = fork_choice.UpdateAndGetHeadOpt;
-pub const UpdateAndGetHeadResult = fork_choice.UpdateAndGetHeadResult;
-pub const CheckpointWithPayloadAndBalance = fork_choice.CheckpointWithPayloadAndBalance;
-pub const CheckpointWithPayloadAndTotalBalance = fork_choice.CheckpointWithPayloadAndTotalBalance;
-pub const onBlockFromProto = fork_choice.onBlockFromProto;
-pub const HeadResult = fork_choice.HeadResult;
-pub const initFromAnchor = fork_choice.initFromAnchor;
-pub const destroyFromAnchor = fork_choice.destroyFromAnchor;
 
 test {
     testing.refAllDecls(@This());

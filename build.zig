@@ -975,6 +975,8 @@ pub fn build(b: *std.Build) void {
     module_fork_choice.addImport("constants", module_constants);
     module_fork_choice.addImport("preset", module_preset);
     module_fork_choice.addImport("state_transition", module_state_transition);
+    module_fork_choice.addImport("config", module_config);
+    module_fork_choice.addImport("fork_types", module_fork_types);
 
     // === discv5 integration test (manual, requires network) ===
     const discv5_integration_exe = b.addExecutable(.{

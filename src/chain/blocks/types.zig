@@ -142,7 +142,7 @@ pub const SanityResult = struct {
     /// The block's parent root.
     parent_root: Root,
     /// The parent block node from fork choice (when available).
-    parent_block: ?*const ProtoNode,
+    parent_block: ?ProtoBlock,
     /// Parent block slot (from fork choice or chain state).
     parent_slot: Slot,
 };

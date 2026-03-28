@@ -253,7 +253,7 @@ pub const Chain = struct {
 
     /// Build a PipelineContext from the current Chain state.
     pub fn getPipelineContext(self: *Chain) PipelineContext {
-        const current_slot = if (self.fork_choice) |fc| fc.current_slot else self.head_tracker.head_slot;
+        const current_slot = if (self.fork_choice) |fc| fc.getTime() else self.head_tracker.head_slot;
         return .{
             .allocator = self.allocator,
             .block_state_cache = self.block_state_cache,
@@ -294,7 +294,7 @@ pub const Chain = struct {
 
         // Apply vote weight to fork choice.
         if (self.fork_choice) |fc| {
-            fc.onAttestation(
+            fc.onSingleVote(
                 self.allocator,
                 @intCast(validator_index),
                 target_root,
@@ -321,7 +321,7 @@ pub const Chain = struct {
     pub fn onSlot(self: *Chain, slot: u64) void {
         // Update fork choice time (removes proposer boost from previous slot).
         if (self.fork_choice) |fc| {
-            fc.updateTime(slot) catch {};
+            fc.updateTime(self.allocator, slot) catch {};
         }
 
         // Prune seen blocks older than 2 epochs.
