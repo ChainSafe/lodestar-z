@@ -31,6 +31,33 @@ const capella = @import("consensus_types").capella;
 const SignedBLSToExecutionChange = capella.SignedBLSToExecutionChange;
 
 // ---------------------------------------------------------------------------
+// Pool capacity limits
+// ---------------------------------------------------------------------------
+// These caps prevent gossip-spam from causing unbounded memory growth (OOM).
+// Limits are chosen to be well above normal mainnet load while bounding
+// worst-case memory usage:
+//
+//   AttestationPool / BlsChangePool  — 16 384 entries ≈ half the active
+//     validator set; covers realistic committee diversity across many slots.
+//   VoluntaryExit / Slashing pools   —   256 entries; far exceeds any
+//     realistic on-chain rate even during mass-exit events.
+//
+// When a pool is full, new entries are silently dropped (best-effort DoS
+// protection).  Pools are pruned on every slot/epoch transition so the caps
+// are transient ceilings, not steady-state limits.
+
+/// Maximum unique AttestationData groups in AttestationPool.
+const MAX_ATTESTATION_POOL_SIZE: u32 = 16_384;
+/// Maximum entries in VoluntaryExitPool.
+const MAX_VOLUNTARY_EXIT_POOL_SIZE: u32 = 256;
+/// Maximum entries in ProposerSlashingPool.
+const MAX_PROPOSER_SLASHING_POOL_SIZE: u32 = 256;
+/// Maximum entries in AttesterSlashingPool.
+const MAX_ATTESTER_SLASHING_POOL_SIZE: u32 = 256;
+/// Maximum entries in BlsChangePool.
+const MAX_BLS_CHANGE_POOL_SIZE: u32 = 16_384;
+
+// ---------------------------------------------------------------------------
 // AttestationPool
 // ---------------------------------------------------------------------------
 
@@ -65,6 +92,8 @@ pub const AttestationPool = struct {
     ///
     /// Grouped by hash-tree-root of `AttestationData`.
     pub fn add(self: *AttestationPool, attestation: Phase0Attestation.Type) !void {
+        // Capacity limit: drop new entries when the pool is full.
+        if (self.pool.count() >= MAX_ATTESTATION_POOL_SIZE) return;
         var data_root: [32]u8 = undefined;
         try AttestationData.hashTreeRoot(&attestation.data, &data_root);
 
@@ -159,6 +188,11 @@ pub const AttestationPool = struct {
     pub fn groupCount(self: *const AttestationPool) usize {
         return self.pool.count();
     }
+
+    /// Alias for groupCount — total unique AttestationData entries.
+    pub fn count(self: *const AttestationPool) usize {
+        return self.pool.count();
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -182,6 +216,8 @@ pub const VoluntaryExitPool = struct {
     /// Insert a voluntary exit. Duplicate validator indices are silently
     /// replaced (latest wins).
     pub fn add(self: *VoluntaryExitPool, exit: SignedVoluntaryExit.Type) !void {
+        // Capacity limit: drop when pool is full (duplicate keys still allowed to replace).
+        if (self.pool.count() >= MAX_VOLUNTARY_EXIT_POOL_SIZE and !self.pool.contains(exit.message.validator_index)) return;
         try self.pool.put(exit.message.validator_index, exit);
     }
 
@@ -256,6 +292,9 @@ pub const ProposerSlashingPool = struct {
     /// Insert a proposer slashing. The proposer index is extracted from the
     /// first signed header.
     pub fn add(self: *ProposerSlashingPool, slashing: ProposerSlashing.Type) !void {
+        // Capacity limit: drop when pool is full (duplicate keys still allowed to replace).
+        const proposer_idx_check = slashing.signed_header_1.message.proposer_index;
+        if (self.pool.count() >= MAX_PROPOSER_SLASHING_POOL_SIZE and !self.pool.contains(proposer_idx_check)) return;
         const proposer_index = slashing.signed_header_1.message.proposer_index;
         try self.pool.put(proposer_index, slashing);
     }
@@ -336,6 +375,8 @@ pub const AttesterSlashingPool = struct {
 
     /// Insert an attester slashing.
     pub fn add(self: *AttesterSlashingPool, slashing: Phase0AttesterSlashing) !void {
+        // Capacity limit: drop new entries when the pool is full.
+        if (self.pool.count() >= MAX_ATTESTER_SLASHING_POOL_SIZE) return;
         var root: [32]u8 = undefined;
         try types.phase0.AttesterSlashing.hashTreeRoot(self.allocator, &slashing, &root);
         try self.pool.put(root, slashing);
@@ -401,6 +442,8 @@ pub const BlsChangePool = struct {
     }
 
     pub fn add(self: *BlsChangePool, change: SignedBLSToExecutionChange.Type) !void {
+        // Capacity limit: drop when pool is full (duplicate keys still allowed to replace).
+        if (self.pool.count() >= MAX_BLS_CHANGE_POOL_SIZE and !self.pool.contains(change.message.validator_index)) return;
         try self.pool.put(change.message.validator_index, change);
     }
 
