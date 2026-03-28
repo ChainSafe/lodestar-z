@@ -11,6 +11,8 @@ const isSlashableValidator = @import("../utils/validator.zig").isSlashableValida
 const getProposerSlashingSignatureSets = @import("../signature_sets/proposer_slashings.zig").getProposerSlashingSignatureSets;
 const verifySignature = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
 const slashValidator = @import("./slash_validator.zig").slashValidator;
+const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
+const preset = @import("preset").preset;
 
 pub fn processProposerSlashing(
     comptime fork: ForkSeq,
@@ -24,6 +26,27 @@ pub fn processProposerSlashing(
 ) !void {
     try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
     try assertValidProposerSlashing(fork, config, epoch_cache, state, proposer_slashing, verify_signatures);
+
+    if (fork.gte(.gloas)) {
+        const slot = proposer_slashing.signed_header_1.message.slot;
+        const proposal_epoch = computeEpochAtSlot(slot);
+        const current_epoch = epoch_cache.epoch;
+        const previous_epoch = current_epoch - 1;
+
+        const payment_index: ?u64 = if (proposal_epoch == current_epoch)
+            preset.SLOTS_PER_EPOCH + (slot % preset.SLOTS_PER_EPOCH)
+        else if (proposal_epoch == previous_epoch)
+            slot % preset.SLOTS_PER_EPOCH
+        else
+            null;
+
+        if (payment_index) |idx| {
+            var builder_pending_payments = try state.inner.get("builder_pending_payments");
+            const default_payment = types.gloas.BuilderPendingPayment.default_value;
+            try builder_pending_payments.setValue(idx, &default_payment);
+        }
+    }
+
     const proposer_index = proposer_slashing.signed_header_1.message.proposer_index;
     try slashValidator(fork, config, epoch_cache, state, slashings_cache, proposer_index, null);
 }
