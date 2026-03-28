@@ -352,6 +352,31 @@ pub const ForkChoiceError = error{
     ForkChoiceStoreErr,
     UnableToSetJustifiedCheckpoint,
     AfterBlockFailed,
+    // ── Extended error types (EIP-3675 / proposer boost / ancestry) ──
+    /// Block references a parent that does not exist in the DAG.
+    UnknownParent,
+    /// The finalized checkpoint block is not in the proto-array.
+    FinalizedNodeUnknown,
+    /// The justified checkpoint block is not in the proto-array.
+    JustifiedNodeUnknown,
+    /// The best node selected by proto-array is not viable for the head.
+    InvalidBestNode,
+    /// A block is not a descendant of the expected ancestor.
+    InvalidAncestry,
+    /// An error occurred during proto-array pruning.
+    ProtoArrayPruneError,
+    /// onBlock was called with inconsistent state (e.g. slot went backwards).
+    InconsistentOnBlock,
+    /// The justified checkpoint root could not be resolved to a block.
+    UnknownJustifiedRoot,
+    /// The finalized checkpoint root could not be resolved to a block.
+    UnknownFinalizedRoot,
+    /// The justified checkpoint block has an invalid execution payload status.
+    InvalidJustifiedPayload,
+    /// The execution payload for a block was marked invalid by the EL.
+    ExecutionPayloadInvalid,
+    /// A finalized state is required but not available.
+    NotFinalized,
 };
 const GENESIS_EPOCH = preset_mod.GENESIS_EPOCH;
 
