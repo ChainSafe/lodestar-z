@@ -67,7 +67,7 @@
                 .type = "string",
             },
             .spec_test_version = .{
-                .default = "v1.6.0-beta.2",
+                .default = "v1.6.1",
                 .type = "string",
             },
             .spec_test_out_dir = .{
