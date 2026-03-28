@@ -1545,13 +1545,13 @@ pub const ForkChoice = struct {
                     const block_root = block_entry.key_ptr.*;
                     var vote_iter = block_entry.value_ptr.iterator();
                     while (vote_iter.next()) |vote_entry| {
-                        try self.addLatestMessage(
+                        self.addLatestMessage(
                             allocator,
                             vote_entry.key_ptr.*,
                             att_slot,
                             block_root,
                             vote_entry.value_ptr.*,
-                        );
+                        ) catch continue;
                     }
 
                     if (att_slot == current_slot - 1) {

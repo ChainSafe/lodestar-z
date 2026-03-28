@@ -292,9 +292,23 @@ pub const EthGossipAdapter = struct {
         // Deliver accepted messages to the beacon node processing pipeline.
         // This is the gossip → BN handoff. Without this, validated messages are
         // silently discarded and never imported into the chain.
+        //
+        // For beacon_block, raw_ssz carries the full decompressed SSZ bytes.
+        // On ACCEPT: ownership transfers to the callback recipient (they must free).
+        // On REJECT/IGNORE: we free here to avoid leaking.
         if (result == .accept) {
             if (self.on_validated_message) |handler| {
                 handler.callback(handler.ctx, decoded);
+            } else {
+                // No handler wired — free raw_ssz to avoid leak.
+                if (decoded == .beacon_block) {
+                    self.allocator.free(decoded.beacon_block.raw_ssz);
+                }
+            }
+        } else {
+            // REJECT or IGNORE — free raw_ssz if present.
+            if (decoded == .beacon_block) {
+                self.allocator.free(decoded.beacon_block.raw_ssz);
             }
         }
 
