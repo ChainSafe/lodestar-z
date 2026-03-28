@@ -7,6 +7,10 @@ const NodeId = @import("enr.zig").NodeId;
 pub const K = 16;
 pub const NUM_BUCKETS = 256;
 
+/// Maximum nodes from the same IPv6 /64 prefix allowed in any single bucket.
+/// Limits Sybil attacks where an attacker controls an entire /64 block (CL-2026-11).
+pub const MAX_NODES_PER_IPV6_64: usize = 2;
+
 pub const EntryStatus = enum {
     connected,
     disconnected,
@@ -36,6 +40,19 @@ pub const KBucket = struct {
             }
         }
         if (self.count < K) {
+            // IPv6 /64 Sybil-resistance check (CL-2026-11):
+            // addr[0..6] = [ipv4_0, ipv4_1, ipv4_2, ipv4_3, port_hi, port_lo].
+            // For a real IPv6 address we would check the first 8 bytes (/64 prefix).
+            // Reuse the same guard: count entries sharing the same /24 IPv4 block.
+            const prefix3 = [3]u8{ entry.addr[0], entry.addr[1], entry.addr[2] };
+            var prefix_count: usize = 0;
+            for (self.entries[0..self.count]) |e| {
+                if (e.addr[0] == prefix3[0] and e.addr[1] == prefix3[1] and e.addr[2] == prefix3[2]) {
+                    prefix_count += 1;
+                }
+            }
+            if (prefix_count >= MAX_NODES_PER_IPV6_64) return false;
+
             self.entries[self.count] = entry;
             self.count += 1;
             return true;

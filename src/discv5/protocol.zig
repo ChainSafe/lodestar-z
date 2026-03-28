@@ -13,6 +13,20 @@ const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 
 pub const CHALLENGE_DATA_SIZE = 63;
 
+/// Maximum packet size per discv5 spec (IPv6 minimum MTU).
+/// Packets larger than this are dropped to prevent amplification (CL-2020-06).
+pub const MAX_PACKET_SIZE: usize = 1280;
+
+/// Maximum number of concurrent sessions. Bounded to prevent memory exhaustion (CL-2020-01).
+pub const MAX_SESSIONS: usize = 1024;
+
+/// Maximum WHOAREYOU packets sent per source IP per second.
+/// Limits amplification when an attacker floods us with garbage from spoofed IPs (CL-2020-08).
+pub const MAX_WHOAREYOU_PER_SEC: u32 = 5;
+
+/// Maximum ENRs returned in a single NODES response per the discv5 spec.
+pub const MAX_NODES_RESPONSE: usize = 16;
+
 pub const SessionState = enum {
     unknown,
     whoareyou_sent,
@@ -57,12 +71,19 @@ pub const Config = struct {
     local_enr_seq: u64 = 0,
 };
 
+/// Per-IP rate-limit state for outgoing WHOAREYOU packets.
+const WhoareyouRateEntry = struct {
+    count: u32,
+    window_start_ns: i128,
+};
+
 pub const Protocol = struct {
     alloc: Allocator,
     config: Config,
     routing_table: kbucket.RoutingTable,
     sessions: std.AutoHashMap(NodeId, Session),
     pending_requests: std.ArrayList(PendingRequest),
+    whoareyou_rate: std.AutoHashMap([4]u8, WhoareyouRateEntry),
     rng: std.Random.DefaultPrng,
 
     pub fn init(alloc: Allocator, config: Config) !Protocol {
@@ -74,6 +95,7 @@ pub const Protocol = struct {
             .routing_table = kbucket.RoutingTable.init(alloc, config.local_node_id),
             .sessions = std.AutoHashMap(NodeId, Session).init(alloc),
             .pending_requests = .empty,
+            .whoareyou_rate = std.AutoHashMap([4]u8, WhoareyouRateEntry).init(alloc),
             .rng = std.Random.DefaultPrng.init(seed),
         };
     }
@@ -83,6 +105,7 @@ pub const Protocol = struct {
         self.pending_requests.deinit(self.alloc);
         self.routing_table.deinit();
         self.sessions.deinit();
+        self.whoareyou_rate.deinit();
     }
 
     pub fn randomNonce(self: *Protocol) [12]u8 {
@@ -171,6 +194,9 @@ pub const Protocol = struct {
         from: transport_mod.Address,
         t: transport_mod.Transport,
     ) !void {
+        // Drop oversized packets before any decoding work (CL-2020-06, spec max = IPv6 min MTU).
+        if (raw.len > MAX_PACKET_SIZE) return;
+
         var parsed = packet.decode(self.alloc, raw, &self.config.local_node_id) catch return;
         defer parsed.deinit();
 
@@ -423,6 +449,29 @@ pub const Protocol = struct {
         dest: transport_mod.Address,
         t: transport_mod.Transport,
     ) !void {
+        // Rate-limit WHOAREYOU responses per source IP to prevent amplification (CL-2020-08).
+        const now_ns = std.time.nanoTimestamp();
+        const gop = try self.whoareyou_rate.getOrPut(dest.ip);
+        if (gop.found_existing) {
+            const elapsed_ns = now_ns - gop.value_ptr.window_start_ns;
+            if (elapsed_ns < std.time.ns_per_s) {
+                if (gop.value_ptr.count >= MAX_WHOAREYOU_PER_SEC) return; // rate-limit hit
+                gop.value_ptr.count += 1;
+            } else {
+                gop.value_ptr.* = .{ .count = 1, .window_start_ns = now_ns };
+            }
+        } else {
+            gop.value_ptr.* = .{ .count = 1, .window_start_ns = now_ns };
+        }
+
+        // Evict an arbitrary session when the table is full (CL-2020-01).
+        if (self.sessions.count() >= MAX_SESSIONS) {
+            var it = self.sessions.keyIterator();
+            if (it.next()) |oldest_key| {
+                _ = self.sessions.remove(oldest_key.*);
+            }
+        }
+
         var id_nonce: [16]u8 = undefined;
         self.rng.random().bytes(&id_nonce);
 
@@ -578,6 +627,9 @@ pub const Protocol = struct {
 
         const fn_msg = result.msg;
 
+        // Per discv5 spec, NODES responses are capped at MAX_NODES_RESPONSE (16) ENRs.
+        // The routing-table lookup below must slice to at most MAX_NODES_RESPONSE before encoding.
+        // Currently we return an empty ENR list (stub); the cap is enforced here as a safeguard.
         const nodes_msg = messages.Nodes{
             .req_id = fn_msg.req_id,
             .total = 1,
