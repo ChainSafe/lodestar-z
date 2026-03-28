@@ -53,21 +53,103 @@ pub const SseCallback = struct {
 // BeaconApiClient
 // ---------------------------------------------------------------------------
 
+/// Maximum consecutive failures before logging "beacon node unreachable".
+const BN_UNREACHABLE_THRESHOLD: u64 = 3;
+
 /// HTTP client for the Beacon Node REST API (validator-facing endpoints).
+///
+/// Supports multiple beacon node URLs with primary-with-fallback strategy.
+/// Tracks consecutive failures and logs when BN becomes unreachable/reconnects.
 pub const BeaconApiClient = struct {
     allocator: Allocator,
-    /// Base URL of the beacon node (e.g. "http://127.0.0.1:5052").
+    /// Primary beacon node URL (first in urls list, or beacon_node_url).
     base_url: []const u8,
+    /// Additional fallback beacon node URLs (may be empty).
+    /// Tried in order when the primary fails.
+    fallback_urls: []const []const u8,
+    /// Index of the currently active URL (0 = primary).
+    active_url_idx: usize,
+    /// Consecutive HTTP/transport failures on the current URL.
+    consecutive_failures: u64,
+    /// Whether the BN was considered unreachable at the last check.
+    was_unreachable: bool,
+    /// Monotonic ns timestamp when BN first became unreachable.
+    unreachable_since_ns: u64,
 
     pub fn init(allocator: Allocator, base_url: []const u8) BeaconApiClient {
         return .{
             .allocator = allocator,
             .base_url = base_url,
+            .fallback_urls = &.{},
+            .active_url_idx = 0,
+            .consecutive_failures = 0,
+            .was_unreachable = false,
+            .unreachable_since_ns = 0,
+        };
+    }
+
+    /// Create a client with multiple beacon node URLs (fallback support).
+    ///
+    /// `urls` must have at least one entry. The first is the primary.
+    /// TS: BeaconNodeOpts.urls (array of BN endpoints)
+    pub fn initMulti(allocator: Allocator, urls: []const []const u8) BeaconApiClient {
+        if (urls.len == 0) @panic("BeaconApiClient.initMulti: urls must not be empty");
+        return .{
+            .allocator = allocator,
+            .base_url = urls[0],
+            .fallback_urls = urls[1..],
+            .active_url_idx = 0,
+            .consecutive_failures = 0,
+            .was_unreachable = false,
+            .unreachable_since_ns = 0,
         };
     }
 
     pub fn deinit(self: *BeaconApiClient) void {
         _ = self;
+    }
+
+    /// Return the currently active beacon node URL.
+    fn activeUrl(self: *const BeaconApiClient) []const u8 {
+        if (self.active_url_idx == 0) return self.base_url;
+        const idx = self.active_url_idx - 1;
+        if (idx < self.fallback_urls.len) return self.fallback_urls[idx];
+        return self.base_url;
+    }
+
+    /// Record a transport/HTTP failure. Rotates to next BN URL after threshold.
+    fn recordFailure(self: *BeaconApiClient) void {
+        self.consecutive_failures += 1;
+        const total_urls = 1 + self.fallback_urls.len;
+        if (self.consecutive_failures >= BN_UNREACHABLE_THRESHOLD) {
+            if (!self.was_unreachable) {
+                self.was_unreachable = true;
+                self.unreachable_since_ns = @intCast(std.time.nanoTimestamp());
+                log.warn("beacon node unreachable url={s} (consecutive_failures={d})", .{
+                    self.activeUrl(), self.consecutive_failures,
+                });
+            } else {
+                const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+                const secs = (now_ns -| self.unreachable_since_ns) / std.time.ns_per_s;
+                log.warn("beacon node unreachable for {d}s url={s}", .{ secs, self.activeUrl() });
+            }
+            // Rotate to next URL.
+            if (total_urls > 1) {
+                self.active_url_idx = (self.active_url_idx + 1) % total_urls;
+                self.consecutive_failures = 0;
+                log.info("rotating to beacon node url={s}", .{self.activeUrl()});
+            }
+        }
+    }
+
+    /// Record a successful HTTP call. Clears failure state.
+    fn recordSuccess(self: *BeaconApiClient) void {
+        if (self.was_unreachable) {
+            log.info("beacon node reconnected url={s}", .{self.activeUrl()});
+            self.was_unreachable = false;
+            self.unreachable_since_ns = 0;
+        }
+        self.consecutive_failures = 0;
     }
 
     // -----------------------------------------------------------------------
@@ -76,31 +158,42 @@ pub const BeaconApiClient = struct {
 
     /// Perform a GET request and return the response body (caller frees).
     fn get(self: *BeaconApiClient, io: Io, path: []const u8) ![]const u8 {
-        const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.base_url, path });
+        const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.activeUrl(), path });
         defer self.allocator.free(url);
 
         var client: std.http.Client = .{ .allocator = self.allocator, .io = io };
         defer client.deinit();
 
         const uri = try std.Uri.parse(url);
-        var req = try client.request(.GET, uri, .{
+        var req = client.request(.GET, uri, .{
             .keep_alive = false,
             .extra_headers = &.{
                 .{ .name = "Accept", .value = "application/json" },
             },
-        });
+        }) catch |err| {
+            self.recordFailure();
+            return err;
+        };
         defer req.deinit();
 
-        try req.sendBodiless();
+        req.sendBodiless() catch |err| {
+            self.recordFailure();
+            return err;
+        };
 
         var redirect_buf: [1024]u8 = undefined;
-        var response = try req.receiveHead(&redirect_buf);
+        var response = req.receiveHead(&redirect_buf) catch |err| {
+            self.recordFailure();
+            return err;
+        };
 
         if (response.head.status != .ok) {
             log.warn("GET {s} → HTTP {d}", .{ path, @intFromEnum(response.head.status) });
+            self.recordFailure();
             return error.HttpError;
         }
 
+        self.recordSuccess();
         var transfer_buf: [8192]u8 = undefined;
         const reader = response.reader(&transfer_buf);
         return reader.allocRemaining(self.allocator, Io.Limit.limited(MAX_RESPONSE_BYTES)) catch |err| switch (err) {
@@ -113,14 +206,14 @@ pub const BeaconApiClient = struct {
     ///
     /// Pass an empty body (`""`) for POST endpoints that don't require a body.
     fn post(self: *BeaconApiClient, io: Io, path: []const u8, body: []const u8) ![]const u8 {
-        const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.base_url, path });
+        const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.activeUrl(), path });
         defer self.allocator.free(url);
 
         var client: std.http.Client = .{ .allocator = self.allocator, .io = io };
         defer client.deinit();
 
         const uri = try std.Uri.parse(url);
-        var req = try client.request(.POST, uri, .{
+        var req = client.request(.POST, uri, .{
             .keep_alive = false,
             .extra_headers = &.{
                 .{ .name = "Accept", .value = "application/json" },
@@ -128,22 +221,33 @@ pub const BeaconApiClient = struct {
             .headers = .{
                 .content_type = .{ .override = "application/json" },
             },
-        });
+        }) catch |err| {
+            self.recordFailure();
+            return err;
+        };
         defer req.deinit();
 
         req.transfer_encoding = .{ .content_length = body.len };
-        try req.sendBodyComplete(@constCast(body));
+        req.sendBodyComplete(@constCast(body)) catch |err| {
+            self.recordFailure();
+            return err;
+        };
 
         var redirect_buf: [1024]u8 = undefined;
-        var response = try req.receiveHead(&redirect_buf);
+        var response = req.receiveHead(&redirect_buf) catch |err| {
+            self.recordFailure();
+            return err;
+        };
 
         const status = response.head.status;
         // 2xx codes are all success; 204 has no body.
         if (@intFromEnum(status) < 200 or @intFromEnum(status) >= 300) {
             log.warn("POST {s} → HTTP {d}", .{ path, @intFromEnum(status) });
+            self.recordFailure();
             return error.HttpError;
         }
 
+        self.recordSuccess();
         if (status == .no_content) {
             // 204 No Content — return empty slice.
             return try self.allocator.dupe(u8, "");
@@ -734,6 +838,35 @@ pub const BeaconApiClient = struct {
     // -----------------------------------------------------------------------
 
     /// POST /eth/v1/validator/liveness/{epoch}
+    /// GET /eth/v1/node/syncing
+    ///
+    /// Returns sync status of the beacon node.
+    /// TS: Api.node.getSyncingStatus()
+    pub fn getNodeSyncing(self: *BeaconApiClient, io: Io) !NodeSyncingResponse {
+        const body = try self.get(io, "/eth/v1/node/syncing");
+        defer self.allocator.free(body);
+
+        const Parsed = struct {
+            data: struct {
+                head_slot: []const u8,
+                sync_distance: []const u8,
+                is_syncing: bool,
+                is_optimistic: bool = false,
+            },
+        };
+
+        var parsed = try std.json.parseFromSlice(Parsed, self.allocator, body, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+
+        const d = parsed.value.data;
+        return .{
+            .head_slot = try std.fmt.parseInt(u64, d.head_slot, 10),
+            .sync_distance = try std.fmt.parseInt(u64, d.sync_distance, 10),
+            .is_syncing = d.is_syncing,
+            .is_optimistic = d.is_optimistic,
+        };
+    }
+
     pub fn getLiveness(
         self: *BeaconApiClient,
         io: Io,
@@ -826,4 +959,11 @@ pub const SyncCommitteeContributionResponse = struct {
 pub const ValidatorLiveness = struct {
     index: u64,
     is_live: bool,
+};
+
+pub const NodeSyncingResponse = struct {
+    head_slot: u64,
+    sync_distance: u64,
+    is_syncing: bool,
+    is_optimistic: bool,
 };
