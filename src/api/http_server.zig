@@ -28,18 +28,28 @@ const types = @import("types.zig");
 
 const log = std.log.scoped(.http_server);
 
-/// CORS headers applied to every response.
-const cors_headers: []const http.Header = &.{
-    .{ .name = "Access-Control-Allow-Origin", .value = "*" },
-    .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, OPTIONS" },
-    .{ .name = "Access-Control-Allow-Headers", .value = "Content-Type, Accept" },
+/// Keymanager path prefixes that must never receive wildcard CORS.
+const keymanager_paths: []const []const u8 = &.{
+    "/eth/v1/keystores",
+    "/eth/v1/remotekeys",
 };
+
+/// Returns true if path is a keymanager endpoint.
+fn isKeymanagerPath(path: []const u8) bool {
+    for (keymanager_paths) |prefix| {
+        if (std.mem.startsWith(u8, path, prefix)) return true;
+    }
+    return false;
+}
 
 pub const HttpServer = struct {
     allocator: Allocator,
     api_context: *ApiContext,
     address: []const u8,
     port: u16,
+    /// CORS origin to allow. Null = no CORS headers (same-origin only).
+    /// Never applied to keymanager endpoints regardless of this setting.
+    cors_origin: ?[]const u8 = null,
     /// Set to true to request a clean shutdown of the serve loop.
     shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
@@ -54,6 +64,23 @@ pub const HttpServer = struct {
             .api_context = api_context,
             .address = address,
             .port = port,
+        };
+    }
+
+    /// Create an HttpServer with CORS configured.
+    pub fn initWithCors(
+        allocator: Allocator,
+        api_context: *ApiContext,
+        address: []const u8,
+        port: u16,
+        cors_origin: ?[]const u8,
+    ) HttpServer {
+        return .{
+            .allocator = allocator,
+            .api_context = api_context,
+            .address = address,
+            .port = port,
+            .cors_origin = cors_origin,
         };
     }
 
@@ -119,10 +146,20 @@ pub const HttpServer = struct {
 
         // CORS preflight.
         if (request.head.method == .OPTIONS) {
-            try request.respond("", .{
-                .status = .no_content,
-                .extra_headers = cors_headers,
-            });
+            if (self.cors_origin) |origin| {
+                const preflight_headers: []const http.Header = &.{
+                    .{ .name = "Access-Control-Allow-Origin", .value = origin },
+                    .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, DELETE, OPTIONS" },
+                    .{ .name = "Access-Control-Allow-Headers", .value = "Content-Type, Authorization" },
+                    .{ .name = "Access-Control-Max-Age", .value = "3600" },
+                };
+                try request.respond("", .{
+                    .status = .no_content,
+                    .extra_headers = preflight_headers,
+                });
+            } else {
+                try request.respond("", .{ .status = .no_content });
+            }
             return;
         }
 
@@ -204,12 +241,17 @@ pub const HttpServer = struct {
 
         extra_hdrs_buf[extra_count] = .{ .name = "Content-Type", .value = result.content_type };
         extra_count += 1;
-        extra_hdrs_buf[extra_count] = .{ .name = "Access-Control-Allow-Origin", .value = "*" };
-        extra_count += 1;
-        extra_hdrs_buf[extra_count] = .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, OPTIONS" };
-        extra_count += 1;
-        extra_hdrs_buf[extra_count] = .{ .name = "Access-Control-Allow-Headers", .value = "Content-Type, Accept" };
-        extra_count += 1;
+        // Apply CORS headers only when configured AND not a keymanager endpoint.
+        if (self.cors_origin) |origin| {
+            if (!isKeymanagerPath(path)) {
+                extra_hdrs_buf[extra_count] = .{ .name = "Access-Control-Allow-Origin", .value = origin };
+                extra_count += 1;
+                extra_hdrs_buf[extra_count] = .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, DELETE, OPTIONS" };
+                extra_count += 1;
+                extra_hdrs_buf[extra_count] = .{ .name = "Access-Control-Allow-Headers", .value = "Content-Type, Authorization" };
+                extra_count += 1;
+            }
+        }
 
         // Emit metadata headers from the handler result.
         var meta_hdrs: response_meta.MetaHeaders = undefined;
@@ -1224,7 +1266,6 @@ fn respondApiError(request: *http.Server.Request, api_err: error_response.ApiErr
         .status = statusFromCode(api_err.code.statusCode()),
         .extra_headers = &.{
             .{ .name = "Content-Type", .value = "application/json" },
-            .{ .name = "Access-Control-Allow-Origin", .value = "*" },
         },
     });
 }
