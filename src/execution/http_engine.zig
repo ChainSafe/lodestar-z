@@ -223,7 +223,7 @@ pub const HttpEngine = struct {
         self.state = new_state;
         switch (new_state) {
             .online => std.log.info("Engine API: EL came online (was {s})", .{@tagName(old)}),
-            .offline => std.log.err("Engine API: EL went offline (was {s})", .{@tagName(old)}),
+            .offline => std.log.warn("Engine API: EL went offline (was {s})", .{@tagName(old)}),
             .syncing => std.log.warn("Engine API: EL is syncing (was {s})", .{@tagName(old)}),
             .auth_failed => std.log.err("Engine API: JWT authentication failed (was {s})", .{@tagName(old)}),
         }
@@ -474,6 +474,88 @@ pub const HttpEngine = struct {
             self.allocator.free(cv.commit);
         }
         self.allocator.free(versions);
+    }
+
+
+    // ── Health monitoring ─────────────────────────────────────────────────────
+
+    /// EL syncing result from eth_syncing.
+    pub const SyncingStatus = union(enum) {
+        /// EL is fully synced.
+        synced,
+        /// EL is syncing — contains progress info.
+        syncing: SyncingProgress,
+    };
+
+    pub const SyncingProgress = struct {
+        /// Current head block.
+        current_block: u64,
+        /// Highest block seen.
+        highest_block: u64,
+    };
+
+    /// Call eth_syncing to check EL health and sync status.
+    ///
+    /// Returns `.synced` if the EL is fully synced (eth_syncing returns false),
+    /// or `.syncing` with progress info if syncing is in progress.
+    ///
+    /// Used for periodic health monitoring (every ~30s when idle).
+    /// Updates the internal connection state: online, offline, or syncing.
+    pub fn checkHealth(self: *HttpEngine) !SyncingStatus {
+        const id = self.nextId();
+
+        const body = try encodeRawRequest(self.allocator, "eth_syncing", "[]", id);
+        defer self.allocator.free(body);
+
+        const response = self.sendRequest(body) catch |err| {
+            std.log.warn("execution layer offline — retrying ({})", .{err});
+            self.updateState(.offline);
+            return err;
+        };
+        defer self.allocator.free(response);
+
+        // eth_syncing returns either false (synced) or a sync status object.
+        // We need to try parsing as bool first, then as object.
+        const BoolOrSyncing = std.json.Value;
+        var parsed = try json_rpc.decodeResponse(BoolOrSyncing, self.allocator, response);
+        defer parsed.deinit();
+
+        switch (parsed.value) {
+            .bool => |b| {
+                if (!b) {
+                    // false = fully synced
+                    if (self.state != .online) {
+                        std.log.info("execution layer connected", .{});
+                    }
+                    self.updateState(.online);
+                    return .synced;
+                }
+                // true = syncing but no detail
+                std.log.warn("execution layer syncing", .{});
+                self.updateState(.syncing);
+                return .{ .syncing = .{ .current_block = 0, .highest_block = 0 } };
+            },
+            .object => |obj| {
+                // Syncing object: {currentBlock, highestBlock, ...}
+                const current = if (obj.get("currentBlock")) |v|
+                    try hexDecodeQuantity(v.string)
+                else
+                    0;
+                const highest = if (obj.get("highestBlock")) |v|
+                    try hexDecodeQuantity(v.string)
+                else
+                    0;
+
+                std.log.warn("execution layer syncing: block {d}/{d}", .{ current, highest });
+                self.updateState(.syncing);
+                return .{ .syncing = .{ .current_block = current, .highest_block = highest } };
+            },
+            else => {
+                std.log.warn("execution layer syncing: unexpected response type", .{});
+                self.updateState(.syncing);
+                return .{ .syncing = .{ .current_block = 0, .highest_block = 0 } };
+            },
+        }
     }
 
     // ── Fork-aware dispatch ───────────────────────────────────────────────────
@@ -3169,4 +3251,96 @@ test "HttpEngine: optimistic sync — SYNCING newPayload accepted without error"
     const result = try api.newPayload(makeTestPayload([_]u8{0x42} ** 32), &.{}, std.mem.zeroes([32]u8));
     try testing.expectEqual(ExecutionPayloadStatus.syncing, result.status);
     try testing.expect(result.latest_valid_hash == null);
+}
+
+test "checkHealth: eth_syncing returns false = synced" {
+    const allocator = testing.allocator;
+
+    // EL is fully synced — eth_syncing returns false
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":false}
+    ;
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const status = try engine.checkHealth();
+    try testing.expectEqual(HttpEngine.SyncingStatus.synced, status);
+    try testing.expectEqual(EngineState.online, engine.state);
+
+    const body = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, body, "eth_syncing") != null);
+}
+
+test "checkHealth: eth_syncing returns object = syncing with progress" {
+    const allocator = testing.allocator;
+
+    // EL is syncing — returns progress object
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":{"currentBlock":"0x100","highestBlock":"0x200","startingBlock":"0x0","knownStates":"0x0","pulledStates":"0x0"}}
+    ;
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const status = try engine.checkHealth();
+    try testing.expect(status == .syncing);
+    try testing.expectEqual(@as(u64, 0x100), status.syncing.current_block);
+    try testing.expectEqual(@as(u64, 0x200), status.syncing.highest_block);
+    try testing.expectEqual(EngineState.syncing, engine.state);
+}
+
+test "checkHealth: transport error marks EL offline" {
+    const allocator = testing.allocator;
+
+    var mock = MockTransport.init(allocator, "");
+    defer mock.deinit();
+
+    // Use an engine that will get an error from the transport
+    // We need a custom transport that errors — use a mock engine that fails
+    const ErrorTransport = struct {
+        fn send(_: *anyopaque, _: []const u8, _: []const Header, _: []const u8) anyerror![]const u8 {
+            return error.ConnectionRefused;
+        }
+    };
+    var dummy: u8 = 0;
+    const error_transport = Transport{
+        .ptr = @ptrCast(&dummy),
+        .sendFn = ErrorTransport.send,
+    };
+
+    var engine = HttpEngine.initWithRetry(allocator, "http://localhost:8551", null, error_transport, .{
+        .max_retries = 0,
+        .initial_backoff_ms = 0,
+    });
+    defer engine.deinit();
+
+    const result = engine.checkHealth();
+    try testing.expectError(error.ConnectionRefused, result);
+    try testing.expectEqual(EngineState.offline, engine.state);
+}
+
+test "checkHealth: offline→online transition logs" {
+    const allocator = testing.allocator;
+
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":false}
+    ;
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    // Force offline state
+    engine.state = .offline;
+
+    // Health check should transition to online
+    const status = try engine.checkHealth();
+    try testing.expectEqual(HttpEngine.SyncingStatus.synced, status);
+    try testing.expectEqual(EngineState.online, engine.state);
 }
