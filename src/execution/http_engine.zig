@@ -713,12 +713,17 @@ pub const HttpEngine = struct {
             },
             .deneb => self.getPayloadV3(payload_id),
             .electra, .fulu => blk: {
+                // Fix 2: For Electra/Fulu, call V4 and preserve execution requests.
+                // promoteToV3() would discard deposit/withdrawal/consolidation requests.
                 const r = try self.getPayloadV4(payload_id);
                 break :blk GetPayloadResponse{
                     .execution_payload = promoteToV3(r.execution_payload),
                     .block_value = r.block_value,
                     .blobs_bundle = r.blobs_bundle,
                     .should_override_builder = r.should_override_builder,
+                    .deposit_requests = r.execution_payload.deposit_requests,
+                    .withdrawal_requests = r.execution_payload.withdrawal_requests,
+                    .consolidation_requests = r.execution_payload.consolidation_requests,
                 };
             },
         };
@@ -2234,7 +2239,7 @@ fn hexStrip0x(hex: []const u8) ![]const u8 {
     return error.MissingHexPrefix;
 }
 
-fn hexDecode48(hex: []const u8) ![48]u8 {
+pub fn hexDecode48(hex: []const u8) ![48]u8 {
     const stripped = try hexStrip0x(hex);
     if (stripped.len != 96) return error.InvalidHexLength;
     var out: [48]u8 = undefined;
@@ -2242,7 +2247,7 @@ fn hexDecode48(hex: []const u8) ![48]u8 {
     return out;
 }
 
-fn hexDecode96(hex: []const u8) ![96]u8 {
+pub fn hexDecode96(hex: []const u8) ![96]u8 {
     const stripped = try hexStrip0x(hex);
     if (stripped.len != 192) return error.InvalidHexLength;
     var out: [96]u8 = undefined;
@@ -2250,7 +2255,7 @@ fn hexDecode96(hex: []const u8) ![96]u8 {
     return out;
 }
 
-fn hexDecode32(hex: []const u8) ![32]u8 {
+pub fn hexDecode32(hex: []const u8) ![32]u8 {
     const stripped = try hexStrip0x(hex);
     if (stripped.len != 64) return error.InvalidHexLength;
     var out: [32]u8 = undefined;
@@ -2258,7 +2263,7 @@ fn hexDecode32(hex: []const u8) ![32]u8 {
     return out;
 }
 
-fn hexDecode20(hex: []const u8) ![20]u8 {
+pub fn hexDecode20(hex: []const u8) ![20]u8 {
     const stripped = try hexStrip0x(hex);
     if (stripped.len != 40) return error.InvalidHexLength;
     var out: [20]u8 = undefined;
@@ -2266,7 +2271,7 @@ fn hexDecode20(hex: []const u8) ![20]u8 {
     return out;
 }
 
-fn hexDecode256(hex: []const u8) ![256]u8 {
+pub fn hexDecode256(hex: []const u8) ![256]u8 {
     const stripped = try hexStrip0x(hex);
     if (stripped.len != 512) return error.InvalidHexLength;
     var out: [256]u8 = undefined;
@@ -2320,7 +2325,7 @@ fn hexDecodeU256Fixed(hex: []const u8) !u256 {
 }
 
 /// Decode a u256 QUANTITY or DATA field (handles both padded and unpadded hex).
-fn hexDecodeU256(hex: []const u8) !u256 {
+pub fn hexDecodeU256(hex: []const u8) !u256 {
     const stripped = try hexStrip0x(hex);
     if (stripped.len == 0) return error.InvalidHexLength;
     if (stripped.len > 64) return error.InvalidHexLength;

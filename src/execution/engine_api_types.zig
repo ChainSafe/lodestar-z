@@ -201,12 +201,21 @@ pub const GetPayloadResponseV2 = struct {
     block_value: u256,
 };
 
-/// Response from engine_getPayloadV3 (Deneb).
+/// Response from engine_getPayloadV3/V4 (Deneb/Electra).
+///
+/// The `execution_payload` field always contains an `ExecutionPayloadV3`
+/// (blob fields zero for pre-Deneb forks). For Electra+, the Electra-specific
+/// execution requests are stored in the optional fields below rather than
+/// discarded via V3 promotion.
 pub const GetPayloadResponse = struct {
     execution_payload: ExecutionPayloadV3,
     block_value: u256,
     blobs_bundle: BlobsBundle,
     should_override_builder: bool,
+    // Fix 2: Electra execution requests preserved from V4 response.
+    deposit_requests: []const DepositRequest = &.{},
+    withdrawal_requests: []const WithdrawalRequest = &.{},
+    consolidation_requests: []const ConsolidationRequest = &.{},
 };
 
 /// Response from engine_getPayloadV4 (Electra).
