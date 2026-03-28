@@ -38,6 +38,27 @@ const ConnectedPeer = peer_db_mod.ConnectedPeer;
 
 const log = std.log.scoped(.peer_manager);
 
+const peer_relevance = @import("peer_relevance.zig");
+const assertPeerRelevance = peer_relevance.assertPeerRelevance;
+const IrrelevantPeerCode = peer_relevance.IrrelevantPeerCode;
+
+const peer_prioritization = @import("peer_prioritization.zig");
+const ConnectedPeerView = peer_prioritization.ConnectedPeerView;
+const PrioritizationResult = peer_prioritization.PrioritizationResult;
+const SubnetQuery = peer_prioritization.SubnetQuery;
+const PeerDisconnect = peer_prioritization.PeerDisconnect;
+const DisconnectReason = peer_prioritization.DisconnectReason;
+
+const status_cache = @import("status_cache.zig");
+const CachedStatus = status_cache.CachedStatus;
+const StatusCache = status_cache.StatusCache;
+
+const subnet_service_mod = @import("subnet_service.zig");
+const SubnetService = subnet_service_mod.SubnetService;
+const SubnetId = subnet_service_mod.SubnetId;
+
+const RelevanceStatus = peer_info_mod.RelevanceStatus;
+
 // ── Constants ───────────────────────────────────────────────────────────────
 
 /// Heartbeat interval in milliseconds (30 seconds).
@@ -246,6 +267,122 @@ pub const PeerManager = struct {
             peer_id,
             duration.seconds(),
         });
+    }
+
+
+    // ── Relevance check ─────────────────────────────────────────────
+
+    /// Check a peer's relevance after a Status exchange.
+    ///
+    /// Returns the irrelevance code if the peer is on a different chain,
+    /// or null if the peer is relevant. The caller should disconnect
+    /// irrelevant peers with Goodbye(IRRELEVANT_NETWORK).
+    pub fn checkPeerRelevance(
+        self: *PeerManager,
+        peer_id: []const u8,
+        remote_fork_digest: [4]u8,
+        remote_finalized_root: [32]u8,
+        remote_finalized_epoch: u64,
+        remote_head_slot: u64,
+        local_status: CachedStatus,
+        current_slot: u64,
+    ) ?IrrelevantPeerCode {
+        const irrelevance = assertPeerRelevance(
+            remote_fork_digest,
+            remote_finalized_root,
+            remote_finalized_epoch,
+            remote_head_slot,
+            local_status,
+            current_slot,
+        );
+
+        if (irrelevance) |info| {
+            self.db.setRelevanceStatus(peer_id, .irrelevant);
+            log.info("Peer irrelevant {s}: {s}", .{
+                peer_id,
+                @tagName(info.code()),
+            });
+            return info.code();
+        } else {
+            self.db.setRelevanceStatus(peer_id, .relevant);
+            return null;
+        }
+    }
+
+    /// Update peer status from a Status handshake AND check relevance.
+    /// Returns the irrelevance code if the peer should be disconnected.
+    pub fn onPeerStatus(
+        self: *PeerManager,
+        peer_id: []const u8,
+        fork_digest: [4]u8,
+        finalized_root: [32]u8,
+        finalized_epoch: u64,
+        head_root: [32]u8,
+        head_slot: u64,
+        local_status: CachedStatus,
+        current_slot: u64,
+    ) ?IrrelevantPeerCode {
+        // Update the peer's stored status.
+        self.db.updatePeerStatus(
+            peer_id,
+            fork_digest,
+            finalized_root,
+            finalized_epoch,
+            head_slot,
+            head_root,
+        );
+
+        // Check relevance.
+        return self.checkPeerRelevance(
+            peer_id,
+            fork_digest,
+            finalized_root,
+            finalized_epoch,
+            head_slot,
+            local_status,
+            current_slot,
+        );
+    }
+
+    // ── Prioritization ──────────────────────────────────────────────
+
+    /// Run subnet-aware peer prioritization.
+    ///
+    /// Returns the prioritization result with peers to disconnect,
+    /// discovery count, and subnet queries. Caller owns the result.
+    pub fn runPrioritization(
+        self: *PeerManager,
+        active_attnets: []const SubnetId,
+        active_syncnets: []const SubnetId,
+    ) !PrioritizationResult {
+        // Build the peer snapshot for prioritization.
+        const all_connected = try self.db.getConnectedPeers();
+        defer self.allocator.free(all_connected);
+
+        var views = try self.allocator.alloc(ConnectedPeerView, all_connected.len);
+        defer self.allocator.free(views);
+
+        for (all_connected, 0..) |cp, i| {
+            views[i] = .{
+                .peer_id = cp.peer_id,
+                .direction = cp.info.direction,
+                .attnets = cp.info.attnets,
+                .syncnets = cp.info.syncnets,
+                .score = cp.info.score(),
+                .is_trusted = cp.info.is_trusted,
+            };
+        }
+
+        return peer_prioritization.prioritizePeers(
+            self.allocator,
+            views,
+            active_attnets,
+            active_syncnets,
+            .{
+                .target_peers = self.config.target_peers,
+                .max_peers = self.config.max_peers,
+            },
+        );
     }
 
     // ── Queries (sync integration) ──────────────────────────────────

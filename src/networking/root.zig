@@ -142,3 +142,16 @@ pub const reconnectionCoolDownMs = peer_scoring.reconnectionCoolDownMs;
 // Enhanced rate limiter.
 pub const RateLimitResult = rate_limiter.RateLimitResult;
 pub const GlobalRateConfig = rate_limiter.GlobalRateConfig;
+
+// Peer relevance assertion.
+pub const peer_relevance = @import("peer_relevance.zig");
+pub const assertPeerRelevance = peer_relevance.assertPeerRelevance;
+pub const IrrelevantPeerCode = peer_relevance.IrrelevantPeerCode;
+pub const IrrelevantPeerInfo = peer_relevance.IrrelevantPeerInfo;
+
+// Subnet-aware peer prioritization.
+pub const peer_prioritization = @import("peer_prioritization.zig");
+pub const ConnectedPeerView = peer_prioritization.ConnectedPeerView;
+pub const PrioritizationResult = peer_prioritization.PrioritizationResult;
+pub const DisconnectReason = peer_prioritization.DisconnectReason;
+pub const SubnetQuery = peer_prioritization.SubnetQuery;

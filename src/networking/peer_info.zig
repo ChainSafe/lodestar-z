@@ -325,6 +325,18 @@ fn gossipsubNegativeScoreWeight() f64 {
     return 0.0012;
 }
 
+// ── Relevance status ────────────────────────────────────────────────────────
+
+/// Whether a peer has been determined to be on our chain.
+pub const RelevanceStatus = enum {
+    /// Not yet checked (no Status exchange yet).
+    unknown,
+    /// Peer passed relevance check — on our chain.
+    relevant,
+    /// Peer failed relevance check — different chain.
+    irrelevant,
+};
+
 // ── PeerInfo ────────────────────────────────────────────────────────────────
 
 /// Comprehensive per-peer state.
@@ -358,6 +370,13 @@ pub const PeerInfo = struct {
     ban_expiry_ms: u64 = 0,
     /// Whether this is a trusted/direct peer that should always be reconnected.
     is_trusted: bool = false,
+    /// Relevance status from last Status exchange.
+    relevance: RelevanceStatus = .unknown,
+    /// Last received Status message fields (for periodic re-checks).
+    last_status_fork_digest: ?[4]u8 = null,
+    last_status_finalized_root: ?[32]u8 = null,
+    last_status_finalized_epoch: ?u64 = null,
+    last_status_head_slot: ?u64 = null,
 
     /// Get the combined score.
     pub fn score(self: *const PeerInfo) f64 {

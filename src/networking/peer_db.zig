@@ -21,6 +21,7 @@ const AttnetsBitfield = peer_info_mod.AttnetsBitfield;
 const SyncnetsBitfield = peer_info_mod.SyncnetsBitfield;
 const ATTESTATION_SUBNET_COUNT = peer_info_mod.ATTESTATION_SUBNET_COUNT;
 const SYNC_COMMITTEE_SUBNET_COUNT = peer_info_mod.SYNC_COMMITTEE_SUBNET_COUNT;
+const RelevanceStatus = peer_info_mod.RelevanceStatus;
 
 const log = std.log.scoped(.peer_db);
 
@@ -271,6 +272,35 @@ pub const PeerDB = struct {
         const info = self.peers.getPtr(peer_id) orelse return;
         info.attnets = attnets;
         info.syncnets = syncnets;
+    }
+
+    /// Update a peer's last received Status message fields.
+    pub fn updatePeerStatus(
+        self: *PeerDB,
+        peer_id: []const u8,
+        fork_digest: [4]u8,
+        finalized_root: [32]u8,
+        finalized_epoch: u64,
+        head_slot: u64,
+        head_root: [32]u8,
+    ) void {
+        const info = self.peers.getPtr(peer_id) orelse return;
+        info.sync_info = .{
+            .head_slot = head_slot,
+            .head_root = head_root,
+            .finalized_epoch = finalized_epoch,
+            .finalized_root = finalized_root,
+        };
+        info.last_status_fork_digest = fork_digest;
+        info.last_status_finalized_root = finalized_root;
+        info.last_status_finalized_epoch = finalized_epoch;
+        info.last_status_head_slot = head_slot;
+    }
+
+    /// Update the relevance status of a peer.
+    pub fn setRelevanceStatus(self: *PeerDB, peer_id: []const u8, status: RelevanceStatus) void {
+        const info = self.peers.getPtr(peer_id) orelse return;
+        info.relevance = status;
     }
 
     /// Apply a peer action (score penalty).
