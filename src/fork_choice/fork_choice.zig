@@ -60,6 +60,37 @@ pub const HeadResult = struct {
     payload_status: PayloadStatus = .full,
 };
 
+/// Information passed to shouldOverrideForkChoiceUpdate to decide
+/// whether to reorg the current head by building on its parent.
+///
+/// Corresponds to Lodestar TS shouldOverrideForkChoiceUpdate() parameters.
+pub const ProposerHeadInfo = struct {
+    /// Root of the current head block (may be weak).
+    head_block_root: Root,
+    /// Payload status of the current head block.
+    head_payload_status: PayloadStatus,
+    /// The current slot (when the proposer is preparing to produce a block).
+    current_slot: Slot,
+    /// Seconds elapsed since the start of current_slot.
+    /// Used for timing check: reorg is only safe if proposing on time.
+    sec_from_slot: f64,
+    /// Total effective balance of justified validators (in ETH increments).
+    /// Used to compute weight thresholds via committee fraction.
+    total_justified_balance: u64,
+    /// REORG_HEAD_WEIGHT_THRESHOLD from ChainConfig (default: 20).
+    /// Head is "weak" if its weight < total_balance * threshold / (100 * SLOTS_PER_EPOCH).
+    reorg_head_weight_threshold: u64,
+    /// REORG_PARENT_WEIGHT_THRESHOLD from ChainConfig (default: 160).
+    /// Parent is "strong" if its weight > total_balance * threshold / (100 * SLOTS_PER_EPOCH).
+    reorg_parent_weight_threshold: u64,
+    /// REORG_MAX_EPOCHS_SINCE_FINALIZATION from ChainConfig (default: 2).
+    /// Reorg is only attempted if the chain has been finalizing recently.
+    reorg_max_epochs_since_finalization: u64,
+    /// Whether the proposer-boost reorg feature is enabled.
+    /// When false, shouldOverrideForkChoiceUpdate always returns false.
+    proposer_boost_reorg_enabled: bool,
+};
+
 /// Options for ForkChoice initialization.
 pub const InitOpts = struct {
     justified_checkpoint: Checkpoint,
@@ -506,6 +537,90 @@ pub const ForkChoice = struct {
         return node.extra_meta.executionPayloadBlockHash() orelse ZERO_HASH;
     }
 
+    // ── Proposer head (single-slot reorg) ──
+
+    /// Determine whether to override the fork choice update to build on the head's
+    /// parent instead of the head itself (proposer-boost reorg).
+    ///
+    /// Returns true if the current head is "weak" and the proposer should build
+    /// on the parent to reorg it. All of the following must hold:
+    ///   1. proposer_boost_reorg_enabled is true
+    ///   2. Head block arrived late (timeliness == false)
+    ///   3. Proposal slot is not at an epoch boundary (shuffling stable)
+    ///   4. Head and parent share the same unrealized justified checkpoint (FFG competitive)
+    ///   5. Chain has been finalizing recently (epochsSinceFinalization <= max)
+    ///   6. Parent is exactly one slot before head
+    ///   7. Head arrived in the current slot (timing check)
+    ///   8. Head node weight < committee fraction (head is weak)
+    ///   9. Parent node weight > parent committee fraction (parent is strong)
+    ///
+    /// Spec: https://github.com/ethereum/consensus-specs/blob/v1.4.0-beta.4/specs/phase0/fork-choice.md#get_proposer_head
+    pub fn shouldOverrideForkChoiceUpdate(
+        self: *const ForkChoice,
+        info: ProposerHeadInfo,
+    ) bool {
+        // Feature gate: proposer-boost reorg must be enabled.
+        if (!info.proposer_boost_reorg_enabled) return false;
+
+        // Head block must exist.
+        const head_node = self.proto_array.getNode(
+            info.head_block_root,
+            info.head_payload_status,
+        ) orelse return false;
+
+        // Head must have arrived late (timeliness == false means late block).
+        // is_head_late = NOT timeliness
+        if (head_node.timeliness) return false; // Head is timely — no reorg
+
+        // Proposal slot must not be at an epoch boundary (shuffling stable check).
+        const proposal_slot = head_node.slot + 1;
+        if (proposal_slot % preset.SLOTS_PER_EPOCH == 0) return false;
+
+        // Parent block must exist.
+        const parent_node = blk: {
+            const parent_idx = self.proto_array.getDefaultNodeIndex(head_node.parent_root) orelse
+                return false;
+            break :blk &self.proto_array.nodes.items[parent_idx];
+        };
+
+        // FFG competitive: head and parent must share the same unrealized justified checkpoint.
+        const head_j_epoch = head_node.unrealized_justified_epoch;
+        const head_j_root = head_node.unrealized_justified_root;
+        const parent_j_epoch = parent_node.unrealized_justified_epoch;
+        const parent_j_root = parent_node.unrealized_justified_root;
+        const ffg_ok = head_j_epoch == parent_j_epoch and
+            std.mem.eql(u8, &head_j_root, &parent_j_root);
+        if (!ffg_ok) return false;
+
+        // Finalization check: chain must be finalizing within configured max.
+        const current_epoch = computeEpochAtSlot(info.current_slot);
+        const epochs_since_finalization = current_epoch -| self.finalized_checkpoint.epoch;
+        if (epochs_since_finalization > info.reorg_max_epochs_since_finalization) return false;
+
+        // Single-slot reorg: parent must be exactly one slot before head.
+        if (parent_node.slot + 1 != head_node.slot) return false;
+
+        // Timing check: head block must be in the current slot.
+        if (head_node.slot != info.current_slot) return false;
+
+        // Head weight threshold: head is "weak" if weight < reorg threshold.
+        // committee_fraction = total_balance * threshold / (100 * SLOTS_PER_EPOCH)
+        const head_threshold = info.total_justified_balance *
+            info.reorg_head_weight_threshold /
+            (100 * @as(u64, preset.SLOTS_PER_EPOCH));
+        const head_weight: i64 = head_node.weight;
+        if (head_weight >= @as(i64, @intCast(head_threshold))) return false; // Head is not weak
+
+        // Parent weight threshold: parent must be "strong".
+        const parent_threshold = info.total_justified_balance *
+            info.reorg_parent_weight_threshold /
+            (100 * @as(u64, preset.SLOTS_PER_EPOCH));
+        const parent_weight: i64 = parent_node.weight;
+        if (parent_weight <= @as(i64, @intCast(parent_threshold))) return false; // Parent not strong
+
+        return true;
+    }
+
     // ── Gloas (ePBS) ──
 
     /// Process an execution payload for a Gloas block (creates FULL variant).
@@ -911,4 +1026,106 @@ test "getSafeExecutionBlockHash returns execution block hash for post-merge just
     // Update justified to the post-merge block.
     try fc.updateJustifiedCheckpoint(testing.allocator, makeTestCheckpoint(1, justified_root), &.{});
     try testing.expectEqual(exec_hash, fc.getSafeExecutionBlockHash());
+}
+
+test "shouldOverrideForkChoiceUpdate disabled when feature off" {
+    const genesis_root = hashFromByte(0x01);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &.{},
+    }, genesis_block, 10);
+    defer fc.deinit(testing.allocator);
+
+    try testing.expect(!fc.shouldOverrideForkChoiceUpdate(.{
+        .head_block_root = genesis_root,
+        .head_payload_status = .full,
+        .current_slot = 10,
+        .sec_from_slot = 0.0,
+        .total_justified_balance = 1000,
+        .reorg_head_weight_threshold = 20,
+        .reorg_parent_weight_threshold = 160,
+        .reorg_max_epochs_since_finalization = 2,
+        .proposer_boost_reorg_enabled = false, // Disabled
+    }));
+}
+
+test "shouldOverrideForkChoiceUpdate timely head not reorged" {
+    const genesis_root = hashFromByte(0x01);
+    const head_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &.{},
+    }, genesis_block, 10);
+    defer fc.deinit(testing.allocator);
+
+    // Add head block — timeliness = true (arrived on time).
+    var head_block = makeTestBlock(10, head_root, genesis_root);
+    head_block.timeliness = true;
+    try fc.onBlock(testing.allocator, head_block, 10);
+
+    try testing.expect(!fc.shouldOverrideForkChoiceUpdate(.{
+        .head_block_root = head_root,
+        .head_payload_status = .full,
+        .current_slot = 10,
+        .sec_from_slot = 0.0,
+        .total_justified_balance = 1000,
+        .reorg_head_weight_threshold = 20,
+        .reorg_parent_weight_threshold = 160,
+        .reorg_max_epochs_since_finalization = 2,
+        .proposer_boost_reorg_enabled = true,
+    }));
+}
+
+test "shouldOverrideForkChoiceUpdate returns true for weak late head" {
+    const slots_per_epoch = preset.SLOTS_PER_EPOCH;
+    const genesis_root = hashFromByte(0x01);
+    const head_root = hashFromByte(0x02);
+    // Use slot within an epoch (not boundary) so shuffling check passes.
+    const head_slot: Slot = slots_per_epoch + 5; // Not epoch boundary
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try ForkChoice.init(testing.allocator, .{
+        .justified_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .finalized_checkpoint = makeTestCheckpoint(0, genesis_root),
+        .justified_balances = &.{},
+    }, genesis_block, head_slot);
+    defer fc.deinit(testing.allocator);
+
+    // Add head block with timeliness = false (arrived late).
+    var head_block = makeTestBlock(head_slot, head_root, genesis_root);
+    head_block.timeliness = false;
+    // Same unrealized justified as parent (genesis) for FFG competitive check.
+    head_block.unrealized_justified_epoch = 0;
+    head_block.unrealized_justified_root = genesis_root;
+    try fc.onBlock(testing.allocator, head_block, head_slot);
+
+    // Also update genesis's unrealized justified to match.
+    fc.proto_array.nodes.items[0].unrealized_justified_epoch = 0;
+    fc.proto_array.nodes.items[0].unrealized_justified_root = genesis_root;
+
+    // Scale total_balance so thresholds work out cleanly.
+    const total_balance: u64 = 10000 * @as(u64, slots_per_epoch);
+
+    // Set head weight to 0 (weak) and parent weight high enough to be "strong".
+    fc.proto_array.nodes.items[0].weight = @intCast(total_balance); // genesis/parent = strong
+    fc.proto_array.nodes.items[1].weight = 0; // head = weak (0 < threshold)
+
+    const result = fc.shouldOverrideForkChoiceUpdate(.{
+        .head_block_root = head_root,
+        .head_payload_status = .full,
+        .current_slot = head_slot,
+        .sec_from_slot = 0.0,
+        .total_justified_balance = total_balance,
+        .reorg_head_weight_threshold = 20,
+        .reorg_parent_weight_threshold = 0, // parent threshold = 0, so any positive weight passes
+        .reorg_max_epochs_since_finalization = 10,
+        .proposer_boost_reorg_enabled = true,
+    });
+    try testing.expect(result);
 }
