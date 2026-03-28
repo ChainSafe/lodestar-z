@@ -84,8 +84,27 @@ pub const InterchangeMetadata = struct {
 /// only the *highest* signed slot/epoch from the interchange (conservative
 /// protection — same as what TS lodestar does for fast import).
 ///
+/// Skips genesis_validators_root verification — use importInterchangeVerified
+/// when the expected root is known (always preferred in production).
+///
 /// TS: SlashingProtectionInterchange.importInterchange(interchange)
 pub fn importInterchange(allocator: Allocator, json: []const u8) ![]SlashingProtectionRecord {
+    return importInterchangeVerified(allocator, json, null);
+}
+
+/// Import EIP-3076 interchange with optional genesis validators root verification.
+///
+/// If expected_genesis_validators_root is non-null, the interchange metadata is
+/// checked against the provided root and error.GenesisValidatorsRootMismatch is
+/// returned if they don't match. This prevents accidentally importing protection
+/// data from a different chain (e.g. mainnet data into a testnet validator).
+///
+/// TS: SlashingProtectionInterchange.importInterchange — always verifies GVR.
+pub fn importInterchangeVerified(
+    allocator: Allocator,
+    json: []const u8,
+    expected_genesis_validators_root: ?[32]u8,
+) ![]SlashingProtectionRecord {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -122,8 +141,25 @@ pub fn importInterchange(allocator: Allocator, json: []const u8) ![]SlashingProt
     var genesis_validators_root: [32]u8 = [_]u8{0} ** 32;
     const gvr_hex = if (std.mem.startsWith(u8, gvr_str, "0x")) gvr_str[2..] else gvr_str;
     _ = std.fmt.hexToBytes(&genesis_validators_root, gvr_hex) catch {};
-    // TODO: verify genesis_validators_root matches our chain before importing.
-    // For now, we accept any GVR (permissive import).
+
+    // Verify genesis_validators_root matches our chain before importing.
+    // This is a critical safety check: importing slashing protection data from
+    // a different chain (e.g. mainnet into a testnet VC) would leave the validator
+    // unprotected against signing on the target chain.
+    //
+    // TS: SlashingProtectionInterchange.importInterchange always verifies GVR.
+    if (expected_genesis_validators_root) |expected_gvr| {
+        if (!std.mem.eql(u8, &genesis_validators_root, &expected_gvr)) {
+            const file_gvr_hex = std.fmt.bytesToHex(&genesis_validators_root, .lower);
+            const expected_gvr_hex = std.fmt.bytesToHex(&expected_gvr, .lower);
+            log.err(
+                "interchange genesis_validators_root mismatch: file=0x{s} expected=0x{s}",
+                .{ file_gvr_hex, expected_gvr_hex },
+            );
+            return error.GenesisValidatorsRootMismatch;
+        }
+        log.debug("interchange genesis_validators_root verified OK", .{});
+    }
 
     // Parse data array.
     const data_val = root_obj.get("data") orelse return error.MissingInterchangeField;
@@ -329,4 +365,36 @@ test "importInterchange: single validator round-trip" {
     try testing.expectEqual(@as(?u64, 42), records[0].last_signed_block_slot);
     try testing.expectEqual(@as(?u64, 7), records[0].last_signed_attestation_target_epoch);
     try testing.expectEqual(@as(?u64, 3), records[0].last_signed_attestation_source_epoch);
+}
+
+test "importInterchangeVerified: rejects mismatched genesis_validators_root" {
+    const json =
+        \\{"metadata":{"interchange_format_version":"5","genesis_validators_root":"0xabababababababababababababababababababababababababababababababababab"},"data":[]}
+    ;
+    // Expected root is all zeros — should not match 0xabab...
+    const expected_gvr = [_]u8{0x00} ** 32;
+    try testing.expectError(
+        error.GenesisValidatorsRootMismatch,
+        importInterchangeVerified(testing.allocator, json, expected_gvr),
+    );
+}
+
+test "importInterchangeVerified: accepts matching genesis_validators_root" {
+    const json =
+        \\{"metadata":{"interchange_format_version":"5","genesis_validators_root":"0x0000000000000000000000000000000000000000000000000000000000000000"},"data":[]}
+    ;
+    const expected_gvr = [_]u8{0x00} ** 32;
+    const records = try importInterchangeVerified(testing.allocator, json, expected_gvr);
+    defer testing.allocator.free(records);
+    try testing.expectEqual(@as(usize, 0), records.len);
+}
+
+test "importInterchangeVerified: skips verification when expected is null" {
+    const json =
+        \\{"metadata":{"interchange_format_version":"5","genesis_validators_root":"0xabababababababababababababababababababababababababababababababababab"},"data":[]}
+    ;
+    // null → no verification, any GVR accepted
+    const records = try importInterchangeVerified(testing.allocator, json, null);
+    defer testing.allocator.free(records);
+    try testing.expectEqual(@as(usize, 0), records.len);
 }

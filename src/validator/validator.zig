@@ -65,6 +65,12 @@ const KeyDiscovery = key_discovery_mod.KeyDiscovery;
 const remote_signer_mod = @import("remote_signer.zig");
 const RemoteSigner = remote_signer_mod.RemoteSigner;
 
+const index_tracker_mod = @import("index_tracker.zig");
+const IndexTracker = index_tracker_mod.IndexTracker;
+
+const liveness_mod = @import("liveness.zig");
+const LivenessTracker = liveness_mod.LivenessTracker;
+
 const log = std.log.scoped(.validator_client);
 
 /// Default fee recipient (zero address) — operator should override.
@@ -94,6 +100,18 @@ pub const ValidatorClient = struct {
     // I/O context — stored so clock callbacks can make HTTP calls.
     // Set in start() before the run loop begins.
     io: ?std.Io,
+
+    // Index tracker — resolves pubkey → validator index mappings.
+    index_tracker: IndexTracker,
+
+    // Liveness tracker — records per-validator duty outcomes.
+    liveness_tracker: LivenessTracker,
+
+    // Shutdown requested flag — set on signal, stops the clock loop.
+    shutdown_requested: std.atomic.Value(bool),
+
+    // Session stats.
+    session_start_ns: u64,
 
     // ---------------------------------------------------------------------------
     // Lifecycle
@@ -175,6 +193,15 @@ pub const ValidatorClient = struct {
         }
         log.info("validator keys loaded from disk: {d}", .{loaded_count});
 
+        var idx_tracker = IndexTracker.init(allocator, &api);
+        var live_tracker = LivenessTracker.init(allocator);
+
+        // Register all loaded keys in the index tracker and liveness tracker.
+        for (validator_store.validators.items) |v| {
+            idx_tracker.trackPubkey(v.pubkey);
+            live_tracker.register(v.pubkey);
+        }
+
         return .{
             .allocator = allocator,
             .config = config,
@@ -188,6 +215,10 @@ pub const ValidatorClient = struct {
             .prepare_proposer = prepare_proposer,
             .doppelganger = doppelganger,
             .io = null,
+            .index_tracker = idx_tracker,
+            .liveness_tracker = live_tracker,
+            .shutdown_requested = std.atomic.Value(bool).init(false),
+            .session_start_ns = @intCast(std.time.nanoTimestamp()),
         };
     }
 
@@ -196,8 +227,26 @@ pub const ValidatorClient = struct {
         self.attestation_service.deinit();
         self.sync_committee_service.deinit();
         if (self.doppelganger) |*d| d.deinit();
+        self.index_tracker.deinit();
+        self.liveness_tracker.deinit();
         self.validator_store.deinit();
         self.api.deinit();
+    }
+
+    /// Request graceful shutdown of the validator client.
+    ///
+    /// Can be called from a signal handler or external code.
+    /// The run loop will stop at the next clock tick.
+    ///
+    /// TS: Validator.close(signal)
+    pub fn requestShutdown(self: *ValidatorClient) void {
+        log.info("shutdown requested", .{});
+        self.shutdown_requested.store(true, .seq_cst);
+    }
+
+    /// Return true if shutdown has been requested.
+    pub fn isShutdownRequested(self: *ValidatorClient) bool {
+        return self.shutdown_requested.load(.seq_cst);
     }
 
     /// Add a validator secret key to the store.
@@ -205,10 +254,14 @@ pub const ValidatorClient = struct {
     /// Must be called before `start()`.
     pub fn addKey(self: *ValidatorClient, secret_key: bls.SecretKey) !void {
         try self.validator_store.addKey(secret_key);
+        const pk = secret_key.toPublicKey();
+        const pk_bytes = pk.compress();
         if (self.doppelganger) |*d| {
-            const pk = secret_key.toPublicKey();
-            try d.registerValidator(pk.compress());
+            try d.registerValidator(pk_bytes);
         }
+        // Track in index tracker and liveness tracker.
+        self.index_tracker.trackPubkey(pk_bytes);
+        self.liveness_tracker.register(pk_bytes);
     }
 
     /// Start the validator client: wire up clock callbacks and enter the run loop.
@@ -221,6 +274,7 @@ pub const ValidatorClient = struct {
 
         // Wire up chain header tracker callbacks.
         self.sync_committee_service.setHeaderTracker(&self.header_tracker);
+        self.attestation_service.setHeaderTracker(&self.header_tracker);
 
         // Register clock callbacks.
         self.clock.onSlot(.{ .ctx = self, .fn_ptr = onSlotBlockService });
@@ -240,6 +294,51 @@ pub const ValidatorClient = struct {
 
         // Store io so clock callbacks can perform HTTP requests.
         self.io = io;
+
+        // Resolve validator indices at startup.
+        // This is required before duties can be fetched (duties use validator index, not pubkey).
+        //
+        // TS: IndicesService.pollValidatorIndices() on startup.
+        log.info("resolving validator indices at startup", .{});
+        self.index_tracker.resolveIndices(io) catch |err| {
+            log.warn("startup index resolution failed: {s} — will retry on first epoch", .{@errorName(err)});
+        };
+
+        // Apply resolved indices to the validator store.
+        for (self.index_tracker.entries.items) |e| {
+            if (e.index) |idx| {
+                self.validator_store.updateIndex(e.pubkey, idx, .active_ongoing);
+            }
+        }
+
+        // Wire index tracker epoch callback.
+        self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochIndexTracker });
+
+        // Doppelganger startup: if enabled, validators start as Unverified and cannot sign.
+        // The doppelganger service checks liveness each epoch and promotes to VerifiedSafe
+        // after DEFAULT_REMAINING_DETECTION_EPOCHS clean epochs.
+        //
+        // TS: DoppelgangerService.pollLiveness — runs on each epoch, blocks signing until safe.
+        if (self.doppelganger) |*d| {
+            // Register all validators that don't have indices yet.
+            for (self.validator_store.validators.items) |v| {
+                d.registerValidator(v.pubkey) catch |err| {
+                    log.warn("doppelganger registerValidator error: {s}", .{@errorName(err)});
+                };
+                // Apply resolved index if available.
+                if (self.index_tracker.getIndex(v.pubkey)) |idx| {
+                    for (d.entries.items) |*de| {
+                        if (std.mem.eql(u8, &de.pubkey, &v.pubkey)) {
+                            de.index = idx;
+                            break;
+                        }
+                    }
+                }
+            }
+            log.info("doppelganger protection enabled — signing blocked until {d} clean epoch(s) observed", .{
+                @import("doppelganger.zig").DEFAULT_REMAINING_DETECTION_EPOCHS,
+            });
+        }
 
         // Fetch remote signer keys if web3signer is configured.
         if (self.config.web3signer_url) |url| {
@@ -268,8 +367,27 @@ pub const ValidatorClient = struct {
         // without it (sync committee service uses zero block root as fallback).
         log.info("note: ChainHeaderTracker SSE subscription not started (requires separate thread/fiber)", .{});
 
-        // Run the clock loop (blocking).
+        // Run the clock loop (blocking until shutdown or error).
         try self.clock.run(io);
+
+        // Graceful shutdown sequence.
+        log.info("validator client stopping...", .{});
+
+        // Flush slashing protection DB.
+        self.validator_store.slashing_db.close();
+
+        // Log session summary.
+        const session_end_ns: u64 = @intCast(std.time.nanoTimestamp());
+        const session_duration_s = (session_end_ns -| self.session_start_ns) / std.time.ns_per_s;
+        log.info(
+            "validator client stopped: session_duration={d}s validators={d} missed_blocks={d}",
+            .{
+                session_duration_s,
+                self.validator_store.validators.items.len,
+                self.block_service.missed_block_count,
+            },
+        );
+        self.liveness_tracker.logSummary();
     }
 
     // -----------------------------------------------------------------------
@@ -323,6 +441,19 @@ pub const ValidatorClient = struct {
         const io = self.io orelse return;
         if (self.doppelganger) |*d| {
             d.onEpoch(io, epoch);
+        }
+    }
+
+    fn onEpochIndexTracker(ctx: *anyopaque, epoch: u64) void {
+        const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
+        const io = self.io orelse return;
+        self.index_tracker.onEpoch(io, epoch);
+
+        // Apply any newly resolved indices to the validator store.
+        for (self.index_tracker.entries.items) |e| {
+            if (e.index) |idx| {
+                self.validator_store.updateIndex(e.pubkey, idx, .active_ongoing);
+            }
         }
     }
 };

@@ -23,6 +23,10 @@ const ValidatorStore = @import("validator_store.zig").ValidatorStore;
 const signing_mod = @import("signing.zig");
 const SigningContext = signing_mod.SigningContext;
 
+const chain_header_tracker = @import("chain_header_tracker.zig");
+const ChainHeaderTracker = chain_header_tracker.ChainHeaderTracker;
+const HeadInfo = chain_header_tracker.HeadInfo;
+
 const state_transition = @import("state_transition");
 
 const log = std.log.scoped(.attestation_service);
@@ -45,6 +49,15 @@ pub const AttestationService = struct {
     duties: std.ArrayList(AttesterDutyWithProof),
     /// Epoch for which duties are currently cached.
     duties_epoch: ?u64,
+    /// Optional chain header tracker for reorg detection.
+    header_tracker: ?*ChainHeaderTracker,
+    /// Last known previous_duty_dependent_root — used to detect reorgs.
+    /// When this changes, attester duties for the current epoch must be re-fetched.
+    ///
+    /// TS: AttestationDutiesService.currentDependentRoot
+    last_previous_dependent_root: [32]u8,
+    /// Last known current_duty_dependent_root — used to detect reorgs.
+    last_current_dependent_root: [32]u8,
 
     pub fn init(
         allocator: Allocator,
@@ -61,11 +74,55 @@ pub const AttestationService = struct {
             .seconds_per_slot = seconds_per_slot,
             .duties = std.ArrayList(AttesterDutyWithProof).init(allocator),
             .duties_epoch = null,
+            .header_tracker = null,
+            .last_previous_dependent_root = [_]u8{0} ** 32,
+            .last_current_dependent_root = [_]u8{0} ** 32,
         };
     }
 
     pub fn deinit(self: *AttestationService) void {
         self.duties.deinit();
+    }
+
+    /// Attach a chain header tracker for reorg detection.
+    ///
+    /// When set, onHead() will be called via HeadCallback when the chain head
+    /// changes. If the dependent_root changes, duties are re-fetched.
+    pub fn setHeaderTracker(self: *AttestationService, tracker: *ChainHeaderTracker) void {
+        self.header_tracker = tracker;
+        tracker.onHead(.{ .ctx = self, .fn_ptr = onHeadChange });
+    }
+
+    /// Called when a new head event arrives from ChainHeaderTracker.
+    ///
+    /// If the duty-dependent root changed, we re-fetch attester duties to avoid
+    /// attesting to a stale chain after a reorg.
+    ///
+    /// TS: AttestationDutiesService.handleClockDutiesReorg
+    fn onHeadChange(ctx: *anyopaque, info: HeadInfo) void {
+        const self: *AttestationService = @ptrCast(@alignCast(ctx));
+
+        const prev_changed = !std.mem.eql(u8, &self.last_previous_dependent_root, &info.previous_duty_dependent_root);
+        const curr_changed = !std.mem.eql(u8, &self.last_current_dependent_root, &info.current_duty_dependent_root);
+
+        if (!prev_changed and !curr_changed) return;
+
+        const epoch = info.slot / 32; // approximate; slots_per_epoch not stored
+        log.warn(
+            "reorg detected at slot={d}: dependent_root changed — re-fetching attester duties for epoch={d}",
+            .{ info.slot, epoch },
+        );
+        self.last_previous_dependent_root = info.previous_duty_dependent_root;
+        self.last_current_dependent_root = info.current_duty_dependent_root;
+
+        // We don't have an io handle here (head callbacks are sync, called from SSE reader).
+        // Flag that duties need refresh; they will be re-fetched on the next slot callback.
+        // An alternative would be to fire an async task if io is stored; for now we clear
+        // cached duties so they get re-fetched at the next onEpoch/onSlot boundary.
+        //
+        // TS: AttestationDutiesService immediately re-fetches via pollBeaconAttesters.
+        self.duties_epoch = null; // invalidate cache → forces refresh on next onEpoch
+        log.warn("attester duties cache invalidated due to reorg", .{});
     }
 
     // -----------------------------------------------------------------------

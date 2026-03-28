@@ -65,3 +65,15 @@ pub const keystore_create = @import("keystore_create.zig");
 pub const createKeystore = keystore_create.createKeystore;
 pub const encryptKeystore = keystore_create.encryptKeystore;
 pub const writeKeystoreToDir = keystore_create.writeKeystoreToDir;
+
+// New: Index tracker (pubkey → validator index mapping).
+pub const index_tracker = @import("index_tracker.zig");
+pub const IndexTracker = index_tracker.IndexTracker;
+
+// New: Validator liveness tracker (per-epoch duty outcome tracking).
+pub const liveness = @import("liveness.zig");
+pub const LivenessTracker = liveness.LivenessTracker;
+pub const DutyKind = liveness.DutyKind;
+
+// Genesis validators root verified interchange import.
+pub const importInterchangeVerified = interchange.importInterchangeVerified;
