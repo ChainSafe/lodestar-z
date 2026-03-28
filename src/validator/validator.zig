@@ -296,7 +296,7 @@ pub const ValidatorClient = struct {
     /// BUG-1 Fix: init() captures &api / &validator_store as local variable addresses.
     /// Once the caller assigns the returned struct to heap memory, those local addresses
     /// are stale. This method updates all service pointers to &self.api and &self.validator_store.
-    fn postInit(self: *ValidatorClient) void {
+    pub fn wireServices(self: *ValidatorClient) void {
         self.block_service.api = &self.api;
         self.block_service.validator_store = &self.validator_store;
         self.attestation_service.api = &self.api;
@@ -324,7 +324,7 @@ pub const ValidatorClient = struct {
         // BUG-1 Fix: Re-wire service pointers to stable self fields.
         // init() captures pointers to locals; now that self is at a stable address
         // (heap-allocated by the caller), update all service api/store pointers.
-        self.postInit();
+        self.wireServices();
 
         // Wire up chain header tracker callbacks.
         self.sync_committee_service.setHeaderTracker(&self.header_tracker);

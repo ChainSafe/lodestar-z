@@ -53,6 +53,8 @@ pub const ValidatorRecord = struct {
 pub const ValidatorStore = struct {
     allocator: Allocator,
     validators: std.ArrayList(ValidatorRecord),
+    /// Cached pubkey slice kept in sync with validators for non-allocating pubkeys() access.
+    pubkeys_cache: std.ArrayList([48]u8),
     /// Persistent slashing protection database.
     slashing_db: SlashingProtectionDb,
     /// Mutex protecting validators list for concurrent add/remove.
@@ -66,6 +68,7 @@ pub const ValidatorStore = struct {
         return .{
             .allocator = allocator,
             .validators = std.ArrayList(ValidatorRecord).init(allocator),
+            .pubkeys_cache = std.ArrayList([48]u8).init(allocator),
             .slashing_db = slashing_db,
             .mutex = .{},
         };
@@ -73,6 +76,7 @@ pub const ValidatorStore = struct {
 
     pub fn deinit(self: *ValidatorStore) void {
         self.validators.deinit();
+        self.pubkeys_cache.deinit();
         self.slashing_db.close();
     }
 
@@ -112,6 +116,8 @@ pub const ValidatorStore = struct {
                 .last_signed_attestation_target_epoch = null,
             },
         });
+        // Keep pubkeys_cache in sync for non-allocating pubkeys() access.
+        try self.pubkeys_cache.append(pubkey_bytes);
         log.debug("added validator pubkey={}", .{std.fmt.fmtSliceHexLower(&pubkey_bytes)});
     }
 
@@ -135,6 +141,8 @@ pub const ValidatorStore = struct {
         for (self.validators.items, 0..) |v, i| {
             if (std.mem.eql(u8, &v.pubkey, &pubkey)) {
                 _ = self.validators.swapRemove(i);
+                // Keep pubkeys_cache in sync.
+                _ = self.pubkeys_cache.swapRemove(i);
                 log.info("removed validator pubkey={}", .{std.fmt.fmtSliceHexLower(&pubkey)});
                 return true;
             }
@@ -173,13 +181,17 @@ pub const ValidatorStore = struct {
         return result;
     }
 
-    /// Return an empty slice — use allPubkeys() for an owned copy.
+    /// Return a non-owning slice of all validator public keys.
     ///
-    /// This stub exists for API compatibility. Validators may have keys
-    /// that are not yet indexed; use allPubkeys() to get owned copies.
+    /// STUB Fix: Returns the actual loaded pubkeys from pubkeys_cache, which is kept
+    /// in sync with the validators list by addKeyLocked() and removeValidator().
+    ///
+    /// Safety: The returned slice is valid only while no concurrent writes occur.
+    /// For multi-threaded access, use allPubkeys() which returns an owned copy.
+    ///
+    /// TS: ValidatorStore.hasVote() / all pubkey iteration patterns.
     pub fn pubkeys(self: *const ValidatorStore) []const [48]u8 {
-        _ = self;
-        return &[_][48]u8{};
+        return self.pubkeys_cache.items;
     }
 
     /// Return all known public keys as an owned slice (caller must free).

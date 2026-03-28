@@ -286,9 +286,13 @@ pub const AttestationService = struct {
         const one_third_ns = slot_duration_ns / 3;
         const two_thirds_ns = slot_duration_ns * 2 / 3;
 
-        // BUG-5 Fix: Compute elapsed time within slot using genesis-relative time.
-        // slot_start_ns = genesis_time_ns + slot * slot_duration_ns
-        // elapsed_in_slot_ns = now_ns - slot_start_ns
+        // Sub-slot timing: compute absolute slot start relative to genesis.
+        // slot_start_ns = (genesis_time_unix_secs + slot * seconds_per_slot) * ns_per_s
+        //
+        // BUG-5 Note: std.time.nanoTimestamp() uses CLOCK_REALTIME on Linux/macOS/Windows
+        // (confirmed in zig/lib/std/time.zig — it calls posix.clock_gettime(.REALTIME)).
+        // This IS Unix wall-clock time, NOT boot-relative, so comparing against
+        // genesis_time_ns is correct. No platform-specific workaround needed.
         const genesis_time_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
         const slot_start_ns = genesis_time_ns + slot * slot_duration_ns;
         {

@@ -280,7 +280,10 @@ pub const SyncCommitteeService = struct {
         const one_third_ns = slot_duration_ns / 3;
         const two_thirds_ns = slot_duration_ns * 2 / 3;
 
-        // BUG-5 Fix: Compute timing using genesis-relative slot start.
+        // Sub-slot timing: compute absolute slot start relative to genesis.
+        // BUG-5 Note: std.time.nanoTimestamp() is CLOCK_REALTIME (Unix wall-clock) on
+        // Linux/macOS/Windows. Confirmed in zig/lib/std/time.zig. Comparing against
+        // genesis_time_ns is correct — no platform workaround needed.
         const genesis_time_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
         const slot_start_ns = genesis_time_ns + slot * slot_duration_ns;
 

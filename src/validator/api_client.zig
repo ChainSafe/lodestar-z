@@ -157,6 +157,12 @@ pub const BeaconApiClient = struct {
     // -----------------------------------------------------------------------
 
     /// Perform a GET request and return the response body (caller frees).
+    ///
+    /// COH-4: A new std.http.Client is created per request instead of reusing a
+    /// persistent connection. This avoids connection-state bugs in the current Zig 0.14
+    /// std.http.Client (no idle-connection pool, and keep_alive requires manual drain).
+    /// TODO: Add an `http_client: std.http.Client` field to BeaconApiClient and reuse
+    ///       it once std.http.Client supports connection pooling with Zig 0.16 evented I/O.
     fn get(self: *BeaconApiClient, io: Io, path: []const u8) ![]const u8 {
         const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.activeUrl(), path });
         defer self.allocator.free(url);
@@ -205,6 +211,8 @@ pub const BeaconApiClient = struct {
     /// Perform a POST request with JSON body and return the response body (caller frees).
     ///
     /// Pass an empty body (`""`) for POST endpoints that don't require a body.
+    ///
+    /// COH-4: See get() — per-request clients are intentional for now; same TODO applies.
     fn post(self: *BeaconApiClient, io: Io, path: []const u8, body: []const u8) ![]const u8 {
         const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.activeUrl(), path });
         defer self.allocator.free(url);
@@ -489,10 +497,14 @@ pub const BeaconApiClient = struct {
             dst.index = try std.fmt.parseInt(u64, src.index, 10);
             const pk_hex = if (std.mem.startsWith(u8, src.validator.pubkey, "0x")) src.validator.pubkey[2..] else src.validator.pubkey;
             _ = std.fmt.hexToBytes(&dst.pubkey, pk_hex) catch {};
-            // Status is a string slice pointing into parsed arena — but parsed is deferred;
-            // we need to copy it. For now, use a fixed-size buffer.
-            dst.status = src.status; // NOTE: arena-owned, valid only within this scope.
-            // TODO: copy status string to owned memory if needed beyond this call.
+            // COH-3 Fix: copy status string into owned fixed-size buffer
+            // to avoid dangling pointer into the freed JSON arena.
+            {
+                const s = src.status;
+                const copy_len: u8 = @intCast(@min(s.len, dst.status.len));
+                @memcpy(dst.status[0..copy_len], s[0..copy_len]);
+                dst.status_len = copy_len;
+            }
         }
         return result;
     }
@@ -921,7 +933,16 @@ pub const GenesisResponse = struct {
 pub const ValidatorIndexAndStatus = struct {
     pubkey: [48]u8,
     index: u64,
-    status: []const u8,
+    /// Validator status string (e.g. "active_ongoing", "withdrawal_possible").
+    /// COH-3 Fix: stored as fixed-size buffer to avoid dangling pointer into freed arena.
+    /// Max known status len is 20 bytes ("withdrawal_possible"); 32 is safe margin.
+    status: [32]u8,
+    status_len: u8,
+
+    /// Return the status string slice.
+    pub fn statusStr(self: *const ValidatorIndexAndStatus) []const u8 {
+        return self.status[0..self.status_len];
+    }
 };
 
 pub const ProduceBlockResponse = struct {

@@ -310,24 +310,38 @@ pub const BlockService = struct {
         const sig_hex = std.fmt.bytesToHex(&sig_bytes, .lower);
 
         // 5. Assemble SignedBeaconBlock JSON and publish.
-        //    We wrap the BN's block JSON (block_resp.block_ssz is JSON from v3 API)
-        //    by injecting the signature into the response structure.
-        //    Full implementation would SSZ-encode SignedBeaconBlock{message, signature}.
+        //
+        // BUG-4 Fix: The BN v3 response is {"version":"...","data":{block_fields}}.
+        // POST /eth/v2/beacon/blocks expects {"message":{block_fields},"signature":"0x..."}.
+        //
+        // Extract the "data" object and wrap in the correct SignedBeaconBlock envelope.
         var signed_json = std.ArrayList(u8).init(self.allocator);
         defer signed_json.deinit();
-        // Try to inject signature into the BN response; fall back to wrapping.
-        const raw = block_resp.block_ssz;
-        if (std.mem.endsWith(u8, std.mem.trimRight(u8, raw, " \t\r\n"), "}")) {
-            // JSON object — inject signature field before closing brace.
-            const trimmed_raw = std.mem.trimRight(u8, raw, " \t\r\n");
-            try signed_json.appendSlice(trimmed_raw[0 .. trimmed_raw.len - 1]);
-            try signed_json.writer().print(",\"signature\":\"0x{s}\"}}", .{sig_hex});
-        } else {
-            // Fallback: pass raw block and log warning.
-            log.warn("could not inject signature into block response — publishing raw body", .{});
-            try signed_json.appendSlice(raw);
+        {
+            const raw = block_resp.block_ssz;
+            var extracted = false;
+            blk_wrap: {
+                var arena2 = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena2.deinit();
+                const parsed2 = std.json.parseFromSlice(std.json.Value, arena2.allocator(), raw, .{}) catch break :blk_wrap;
+                const root_obj = switch (parsed2.value) {
+                    .object => |o| o,
+                    else => break :blk_wrap,
+                };
+                const data_val = root_obj.get("data") orelse break :blk_wrap;
+                var data_json = std.ArrayList(u8).init(arena2.allocator());
+                try std.json.stringify(data_val, .{}, data_json.writer());
+                try signed_json.writer().print(
+                    "{{\"message\":{s},\"signature\":\"0x{s}\"}}",
+                    .{ data_json.items, sig_hex },
+                );
+                extracted = true;
+            }
+            if (!extracted) {
+                log.warn("BUG-4: could not extract data from v3 block response -- publishing raw body", .{});
+                try signed_json.appendSlice(raw);
+            }
         }
-
         try self.api.publishBlock(io, signed_json.items);
         log.info("published block slot={d} validator_index={d}", .{ slot, duty.validator_index });
 
