@@ -15,6 +15,8 @@ const Allocator = std.mem.Allocator;
 const consensus_types = @import("consensus_types");
 const constants = @import("constants");
 const state_transition = @import("state_transition");
+const config_mod = @import("config");
+const BeaconConfig = config_mod.BeaconConfig;
 
 const computeDomain = state_transition.computeDomain;
 const computeSigningRoot = state_transition.computeSigningRoot;
@@ -31,11 +33,49 @@ const DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF = constants.DOMAIN_SYNC_COMMITTEE_SE
 const DOMAIN_CONTRIBUTION_AND_PROOF = constants.DOMAIN_CONTRIBUTION_AND_PROOF;
 
 /// Signing context shared across all sign calls for a given state.
+///
+/// BUG-6 fix: SigningContext now holds the BeaconConfig reference so that
+/// fork_version can be computed dynamically per epoch. Use forkVersionAtEpoch()
+/// or forkVersionAtSlot() to get the correct fork version for a given message.
 pub const SigningContext = struct {
-    /// Active fork version for the message's epoch.
-    fork_version: [4]u8,
     /// Beacon chain genesis validators root.
     genesis_validators_root: [32]u8,
+    /// Genesis time (Unix seconds) — used to compute current epoch.
+    genesis_time_unix_secs: u64,
+    /// Seconds per slot — used to compute current epoch.
+    seconds_per_slot: u64,
+    /// Slots per epoch — used to compute current epoch.
+    slots_per_epoch: u64,
+    /// Fork schedule: up to 16 (epoch, fork_version) pairs, sorted by epoch ascending.
+    /// Index 0 = phase0 (epoch 0). Populated from chain config at startup.
+    fork_schedule_len: usize,
+    fork_schedule: [16]ForkEntry,
+
+    pub const ForkEntry = struct {
+        epoch: u64,
+        version: [4]u8,
+    };
+
+    /// Return the fork version active at the given epoch.
+    pub fn forkVersionAtEpoch(self: *const SigningContext, epoch: u64) [4]u8 {
+        // Walk schedule in reverse to find the latest fork active at `epoch`.
+        var i: usize = self.fork_schedule_len;
+        while (i > 0) {
+            i -= 1;
+            if (epoch >= self.fork_schedule[i].epoch) {
+                return self.fork_schedule[i].version;
+            }
+        }
+        // Fallback: phase0 version.
+        if (self.fork_schedule_len > 0) return self.fork_schedule[0].version;
+        return [4]u8{ 0, 0, 0, 0 };
+    }
+
+    /// Return the fork version active at the given slot.
+    pub fn forkVersionAtSlot(self: *const SigningContext, slot: u64) [4]u8 {
+        const epoch = slot / self.slots_per_epoch;
+        return self.forkVersionAtEpoch(epoch);
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -47,7 +87,8 @@ pub const SigningContext = struct {
 /// TS: getDomainForEpoch(epoch) + computeSigningRoot(epoch, domain)
 pub fn randaoSigningRoot(ctx: SigningContext, epoch: u64, out: *[32]u8) !void {
     var domain: [32]u8 = undefined;
-    try computeDomain(DOMAIN_RANDAO, ctx.fork_version, ctx.genesis_validators_root, &domain);
+    const fork_version = ctx.forkVersionAtEpoch(epoch);
+    try computeDomain(DOMAIN_RANDAO, fork_version, ctx.genesis_validators_root, &domain);
     try computeSigningRoot(consensus_types.primitive.Epoch, &epoch, &domain, out);
 }
 
@@ -64,7 +105,8 @@ pub fn blockHeaderSigningRoot(
     out: *[32]u8,
 ) !void {
     var domain: [32]u8 = undefined;
-    try computeDomain(DOMAIN_BEACON_PROPOSER, ctx.fork_version, ctx.genesis_validators_root, &domain);
+    const fork_version = ctx.forkVersionAtSlot(header.slot);
+    try computeDomain(DOMAIN_BEACON_PROPOSER, fork_version, ctx.genesis_validators_root, &domain);
     try computeSigningRoot(consensus_types.phase0.BeaconBlockHeader, header, &domain, out);
 }
 
@@ -81,7 +123,8 @@ pub fn attestationSigningRoot(
     out: *[32]u8,
 ) !void {
     var domain: [32]u8 = undefined;
-    try computeDomain(DOMAIN_BEACON_ATTESTER, ctx.fork_version, ctx.genesis_validators_root, &domain);
+    const fork_version = ctx.forkVersionAtSlot(attestation_data.slot);
+    try computeDomain(DOMAIN_BEACON_ATTESTER, fork_version, ctx.genesis_validators_root, &domain);
     try computeSigningRoot(consensus_types.phase0.AttestationData, attestation_data, &domain, out);
 }
 
@@ -95,11 +138,13 @@ pub fn attestationSigningRoot(
 /// TS: computeSigningRoot(beaconBlockRoot, domain)
 pub fn syncCommitteeSigningRoot(
     ctx: SigningContext,
+    slot: u64,
     beacon_block_root: *const [32]u8,
     out: *[32]u8,
 ) !void {
     var domain: [32]u8 = undefined;
-    try computeDomain(DOMAIN_SYNC_COMMITTEE, ctx.fork_version, ctx.genesis_validators_root, &domain);
+    const fork_version = ctx.forkVersionAtSlot(slot);
+    try computeDomain(DOMAIN_SYNC_COMMITTEE, fork_version, ctx.genesis_validators_root, &domain);
     // SyncCommitteeMessage signs over the beacon block root as a Root type.
     try computeSigningRoot(consensus_types.primitive.Root, beacon_block_root, &domain, out);
 }
@@ -118,7 +163,8 @@ pub fn syncCommitteeSelectionProofSigningRoot(
     out: *[32]u8,
 ) !void {
     var domain: [32]u8 = undefined;
-    try computeDomain(DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF, ctx.fork_version, ctx.genesis_validators_root, &domain);
+    const fork_version = ctx.forkVersionAtSlot(slot);
+    try computeDomain(DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF, fork_version, ctx.genesis_validators_root, &domain);
     const selection_data = consensus_types.altair.SyncAggregatorSelectionData.Type{
         .slot = slot,
         .subcommittee_index = subcommittee_index,
@@ -137,7 +183,8 @@ pub fn contributionAndProofSigningRoot(
     out: *[32]u8,
 ) !void {
     var domain: [32]u8 = undefined;
-    try computeDomain(DOMAIN_CONTRIBUTION_AND_PROOF, ctx.fork_version, ctx.genesis_validators_root, &domain);
+    const fork_version = ctx.forkVersionAtSlot(contribution_and_proof.contribution.slot);
+    try computeDomain(DOMAIN_CONTRIBUTION_AND_PROOF, fork_version, ctx.genesis_validators_root, &domain);
     try computeSigningRoot(consensus_types.altair.ContributionAndProof, contribution_and_proof, &domain, out);
 }
 
@@ -153,7 +200,9 @@ pub fn aggregateAndProofSigningRoot(
     out: *[32]u8,
 ) !void {
     var domain: [32]u8 = undefined;
-    try computeDomain(DOMAIN_AGGREGATE_AND_PROOF, ctx.fork_version, ctx.genesis_validators_root, &domain);
+    // Use the slot from the aggregate attestation data for fork version lookup.
+    const fork_version = ctx.forkVersionAtSlot(aggregate_and_proof.aggregate.data.slot);
+    try computeDomain(DOMAIN_AGGREGATE_AND_PROOF, fork_version, ctx.genesis_validators_root, &domain);
     try computeSigningRootAlloc(consensus_types.phase0.AggregateAndProof, allocator, aggregate_and_proof, &domain, out);
 }
 
@@ -168,7 +217,8 @@ pub fn voluntaryExitSigningRoot(
     out: *[32]u8,
 ) !void {
     var domain: [32]u8 = undefined;
-    try computeDomain(DOMAIN_VOLUNTARY_EXIT, ctx.fork_version, ctx.genesis_validators_root, &domain);
+    const fork_version = ctx.forkVersionAtEpoch(voluntary_exit.epoch);
+    try computeDomain(DOMAIN_VOLUNTARY_EXIT, fork_version, ctx.genesis_validators_root, &domain);
     try computeSigningRoot(consensus_types.phase0.VoluntaryExit, voluntary_exit, &domain, out);
 }
 
@@ -188,6 +238,7 @@ pub fn attestationSelectionProofSigningRoot(
     var domain: [32]u8 = undefined;
     // DOMAIN_SELECTION_PROOF = 0x05
     const DOMAIN_SELECTION_PROOF = [4]u8{ 0x05, 0x00, 0x00, 0x00 };
-    try computeDomain(DOMAIN_SELECTION_PROOF, ctx.fork_version, ctx.genesis_validators_root, &domain);
+    const fork_version = ctx.forkVersionAtSlot(slot);
+    try computeDomain(DOMAIN_SELECTION_PROOF, fork_version, ctx.genesis_validators_root, &domain);
     try computeSigningRoot(consensus_types.primitive.Slot, &slot, &domain, out);
 }

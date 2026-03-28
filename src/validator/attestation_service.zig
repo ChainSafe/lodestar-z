@@ -49,6 +49,8 @@ pub const AttestationService = struct {
     validator_store: *ValidatorStore,
     signing_ctx: SigningContext,
     seconds_per_slot: u64,
+    /// Genesis time (Unix seconds) — for correct sub-slot timing (BUG-5 fix).
+    genesis_time_unix_secs: u64,
 
     /// Duties indexed by slot (rolling window across epochs).
     duties: std.ArrayList(AttesterDutyWithProof),
@@ -77,6 +79,7 @@ pub const AttestationService = struct {
         validator_store: *ValidatorStore,
         signing_ctx: SigningContext,
         seconds_per_slot: u64,
+        genesis_time_unix_secs: u64,
     ) AttestationService {
         return .{
             .allocator = allocator,
@@ -84,6 +87,7 @@ pub const AttestationService = struct {
             .validator_store = validator_store,
             .signing_ctx = signing_ctx,
             .seconds_per_slot = seconds_per_slot,
+            .genesis_time_unix_secs = genesis_time_unix_secs,
             .duties = std.ArrayList(AttesterDutyWithProof).init(allocator),
             .duties_epoch = null,
             .next_duties = std.ArrayList(AttesterDutyWithProof).init(allocator),
@@ -282,14 +286,16 @@ pub const AttestationService = struct {
         const one_third_ns = slot_duration_ns / 3;
         const two_thirds_ns = slot_duration_ns * 2 / 3;
 
-        // Compute elapsed time within the current slot.
-        // genesis_time is not passed here; use nanoTimestamp mod slot_duration as a proxy.
-        // This is accurate when the slot clock is aligned with wall clock (which it is).
+        // BUG-5 Fix: Compute elapsed time within slot using genesis-relative time.
+        // slot_start_ns = genesis_time_ns + slot * slot_duration_ns
+        // elapsed_in_slot_ns = now_ns - slot_start_ns
+        const genesis_time_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
+        const slot_start_ns = genesis_time_ns + slot * slot_duration_ns;
         {
             const now_ns: u64 = @intCast(std.time.nanoTimestamp());
-            const elapsed_in_slot_ns = now_ns % slot_duration_ns;
-            if (elapsed_in_slot_ns < one_third_ns) {
-                std.Thread.sleep(one_third_ns - elapsed_in_slot_ns);
+            if (now_ns < slot_start_ns + one_third_ns) {
+                const wait_ns = slot_start_ns + one_third_ns - now_ns;
+                std.Thread.sleep(wait_ns);
             }
         }
 
@@ -299,9 +305,9 @@ pub const AttestationService = struct {
         // Sleep until 2/3 slot for aggregation.
         {
             const now_ns: u64 = @intCast(std.time.nanoTimestamp());
-            const elapsed_in_slot_ns = now_ns % slot_duration_ns;
-            if (elapsed_in_slot_ns < two_thirds_ns) {
-                std.Thread.sleep(two_thirds_ns - elapsed_in_slot_ns);
+            if (now_ns < slot_start_ns + two_thirds_ns) {
+                const wait_ns = slot_start_ns + two_thirds_ns - now_ns;
+                std.Thread.sleep(wait_ns);
             }
         }
 
@@ -448,16 +454,20 @@ pub const AttestationService = struct {
             }
 
             // 1. Use the real AttestationData hash_tree_root (SSZ-computed).
-            const agg_data_root: [32]u8 = att_data_root;
-            const agg = try self.api.getAggregatedAttestation(io, slot, agg_data_root);
+            // BUG-2 fix: att_data_root is already computed from the real attestation data
+            // in produceAndPublishAttestations() and passed in here (not zeroed).
+            const agg = try self.api.getAggregatedAttestation(io, slot, att_data_root);
             defer self.allocator.free(agg.attestation_ssz);
 
-            // 2. Build AggregateAndProof and compute its signing root.
+            // 2. Build AggregateAndProof by parsing the aggregate from the BN response.
+            // BUG-2 fix: Parse the actual aggregate attestation from the BN JSON response
+            // instead of using a zeroed Attestation struct.
+            var aggregate_attestation = try self.parseAggregateAttestation(agg.attestation_ssz);
+            defer aggregate_attestation.aggregation_bits.data.deinit(self.allocator);
+
             const aggregate_and_proof = consensus_types.phase0.AggregateAndProof.Type{
                 .aggregator_index = dp.duty.validator_index,
-                // aggregate: we pass the decoded aggregate attestation here.
-                // For now we use a zeroed aggregate since we don't decode the SSZ response.
-                .aggregate = std.mem.zeroes(consensus_types.phase0.Attestation.Type),
+                .aggregate = aggregate_attestation,
                 .selection_proof = sel_proof,
             };
 
@@ -478,19 +488,146 @@ pub const AttestationService = struct {
             };
             const sig_bytes = sig.compress();
             const sig_hex = std.fmt.bytesToHex(&sig_bytes, .lower);
-            const agg_pk_hex = std.fmt.bytesToHex(&dp.duty.pubkey, .lower);
+            const sel_hex = std.fmt.bytesToHex(&sel_proof, .lower);
 
             // 3. Build SignedAggregateAndProof JSON and publish.
+            // BUG-2 fix: Use the actual aggregate data from the BN response.
+            const agg_data = aggregate_and_proof.aggregate.data;
+            const agg_bbr_hex = std.fmt.bytesToHex(&agg_data.beacon_block_root, .lower);
+            const agg_src_root_hex = std.fmt.bytesToHex(&agg_data.source.root, .lower);
+            const agg_tgt_root_hex = std.fmt.bytesToHex(&agg_data.target.root, .lower);
+            const agg_sig_hex = std.fmt.bytesToHex(&aggregate_and_proof.aggregate.signature, .lower);
             var agg_json = std.ArrayList(u8).init(self.allocator);
             defer agg_json.deinit();
             try agg_json.writer().print(
-                "[{{\"message\":{{\"aggregator_index\":\"{d}\",\"aggregate\":{{\"aggregation_bits\":\"0x00\",\"data\":{{\"slot\":\"{d}\",\"index\":\"0\",\"beacon_block_root\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"source\":{{\"epoch\":\"0\",\"root\":\"0x0000000000000000000000000000000000000000000000000000000000000000\"}},\"target\":{{\"epoch\":\"0\",\"root\":\"0x0000000000000000000000000000000000000000000000000000000000000000\"}}}},\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}]",
-                .{ dp.duty.validator_index, slot, sig_hex, agg_pk_hex[0..2], sig_hex },
+                "[{{\"message\":{{\"aggregator_index\":\"{d}\",\"aggregate\":{{\"aggregation_bits\":\"0x01\",\"data\":{{\"slot\":\"{d}\",\"index\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}},\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}]",
+                .{
+                    dp.duty.validator_index,
+                    agg_data.slot,
+                    agg_data.index,
+                    agg_bbr_hex,
+                    agg_data.source.epoch, agg_src_root_hex,
+                    agg_data.target.epoch, agg_tgt_root_hex,
+                    agg_sig_hex,
+                    sel_hex,
+                    sig_hex,
+                },
             );
 
             self.api.publishAggregateAndProofs(io, agg_json.items) catch |err| {
                 log.warn("publishAggregateAndProofs error: {s}", .{@errorName(err)});
             };
         }
+    }
+    /// Parse an aggregate attestation from the BN JSON response.
+    ///
+    /// BUG-2 fix: Decode the real aggregate data from the BN response instead of
+    /// using zeroed structs. Parses the JSON fields needed for the AggregateAndProof.
+    ///
+    /// The aggregation_bits field is heap-allocated; caller must deinit via
+    /// `aggregate.aggregation_bits.data.deinit(allocator)`.
+    fn parseAggregateAttestation(
+        self: *AttestationService,
+        json_bytes: []const u8,
+    ) !consensus_types.phase0.Attestation.Type {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+
+        var result = consensus_types.phase0.Attestation.Type{
+            .aggregation_bits = .{ .data = .empty, .bit_len = 0 },
+            .data = std.mem.zeroes(consensus_types.phase0.AttestationData.Type),
+            .signature = [_]u8{0} ** 96,
+        };
+
+        const parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), json_bytes, .{}) catch return result;
+
+        // Response may be {"data": {...}} or the attestation directly.
+        const att_obj = blk: {
+            const root_obj = switch (parsed.value) {
+                .object => |o| o,
+                else => return result,
+            };
+            if (root_obj.get("data")) |data_val| {
+                break :blk switch (data_val) {
+                    .object => |o| o,
+                    else => return result,
+                };
+            }
+            break :blk root_obj;
+        };
+
+        // Parse aggregation_bits (hex-encoded bitlist).
+        if (att_obj.get("aggregation_bits")) |bits_val| {
+            const bits_str = switch (bits_val) { .string => |s| s, else => "" };
+            const hex = if (std.mem.startsWith(u8, bits_str, "0x")) bits_str[2..] else bits_str;
+            const byte_len = hex.len / 2;
+            if (byte_len > 0) {
+                const bytes = try self.allocator.alloc(u8, byte_len);
+                defer self.allocator.free(bytes);
+                _ = std.fmt.hexToBytes(bytes, hex) catch {};
+                // Last byte has length sentinel: highest set bit marks the end.
+                const last_byte = bytes[byte_len - 1];
+                if (last_byte != 0) {
+                    const sentinel_bit = @as(u3, @intCast(7 - @clz(last_byte)));
+                    const bit_len = (byte_len - 1) * 8 + sentinel_bit;
+                    result.aggregation_bits = try @TypeOf(result.aggregation_bits).fromBitLen(self.allocator, bit_len);
+                    if (byte_len > 1) {
+                        @memcpy(result.aggregation_bits.data.items, bytes[0 .. byte_len - 1]);
+                    }
+                }
+            }
+        }
+
+        // Parse attestation data fields.
+        if (att_obj.get("data")) |data_val| {
+            const data_map = switch (data_val) { .object => |o| o, else => return result };
+
+            if (data_map.get("slot")) |v| {
+                const s = switch (v) { .string => |s| s, else => "" };
+                result.data.slot = std.fmt.parseInt(u64, s, 10) catch result.data.slot;
+            }
+            if (data_map.get("index")) |v| {
+                const s = switch (v) { .string => |s| s, else => "" };
+                result.data.index = std.fmt.parseInt(u64, s, 10) catch result.data.index;
+            }
+            if (data_map.get("beacon_block_root")) |v| {
+                const s = switch (v) { .string => |s| s, else => "" };
+                const hex = if (std.mem.startsWith(u8, s, "0x")) s[2..] else s;
+                _ = std.fmt.hexToBytes(&result.data.beacon_block_root, hex) catch {};
+            }
+            if (data_map.get("source")) |src_val| {
+                const src_map = switch (src_val) { .object => |o| o, else => return result };
+                if (src_map.get("epoch")) |v| {
+                    const s = switch (v) { .string => |s| s, else => "" };
+                    result.data.source.epoch = std.fmt.parseInt(u64, s, 10) catch result.data.source.epoch;
+                }
+                if (src_map.get("root")) |v| {
+                    const s = switch (v) { .string => |s| s, else => "" };
+                    const hex = if (std.mem.startsWith(u8, s, "0x")) s[2..] else s;
+                    _ = std.fmt.hexToBytes(&result.data.source.root, hex) catch {};
+                }
+            }
+            if (data_map.get("target")) |tgt_val| {
+                const tgt_map = switch (tgt_val) { .object => |o| o, else => return result };
+                if (tgt_map.get("epoch")) |v| {
+                    const s = switch (v) { .string => |s| s, else => "" };
+                    result.data.target.epoch = std.fmt.parseInt(u64, s, 10) catch result.data.target.epoch;
+                }
+                if (tgt_map.get("root")) |v| {
+                    const s = switch (v) { .string => |s| s, else => "" };
+                    const hex = if (std.mem.startsWith(u8, s, "0x")) s[2..] else s;
+                    _ = std.fmt.hexToBytes(&result.data.target.root, hex) catch {};
+                }
+            }
+        }
+
+        // Parse signature.
+        if (att_obj.get("signature")) |v| {
+            const s = switch (v) { .string => |s| s, else => "" };
+            const hex = if (std.mem.startsWith(u8, s, "0x")) s[2..] else s;
+            _ = std.fmt.hexToBytes(&result.signature, hex) catch {};
+        }
+
+        return result;
     }
 };

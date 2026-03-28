@@ -167,6 +167,7 @@ pub const ValidatorClient = struct {
             &validator_store,
             signing_ctx,
             config.seconds_per_slot,
+            config.genesis_time, // BUG-5 fix: pass genesis_time for correct sub-slot timing
         );
         const sync_committee_service = SyncCommitteeService.init(
             allocator,
@@ -176,6 +177,7 @@ pub const ValidatorClient = struct {
             config.slots_per_epoch,
             256, // EPOCHS_PER_SYNC_COMMITTEE_PERIOD (mainnet)
             config.seconds_per_slot,
+            config.genesis_time, // BUG-5 fix: pass genesis_time for correct sub-slot timing
         );
 
         const header_tracker = ChainHeaderTracker.init(allocator, &api);
@@ -262,6 +264,8 @@ pub const ValidatorClient = struct {
     pub fn requestShutdown(self: *ValidatorClient) void {
         log.info("shutdown requested", .{});
         self.shutdown_requested.store(true, .seq_cst);
+        // BUG-7 Fix: Propagate shutdown to the clock's run loop.
+        self.clock.requestShutdown();
     }
 
     /// Return true if shutdown has been requested.
@@ -284,6 +288,31 @@ pub const ValidatorClient = struct {
         self.liveness_tracker.register(pk_bytes);
     }
 
+    /// Re-wire all service api/store pointers to stable fields of this ValidatorClient.
+    ///
+    /// Must be called after the ValidatorClient is placed at a stable memory address
+    /// (i.e., heap-allocated by the caller). start() calls this automatically.
+    ///
+    /// BUG-1 Fix: init() captures &api / &validator_store as local variable addresses.
+    /// Once the caller assigns the returned struct to heap memory, those local addresses
+    /// are stale. This method updates all service pointers to &self.api and &self.validator_store.
+    fn postInit(self: *ValidatorClient) void {
+        self.block_service.api = &self.api;
+        self.block_service.validator_store = &self.validator_store;
+        self.attestation_service.api = &self.api;
+        self.attestation_service.validator_store = &self.validator_store;
+        self.sync_committee_service.api = &self.api;
+        self.sync_committee_service.validator_store = &self.validator_store;
+        self.header_tracker.api = &self.api;
+        self.prepare_proposer.api = &self.api;
+        self.prepare_proposer.validator_store = &self.validator_store;
+        if (self.doppelganger) |*d| {
+            d.api = &self.api;
+        }
+        self.index_tracker.api = &self.api;
+        self.syncing_tracker.api = &self.api;
+    }
+
     /// Start the validator client: wire up clock callbacks and enter the run loop.
     ///
     /// Blocks until error or explicit stop.
@@ -291,6 +320,11 @@ pub const ValidatorClient = struct {
     /// TS: clock.start(signal) → runs all registered fns in background.
     pub fn start(self: *ValidatorClient, io: Io) !void {
         log.info("starting validator client beacon_node={s}", .{self.config.beacon_node_url});
+
+        // BUG-1 Fix: Re-wire service pointers to stable self fields.
+        // init() captures pointers to locals; now that self is at a stable address
+        // (heap-allocated by the caller), update all service api/store pointers.
+        self.postInit();
 
         // Wire up chain header tracker callbacks.
         self.sync_committee_service.setHeaderTracker(&self.header_tracker);
