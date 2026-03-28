@@ -189,6 +189,15 @@ pub fn importVerifiedBlock(
             // - Unrealized checkpoint computation
             // - Proposer boost assignment
             // - Target root computation from state
+            // C-boost fix: pass block_delay_sec based on block source.
+            // Gossip blocks are "timely" (delay=0 → proposer boost applies).
+            // Sync/API/regen blocks use delay=5 (> ATTESTATION_DUE threshold of 4s)
+            // so they do NOT receive proposer boost.
+            // TODO: replace with actual wall-clock arrival time tracking.
+            const block_delay_sec: u64 = switch (block_input.source) {
+                .gossip => 0, // timely — proposer boost applies
+                else => 5, // late — no proposer boost (threshold is >4s)
+            };
             _ = fork_choice_mod.onBlockFromState(
                 fc,
                 ctx.allocator,
@@ -197,7 +206,7 @@ pub fn importVerifiedBlock(
                 verified.block_input.block.beaconBlock().parentRoot().*,
                 state_root,
                 post_state,
-                0, // block_delay_sec: 0 = timely (real delay tracking is TODO)
+                block_delay_sec,
                 fc.getTime(),
                 extra_meta,
             ) catch |err| {

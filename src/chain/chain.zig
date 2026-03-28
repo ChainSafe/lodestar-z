@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const log_mod = @import("log");
 
 const consensus_types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -338,7 +339,7 @@ pub const Chain = struct {
                 target_root,
                 target_epoch,
             ) catch |err| {
-                std.log.warn("FC onAttestation failed for validator {d} slot {d}: {}", .{
+                log_mod.logger(.chain).warn("FC onAttestation failed for validator {d} slot {d}: {}", .{
                     validator_index, attestation_slot, err,
                 });
                 // Non-fatal — still insert into pool for block packing.
@@ -379,7 +380,7 @@ pub const Chain = struct {
     /// Prunes caches to free memory from pre-finalization data,
     /// prunes the fork choice DAG, and emits SSE finalized_checkpoint event.
     pub fn onFinalized(self: *Chain, finalized_epoch: u64, finalized_root: [32]u8) void {
-        std.log.info("onFinalized: epoch={d} root={s}...", .{
+        log_mod.logger(.chain).info("onFinalized: epoch={d} root={s}...", .{
             finalized_epoch,
             &std.fmt.bytesToHex(finalized_root[0..4], .lower),
         });
@@ -389,13 +390,13 @@ pub const Chain = struct {
 
         // Prune checkpoint state cache — remove checkpoints below finalized epoch.
         self.checkpoint_state_cache.pruneFinalized(finalized_epoch) catch |err| {
-            std.log.warn("onFinalized: checkpoint cache prune failed: {}", .{err});
+            log_mod.logger(.chain).warn("onFinalized: checkpoint cache prune failed: {}", .{err});
         };
 
         // Prune fork choice DAG — remove nodes below finalized root.
         if (self.fork_choice) |fc| {
             _ = fc.prune(self.allocator, finalized_root) catch |err| {
-                std.log.warn("onFinalized: fork choice prune failed: {}", .{err});
+                log_mod.logger(.chain).warn("onFinalized: fork choice prune failed: {}", .{err});
             };
         }
 

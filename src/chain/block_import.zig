@@ -139,7 +139,9 @@ pub fn verifySanity(
 
     // Not already finalized.
     const finalized_slot = finalized_epoch * preset.SLOTS_PER_EPOCH;
-    if (block_slot <= finalized_slot) return ImportError.BlockAlreadyFinalized;
+    // C-finalized fix: spec says reject slot < finalized_slot (not <=).
+    // Using <= would incorrectly reject the finalized block itself during checkpoint sync.
+    if (block_slot < finalized_slot) return ImportError.BlockAlreadyFinalized;
 
     // Not a duplicate.
     if (known_roots.contains(block_root)) return ImportError.BlockAlreadyKnown;

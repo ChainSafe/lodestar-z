@@ -19,6 +19,10 @@ pub const CachedBeaconState = state_transition.CachedBeaconState;
 // ---------------------------------------------------------------------------
 
 /// Tracks the chain head (slot, root, state root).
+///
+/// C-api-root: BeaconNode writes to this via a raw pointer; fields must stay
+/// in sync with the initialization in src/node/beacon_node.zig (initFromGenesis /
+/// initFromCheckpoint). Current layout verified 2026-03-28.
 pub const HeadTracker = struct {
     head_slot: u64,
     head_root: [32]u8,
@@ -32,6 +36,12 @@ pub const HeadTracker = struct {
 };
 
 /// Sync status tracker.
+///
+/// C-api-root: These fields MUST stay in sync with `beacon_node.SyncStatus`
+/// (src/node/beacon_node.zig). BeaconNode writes to this struct via a raw
+/// pointer — field name or type mismatches are silent ABI breakage.
+/// Verified identical as of 2026-03-28: head_slot, sync_distance, is_syncing,
+/// is_optimistic, el_offline.
 pub const SyncStatus = struct {
     head_slot: u64,
     sync_distance: u64,

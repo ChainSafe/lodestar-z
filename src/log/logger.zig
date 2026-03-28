@@ -10,10 +10,38 @@
 //!
 //! Uses the Zig 0.16 std.Io interface for thread-safe stderr output.
 //!
+//! ## Intended Logging Solution (C-logger)
+//!
+//! This module is the CANONICAL logging solution for lodestar-z. Use it instead
+//! of `std.log.*` directly.
+//!
 //! Usage:
 //!   const log_mod = @import("log");
 //!   const logger = log_mod.logger(.chain);
 //!   logger.info("block imported", .{ .slot = slot, .root = root });
+//!
+//! Available modules: chain, sync, network, api, execution, db, validator,
+//!   bls, node, backfill, rest, metrics, default.
+//!
+//! ## Migration Plan (std.log → custom logger)
+//!
+//! Status (2026-03-28): ~357 `std.log.*` calls vs ~4 custom logger calls.
+//! The custom logger routes through `logFn` so `std.log` calls already use
+//! the same output path — this is a cosmetic + structured-logging migration.
+//!
+//! Priority order for migration:
+//!   1. beacon_node.zig — high-visibility node lifecycle events
+//!   2. chain/chain.zig — block import, finality, head update hot path
+//!   3. fork_choice/fork_choice.zig — fork choice ops
+//!   4. validator/ — signing and duty submission events
+//!   5. Remaining files: replace `std.log.X(fmt, .{...})` with
+//!      `log_mod.logger(.MODULE).X(fmt, .{...})` as they are touched.
+//!
+//! Why migrate?
+//!   - Per-module log-level control (e.g. silence .db, verbose .chain)
+//!   - Structured JSON output for log aggregation
+//!   - Caller context (module tag) in every log line
+//!   - `verbose` and `trace` levels not available in std.log
 
 const std = @import("std");
 

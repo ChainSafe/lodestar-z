@@ -153,54 +153,14 @@ pub const BatchVerifier = struct {
 /// Uses OS entropy for cryptographic security (random scalars must be
 /// unpredictable to prevent rogue-key attacks on the batch).
 ///
-/// Cross-platform: dispatches to the appropriate OS CSPRNG.
+/// C-bls fix: use std.crypto.random as the primary path for all platforms.
+/// std.crypto.random is backed by the OS CSPRNG (getrandom on Linux,
+/// SecRandomCopyBytes on macOS, etc.) and is correct on all Zig targets.
+/// The previous hand-rolled platform dispatch was fragile; the ASLR-seeded
+/// ChaCha fallback provided only ~40 bits of entropy — cryptographically weak.
 fn fillRandomScalars(rands: [][32]u8) void {
     const bytes = std.mem.sliceAsBytes(rands);
-    const native_os = @import("builtin").os.tag;
-
-    if (native_os == .linux) {
-        // Linux: getrandom syscall (blocking, full entropy).
-        var filled: usize = 0;
-        while (filled < bytes.len) {
-            const rc = std.os.linux.getrandom(bytes.ptr + filled, bytes.len - filled, 0);
-            const signed_rc: isize = @bitCast(rc);
-            if (signed_rc < 0) {
-                // getrandom failed — fall through to CSPRNG fallback.
-                fillWithCsprngFallback(bytes[filled..]);
-                return;
-            }
-            filled += rc;
-        }
-    } else if (native_os == .macos or native_os == .freebsd or native_os == .netbsd or native_os == .openbsd) {
-        // BSD/macOS: arc4random_buf via libc.
-        if (@hasDecl(std.c, "arc4random_buf")) {
-            std.c.arc4random_buf(bytes.ptr, bytes.len);
-        } else {
-            fillWithCsprngFallback(bytes);
-        }
-    } else {
-        // Other platforms: CSPRNG fallback.
-        fillWithCsprngFallback(bytes);
-    }
-}
-
-/// Fallback: seed ChaCha CSPRNG from stack ASLR + thread pointer.
-/// Provides sufficient entropy for the 64-bit security level of
-/// batch verification random scalars.
-fn fillWithCsprngFallback(bytes: []u8) void {
-    var seed: [32]u8 = [_]u8{0} ** 32;
-    // Mix in stack address for ASLR entropy (~28-40 bits on 64-bit).
-    var stack_var: u8 = 0;
-    const addr: u64 = @truncate(@intFromPtr(&stack_var));
-    @memcpy(seed[0..8], std.mem.asBytes(&addr));
-    // Mix in the address of a global for additional entropy from ASLR.
-    const global_addr: u64 = @truncate(@intFromPtr(&seed));
-    @memcpy(seed[8..16], std.mem.asBytes(&global_addr));
-    // Mix in any existing bytes in the buffer for further entropy.
-    const mix_len = @min(bytes.len, 16);
-    if (mix_len > 0) @memcpy(seed[16..][0..mix_len], bytes[0..mix_len]);
-    var prng = std.Random.ChaCha.init(seed);
-    prng.random().bytes(bytes);
+    std.crypto.random.bytes(bytes);
 }
 
 // ---------------------------------------------------------------------------
