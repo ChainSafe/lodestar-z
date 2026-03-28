@@ -127,6 +127,13 @@ const BlockSource = chain_mod.blocks.BlockSource;
 const gossip_handler_mod = @import("gossip_handler.zig");
 pub const GossipHandler = gossip_handler_mod.GossipHandler;
 
+
+// BeaconProcessor — central priority scheduling loop.
+const processor_mod = @import("processor");
+const BeaconProcessor = processor_mod.BeaconProcessor;
+const QueueConfig = processor_mod.QueueConfig;
+const WorkItem = processor_mod.WorkItem;
+const WorkQueues = processor_mod.WorkQueues;
 // HeadTracker, ImportResult, ImportError are in chain_mod (src/chain/block_import.zig).
 // BlockImporter lives here because it depends on db, fork_choice, and state_transition
 // directly — extracting it would require either circular deps or vtable indirection.
@@ -832,6 +839,11 @@ pub const BeaconNode = struct {
     // GossipHandler — lazily initialized when P2P starts (owns its SeenSets).
     gossip_handler: ?*GossipHandler = null,
 
+    // BeaconProcessor — priority-based work queue scheduler.
+    // Routes gossip messages through priority queues instead of inline processing.
+    // Instantiated in init(); drained by the main sync/gossip loop.
+    beacon_processor: ?*BeaconProcessor = null,
+
     // Unknown block sync — queues blocks whose parent is not yet known.
     // Initialized eagerly in init(); used by the gossip block import path.
     unknown_block_sync: UnknownBlockSync,
@@ -1169,6 +1181,17 @@ pub const BeaconNode = struct {
         // Wire node pointer into block_import_ctx (node wasn't created until now).
         block_import_ctx.node = node;
 
+        // Create BeaconProcessor with default queue config.
+        // The handler dispatches work items back to the node for processing.
+        const beacon_processor = try allocator.create(BeaconProcessor);
+        beacon_processor.* = try BeaconProcessor.init(
+            allocator,
+            QueueConfig.default,
+            &processorHandlerCallback,
+            @ptrCast(node),
+        );
+        node.beacon_processor = beacon_processor;
+
         // Wire data availability check (will be populated after node is created).
         // Note: The callback is set after BeaconNode.init returns since it needs
         // the node pointer. See the isDataAvailableCallback below.
@@ -1288,6 +1311,10 @@ pub const BeaconNode = struct {
 
         if (self.gossip_handler) |gh| {
             gh.deinit();
+        }
+
+        if (self.beacon_processor) |bp| {
+            allocator.destroy(bp);
         }
 
         // Sync pipeline cleanup.
@@ -2101,6 +2128,13 @@ pub const BeaconNode = struct {
                 self.processGossipEvents(p2p);
             }
 
+            // Drain the BeaconProcessor work queues.
+            // Items were enqueued by gossip/reqresp handlers above.
+            // Dispatches in strict priority order: blocks > attestations > slashings > etc.
+            if (self.beacon_processor) |bp| {
+                _ = bp.drainAll();
+            }
+
             // Tick the sync service state machine — evaluates mode, dispatches
             // new batches, re-dispatches failed ones.
             if (self.sync_service_inst) |sync_svc| {
@@ -2714,15 +2748,36 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                 std.log.warn("Gossip: failed to decompress block", .{});
                 return;
             };
-            defer self.allocator.free(ssz_bytes);
 
             const fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
             const any_signed = AnySignedBeaconBlock.deserialize(
                 self.allocator, .full, fork_seq, ssz_bytes,
             ) catch |err| {
+                self.allocator.free(ssz_bytes);
                 std.log.warn("Gossip block deserialize: {}", .{err});
                 return;
             };
+
+            // When the BeaconProcessor is available, enqueue the block for
+            // priority-ordered processing instead of importing inline.
+            // This ensures blocks are processed before attestations, etc.
+            if (self.beacon_processor) |bp| {
+                // Transfer ownership: the processor handler will free ssz_bytes
+                // and deinit any_signed after import. Don't defer free here.
+                bp.ingest(.{ .gossip_block = .{
+                    .peer_id = 0, // TODO: wire real peer_id from gossipsub event
+                    .message_id = 0,
+                    .block = any_signed,
+                    .seen_timestamp_ns = 0, // TODO: use Io clock when available
+                } });
+                // SSZ bytes ownership: store in a side buffer for the handler.
+                // For now, free here — the handler uses any_signed which owns the data.
+                self.allocator.free(ssz_bytes);
+                return;
+            }
+
+            // Fallback: inline processing (no processor available — tests, early init).
+            defer self.allocator.free(ssz_bytes);
             defer any_signed.deinit(self.allocator);
 
             const result = self.importBlock(any_signed, .gossip) catch |err| {
@@ -3451,6 +3506,62 @@ fn parseIp4(s: []const u8) ?[4]u8 {
 // Gossip callbacks — wired into GossipHandler as function pointers.
 // These bridge the type-erased *anyopaque back to *BeaconNode.
 //
+// ---------------------------------------------------------------------------
+// BeaconProcessor handler callback.
+//
+// Called by BeaconProcessor.dispatchOne() for each dequeued work item.
+// Routes work items to the appropriate chain import / validation function.
+// The context pointer is a *BeaconNode.
+// ---------------------------------------------------------------------------
+
+fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
+    const node: *BeaconNode = @ptrCast(@alignCast(context));
+    const wtype = item.workType();
+
+    switch (item) {
+        .gossip_block => |work| {
+            // Full block import via STFN + fork choice.
+            // The AnySignedBeaconBlock is owned by the work item.
+            const result = node.importBlock(work.block, .gossip) catch |err| {
+                if (err == error.UnknownParentBlock) {
+                    const ssz_bytes = work.block.serialize(node.allocator) catch {
+                        work.block.deinit(node.allocator);
+                        return;
+                    };
+                    defer node.allocator.free(ssz_bytes);
+                    node.queueOrphanBlock(work.block, ssz_bytes);
+                } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
+                    std.log.warn("Processor: gossip block import failed: {}", .{err});
+                }
+                work.block.deinit(node.allocator);
+                return;
+            };
+            work.block.deinit(node.allocator);
+            node.processPendingChildren(result.block_root);
+            std.log.info("PROCESSOR: block imported slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                result.slot,
+                result.block_root[0], result.block_root[1],
+                result.block_root[2], result.block_root[3],
+            });
+        },
+        .attestation_batch => |batch| {
+            // Batch BLS verification: the key performance optimization.
+            // Each item in the batch has a data handle pointing to SSZ bytes.
+            // TODO: Batch-verify BLS signatures, then import valid ones.
+            std.log.debug("Processor: attestation batch (count={d})", .{batch.count});
+        },
+        .aggregate_batch => |batch| {
+            // Batch BLS verification for aggregates.
+            std.log.debug("Processor: aggregate batch (count={d})", .{batch.count});
+        },
+        else => {
+            // For all other work types, log at debug level.
+            // Full handler wiring per work type is progressive — add as needed.
+            std.log.debug("Processor: dispatched {s}", .{@tagName(wtype)});
+        },
+    }
+}
+
 // For ptr-free vtable functions (getProposerIndex, isKnownBlockRoot,
 // getValidatorCount), we use a module-level node pointer set during
 // initGossipHandler. This is safe because there is exactly one
