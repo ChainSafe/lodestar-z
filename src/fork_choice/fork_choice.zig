@@ -197,6 +197,13 @@ pub const BlockAttestationMap = std.AutoHashMapUnmanaged(Root, ValidatorVoteMap)
 /// Slot -> BlockAttestationMap for all queued attestations.
 pub const QueuedAttestationMap = std.AutoArrayHashMapUnmanaged(Slot, BlockAttestationMap);
 
+/// Maximum number of slots to retain in the queued attestations map.
+///
+/// During processing delays, attestations for future slots are queued.
+/// Capping at 3 slots bounds memory to ~3 × 2.18M validators × (root+status)
+/// ≈ a few MB, rather than growing unboundedly during extended stalls.
+const MAX_QUEUED_SLOTS: usize = 3;
+
 /// Set of validated attestation data roots (cleared each slot).
 pub const RootSet = std.HashMapUnmanaged(Root, void, RootContext, 80);
 
@@ -706,6 +713,37 @@ pub const ForkChoice = struct {
         block_root: Root,
         payload_status: PayloadStatus,
     ) !void {
+        // Bound queued_attestations to MAX_QUEUED_SLOTS slots.
+        //
+        // During processing delays, future-slot attestations accumulate.  Each
+        // validator can contribute one entry, so an unbounded map can reach
+        // ~2.18 M entries per slot (218 MB for mainnet). Cap by evicting the
+        // oldest slot whenever the map exceeds the limit.
+        //
+        // We evict before inserting so that att_slot (the current write) is
+        // always accepted; the drop targets stale slots that are farthest from
+        // the current slot.
+        while (self.queued_attestations.count() >= MAX_QUEUED_SLOTS) {
+            // Find the oldest (smallest) slot.  AutoArrayHashMap is
+            // insertion-ordered, not sorted, so we must scan.
+            var oldest_slot: Slot = std.math.maxInt(Slot);
+            var oldest_idx: usize = 0;
+            for (self.queued_attestations.keys(), 0..) |s, i| {
+                if (s < oldest_slot) {
+                    oldest_slot = s;
+                    oldest_idx = i;
+                }
+            }
+            // Free the inner maps then remove the slot entry.
+            const block_map_ptr = &self.queued_attestations.values()[oldest_idx];
+            var root_it = block_map_ptr.iterator();
+            while (root_it.next()) |re| {
+                re.value_ptr.deinit(allocator);
+            }
+            block_map_ptr.deinit(allocator);
+            self.queued_attestations.swapRemoveAt(oldest_idx);
+        }
+
         const by_root_gop = try self.queued_attestations.getOrPut(allocator, att_slot);
         if (!by_root_gop.found_existing) by_root_gop.value_ptr.* = .{};
         const by_root = by_root_gop.value_ptr;

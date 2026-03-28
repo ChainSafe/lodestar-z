@@ -41,6 +41,20 @@ pub const max_request_data_column_sidecars: u64 = 16384;
 ///
 /// The encoding layer (req_resp_encoding.zig) is responsible for wire-encoding these
 /// chunks with Snappy compression and varint framing.
+/// A single response chunk returned by `handleRequest`.
+///
+/// Memory ownership
+/// ----------------
+/// Both the `[]ResponseChunk` slice and each `ssz_payload` slice are allocated
+/// with the `allocator` passed to `handleRequest`.  The caller owns this memory
+/// and MUST release it by calling `freeResponseChunks(allocator, chunks)`.
+///
+/// Example:
+/// ```zig
+/// const chunks = try handleRequest(alloc, method, bytes, ctx);
+/// defer freeResponseChunks(alloc, chunks);
+/// // ... encode and send chunks ...
+/// ```
 pub const ResponseChunk = struct {
     /// The result code for this chunk.
     result: ResponseCode,
@@ -48,6 +62,7 @@ pub const ResponseChunk = struct {
     context_bytes: ?[4]u8,
     /// Raw SSZ payload bytes (not yet Snappy-compressed).
     /// For error responses, this contains the UTF-8 error message.
+    /// Freed by `freeResponseChunks` — do not free individually.
     ssz_payload: []const u8,
 };
 
@@ -596,6 +611,10 @@ fn makeErrorResponse(
 }
 
 /// Free all response chunks and their payloads.
+///
+/// Must be called exactly once for every successful `handleRequest` return.
+/// Frees each `ssz_payload` slice, then frees the outer `chunks` slice.
+/// It is safe to call with an empty slice (e.g. Goodbye returns 0 chunks).
 pub fn freeResponseChunks(allocator: Allocator, chunks: []const ResponseChunk) void {
     for (chunks) |chunk| {
         allocator.free(chunk.ssz_payload);

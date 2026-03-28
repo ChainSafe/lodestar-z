@@ -44,6 +44,14 @@ const SLOTS_RETAINED: u64 = 8;
 /// DoS limit: max distinct block roots per slot per pool.
 const MAX_ITEMS_PER_SLOT: usize = 512;
 
+/// Hard cap on distinct slots tracked by each pool.
+///
+/// `prune()` removes slots older than `head_slot - SLOTS_RETAINED` (8 slots),
+/// but it is called reactively and may lag. This cap ensures the `by_slot` map
+/// cannot grow beyond a fixed bound even if `prune()` is delayed.  When the
+/// cap is hit, the oldest slot is evicted before inserting the new one.
+const MAX_TRACKED_SLOTS: usize = 16;
+
 /// G2 point at infinity — used as the signature when no participants.
 const G2_POINT_AT_INFINITY: [96]u8 = constants.G2_POINT_AT_INFINITY;
 
@@ -106,6 +114,25 @@ pub const SyncContributionAndProofPool = struct {
 
         const rh = rootHex(contribution.beacon_block_root);
         const subnet: u64 = contribution.subcommittee_index;
+
+        // Enforce MAX_TRACKED_SLOTS: evict the oldest slot if we are at capacity
+        // and this contribution is for a slot not already present.
+        // This guards against prune() being called late (e.g. during a stall).
+        if (self.by_slot.count() >= MAX_TRACKED_SLOTS and !self.by_slot.contains(slot)) {
+            var oldest: Slot = std.math.maxInt(Slot);
+            var it = self.by_slot.iterator();
+            while (it.next()) |entry| {
+                if (entry.key_ptr.* < oldest) oldest = entry.key_ptr.*;
+            }
+            if (self.by_slot.fetchRemove(oldest)) |kv| {
+                var root_map = kv.value;
+                var root_it = root_map.iterator();
+                while (root_it.next()) |root_entry| {
+                    root_entry.value_ptr.deinit();
+                }
+                root_map.deinit();
+            }
+        }
 
         // Get or create the slot entry.
         const root_map_gop = try self.by_slot.getOrPut(slot);
@@ -312,6 +339,23 @@ pub const SyncCommitteeMessagePool = struct {
         if (index_in_subcommittee >= SYNC_SUBCOMMITTEE_SIZE) return;
 
         const rh = rootHex(beacon_block_root);
+
+        // Enforce MAX_TRACKED_SLOTS: evict oldest if at capacity and slot is new.
+        if (self.by_slot.count() >= MAX_TRACKED_SLOTS and !self.by_slot.contains(slot)) {
+            var oldest: Slot = std.math.maxInt(Slot);
+            var scan_it = self.by_slot.iterator();
+            while (scan_it.next()) |entry| {
+                if (entry.key_ptr.* < oldest) oldest = entry.key_ptr.*;
+            }
+            if (self.by_slot.fetchRemove(oldest)) |kv| {
+                var subnet_map = kv.value;
+                var subnet_it = subnet_map.iterator();
+                while (subnet_it.next()) |subnet_entry| {
+                    subnet_entry.value_ptr.deinit();
+                }
+                subnet_map.deinit();
+            }
+        }
 
         // Get or create slot → subnet → root entry.
         const subnet_map_gop = try self.by_slot.getOrPut(slot);
