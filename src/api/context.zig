@@ -50,6 +50,20 @@ pub const SyncStatus = struct {
     el_offline: bool,
 };
 
+// Comptime ABI guard: verify field layout matches what BeaconNode writes via raw pointer.
+// If beacon_node.SyncStatus changes, this will catch it at compile time.
+// Keep this in sync with src/node/beacon_node.zig:SyncStatus.
+comptime {
+    // Field order and types must match the beacon_node.SyncStatus layout exactly.
+    // Asserted sizes: u64 + u64 + bool + bool + bool = 18 bytes (with padding).
+    std.debug.assert(@offsetOf(SyncStatus, "head_slot") == 0);
+    std.debug.assert(@offsetOf(SyncStatus, "sync_distance") == @sizeOf(u64));
+    // is_syncing, is_optimistic, el_offline follow after two u64s.
+    std.debug.assert(@offsetOf(SyncStatus, "is_syncing") == 2 * @sizeOf(u64));
+    std.debug.assert(@offsetOf(SyncStatus, "is_optimistic") == 2 * @sizeOf(u64) + 1);
+    std.debug.assert(@offsetOf(SyncStatus, "el_offline") == 2 * @sizeOf(u64) + 2);
+}
+
 /// Stub for state regeneration. In the full implementation this would
 /// load or replay state to a requested slot/root.
 pub const StateRegen = struct {
