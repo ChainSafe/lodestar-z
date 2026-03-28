@@ -479,6 +479,7 @@ pub const HttpServer = struct {
         .{ "getForkSchedule",               &hGetForkSchedule },
         .{ "getValidatorMonitor",           &hGetValidatorMonitor },
         .{ "produceBlock",                  &hProduceBlock },
+        .{ "produceBlockV3",                &hProduceBlock },
         .{ "getAttestationData",            &hGetAttestationData },
         .{ "getAggregateAttestation",       &hGetAggregateAttestation },
         .{ "publishAggregateAndProofs",     &hPublishAggregateAndProofs },
@@ -807,14 +808,15 @@ pub const HttpServer = struct {
         }
         try buf.appendSlice(alloc, "]");
         const meta = handler_res.meta;
-        const opt = meta.execution_optimistic;
         if (meta.dependent_root) |root| {
             const hex = std.fmt.bytesToHex(&root, .lower);
             const dep_root = try std.fmt.allocPrint(alloc, ",\"dependent_root\":\"0x{s}\"", .{hex});
             defer alloc.free(dep_root);
             try buf.appendSlice(alloc, dep_root);
         }
-        try buf.appendSlice(alloc, if (opt) ",\"execution_optimistic\":true" else ",\"execution_optimistic\":false");
+        if (meta.execution_optimistic) |v| {
+            try buf.appendSlice(alloc, if (v) ",\"execution_optimistic\":true" else ",\"execution_optimistic\":false");
+        }
         try buf.appendSlice(alloc, "}");
         return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc) };
     }
@@ -855,8 +857,11 @@ pub const HttpServer = struct {
             try buf.appendSlice(alloc, entry);
         }
         const meta = handler_res.meta;
-        const opt = meta.execution_optimistic;
-        try buf.appendSlice(alloc, if (opt) "],\"execution_optimistic\":true}" else "],\"execution_optimistic\":false}");
+        if (meta.execution_optimistic) |v| {
+            try buf.appendSlice(alloc, if (v) "],\"execution_optimistic\":true}" else "],\"execution_optimistic\":false}");
+        } else {
+            try buf.appendSlice(alloc, "]}");
+        }
         return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc) };
     }
 
@@ -897,6 +902,10 @@ pub const HttpServer = struct {
             break :blk null;
         } else null;
         const handler_res = try handlers.validator.produceBlock(self.api_context, slot, randao_reveal, graffiti);
+        if (dc.format == .ssz) {
+            const ssz_copy = try alloc.dupe(u8, handler_res.data.ssz_bytes);
+            return .{ .status = 200, .content_type = "application/octet-stream", .body = ssz_copy, .meta = handler_res.meta };
+        }
         const body_json = try std.fmt.allocPrint(alloc,
             "{{\"data\":\"0x{s}\",\"version\":\"{s}\"}}",
             .{ std.fmt.fmtSliceHexLower(handler_res.data.ssz_bytes), handler_res.data.fork });
