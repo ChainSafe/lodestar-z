@@ -445,4 +445,3 @@ test "consolidation request - valid consolidation" {
     try testing.expectEqual(@as(u64, 0), try consolidation.get("source_index"));
     try testing.expectEqual(@as(u64, 1), try consolidation.get("target_index"));
 }
-
