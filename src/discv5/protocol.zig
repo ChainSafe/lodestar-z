@@ -119,17 +119,54 @@ pub const Protocol = struct {
         try self.sendWhoareyou(src_id, &parsed.static_header.nonce, from, t);
     }
 
+    /// Handle a WHOAREYOU challenge from a remote node.
+    ///
+    /// When we send an ordinary message to a node that has no session with us,
+    /// it responds with WHOAREYOU. We must respond with a Handshake packet that
+    /// contains:
+    ///
+    ///   1. `id-signature` — ECDSA-secp256k1 signature over:
+    ///        sha256("discovery v5 identity" || challenge_data || eph_pubkey || dest_node_id)
+    ///   2. `eph-pubkey` — an ephemeral secp256k1 public key
+    ///   3. Optional ENR if the remote's `enr-seq` field is stale
+    ///
+    /// Key derivation (session keys) uses HKDF-SHA256 over the ECDH secret from
+    /// eph-privkey × src-pubkey, with the challenge data as IKM salt.
+    ///
+    /// TODO: This requires:
+    ///   - secp256k1 ECDH + ephemeral key generation (libssl or zig-secp256k1)
+    ///   - HKDF-SHA256 key derivation matching discv5 spec §5.1
+    ///   - Session key storage for the established session
+    ///   - Replay protection via the id-nonce
+    ///
+    /// Without this, discovery cannot establish sessions with nodes that don't
+    /// have an existing session with us. Peers that already have a session (e.g.
+    /// bootnodes after first handshake) continue to work. Discovery beyond the
+    /// initial bootstrap is broken until this is implemented.
     fn handleWhoareyou(
         self: *Protocol,
         parsed: *packet.ParsedPacket,
         from: transport_mod.Address,
         t: transport_mod.Transport,
     ) !void {
-        _ = self;
-        _ = parsed;
-        _ = from;
         _ = t;
-        // TODO: respond with handshake
+        // Extract source node ID from authdata if available for logging.
+        const authdata = parsed.authdata_raw;
+        const src_id_hex: []const u8 = if (authdata.len >= 32) blk: {
+            const id: *const [32]u8 = authdata[0..32];
+            _ = id;
+            break :blk "<node>";
+        } else "<unknown>";
+        _ = src_id_hex;
+        _ = from;
+        _ = self;
+
+        std.log.warn(
+            "discv5: received WHOAREYOU challenge — handshake response not yet implemented. " ++
+            "Discovery beyond bootnodes is limited until this is implemented. " ++
+            "See handleWhoareyou() in protocol.zig for required implementation steps.",
+            .{},
+        );
     }
 
     fn handleHandshake(
