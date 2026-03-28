@@ -71,6 +71,9 @@ pub const RetryConfig = struct {
 
 // ── Transport interface ───────────────────────────────────────────────────────
 
+/// HTTP method for a transport send call.
+pub const HttpMethod = enum { GET, POST };
+
 /// An HTTP header name/value pair.
 pub const Header = struct {
     name: []const u8,
@@ -88,6 +91,7 @@ pub const Transport = struct {
     ptr: *anyopaque,
     sendFn: *const fn (
         ptr: *anyopaque,
+        method: HttpMethod,
         url: []const u8,
         headers: []const Header,
         body: []const u8,
@@ -95,11 +99,12 @@ pub const Transport = struct {
 
     pub fn send(
         self: Transport,
+        method: HttpMethod,
         url: []const u8,
         headers: []const Header,
         body: []const u8,
     ) ![]const u8 {
-        return self.sendFn(self.ptr, url, headers, body);
+        return self.sendFn(self.ptr, method, url, headers, body);
     }
 };
 
@@ -290,7 +295,7 @@ pub const HttpEngine = struct {
                 }
             }
 
-            const result = self.transport.send(self.endpoint, headers_buf[0..header_count], body);
+            const result = self.transport.send(.POST, self.endpoint, headers_buf[0..header_count], body);
             if (result) |response| {
                 // Successful transport — mark online.
                 self.updateState(.online);
@@ -1149,14 +1154,6 @@ pub fn hexEncodeFixed(allocator: Allocator, bytes: anytype) ![]const u8 {
     return hexEncode(allocator, bytes);
 }
 
-/// Hex-encode a u64 as big-endian with "0x" prefix (no leading zero bytes stripped).
-/// Use this for fixed-width DATA fields (block_hash, etc.).
-pub fn hexEncodeU64(allocator: Allocator, value: u64) ![]const u8 {
-    var buf: [8]u8 = undefined;
-    std.mem.writeInt(u64, &buf, value, .big);
-    return hexEncode(allocator, &buf);
-}
-
 /// Hex-encode a u256 as big-endian with "0x" prefix.
 /// Use this for fixed-width DATA fields.
 pub fn hexEncodeU256(allocator: Allocator, value: u256) ![]const u8 {
@@ -1863,17 +1860,17 @@ fn decodeGetPayloadResponse(allocator: Allocator, j: GetPayloadJson) !GetPayload
         .receipts_root = try hexDecode32(ep.receiptsRoot),
         .logs_bloom = try hexDecode256(ep.logsBloom),
         .prev_randao = try hexDecode32(ep.prevRandao),
-        .block_number = try hexDecodeU64(ep.blockNumber),
-        .gas_limit = try hexDecodeU64(ep.gasLimit),
-        .gas_used = try hexDecodeU64(ep.gasUsed),
-        .timestamp = try hexDecodeU64(ep.timestamp),
+        .block_number = try hexDecodeQuantity(ep.blockNumber),
+        .gas_limit = try hexDecodeQuantity(ep.gasLimit),
+        .gas_used = try hexDecodeQuantity(ep.gasUsed),
+        .timestamp = try hexDecodeQuantity(ep.timestamp),
         .extra_data = extra_data,
         .base_fee_per_gas = try hexDecodeU256(ep.baseFeePerGas),
         .block_hash = try hexDecode32(ep.blockHash),
         .transactions = transactions,
         .withdrawals = withdrawals,
-        .blob_gas_used = try hexDecodeU64(ep.blobGasUsed),
-        .excess_blob_gas = try hexDecodeU64(ep.excessBlobGas),
+        .blob_gas_used = try hexDecodeQuantity(ep.blobGasUsed),
+        .excess_blob_gas = try hexDecodeQuantity(ep.excessBlobGas),
     };
 
     const block_value = try hexDecodeU256(j.blockValue);
@@ -1931,10 +1928,10 @@ fn decodeGetPayloadResponseV1(allocator: Allocator, j: GetPayloadV1Json) !GetPay
             .receipts_root = try hexDecode32(ep.receiptsRoot),
             .logs_bloom = try hexDecode256(ep.logsBloom),
             .prev_randao = try hexDecode32(ep.prevRandao),
-            .block_number = try hexDecodeU64(ep.blockNumber),
-            .gas_limit = try hexDecodeU64(ep.gasLimit),
-            .gas_used = try hexDecodeU64(ep.gasUsed),
-            .timestamp = try hexDecodeU64(ep.timestamp),
+            .block_number = try hexDecodeQuantity(ep.blockNumber),
+            .gas_limit = try hexDecodeQuantity(ep.gasLimit),
+            .gas_used = try hexDecodeQuantity(ep.gasUsed),
+            .timestamp = try hexDecodeQuantity(ep.timestamp),
             .extra_data = extra_data,
             .base_fee_per_gas = try hexDecodeU256(ep.baseFeePerGas),
             .block_hash = try hexDecode32(ep.blockHash),
@@ -1991,10 +1988,10 @@ fn decodeGetPayloadResponseV2(allocator: Allocator, j: GetPayloadV2Json) !GetPay
             .receipts_root = try hexDecode32(ep.receiptsRoot),
             .logs_bloom = try hexDecode256(ep.logsBloom),
             .prev_randao = try hexDecode32(ep.prevRandao),
-            .block_number = try hexDecodeU64(ep.blockNumber),
-            .gas_limit = try hexDecodeU64(ep.gasLimit),
-            .gas_used = try hexDecodeU64(ep.gasUsed),
-            .timestamp = try hexDecodeU64(ep.timestamp),
+            .block_number = try hexDecodeQuantity(ep.blockNumber),
+            .gas_limit = try hexDecodeQuantity(ep.gasLimit),
+            .gas_used = try hexDecodeQuantity(ep.gasUsed),
+            .timestamp = try hexDecodeQuantity(ep.timestamp),
             .extra_data = extra_data,
             .base_fee_per_gas = try hexDecodeU256(ep.baseFeePerGas),
             .block_hash = try hexDecode32(ep.blockHash),
@@ -2038,10 +2035,10 @@ fn decodeWithdrawalsOwned(allocator: Allocator, withdrawals: []const WithdrawalJ
     errdefer allocator.free(result);
     for (withdrawals, 0..) |w, i| {
         result[i] = Withdrawal{
-            .index = try hexDecodeU64(w.index),
-            .validator_index = try hexDecodeU64(w.validatorIndex),
+            .index = try hexDecodeQuantity(w.index),
+            .validator_index = try hexDecodeQuantity(w.validatorIndex),
             .address = try hexDecode20(w.address),
-            .amount = try hexDecodeU64(w.amount),
+            .amount = try hexDecodeQuantity(w.amount),
         };
     }
     return result;
@@ -2139,17 +2136,17 @@ fn decodeGetPayloadResponseV4(allocator: Allocator, j: GetPayloadV4Json) !GetPay
         .receipts_root = try hexDecode32(ep.receiptsRoot),
         .logs_bloom = try hexDecode256(ep.logsBloom),
         .prev_randao = try hexDecode32(ep.prevRandao),
-        .block_number = try hexDecodeU64(ep.blockNumber),
-        .gas_limit = try hexDecodeU64(ep.gasLimit),
-        .gas_used = try hexDecodeU64(ep.gasUsed),
-        .timestamp = try hexDecodeU64(ep.timestamp),
+        .block_number = try hexDecodeQuantity(ep.blockNumber),
+        .gas_limit = try hexDecodeQuantity(ep.gasLimit),
+        .gas_used = try hexDecodeQuantity(ep.gasUsed),
+        .timestamp = try hexDecodeQuantity(ep.timestamp),
         .extra_data = extra_data,
         .base_fee_per_gas = try hexDecodeU256(ep.baseFeePerGas),
         .block_hash = try hexDecode32(ep.blockHash),
         .transactions = transactions,
         .withdrawals = withdrawals,
-        .blob_gas_used = try hexDecodeU64(ep.blobGasUsed),
-        .excess_blob_gas = try hexDecodeU64(ep.excessBlobGas),
+        .blob_gas_used = try hexDecodeQuantity(ep.blobGasUsed),
+        .excess_blob_gas = try hexDecodeQuantity(ep.excessBlobGas),
         .deposit_requests = deposit_requests,
         .withdrawal_requests = withdrawal_requests,
         .consolidation_requests = consolidation_requests,
@@ -2172,9 +2169,9 @@ fn decodeDepositRequests(allocator: Allocator, requests: []const DepositRequestJ
         result[i] = DepositRequest{
             .pubkey = try hexDecode48(r.pubkey),
             .withdrawal_credentials = try hexDecode32(r.withdrawalCredentials),
-            .amount = try hexDecodeU64(r.amount),
+            .amount = try hexDecodeQuantity(r.amount),
             .signature = try hexDecode96(r.signature),
-            .index = try hexDecodeU64(r.index),
+            .index = try hexDecodeQuantity(r.index),
         };
     }
     return result;
@@ -2189,7 +2186,7 @@ fn decodeWithdrawalRequests(allocator: Allocator, requests: []const WithdrawalRe
         result[i] = WithdrawalRequest{
             .source_address = try hexDecode20(r.sourceAddress),
             .validator_pubkey = try hexDecode48(r.validatorPubkey),
-            .amount = try hexDecodeU64(r.amount),
+            .amount = try hexDecodeQuantity(r.amount),
         };
     }
     return result;
@@ -2279,15 +2276,6 @@ pub fn hexDecode256(hex: []const u8) ![256]u8 {
     return out;
 }
 
-/// Decode a fixed-length 8-byte DATA field from 16-char hex.
-fn hexDecodeU64Fixed(hex: []const u8) !u64 {
-    const stripped = try hexStrip0x(hex);
-    if (stripped.len != 16) return error.InvalidHexLength;
-    var bytes: [8]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&bytes, stripped);
-    return std.mem.readInt(u64, &bytes, .big);
-}
-
 /// Decode a QUANTITY field (variable-length hex, no leading zeros).
 /// Handles "0x0" through "0xffffffffffffffff".
 pub fn hexDecodeQuantity(hex: []const u8) !u64 {
@@ -2300,28 +2288,6 @@ pub fn hexDecodeQuantity(hex: []const u8) !u64 {
     var bytes: [8]u8 = undefined;
     _ = try std.fmt.hexToBytes(&bytes, &padded);
     return std.mem.readInt(u64, &bytes, .big);
-}
-
-/// Decode a u64 QUANTITY or DATA field (handles both padded and unpadded hex).
-fn hexDecodeU64(hex: []const u8) !u64 {
-    const stripped = try hexStrip0x(hex);
-    if (stripped.len == 0) return error.InvalidHexLength;
-    if (stripped.len > 16) return error.InvalidHexLength;
-    // Left-pad to 16 chars to handle quantities without leading zeros.
-    var padded: [16]u8 = .{'0'} ** 16;
-    @memcpy(padded[16 - stripped.len ..], stripped);
-    var bytes: [8]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&bytes, &padded);
-    return std.mem.readInt(u64, &bytes, .big);
-}
-
-/// Decode a fixed-length 32-byte DATA field (64-char hex).
-fn hexDecodeU256Fixed(hex: []const u8) !u256 {
-    const stripped = try hexStrip0x(hex);
-    if (stripped.len != 64) return error.InvalidHexLength;
-    var bytes: [32]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&bytes, stripped);
-    return std.mem.readInt(u256, &bytes, .big);
 }
 
 /// Decode a u256 QUANTITY or DATA field (handles both padded and unpadded hex).
@@ -2352,6 +2318,8 @@ pub const MockTransport = struct {
     last_url: ?[]const u8 = null,
     /// Whether an Authorization header was present in the last call.
     last_had_auth: bool = false,
+    /// Last HTTP method used.
+    last_method: ?HttpMethod = null,
 
     pub fn init(allocator: Allocator, canned_response: []const u8) MockTransport {
         return .{
@@ -2374,6 +2342,7 @@ pub const MockTransport = struct {
 
     fn send(
         self: *MockTransport,
+        method: HttpMethod,
         url: []const u8,
         headers: []const Header,
         body: []const u8,
@@ -2388,6 +2357,7 @@ pub const MockTransport = struct {
             self.last_url = null;
         }
 
+        self.last_method = method;
         self.last_body = try self.allocator.dupe(u8, body);
         self.last_url = try self.allocator.dupe(u8, url);
         self.last_had_auth = false;
@@ -2424,20 +2394,6 @@ test "hexEncode all bytes" {
     const result = try hexEncode(allocator, &[_]u8{ 0x00, 0xff, 0xab, 0xcd });
     defer allocator.free(result);
     try testing.expectEqualStrings("0x00ffabcd", result);
-}
-
-test "hexEncodeU64 known value" {
-    const allocator = testing.allocator;
-    const result = try hexEncodeU64(allocator, 0x0102030405060708);
-    defer allocator.free(result);
-    try testing.expectEqualStrings("0x0102030405060708", result);
-}
-
-test "hexEncodeU64 zero" {
-    const allocator = testing.allocator;
-    const result = try hexEncodeU64(allocator, 0);
-    defer allocator.free(result);
-    try testing.expectEqualStrings("0x0000000000000000", result);
 }
 
 test "base64urlEncode known" {
@@ -2801,10 +2757,10 @@ test "hexDecodeQuantity: full padded" {
     try testing.expectEqual(@as(u64, 0x0102030405060708), try hexDecodeQuantity("0x0102030405060708"));
 }
 
-test "hexDecodeU64: handles both padded and unpadded" {
-    try testing.expectEqual(@as(u64, 1), try hexDecodeU64("0x1"));
-    try testing.expectEqual(@as(u64, 1), try hexDecodeU64("0x0000000000000001"));
-    try testing.expectEqual(@as(u64, 30_000_000), try hexDecodeU64("0x1c9c380"));
+test "hexDecodeQuantity: handles both padded and unpadded aliases" {
+    try testing.expectEqual(@as(u64, 1), try hexDecodeQuantity("0x1"));
+    try testing.expectEqual(@as(u64, 1), try hexDecodeQuantity("0x0000000000000001"));
+    try testing.expectEqual(@as(u64, 30_000_000), try hexDecodeQuantity("0x1c9c380"));
 }
 
 test "hexDecodeU256: handles variable length" {
@@ -3034,6 +2990,7 @@ pub const IoHttpTransport = struct {
 
     fn send(
         self: *IoHttpTransport,
+        method: HttpMethod,
         url: []const u8,
         headers: []const Header,
         body: []const u8,
@@ -3052,8 +3009,13 @@ pub const IoHttpTransport = struct {
             extra_hdrs[i] = .{ .name = h.name, .value = h.value };
         }
 
-        // Use the lower-level request API for POST with body.
-        var req = try client.request(.POST, uri, .{
+        const http_method: std.http.Method = switch (method) {
+            .GET => .GET,
+            .POST => .POST,
+        };
+
+        // Use the lower-level request API with the specified method.
+        var req = try client.request(http_method, uri, .{
             .keep_alive = true,
             .extra_headers = extra_hdrs,
             .headers = .{
@@ -3082,13 +3044,6 @@ pub const IoHttpTransport = struct {
 };
 
 // ── GetPayload response parsing tests ─────────────────────────────────────────
-
-// Helper: build a minimal execution payload JSON object for testing.
-// All zero fields except blockHash which is provided.
-fn makePayloadJsonV1(block_hash_hex: []const u8) []const u8 {
-    _ = block_hash_hex;
-    return "";
-}
 
 test "getPayloadV1: parses ExecutionPayload response" {
     const allocator = testing.allocator;
