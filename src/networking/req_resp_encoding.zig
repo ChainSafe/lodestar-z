@@ -274,9 +274,12 @@ fn calcSnappyFrameSize(data: []const u8, expected_uncompressed: usize) !usize {
         switch (chunk_type) {
             0x00 => { // compressed
                 // frame = crc(4) + compressed_data
-                // We don't know exact uncompressed size without decompressing,
-                // but for a single-chunk message it should be the full expected size
-                uncompressed_so_far = expected_uncompressed;
+                // We can't know the exact uncompressed size without decompressing,
+                // so use a conservative estimate: frame payload minus the 4-byte checksum.
+                // This keeps us walking all chunks until we've accounted for enough bytes.
+                if (frame_size >= 4) {
+                    uncompressed_so_far += frame_size - 4;
+                }
             },
             0x01 => { // uncompressed
                 // frame = crc(4) + raw_data

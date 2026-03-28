@@ -131,7 +131,10 @@ pub const SyncService = struct {
     local_head_slot: u64,
     /// Our local finalized epoch.
     local_finalized_epoch: u64,
-    /// Number of connected peers (tracked from status messages).
+    /// Set of known connected peers (deduplicated by peer_id string key).
+    /// Heap-allocated string keys; freed on remove/deinit.
+    known_peers: std.StringHashMap(void),
+    /// Number of connected peers — derived from known_peers.count().
     peer_count: usize,
     /// Highest known peer slot.
     best_peer_slot: u64,
@@ -168,6 +171,7 @@ pub const SyncService = struct {
             .callbacks = callbacks,
             .local_head_slot = local_head_slot,
             .local_finalized_epoch = local_finalized_epoch,
+            .known_peers = std.StringHashMap(void).init(allocator),
             .peer_count = 0,
             .best_peer_slot = 0,
         };
@@ -178,6 +182,9 @@ pub const SyncService = struct {
     pub fn deinit(self: *SyncService) void {
         self.range_sync.deinit();
         self.unknown_block_sync.deinit();
+        var it = self.known_peers.keyIterator();
+        while (it.next()) |k| self.allocator.free(k.*);
+        self.known_peers.deinit();
     }
 
     /// Called when a peer Status message is received.
@@ -186,7 +193,12 @@ pub const SyncService = struct {
         peer_id: []const u8,
         status: StatusMessage.Type,
     ) !void {
-        self.peer_count += 1;
+        // Track peers in a set to avoid double-counting repeated Status messages.
+        if (!self.known_peers.contains(peer_id)) {
+            const owned_key = try self.allocator.dupe(u8, peer_id);
+            try self.known_peers.put(owned_key, {});
+        }
+        self.peer_count = @intCast(self.known_peers.count());
         if (status.head_slot > self.best_peer_slot) {
             self.best_peer_slot = status.head_slot;
         }
@@ -214,7 +226,10 @@ pub const SyncService = struct {
 
     /// Called when a peer disconnects.
     pub fn onPeerDisconnect(self: *SyncService, peer_id: []const u8) void {
-        self.peer_count -|= 1;
+        if (self.known_peers.fetchRemove(peer_id)) |kv| {
+            self.allocator.free(kv.key);
+        }
+        self.peer_count = @intCast(self.known_peers.count());
         self.range_sync.removePeer(peer_id);
         self.updateMode();
     }

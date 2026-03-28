@@ -236,9 +236,11 @@ pub const PeerScore = struct {
         // If lodestar score is catastrophically low, ignore gossipsub entirely.
         if (self.lodestar_score <= MIN_SCORE_BEFORE_BAN) return;
         if (self.gossipsub_score >= 0.0) {
-            // Weight positive gossipsub scores conservatively.
-            self.score += self.gossipsub_score * gossipsubNegativeScoreWeight();
+            // Positive gossipsub score — use full weight to reward well-behaving peers.
+            self.score += self.gossipsub_score * gossipsubPositiveScoreWeight();
         } else if (!self.ignore_negative_gossipsub) {
+            // Negative gossipsub score — apply dampened weight so gossipsub alone
+            // cannot push a peer below the disconnect threshold.
             self.score += self.gossipsub_score * gossipsubNegativeScoreWeight();
         }
     }
@@ -315,6 +317,11 @@ pub const PeerScore = struct {
         return .healthy;
     }
 };
+
+/// Gossipsub positive score weight. Well-behaving peers receive full credit.
+fn gossipsubPositiveScoreWeight() f64 {
+    return 1.0;
+}
 
 /// Gossipsub negative score weight. Ensures gossipsub scores alone
 /// never push a peer below disconnect threshold.

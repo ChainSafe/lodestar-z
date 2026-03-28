@@ -532,11 +532,24 @@ pub const Protocol = struct {
             gop.value_ptr.* = .{ .count = 1, .window_start_ns = now_ns };
         }
 
-        // Evict an arbitrary session when the table is full (CL-2020-01).
+        // Evict a session when the table is full (CL-2020-01).
+        // Prefer evicting pending (whoareyou_sent) sessions first — they have no
+        // established keying material and evicting them is safe. Only fall back to
+        // an arbitrary entry if no pending sessions exist.
         if (self.sessions.count() >= MAX_SESSIONS) {
-            var it = self.sessions.keyIterator();
-            if (it.next()) |oldest_key| {
-                _ = self.sessions.remove(oldest_key.*);
+            var evict_key: ?NodeId = null;
+            var it = self.sessions.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.state == .whoareyou_sent) {
+                    evict_key = entry.key_ptr.*;
+                    break;
+                }
+                if (evict_key == null) {
+                    evict_key = entry.key_ptr.*;
+                }
+            }
+            if (evict_key) |k| {
+                _ = self.sessions.remove(k);
             }
         }
 

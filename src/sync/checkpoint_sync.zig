@@ -41,11 +41,19 @@ pub const CheckpointSync = struct {
         };
     }
 
-    /// Bootstrap from a checkpoint: validate, persist state + block.
+    /// Bootstrap from a checkpoint: validate integrity, persist state + block.
     ///
     /// `checkpoint_state_bytes`: SSZ-encoded BeaconState at the finalized slot.
     /// `checkpoint_block_bytes`: SSZ-encoded SignedBeaconBlock at the same slot.
-    /// `trusted_root`: the expected SHA-256 hash of `checkpoint_state_bytes`.
+    /// `trusted_sha256`: the expected SHA-256 hash of the raw `checkpoint_state_bytes`
+    ///   bytes (NOT the beacon state's SSZ hash-tree-root). This is a raw transport-
+    ///   integrity check, not spec-compliant state root verification. The caller must
+    ///   compute this hash over the bytes they downloaded. Beacon API state roots
+    ///   (hash-tree-root) are different and cannot be used here directly.
+    ///
+    /// TODO: Replace `trusted_sha256` with SSZ hash-tree-root verification once the
+    ///   SSZ BeaconState type supports `hashTreeRoot()`. Until then, callers should
+    ///   verify the SSZ state root through an independent beacon API call.
     ///
     /// The caller is responsible for obtaining these from a trusted source
     /// (e.g. a `/eth/v2/debug/beacon/states/finalized` endpoint).
@@ -53,19 +61,19 @@ pub const CheckpointSync = struct {
         self: *CheckpointSync,
         checkpoint_state_bytes: []const u8,
         checkpoint_block_bytes: []const u8,
-        trusted_root: [32]u8,
+        trusted_sha256: [32]u8,
     ) !CheckpointSyncResult {
         if (checkpoint_state_bytes.len == 0) return CheckpointSyncError.EmptyState;
         if (checkpoint_block_bytes.len == 0) return CheckpointSyncError.EmptyBlock;
 
-        // Compute the SHA-256 hash of the state bytes as a simple
-        // integrity check. In production this would be an SSZ hash-tree-root,
-        // but at this layer we operate on opaque bytes and use the hash
-        // the caller provides.
+        // SHA-256 raw-bytes integrity check. This is intentionally NOT an SSZ
+        // hash-tree-root: we operate on opaque byte blobs here and cannot call
+        // hashTreeRoot() without deserializing the full BeaconState. The caller
+        // is expected to pass the SHA-256 of the downloaded bytes.
         var state_hash: [32]u8 = undefined;
         Sha256.hash(checkpoint_state_bytes, &state_hash, .{});
 
-        if (!std.mem.eql(u8, &state_hash, &trusted_root)) {
+        if (!std.mem.eql(u8, &state_hash, &trusted_sha256)) {
             return CheckpointSyncError.StateRootMismatch;
         }
 
