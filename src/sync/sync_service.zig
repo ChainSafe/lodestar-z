@@ -152,7 +152,14 @@ pub const SyncService = struct {
             .reportPeerFn = callbacks.reportPeerFn,
         };
 
-        return .{
+        const unknown_block_callbacks = UnknownBlockCallbacks{
+            .ptr = callbacks.ptr,
+            .requestBlockByRootFn = callbacks.requestBlockByRootFn,
+            .importBlockFn = callbacks.importBlockFn,
+            .getConnectedPeersFn = callbacks.getConnectedPeersFn,
+        };
+
+        var svc: SyncService = .{
             .allocator = allocator,
             .mode = .idle,
             .gossip_state = .enabled,
@@ -164,6 +171,8 @@ pub const SyncService = struct {
             .peer_count = 0,
             .best_peer_slot = 0,
         };
+        svc.unknown_block_sync.setCallbacks(unknown_block_callbacks);
+        return svc;
     }
 
     pub fn deinit(self: *SyncService) void {

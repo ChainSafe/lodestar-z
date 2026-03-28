@@ -359,10 +359,19 @@ pub const EthGossipAdapter = struct {
                     self.validator,
                 );
             },
-            // attester_slashing: decoding not yet implemented, accept for now.
-            .attester_slashing => return .accept,
-            // bls_to_execution_change: decoding not yet implemented, accept for now.
-            .bls_to_execution_change => return .accept,
+            .attester_slashing => |slashing| {
+                return gossip_validation.validateAttesterSlashingDecoded(
+                    slashing.is_slashable,
+                    slashing.slashable_key,
+                    self.validator,
+                );
+            },
+            .bls_to_execution_change => |change| {
+                return gossip_validation.validateBlsToExecutionChange(
+                    change.validator_index,
+                    self.validator,
+                );
+            },
             // Other topics (blob_sidecar, sync_committee, etc.) — not yet validated.
             else => return .ignore,
         }
@@ -447,6 +456,7 @@ fn testValidationContext(
     seen_exits: *gossip_validation.SeenSet,
     seen_proposer_slashings: *gossip_validation.SeenSet,
     seen_attester_slashings: *gossip_validation.SeenSet,
+    seen_bls_changes: *gossip_validation.SeenSet,
 ) GossipValidationContext {
     return .{
         .current_slot = 100,
@@ -457,6 +467,7 @@ fn testValidationContext(
         .seen_voluntary_exits = seen_exits,
         .seen_proposer_slashings = seen_proposer_slashings,
         .seen_attester_slashings = seen_attester_slashings,
+        .seen_bls_changes = seen_bls_changes,
         .ptr = @ptrFromInt(1),
         .getProposerIndex = &testGetProposerIndex,
         .isKnownBlockRoot = &testIsKnownBlockRoot,
@@ -488,6 +499,7 @@ const TestAdapter = struct {
     seen_exits: gossip_validation.SeenSet,
     seen_ps: gossip_validation.SeenSet,
     seen_as: gossip_validation.SeenSet,
+    seen_bls: gossip_validation.SeenSet,
     ctx: GossipValidationContext,
     gossipsub: *GossipsubService,
     adapter: EthGossipAdapter,
@@ -500,6 +512,7 @@ const TestAdapter = struct {
         self.seen_exits = gossip_validation.SeenSet.init(allocator);
         self.seen_ps = gossip_validation.SeenSet.init(allocator);
         self.seen_as = gossip_validation.SeenSet.init(allocator);
+        self.seen_bls = gossip_validation.SeenSet.init(allocator);
 
         self.ctx = testValidationContext(
             &self.seen_blocks,
@@ -507,6 +520,7 @@ const TestAdapter = struct {
             &self.seen_exits,
             &self.seen_ps,
             &self.seen_as,
+            &self.seen_bls,
         );
 
         self.gossipsub = try GossipsubService.init(allocator, .{});
@@ -530,6 +544,7 @@ const TestAdapter = struct {
         self.seen_exits.deinit();
         self.seen_ps.deinit();
         self.seen_as.deinit();
+        self.seen_bls.deinit();
     }
 };
 

@@ -287,6 +287,12 @@ fn handleBeaconBlocksByRange(
         return makeErrorResponse(allocator, .invalid_request, "Malformed BeaconBlocksByRangeRequest");
     };
 
+    // Validate step: per Altair+ the step field must be 1.
+    // Reference: consensus-specs/specs/phase0/p2p-interface.md#beaconblocksbyrange-v2
+    if (request.step != 1) {
+        return makeErrorResponse(allocator, .invalid_request, "BlocksByRange step must be 1");
+    }
+
     // Validate count.
     if (request.count == 0) {
         return makeErrorResponse(allocator, .invalid_request, "Count must be greater than zero");
