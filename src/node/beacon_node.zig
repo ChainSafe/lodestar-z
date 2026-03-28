@@ -1263,6 +1263,10 @@ pub const BeaconNode = struct {
         if (result.epoch_transition) {
             self.api_head_tracker.finalized_slot = self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH;
             self.api_head_tracker.justified_slot = self.head_tracker.justified_epoch * preset.SLOTS_PER_EPOCH;
+            if (self.chain.fork_choice) |fc| {
+                self.api_head_tracker.justified_root = fc.getJustifiedCheckpoint().root;
+                self.api_head_tracker.finalized_root = fc.getFinalizedCheckpoint().root;
+            }
             // Archive the post-epoch state for cold-path recovery.
             // Errors are non-fatal — the block is already imported.
             self.archiveState(result.slot, result.state_root) catch {};

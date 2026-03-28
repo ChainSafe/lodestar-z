@@ -220,6 +220,13 @@ pub const routes = [_]Route{
     },
     .{
         .method = .GET,
+        .path = "/eth/v3/validator/blocks/{slot}",
+        .operation_id = "produceBlockV3",
+        .supports_ssz = true,
+        .meta_flags = .{ .version = true },
+    },
+    .{
+        .method = .GET,
         .path = "/eth/v1/validator/attestation_data",
         .operation_id = "getAttestationData",
     },
