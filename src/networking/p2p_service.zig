@@ -122,6 +122,7 @@ pub const PassthroughValidator = struct {
     seen_exits: SeenSet,
     seen_proposer_slashings: SeenSet,
     seen_attester_slashings: SeenSet,
+    seen_bls_changes: SeenSet,
     ctx: GossipValidationContext,
 
     /// Initialise the validator.
@@ -136,6 +137,7 @@ pub const PassthroughValidator = struct {
             .seen_exits = SeenSet.init(allocator),
             .seen_proposer_slashings = SeenSet.init(allocator),
             .seen_attester_slashings = SeenSet.init(allocator),
+            .seen_bls_changes = SeenSet.init(allocator),
             .ctx = undefined,
         };
     }
@@ -152,6 +154,7 @@ pub const PassthroughValidator = struct {
             .seen_voluntary_exits = &self.seen_exits,
             .seen_proposer_slashings = &self.seen_proposer_slashings,
             .seen_attester_slashings = &self.seen_attester_slashings,
+            .seen_bls_changes = &self.seen_bls_changes,
             .getProposerIndex = &stubGetProposerIndex,
             .isKnownBlockRoot = &stubIsKnownBlockRoot,
             .isValidatorActive = &stubIsValidatorActive,
@@ -165,6 +168,7 @@ pub const PassthroughValidator = struct {
         self.seen_exits.deinit();
         self.seen_proposer_slashings.deinit();
         self.seen_attester_slashings.deinit();
+        self.seen_bls_changes.deinit();
     }
 };
 
