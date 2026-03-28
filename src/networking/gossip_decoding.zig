@@ -117,6 +117,10 @@ pub const DecodedAttesterSlashing = struct {
     /// (double vote or surround vote).  Computed at decode time so the
     /// caller doesn't need to re-parse the variable-length container.
     is_slashable: bool,
+    /// Deduplication key derived from the sorted intersection of attesting indices.
+    /// Matches the output of gossip_validation.attesterSlashingKey so the caller
+    /// can pass it directly to SeenSet without re-parsing.
+    slashable_key: [32]u8,
 };
 
 /// Result of decoding a bls_to_execution_change gossip message.
@@ -161,6 +165,36 @@ pub const DecodedAttestation = struct {
     source_epoch: u64,
     source_root: [32]u8,
 };
+
+/// Compute a deduplication key for an attester slashing from the sorted intersection
+/// of attesting indices.  Uses the same Wyhash-based algorithm as
+/// gossip_validation.attesterSlashingKey so keys are compatible with SeenSet.
+///
+/// Both index slices must already be sorted in ascending order (the spec requires this
+/// for IndexedAttestation).  A two-pointer walk finds the intersection without allocation.
+fn attesterSlashingKey(indices_a: []const u64, indices_b: []const u64) [32]u8 {
+    var hasher = std.hash.Wyhash.init(0x04);
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < indices_a.len and j < indices_b.len) {
+        if (indices_a[i] == indices_b[j]) {
+            var buf: [8]u8 = undefined;
+            std.mem.writeInt(u64, &buf, indices_a[i], .little);
+            hasher.update(&buf);
+            i += 1;
+            j += 1;
+        } else if (indices_a[i] < indices_b[j]) {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    var key: [32]u8 = std.mem.zeroes([32]u8);
+    const hash = hasher.final();
+    std.mem.writeInt(u64, key[0..8], hash, .little);
+    key[16] = 0x04;
+    return key;
+}
 
 /// Count the number of set bits in a BitList's underlying data.
 ///
@@ -392,8 +426,13 @@ pub fn decodeFromSszBytes(
                 const d2 = &slashing.attestation_2.data;
                 const is_double_vote = !phase0.AttestationData.equals(d1, d2) and d1.target.epoch == d2.target.epoch;
                 const is_surround_vote = d1.source.epoch < d2.source.epoch and d2.target.epoch < d1.target.epoch;
+                const key = attesterSlashingKey(
+                    slashing.attestation_1.attesting_indices.items,
+                    slashing.attestation_2.attesting_indices.items,
+                );
                 return .{ .attester_slashing = .{
                     .is_slashable = is_double_vote or is_surround_vote,
+                    .slashable_key = key,
                 } };
             } else {
                 var slashing: phase0.AttesterSlashing.Type = undefined;
@@ -403,8 +442,13 @@ pub fn decodeFromSszBytes(
                 const d2 = &slashing.attestation_2.data;
                 const is_double_vote = !phase0.AttestationData.equals(d1, d2) and d1.target.epoch == d2.target.epoch;
                 const is_surround_vote = d1.source.epoch < d2.source.epoch and d2.target.epoch < d1.target.epoch;
+                const key = attesterSlashingKey(
+                    slashing.attestation_1.attesting_indices.items,
+                    slashing.attestation_2.attesting_indices.items,
+                );
                 return .{ .attester_slashing = .{
                     .is_slashable = is_double_vote or is_surround_vote,
+                    .slashable_key = key,
                 } };
             }
         },

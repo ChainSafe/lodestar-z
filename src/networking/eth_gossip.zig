@@ -553,7 +553,7 @@ test "EthGossipAdapter: handleMessage rejects malformed topic" {
     var t = try TestAdapter.create(allocator);
     defer t.destroy();
 
-    const result = t.adapter.handleMessage("/bad/topic/string", "some-data");
+    const result = t.adapter.handleMessage("/bad/topic/string", "some-data", null);
     try testing.expectEqual(ValidationResult.reject, result.validation);
     try testing.expectEqual(@as(?DecodedGossipMessage, null), result.decoded);
 }
@@ -566,6 +566,7 @@ test "EthGossipAdapter: handleMessage rejects invalid snappy data" {
     const result = t.adapter.handleMessage(
         "/eth2/abcdef01/beacon_block/ssz_snappy",
         &([_]u8{ 0x00 } ** 16),
+        null,
     );
     try testing.expectEqual(ValidationResult.reject, result.validation);
     try testing.expectEqual(@as(?DecodedGossipMessage, null), result.decoded);
@@ -617,6 +618,7 @@ test "EthGossipAdapter: handleMessage with valid snappy beacon_block" {
     const result = t.adapter.handleMessage(
         "/eth2/abcdef01/beacon_block/ssz_snappy",
         compressed,
+        null,
     );
 
     // SSZ deserialization should fail for this truncated payload.
