@@ -3553,13 +3553,42 @@ fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
         },
         .attestation_batch => |batch| {
             // Batch BLS verification: the key performance optimization.
-            // Each item in the batch has a data handle pointing to SSZ bytes.
-            // TODO: Batch-verify BLS signatures, then import valid ones.
+            //
+            // Architecture (matches TS Lodestar's gossipQueues/indexed.ts):
+            // 1. Collect N attestation signature sets
+            // 2. Batch-verify all N signatures at once (~3-10x faster than individual)
+            // 3. On batch success: import all attestations to fork choice + pool
+            // 4. On batch failure: fall back to individual verification
+            //
+            // The batch is formed by WorkQueues.formAttestationBatch() which
+            // pops up to max_attestation_batch_size (64) items from the LIFO queue.
+            //
+            // TODO: When data handles carry real decoded attestation data,
+            // build signature sets and call BatchVerifier.verifyAll().
+            // For now, count items for metrics.
+            if (node.metrics) |m| {
+                _ = m; // TODO: m.attestation_batches_total.incr()
+            }
             std.log.debug("Processor: attestation batch (count={d})", .{batch.count});
+
+            // Process each item in the batch individually for now.
+            // When BLS batch verify is wired, this loop only runs on batch failure.
+            var i: u32 = 0;
+            while (i < batch.count) : (i += 1) {
+                const att_work = batch.items[i];
+                _ = att_work; // TODO: import individual attestation
+            }
         },
         .aggregate_batch => |batch| {
             // Batch BLS verification for aggregates.
+            // Same pattern as attestation batching.
             std.log.debug("Processor: aggregate batch (count={d})", .{batch.count});
+
+            var i: u32 = 0;
+            while (i < batch.count) : (i += 1) {
+                const agg_work = batch.items[i];
+                _ = agg_work; // TODO: import individual aggregate
+            }
         },
         else => {
             // For all other work types, log at debug level.

@@ -517,3 +517,143 @@ test "BeaconProcessor: getQueueDepths" {
     try testing.expectEqual(@as(u32, 1), depths.attestations);
     try testing.expectEqual(@as(u64, 1), depths.pool_objects);
 }
+
+test "BeaconProcessor: attestation batching" {
+    // Verify that multiple attestations are formed into a batch by the
+    // priority queue system, and that the batch is dispatched as a single
+    // attestation_batch work item.
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var ctx = TestContext.init();
+    const config = testConfig();
+
+    var proc = try BeaconProcessor.init(
+        allocator,
+        config,
+        &TestContext.handler,
+        @ptrCast(&ctx),
+    );
+
+    // Ingest 3 attestations. The LIFO queue should batch them when popped.
+    const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+    proc.ingest(.{ .attestation = .{
+        .peer_id = 1,
+        .message_id = 1,
+        .data = dummy_handle,
+        .subnet_id = 0,
+        .seen_timestamp_ns = 100,
+    } });
+    proc.ingest(.{ .attestation = .{
+        .peer_id = 2,
+        .message_id = 2,
+        .data = dummy_handle,
+        .subnet_id = 1,
+        .seen_timestamp_ns = 200,
+    } });
+    proc.ingest(.{ .attestation = .{
+        .peer_id = 3,
+        .message_id = 3,
+        .data = dummy_handle,
+        .subnet_id = 2,
+        .seen_timestamp_ns = 300,
+    } });
+
+    try testing.expectEqual(@as(u64, 3), proc.totalQueued());
+
+    // Dispatch once — should get a batch, not individual items.
+    try testing.expect(proc.dispatchOne());
+    try testing.expectEqual(@as(u32, 1), ctx.count);
+
+    // The dispatched item should be attestation_batch (3 items batched).
+    try testing.expectEqual(WorkType.attestation_batch, ctx.processed_types[0]);
+
+    // Queue should be empty after batch dispatch.
+    try testing.expect(proc.allQueuesEmpty());
+}
+
+test "BeaconProcessor: single attestation not batched" {
+    // A single attestation should come out as a plain attestation,
+    // not a batch.
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var ctx = TestContext.init();
+    const config = testConfig();
+
+    var proc = try BeaconProcessor.init(
+        allocator,
+        config,
+        &TestContext.handler,
+        @ptrCast(&ctx),
+    );
+
+    const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+    proc.ingest(.{ .attestation = .{
+        .peer_id = 1,
+        .message_id = 1,
+        .data = dummy_handle,
+        .subnet_id = 0,
+        .seen_timestamp_ns = 100,
+    } });
+
+    try testing.expect(proc.dispatchOne());
+    try testing.expectEqual(@as(u32, 1), ctx.count);
+
+    // Single attestation — NOT batched.
+    try testing.expectEqual(WorkType.attestation, ctx.processed_types[0]);
+    try testing.expect(proc.allQueuesEmpty());
+}
+
+test "BeaconProcessor: blocks dispatched before attestations" {
+    // Verify strict priority: gossip_block (priority 5) should be
+    // dispatched before attestation (priority 12), even if attestations
+    // were enqueued first.
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var ctx = TestContext.init();
+    const config = testConfig();
+
+    var proc = try BeaconProcessor.init(
+        allocator,
+        config,
+        &TestContext.handler,
+        @ptrCast(&ctx),
+    );
+
+    const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+
+    // Enqueue attestation first, then block.
+    proc.ingest(.{ .attestation = .{
+        .peer_id = 1,
+        .message_id = 1,
+        .data = dummy_handle,
+        .subnet_id = 0,
+        .seen_timestamp_ns = 100,
+    } });
+
+    const fork_types = @import("fork_types");
+    proc.ingest(.{ .gossip_block = .{
+        .peer_id = 2,
+        .message_id = 2,
+        .block = fork_types.AnySignedBeaconBlock{ .phase0 = undefined },
+        .seen_timestamp_ns = 200,
+    } });
+
+    // First dispatch: should be the block (higher priority).
+    try testing.expect(proc.dispatchOne());
+    try testing.expectEqual(WorkType.gossip_block, ctx.processed_types[0]);
+
+    // Second dispatch: attestation.
+    try testing.expect(proc.dispatchOne());
+    try testing.expectEqual(WorkType.attestation, ctx.processed_types[1]);
+
+    try testing.expect(proc.allQueuesEmpty());
+}
