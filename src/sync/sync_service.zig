@@ -142,9 +142,11 @@ pub const SyncService = struct {
         local_head_slot: u64,
         local_finalized_epoch: u64,
     ) SyncService {
-        // Build range sync callbacks bridging to our service callbacks.
+        // Build range sync callbacks. processChainSegmentImpl is kept as a
+        // compatibility shim but importBlockFn is called directly in SyncChain.
         const range_callbacks = RangeSyncCallbacks{
             .ptr = callbacks.ptr,
+            .importBlockFn = callbacks.importBlockFn,
             .processChainSegmentFn = &processChainSegmentImpl,
             .downloadByRangeFn = callbacks.requestBlocksByRangeFn,
             .reportPeerFn = callbacks.reportPeerFn,
@@ -345,19 +347,9 @@ pub const SyncService = struct {
         _ = old_mode;
     }
 
-    /// Wrapper to adapt SyncServiceCallbacks.importBlockFn to
-    /// RangeSyncCallbacks.processChainSegmentFn.
-    fn processChainSegmentImpl(ptr: *anyopaque, blocks: []const BatchBlock, _: RangeSyncType) anyerror!void {
-        // The ptr is the same as callbacks.ptr — the BeaconNode's sync callback context.
-        // Each block is imported individually through the import callback.
-        // Note: ptr comes from SyncServiceCallbacks.ptr which is passed through
-        // to RangeSyncCallbacks.ptr.
-        _ = ptr;
-        _ = blocks;
-        // Block import is handled by the chain segment processor at the
-        // SyncChain level — this is a pass-through that the BeaconNode
-        // wires to its own block import pipeline.
-    }
+    /// Compatibility shim for RangeSyncCallbacks.processChainSegmentFn.
+    /// Block import is done directly by SyncChain.processNextBatch via importBlockFn.
+    fn processChainSegmentImpl(_: *anyopaque, _: []const BatchBlock, _: RangeSyncType) anyerror!void {}
 };
 
 // ── Tests ────────────────────────────────────────────────────────────

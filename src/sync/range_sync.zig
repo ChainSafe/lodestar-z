@@ -30,6 +30,9 @@ const BatchBlock = batch_mod.BatchBlock;
 pub const RangeSyncCallbacks = struct {
     ptr: *anyopaque,
 
+    /// Import a single block. ptr is the same as RangeSyncCallbacks.ptr.
+    importBlockFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
+
     processChainSegmentFn: *const fn (
         ptr: *anyopaque,
         blocks: []const BatchBlock,
@@ -51,6 +54,7 @@ pub const RangeSyncCallbacks = struct {
     fn toSyncChainCallbacks(self: *const RangeSyncCallbacks) SyncChainCallbacks {
         return .{
             .ptr = self.ptr,
+            .importBlockFn = self.importBlockFn,
             .processChainSegmentFn = self.processChainSegmentFn,
             .downloadByRangeFn = self.downloadByRangeFn,
             .reportPeerFn = self.reportPeerFn,
@@ -333,6 +337,8 @@ const TestCallbacks = struct {
     downloaded: u32 = 0,
     reported: u32 = 0,
 
+    fn importBlockFn(_: *anyopaque, _: []const u8) anyerror!void {}
+
     fn processChainSegmentFn(ptr: *anyopaque, _: []const BatchBlock, _: RangeSyncType) anyerror!void {
         const self: *TestCallbacks = @ptrCast(@alignCast(ptr));
         self.processed += 1;
@@ -351,6 +357,7 @@ const TestCallbacks = struct {
     fn rangeSyncCallbacks(self: *TestCallbacks) RangeSyncCallbacks {
         return .{
             .ptr = self,
+            .importBlockFn = &importBlockFn,
             .processChainSegmentFn = &processChainSegmentFn,
             .downloadByRangeFn = &downloadByRangeFn,
             .reportPeerFn = &reportPeerFn,
