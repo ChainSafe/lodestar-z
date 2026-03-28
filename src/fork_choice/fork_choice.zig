@@ -1312,6 +1312,37 @@ pub const ForkChoice = struct {
         return self.fc_store.current_slot;
     }
 
+    /// Prune queued attestations whose slot is older than `current_slot - MAX_QUEUED_SLOTS`.
+    ///
+    /// Called from the chain's `updateTime` catch path: if `updateTime` fails (e.g. due to an
+    /// OOM during attestation processing), the queued_attestations map may still contain stale
+    /// entries that will never be consumed. Pruning here prevents unbounded growth.
+    pub fn pruneStaleQueuedAttestations(self: *ForkChoice, allocator: Allocator, current_slot: Slot) void {
+        if (self.queued_attestations.count() == 0) return;
+        const min_slot: Slot = if (current_slot > MAX_QUEUED_SLOTS)
+            current_slot - @as(Slot, MAX_QUEUED_SLOTS)
+        else
+            0;
+        // Collect stale keys (slot < min_slot).
+        var to_remove = std.ArrayListUnmanaged(Slot){};
+        defer to_remove.deinit(allocator);
+        var iter = self.queued_attestations.iterator();
+        while (iter.next()) |entry| {
+            if (entry.key_ptr.* < min_slot) {
+                to_remove.append(allocator, entry.key_ptr.*) catch continue;
+            }
+        }
+        for (to_remove.items) |slot| {
+            if (self.queued_attestations.getPtr(slot)) |block_map| {
+                var bm_iter = block_map.iterator();
+                while (bm_iter.next()) |block_entry| {
+                    block_entry.value_ptr.deinit(allocator);
+                }
+                block_map.deinit(allocator);
+            }
+            _ = self.queued_attestations.swapRemove(slot);
+        }
+    }
 
     // ── Compatibility shims for chain pipeline ──
 
@@ -1326,7 +1357,7 @@ pub const ForkChoice = struct {
         block_root: Root,
         target_epoch: Epoch,
     ) !void {
-        if (target_epoch > computeEpochAtSlot(self.fc_store.current_slot)) return error.InvalidAttestation;
+        if (target_epoch > computeEpochAtSlot(self.fc_store.current_slot)) return error.InvalidAttestationFutureEpoch;
         if (self.fc_store.equivocating_indices.contains(validator_index)) return;
         try self.addLatestMessage(allocator, validator_index, att_slot, block_root, .full);
     }
@@ -1631,7 +1662,7 @@ pub const ForkChoice = struct {
         response: LVHExecResponse,
         current_slot: Slot,
     ) void {
-        self.proto_array.validateLatestHash(allocator, response, current_slot) catch |err| {
+        self.proto_array.validateLatestHash(allocator, &self.deltas_cache, response, current_slot) catch |err| {
             self.irrecoverable_error = err;
         };
     }

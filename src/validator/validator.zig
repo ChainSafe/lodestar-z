@@ -185,7 +185,9 @@ pub const ValidatorClient = struct {
             &validator_store,
             signing_ctx,
             config.slots_per_epoch,
-            256, // TODO: add epochs_per_sync_committee_period to ValidatorConfig (mainnet=256, minimal=8)
+            config.epochs_per_sync_committee_period,
+            config.sync_committee_size,
+            config.sync_committee_subnet_count,
             config.seconds_per_slot,
             config.genesis_time, // BUG-5 fix: pass genesis_time for correct sub-slot timing
         );

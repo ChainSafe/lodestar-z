@@ -1648,6 +1648,10 @@ pub const ProtoArray = struct {
     fn propagateInvalidExecutionStatusByIndex(
         self: *ProtoArray,
         allocator: Allocator,
+        /// Pre-allocated scratch buffer for zero deltas (avoids fresh allocation during INVALID
+        /// propagation). Caller must ensure this is sized to at least nodes.items.len.
+        /// Using a cached/reused buffer prevents OOM during the error-path score recalculation.
+        deltas_buf: *std.ArrayListUnmanaged(i64),
         invalidate_from_index: u32,
         latest_valid_hash_index: u32,
         current_slot: Slot,
@@ -1674,14 +1678,14 @@ pub const ProtoArray = struct {
         }
 
         // Recalculate the DAG with zero deltas.
-        const num_nodes: u32 = @intCast(self.nodes.items.len);
-        const zero_deltas = try allocator.alloc(i64, num_nodes);
-        defer allocator.free(zero_deltas);
-
-        @memset(zero_deltas, 0);
+        // Use the caller-supplied buffer to avoid a fresh allocation in this error path.
+        // resize() will reuse existing capacity when possible, growing only if needed.
+        const num_nodes: usize = self.nodes.items.len;
+        try deltas_buf.resize(allocator, num_nodes);
+        @memset(deltas_buf.items, 0);
 
         try self.applyScoreChanges(
-            zero_deltas,
+            deltas_buf.items,
             self.previous_proposer_boost,
             self.justified_epoch,
             self.justified_root,
@@ -2077,6 +2081,9 @@ pub const ProtoArray = struct {
     pub fn validateLatestHash(
         self: *ProtoArray,
         allocator: Allocator,
+        /// Scratch buffer for zero-delta score recalculation during INVALID propagation.
+        /// Reused to avoid allocation in the EL-invalid error path.
+        deltas_buf: *std.ArrayListUnmanaged(i64),
         response: LVHExecResponse,
         current_slot: Slot,
     ) (Allocator.Error || ProtoArrayError)!void {
@@ -2114,6 +2121,7 @@ pub const ProtoArray = struct {
 
                 try self.propagateInvalidExecutionStatusByIndex(
                     allocator,
+                    deltas_buf,
                     invalidate_from_index,
                     latest_valid_hash_index.?,
                     current_slot,
@@ -4277,6 +4285,9 @@ test "Prune unknown finalized root returns error" {
 // validateLatestHash(valid, latestValidExecHash=0xA1)
 // -> 0x01 becomes valid.
 test "SetOptimisticToValid propagates up from matching hash" {
+
+    var test_deltas_buf: std.ArrayListUnmanaged(i64) = .empty;
+    defer test_deltas_buf.deinit(testing.allocator);
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
@@ -4298,6 +4309,7 @@ test "SetOptimisticToValid propagates up from matching hash" {
 
     try pa.validateLatestHash(
         testing.allocator,
+        &test_deltas_buf,
         .{ .valid = .{ .latest_valid_exec_hash = makeRoot(0xA1) } },
         2,
     );
@@ -4316,6 +4328,9 @@ test "SetOptimisticToValid propagates up from matching hash" {
 //
 // Invalidate D with LVH=A. Only D becomes invalid; B and C stay syncing.
 test "SetOptimisticToInvalid only invalidates target not siblings" {
+
+    var test_deltas_buf: std.ArrayListUnmanaged(i64) = .empty;
+    defer test_deltas_buf.deinit(testing.allocator);
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
@@ -4351,6 +4366,7 @@ test "SetOptimisticToInvalid only invalidates target not siblings" {
 
     try pa.validateLatestHash(
         testing.allocator,
+        &test_deltas_buf,
         .{ .invalid = .{
             .invalidate_from_parent_block_root = root_d,
             .latest_valid_exec_hash = makeRoot('A'),
@@ -4381,6 +4397,9 @@ test "SetOptimisticToInvalid only invalidates target not siblings" {
 // Invalidate from d with LVH=ZERO_HASH (pre-merge boundary).
 // -> b, c, d, e become invalid; a, r stay pre-merge; f, g stay syncing.
 test "SetOptimisticToInvalid ForkAtMerge invalidates post-merge chain" {
+
+    var test_deltas_buf: std.ArrayListUnmanaged(i64) = .empty;
+    defer test_deltas_buf.deinit(testing.allocator);
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
@@ -4437,6 +4456,7 @@ test "SetOptimisticToInvalid ForkAtMerge invalidates post-merge chain" {
     // Invalidate from d, LVH = ZERO_HASH (pre-merge boundary at 'a').
     try pa.validateLatestHash(
         testing.allocator,
+        &test_deltas_buf,
         .{ .invalid = .{
             .invalidate_from_parent_block_root = root_d,
             .latest_valid_exec_hash = ZERO_HASH,
@@ -4460,6 +4480,9 @@ test "SetOptimisticToInvalid ForkAtMerge invalidates post-merge chain" {
 //     |
 //   0x01(syncing)
 test "SetOptimisticToInvalid with null LVH returns error" {
+
+    var test_deltas_buf: std.ArrayListUnmanaged(i64) = .empty;
+    defer test_deltas_buf.deinit(testing.allocator);
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
@@ -4474,6 +4497,7 @@ test "SetOptimisticToInvalid with null LVH returns error" {
 
     const result = pa.validateLatestHash(
         testing.allocator,
+        &test_deltas_buf,
         .{ .invalid = .{
             .invalidate_from_parent_block_root = root_1,
             .latest_valid_exec_hash = null,
@@ -4489,6 +4513,9 @@ test "SetOptimisticToInvalid with null LVH returns error" {
 //     |
 //   0x01(valid)
 test "SetOptimisticToInvalid on valid node stores lvh_error" {
+
+    var test_deltas_buf: std.ArrayListUnmanaged(i64) = .empty;
+    defer test_deltas_buf.deinit(testing.allocator);
     var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
@@ -4503,6 +4530,7 @@ test "SetOptimisticToInvalid on valid node stores lvh_error" {
 
     const result = pa.validateLatestHash(
         testing.allocator,
+        &test_deltas_buf,
         .{ .invalid = .{
             .invalidate_from_parent_block_root = root_1,
             .latest_valid_exec_hash = ZERO_HASH,

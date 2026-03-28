@@ -125,6 +125,12 @@ pub const ValidatorConfig = struct {
     seconds_per_slot: u64 = 12,
     /// Slots per epoch (default: 32).
     slots_per_epoch: u64 = 32,
+    /// Epochs per sync committee period (default: 256 mainnet, 8 minimal).
+    epochs_per_sync_committee_period: u64 = 256,
+    /// Sync committee size (default: 512 mainnet, 32 minimal).
+    sync_committee_size: u64 = 512,
+    /// Sync committee subnet count (default: 4).
+    sync_committee_subnet_count: u64 = 4,
     /// Whether doppelganger protection is enabled.
     doppelganger_protection: bool = true,
     /// Path to slashing protection DB file (null = in-memory only).

@@ -367,7 +367,12 @@ pub const Chain = struct {
     pub fn onSlot(self: *Chain, slot: u64) void {
         // Update fork choice time (removes proposer boost from previous slot).
         if (self.fork_choice) |fc| {
-            fc.updateTime(self.allocator, slot) catch |err| log_mod.logger(.chain).err("fork choice updateTime failed at slot {d}: {}", .{ slot, err });
+            fc.updateTime(self.allocator, slot) catch |err| {
+                log_mod.logger(.chain).err("fork choice updateTime failed at slot {d}: {}", .{ slot, err });
+                // Prune stale queued attestations to prevent unbounded growth when
+                // updateTime fails (e.g. OOM during attestation processing).
+                fc.pruneStaleQueuedAttestations(self.allocator, slot);
+            };
         }
 
         // Prune seen blocks older than 2 epochs.

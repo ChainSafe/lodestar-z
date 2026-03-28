@@ -36,10 +36,10 @@ const LivenessTracker = liveness_mod.LivenessTracker;
 
 const log = std.log.scoped(.sync_committee_service);
 
-/// Mainnet preset values. Minimal preset uses SYNC_COMMITTEE_SIZE=32, SYNC_COMMITTEE_SUBNET_COUNT=4.
-/// TODO: pass these from ValidatorConfig/SigningContext so minimal devnets work correctly.
-const SYNC_COMMITTEE_SUBNET_COUNT: u64 = 4; // mainnet; minimal = 4 (same)
-const SYNC_COMMITTEE_SIZE: u64 = 512; // mainnet; minimal = 32
+/// Maximum subcommittee byte size for stack-allocated agg_bits buffer.
+/// = max(SYNC_COMMITTEE_SIZE) / min(SYNC_COMMITTEE_SUBNET_COUNT) / 8
+/// Spec max: 2048/4/8 = 64 bytes.
+const MAX_SUBCOMMITTEE_BYTES: usize = 64;
 
 // ---------------------------------------------------------------------------
 // SyncCommitteeService
@@ -54,6 +54,10 @@ pub const SyncCommitteeService = struct {
     signing_ctx: SigningContext,
     slots_per_epoch: u64,
     epochs_per_sync_committee_period: u64,
+    /// Sync committee size (preset: mainnet=512, minimal=32).
+    sync_committee_size: u64,
+    /// Sync committee subnet count (preset: mainnet=4, minimal=4).
+    sync_committee_subnet_count: u64,
     /// Seconds per slot for sub-slot timing.
     seconds_per_slot: u64,
     /// Genesis time (Unix seconds) — for correct sub-slot timing (BUG-5 fix).
@@ -77,6 +81,8 @@ pub const SyncCommitteeService = struct {
         signing_ctx: SigningContext,
         slots_per_epoch: u64,
         epochs_per_sync_committee_period: u64,
+        sync_committee_size: u64,
+        sync_committee_subnet_count: u64,
         seconds_per_slot: u64,
         genesis_time_unix_secs: u64,
     ) SyncCommitteeService {
@@ -88,6 +94,8 @@ pub const SyncCommitteeService = struct {
             .signing_ctx = signing_ctx,
             .slots_per_epoch = slots_per_epoch,
             .epochs_per_sync_committee_period = epochs_per_sync_committee_period,
+            .sync_committee_size = sync_committee_size,
+            .sync_committee_subnet_count = sync_committee_subnet_count,
             .seconds_per_slot = seconds_per_slot,
             .genesis_time_unix_secs = genesis_time_unix_secs,
             .duties = std.ArrayList(SyncCommitteeDutyWithProofs).init(allocator),
@@ -405,7 +413,7 @@ pub const SyncCommitteeService = struct {
     ) !void {
         for (self.duties.items) |*dp| {
             for (dp.duty.validator_sync_committee_indices, dp.selection_proofs) |sc_idx, *cached_proof| {
-                const subcommittee_index = sc_idx / (SYNC_COMMITTEE_SIZE / SYNC_COMMITTEE_SUBNET_COUNT);
+                const subcommittee_index = sc_idx / (self.sync_committee_size / self.sync_committee_subnet_count);
 
                 // BUG-8 Fix: Compute selection proof with the ACTUAL current slot (not epoch start).
                 // The spec requires SyncAggregatorSelectionData{slot=current_slot, subcommittee_index}.
@@ -441,11 +449,13 @@ pub const SyncCommitteeService = struct {
                 // Set the correct bit for our validator's position in the sync subcommittee.
                 // sc_idx is the full sync committee index (0..SYNC_COMMITTEE_SIZE-1).
                 // The bit position within the subcommittee is sc_idx % subcommittee_size.
-                const subcommittee_size = SYNC_COMMITTEE_SIZE / SYNC_COMMITTEE_SUBNET_COUNT;
+                const subcommittee_size = self.sync_committee_size / self.sync_committee_subnet_count;
                 const bit_index = sc_idx % subcommittee_size; // position within subcommittee
-                var agg_bits = [_]u8{0} ** @divTrunc(512, 4 * 8); // 16 bytes = 128 bits
+                var agg_bits_buf = [_]u8{0} ** MAX_SUBCOMMITTEE_BYTES;
+                const subcommittee_bytes = (subcommittee_size + 7) / 8;
+                var agg_bits = agg_bits_buf[0..subcommittee_bytes];
                 // Copy BN's aggregated bits (all validators' bits), then set ours.
-                const copy_len = @min(contrib.aggregation_bits.len, 16);
+                const copy_len = @min(contrib.aggregation_bits.len, agg_bits.len);
                 @memcpy(agg_bits[0..copy_len], contrib.aggregation_bits[0..copy_len]);
                 agg_bits[bit_index / 8] |= @as(u8, 1) << @intCast(bit_index % 8);
 

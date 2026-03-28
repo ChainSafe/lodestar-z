@@ -1386,36 +1386,94 @@ fn encodePayloadAttributesV2(allocator: Allocator, attrs: PayloadAttributesV2) !
     );
 }
 
-fn encodeExecutionPayloadV1(allocator: Allocator, p: ExecutionPayloadV1) ![]const u8 {
-    const parent_hash = try hexEncodeFixed(allocator, &p.parent_hash);
-    defer allocator.free(parent_hash);
-    const fee_recipient = try hexEncodeFixed(allocator, &p.fee_recipient);
-    defer allocator.free(fee_recipient);
-    const state_root = try hexEncodeFixed(allocator, &p.state_root);
-    defer allocator.free(state_root);
-    const receipts_root = try hexEncodeFixed(allocator, &p.receipts_root);
-    defer allocator.free(receipts_root);
-    const logs_bloom = try hexEncodeFixed(allocator, &p.logs_bloom);
-    defer allocator.free(logs_bloom);
-    const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
-    defer allocator.free(prev_randao);
-    const block_number = try hexEncodeQuantity(allocator, p.block_number);
-    defer allocator.free(block_number);
-    const gas_limit = try hexEncodeQuantity(allocator, p.gas_limit);
-    defer allocator.free(gas_limit);
-    const gas_used = try hexEncodeQuantity(allocator, p.gas_used);
-    defer allocator.free(gas_used);
-    const timestamp = try hexEncodeQuantity(allocator, p.timestamp);
-    defer allocator.free(timestamp);
-    const extra_data = try hexEncode(allocator, p.extra_data);
-    defer allocator.free(extra_data);
-    const base_fee = try hexEncodeQuantityU256(allocator, p.base_fee_per_gas);
-    defer allocator.free(base_fee);
-    const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
-    defer allocator.free(block_hash);
-    const transactions = try encodeTransactions(allocator, p.transactions);
-    defer allocator.free(transactions);
+/// Encodes the 14 base execution payload fields (present in V1-V4) into
+/// their hex/JSON representations. Call `b.deinit(allocator)` to free all strings.
+const BasePayloadEncoded = struct {
+    parent_hash: []const u8,
+    fee_recipient: []const u8,
+    state_root: []const u8,
+    receipts_root: []const u8,
+    logs_bloom: []const u8,
+    prev_randao: []const u8,
+    block_number: []const u8,
+    gas_limit: []const u8,
+    gas_used: []const u8,
+    timestamp: []const u8,
+    extra_data: []const u8,
+    base_fee: []const u8,
+    block_hash: []const u8,
+    transactions: []const u8,
 
+    fn deinit(self: BasePayloadEncoded, allocator: Allocator) void {
+        allocator.free(self.parent_hash);
+        allocator.free(self.fee_recipient);
+        allocator.free(self.state_root);
+        allocator.free(self.receipts_root);
+        allocator.free(self.logs_bloom);
+        allocator.free(self.prev_randao);
+        allocator.free(self.block_number);
+        allocator.free(self.gas_limit);
+        allocator.free(self.gas_used);
+        allocator.free(self.timestamp);
+        allocator.free(self.extra_data);
+        allocator.free(self.base_fee);
+        allocator.free(self.block_hash);
+        allocator.free(self.transactions);
+    }
+};
+
+/// Encode the 14 fields common to ExecutionPayload V1-V4.
+/// Accepts any payload struct that has these fields (V1/V2/V3/V4 all qualify).
+fn encodeBasePayloadFields(allocator: Allocator, p: anytype) !BasePayloadEncoded {
+    const parent_hash = try hexEncodeFixed(allocator, &p.parent_hash);
+    errdefer allocator.free(parent_hash);
+    const fee_recipient = try hexEncodeFixed(allocator, &p.fee_recipient);
+    errdefer allocator.free(fee_recipient);
+    const state_root = try hexEncodeFixed(allocator, &p.state_root);
+    errdefer allocator.free(state_root);
+    const receipts_root = try hexEncodeFixed(allocator, &p.receipts_root);
+    errdefer allocator.free(receipts_root);
+    const logs_bloom = try hexEncodeFixed(allocator, &p.logs_bloom);
+    errdefer allocator.free(logs_bloom);
+    const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
+    errdefer allocator.free(prev_randao);
+    const block_number = try hexEncodeQuantity(allocator, p.block_number);
+    errdefer allocator.free(block_number);
+    const gas_limit = try hexEncodeQuantity(allocator, p.gas_limit);
+    errdefer allocator.free(gas_limit);
+    const gas_used = try hexEncodeQuantity(allocator, p.gas_used);
+    errdefer allocator.free(gas_used);
+    const timestamp = try hexEncodeQuantity(allocator, p.timestamp);
+    errdefer allocator.free(timestamp);
+    const extra_data = try hexEncode(allocator, p.extra_data);
+    errdefer allocator.free(extra_data);
+    const base_fee = try hexEncodeQuantityU256(allocator, p.base_fee_per_gas);
+    errdefer allocator.free(base_fee);
+    const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
+    errdefer allocator.free(block_hash);
+    const transactions = try encodeTransactions(allocator, p.transactions);
+    errdefer allocator.free(transactions);
+    return .{
+        .parent_hash = parent_hash,
+        .fee_recipient = fee_recipient,
+        .state_root = state_root,
+        .receipts_root = receipts_root,
+        .logs_bloom = logs_bloom,
+        .prev_randao = prev_randao,
+        .block_number = block_number,
+        .gas_limit = gas_limit,
+        .gas_used = gas_used,
+        .timestamp = timestamp,
+        .extra_data = extra_data,
+        .base_fee = base_fee,
+        .block_hash = block_hash,
+        .transactions = transactions,
+    };
+}
+
+fn encodeExecutionPayloadV1(allocator: Allocator, p: ExecutionPayloadV1) ![]const u8 {
+    const b = try encodeBasePayloadFields(allocator, p);
+    defer b.deinit(allocator);
     return std.fmt.allocPrint(allocator,
         \\{{
         \\"parentHash":"{s}",
@@ -1434,45 +1492,18 @@ fn encodeExecutionPayloadV1(allocator: Allocator, p: ExecutionPayloadV1) ![]cons
         \\"transactions":{s}
         \\}}
     , .{
-        parent_hash,  fee_recipient, state_root,  receipts_root,
-        logs_bloom,   prev_randao,   block_number, gas_limit,
-        gas_used,     timestamp,     extra_data,   base_fee,
-        block_hash,   transactions,
+        b.parent_hash,  b.fee_recipient, b.state_root,  b.receipts_root,
+        b.logs_bloom,   b.prev_randao,   b.block_number, b.gas_limit,
+        b.gas_used,     b.timestamp,     b.extra_data,   b.base_fee,
+        b.block_hash,   b.transactions,
     });
 }
 
 fn encodeExecutionPayloadV2(allocator: Allocator, p: ExecutionPayloadV2) ![]const u8 {
-    const parent_hash = try hexEncodeFixed(allocator, &p.parent_hash);
-    defer allocator.free(parent_hash);
-    const fee_recipient = try hexEncodeFixed(allocator, &p.fee_recipient);
-    defer allocator.free(fee_recipient);
-    const state_root = try hexEncodeFixed(allocator, &p.state_root);
-    defer allocator.free(state_root);
-    const receipts_root = try hexEncodeFixed(allocator, &p.receipts_root);
-    defer allocator.free(receipts_root);
-    const logs_bloom = try hexEncodeFixed(allocator, &p.logs_bloom);
-    defer allocator.free(logs_bloom);
-    const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
-    defer allocator.free(prev_randao);
-    const block_number = try hexEncodeQuantity(allocator, p.block_number);
-    defer allocator.free(block_number);
-    const gas_limit = try hexEncodeQuantity(allocator, p.gas_limit);
-    defer allocator.free(gas_limit);
-    const gas_used = try hexEncodeQuantity(allocator, p.gas_used);
-    defer allocator.free(gas_used);
-    const timestamp = try hexEncodeQuantity(allocator, p.timestamp);
-    defer allocator.free(timestamp);
-    const extra_data = try hexEncode(allocator, p.extra_data);
-    defer allocator.free(extra_data);
-    const base_fee = try hexEncodeQuantityU256(allocator, p.base_fee_per_gas);
-    defer allocator.free(base_fee);
-    const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
-    defer allocator.free(block_hash);
-    const transactions = try encodeTransactions(allocator, p.transactions);
-    defer allocator.free(transactions);
+    const b = try encodeBasePayloadFields(allocator, p);
+    defer b.deinit(allocator);
     const withdrawals = try encodeWithdrawals(allocator, p.withdrawals);
     defer allocator.free(withdrawals);
-
     return std.fmt.allocPrint(allocator,
         \\{{
         \\"parentHash":"{s}",
@@ -1492,10 +1523,10 @@ fn encodeExecutionPayloadV2(allocator: Allocator, p: ExecutionPayloadV2) ![]cons
         \\"withdrawals":{s}
         \\}}
     , .{
-        parent_hash,  fee_recipient, state_root,   receipts_root,
-        logs_bloom,   prev_randao,   block_number,  gas_limit,
-        gas_used,     timestamp,     extra_data,    base_fee,
-        block_hash,   transactions,  withdrawals,
+        b.parent_hash,  b.fee_recipient, b.state_root,   b.receipts_root,
+        b.logs_bloom,   b.prev_randao,   b.block_number,  b.gas_limit,
+        b.gas_used,     b.timestamp,     b.extra_data,    b.base_fee,
+        b.block_hash,   b.transactions,  withdrawals,
     });
 }
 
@@ -1582,34 +1613,8 @@ fn encodeConsolidationRequests(allocator: Allocator, requests: []const Consolida
 }
 
 fn encodeExecutionPayloadV4(allocator: Allocator, p: ExecutionPayloadV4) ![]const u8 {
-    const parent_hash = try hexEncodeFixed(allocator, &p.parent_hash);
-    defer allocator.free(parent_hash);
-    const fee_recipient = try hexEncodeFixed(allocator, &p.fee_recipient);
-    defer allocator.free(fee_recipient);
-    const state_root = try hexEncodeFixed(allocator, &p.state_root);
-    defer allocator.free(state_root);
-    const receipts_root = try hexEncodeFixed(allocator, &p.receipts_root);
-    defer allocator.free(receipts_root);
-    const logs_bloom = try hexEncodeFixed(allocator, &p.logs_bloom);
-    defer allocator.free(logs_bloom);
-    const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
-    defer allocator.free(prev_randao);
-    const block_number = try hexEncodeQuantity(allocator, p.block_number);
-    defer allocator.free(block_number);
-    const gas_limit = try hexEncodeQuantity(allocator, p.gas_limit);
-    defer allocator.free(gas_limit);
-    const gas_used = try hexEncodeQuantity(allocator, p.gas_used);
-    defer allocator.free(gas_used);
-    const timestamp = try hexEncodeQuantity(allocator, p.timestamp);
-    defer allocator.free(timestamp);
-    const extra_data = try hexEncode(allocator, p.extra_data);
-    defer allocator.free(extra_data);
-    const base_fee = try hexEncodeQuantityU256(allocator, p.base_fee_per_gas);
-    defer allocator.free(base_fee);
-    const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
-    defer allocator.free(block_hash);
-    const transactions = try encodeTransactions(allocator, p.transactions);
-    defer allocator.free(transactions);
+    const b = try encodeBasePayloadFields(allocator, p);
+    defer b.deinit(allocator);
     const withdrawals = try encodeWithdrawals(allocator, p.withdrawals);
     defer allocator.free(withdrawals);
     const blob_gas_used = try hexEncodeQuantity(allocator, p.blob_gas_used);
@@ -1622,7 +1627,6 @@ fn encodeExecutionPayloadV4(allocator: Allocator, p: ExecutionPayloadV4) ![]cons
     defer allocator.free(withdrawal_requests);
     const consolidation_requests = try encodeConsolidationRequests(allocator, p.consolidation_requests);
     defer allocator.free(consolidation_requests);
-
     return std.fmt.allocPrint(allocator,
         \\{{
         \\"parentHash":"{s}",
@@ -1647,50 +1651,23 @@ fn encodeExecutionPayloadV4(allocator: Allocator, p: ExecutionPayloadV4) ![]cons
         \\"consolidationRequests":{s}
         \\}}
     , .{
-        parent_hash,          fee_recipient,        state_root,           receipts_root,
-        logs_bloom,           prev_randao,           block_number,         gas_limit,
-        gas_used,             timestamp,             extra_data,           base_fee,
-        block_hash,           transactions,          withdrawals,          blob_gas_used,
-        excess_blob_gas,      deposit_requests,      withdrawal_requests,  consolidation_requests,
+        b.parent_hash,          b.fee_recipient,        b.state_root,           b.receipts_root,
+        b.logs_bloom,           b.prev_randao,           b.block_number,         b.gas_limit,
+        b.gas_used,             b.timestamp,             b.extra_data,           b.base_fee,
+        b.block_hash,           b.transactions,          withdrawals,            blob_gas_used,
+        excess_blob_gas,        deposit_requests,        withdrawal_requests,    consolidation_requests,
     });
 }
 
 fn encodeExecutionPayloadV3(allocator: Allocator, p: ExecutionPayloadV3) ![]const u8 {
-    const parent_hash = try hexEncodeFixed(allocator, &p.parent_hash);
-    defer allocator.free(parent_hash);
-    const fee_recipient = try hexEncodeFixed(allocator, &p.fee_recipient);
-    defer allocator.free(fee_recipient);
-    const state_root = try hexEncodeFixed(allocator, &p.state_root);
-    defer allocator.free(state_root);
-    const receipts_root = try hexEncodeFixed(allocator, &p.receipts_root);
-    defer allocator.free(receipts_root);
-    const logs_bloom = try hexEncodeFixed(allocator, &p.logs_bloom);
-    defer allocator.free(logs_bloom);
-    const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
-    defer allocator.free(prev_randao);
-    const block_number = try hexEncodeQuantity(allocator, p.block_number);
-    defer allocator.free(block_number);
-    const gas_limit = try hexEncodeQuantity(allocator, p.gas_limit);
-    defer allocator.free(gas_limit);
-    const gas_used = try hexEncodeQuantity(allocator, p.gas_used);
-    defer allocator.free(gas_used);
-    const timestamp = try hexEncodeQuantity(allocator, p.timestamp);
-    defer allocator.free(timestamp);
-    const extra_data = try hexEncode(allocator, p.extra_data);
-    defer allocator.free(extra_data);
-    const base_fee = try hexEncodeQuantityU256(allocator, p.base_fee_per_gas);
-    defer allocator.free(base_fee);
-    const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
-    defer allocator.free(block_hash);
-    const transactions = try encodeTransactions(allocator, p.transactions);
-    defer allocator.free(transactions);
+    const b = try encodeBasePayloadFields(allocator, p);
+    defer b.deinit(allocator);
     const withdrawals = try encodeWithdrawals(allocator, p.withdrawals);
     defer allocator.free(withdrawals);
     const blob_gas_used = try hexEncodeQuantity(allocator, p.blob_gas_used);
     defer allocator.free(blob_gas_used);
     const excess_blob_gas = try hexEncodeQuantity(allocator, p.excess_blob_gas);
     defer allocator.free(excess_blob_gas);
-
     return std.fmt.allocPrint(allocator,
         \\{{
         \\"parentHash":"{s}",
@@ -1712,10 +1689,10 @@ fn encodeExecutionPayloadV3(allocator: Allocator, p: ExecutionPayloadV3) ![]cons
         \\"excessBlobGas":"{s}"
         \\}}
     , .{
-        parent_hash,   fee_recipient, state_root,    receipts_root,
-        logs_bloom,    prev_randao,   block_number,  gas_limit,
-        gas_used,      timestamp,     extra_data,    base_fee,
-        block_hash,    transactions,  withdrawals,   blob_gas_used,
+        b.parent_hash,   b.fee_recipient, b.state_root,    b.receipts_root,
+        b.logs_bloom,    b.prev_randao,   b.block_number,  b.gas_limit,
+        b.gas_used,      b.timestamp,     b.extra_data,    b.base_fee,
+        b.block_hash,    b.transactions,  withdrawals,     blob_gas_used,
         excess_blob_gas,
     });
 }
