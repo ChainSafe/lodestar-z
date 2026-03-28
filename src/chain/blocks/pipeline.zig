@@ -129,11 +129,15 @@ pub fn processBlock(
     const fc = ctx.fork_choice orelse return BlockImportError.InternalError;
 
     // Stage 1: Sanity checks.
+    // Note: verifySanity uses fork_choice for parent lookup. If the fork choice
+    // doesn't have the parent (e.g., early in sync or for test states), the parent
+    // check will fail. The block_to_state map is the authoritative fallback.
     const sanity_outcome = try verify_sanity.verifySanity(
         ctx.allocator,
         block_input,
         fc,
         ctx.current_slot,
+        ctx.block_to_state,
         opts,
     );
 
@@ -251,11 +255,17 @@ fn getPreState(
     block_slot: Slot,
 ) ?*CachedBeaconState {
     // Try queued regen (with dedup + priority) first.
+    // Note: queued_regen uses state roots as cache keys, so if parent_root is a
+    // block root (not state root), the lookup will miss and we fall through.
     if (ctx.queued_regen) |qr| {
-        return qr.getPreState(parent_root, block_slot, .block_import) catch null;
+        if (qr.getPreState(parent_root, block_slot, .block_import) catch null) |state| {
+            return state;
+        }
+        // qr missed (parent_root is a block root) — fall through to block_to_state lookup.
     }
 
-    // Fall back to direct state root lookup + block state cache.
+    // Direct state root lookup via block_root → state_root mapping.
+    // This is the correct path when parent_root is a block root (the common case).
     const state_root = ctx.block_to_state.get(parent_root) orelse return null;
     return ctx.block_state_cache.get(state_root);
 }

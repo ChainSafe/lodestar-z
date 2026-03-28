@@ -122,6 +122,7 @@ const metrics_mod = @import("metrics.zig");
 pub const BeaconMetrics = metrics_mod.BeaconMetrics;
 
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
+const BlockSource = chain_mod.blocks.BlockSource;
 const gossip_handler_mod = @import("gossip_handler.zig");
 pub const GossipHandler = gossip_handler_mod.GossipHandler;
 
@@ -658,11 +659,7 @@ pub const SyncCallbackCtx = struct {
         const allocator = node.allocator;
 
         // Determine the active fork for deserialization.
-        const raw_fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
-        const fork_seq = if (@intFromEnum(raw_fork_seq) > @intFromEnum(config_mod.ForkSeq.electra))
-            config_mod.ForkSeq.electra
-        else
-            raw_fork_seq;
+        const fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
 
         const any_signed = AnySignedBeaconBlock.deserialize(
             allocator, .full, fork_seq, block_bytes,
@@ -672,21 +669,13 @@ pub const SyncCallbackCtx = struct {
         };
         defer any_signed.deinit(allocator);
 
-        switch (any_signed) {
-            .full_electra => |blk| {
-                const result = node.importBlock(blk) catch |err| {
-                    if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
-                        std.log.warn("SyncCallbackCtx: import error: {}", .{err});
-                    }
-                    return err;
-                };
-                std.log.info("SyncCallbackCtx: imported slot={d}", .{result.slot});
-            },
-            else => {
-                std.log.warn("SyncCallbackCtx: unsupported block fork", .{});
-                return error.UnsupportedFork;
-            },
-        }
+        const result = node.importBlock(any_signed, .range_sync) catch |err| {
+            if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
+                std.log.warn("SyncCallbackCtx: import error: {}", .{err});
+            }
+            return err;
+        };
+        std.log.info("SyncCallbackCtx: imported slot={d}", .{result.slot});
     }
 
     fn syncRequestBlocksByRange(
@@ -1019,8 +1008,10 @@ pub const BeaconNode = struct {
         api_regen.* = .{};
 
         const block_import_ctx = try allocator.create(BlockImportCallbackCtx);
+        // NOTE: block_import_ctx.node is set after BeaconNode is created (below).
+        // We set a placeholder here so the struct is valid before node is assigned.
         block_import_ctx.* = .{
-            .importer = block_importer,
+            .node = undefined, // filled in after node is created
             .beacon_config = beacon_config,
         };
 
@@ -1141,6 +1132,9 @@ pub const BeaconNode = struct {
 
         // Wire metrics into block importer for EL timing.
         block_importer.metrics = node.metrics;
+
+        // Wire node pointer into block_import_ctx (node wasn't created until now).
+        block_import_ctx.node = node;
 
         // Wire data availability check (will be populated after node is created).
         // Note: The callback is set after BeaconNode.init returns since it needs
@@ -1468,7 +1462,7 @@ pub const BeaconNode = struct {
                 .justified_balances = genesis_balances.items,
             },
             fc_anchor,
-            0, // current_slot = 0 at genesis
+            genesis_slot, // current_slot = genesis_slot (non-zero for checkpoint states)
         );
 
         // Clean up any previous fork choice (re-genesis case).
@@ -1628,14 +1622,15 @@ pub const BeaconNode = struct {
 
     /// Import a signed beacon block through the full pipeline.
     ///
-    /// Decodes the block, runs STFN, caches the post-state, persists to DB,
-    /// and updates the head tracker.
+    /// Fork-polymorphic: accepts any signed beacon block via AnySignedBeaconBlock.
+    /// Delegates to chain.importBlock which routes through the modular pipeline.
     pub fn importBlock(
         self: *BeaconNode,
-        signed_block: *const types.electra.SignedBeaconBlock.Type,
+        any_signed: AnySignedBeaconBlock,
+        source: BlockSource,
     ) !ImportResult {
         const t0 = if (self.io) |io| std.Io.Clock.awake.now(io) else null;
-        const result = try self.block_importer.importBlock(signed_block);
+        const result = try self.chain.importBlock(any_signed, source);
 
         // Notify EL of fork choice update after each block import.
         self.notifyForkchoiceUpdate(result.block_root) catch |err| {
@@ -2374,11 +2369,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                         ) catch continue;
                         defer self.allocator.free(ssz_bytes);
 
-                        const raw_fork_seq2 = self.config.forkSeq(self.head_tracker.head_slot);
-                        const fork_seq = if (@intFromEnum(raw_fork_seq2) > @intFromEnum(config_mod.ForkSeq.electra))
-                            config_mod.ForkSeq.electra
-                        else
-                            raw_fork_seq2;
+                        const fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
                         const any_signed = AnySignedBeaconBlock.deserialize(
                             self.allocator, .full, fork_seq, ssz_bytes,
                         ) catch |err| {
@@ -2387,25 +2378,20 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                         };
                         defer any_signed.deinit(self.allocator);
 
-                        switch (any_signed) {
-                            .full_electra => |blk| {
-                                const result = self.importBlock(blk) catch |err| {
-                                    if (err == error.UnknownParentBlock) {
-                                        self.queueOrphanBlock(blk, ssz_bytes);
-                                    } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
-                                        std.log.warn("Gossip block import: {}", .{err});
-                                    }
-                                    continue;
-                                };
-                                self.processPendingChildren(result.block_root);
-                                std.log.info("GOSSIP BLOCK IMPORTED slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                                    result.slot,
-                                    result.block_root[0], result.block_root[1],
-                                    result.block_root[2], result.block_root[3],
-                                });
-                            },
-                            else => {},
-                        }
+                        const result = self.importBlock(any_signed, .gossip) catch |err| {
+                            if (err == error.UnknownParentBlock) {
+                                self.queueOrphanBlock(any_signed, ssz_bytes);
+                            } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
+                                std.log.warn("Gossip block import: {}", .{err});
+                            }
+                            continue;
+                        };
+                        self.processPendingChildren(result.block_root);
+                        std.log.info("GOSSIP BLOCK IMPORTED slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                            result.slot,
+                            result.block_root[0], result.block_root[1],
+                            result.block_root[2], result.block_root[3],
+                        });
                     },
                     else => {},
                 }
@@ -2696,11 +2682,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             };
             defer self.allocator.free(ssz_bytes);
 
-            const raw_fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
-            const fork_seq = if (@intFromEnum(raw_fork_seq) > @intFromEnum(config_mod.ForkSeq.electra))
-                config_mod.ForkSeq.electra
-            else
-                raw_fork_seq;
+            const fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
             const any_signed = AnySignedBeaconBlock.deserialize(
                 self.allocator, .full, fork_seq, ssz_bytes,
             ) catch |err| {
@@ -2709,25 +2691,20 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             };
             defer any_signed.deinit(self.allocator);
 
-            switch (any_signed) {
-                .full_electra => |blk| {
-                    const result = self.importBlock(blk) catch |err| {
-                        if (err == error.UnknownParentBlock) {
-                            self.queueOrphanBlock(blk, ssz_bytes);
-                        } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
-                            std.log.warn("Gossip block import: {}", .{err});
-                        }
-                        return;
-                    };
-                    self.processPendingChildren(result.block_root);
-                    std.log.info("GOSSIP BLOCK IMPORTED slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                        result.slot,
-                        result.block_root[0], result.block_root[1],
-                        result.block_root[2], result.block_root[3],
-                    });
-                },
-                else => {},
-            }
+            const result = self.importBlock(any_signed, .gossip) catch |err| {
+                if (err == error.UnknownParentBlock) {
+                    self.queueOrphanBlock(any_signed, ssz_bytes);
+                } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
+                    std.log.warn("Gossip block import: {}", .{err});
+                }
+                return;
+            };
+            self.processPendingChildren(result.block_root);
+            std.log.info("GOSSIP BLOCK IMPORTED slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                result.slot,
+                result.block_root[0], result.block_root[1],
+                result.block_root[2], result.block_root[3],
+            });
         }
 
         /// Handle a gossip data_column_sidecar message: decompress, validate, import.
@@ -2847,13 +2824,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                                 blocks_received + 1, decoded.ssz_bytes.len, ctx[0], ctx[1], ctx[2], ctx[3],
                             });
                         }
-                        // Cap fork_seq at electra for import — fulu blocks are structurally
-                        // identical to electra and importBlock only handles electra type.
-                        const raw_fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
-                        const fork_seq = if (@intFromEnum(raw_fork_seq) > @intFromEnum(config_mod.ForkSeq.electra))
-                            config_mod.ForkSeq.electra
-                        else
-                            raw_fork_seq;
+                        const fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
                         const any_signed = AnySignedBeaconBlock.deserialize(
                             self.allocator, .full, fork_seq, decoded.ssz_bytes,
                         ) catch |err| {
@@ -2862,24 +2833,16 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                             continue;
                         };
                         defer any_signed.deinit(self.allocator);
-                        switch (any_signed) {
-                            .full_electra => |blk| {
-                                const result = self.importBlock(blk) catch |err| {
-                                    std.log.warn("BlocksByRange: import error at block {d}: {}", .{ blocks_received + 1, err });
-                                    blocks_received += 1;
-                                    continue;
-                                };
-                                std.log.info("BlocksByRange: imported slot {d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                                    result.slot,
-                                    result.block_root[0], result.block_root[1],
-                                    result.block_root[2], result.block_root[3],
-                                });
-                            },
-
-                            else => {
-                                std.log.warn("BlocksByRange: unsupported block fork variant, skipping", .{});
-                            },
-                        }
+                        const result = self.importBlock(any_signed, .range_sync) catch |err| {
+                            std.log.warn("BlocksByRange: import error at block {d}: {}", .{ blocks_received + 1, err });
+                            blocks_received += 1;
+                            continue;
+                        };
+                        std.log.info("BlocksByRange: imported slot {d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                            result.slot,
+                            result.block_root[0], result.block_root[1],
+                            result.block_root[2], result.block_root[3],
+                        });
                     }
                     blocks_received += 1;
 
@@ -2905,35 +2868,28 @@ fn parseIp4(s: []const u8) ?[4]u8 {
     /// BeaconBlocksByRoot during the next sync cycle.
     fn queueOrphanBlock(
         self: *BeaconNode,
-        blk: *const types.electra.SignedBeaconBlock.Type,
+        any_signed: AnySignedBeaconBlock,
         ssz_bytes: []const u8,
     ) void {
-        // Compute the block root for dedup.
-        var body_root: [32]u8 = undefined;
-        types.electra.BeaconBlockBody.hashTreeRoot(
-            self.allocator, &blk.message.body, &body_root,
-        ) catch return;
-        const hdr = types.phase0.BeaconBlockHeader.Type{
-            .slot = blk.message.slot,
-            .proposer_index = blk.message.proposer_index,
-            .parent_root = blk.message.parent_root,
-            .state_root = blk.message.state_root,
-            .body_root = body_root,
-        };
+        // Compute the block root using the fork-polymorphic interface.
+        const beacon_block = any_signed.beaconBlock();
+        const block_slot = beacon_block.slot();
+        const parent_root = beacon_block.parentRoot().*;
+
         var block_root: [32]u8 = undefined;
-        types.phase0.BeaconBlockHeader.hashTreeRoot(&hdr, &block_root) catch return;
+        beacon_block.hashTreeRoot(self.allocator, &block_root) catch return;
 
         const added = self.unknown_block_sync.addPendingBlock(
             block_root,
-            blk.message.parent_root,
-            blk.message.slot,
+            parent_root,
+            block_slot,
             ssz_bytes,
         ) catch return;
 
         if (added) {
             std.log.info("Queued orphan block slot={d} parent={s}... ({d} pending)", .{
-                blk.message.slot,
-                &std.fmt.bytesToHex(blk.message.parent_root[0..4], .lower),
+                block_slot,
+                &std.fmt.bytesToHex(parent_root[0..4], .lower),
                 self.unknown_block_sync.pendingCount(),
             });
         }
@@ -2941,15 +2897,15 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         // Also feed the unknown chain sync — it tracks the parent root as
         // an unknown chain and builds backwards to our fork choice.
         self.unknown_chain_sync.onUnknownBlockInput(
-            blk.message.slot,
+            block_slot,
             block_root,
-            blk.message.parent_root,
+            parent_root,
             null, // peer_id not available from gossip context
         ) catch {};
 
         // If the parent root is truly unknown, start a chain for it.
         self.unknown_chain_sync.onUnknownBlockRoot(
-            blk.message.parent_root,
+            parent_root,
             null,
         ) catch {};
     }
@@ -3338,8 +3294,9 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             std.log.warn("No head state available for state root computation at slot={d}", .{slot});
         }
 
-        // 4. Import the block locally
-        const import_result = try self.importBlock(signed_block);
+        // 4. Import the block locally — wrap in fork-polymorphic type
+        const any_signed_produced = AnySignedBeaconBlock{ .full_electra = signed_block };
+        const import_result = try self.importBlock(any_signed_produced, .api);
 
         std.log.info("Block produced and imported: slot={d} root={s}...", .{
             slot,
@@ -3473,11 +3430,7 @@ var gossip_node: ?*BeaconNode = null;
 fn gossipImportBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
     // Decompress is already done by GossipHandler; block_bytes are raw SSZ.
-    const raw_fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
-    const fork_seq = if (@intFromEnum(raw_fork_seq) > @intFromEnum(config_mod.ForkSeq.electra))
-        config_mod.ForkSeq.electra
-    else
-        raw_fork_seq;
+    const fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
     const any_signed = AnySignedBeaconBlock.deserialize(
         node.allocator, .full, fork_seq, block_bytes,
     ) catch |err| {
@@ -3486,21 +3439,16 @@ fn gossipImportBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerro
     };
     defer any_signed.deinit(node.allocator);
 
-    switch (any_signed) {
-        .full_electra => |blk| {
-            const result = node.importBlock(blk) catch |err| {
-                if (err == error.UnknownParentBlock) {
-                    node.queueOrphanBlock(blk, block_bytes);
-                } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
-                    std.log.warn("Gossip block import: {}", .{err});
-                }
-                return err;
-            };
-            node.processPendingChildren(result.block_root);
-            std.log.info("GOSSIP BLOCK IMPORTED (via handler) slot={d}", .{result.slot});
-        },
-        else => {},
-    }
+    const result = node.importBlock(any_signed, .gossip) catch |err| {
+        if (err == error.UnknownParentBlock) {
+            node.queueOrphanBlock(any_signed, block_bytes);
+        } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
+            std.log.warn("Gossip block import: {}", .{err});
+        }
+        return err;
+    };
+    node.processPendingChildren(result.block_root);
+    std.log.info("GOSSIP BLOCK IMPORTED (via handler) slot={d}", .{result.slot});
 }
 
 
@@ -4228,11 +4176,11 @@ fn reqRespOnPeerStatus(ptr: *anyopaque, status: StatusMessage.Type) void {
 // — glue between ApiContext.BlockImportCallback and BlockImporter
 // ---------------------------------------------------------------------------
 
-/// Wraps a BlockImporter pointer together with the BeaconConfig needed to
-/// compute the active fork for SSZ deserialization. One instance per node,
-/// owned by BeaconNode alongside api_context.
+/// Wraps a BeaconNode pointer for the API import callback.
+/// The BeaconNode provides both the block import path and the beacon config
+/// needed to compute the active fork for SSZ deserialization.
 pub const BlockImportCallbackCtx = struct {
-    importer: *BlockImporter,
+    node: *BeaconNode,
     beacon_config: *const BeaconConfig,
 };
 
@@ -4266,26 +4214,18 @@ fn getHeadStateCallback(ptr: *anyopaque) ?*CachedBeaconState {
 /// AnySignedBeaconBlock.
 fn importBlockCallback(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
     const cb_ctx: *BlockImportCallbackCtx = @ptrCast(@alignCast(ptr));
-    const importer = cb_ctx.importer;
-    const allocator = importer.allocator;
+    const node = cb_ctx.node;
+    const allocator = node.allocator;
 
     // Infer fork from head slot.
-    const head_slot = importer.head_tracker.head_slot;
+    const head_slot = node.head_tracker.head_slot;
     const fork_seq = cb_ctx.beacon_config.forkSeq(head_slot);
 
     const any_signed = try AnySignedBeaconBlock.deserialize(allocator, .full, fork_seq, block_bytes);
     defer any_signed.deinit(allocator);
 
-    // Dispatch to importBlock. BlockImporter accepts electra blocks;
-    // for pre-electra forks we fall through to UnsupportedFork (future work).
-    switch (any_signed) {
-        .full_electra => |blk| _ = try importer.importBlock(blk),
-        .full_fulu => |blk| {
-            const electra_blk: *const types.electra.SignedBeaconBlock.Type = @ptrCast(blk);
-            _ = try importer.importBlock(electra_blk);
-        },
-        else => return error.UnsupportedFork,
-    }
+    // Fork-polymorphic import — chain.importBlock handles all forks.
+    _ = try node.importBlock(any_signed, .api);
 }
 
 // ---------------------------------------------------------------------------
