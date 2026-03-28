@@ -16,7 +16,16 @@ const HYSTERESIS_INCREMENT = preset.EFFECTIVE_BALANCE_INCREMENT / preset.HYSTERE
 const DOWNWARD_THRESHOLD = HYSTERESIS_INCREMENT * preset.HYSTERESIS_DOWNWARD_MULTIPLIER;
 const UPWARD_THRESHOLD = HYSTERESIS_INCREMENT * preset.HYSTERESIS_UPWARD_MULTIPLIER;
 
-/// this function also update EpochTransitionCache
+/// Process effective balance updates with hysteresis for all validators.
+///
+/// Security note (CL-2025-07): The Lighthouse hysteresis bug was caused by effective balance
+/// updates running with stale balance data. Our correctness depends on:
+/// 1. `processPendingConsolidations` running BEFORE this function (cache.balances updated)
+/// 2. `cache.balances` reflecting consolidation effects before this reads it
+/// 3. This function being called exactly once per epoch (not inside a single-pass loop)
+/// Reference: https://github.com/sigp/beacon-fuzz/blob/master/reports/CL-2025-07.md
+///
+/// This function also updates EpochTransitionCache
 pub fn processEffectiveBalanceUpdates(
     comptime fork: ForkSeq,
     allocator: Allocator,

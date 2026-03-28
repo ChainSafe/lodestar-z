@@ -329,3 +329,47 @@ test "formatTopic roundtrip for subnet topic" {
     try testing.expectEqual(GossipTopicType.beacon_attestation, parsed.topic_type);
     try testing.expectEqual(@as(?u8, 42), parsed.subnet_id);
 }
+
+test "fuzz resilience: extra slashes in topic string" {
+    // Extra slash after encoding suffix.
+    try testing.expectEqual(@as(?GossipTopic, null), parseTopic("/eth2/deadbeef/beacon_block/ssz_snappy/"));
+    // Extra slash inside topic name — parsed as truncated encoding suffix.
+    try testing.expectEqual(@as(?GossipTopic, null), parseTopic("/eth2/deadbeef/beacon_block//ssz_snappy"));
+    // Double slash after prefix.
+    try testing.expectEqual(@as(?GossipTopic, null), parseTopic("/eth2//deadbeef/beacon_block/ssz_snappy"));
+    // Leading double slash.
+    try testing.expectEqual(@as(?GossipTopic, null), parseTopic("//eth2/deadbeef/beacon_block/ssz_snappy"));
+}
+
+test "fuzz resilience: very long topic strings (>1KB)" {
+    // A topic string well over 1 KB should not panic — it must return null.
+    var long_buf: [2048]u8 = undefined;
+    // Fill with a plausible-looking but invalid topic.
+    const prefix = "/eth2/deadbeef/";
+    @memcpy(long_buf[0..prefix.len], prefix);
+    @memset(long_buf[prefix.len..], 'a');
+    const long_topic = long_buf[0..2048];
+    try testing.expectEqual(@as(?GossipTopic, null), parseTopic(long_topic));
+}
+
+test "fuzz resilience: non-UTF8 bytes in topic string" {
+    // Topics containing raw non-ASCII bytes must not panic; they should return null.
+    // These bytes are invalid hex and will fail fork_digest parsing or topic name matching.
+    const non_utf8_topic = "/eth2/\xff\xfe\xfd\xfc/beacon_block/ssz_snappy";
+    try testing.expectEqual(@as(?GossipTopic, null), parseTopic(non_utf8_topic));
+
+    // Non-ASCII in topic name.
+    const non_utf8_name = "/eth2/deadbeef/beacon_\x80block/ssz_snappy";
+    try testing.expectEqual(@as(?GossipTopic, null), parseTopic(non_utf8_name));
+
+    // Null byte in topic.
+    const null_byte_topic = "/eth2/deadbeef/beacon_block\x00/ssz_snappy";
+    try testing.expectEqual(@as(?GossipTopic, null), parseTopic(null_byte_topic));
+}
+
+test "fuzz resilience: missing topic name (empty segment)" {
+    // Empty topic name segment between the two slashes after fork digest.
+    try testing.expectEqual(@as(?GossipTopic, null), parseTopic("/eth2/deadbeef//ssz_snappy"));
+    // Only prefix and fork digest, no further segments.
+    try testing.expectEqual(@as(?GossipTopic, null), parseTopic("/eth2/deadbeef/"));
+}
