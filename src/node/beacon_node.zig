@@ -2371,17 +2371,17 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             // priority-ordered processing instead of importing inline.
             // This ensures blocks are processed before attestations, etc.
             if (self.beacon_processor) |bp| {
-                // Transfer ownership: the processor handler will free ssz_bytes
-                // and deinit any_signed after import. Don't defer free here.
+                // Safety: AnySignedBeaconBlock.deserialize deep-copies all fields from
+                // ssz_bytes via allocator — no slice in any_signed points back into ssz_bytes.
+                // It is therefore safe to free ssz_bytes immediately after deserialization,
+                // before the processor ingests the block. No UAF risk.
+                self.allocator.free(ssz_bytes);
                 bp.ingest(.{ .gossip_block = .{
                     .peer_id = 0, // TODO: wire real peer_id from gossipsub event
                     .message_id = 0,
                     .block = any_signed,
                     .seen_timestamp_ns = 0, // TODO: use Io clock when available
                 } });
-                // SSZ bytes ownership: store in a side buffer for the handler.
-                // For now, free here — the handler uses any_signed which owns the data.
-                self.allocator.free(ssz_bytes);
                 return;
             }
 

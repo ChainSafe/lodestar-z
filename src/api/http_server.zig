@@ -822,7 +822,7 @@ pub const HttpServer = struct {
             try buf.appendSlice(alloc, if (v) ",\"execution_optimistic\":true" else ",\"execution_optimistic\":false");
         }
         try buf.appendSlice(alloc, "}");
-        return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc) };
+        return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc), .meta = handler_res.meta };
     }
 
     fn hGetSyncDuties(self: *HttpServer, dc: DispatchContext) !HandlerResult {
@@ -866,7 +866,7 @@ pub const HttpServer = struct {
         } else {
             try buf.appendSlice(alloc, "]}");
         }
-        return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc) };
+        return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc), .meta = handler_res.meta };
     }
 
     fn hGetSpec(self: *HttpServer, _: DispatchContext) !HandlerResult {
@@ -906,14 +906,17 @@ pub const HttpServer = struct {
             break :blk null;
         } else null;
         const handler_res = try handlers.validator.produceBlock(self.api_context, slot, randao_reveal, graffiti);
+        // Populate Eth-Consensus-Version header from the fork name returned with the block data.
+        var block_meta = handler_res.meta;
+        block_meta.version = response_meta.Fork.fromString(handler_res.data.fork);
         if (dc.format == .ssz) {
             const ssz_copy = try alloc.dupe(u8, handler_res.data.ssz_bytes);
-            return .{ .status = 200, .content_type = "application/octet-stream", .body = ssz_copy, .meta = handler_res.meta };
+            return .{ .status = 200, .content_type = "application/octet-stream", .body = ssz_copy, .meta = block_meta };
         }
         const body_json = try std.fmt.allocPrint(alloc,
             "{{\"data\":\"0x{s}\",\"version\":\"{s}\"}}",
             .{ std.fmt.fmtSliceHexLower(handler_res.data.ssz_bytes), handler_res.data.fork });
-        return .{ .status = 200, .content_type = "application/json", .body = body_json, .meta = handler_res.meta };
+        return .{ .status = 200, .content_type = "application/json", .body = body_json, .meta = block_meta };
     }
 
     fn hGetAttestationData(self: *HttpServer, dc: DispatchContext) !HandlerResult {
@@ -932,7 +935,7 @@ pub const HttpServer = struct {
                 d.source_epoch, std.fmt.bytesToHex(&d.source_root, .lower),
                 d.target_epoch, std.fmt.bytesToHex(&d.target_root, .lower),
             });
-        return .{ .status = 200, .content_type = "application/json", .body = body_json };
+        return .{ .status = 200, .content_type = "application/json", .body = body_json, .meta = handler_res.meta };
     }
 
     fn hGetAggregateAttestation(self: *HttpServer, dc: DispatchContext) !HandlerResult {
@@ -947,7 +950,7 @@ pub const HttpServer = struct {
         const raw_json = try handlers.validator.getAggregateAttestation(self.api_context, slot, data_root);
         defer alloc.free(raw_json);
         const envelope = try std.fmt.allocPrint(alloc, "{{\"data\":{s}}}", .{raw_json});
-        return .{ .status = 200, .content_type = "application/json", .body = envelope };
+        return .{ .status = 200, .content_type = "application/json", .body = envelope, .meta = .{} };
     }
 
     fn hPublishAggregateAndProofs(self: *HttpServer, dc: DispatchContext) !HandlerResult {
@@ -969,7 +972,7 @@ pub const HttpServer = struct {
         const raw_json = try handlers.validator.getSyncCommitteeContribution(self.api_context, slot, subcommittee_index, block_root);
         defer alloc.free(raw_json);
         const envelope = try std.fmt.allocPrint(alloc, "{{\"data\":{s}}}", .{raw_json});
-        return .{ .status = 200, .content_type = "application/json", .body = envelope };
+        return .{ .status = 200, .content_type = "application/json", .body = envelope, .meta = .{} };
     }
 
     fn hPublishContributionAndProofs(self: *HttpServer, dc: DispatchContext) !HandlerResult {
@@ -1098,9 +1101,15 @@ pub const HttpServer = struct {
 
     fn hGetBlobSidecars(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
-        _ = dc.match.getParam("block_id") orelse return error.InvalidBlockId;
-        const body = try alloc.dupe(u8, "{\"data\":[]}");
-        return .{ .status = 200, .content_type = "application/json", .body = body };
+        const block_id_str = dc.match.getParam("block_id") orelse return error.InvalidBlockId;
+        const block_id = try types.BlockId.parse(block_id_str);
+        // TODO: wire Deneb blob DB lookup — parse optional ?indices query param and filter.
+        // When BeaconDB.getBlobSidecars is plumbed through ApiContext, call:
+        //   handlers.beacon.getBlobSidecars(self.api_context, block_id, indices_opt)
+        // and return the raw SSZ-decoded blob sidecar list as JSON.
+        _ = block_id;
+        _ = alloc;
+        return error.NotImplemented;
     }
 
     // TODO(stub): returns full block data, not an actual blinded block.
