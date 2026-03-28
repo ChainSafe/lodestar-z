@@ -3446,7 +3446,7 @@ test "checkHealth: transport error marks EL offline" {
     // Use an engine that will get an error from the transport
     // We need a custom transport that errors — use a mock engine that fails
     const ErrorTransport = struct {
-        fn send(_: *anyopaque, _: []const u8, _: []const Header, _: []const u8) anyerror![]const u8 {
+        fn send(_: *anyopaque, _: HttpMethod, _: []const u8, _: []const Header, _: []const u8) anyerror![]const u8 {
             return error.ConnectionRefused;
         }
     };
