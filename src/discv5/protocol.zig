@@ -574,16 +574,24 @@ pub const Protocol = struct {
         );
         defer self.alloc.free(whoareyou_packet);
 
+        // Build challenge_data from plaintext components:
+        // challenge_data = masking_iv (16) || static_header (23) || authdata (24) = 63 bytes
+        // Per spec: challenge_data must be the plaintext bytes, NOT the masked wire bytes.
+        const header_raw_cd = try buildHeaderRaw(self.alloc, packet.FLAG_WHOAREYOU, request_nonce, &authdata);
+        defer self.alloc.free(header_raw_cd);
+        // total plaintext = 16 (masking_iv) + header_raw_cd.len
+        const cd_total = 16 + header_raw_cd.len;
         var s = Session{
             .node_id = src_id,
             .state = .whoareyou_sent,
             .challenge_data = undefined,
-            .challenge_data_len = @min(whoareyou_packet.len, CHALLENGE_DATA_SIZE),
+            .challenge_data_len = @min(cd_total, CHALLENGE_DATA_SIZE),
             .initiator_key = undefined,
             .recipient_key = undefined,
             .next_nonce = undefined,
         };
-        @memcpy(s.challenge_data[0..s.challenge_data_len], whoareyou_packet[0..s.challenge_data_len]);
+        @memcpy(s.challenge_data[0..16], &masking_iv);
+        @memcpy(s.challenge_data[16..s.challenge_data_len], header_raw_cd[0 .. s.challenge_data_len - 16]);
         try self.sessions.put(src_id, s);
 
         try t.send(dest, whoareyou_packet);
