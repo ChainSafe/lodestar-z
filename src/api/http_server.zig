@@ -9,6 +9,7 @@
 //!   try server.serve(io);
 
 const std = @import("std");
+const builtin = @import("builtin");
 const http = std.http;
 const net = std.Io.net;
 const Io = std.Io;
@@ -152,18 +153,21 @@ pub const HttpServer = struct {
         // Set a receive timeout to guard against Slowloris-style attacks.
         // A client that does not send a complete request head within
         // recv_timeout_sec seconds will have the connection closed.
-        const tv = std.os.linux.timeval{
-            .sec = recv_timeout_sec,
-            .usec = 0,
-        };
-        std.posix.setsockopt(
-            stream.socket.handle,
-            std.os.linux.SOL.SOCKET,
-            std.os.linux.SO.RCVTIMEO,
-            std.mem.asBytes(&tv),
-        ) catch |err| {
-            log.warn("setsockopt SO_RCVTIMEO failed: {s}", .{@errorName(err)});
-        };
+        // Guard SO_RCVTIMEO to platforms that expose POSIX socket options.
+        if (comptime builtin.os.tag != .wasi) {
+            const tv = std.posix.timeval{
+                .sec = recv_timeout_sec,
+                .usec = 0,
+            };
+            std.posix.setsockopt(
+                stream.socket.handle,
+                std.posix.SOL.SOCKET,
+                std.posix.SO.RCVTIMEO,
+                std.mem.asBytes(&tv),
+            ) catch |err| {
+                log.warn("setsockopt SO_RCVTIMEO failed: {s}", .{@errorName(err)});
+            };
+        }
 
         var send_buf: [8192]u8 = undefined;
         var recv_buf: [8192]u8 = undefined;
@@ -1119,16 +1123,25 @@ pub const HttpServer = struct {
         };
     }
 
-    fn hGetBlockRewards(_: *HttpServer, _: DispatchContext) !HandlerResult {
-        return error.NotImplemented;
+    fn hGetBlockRewards(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const block_id_str = dc.match.getParam("block_id") orelse return error.InvalidBlockId;
+        const block_id = try types.BlockId.parse(block_id_str);
+        const result = try handlers.beacon.getBlockRewards(self.api_context, block_id);
+        return self.makeJsonResult(types.BlockRewards, result);
     }
 
-    fn hGetAttestationRewards(_: *HttpServer, _: DispatchContext) !HandlerResult {
-        return error.NotImplemented;
+    fn hGetAttestationRewards(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const epoch_str = dc.match.getParam("epoch") orelse return error.InvalidRequest;
+        const epoch = std.fmt.parseInt(u64, epoch_str, 10) catch return error.InvalidRequest;
+        const result = try handlers.beacon.getAttestationRewards(self.api_context, epoch, &[_]u64{});
+        return self.makeJsonResult(types.AttestationRewardsData, result);
     }
 
-    fn hGetSyncCommitteeRewards(_: *HttpServer, _: DispatchContext) !HandlerResult {
-        return error.NotImplemented;
+    fn hGetSyncCommitteeRewards(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const block_id_str = dc.match.getParam("block_id") orelse return error.InvalidBlockId;
+        const block_id = try types.BlockId.parse(block_id_str);
+        const result = try handlers.beacon.getSyncCommitteeRewards(self.api_context, block_id, &[_]u64{});
+        return self.makeJsonResult([]const types.SyncCommitteeReward, result);
     }
 
     fn hPrepareBeaconProposer(self: *HttpServer, dc: DispatchContext) !HandlerResult {
@@ -1309,6 +1322,17 @@ pub const HttpServer = struct {
         body: ?[]const u8,
     ) !HttpResponse {
 
+        // OPTIONS (CORS preflight) — check before method validation so it isn't
+        // rejected as 405.
+        if (std.mem.eql(u8, method, "OPTIONS")) {
+            return .{
+                .status = 204,
+                .status_text = "No Content",
+                .content_type = "text/plain",
+                .body = "",
+            };
+        }
+
         const route_method: routes_mod.HttpMethod = if (std.mem.eql(u8, method, "GET"))
             .GET
         else if (std.mem.eql(u8, method, "POST"))
@@ -1322,16 +1346,6 @@ pub const HttpServer = struct {
                 .content_type = "application/json",
                 .body = "{\"statusCode\":405,\"message\":\"Method not allowed\"}",
             };
-
-        // OPTIONS (CORS preflight).
-        if (std.mem.eql(u8, method, "OPTIONS")) {
-            return .{
-                .status = 204,
-                .status_text = "No Content",
-                .content_type = "text/plain",
-                .body = "",
-            };
-        }
 
         const clean_path, _ = splitTarget(path);
 
@@ -1354,11 +1368,13 @@ pub const HttpServer = struct {
             const api_err = error_response.fromZigError(err);
             var err_buf: [256]u8 = undefined;
             const err_json = api_err.formatJson(&err_buf);
+            // Dupe onto heap — err_buf is stack-local and would dangle after return.
+            const err_json_heap = self.allocator.dupe(u8, err_json) catch err_json;
             return .{
                 .status = api_err.code.statusCode(),
                 .status_text = api_err.code.phrase(),
                 .content_type = "application/json",
-                .body = err_json,
+                .body = err_json_heap,
             };
         };
 

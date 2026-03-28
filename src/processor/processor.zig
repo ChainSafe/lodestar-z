@@ -126,10 +126,10 @@ pub const BeaconProcessor = struct {
 
         const wtype = item.workType();
 
+        const t0 = std.time.nanoTimestamp();
         self.handler(item, self.handler_context);
-
-        // TODO: Add timing when std.Io clock is available.
-        const elapsed: u64 = 0;
+        const t1 = std.time.nanoTimestamp();
+        const elapsed: u64 = if (t1 > t0) @intCast(t1 - t0) else 0;
         self.metrics.recordProcessed(wtype, elapsed);
         self.metrics.items_dispatched += 1;
 
