@@ -51,6 +51,7 @@ const ImportContext = import_block.ImportContext;
 
 const QueuedStateRegen = @import("../queued_regen.zig").QueuedStateRegen;
 const HeadTracker = @import("../block_import.zig").HeadTracker;
+const ReprocessQueue = @import("../reprocess.zig").ReprocessQueue;
 
 const Slot = consensus_types.primitive.Slot.Type;
 
@@ -62,6 +63,17 @@ const Slot = consensus_types.primitive.Slot.Type;
 ///
 /// Created once by the Chain and reused for each block import.
 /// Contains references to all chain components needed by the pipeline.
+///
+/// Relationship to ImportContext (P1-9 note):
+/// `ImportContext` is a strict subset of `PipelineContext`. The import stage
+/// (import_block.zig) only needs the fields that appear in ImportContext —
+/// it doesn't need `execution_verifier` (handled before import) or
+/// `current_slot` (used only for sanity/DA checks). The conversion via
+/// `toImportContext()` is intentional: it gives the import stage a focused
+/// interface and avoids import_block.zig depending on the full pipeline type
+/// (which would create a circular import). If import_block gains new deps,
+/// they should be added to ImportContext and toImportContext(), not to the
+/// full PipelineContext.
 pub const PipelineContext = struct {
     allocator: Allocator,
 
@@ -91,6 +103,10 @@ pub const PipelineContext = struct {
     // -- Clock --
     current_slot: Slot,
 
+    // -- Reprocessing -- (P1-10 fix)
+    /// When set, blocks pending reprocessing are notified after successful import.
+    reprocess_queue: ?*ReprocessQueue = null,
+
     /// Convert to ImportContext for the import stage.
     pub fn toImportContext(self: PipelineContext) ImportContext {
         return .{
@@ -103,6 +119,7 @@ pub const PipelineContext = struct {
             .head_tracker = self.head_tracker,
             .block_to_state = self.block_to_state,
             .event_callback = self.event_callback,
+            .reprocess_queue = self.reprocess_queue,
         };
     }
 };
@@ -249,25 +266,33 @@ fn processSingleForBatch(
 }
 
 /// Get the pre-state for a block, trying queued regen first.
+///
+/// `parent_root` is the BLOCK root of the parent block (i.e., block.parent_root).
+/// QueuedStateRegen expects a STATE root as its cache key. We translate via the
+/// block_to_state map first, then pass the state_root to queued_regen.
+///
+/// Without the translation, qr.getPreState would always miss (block_root ≠ state_root),
+/// making the queued_regen fast path dead code (P0-2 / INT-4 fix).
 fn getPreState(
     ctx: PipelineContext,
     parent_root: [32]u8,
     block_slot: Slot,
 ) ?*CachedBeaconState {
+    // Translate block root → state root for cache lookups.
+    // block_to_state maps parent_block_root → parent_state_root.
+    const parent_state_root = ctx.block_to_state.get(parent_root) orelse return null;
+
     // Try queued regen (with dedup + priority) first.
-    // Note: queued_regen uses state roots as cache keys, so if parent_root is a
-    // block root (not state root), the lookup will miss and we fall through.
+    // Now passing the correct state_root (not block_root), so cache lookups work.
     if (ctx.queued_regen) |qr| {
-        if (qr.getPreState(parent_root, block_slot, .block_import) catch null) |state| {
+        if (qr.getPreState(parent_state_root, block_slot, .block_import) catch null) |state| {
             return state;
         }
-        // qr missed (parent_root is a block root) — fall through to block_to_state lookup.
+        // qr missed (state not in regen cache) — fall through to block_state_cache.
     }
 
-    // Direct state root lookup via block_root → state_root mapping.
-    // This is the correct path when parent_root is a block root (the common case).
-    const state_root = ctx.block_to_state.get(parent_root) orelse return null;
-    return ctx.block_state_cache.get(state_root);
+    // Direct state root lookup in block state cache.
+    return ctx.block_state_cache.get(parent_state_root);
 }
 
 // ---------------------------------------------------------------------------

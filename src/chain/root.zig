@@ -15,7 +15,9 @@ pub const gossip_validation = @import("gossip_validation.zig");
 
 // Chain struct and types
 pub const Chain = chain.Chain;
-pub const BlockInput = chain_types.BlockInput;
+// BlockInput is now consolidated to blocks/types.BlockInput (P1-7 fix).
+pub const BlockInput = blocks.BlockInput;
+pub const BlockSource = blocks.BlockSource;
 pub const HeadInfo = chain_types.HeadInfo;
 pub const SyncStatus = chain_types.SyncStatus;
 pub const EventCallback = chain_types.EventCallback;
@@ -23,7 +25,8 @@ pub const SseEvent = chain_types.SseEvent;
 
 // Existing re-exports (kept for backward compatibility)
 pub const HeadTracker = block_import.HeadTracker;
-pub const ImportResult = chain_types.ImportResult;
+// ImportResult is now consolidated to blocks/types.ImportResult (P1-8 fix).
+pub const ImportResult = blocks.ImportResult;
 pub const ImportError = block_import.ImportError;
 pub const OpPool = op_pool.OpPool;
 pub const SeenCache = seen_cache.SeenCache;
@@ -62,7 +65,7 @@ pub const shuffling_cache = @import("shuffling_cache.zig");
 pub const beacon_proposer_cache = @import("beacon_proposer_cache.zig");
 pub const prepare_next_slot = @import("prepare_next_slot.zig");
 pub const archive_store = @import("archive_store.zig");
-pub const block_verification = @import("block_verification.zig");
+// block_verification.zig removed — superseded by blocks/ pipeline (P1-6 fix).
 pub const reprocess = @import("reprocess.zig");
 
 // Re-exports
@@ -74,7 +77,7 @@ pub const ArchiveStore = archive_store.ArchiveStore;
 pub const ReprocessQueue = reprocess.ReprocessQueue;
 pub const PendingBlock = reprocess.PendingBlock;
 pub const PendingReason = reprocess.PendingReason;
-pub const BlockVerification = block_verification;
+// BlockVerification removed — use blocks/pipeline.zig instead.
 
 // Queued state regeneration
 pub const queued_regen = @import("queued_regen.zig");
@@ -94,10 +97,12 @@ pub const verifyDataColumnSidecar = blob_kzg_verification.verifyDataColumnSideca
 pub const blocks = @import("blocks/root.zig");
 pub const BlockPipeline = blocks.pipeline;
 pub const PipelineContext = blocks.PipelineContext;
-pub const PipelineBlockInput = blocks.BlockInput;
-pub const PipelineBlockSource = blocks.BlockSource;
+// PipelineBlockInput / PipelineImportResult are now consolidated to the primary names.
+// Keep aliases for backward compatibility.
+pub const PipelineBlockInput = blocks.BlockInput; // = BlockInput (same type now)
+pub const PipelineBlockSource = blocks.BlockSource; // = BlockSource (same type now)
 pub const PipelineImportOpts = blocks.ImportBlockOpts;
-pub const PipelineImportResult = blocks.ImportResult;
+pub const PipelineImportResult = blocks.ImportResult; // = ImportResult (same type now)
 pub const VerifiedBlock = blocks.VerifiedBlock;
 pub const ExecutionStatus = blocks.ExecutionStatus;
 pub const PipelineDataAvailabilityStatus = blocks.DataAvailabilityStatus;

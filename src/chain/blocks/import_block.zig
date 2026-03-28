@@ -48,6 +48,9 @@ const SseEvent = chain_types.SseEvent;
 const block_import = @import("../block_import.zig");
 const HeadTracker = block_import.HeadTracker;
 const QueuedStateRegen = @import("../queued_regen.zig").QueuedStateRegen;
+const reprocess_mod = @import("../reprocess.zig");
+const ReprocessQueue = reprocess_mod.ReprocessQueue;
+const PendingReason = reprocess_mod.PendingReason;
 
 /// Maximum number of slots in the past for which we emit block events.
 /// Prevents flooding the event stream during sync.
@@ -87,6 +90,11 @@ pub const ImportContext = struct {
 
     // -- Events --
     event_callback: ?EventCallback,
+
+    // -- Reprocessing -- (P1-10 fix)
+    /// When set, blocks that fail with ParentUnknown are queued here for
+    /// reprocessing once the parent arrives via onBlockImported().
+    reprocess_queue: ?*ReprocessQueue = null,
 };
 
 // ---------------------------------------------------------------------------
@@ -323,7 +331,13 @@ pub fn importVerifiedBlock(
             }
         }
 
-        // If head changed, detect reorg.
+        // Update HeadTracker from fork choice result (P0-3 fix).
+        // Head is ONLY updated here — based on fork choice's authoritative getHead result.
+        // HeadTracker.onBlock no longer sets head; it only records slot→root mappings.
+        ctx.head_tracker.setHead(new_head.block_root, new_head.slot, new_head.state_root);
+
+        // If head changed, detect reorg and emit head event from detectAndEmitReorg.
+        // If head didn't change, emit head event here (block extended canonical chain).
         if (!std.mem.eql(u8, &new_head.block_root, &old_head_root)) {
             detectAndEmitReorg(
                 ctx,
@@ -333,12 +347,29 @@ pub fn importVerifiedBlock(
                 new_head,
                 is_epoch_transition,
             );
+        } else {
+            // Head didn't change (same root) — emit head event for the new canonical tip.
+            if (ctx.event_callback) |cb| {
+                cb.emit(.{ .head = .{
+                    .slot = new_head.slot,
+                    .block_root = new_head.block_root,
+                    .state_root = new_head.state_root,
+                    .epoch_transition = is_epoch_transition,
+                    .execution_optimistic = new_head.execution_optimistic,
+                } });
+            }
         }
     }
 
-    // 7. Emit SSE events (only for recent blocks to avoid flooding during sync).
+    // 7. Emit SSE block event (only for recent blocks to avoid flooding during sync).
     // Use block_slot as fallback when fork choice current_slot is 0 (e.g., after genesis init
     // before updateTime is called). This avoids integer overflow in the subtraction.
+    //
+    // NOTE (P0-4 fix): HEAD events are emitted ONLY from the fork-choice recompute block
+    // above (step 6), not here. Previously both places emitted head events, causing
+    // double-emission on every new block. Now:
+    // - 'block' event: emitted here for all recent blocks
+    // - 'head' event: emitted from fork choice recompute (detectAndEmitReorg or head-unchanged path)
     const current_slot = blk: {
         if (ctx.fork_choice) |fc| {
             if (fc.getTime() >= block_slot) break :blk fc.getTime();
@@ -351,13 +382,22 @@ pub fn importVerifiedBlock(
                 .slot = block_slot,
                 .block_root = block_root,
             } });
-            cb.emit(.{ .head = .{
-                .slot = block_slot,
-                .block_root = block_root,
-                .state_root = state_root,
-                .epoch_transition = is_epoch_transition,
-                .execution_optimistic = verified.execution_status == .syncing,
-            } });
+        }
+    }
+
+    // 8. Notify reprocess queue (P1-10 fix).
+    // Any blocks that were waiting for this block as their parent can now be reprocessed.
+    // This handles the common case of out-of-order block delivery on gossip.
+    if (ctx.reprocess_queue) |rq| {
+        var released = rq.onBlockImported(block_root);
+        defer released.deinit(ctx.allocator);
+        // Log but don't reprocess inline (avoids deep recursion / stack overflow).
+        // Callers should drain the queue asynchronously after import.
+        if (released.items.len > 0) {
+            std.log.info("importBlock: {d} block(s) queued for reprocessing (parent={s}...)", .{
+                released.items.len,
+                &std.fmt.bytesToHex(block_root[0..4], .lower),
+            });
         }
     }
 

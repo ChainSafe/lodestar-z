@@ -79,10 +79,31 @@ pub fn verifySanity(
     const block_slot = block.slot();
     const parent_root = block.parentRoot().*;
 
-    // Compute block root via BeaconBlock hash-tree-root.
-    // The SSZ hashTreeRoot needs an allocator for intermediate nodes.
+    // Compute block root via BeaconBlockHeader hash-tree-root (canonical per spec).
+    //
+    // Per the beacon spec, block_root = hash_tree_root(BeaconBlockHeader), where
+    // BeaconBlockHeader.body_root = hash_tree_root(BeaconBlockBody). This is
+    // equivalent to BeaconBlock.hashTreeRoot() but makes the computation explicit
+    // and consistent with executeStateTransition which also uses BeaconBlockHeader.
+    //
+    // Note: for well-formed blocks (state_root != 0), this matches the canonical
+    // root stored in fork_choice after import. For test blocks with placeholder
+    // state_root=0, this root will DIFFER from the post-import canonical root
+    // (which uses the actual computed state_root). The AlreadyKnown check below
+    // uses this "declared" root — duplicate detection works correctly for real blocks.
+    // executeStateTransition computes the canonical root with the actual state_root.
+    var body_root: Root = undefined;
+    block.beaconBlockBody().hashTreeRoot(allocator, &body_root) catch return BlockImportError.InternalError;
+    const block_header_for_root = consensus_types.phase0.BeaconBlockHeader.Type{
+        .slot = block_slot,
+        .proposer_index = block.proposerIndex(),
+        .parent_root = parent_root,
+        .state_root = block.stateRoot().*,
+        .body_root = body_root,
+    };
     var block_root: Root = undefined;
-    block.hashTreeRoot(allocator, &block_root) catch return BlockImportError.InternalError;
+    consensus_types.phase0.BeaconBlockHeader.hashTreeRoot(&block_header_for_root, &block_root) catch
+        return BlockImportError.InternalError;
 
     // 1. Not genesis block.
     if (block_slot == 0) {

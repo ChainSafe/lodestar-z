@@ -160,17 +160,26 @@ pub const QueuedStateRegen = struct {
 
     /// Get the pre-state for processing a block.
     ///
+    /// `parent_root` MUST be a STATE root (not a block root).
+    /// BlockStateCache is keyed by state root. Callers must translate
+    /// block_root → state_root via block_to_state map BEFORE calling this.
+    ///
+    /// This is verified in pipeline.getPreState (P1-13 / P0-2 fix):
+    ///   parent_state_root = block_to_state.get(parent_block_root)
+    ///   qr.getPreState(parent_state_root, ...)  ← correct
+    ///
     /// Fast path: checks block cache and checkpoint cache.
     /// Slow path: delegates to StateRegen.getPreState (which may read from DB).
     pub fn getPreState(
         self: *QueuedStateRegen,
-        parent_root: [32]u8,
+        parent_root: [32]u8, // Must be state root, not block root
         block_slot: u64,
         priority: RegenPriority,
     ) !*CachedBeaconState {
         _ = priority;
 
         // Fast path: try caches directly.
+        // block_cache is keyed by state root — correct since parent_root is state_root.
         if (self.regen.block_cache.get(parent_root)) |state| {
             self.cache_hits += 1;
             return state;
