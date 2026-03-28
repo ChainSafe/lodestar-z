@@ -544,6 +544,19 @@ pub const HttpServer = struct {
             return self.makeJsonResult([]const types.ForkScheduleEntry, result);
         }
 
+        // Lodestar custom endpoints.
+        if (std.mem.eql(u8, op, "getValidatorMonitor")) {
+            const result = handlers.lodestar.getValidatorMonitor(ctx) catch |err| {
+                if (err == error.ValidatorMonitorNotConfigured) return error.NotImplemented;
+                return err;
+            };
+            return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = result.data,
+            };
+        }
+
         // --- New validator endpoints ---
 
         if (std.mem.eql(u8, op, "produceBlock")) {
