@@ -124,6 +124,10 @@ pub fn getExpectedWithdrawals(
             const total_withdrawn_gop = try withdrawal_balances.getOrPut(withdrawal.validator_index);
 
             const total_withdrawn: u64 = if (total_withdrawn_gop.found_existing) total_withdrawn_gop.value_ptr.* else 0;
+            // CL-2026-08: deduct previously-queued withdrawal amounts before computing the
+            // withdrawable balance. Without this deduction a validator with balance B and two
+            // pending partial withdrawals of amount A (A > B/2) could yield A+A > B total,
+            // violating the invariant that total withdrawals never exceed the validator balance.
             const balance = try balances.get(withdrawal.validator_index) - total_withdrawn;
 
             if (validator.exit_epoch == c.FAR_FUTURE_EPOCH and
@@ -159,8 +163,11 @@ pub fn getExpectedWithdrawals(
         const withdraw_balance_gop = try withdrawal_balances.getOrPut(validator_index);
         const withdraw_balance: u64 = if (withdraw_balance_gop.found_existing) withdraw_balance_gop.value_ptr.* else 0;
         const val_balance = try balances.get(validator_index);
+        // CL-2026-08: deduct all amounts already queued for this validator (both from
+        // the EIP-7002 pending-partial loop above and from earlier iterations of this
+        // sweep) before computing the withdrawable amount. This prevents a validator
+        // with balance B from having multiple withdrawals that together exceed B.
         const balance = if (comptime fork.gte(.electra))
-            // Deduct partially withdrawn balance already queued above
             if (val_balance > withdraw_balance) val_balance - withdraw_balance else 0
         else
             val_balance;
