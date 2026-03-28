@@ -1461,6 +1461,7 @@ pub const BeaconNode = struct {
         // this function returns.
         self.p2p_service = try P2pService.init(self.allocator, P2pConfig{
             .fork_digest = fork_digest,
+            .fork_seq = self.config.forkSeq(self.head_tracker.head_slot),
             .req_resp_context = req_resp_ctx,
             .validator = &validator.ctx,
             .host_key = host_key,
@@ -1688,9 +1689,13 @@ pub const BeaconNode = struct {
                             std.fmt.fmtSliceHexLower(&self.last_active_fork_digest),
                             std.fmt.fmtSliceHexLower(&current_digest),
                         });
-                        svc.onForkTransition(current_digest) catch |err| {
+                        svc.onForkTransition(current_digest, self.config.forkSeq(head_slot)) catch |err| {
                             std.log.warn("onForkTransition failed: {}", .{err});
                         };
+                        // Keep gossip_handler fork_seq in sync.
+                        if (self.gossip_handler) |gh| {
+                            gh.updateForkSeq(self.config.forkSeq(head_slot));
+                        }
                     }
                     self.last_active_fork_digest = current_digest;
                 }
