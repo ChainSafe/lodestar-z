@@ -61,16 +61,9 @@ const BeaconNode = beacon_node_mod.BeaconNode;
 fn reqRespGetStatus(ptr: *anyopaque) StatusMessage.Type {
     const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
     const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
-    const preset = @import("preset").preset;
-    return .{
-        .fork_digest = node.config.forkDigestAtSlot(node.head_tracker.head_slot, node.genesis_validators_root),
-        .finalized_root = node.head_tracker.getBlockRoot(
-            node.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH,
-        ) orelse [_]u8{0} ** 32,
-        .finalized_epoch = node.head_tracker.finalized_epoch,
-        .head_root = node.head_tracker.head_root,
-        .head_slot = node.head_tracker.head_slot,
-    };
+    // Delegate to node.getStatus() which uses the FC checkpoint for finalized_root,
+    // correctly handling skip slots where slot-based lookup would fail (C2 fix).
+    return node.getStatus();
 }
 
 fn reqRespGetMetadata(ptr: *anyopaque) networking.messages.MetadataV2.Type {

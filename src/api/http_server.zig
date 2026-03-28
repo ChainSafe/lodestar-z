@@ -224,6 +224,7 @@ pub const HttpServer = struct {
         const route_method: routes_mod.HttpMethod = switch (request.head.method) {
             .GET => .GET,
             .POST => .POST,
+            .DELETE => .DELETE,
             else => {
                 try respondApiError(request, .{
                     .code = .method_not_allowed,
@@ -269,7 +270,7 @@ pub const HttpServer = struct {
         // Read request body for POST methods.
         var request_body: []const u8 = &[_]u8{};
         var request_body_owned = false;
-        if (route_method == .POST) {
+        if (route_method == .POST or route_method == .DELETE) {
             var reader_buf: [4096]u8 = undefined;
             const body_reader = request.readerExpectNone(&reader_buf);
             // Block-submission endpoints allow up to max_block_body_bytes; all

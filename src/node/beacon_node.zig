@@ -765,6 +765,11 @@ pub const BeaconNode = struct {
             fork_choice_mod.destroyFromAnchor(allocator, fc);
         }
 
+        // W5/W6/W-pool: deinit callback contexts BEFORE destroying api_context (UAF fix)
+        if (self.api_context.produce_block) |cb| allocator.destroy(@as(*ProduceBlockCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
+        if (self.api_context.attestation_data) |cb| allocator.destroy(@as(*AttestationDataCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
+        if (self.api_context.pool_submit) |cb| allocator.destroy(@as(*PoolSubmitCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
+
         // api_regen was allocated but stored in api_context.regen
         allocator.destroy(self.api_context.regen);
         allocator.destroy(self.api_context);
@@ -777,11 +782,6 @@ pub const BeaconNode = struct {
         // W4: deinit EventBus
         allocator.destroy(self.event_bus);
         allocator.destroy(self.event_callback_ctx);
-
-        // W5/W6/W-pool: deinit callback contexts
-        if (self.api_context.produce_block) |cb| allocator.destroy(@as(*ProduceBlockCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
-        if (self.api_context.attestation_data) |cb| allocator.destroy(@as(*AttestationDataCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
-        if (self.api_context.pool_submit) |cb| allocator.destroy(@as(*PoolSubmitCallbackCtx, @ptrCast(@alignCast(cb.ptr))));
 
         self.queued_regen.deinit();
         allocator.destroy(self.queued_regen);
@@ -1715,7 +1715,7 @@ pub const BeaconNode = struct {
             }
 
             // W7: Check if local validator is next-slot proposer; if so, preparePayload.
-            self.maybePreparePropserPayload(io);
+            self.maybePrepareProposerPayload(io);
 
             // Prune sync committee pools by current head slot.
             {
@@ -4610,7 +4610,7 @@ fn submitAggregateAndProofCallback(ptr: *anyopaque, json_bytes: []const u8) anye
 }
 
 // ---------------------------------------------------------------------------
-// W7: maybePreparePropserPayload — slot-aware proposer duty check
+// W7: maybePrepareProposerPayload — slot-aware proposer duty check
 // ---------------------------------------------------------------------------
 
 /// Check if local validator is the proposer for the next slot and call preparePayload.
@@ -4623,7 +4623,7 @@ fn submitAggregateAndProofCallback(ptr: *anyopaque, json_bytes: []const u8) anye
 /// we check against `node_options.suggested_fee_recipient` as a signal that this
 /// node is acting as a proposer. This is a best-effort implementation; a full VC
 /// integration would compare proposer pubkeys against local keystores.
-fn maybePreparePropserPayload(self: *BeaconNode, io: std.Io) void {
+fn maybePrepareProposerPayload(self: *BeaconNode, io: std.Io) void {
     // Only attempt if we have a clock and engine.
     const clock = self.clock orelse return;
     _ = self.engine_api orelse return;
@@ -4650,8 +4650,15 @@ fn maybePreparePropserPayload(self: *BeaconNode, io: std.Io) void {
     // Compute payload attributes for the next slot.
     const timestamp = clock.slotStartSeconds(next_slot);
 
-    // prev_randao: ideally from the state's randao_mixes; use zero as fallback.
-    const prev_randao = [_]u8{0} ** 32;
+    // prev_randao: read from head state's randao_mixes for the next slot's epoch.
+    // The EL uses this for randomness; zeros would produce an invalid payload.
+    const next_epoch = next_slot / preset.SLOTS_PER_EPOCH;
+    const randao_index = next_epoch % preset.EPOCHS_PER_HISTORICAL_VECTOR;
+    const prev_randao: [32]u8 = blk: {
+        var mixes = head_state.state.randaoMixes() catch break :blk [_]u8{0} ** 32;
+        const mix_ptr = mixes.getFieldRoot(randao_index) catch break :blk [_]u8{0} ** 32;
+        break :blk mix_ptr.*;
+    };
 
     // parent_beacon_block_root = current head block root.
     const parent_beacon_block_root = self.head_tracker.head_root;
