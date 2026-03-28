@@ -42,6 +42,24 @@ pub const HttpServer = struct {
     port: u16,
     /// Set to true to request a clean shutdown of the serve loop.
     shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Number of currently active connections.
+    active_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+
+    // ── DoS protection limits ─────────────────────────────────────────────────
+
+    /// Read timeout per connection in seconds (Slowloris defence).
+    pub const recv_timeout_sec: c_long = 30;
+    /// Maximum request body size for general POST endpoints (1 MiB).
+    pub const max_body_bytes: usize = 1 * 1024 * 1024;
+    /// Maximum request body size for block-submission endpoints (10 MiB).
+    pub const max_block_body_bytes: usize = 10 * 1024 * 1024;
+    /// Maximum keep-alive requests per connection.
+    pub const max_keepalive_requests: u32 = 100;
+    /// Maximum concurrent TCP connections.
+    pub const max_concurrent_connections: u32 = 256;
+    // TODO(SSE): Add a separate sse_connections counter when real SSE streaming
+    // is implemented.  SSE connections are long-lived and should be accounted
+    // separately so they cannot exhaust the general connection budget.
 
     pub fn init(
         allocator: Allocator,
@@ -79,7 +97,22 @@ pub const HttpServer = struct {
                 log.err("accept failed: {s}", .{@errorName(err)});
                 continue;
             };
+
+            // Enforce maximum concurrent connection limit (DoS protection).
+            const prev = self.active_connections.fetchAdd(1, .acquire);
+            if (prev >= max_concurrent_connections) {
+                _ = self.active_connections.fetchSub(1, .release);
+                log.warn("connection limit reached ({d}), rejecting new connection", .{max_concurrent_connections});
+                // Send a minimal 503 response before closing.
+                var reject_buf: [128]u8 = undefined;
+                var reject_writer = stream.writer(io, &reject_buf);
+                _ = reject_writer.interface.write("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") catch {};
+                var stream_copy = stream;
+                stream_copy.close(io);
+                continue;
+            }
             self.handleConnection(io, stream);
+            _ = self.active_connections.fetchSub(1, .release);
         }
     }
 
@@ -89,6 +122,22 @@ pub const HttpServer = struct {
             copy.close(io);
         }
 
+        // Set a receive timeout to guard against Slowloris-style attacks.
+        // A client that does not send a complete request head within
+        // recv_timeout_sec seconds will have the connection closed.
+        const tv = std.os.linux.timeval{
+            .sec = recv_timeout_sec,
+            .usec = 0,
+        };
+        std.posix.setsockopt(
+            stream.socket.handle,
+            std.os.linux.SOL.SOCKET,
+            std.os.linux.SO.RCVTIMEO,
+            std.mem.asBytes(&tv),
+        ) catch |err| {
+            log.warn("setsockopt SO_RCVTIMEO failed: {s}", .{@errorName(err)});
+        };
+
         var send_buf: [8192]u8 = undefined;
         var recv_buf: [8192]u8 = undefined;
         var conn_reader = stream.reader(io, &recv_buf);
@@ -96,7 +145,14 @@ pub const HttpServer = struct {
         var server: http.Server = .init(&conn_reader.interface, &conn_writer.interface);
 
         // Handle requests on this connection (keep-alive support).
+        var requests_served: u32 = 0;
         while (!self.shutdown_requested.load(.acquire)) {
+            // Enforce per-connection keep-alive request limit.
+            if (requests_served >= max_keepalive_requests) {
+                log.debug("keep-alive limit reached, closing connection", .{});
+                return;
+            }
+
             var request = server.receiveHead() catch |err| switch (err) {
                 error.HttpConnectionClosing => return,
                 else => {
@@ -108,6 +164,7 @@ pub const HttpServer = struct {
                 log.err("handle request failed: {s}", .{@errorName(err)});
                 return;
             };
+            requests_served += 1;
         }
     }
 
@@ -178,9 +235,11 @@ pub const HttpServer = struct {
         if (route_method == .POST) {
             var reader_buf: [4096]u8 = undefined;
             const body_reader = request.readerExpectNone(&reader_buf);
-            // Read up to 1MB body
-            const max_body = 1 << 20;
-            request_body = body_reader.readAlloc(self.allocator, max_body) catch &[_]u8{};
+            // Block-submission endpoints allow up to max_block_body_bytes; all
+            // other POST endpoints are capped at max_body_bytes (1 MiB).
+            const is_block_endpoint = std.mem.eql(u8, match.route.operation_id, "publishBlockV2");
+            const body_limit: usize = if (is_block_endpoint) max_block_body_bytes else max_body_bytes;
+            request_body = body_reader.readAlloc(self.allocator, body_limit) catch &[_]u8{};
             request_body_owned = true;
         }
         defer if (request_body_owned) self.allocator.free(request_body);
