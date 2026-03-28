@@ -133,7 +133,6 @@ pub fn getRewardsAndPenaltiesAltair(
     }
 }
 
-
 const testing = std.testing;
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const Node = @import("persistent_merkle_tree").Node;
