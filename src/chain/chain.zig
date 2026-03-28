@@ -279,6 +279,13 @@ pub const Chain = struct {
         return blocks_mod.processBlockBatch(ctx, block_inputs, opts);
     }
 
+    /// Finality callback shim — called from import_block.zig when a new
+    /// finalized epoch is detected.  Signature must match ImportContext.on_finalized_fn.
+    fn onFinalizedCallback(ptr: *anyopaque, finalized_epoch: u64, finalized_root: [32]u8) void {
+        const chain: *Chain = @ptrCast(@alignCast(ptr));
+        chain.onFinalized(finalized_epoch, finalized_root);
+    }
+
     /// Build a PipelineContext from the current Chain state.
     pub fn getPipelineContext(self: *Chain) PipelineContext {
         const current_slot = if (self.fork_choice) |fc| fc.getTime() else self.head_tracker.head_slot;
@@ -295,6 +302,8 @@ pub const Chain = struct {
             .execution_verifier = null, // Set by BeaconNode when EL is configured
             .current_slot = current_slot,
             .reprocess_queue = self.reprocess_queue, // P1-10: wire reprocess queue
+            .on_finalized_ptr = @ptrCast(self), // W2: prune caches on finalization
+            .on_finalized_fn = &Chain.onFinalizedCallback,
         };
     }
 
@@ -464,6 +473,10 @@ pub const Chain = struct {
             .fork_digest = self.config.forkDigestAtSlot(self.head_tracker.head_slot, self.genesis_validators_root),
             .finalized_root = if (self.head_tracker.finalized_epoch == 0)
                 [_]u8{0} ** 32
+            else if (self.fork_choice) |fc|
+                // Use fork choice's authoritative finalized checkpoint root.
+                // Avoid slot_roots lookup which may miss skip slots.
+                fc.getFinalizedCheckpoint().root
             else if (self.head_tracker.getBlockRoot(
                 self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH,
             )) |r| r else [_]u8{0} ** 32,
@@ -499,31 +512,35 @@ pub const Chain = struct {
         else
             self.head_tracker.finalized_epoch;
 
-        // Static function closures — capture chain pointer via opaque cast.
-        // These are called during gossip validation with the snapshot state.
+        // Static function closures — ChainGossipState requires *anyopaque first param
+        // matching the ptr: *anyopaque field signature in gossip_validation.zig.
         const Callbacks = struct {
-            fn getProposerIndex(_slot: u64) ?u32 {
+            fn getProposerIndex(_ptr: *anyopaque, _slot: u64) ?u32 {
                 // TODO: integrate BeaconProposerCache when available on Chain.
                 // Currently returns null (cache miss) — gossip validator falls back
                 // to non-proposer-specific checks.
+                _ = _ptr;
                 _ = _slot;
                 return null;
             }
-            fn isKnownBlockRoot(root: [32]u8) bool {
+            fn isKnownBlockRoot(_ptr: *anyopaque, root: [32]u8) bool {
                 // Stateless stub — real implementation should query fork choice.
                 // The gossip validator also checks seen_cache, so this is an
                 // additional (optional) fast path.
+                _ = _ptr;
                 _ = root;
                 return false;
             }
-            fn getValidatorCount() u32 {
+            fn getValidatorCount(_ptr: *anyopaque) u32 {
                 // TODO: read from head state epoch_cache when available.
                 // Returns 0 = unknown (gossip validator skips proposer-index bounds check).
+                _ = _ptr;
                 return 0;
             }
         };
 
         return .{
+            .ptr = @ptrCast(@constCast(self)),
             .current_slot = current_slot,
             .current_epoch = computeEpochAtSlot(current_slot),
             .finalized_slot = finalized_epoch * preset.SLOTS_PER_EPOCH,

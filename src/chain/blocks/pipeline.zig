@@ -107,6 +107,10 @@ pub const PipelineContext = struct {
     /// When set, blocks pending reprocessing are notified after successful import.
     reprocess_queue: ?*ReprocessQueue = null,
 
+    // -- Finality callback -- (W2 fix)
+    on_finalized_ptr: ?*anyopaque = null,
+    on_finalized_fn: ?*const fn (ptr: *anyopaque, finalized_epoch: u64, finalized_root: [32]u8) void = null,
+
     /// Convert to ImportContext for the import stage.
     pub fn toImportContext(self: PipelineContext) ImportContext {
         return .{
@@ -120,6 +124,8 @@ pub const PipelineContext = struct {
             .block_to_state = self.block_to_state,
             .event_callback = self.event_callback,
             .reprocess_queue = self.reprocess_queue,
+            .on_finalized_ptr = self.on_finalized_ptr,
+            .on_finalized_fn = self.on_finalized_fn,
         };
     }
 };

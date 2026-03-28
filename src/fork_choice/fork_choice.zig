@@ -1488,6 +1488,13 @@ pub const ForkChoice = struct {
         const current_slot = self.fc_store.current_slot;
         var remove_count: u32 = 0;
 
+        // Collect slots to remove: AutoArrayHashMap is insertion-ordered, NOT sorted.
+        // We must iterate all entries (not break on first future slot) because a future-slot
+        // attestation queued before a past-slot one would otherwise cause the past-slot one
+        // to be skipped. Collect keys to remove in a separate pass.
+        var keys_to_remove = std.ArrayListUnmanaged(u64){};
+        defer keys_to_remove.deinit(allocator);
+
         var slot_iter = self.queued_attestations.iterator();
         while (slot_iter.next()) |entry| {
             const att_slot = entry.key_ptr.*;
@@ -1513,15 +1520,14 @@ pub const ForkChoice = struct {
                     block_entry.value_ptr.deinit(allocator);
                 }
                 entry.value_ptr.deinit(allocator);
+                try keys_to_remove.append(allocator, att_slot);
                 remove_count += 1;
-            } else {
-                break;
             }
+            // No break here: map is insertion-ordered, not sorted — must scan all entries.
         }
 
-        // Remove processed slots from front.
-        for (0..remove_count) |_| {
-            const key = self.queued_attestations.keys()[0];
+        // Remove processed slots.
+        for (keys_to_remove.items) |key| {
             _ = self.queued_attestations.orderedRemove(key);
         }
     }

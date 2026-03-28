@@ -97,6 +97,13 @@ pub const ImportContext = struct {
     /// When set, blocks that fail with ParentUnknown are queued here for
     /// reprocessing once the parent arrives via onBlockImported().
     reprocess_queue: ?*ReprocessQueue = null,
+
+    // -- Finality callback -- (W2 fix)
+    /// Called when a new finalized epoch is detected during import.
+    /// Prunes block state cache, fork choice DAG, and other caches.
+    /// Signature: fn(ptr: *anyopaque, finalized_epoch: u64, finalized_root: [32]u8) void
+    on_finalized_ptr: ?*anyopaque = null,
+    on_finalized_fn: ?*const fn (ptr: *anyopaque, finalized_epoch: u64, finalized_root: [32]u8) void = null,
 };
 
 // ---------------------------------------------------------------------------
@@ -342,6 +349,13 @@ pub fn importVerifiedBlock(
                     .root = new_finalized.root,
                     .state_root = fin_state_root,
                 } });
+            }
+            // Prune caches for the new finalized checkpoint (W2 fix).
+            // Without this, block state cache and fork choice DAG grow without bound (OOM).
+            if (ctx.on_finalized_fn) |on_fin| {
+                if (ctx.on_finalized_ptr) |ptr| {
+                    on_fin(ptr, new_finalized.epoch, new_finalized.root);
+                }
             }
         }
 

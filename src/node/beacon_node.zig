@@ -1660,6 +1660,19 @@ pub const BeaconNode = struct {
                 if (self.sync_contribution_pool) |pool| pool.prune(head_slot);
                 if (self.sync_committee_message_pool) |pool| pool.prune(head_slot);
             }
+
+            // Advance the fork choice clock each tick so proposer boost decays
+            // correctly across slot boundaries. Without this, FC time never
+            // advances between block imports and proposer boost persists forever.
+            if (self.clock) |clk| {
+                if (clk.currentSlot(io)) |current_slot| {
+                    if (self.chain.fork_choice) |fc| {
+                        fc.updateTime(self.allocator, current_slot) catch |err| {
+                            std.log.warn("fork choice updateTime failed: {}", .{err});
+                        };
+                    }
+                }
+            }
         }
     }
 
@@ -3004,11 +3017,14 @@ fn parseIp4(s: []const u8) ?[4]u8 {
     pub fn getStatus(self: *const BeaconNode) StatusMessage.Type {
         // Always use head_tracker which is updated during range sync import.
         // Fork choice head isn't reliably updated during batch import.
-        _ = self.fork_choice; // suppress unused
         return .{
             .fork_digest = self.config.forkDigestAtSlot(self.head_tracker.head_slot, self.genesis_validators_root),
             .finalized_root = if (self.head_tracker.finalized_epoch == 0)
                 [_]u8{0} ** 32
+            else if (self.fork_choice) |fc|
+                // Use fork choice's authoritative finalized checkpoint root (C2 fix).
+                // Slot-based lookup fails on skip slots.
+                fc.getFinalizedCheckpoint().root
             else if (self.head_tracker.getBlockRoot(
                 self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH,
             )) |r| r else [_]u8{0} ** 32,
