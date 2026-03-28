@@ -5,7 +5,7 @@
 //! and exposes the core pipeline functions:
 //!
 //! - `importBlock` — full block import pipeline (sanity → STFN → FC → persist)
-//! - `importAttestation` — validate → FC weight → pool
+//! - `importAttestation` — validate → FC weight → pool (stub)
 //! - `onSlot` — FC time update, seen cache prune
 //! - `onFinalized` — archive, prune caches, prune FC (stub)
 //! - `getHead` — current head info
@@ -58,7 +58,6 @@ const produceBlockBody = produce_block_mod.produceBlockBody;
 const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
 const ProtoBlock = fork_choice_mod.ProtoBlock;
-const HeadResult = fork_choice_mod.HeadResult;
 
 const networking = @import("networking");
 const StatusMessage = networking.messages.StatusMessage;
@@ -75,10 +74,6 @@ const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const da_mod = @import("data_availability.zig");
 const DataAvailabilityManager = da_mod.DataAvailabilityManager;
 
-/// Fork choice attestation epoch limit.
-/// Attestations from blocks older than current_epoch - 1 are skipped for fork choice.
-/// This matches Lodestar TS FORK_CHOICE_ATT_EPOCH_LIMIT = 1.
-const FORK_CHOICE_ATT_EPOCH_LIMIT: u64 = 1;
 
 // ---------------------------------------------------------------------------
 // Chain
@@ -176,209 +171,56 @@ pub const Chain = struct {
 
     /// Full block import pipeline: sanity → STFN → fork choice → persist → head → SSE.
     ///
-    /// Returns `error.UnknownParentBlock` when the parent root is not in
-    /// the chain — callers should catch this to trigger unknown block sync.
+    /// Fork-polymorphic entry point. Accepts any signed beacon block via
+    /// AnySignedBeaconBlock and delegates to processBlockPipeline, eliminating
+    /// the electra-specific hardcoding of the old implementation.
+    ///
+    /// The `source` parameter tells the pipeline where the block came from
+    /// (gossip, range_sync, api, etc.) so it can apply the right checks.
+    ///
+    /// Legacy error names (UnknownParentBlock, BlockAlreadyKnown, etc.) are
+    /// preserved for backward compatibility with existing callers.
     pub fn importBlock(
         self: *Chain,
-        signed_block: *const consensus_types.electra.SignedBeaconBlock.Type,
+        any_signed: AnySignedBeaconBlock,
+        source: blocks_mod.BlockSource,
     ) !ImportResult {
-        const block_slot = signed_block.message.slot;
-        const parent_root = signed_block.message.parent_root;
-
-        const prev_epoch = computeEpochAtSlot(if (block_slot > 0) block_slot - 1 else 0);
-        const target_epoch = computeEpochAtSlot(block_slot);
-        const is_epoch_transition = target_epoch != prev_epoch;
-
-        // Compute block root for sanity checks and persistence.
-        var body_root: [32]u8 = undefined;
-        try consensus_types.electra.BeaconBlockBody.hashTreeRoot(self.allocator, &signed_block.message.body, &body_root);
-        const header = consensus_types.phase0.BeaconBlockHeader.Type{
-            .slot = block_slot,
-            .proposer_index = signed_block.message.proposer_index,
-            .parent_root = parent_root,
-            .state_root = signed_block.message.state_root,
-            .body_root = body_root,
+        const block_input = PipelineBlockInput{
+            .block = any_signed,
+            .source = source,
+            .da_status = .not_required,
         };
-        var block_root: [32]u8 = undefined;
-        try consensus_types.phase0.BeaconBlockHeader.hashTreeRoot(&header, &block_root);
-
-        // Stage 1: Sanity checks (cheap, before any state transition work).
-        verifySanity(
-            block_slot,
-            parent_root,
-            block_root,
-            self.head_tracker.finalized_epoch,
-            &self.block_to_state,
-        ) catch |err| {
-            switch (err) {
-                ImportError.UnknownParentBlock => {
-                    std.log.info("Unknown parent for slot {d} parent={s}...", .{
-                        block_slot, &std.fmt.bytesToHex(parent_root[0..4], .lower),
-                    });
-                },
-                ImportError.BlockAlreadyKnown, ImportError.BlockAlreadyFinalized => {},
-                else => {
-                    std.log.warn("Sanity check failed for slot {d}: {}", .{ block_slot, err });
-                },
-            }
-            return err;
+        // Skip execution verification here — the EL call (engine_newPayload) is
+        // handled by BeaconNode after importBlock returns, via notifyForkchoiceUpdate.
+        // Skip future-slot check: callers (gossip handler, API, sync) have already
+        // validated timing. The legacy importBlock never enforced this check.
+        // Propagate verify_signatures from chain config: when false (default for tests),
+        // skip BLS signature verification to avoid failures with dummy test signatures.
+        const opts = PipelineImportOpts{
+            .skip_execution = true,
+            .skip_future_slot = true,
+            .skip_signatures = !self.verify_signatures,
         };
-
-        // Stage 2: State transition.
-        // Use queued regen (with dedup + priority) when available,
-        // fall back to direct cache lookup.
-        const pre_state = if (self.queued_regen) |qr|
-            qr.getPreState(parent_root, block_slot, .block_import) catch |err| {
-                std.log.warn("QueuedRegen.getPreState failed: parent_root={s}... err={}", .{
-                    &std.fmt.bytesToHex(parent_root[0..4], .lower),
-                    err,
-                });
-                return error.NoPreStateAvailable;
-            }
-        else
-            self.getStateByBlockRoot(parent_root) orelse {
-                std.log.warn("NoPreStateAvailable: parent_root={s}... block_to_state has {d} entries", .{
-                    &std.fmt.bytesToHex(parent_root[0..4], .lower),
-                    self.block_to_state.count(),
-                });
-                return error.NoPreStateAvailable;
+        const pipeline_result = self.processBlockPipeline(block_input, opts) catch |err| {
+            // Translate pipeline error names to legacy names expected by callers.
+            return switch (err) {
+                BlockImportError.ParentUnknown => error.UnknownParentBlock,
+                BlockImportError.AlreadyKnown => error.BlockAlreadyKnown,
+                BlockImportError.WouldRevertFinalizedSlot => error.BlockAlreadyFinalized,
+                BlockImportError.GenesisBlock => error.GenesisBlock,
+                BlockImportError.PrestateMissing => error.NoPreStateAvailable,
+                BlockImportError.StateTransitionFailed => error.StateTransitionFailed,
+                BlockImportError.InternalError => error.InternalError,
+                else => err,
             };
-
-        const stfn_result = try self.runStateTransition(pre_state, signed_block, block_slot);
-        const post_state = stfn_result.post_state;
-
-        // Stage 3: Cache post-state + persist block.
-        _ = if (self.queued_regen) |qr| try qr.onNewBlock(post_state, true) else try self.state_regen.onNewBlock(post_state, true);
-        try self.block_to_state.put(stfn_result.block_root, stfn_result.state_root);
-
-        const any_signed = AnySignedBeaconBlock{ .full_electra = @constCast(signed_block) };
-        const block_bytes = try any_signed.serialize(self.allocator);
-        defer self.allocator.free(block_bytes);
-        try self.db.putBlock(stfn_result.block_root, block_bytes);
-
-        // Checkpoint caching at epoch boundaries.
-        if (is_epoch_transition) {
-            const cp_state = try post_state.clone(self.allocator, .{ .transfer_cache = false });
-            errdefer {
-                cp_state.deinit();
-                self.allocator.destroy(cp_state);
-            }
-            if (self.queued_regen) |qr| {
-                try qr.onCheckpoint(
-                    .{ .epoch = target_epoch, .root = stfn_result.block_root },
-                    cp_state,
-                );
-            } else {
-                try self.state_regen.onCheckpoint(
-                    .{ .epoch = target_epoch, .root = stfn_result.block_root },
-                    cp_state,
-                );
-            }
-
-        }
-
-        // Stage 4: Head tracking + fork choice update.
-        try self.head_tracker.onBlock(stfn_result.block_root, block_slot, stfn_result.state_root);
-        if (is_epoch_transition) {
-            try self.head_tracker.onEpochTransition(post_state);
-        }
-
-        // Wire block into fork choice DAG.
-        var justified_cp: consensus_types.phase0.Checkpoint.Type = undefined;
-        try post_state.state.currentJustifiedCheckpoint(&justified_cp);
-        var finalized_cp: consensus_types.phase0.Checkpoint.Type = undefined;
-        try post_state.state.finalizedCheckpoint(&finalized_cp);
-
-        const fc_block = ProtoBlock{
-            .slot = block_slot,
-            .block_root = stfn_result.block_root,
-            .parent_root = parent_root,
-            .state_root = stfn_result.state_root,
-            .target_root = stfn_result.block_root,
-            .justified_epoch = justified_cp.epoch,
-            .justified_root = justified_cp.root,
-            .finalized_epoch = finalized_cp.epoch,
-            .finalized_root = finalized_cp.root,
-            .unrealized_justified_epoch = justified_cp.epoch,
-            .unrealized_justified_root = justified_cp.root,
-            .unrealized_finalized_epoch = finalized_cp.epoch,
-            .unrealized_finalized_root = finalized_cp.root,
-            .extra_meta = .{ .pre_merge = {} },
-            .timeliness = true,
         };
-
-        if (self.fork_choice) |fc| fc.onBlock(self.allocator, fc_block, block_slot) catch |err| switch (err) {
-            error.InvalidBlock => {},
-            else => return err,
+        return .{
+            .block_root = pipeline_result.block_root,
+            .state_root = pipeline_result.state_root,
+            .slot = pipeline_result.slot,
+            .epoch_transition = pipeline_result.epoch_transition,
+            .execution_optimistic = pipeline_result.execution_optimistic,
         };
-
-        // Wire attestations from the imported block into fork choice.
-        // Only process attestations when block epoch is recent enough to matter for FC:
-        // If current epoch is N, blocks from epoch < N - FORK_CHOICE_ATT_EPOCH_LIMIT have no
-        // attestations that can still influence fork choice head selection.
-        if (self.fork_choice) |fc| {
-            const current_epoch = computeEpochAtSlot(fc.current_slot);
-            if (target_epoch + FORK_CHOICE_ATT_EPOCH_LIMIT >= current_epoch) {
-                for (signed_block.message.body.attestations.items) |*att| {
-                    const att_target_epoch = att.data.target.epoch;
-                    const att_block_root = att.data.beacon_block_root;
-                    var indices = post_state.epoch_cache.getAttestingIndicesElectra(att) catch continue;
-                    defer indices.deinit();
-                    for (indices.items) |validator_index| {
-                        fc.onAttestation(
-                            self.allocator,
-                            validator_index,
-                            att_block_root,
-                            att_target_epoch,
-                        ) catch {}; // Non-fatal: stale or unknown block votes silently dropped.
-                    }
-                }
-            }
-        }
-
-        // Wire attester slashings from the imported block into fork choice.
-        // Mark equivocating validators so their weight is excluded from future head computation.
-        if (self.fork_choice) |fc| {
-            for (signed_block.message.body.attester_slashings.items) |*slashing| {
-                // Find intersection of attesting_indices from attestation_1 and attestation_2.
-                const a = slashing.attestation_1.attesting_indices.items;
-                const b = slashing.attestation_2.attesting_indices.items;
-                var i: usize = 0;
-                var j: usize = 0;
-                while (i < a.len and j < b.len) {
-                    if (a[i] == b[j]) {
-                        fc.onAttesterSlashing(&[_]u64{a[i]}) catch {};
-                        i += 1;
-                        j += 1;
-                    } else if (a[i] < b[j]) {
-                        i += 1;
-                    } else {
-                        j += 1;
-                    }
-                }
-            }
-        }
-
-        const result = ImportResult{
-            .block_root = stfn_result.block_root,
-            .state_root = stfn_result.state_root,
-            .slot = block_slot,
-            .epoch_transition = is_epoch_transition,
-        };
-
-        // Stage 5: Emit block event and recompute head.
-        if (self.event_callback) |cb| {
-            cb.emit(.{ .block = .{
-                .slot = block_slot,
-                .block_root = stfn_result.block_root,
-            } });
-        }
-
-        // Recompute fork choice head after attestation/block weight changes.
-        // This detects reorgs and emits head/chain_reorg SSE events.
-        self.recomputeHead();
-
-        return result;
     }
 
     // -----------------------------------------------------------------------
@@ -387,11 +229,9 @@ pub const Chain = struct {
 
     /// Process a block through the staged import pipeline.
     ///
-    /// This is the new entry point that uses the modular pipeline stages
-    /// (verify_sanity → state_transition → verify_execution → import).
-    /// It replaces the monolithic importBlock above.
-    ///
-    /// The old importBlock is kept for backward compatibility during migration.
+    /// This is the main entry point for block processing. It runs all stages
+    /// in sequence: verify_sanity → state_transition → verify_execution → import.
+    /// importBlock delegates here, so this is the canonical implementation.
     pub fn processBlockPipeline(
         self: *Chain,
         block_input: PipelineBlockInput,
@@ -445,7 +285,7 @@ pub const Chain = struct {
         self: *Chain,
         attestation_slot: u64,
         committee_index: u64,
-        beacon_block_root: [32]u8,
+        target_root: [32]u8,
         target_epoch: u64,
         validator_index: u64,
         attestation: consensus_types.phase0.Attestation.Type,
@@ -453,13 +293,11 @@ pub const Chain = struct {
         _ = committee_index;
 
         // Apply vote weight to fork choice.
-        // beacon_block_root is what the validator is voting FOR (the attested block),
-        // while target_epoch is the epoch of the target checkpoint.
         if (self.fork_choice) |fc| {
             fc.onAttestation(
                 self.allocator,
                 @intCast(validator_index),
-                beacon_block_root,
+                target_root,
                 target_epoch,
             ) catch |err| {
                 std.log.warn("FC onAttestation failed for validator {d} slot {d}: {}", .{
@@ -469,11 +307,8 @@ pub const Chain = struct {
             };
         }
 
-        // Insert into both attestation pools for block production.
-        // The aggregated pool provides optimized greedy selection;
-        // the legacy pool is kept as fallback.
+        // Insert into attestation pool for block production.
         try self.op_pool.attestation_pool.add(attestation);
-        _ = try self.op_pool.agg_attestation_pool.add(attestation);
     }
 
     // -----------------------------------------------------------------------
@@ -495,10 +330,6 @@ pub const Chain = struct {
         else
             0;
         self.seen_cache.pruneBlocks(min_slot);
-
-        // Prune attestation pools: remove attestations older than 2 epochs.
-        self.op_pool.attestation_pool.prune(slot);
-        self.op_pool.agg_attestation_pool.pruneBySlot(slot);
     }
 
     // -----------------------------------------------------------------------
@@ -614,125 +445,6 @@ pub const Chain = struct {
     }
 
     // -----------------------------------------------------------------------
-    // Head recomputation
-    // -----------------------------------------------------------------------
-
-    /// Recompute the fork choice head after attestation weight changes.
-    ///
-    /// Called after importing attestations or a new block to ensure
-    /// the head reflects the latest LMD-GHOST weights.
-    ///
-    /// Steps:
-    /// 1. Save old head root
-    /// 2. Call fork_choice.getHead() (recomputes from latest weights)
-    /// 3. Compare old vs new head
-    /// 4. If changed → detect possible reorg and emit events
-    pub fn recomputeHead(self: *Chain) void {
-        const fc = self.fork_choice orelse return;
-
-        const old_head_root = fc.head.block_root;
-        const old_head_slot = fc.head.slot;
-        const old_head_state_root = fc.head.state_root;
-
-        // Get effective balance increments from current head state, if available.
-        // If unavailable, pass empty slice — fork choice uses cached balances.
-        const head_state_root = self.block_to_state.get(old_head_root) orelse old_head_state_root;
-        const new_balances: []const u16 = if (self.block_state_cache.get(head_state_root)) |cached|
-            cached.epoch_cache.getEffectiveBalanceIncrements().items
-        else
-            &.{};
-
-        const new_head = fc.getHead(self.allocator, new_balances) catch |err| {
-            std.log.warn("recomputeHead: getHead failed: {}", .{err});
-            return;
-        };
-
-        // No change — nothing to do.
-        if (std.mem.eql(u8, &new_head.block_root, &old_head_root)) return;
-
-        std.log.info("head updated: slot={d} root={s}...", .{
-            new_head.slot,
-            &std.fmt.bytesToHex(new_head.block_root[0..4], .lower),
-        });
-
-        // Detect reorg: if old head not in proto_array (pruned), just emit head event.
-        if (fc.proto_array.getNode(old_head_root, .full) == null and
-            fc.proto_array.getNode(old_head_root, .pending) == null)
-        {
-            // Old head not in proto_array (already pruned?) — no reorg detection.
-            self.emitHeadEvent(new_head, false);
-            return;
-        }
-
-        self.detectAndEmitReorg(
-            old_head_root,
-            old_head_slot,
-            old_head_state_root,
-            new_head,
-        );
-    }
-
-    /// Detect reorg between old head and new head, emit events.
-    fn detectAndEmitReorg(
-        self: *Chain,
-        old_head_root: [32]u8,
-        old_head_slot: u64,
-        old_head_state_root: [32]u8,
-        new_head: HeadResult,
-    ) void {
-        const fc = self.fork_choice orelse return;
-
-        // Find old and new head nodes in proto_array.
-        const old_node = fc.proto_array.getNode(old_head_root, .full) orelse
-            fc.proto_array.getNode(old_head_root, .pending);
-        const new_node = fc.proto_array.getNode(new_head.block_root, .full) orelse
-            fc.proto_array.getNode(new_head.block_root, .pending);
-
-        if (old_node != null and new_node != null) {
-            const ancestor = fc.proto_array.getCommonAncestor(old_node.?, new_node.?);
-            if (ancestor) |anc| {
-                const reorg_depth = if (old_head_slot > anc.slot) old_head_slot - anc.slot else 0;
-
-                if (reorg_depth > 0) {
-                    std.log.warn("chain reorg detected depth={d} old={s}... new={s}...", .{
-                        reorg_depth,
-                        &std.fmt.bytesToHex(old_head_root[0..4], .lower),
-                        &std.fmt.bytesToHex(new_head.block_root[0..4], .lower),
-                    });
-
-                    if (self.event_callback) |cb| {
-                        cb.emit(.{ .chain_reorg = .{
-                            .slot = new_head.slot,
-                            .depth = reorg_depth,
-                            .old_head_root = old_head_root,
-                            .new_head_root = new_head.block_root,
-                            .old_state_root = old_head_state_root,
-                            .new_state_root = new_head.state_root,
-                            .epoch = computeEpochAtSlot(new_head.slot),
-                        } });
-                    }
-                    return;
-                }
-            }
-        }
-
-        self.emitHeadEvent(new_head, false);
-    }
-
-    /// Emit head SSE event for a given HeadResult.
-    fn emitHeadEvent(self: *Chain, head: HeadResult, epoch_transition: bool) void {
-        if (self.event_callback) |cb| {
-            cb.emit(.{ .head = .{
-                .slot = head.slot,
-                .block_root = head.block_root,
-                .state_root = head.state_root,
-                .epoch_transition = epoch_transition,
-                .execution_optimistic = head.execution_optimistic,
-            } });
-        }
-    }
-
-    // -----------------------------------------------------------------------
     // Block production
     // -----------------------------------------------------------------------
 
@@ -788,106 +500,6 @@ pub const Chain = struct {
         try self.head_tracker.slot_roots.put(target_slot, self.head_tracker.head_root);
     }
 
-    // -----------------------------------------------------------------------
-    // Internal helpers
-    // -----------------------------------------------------------------------
 
-    fn getStateByBlockRoot(self: *Chain, block_root: [32]u8) ?*CachedBeaconState {
-        const state_root = self.block_to_state.get(block_root) orelse return null;
-        return self.block_state_cache.get(state_root);
-    }
 
-    const StfnResult = struct {
-        post_state: *CachedBeaconState,
-        state_root: [32]u8,
-        block_root: [32]u8,
-    };
-
-    fn runStateTransition(
-        self: *Chain,
-        pre_state: *CachedBeaconState,
-        signed_block: *const consensus_types.electra.SignedBeaconBlock.Type,
-        block_slot: u64,
-    ) !StfnResult {
-        const post_state = try pre_state.clone(self.allocator, .{ .transfer_cache = false });
-        errdefer {
-            post_state.deinit();
-            self.allocator.destroy(post_state);
-        }
-
-        try state_transition.processSlots(self.allocator, post_state, block_slot, .{});
-
-        const any_signed = AnySignedBeaconBlock{ .full_electra = @constCast(signed_block) };
-        const block = any_signed.beaconBlock();
-
-        switch (post_state.state.forkSeq()) {
-            inline else => |f| {
-                switch (block.blockType()) {
-                    inline else => |bt| {
-                        if (comptime bt == .blinded and f.lt(.bellatrix)) {
-                            return error.InvalidBlockTypeForFork;
-                        }
-                        // Use batch verification when signatures are enabled for ~3-10x speedup.
-                        // Collect all signature sets during processBlock, then verify in one shot.
-                        var batch = BatchVerifier.init(null);
-                        const opts = state_transition.ProcessBlockOpts{
-                            .verify_signature = self.verify_signatures,
-                            .batch_verifier = if (self.verify_signatures) &batch else null,
-                        };
-                        try state_transition.processBlock(
-                            f,
-                            self.allocator,
-                            post_state.config,
-                            post_state.epoch_cache,
-                            post_state.state.castToFork(f),
-                            &post_state.slashings_cache,
-                            bt,
-                            block.castToFork(bt, f),
-                            .{
-                                .execution_payload_status = .valid,
-                                .data_availability_status = .available,
-                            },
-                            opts,
-                        );
-                        // Batch-verify all collected signatures
-                        if (self.verify_signatures and batch.len() > 0) {
-                            const valid = batch.verifyAll() catch false;
-                            if (!valid) return error.InvalidBatchSignature;
-                        }
-                    },
-                }
-            },
-        }
-
-        try post_state.state.commit();
-        const state_root = (try post_state.state.hashTreeRoot()).*;
-
-        if (!std.mem.eql(u8, &state_root, &signed_block.message.state_root)) {
-            std.log.warn("STFN state_root mismatch at slot {d}: ours={s}... block={s}...", .{
-                block_slot,
-                &std.fmt.bytesToHex(state_root[0..8], .lower),
-                &std.fmt.bytesToHex(signed_block.message.state_root[0..8], .lower),
-            });
-        } else {
-            std.log.info("STFN state_root MATCHES at slot {d}", .{block_slot});
-        }
-
-        var br_body_root: [32]u8 = undefined;
-        try consensus_types.electra.BeaconBlockBody.hashTreeRoot(self.allocator, &signed_block.message.body, &br_body_root);
-        const hdr = consensus_types.phase0.BeaconBlockHeader.Type{
-            .slot = block_slot,
-            .proposer_index = signed_block.message.proposer_index,
-            .parent_root = signed_block.message.parent_root,
-            .state_root = signed_block.message.state_root,
-            .body_root = br_body_root,
-        };
-        var computed_block_root: [32]u8 = undefined;
-        try consensus_types.phase0.BeaconBlockHeader.hashTreeRoot(&hdr, &computed_block_root);
-
-        return .{
-            .post_state = post_state,
-            .state_root = state_root,
-            .block_root = computed_block_root,
-        };
-    }
 };

@@ -17,6 +17,7 @@ const Allocator = std.mem.Allocator;
 
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
+const fork_types = @import("fork_types");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 
@@ -186,7 +187,8 @@ pub const SimNodeHarness = struct {
         }
 
         // Import through BeaconNode's full pipeline.
-        const result = try self.node.importBlock(signed_block);
+        const any_signed = fork_types.AnySignedBeaconBlock{ .full_electra = @constCast(signed_block) };
+        const result = try self.node.importBlock(any_signed, .api);
 
         // Advance simulated time.
         self.sim_io.advanceToSlot(

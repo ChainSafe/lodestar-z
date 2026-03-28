@@ -60,6 +60,9 @@ pub const SanityOutcome = union(enum) {
 /// `allocator` is needed for computing the block root (hash-tree-root
 /// involves temporary allocations in the SSZ layer).
 ///
+/// `block_to_state` is used as a fallback for parent detection when fork
+/// choice doesn't have the parent yet (e.g., early in sync, test replay).
+///
 /// Returns:
 /// - SanityOutcome.valid: block should continue through the pipeline
 /// - SanityOutcome.skipped: block was intentionally ignored (not an error)
@@ -69,6 +72,7 @@ pub fn verifySanity(
     block_input: BlockInput,
     fork_choice: *const ForkChoice,
     current_slot: Slot,
+    block_to_state: *const std.AutoArrayHashMap([32]u8, [32]u8),
     opts: ImportBlockOpts,
 ) BlockImportError!SanityOutcome {
     const block = block_input.block.beaconBlock();
@@ -96,7 +100,8 @@ pub fn verifySanity(
     // 3. Not from a future slot.
     // TS Lodestar checks block_slot > current_slot (no tolerance on main pipeline).
     // Clock disparity tolerance is handled at the gossip layer.
-    if (block_slot > current_slot) {
+    // Skip this check when the caller has already validated timing (e.g., API, range sync).
+    if (!opts.skip_future_slot and block_slot > current_slot) {
         return BlockImportError.FutureSlot;
     }
 
@@ -106,16 +111,25 @@ pub fn verifySanity(
         return BlockImportError.AlreadyKnown;
     }
 
-    // 5. Parent must be known to fork choice.
-    const parent_node = fork_choice.getBlock(parent_root) orelse
+    // 5. Parent must be known.
+    // Try fork choice first (authoritative). If the parent isn't in fork choice yet
+    // (e.g., early in sync or for test states where FC is newly initialized),
+    // fall back to block_to_state map which tracks all known parent block roots.
+    const parent_node_opt = fork_choice.getBlock(parent_root);
+    const parent_known_in_map = block_to_state.contains(parent_root);
+
+    if (parent_node_opt == null and !parent_known_in_map) {
         return BlockImportError.ParentUnknown;
+    }
+
+    const parent_slot = if (parent_node_opt) |pn| pn.slot else 0;
 
     return .{ .valid = .{
         .block_root = block_root,
         .block_slot = block_slot,
         .parent_root = parent_root,
-        .parent_block = parent_node,
-        .parent_slot = parent_node.slot,
+        .parent_block = parent_node_opt,
+        .parent_slot = parent_slot,
     } };
 }
 

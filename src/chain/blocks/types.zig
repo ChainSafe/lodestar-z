@@ -122,6 +122,11 @@ pub const ImportBlockOpts = struct {
 
     /// Whether this is from range sync (affects optimistic sync handling).
     from_range_sync: bool = false,
+
+    /// Skip the future-slot check in sanity verification.
+    /// Used when the caller has already validated timing or doesn't need
+    /// clock-based rejection (e.g., Chain.importBlock, range sync, API).
+    skip_future_slot: bool = false,
 };
 
 // ---------------------------------------------------------------------------

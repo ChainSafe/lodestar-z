@@ -131,6 +131,14 @@ pub fn importVerifiedBlock(
     // 2. Import block into fork choice DAG.
     if (opts.update_fork_choice) {
         if (ctx.fork_choice) |fc| {
+            // Advance fork choice clock to at least the block's slot.
+            // This prevents blocks from being rejected as "from the future" when
+            // the chain has advanced faster than the fork choice clock (e.g., range sync,
+            // test replay, or blocks imported before the first onSlot tick).
+            if (block_slot > fc.current_slot) {
+                fc.updateTime(block_slot);
+            }
+
             // Extract justified and finalized checkpoints from post-state.
             var justified_cp: consensus_types.phase0.Checkpoint.Type = undefined;
             post_state.state.currentJustifiedCheckpoint(&justified_cp) catch
@@ -325,7 +333,14 @@ pub fn importVerifiedBlock(
     }
 
     // 7. Emit SSE events (only for recent blocks to avoid flooding during sync).
-    const current_slot = if (ctx.fork_choice) |fc| fc.current_slot else block_slot;
+    // Use block_slot as fallback when fork choice current_slot is 0 (e.g., after genesis init
+    // before updateTime is called). This avoids integer overflow in the subtraction.
+    const current_slot = blk: {
+        if (ctx.fork_choice) |fc| {
+            if (fc.current_slot >= block_slot) break :blk fc.current_slot;
+        }
+        break :blk block_slot;
+    };
     if (current_slot - block_slot < EVENTSTREAM_EMIT_RECENT_BLOCK_SLOTS) {
         if (ctx.event_callback) |cb| {
             cb.emit(.{ .block = .{

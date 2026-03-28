@@ -279,7 +279,7 @@ pub const ForkChoice = struct {
             vote_fields.next_indices,
             self.justified_balances.items,
             new_balances,
-            self.equivocating_indices,
+            &self.equivocating_indices,
         );
 
         try self.proto_array.applyScoreChanges(
