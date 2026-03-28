@@ -108,6 +108,27 @@ pub const HeadTracker = struct {
     pub fn getBlockRoot(self: *const HeadTracker, slot: u64) ?[32]u8 {
         return self.slot_roots.get(slot);
     }
+
+    /// Prune slot → root entries below the finalized slot.
+    ///
+    /// Called from onFinalized to prevent unbounded growth. Entries at or
+    /// above `finalized_slot` are retained (we may still need them for
+    /// fork choice lookups on the canonical chain).
+    pub fn pruneBelow(self: *HeadTracker, finalized_slot: u64) void {
+        if (finalized_slot == 0) return;
+        var keys_to_remove = std.ArrayList(u64).init(self.allocator);
+        defer keys_to_remove.deinit();
+
+        var it = self.slot_roots.iterator();
+        while (it.next()) |entry| {
+            if (entry.key_ptr.* < finalized_slot) {
+                keys_to_remove.append(entry.key_ptr.*) catch continue;
+            }
+        }
+        for (keys_to_remove.items) |slot| {
+            _ = self.slot_roots.swapRemove(slot);
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------

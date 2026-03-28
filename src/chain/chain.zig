@@ -369,6 +369,13 @@ pub const Chain = struct {
         else
             0;
         self.seen_cache.pruneBlocks(min_slot);
+
+        // Prune aggregators at epoch boundaries.
+        // The seen_aggregators map is keyed by (validator_index, epoch) so it grows
+        // each epoch. Clear it at the start of each new epoch to bound memory.
+        if (slot > 0 and slot % preset.SLOTS_PER_EPOCH == 0) {
+            self.seen_cache.pruneAggregators();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -411,6 +418,49 @@ pub const Chain = struct {
         if (self.da_manager) |dam| {
             dam.pruneOldData(prune_slot);
         }
+
+        // Prune slot_roots in HeadTracker — remove entries for pre-finalized slots.
+        // This prevents the slot→root map from growing unboundedly over time.
+        const finalized_slot = finalized_epoch * preset.SLOTS_PER_EPOCH;
+        self.head_tracker.pruneBelow(finalized_slot);
+
+        // Prune block_to_state — remove entries for blocks that are now finalized.
+        // We use the pruned slot_roots as a guide: any root no longer in slot_roots
+        // that is below the finalized slot can be removed. Since pruneBelow already
+        // evicted pre-finalized entries from slot_roots, we iterate block_to_state
+        // and remove roots that are no longer tracked by slot_roots (i.e., pre-fin).
+        {
+            var roots_to_remove = std.ArrayList([32]u8).init(self.allocator);
+            defer roots_to_remove.deinit();
+
+            // Collect all roots in block_to_state that are not the finalized root
+            // and are not referenced by any remaining slot_roots entry.
+            var b2s_it = self.block_to_state.iterator();
+            while (b2s_it.next()) |entry| {
+                const root = entry.key_ptr.*;
+                // Never evict the finalized root itself — needed for SSE event above.
+                if (std.mem.eql(u8, &root, &finalized_root)) continue;
+                // Keep entries still referenced by slot_roots (post-finalization blocks).
+                var found = false;
+                var sr_it = self.head_tracker.slot_roots.iterator();
+                while (sr_it.next()) |sr_entry| {
+                    if (std.mem.eql(u8, sr_entry.value_ptr, &root)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    roots_to_remove.append(root) catch {};
+                }
+            }
+            for (roots_to_remove.items) |root| {
+                _ = self.block_to_state.swapRemove(root);
+            }
+        }
+
+        // Prune SeenCache sub-maps on finalization — these dedup caches are not
+        // authoritative, so clearing them on finalization is safe and prevents OOM.
+        self.seen_cache.pruneOnFinalization();
 
         // Emit SSE finalized_checkpoint event.
         if (self.event_callback) |cb| {

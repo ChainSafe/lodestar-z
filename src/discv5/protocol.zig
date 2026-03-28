@@ -108,6 +108,31 @@ pub const Protocol = struct {
         self.whoareyou_rate.deinit();
     }
 
+    /// Prune stale whoareyou_rate entries.
+    ///
+    /// Entries older than 60 seconds are removed. This prevents the per-IP
+    /// rate-limit map from growing unboundedly when the node encounters many
+    /// unique IPs over time (e.g., during DHT crawls or amplification attacks).
+    ///
+    /// Call periodically (e.g., every minute or at slot boundaries).
+    pub fn pruneWhoareyouRate(self: *Protocol) void {
+        const now_ns = std.time.nanoTimestamp();
+        const max_age_ns: i128 = 60 * std.time.ns_per_s;
+
+        var to_remove = std.ArrayList([4]u8).init(self.alloc);
+        defer to_remove.deinit();
+
+        var it = self.whoareyou_rate.iterator();
+        while (it.next()) |entry| {
+            if (now_ns - entry.value_ptr.window_start_ns > max_age_ns) {
+                to_remove.append(entry.key_ptr.*) catch continue;
+            }
+        }
+        for (to_remove.items) |key| {
+            _ = self.whoareyou_rate.remove(key);
+        }
+    }
+
     pub fn randomNonce(self: *Protocol) [12]u8 {
         var nonce: [12]u8 = undefined;
         self.rng.random().bytes(&nonce);

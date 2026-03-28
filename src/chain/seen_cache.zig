@@ -85,20 +85,19 @@ pub const SeenCache = struct {
     }
 
     /// Prune block entries older than `min_slot`.
+    ///
+    /// Uses a dynamic list to avoid the 256-entry silent truncation bug.
     pub fn pruneBlocks(self: *SeenCache, min_slot: Slot) void {
-        var to_remove_buf: [256][32]u8 = undefined;
-        var to_remove_len: usize = 0;
+        var to_remove = std.ArrayList([32]u8).init(self.allocator);
+        defer to_remove.deinit();
 
         var it = self.seen_blocks.iterator();
         while (it.next()) |entry| {
             if (entry.value_ptr.* < min_slot) {
-                if (to_remove_len < to_remove_buf.len) {
-                    to_remove_buf[to_remove_len] = entry.key_ptr.*;
-                    to_remove_len += 1;
-                }
+                to_remove.append(entry.key_ptr.*) catch continue;
             }
         }
-        for (to_remove_buf[0..to_remove_len]) |key| {
+        for (to_remove.items) |key| {
             _ = self.seen_blocks.remove(key);
         }
     }
@@ -169,27 +168,42 @@ pub const SeenCache = struct {
     }
 
     /// Prune data column entries for a given block root (e.g. when finalized).
+    ///
+    /// Uses a dynamic list to avoid the 256-entry silent truncation bug.
     pub fn pruneDataColumns(self: *SeenCache, block_root: [32]u8) void {
         // Remove all column entries for this block root.
-        // Since AutoHashMap doesn't support prefix deletion, we iterate.
-        var to_remove_buf: [256]DataColumnKey = undefined;
-        var to_remove_len: usize = 0;
+        // Since AutoHashMap doesn't support prefix deletion, we collect then remove.
+        var to_remove = std.ArrayList(DataColumnKey).init(self.allocator);
+        defer to_remove.deinit();
 
         var it = self.seen_data_columns.iterator();
         while (it.next()) |entry| {
             if (std.mem.eql(u8, &entry.key_ptr.block_root, &block_root)) {
-                if (to_remove_len < to_remove_buf.len) {
-                    to_remove_buf[to_remove_len] = entry.key_ptr.*;
-                    to_remove_len += 1;
-                }
+                to_remove.append(entry.key_ptr.*) catch continue;
             }
         }
-        for (to_remove_buf[0..to_remove_len]) |key| {
+        for (to_remove.items) |key| {
             _ = self.seen_data_columns.remove(key);
         }
     }
 
     // -- Bulk prune -----------------------------------------------------------
+
+    /// Prune operation dedup caches on finalization.
+    ///
+    /// These maps (exits, BLS changes, proposer/attester slashings) track already-seen
+    /// gossip messages to avoid re-processing duplicates. They are NOT authoritative
+    /// state — the canonical record is in the beacon state. Clearing them on finalization
+    /// is safe and prevents unbounded memory growth over days/weeks.
+    ///
+    /// After finalization, validators that exited or were slashed pre-finalization will
+    /// never send new gossip for those operations, so the dedup entries are stale anyway.
+    pub fn pruneOnFinalization(self: *SeenCache) void {
+        self.seen_exits.clearRetainingCapacity();
+        self.seen_bls_changes.clearRetainingCapacity();
+        self.seen_proposer_slashings.clearRetainingCapacity();
+        self.seen_attester_slashings.clearRetainingCapacity();
+    }
 
     /// Clear all aggregator entries (call at epoch boundaries).
     pub fn pruneAggregators(self: *SeenCache) void {
