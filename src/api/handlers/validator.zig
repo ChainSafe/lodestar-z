@@ -401,9 +401,8 @@ pub fn publishAggregateAndProofs(
     // Parse to validate even without a callback.
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
-    const parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{}) catch
+    _ = std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{}) catch
         return error.InvalidRequest;
-    defer parsed.deinit();
 
     return .{ .data = {} };
 }
@@ -443,9 +442,8 @@ pub fn publishContributionAndProofs(
 
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
-    const parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{}) catch
+    _ = std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{}) catch
         return error.InvalidRequest;
-    defer parsed.deinit();
 
     return .{ .data = {} };
 }

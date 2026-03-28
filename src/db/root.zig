@@ -39,6 +39,7 @@ pub const BeaconDB = beacon_db.BeaconDB;
 pub const buckets = @import("buckets.zig");
 pub const DatabaseId = buckets.DatabaseId;
 pub const slotKey = buckets.slotKey;
+pub const encodeU64BE = buckets.encodeU64BE;
 pub const rootColumnKey = buckets.rootColumnKey;
 
 pub const memory_kv_store_test = @import("memory_kv_store_test.zig");

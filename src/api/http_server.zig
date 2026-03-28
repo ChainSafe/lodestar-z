@@ -1103,6 +1103,8 @@ pub const HttpServer = struct {
         return .{ .status = 200, .content_type = "application/json", .body = body };
     }
 
+    // TODO(stub): returns full block data, not an actual blinded block.
+    // A real implementation would strip execution payload fields per the blinded block spec.
     fn hGetBlindedBlock(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
         const block_id_str = dc.match.getParam("block_id") orelse return error.InvalidBlockId;

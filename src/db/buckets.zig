@@ -145,8 +145,14 @@ pub const DatabaseId = enum {
 /// 2. Preserve LMDB's lexicographic sort order as slot ascending (BE integers sort
 ///    correctly by value under bytewise comparison)
 pub fn slotKey(slot: u64) [8]u8 {
+    return encodeU64BE(slot);
+}
+
+/// Generic big-endian u64 encoder. Use this for non-slot values (e.g., validator indices).
+/// `slotKey` is an alias kept for readability at slot-keyed call sites.
+pub fn encodeU64BE(value: u64) [8]u8 {
     var buf: [8]u8 = undefined;
-    std.mem.writeInt(u64, &buf, slot, .big);
+    std.mem.writeInt(u64, &buf, value, .big);
     return buf;
 }
 
