@@ -580,7 +580,7 @@ pub const BeaconNode = struct {
             mock.* = MockEngine.init(allocator);
             mock_engine_ptr = mock;
             engine = mock.engine();
-            std.log.info("Execution engine: MockEngine (--engine-mock)", .{});
+            log.logger(.node).info("Execution engine: MockEngine (--engine-mock)", .{});
         } else if (opts.execution_urls.len > 0) {
             // JWT secret will be loaded lazily in setIo() when Io becomes available.
             // Create production HTTP transport and HttpEngine (jwt_secret=null for now).
@@ -604,7 +604,7 @@ pub const BeaconNode = struct {
             mock.* = MockEngine.init(allocator);
             mock_engine_ptr = mock;
             engine = mock.engine();
-            std.log.info("Execution engine: MockEngine (no --execution-url)", .{});
+            log.logger(.node).info("Execution engine: MockEngine (no --execution-url)", .{});
         }
 
         const node = try allocator.create(BeaconNode);
@@ -660,7 +660,7 @@ pub const BeaconNode = struct {
             vm.* = ValidatorMonitor.init(allocator, opts.validator_monitor_indices);
             node.validator_monitor = vm;
             chain_struct.validator_monitor = vm;
-            std.log.info("Validator monitor: tracking {d} validators", .{opts.validator_monitor_indices.len});
+            log.logger(.node).info("Validator monitor: tracking {d} validators", .{opts.validator_monitor_indices.len});
             // Wire validator monitor into API context
             const vm_cb_ctx = try allocator.create(ValidatorMonitorCallbackCtx);
             vm_cb_ctx.* = .{ .monitor = vm };
@@ -848,7 +848,7 @@ pub const BeaconNode = struct {
             self.kzg.?.deinit(self.allocator);
         }
         self.kzg = try Kzg.initFromFile(self.allocator, trusted_setup_path);
-        std.log.info("KZG trusted setup loaded from '{s}'", .{trusted_setup_path});
+        log.logger(.node).info("KZG trusted setup loaded from '{s}'", .{trusted_setup_path});
     }
 
     /// Set the I/O context for the node and all sub-components.
@@ -864,13 +864,13 @@ pub const BeaconNode = struct {
             const cpu_count = std.Thread.getCpuCount() catch 4;
             const n_workers: u16 = @intCast(@max(@min(cpu_count / 2, BlsThreadPool.MAX_WORKERS), 1));
             self.bls_thread_pool = BlsThreadPool.init(self.allocator, io, .{ .n_workers = n_workers }) catch |err| blk: {
-                std.log.err("Failed to initialize BLS thread pool: {}", .{err});
+                log.logger(.node).err("Failed to initialize BLS thread pool: {}", .{err});
                 break :blk null;
             };
             if (self.bls_thread_pool) |pool| {
                 // Wire pool into the block importer for batch BLS verification.
                 self.block_importer.bls_thread_pool = pool;
-                std.log.info("BLS thread pool initialized with {d} workers", .{pool.n_workers});
+                log.logger(.node).info("BLS thread pool initialized with {d} workers", .{pool.n_workers});
             }
         }
 
@@ -878,7 +878,7 @@ pub const BeaconNode = struct {
         // When data_dir is set, resolve DataDir once to get all paths.
         if (self.data_dir.len > 0) {
             var dd = DataDir.resolve(self.allocator, self.node_options) catch |err| blk: {
-                std.log.err("Failed to resolve data dir paths: {}", .{err});
+                log.logger(.node).err("Failed to resolve data dir paths: {}", .{err});
                 break :blk null;
             };
             if (dd) |*data_dir| {
@@ -887,7 +887,7 @@ pub const BeaconNode = struct {
                 // Load or create node identity using the DataDir ENR key path.
                 if (self.node_identity == null) {
                     self.node_identity = identity_mod.loadOrCreateIdentityAtPath(io, data_dir.enr_key) catch |err| blk: {
-                        std.log.err("Failed to load node identity: {}", .{err});
+                        log.logger(.node).err("Failed to load node identity: {}", .{err});
                         break :blk null;
                     };
                 }
@@ -1199,7 +1199,7 @@ pub const BeaconNode = struct {
 
         // Notify EL of fork choice update after each block import.
         self.notifyForkchoiceUpdate(result.block_root) catch |err| {
-            std.log.warn("forkchoiceUpdated failed: {}", .{err});
+            log.logger(.node).warn("forkchoiceUpdated failed: {}", .{err});
         };
 
         const elapsed_s: f64 = if (t0) |start| blk: {
@@ -1445,12 +1445,12 @@ pub const BeaconNode = struct {
 
         // Initialize discovery service.
         self.initDiscoveryService() catch |err| {
-            std.log.warn("Failed to initialize discovery service: {}", .{err});
+            log.logger(.node).warn("Failed to initialize discovery service: {}", .{err});
         };
 
         // Initialize peer manager.
         self.initPeerManager() catch |err| {
-            std.log.warn("Failed to initialize peer manager: {}", .{err});
+            log.logger(.node).warn("Failed to initialize peer manager: {}", .{err});
         };
 
         // Initialize GossipHandler for attestation/aggregate processing.
@@ -1458,7 +1458,7 @@ pub const BeaconNode = struct {
 
         // Initialize the sync pipeline before dialing any peers.
         self.initSyncPipeline() catch |err| {
-            std.log.warn("Failed to initialize sync pipeline: {}", .{err});
+            log.logger(.node).warn("Failed to initialize sync pipeline: {}", .{err});
         };
 
         // Dial bootnodes: decode ENR → extract IP/port → build multiaddr → dial.
@@ -2512,7 +2512,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
     /// The returned payload_id is cached for later getPayload calls.
     fn notifyForkchoiceUpdate(self: *BeaconNode, new_head_root: [32]u8) !void {
         self.notifyForkchoiceUpdateWithAttrs(new_head_root, null) catch |err| {
-            std.log.warn("forkchoiceUpdated failed: {}", .{err});
+            log.logger(.node).warn("forkchoiceUpdated failed: {}", .{err});
         };
     }
 

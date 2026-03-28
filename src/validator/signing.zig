@@ -50,6 +50,12 @@ pub const SigningContext = struct {
     /// Index 0 = phase0 (epoch 0). Populated from chain config at startup.
     fork_schedule_len: usize,
     fork_schedule: [16]ForkEntry,
+    /// EIP-7044: Capella fork version for voluntary exit signing (always used post-Deneb).
+    /// Set from chain config. Zero-value means not configured (pre-Capella chain).
+    capella_fork_version: [4]u8 = [4]u8{ 0, 0, 0, 0 },
+    /// EIP-7044: Deneb fork epoch. Post-Deneb, voluntary exits use CAPELLA_FORK_VERSION.
+    /// std.math.maxInt(u64) means Deneb not scheduled (treat as pre-Deneb).
+    deneb_fork_epoch: u64 = std.math.maxInt(u64),
 
     pub const ForkEntry = struct {
         epoch: u64,
@@ -217,7 +223,15 @@ pub fn voluntaryExitSigningRoot(
     out: *[32]u8,
 ) !void {
     var domain: [32]u8 = undefined;
-    const fork_version = ctx.forkVersionAtEpoch(voluntary_exit.epoch);
+    // EIP-7044: post-Deneb activation, voluntary exits MUST use CAPELLA_FORK_VERSION
+    // regardless of the exit.epoch. This ensures exits signed before Deneb remain
+    // valid after the upgrade, and that validators can exit at any time post-Deneb.
+    // Mirror of BeaconConfig.getDomainForVoluntaryExit on the state-transition side.
+    // Pre-Deneb chains (deneb_fork_epoch == maxInt) fall back to epoch-derived version.
+    const fork_version = if (ctx.deneb_fork_epoch != std.math.maxInt(u64))
+        ctx.capella_fork_version
+    else
+        ctx.forkVersionAtEpoch(voluntary_exit.epoch);
     try computeDomain(DOMAIN_VOLUNTARY_EXIT, fork_version, ctx.genesis_validators_root, &domain);
     try computeSigningRoot(consensus_types.phase0.VoluntaryExit, voluntary_exit, &domain, out);
 }
