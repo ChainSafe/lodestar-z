@@ -30,6 +30,9 @@ const BatchBlock = batch_mod.BatchBlock;
 pub const RangeSyncCallbacks = struct {
     ptr: *anyopaque,
 
+    /// Import a single block. ptr is the same as RangeSyncCallbacks.ptr.
+    importBlockFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
+
     processChainSegmentFn: *const fn (
         ptr: *anyopaque,
         blocks: []const BatchBlock,
@@ -51,6 +54,7 @@ pub const RangeSyncCallbacks = struct {
     fn toSyncChainCallbacks(self: *const RangeSyncCallbacks) SyncChainCallbacks {
         return .{
             .ptr = self.ptr,
+            .importBlockFn = self.importBlockFn,
             .processChainSegmentFn = self.processChainSegmentFn,
             .downloadByRangeFn = self.downloadByRangeFn,
             .reportPeerFn = self.reportPeerFn,
@@ -90,6 +94,9 @@ pub const RangeSync = struct {
 
     /// Our local finalized epoch (updated externally).
     local_finalized_epoch: u64,
+    /// Monotonically-increasing chain ID counter. Owned here to avoid
+    /// the data-race footgun of a file-scope mutable var.
+    next_chain_id: u32,
 
     pub fn init(allocator: Allocator, callbacks: RangeSyncCallbacks) RangeSync {
         return .{
@@ -98,7 +105,15 @@ pub const RangeSync = struct {
             .finalized_chain = null,
             .head_chains = .empty,
             .local_finalized_epoch = 0,
+            .next_chain_id = 0,
         };
+    }
+
+    /// Allocate the next chain ID.
+    fn allocChainId(self: *RangeSync) u32 {
+        const id = self.next_chain_id;
+        self.next_chain_id +%= 1;
+        return id;
     }
 
     pub fn deinit(self: *RangeSync) void {
@@ -135,6 +150,7 @@ pub const RangeSync = struct {
                 } else {
                     var fc = SyncChain.init(
                         self.allocator,
+                        self.allocChainId(),
                         .finalized,
                         start_epoch,
                         target,
@@ -160,6 +176,7 @@ pub const RangeSync = struct {
                 if (self.head_chains.items.len < MAX_HEAD_CHAINS) {
                     var hc = SyncChain.init(
                         self.allocator,
+                        self.allocChainId(),
                         .head,
                         start_epoch,
                         target,
@@ -333,6 +350,8 @@ const TestCallbacks = struct {
     downloaded: u32 = 0,
     reported: u32 = 0,
 
+    fn importBlockFn(_: *anyopaque, _: []const u8) anyerror!void {}
+
     fn processChainSegmentFn(ptr: *anyopaque, _: []const BatchBlock, _: RangeSyncType) anyerror!void {
         const self: *TestCallbacks = @ptrCast(@alignCast(ptr));
         self.processed += 1;
@@ -351,6 +370,7 @@ const TestCallbacks = struct {
     fn rangeSyncCallbacks(self: *TestCallbacks) RangeSyncCallbacks {
         return .{
             .ptr = self,
+            .importBlockFn = &importBlockFn,
             .processChainSegmentFn = &processChainSegmentFn,
             .downloadByRangeFn = &downloadByRangeFn,
             .reportPeerFn = &reportPeerFn,

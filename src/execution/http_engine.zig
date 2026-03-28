@@ -1060,7 +1060,7 @@ pub const HttpEngine = struct {
         var parsed = try json_rpc.decodeResponse(GetPayloadV1Json, self.allocator, response);
         defer parsed.deinit();
 
-        return decodeGetPayloadResponseV1(parsed.value);
+        return decodeGetPayloadResponseV1(self.allocator, parsed.value);
     }
 
     fn getPayloadV2(
@@ -1088,7 +1088,7 @@ pub const HttpEngine = struct {
         var parsed = try json_rpc.decodeResponse(GetPayloadV2Json, self.allocator, response);
         defer parsed.deinit();
 
-        return decodeGetPayloadResponseV2(parsed.value);
+        return decodeGetPayloadResponseV2(self.allocator, parsed.value);
     }
 
     fn getPayloadV4(
@@ -1262,13 +1262,13 @@ pub fn generateJwt(allocator: Allocator, secret: [32]u8, iat: u64) ![]const u8 {
 // ── Engine API JSON encoding ──────────────────────────────────────────────────
 
 fn encodeWithdrawal(allocator: Allocator, w: Withdrawal) ![]const u8 {
-    const index_hex = try hexEncodeU64(allocator, w.index);
+    const index_hex = try hexEncodeQuantity(allocator, w.index);
     defer allocator.free(index_hex);
-    const vi_hex = try hexEncodeU64(allocator, w.validator_index);
+    const vi_hex = try hexEncodeQuantity(allocator, w.validator_index);
     defer allocator.free(vi_hex);
     const addr_hex = try hexEncodeFixed(allocator, &w.address);
     defer allocator.free(addr_hex);
-    const amt_hex = try hexEncodeU64(allocator, w.amount);
+    const amt_hex = try hexEncodeQuantity(allocator, w.amount);
     defer allocator.free(amt_hex);
 
     return std.fmt.allocPrint(
@@ -1352,7 +1352,7 @@ fn encodeVersionedHashes(allocator: Allocator, hashes: []const [32]u8) ![]const 
 }
 
 fn encodePayloadAttributesV1(allocator: Allocator, attrs: PayloadAttributesV1) ![]const u8 {
-    const timestamp = try hexEncodeU64(allocator, attrs.timestamp);
+    const timestamp = try hexEncodeQuantity(allocator, attrs.timestamp);
     defer allocator.free(timestamp);
     const prev_randao = try hexEncodeFixed(allocator, &attrs.prev_randao);
     defer allocator.free(prev_randao);
@@ -1367,7 +1367,7 @@ fn encodePayloadAttributesV1(allocator: Allocator, attrs: PayloadAttributesV1) !
 }
 
 fn encodePayloadAttributesV2(allocator: Allocator, attrs: PayloadAttributesV2) ![]const u8 {
-    const timestamp = try hexEncodeU64(allocator, attrs.timestamp);
+    const timestamp = try hexEncodeQuantity(allocator, attrs.timestamp);
     defer allocator.free(timestamp);
     const prev_randao = try hexEncodeFixed(allocator, &attrs.prev_randao);
     defer allocator.free(prev_randao);
@@ -1396,17 +1396,17 @@ fn encodeExecutionPayloadV1(allocator: Allocator, p: ExecutionPayloadV1) ![]cons
     defer allocator.free(logs_bloom);
     const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
     defer allocator.free(prev_randao);
-    const block_number = try hexEncodeU64(allocator, p.block_number);
+    const block_number = try hexEncodeQuantity(allocator, p.block_number);
     defer allocator.free(block_number);
-    const gas_limit = try hexEncodeU64(allocator, p.gas_limit);
+    const gas_limit = try hexEncodeQuantity(allocator, p.gas_limit);
     defer allocator.free(gas_limit);
-    const gas_used = try hexEncodeU64(allocator, p.gas_used);
+    const gas_used = try hexEncodeQuantity(allocator, p.gas_used);
     defer allocator.free(gas_used);
-    const timestamp = try hexEncodeU64(allocator, p.timestamp);
+    const timestamp = try hexEncodeQuantity(allocator, p.timestamp);
     defer allocator.free(timestamp);
     const extra_data = try hexEncode(allocator, p.extra_data);
     defer allocator.free(extra_data);
-    const base_fee = try hexEncodeU256(allocator, p.base_fee_per_gas);
+    const base_fee = try hexEncodeQuantityU256(allocator, p.base_fee_per_gas);
     defer allocator.free(base_fee);
     const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
     defer allocator.free(block_hash);
@@ -1451,17 +1451,17 @@ fn encodeExecutionPayloadV2(allocator: Allocator, p: ExecutionPayloadV2) ![]cons
     defer allocator.free(logs_bloom);
     const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
     defer allocator.free(prev_randao);
-    const block_number = try hexEncodeU64(allocator, p.block_number);
+    const block_number = try hexEncodeQuantity(allocator, p.block_number);
     defer allocator.free(block_number);
-    const gas_limit = try hexEncodeU64(allocator, p.gas_limit);
+    const gas_limit = try hexEncodeQuantity(allocator, p.gas_limit);
     defer allocator.free(gas_limit);
-    const gas_used = try hexEncodeU64(allocator, p.gas_used);
+    const gas_used = try hexEncodeQuantity(allocator, p.gas_used);
     defer allocator.free(gas_used);
-    const timestamp = try hexEncodeU64(allocator, p.timestamp);
+    const timestamp = try hexEncodeQuantity(allocator, p.timestamp);
     defer allocator.free(timestamp);
     const extra_data = try hexEncode(allocator, p.extra_data);
     defer allocator.free(extra_data);
-    const base_fee = try hexEncodeU256(allocator, p.base_fee_per_gas);
+    const base_fee = try hexEncodeQuantityU256(allocator, p.base_fee_per_gas);
     defer allocator.free(base_fee);
     const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
     defer allocator.free(block_hash);
@@ -1501,11 +1501,11 @@ fn encodeDepositRequest(allocator: Allocator, dr: DepositRequest) ![]const u8 {
     defer allocator.free(pubkey);
     const wc = try hexEncodeFixed(allocator, &dr.withdrawal_credentials);
     defer allocator.free(wc);
-    const amount = try hexEncodeU64(allocator, dr.amount);
+    const amount = try hexEncodeQuantity(allocator, dr.amount);
     defer allocator.free(amount);
     const sig = try hexEncodeFixed(allocator, &dr.signature);
     defer allocator.free(sig);
-    const index = try hexEncodeU64(allocator, dr.index);
+    const index = try hexEncodeQuantity(allocator, dr.index);
     defer allocator.free(index);
     return std.fmt.allocPrint(
         allocator,
@@ -1519,7 +1519,7 @@ fn encodeWithdrawalRequest(allocator: Allocator, wr: WithdrawalRequest) ![]const
     defer allocator.free(src);
     const vpk = try hexEncodeFixed(allocator, &wr.validator_pubkey);
     defer allocator.free(vpk);
-    const amt = try hexEncodeU64(allocator, wr.amount);
+    const amt = try hexEncodeQuantity(allocator, wr.amount);
     defer allocator.free(amt);
     return std.fmt.allocPrint(
         allocator,
@@ -1591,17 +1591,17 @@ fn encodeExecutionPayloadV4(allocator: Allocator, p: ExecutionPayloadV4) ![]cons
     defer allocator.free(logs_bloom);
     const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
     defer allocator.free(prev_randao);
-    const block_number = try hexEncodeU64(allocator, p.block_number);
+    const block_number = try hexEncodeQuantity(allocator, p.block_number);
     defer allocator.free(block_number);
-    const gas_limit = try hexEncodeU64(allocator, p.gas_limit);
+    const gas_limit = try hexEncodeQuantity(allocator, p.gas_limit);
     defer allocator.free(gas_limit);
-    const gas_used = try hexEncodeU64(allocator, p.gas_used);
+    const gas_used = try hexEncodeQuantity(allocator, p.gas_used);
     defer allocator.free(gas_used);
-    const timestamp = try hexEncodeU64(allocator, p.timestamp);
+    const timestamp = try hexEncodeQuantity(allocator, p.timestamp);
     defer allocator.free(timestamp);
     const extra_data = try hexEncode(allocator, p.extra_data);
     defer allocator.free(extra_data);
-    const base_fee = try hexEncodeU256(allocator, p.base_fee_per_gas);
+    const base_fee = try hexEncodeQuantityU256(allocator, p.base_fee_per_gas);
     defer allocator.free(base_fee);
     const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
     defer allocator.free(block_hash);
@@ -1609,9 +1609,9 @@ fn encodeExecutionPayloadV4(allocator: Allocator, p: ExecutionPayloadV4) ![]cons
     defer allocator.free(transactions);
     const withdrawals = try encodeWithdrawals(allocator, p.withdrawals);
     defer allocator.free(withdrawals);
-    const blob_gas_used = try hexEncodeU64(allocator, p.blob_gas_used);
+    const blob_gas_used = try hexEncodeQuantity(allocator, p.blob_gas_used);
     defer allocator.free(blob_gas_used);
-    const excess_blob_gas = try hexEncodeU64(allocator, p.excess_blob_gas);
+    const excess_blob_gas = try hexEncodeQuantity(allocator, p.excess_blob_gas);
     defer allocator.free(excess_blob_gas);
     const deposit_requests = try encodeDepositRequests(allocator, p.deposit_requests);
     defer allocator.free(deposit_requests);
@@ -1665,17 +1665,17 @@ fn encodeExecutionPayloadV3(allocator: Allocator, p: ExecutionPayloadV3) ![]cons
     defer allocator.free(logs_bloom);
     const prev_randao = try hexEncodeFixed(allocator, &p.prev_randao);
     defer allocator.free(prev_randao);
-    const block_number = try hexEncodeU64(allocator, p.block_number);
+    const block_number = try hexEncodeQuantity(allocator, p.block_number);
     defer allocator.free(block_number);
-    const gas_limit = try hexEncodeU64(allocator, p.gas_limit);
+    const gas_limit = try hexEncodeQuantity(allocator, p.gas_limit);
     defer allocator.free(gas_limit);
-    const gas_used = try hexEncodeU64(allocator, p.gas_used);
+    const gas_used = try hexEncodeQuantity(allocator, p.gas_used);
     defer allocator.free(gas_used);
-    const timestamp = try hexEncodeU64(allocator, p.timestamp);
+    const timestamp = try hexEncodeQuantity(allocator, p.timestamp);
     defer allocator.free(timestamp);
     const extra_data = try hexEncode(allocator, p.extra_data);
     defer allocator.free(extra_data);
-    const base_fee = try hexEncodeU256(allocator, p.base_fee_per_gas);
+    const base_fee = try hexEncodeQuantityU256(allocator, p.base_fee_per_gas);
     defer allocator.free(base_fee);
     const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
     defer allocator.free(block_hash);
@@ -1683,9 +1683,9 @@ fn encodeExecutionPayloadV3(allocator: Allocator, p: ExecutionPayloadV3) ![]cons
     defer allocator.free(transactions);
     const withdrawals = try encodeWithdrawals(allocator, p.withdrawals);
     defer allocator.free(withdrawals);
-    const blob_gas_used = try hexEncodeU64(allocator, p.blob_gas_used);
+    const blob_gas_used = try hexEncodeQuantity(allocator, p.blob_gas_used);
     defer allocator.free(blob_gas_used);
-    const excess_blob_gas = try hexEncodeU64(allocator, p.excess_blob_gas);
+    const excess_blob_gas = try hexEncodeQuantity(allocator, p.excess_blob_gas);
     defer allocator.free(excess_blob_gas);
 
     return std.fmt.allocPrint(allocator,
@@ -1733,7 +1733,7 @@ fn encodeForkchoiceState(allocator: Allocator, state: ForkchoiceStateV1) ![]cons
 }
 
 fn encodePayloadAttributes(allocator: Allocator, attrs: PayloadAttributesV3) ![]const u8 {
-    const timestamp = try hexEncodeU64(allocator, attrs.timestamp);
+    const timestamp = try hexEncodeQuantity(allocator, attrs.timestamp);
     defer allocator.free(timestamp);
     const prev_randao = try hexEncodeFixed(allocator, &attrs.prev_randao);
     defer allocator.free(prev_randao);
@@ -1845,9 +1845,31 @@ const BlobsBundleJson = struct {
 };
 
 fn decodeGetPayloadResponse(allocator: Allocator, j: GetPayloadJson) !GetPayloadResponse {
-    _ = allocator;
-
     const ep = j.executionPayload;
+
+    // Deep-copy extra_data: decode hex bytes into owned memory.
+    const extra_data = try decodeExtraData(allocator, ep.extraData);
+    errdefer allocator.free(extra_data);
+
+    // Deep-copy transactions from arena.
+    const transactions = try decodeTransactions(allocator, ep.transactions);
+    errdefer {
+        for (transactions) |tx| allocator.free(tx);
+        allocator.free(transactions);
+    }
+
+    // Decode and deep-copy withdrawals from arena.
+    const withdrawals = try decodeWithdrawalsOwned(allocator, ep.withdrawals);
+    errdefer allocator.free(withdrawals);
+
+    // Decode blobs bundle.
+    const blobs_bundle = try decodeBlobsBundle(allocator, j.blobsBundle);
+    errdefer {
+        allocator.free(blobs_bundle.commitments);
+        allocator.free(blobs_bundle.proofs);
+        allocator.free(blobs_bundle.blobs);
+    }
+
     const payload = ExecutionPayloadV3{
         .parent_hash = try hexDecode32(ep.parentHash),
         .fee_recipient = try hexDecode20(ep.feeRecipient),
@@ -1859,11 +1881,11 @@ fn decodeGetPayloadResponse(allocator: Allocator, j: GetPayloadJson) !GetPayload
         .gas_limit = try hexDecodeU64(ep.gasLimit),
         .gas_used = try hexDecodeU64(ep.gasUsed),
         .timestamp = try hexDecodeU64(ep.timestamp),
-        .extra_data = ep.extraData,
+        .extra_data = extra_data,
         .base_fee_per_gas = try hexDecodeU256(ep.baseFeePerGas),
         .block_hash = try hexDecode32(ep.blockHash),
-        .transactions = ep.transactions,
-        .withdrawals = &.{},
+        .transactions = transactions,
+        .withdrawals = withdrawals,
         .blob_gas_used = try hexDecodeU64(ep.blobGasUsed),
         .excess_blob_gas = try hexDecodeU64(ep.excessBlobGas),
     };
@@ -1873,11 +1895,7 @@ fn decodeGetPayloadResponse(allocator: Allocator, j: GetPayloadJson) !GetPayload
     return GetPayloadResponse{
         .execution_payload = payload,
         .block_value = block_value,
-        .blobs_bundle = .{
-            .commitments = &.{},
-            .proofs = &.{},
-            .blobs = &.{},
-        },
+        .blobs_bundle = blobs_bundle,
         .should_override_builder = j.shouldOverrideBuilder,
     };
 }
@@ -1907,8 +1925,18 @@ const GetPayloadV1Json = struct {
     blockValue: []const u8,
 };
 
-fn decodeGetPayloadResponseV1(j: GetPayloadV1Json) !GetPayloadResponseV1 {
+fn decodeGetPayloadResponseV1(allocator: Allocator, j: GetPayloadV1Json) !GetPayloadResponseV1 {
     const ep = j.executionPayload;
+
+    const extra_data = try decodeExtraData(allocator, ep.extraData);
+    errdefer allocator.free(extra_data);
+
+    const transactions = try decodeTransactions(allocator, ep.transactions);
+    errdefer {
+        for (transactions) |tx| allocator.free(tx);
+        allocator.free(transactions);
+    }
+
     return GetPayloadResponseV1{
         .execution_payload = ExecutionPayloadV1{
             .parent_hash = try hexDecode32(ep.parentHash),
@@ -1921,10 +1949,10 @@ fn decodeGetPayloadResponseV1(j: GetPayloadV1Json) !GetPayloadResponseV1 {
             .gas_limit = try hexDecodeU64(ep.gasLimit),
             .gas_used = try hexDecodeU64(ep.gasUsed),
             .timestamp = try hexDecodeU64(ep.timestamp),
-            .extra_data = ep.extraData,
+            .extra_data = extra_data,
             .base_fee_per_gas = try hexDecodeU256(ep.baseFeePerGas),
             .block_hash = try hexDecode32(ep.blockHash),
-            .transactions = ep.transactions,
+            .transactions = transactions,
         },
         .block_value = try hexDecodeU256(j.blockValue),
     };
@@ -1954,11 +1982,21 @@ const GetPayloadV2Json = struct {
     blockValue: []const u8,
 };
 
-fn decodeGetPayloadResponseV2(j: GetPayloadV2Json) !GetPayloadResponseV2 {
+fn decodeGetPayloadResponseV2(allocator: Allocator, j: GetPayloadV2Json) !GetPayloadResponseV2 {
     const ep = j.executionPayload;
-    // Decode withdrawals: all fields are hex-encoded quantities.
-    var withdrawals = try decodeWithdrawals(ep.withdrawals);
-    _ = &withdrawals; // withdrawals slice is backed by JSON arena — safe to reference
+
+    const extra_data = try decodeExtraData(allocator, ep.extraData);
+    errdefer allocator.free(extra_data);
+
+    const transactions = try decodeTransactions(allocator, ep.transactions);
+    errdefer {
+        for (transactions) |tx| allocator.free(tx);
+        allocator.free(transactions);
+    }
+
+    const withdrawals = try decodeWithdrawalsOwned(allocator, ep.withdrawals);
+    errdefer allocator.free(withdrawals);
+
     return GetPayloadResponseV2{
         .execution_payload = ExecutionPayloadV2{
             .parent_hash = try hexDecode32(ep.parentHash),
@@ -1971,25 +2009,80 @@ fn decodeGetPayloadResponseV2(j: GetPayloadV2Json) !GetPayloadResponseV2 {
             .gas_limit = try hexDecodeU64(ep.gasLimit),
             .gas_used = try hexDecodeU64(ep.gasUsed),
             .timestamp = try hexDecodeU64(ep.timestamp),
-            .extra_data = ep.extraData,
+            .extra_data = extra_data,
             .base_fee_per_gas = try hexDecodeU256(ep.baseFeePerGas),
             .block_hash = try hexDecode32(ep.blockHash),
-            .transactions = ep.transactions,
-            .withdrawals = &.{}, // withdrawals omitted: arena-backed, caller must copy if needed
+            .transactions = transactions,
+            .withdrawals = withdrawals,
         },
         .block_value = try hexDecodeU256(j.blockValue),
     };
 }
 
-/// Decode a slice of WithdrawalJson into Withdrawal values.
-/// Note: returned slice references the JSON arena — values are valid only while
-/// the ParsedResponse is alive.
-fn decodeWithdrawals(withdrawals: []const WithdrawalJson) ![0]Withdrawal {
-    _ = withdrawals;
-    // Withdrawals reference JSON arena memory; for now return empty marker
-    // (callers that need withdrawals should copy them out separately).
-    return .{};
+/// Decode extra_data hex string into an owned byte slice. Caller frees.
+fn decodeExtraData(allocator: Allocator, hex: []const u8) ![]const u8 {
+    const stripped = hexStrip0x(hex) catch hex; // allow missing 0x
+    if (stripped.len == 0) return &.{};
+    const out = try allocator.alloc(u8, stripped.len / 2);
+    _ = try std.fmt.hexToBytes(out, stripped);
+    return out;
 }
+
+/// Decode transaction hex strings into owned byte slices. Caller frees each tx and the slice.
+fn decodeTransactions(allocator: Allocator, txs: []const []const u8) ![]const []const u8 {
+    if (txs.len == 0) return &.{};
+    const result = try allocator.alloc([]const u8, txs.len);
+    errdefer allocator.free(result);
+    var decoded: usize = 0;
+    errdefer for (result[0..decoded]) |tx| allocator.free(tx);
+    for (txs, 0..) |tx_hex, i| {
+        const stripped = hexStrip0x(tx_hex) catch tx_hex;
+        const out = try allocator.alloc(u8, stripped.len / 2);
+        _ = try std.fmt.hexToBytes(out, stripped);
+        result[i] = out;
+        decoded += 1;
+    }
+    return result;
+}
+
+/// Decode a slice of WithdrawalJson into an owned Withdrawal slice. Caller frees.
+fn decodeWithdrawalsOwned(allocator: Allocator, withdrawals: []const WithdrawalJson) ![]const Withdrawal {
+    if (withdrawals.len == 0) return &.{};
+    const result = try allocator.alloc(Withdrawal, withdrawals.len);
+    errdefer allocator.free(result);
+    for (withdrawals, 0..) |w, i| {
+        result[i] = Withdrawal{
+            .index = try hexDecodeU64(w.index),
+            .validator_index = try hexDecodeU64(w.validatorIndex),
+            .address = try hexDecode20(w.address),
+            .amount = try hexDecodeU64(w.amount),
+        };
+    }
+    return result;
+}
+
+/// JSON representation of a DepositRequest from the EL (EIP-6110).
+const DepositRequestJson = struct {
+    pubkey: []const u8,
+    withdrawalCredentials: []const u8,
+    amount: []const u8,
+    signature: []const u8,
+    index: []const u8,
+};
+
+/// JSON representation of a WithdrawalRequest from the EL (EIP-7002).
+const WithdrawalRequestJson = struct {
+    sourceAddress: []const u8,
+    validatorPubkey: []const u8,
+    amount: []const u8,
+};
+
+/// JSON representation of a ConsolidationRequest from the EL (EIP-7251).
+const ConsolidationRequestJson = struct {
+    sourceAddress: []const u8,
+    sourcePubkey: []const u8,
+    targetPubkey: []const u8,
+};
 
 /// JSON representation for ExecutionPayloadV4 (Electra, adds request arrays).
 const ExecutionPayloadJsonV4 = struct {
@@ -2010,9 +2103,9 @@ const ExecutionPayloadJsonV4 = struct {
     withdrawals: []const WithdrawalJson,
     blobGasUsed: []const u8,
     excessBlobGas: []const u8,
-    depositRequests: []const std.json.Value,
-    withdrawalRequests: []const std.json.Value,
-    consolidationRequests: []const std.json.Value,
+    depositRequests: []const DepositRequestJson,
+    withdrawalRequests: []const WithdrawalRequestJson,
+    consolidationRequests: []const ConsolidationRequestJson,
 };
 
 const GetPayloadV4Json = struct {
@@ -2023,8 +2116,36 @@ const GetPayloadV4Json = struct {
 };
 
 fn decodeGetPayloadResponseV4(allocator: Allocator, j: GetPayloadV4Json) !GetPayloadResponseV4 {
-    _ = allocator;
     const ep = j.executionPayload;
+
+    const extra_data = try decodeExtraData(allocator, ep.extraData);
+    errdefer allocator.free(extra_data);
+
+    const transactions = try decodeTransactions(allocator, ep.transactions);
+    errdefer {
+        for (transactions) |tx| allocator.free(tx);
+        allocator.free(transactions);
+    }
+
+    const withdrawals = try decodeWithdrawalsOwned(allocator, ep.withdrawals);
+    errdefer allocator.free(withdrawals);
+
+    const deposit_requests = try decodeDepositRequests(allocator, ep.depositRequests);
+    errdefer allocator.free(deposit_requests);
+
+    const withdrawal_requests = try decodeWithdrawalRequests(allocator, ep.withdrawalRequests);
+    errdefer allocator.free(withdrawal_requests);
+
+    const consolidation_requests = try decodeConsolidationRequests(allocator, ep.consolidationRequests);
+    errdefer allocator.free(consolidation_requests);
+
+    const blobs_bundle = try decodeBlobsBundle(allocator, j.blobsBundle);
+    errdefer {
+        allocator.free(blobs_bundle.commitments);
+        allocator.free(blobs_bundle.proofs);
+        allocator.free(blobs_bundle.blobs);
+    }
+
     const payload = ExecutionPayloadV4{
         .parent_hash = try hexDecode32(ep.parentHash),
         .fee_recipient = try hexDecode20(ep.feeRecipient),
@@ -2036,28 +2157,93 @@ fn decodeGetPayloadResponseV4(allocator: Allocator, j: GetPayloadV4Json) !GetPay
         .gas_limit = try hexDecodeU64(ep.gasLimit),
         .gas_used = try hexDecodeU64(ep.gasUsed),
         .timestamp = try hexDecodeU64(ep.timestamp),
-        .extra_data = ep.extraData,
+        .extra_data = extra_data,
         .base_fee_per_gas = try hexDecodeU256(ep.baseFeePerGas),
         .block_hash = try hexDecode32(ep.blockHash),
-        .transactions = ep.transactions,
-        .withdrawals = &.{},
+        .transactions = transactions,
+        .withdrawals = withdrawals,
         .blob_gas_used = try hexDecodeU64(ep.blobGasUsed),
         .excess_blob_gas = try hexDecodeU64(ep.excessBlobGas),
-        .deposit_requests = &.{},
-        .withdrawal_requests = &.{},
-        .consolidation_requests = &.{},
+        .deposit_requests = deposit_requests,
+        .withdrawal_requests = withdrawal_requests,
+        .consolidation_requests = consolidation_requests,
     };
 
     return GetPayloadResponseV4{
         .execution_payload = payload,
         .block_value = try hexDecodeU256(j.blockValue),
-        .blobs_bundle = .{
-            .commitments = &.{},
-            .proofs = &.{},
-            .blobs = &.{},
-        },
+        .blobs_bundle = blobs_bundle,
         .should_override_builder = j.shouldOverrideBuilder,
     };
+}
+
+/// Decode DepositRequest array. Caller owns the slice.
+fn decodeDepositRequests(allocator: Allocator, requests: []const DepositRequestJson) ![]const DepositRequest {
+    if (requests.len == 0) return &.{};
+    const result = try allocator.alloc(DepositRequest, requests.len);
+    errdefer allocator.free(result);
+    for (requests, 0..) |r, i| {
+        result[i] = DepositRequest{
+            .pubkey = try hexDecode48(r.pubkey),
+            .withdrawal_credentials = try hexDecode32(r.withdrawalCredentials),
+            .amount = try hexDecodeU64(r.amount),
+            .signature = try hexDecode96(r.signature),
+            .index = try hexDecodeU64(r.index),
+        };
+    }
+    return result;
+}
+
+/// Decode WithdrawalRequest array. Caller owns the slice.
+fn decodeWithdrawalRequests(allocator: Allocator, requests: []const WithdrawalRequestJson) ![]const WithdrawalRequest {
+    if (requests.len == 0) return &.{};
+    const result = try allocator.alloc(WithdrawalRequest, requests.len);
+    errdefer allocator.free(result);
+    for (requests, 0..) |r, i| {
+        result[i] = WithdrawalRequest{
+            .source_address = try hexDecode20(r.sourceAddress),
+            .validator_pubkey = try hexDecode48(r.validatorPubkey),
+            .amount = try hexDecodeU64(r.amount),
+        };
+    }
+    return result;
+}
+
+/// Decode ConsolidationRequest array. Caller owns the slice.
+fn decodeConsolidationRequests(allocator: Allocator, requests: []const ConsolidationRequestJson) ![]const ConsolidationRequest {
+    if (requests.len == 0) return &.{};
+    const result = try allocator.alloc(ConsolidationRequest, requests.len);
+    errdefer allocator.free(result);
+    for (requests, 0..) |r, i| {
+        result[i] = ConsolidationRequest{
+            .source_address = try hexDecode20(r.sourceAddress),
+            .source_pubkey = try hexDecode48(r.sourcePubkey),
+            .target_pubkey = try hexDecode48(r.targetPubkey),
+        };
+    }
+    return result;
+}
+
+/// Decode BlobsBundle from JSON. commitments/proofs are 48 bytes, blobs are 131072 bytes.
+/// Caller owns all returned slices.
+fn decodeBlobsBundle(allocator: Allocator, j: BlobsBundleJson) !BlobsBundle {
+    const commitments = try allocator.alloc([48]u8, j.commitments.len);
+    errdefer allocator.free(commitments);
+    for (j.commitments, 0..) |c, i| commitments[i] = try hexDecode48(c);
+
+    const proofs = try allocator.alloc([48]u8, j.proofs.len);
+    errdefer allocator.free(proofs);
+    for (j.proofs, 0..) |p, i| proofs[i] = try hexDecode48(p);
+
+    const blobs = try allocator.alloc([131072]u8, j.blobs.len);
+    errdefer allocator.free(blobs);
+    for (j.blobs, 0..) |b, i| {
+        const stripped = try hexStrip0x(b);
+        if (stripped.len != 131072 * 2) return error.InvalidHexLength;
+        _ = try std.fmt.hexToBytes(&blobs[i], stripped);
+    }
+
+    return BlobsBundle{ .commitments = commitments, .proofs = proofs, .blobs = blobs };
 }
 
 // ── Hex decoding helpers ──────────────────────────────────────────────────────
@@ -2065,6 +2251,22 @@ fn decodeGetPayloadResponseV4(allocator: Allocator, j: GetPayloadV4Json) !GetPay
 fn hexStrip0x(hex: []const u8) ![]const u8 {
     if (hex.len >= 2 and hex[0] == '0' and hex[1] == 'x') return hex[2..];
     return error.MissingHexPrefix;
+}
+
+fn hexDecode48(hex: []const u8) ![48]u8 {
+    const stripped = try hexStrip0x(hex);
+    if (stripped.len != 96) return error.InvalidHexLength;
+    var out: [48]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&out, stripped);
+    return out;
+}
+
+fn hexDecode96(hex: []const u8) ![96]u8 {
+    const stripped = try hexStrip0x(hex);
+    if (stripped.len != 192) return error.InvalidHexLength;
+    var out: [96]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&out, stripped);
+    return out;
 }
 
 fn hexDecode32(hex: []const u8) ![32]u8 {

@@ -280,6 +280,16 @@ pub const LmdbCursor = struct {
         return .{ .key = fromVal(k), .value = fromVal(v) };
     }
 
+    /// Position at the last entry (MDB_LAST). O(1) — LMDB stores keys sorted.
+    pub fn last(self: LmdbCursor) LmdbError!?Entry {
+        var k: c.MDB_val = undefined;
+        var v: c.MDB_val = undefined;
+        const rc = c.mdb_cursor_get(self.cursor, &k, &v, c.MDB_LAST);
+        if (rc == c.MDB_NOTFOUND) return null;
+        try checkRc(rc);
+        return .{ .key = fromVal(k), .value = fromVal(v) };
+    }
+
     /// Close the cursor.
     pub fn close(self: LmdbCursor) void {
         c.mdb_cursor_close(self.cursor);

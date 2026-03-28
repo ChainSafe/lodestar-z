@@ -617,7 +617,8 @@ fn parseSignedBuilderBid(allocator: Allocator, json_bytes: []const u8) !SignedBu
 
 /// Parse an ExecutionPayload from submitBlindedBlock response.
 ///
-/// The builder returns the full payload in the "data" field.
+/// The builder returns the full unblinded payload in the "data" field.
+/// Transactions are the whole point of unblinding — decode them from hex.
 fn parseExecutionPayload(allocator: Allocator, json_bytes: []const u8) !types.ExecutionPayloadV3 {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
     defer parsed.deinit();
@@ -625,7 +626,43 @@ fn parseExecutionPayload(allocator: Allocator, json_bytes: []const u8) !types.Ex
     const root = parsed.value.object;
     const data = (root.get("data") orelse return error.MissingField).object;
 
-    const payload = types.ExecutionPayloadV3{
+    // Decode extra_data hex into owned bytes.
+    const extra_data_hex = (data.get("extra_data") orelse return error.MissingField).string;
+    const extra_data_stripped = extra_data_hex[if (std.mem.startsWith(u8, extra_data_hex, "0x")) 2 else 0..];
+    const extra_data = try allocator.alloc(u8, if (extra_data_stripped.len == 0) 0 else extra_data_stripped.len / 2);
+    errdefer allocator.free(extra_data);
+    if (extra_data.len > 0) _ = try std.fmt.hexToBytes(extra_data, extra_data_stripped);
+
+    // Decode transactions: each is an opaque hex-encoded RLP transaction.
+    const tx_array = if (data.get("transactions")) |v| v.array.items else &[_]std.json.Value{};
+    const transactions = try allocator.alloc([]const u8, tx_array.len);
+    errdefer allocator.free(transactions);
+    var n_decoded: usize = 0;
+    errdefer for (transactions[0..n_decoded]) |tx| allocator.free(tx);
+    for (tx_array, 0..) |tx_val, i| {
+        const tx_hex = tx_val.string;
+        const stripped = tx_hex[if (std.mem.startsWith(u8, tx_hex, "0x")) 2 else 0..];
+        const tx_bytes = try allocator.alloc(u8, stripped.len / 2);
+        _ = try std.fmt.hexToBytes(tx_bytes, stripped);
+        transactions[i] = tx_bytes;
+        n_decoded += 1;
+    }
+
+    // Decode withdrawals if present.
+    const wd_array = if (data.get("withdrawals")) |v| v.array.items else &[_]std.json.Value{};
+    const withdrawals = try allocator.alloc(types.Withdrawal, wd_array.len);
+    errdefer allocator.free(withdrawals);
+    for (wd_array, 0..) |wd_val, i| {
+        const wd = wd_val.object;
+        withdrawals[i] = types.Withdrawal{
+            .index = try parseQuantityU64(wd.get("index").?.string),
+            .validator_index = try parseQuantityU64(wd.get("validator_index").?.string),
+            .address = try parseHex20(wd.get("address").?.string),
+            .amount = try parseQuantityU64(wd.get("amount").?.string),
+        };
+    }
+
+    return types.ExecutionPayloadV3{
         .parent_hash = try parseHex32((data.get("parent_hash") orelse return error.MissingField).string),
         .fee_recipient = try parseHex20((data.get("fee_recipient") orelse return error.MissingField).string),
         .state_root = try parseHex32((data.get("state_root") orelse return error.MissingField).string),
@@ -636,16 +673,14 @@ fn parseExecutionPayload(allocator: Allocator, json_bytes: []const u8) !types.Ex
         .gas_limit = try parseQuantityU64((data.get("gas_limit") orelse return error.MissingField).string),
         .gas_used = try parseQuantityU64((data.get("gas_used") orelse return error.MissingField).string),
         .timestamp = try parseQuantityU64((data.get("timestamp") orelse return error.MissingField).string),
-        .extra_data = (data.get("extra_data") orelse return error.MissingField).string,
+        .extra_data = extra_data,
         .base_fee_per_gas = try parseQuantityU256((data.get("base_fee_per_gas") orelse return error.MissingField).string),
         .block_hash = try parseHex32((data.get("block_hash") orelse return error.MissingField).string),
-        .transactions = &.{}, // transactions are opaque bytes — skipping decode for now
-        .withdrawals = &.{},
+        .transactions = transactions,
+        .withdrawals = withdrawals,
         .blob_gas_used = if (data.get("blob_gas_used")) |v| try parseQuantityU64(v.string) else 0,
         .excess_blob_gas = if (data.get("excess_blob_gas")) |v| try parseQuantityU64(v.string) else 0,
     };
-
-    return payload;
 }
 
 // ── MockBuilderTransport ──────────────────────────────────────────────────────

@@ -25,6 +25,9 @@ const BatchId = batch_mod.BatchId;
 pub const SyncChainCallbacks = struct {
     ptr: *anyopaque,
 
+    /// Import a single block into the chain. Returns error on failure.
+    importBlockFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
+
     /// Import a segment of blocks. Returns error on failure.
     processChainSegmentFn: *const fn (
         ptr: *anyopaque,
@@ -112,17 +115,14 @@ pub const SyncChain = struct {
     peers: std.StringArrayHashMap(ChainTarget),
 
     /// Global chain ID counter.
-    var next_chain_id: u32 = 0;
-
     pub fn init(
         allocator: Allocator,
+        id: u32,
         sync_type: RangeSyncType,
         start_epoch: u64,
         target: ChainTarget,
         callbacks: SyncChainCallbacks,
     ) SyncChain {
-        const id = next_chain_id;
-        next_chain_id +%= 1;
         const start_slot = start_epoch * 32;
         return .{
             .allocator = allocator,
@@ -142,20 +142,36 @@ pub const SyncChain = struct {
 
     pub fn deinit(self: *SyncChain) void {
         self.batches.deinit(self.allocator);
+        // Free owned peer_id keys before deiniting the map.
+        for (self.peers.keys()) |k| self.allocator.free(k);
         self.peers.deinit();
     }
 
     /// Add a peer and update the chain target.
+    ///
+    /// The peer_id string is deep-copied into owned memory so the caller's
+    /// buffer can be freed or reused after this call.
     pub fn addPeer(self: *SyncChain, peer_id: []const u8, target: ChainTarget) !void {
-        try self.peers.put(peer_id, target);
+        // If the key already exists, reuse the owned copy.
+        if (self.peers.contains(peer_id)) {
+            try self.peers.put(peer_id, target);
+            self.computeTarget();
+            return;
+        }
+        const owned_id = try self.allocator.dupe(u8, peer_id);
+        errdefer self.allocator.free(owned_id);
+        try self.peers.put(owned_id, target);
         self.computeTarget();
     }
 
     /// Remove a peer and recompute the chain target.
     pub fn removePeer(self: *SyncChain, peer_id: []const u8) bool {
-        const removed = self.peers.swapRemove(peer_id);
-        if (removed) self.computeTarget();
-        return removed;
+        // Free the owned key before removing.
+        const idx = self.peers.getIndex(peer_id) orelse return false;
+        self.allocator.free(self.peers.keys()[idx]);
+        self.peers.swapRemoveAt(idx);
+        self.computeTarget();
+        return true;
     }
 
     /// Number of peers on this chain.
@@ -307,15 +323,28 @@ pub const SyncChain = struct {
         if (front.status != .awaiting_processing) return;
 
         front.startProcessing();
-        self.callbacks.processChainSegment(front.blocks, self.sync_type) catch |err| {
+        // Import each block individually. Per-block errors are tolerated to avoid
+        // stalling the pipeline on a single bad block; the segment succeeds unless
+        // every block fails (covered by isProcessingExhausted checks on retry).
+        var any_ok = false;
+        for (front.blocks) |batch_block| {
+            self.callbacks.importBlockFn(self.callbacks.ptr, batch_block.block_bytes) catch |err| {
+                std.log.warn("SyncChain: failed to import block (slot={d}): {}", .{
+                    batch_block.slot, err,
+                });
+                continue;
+            };
+            any_ok = true;
+        }
+        // If no blocks in segment imported, treat as processing failure.
+        if (front.blocks.len > 0 and !any_ok) {
             front.onProcessingError();
             if (front.isProcessingExhausted()) {
-                // Chain is broken — report the download peer and error out.
                 if (front.download_peer) |p| self.callbacks.reportPeer(p);
                 self.status = .err;
             }
-            return err;
-        };
+            return error.AllBlocksFailed;
+        }
         front.onProcessingSuccess();
 
         // If a previous batch was awaiting validation, it's now validated
@@ -349,11 +378,8 @@ const TestSyncCallbacks = struct {
     last_generation: u32 = 0,
     should_fail_processing: bool = false,
 
-    fn processChainSegmentFn(ptr: *anyopaque, blocks: []const BatchBlock, _: RangeSyncType) anyerror!void {
-        const self: *TestSyncCallbacks = @ptrCast(@alignCast(ptr));
-        if (self.should_fail_processing) return error.ProcessingFailed;
-        _ = blocks;
-        self.processed_count += 1;
+    fn processChainSegmentFn(_: *anyopaque, _: []const BatchBlock, _: RangeSyncType) anyerror!void {
+        // Block import is done directly via importBlockFn; this shim is unused.
     }
 
     fn downloadByRangeFn(
@@ -377,9 +403,16 @@ const TestSyncCallbacks = struct {
         self.reported_count += 1;
     }
 
+    fn importBlockFnTest(ptr: *anyopaque, _: []const u8) anyerror!void {
+        const self: *TestSyncCallbacks = @ptrCast(@alignCast(ptr));
+        if (self.should_fail_processing) return error.ProcessingFailed;
+        self.processed_count += 1;
+    }
+
     fn callbacks(self: *TestSyncCallbacks) SyncChainCallbacks {
         return .{
             .ptr = self,
+            .importBlockFn = &importBlockFnTest,
             .processChainSegmentFn = &processChainSegmentFn,
             .downloadByRangeFn = &downloadByRangeFn,
             .reportPeerFn = &reportPeerFn,
@@ -392,6 +425,7 @@ test "SyncChain: basic batch pipeline" {
     var tc = TestSyncCallbacks{};
     var chain = SyncChain.init(
         allocator,
+        0, // chain id
         .finalized,
         0, // start epoch 0
         .{ .slot = 128, .root = [_]u8{0xFF} ** 32 },
@@ -413,6 +447,7 @@ test "SyncChain: peer management" {
     var tc = TestSyncCallbacks{};
     var chain = SyncChain.init(
         allocator,
+        0, // chain id
         .head,
         0,
         .{ .slot = 100, .root = [_]u8{0xAA} ** 32 },
@@ -436,6 +471,7 @@ test "SyncChain: completes when all batches processed" {
     // Small target — just 2 slots.
     var chain = SyncChain.init(
         allocator,
+        0, // chain id
         .finalized,
         0,
         .{ .slot = 2, .root = [_]u8{0} ** 32 },
@@ -461,5 +497,6 @@ test "SyncChain: completes when all batches processed" {
     const done = try chain.tick();
     try std.testing.expect(done);
     try std.testing.expectEqual(SyncChainStatus.done, chain.status);
-    try std.testing.expectEqual(@as(u32, 1), tc.processed_count);
+    // 2 blocks were imported (one importBlockFn call per block).
+    try std.testing.expectEqual(@as(u32, 2), tc.processed_count);
 }

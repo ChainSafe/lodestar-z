@@ -79,6 +79,7 @@ pub const MemoryKVStore = struct {
         .writeBatch = memWriteBatch,
         .allKeys = memAllKeys,
         .allEntries = memAllEntries,
+        .lastKey = memLastKey,
         .close = memClose,
     };
 
@@ -174,6 +175,24 @@ pub const MemoryKVStore = struct {
             .keys = try keys.toOwnedSlice(self.allocator),
             .values = try values.toOwnedSlice(self.allocator),
         };
+    }
+
+    /// Get the last key in sorted order. Since MemoryKVStore uses a HashMap (unordered),
+    /// we iterate all keys to find the lexicographically largest. For test use only.
+    fn memLastKey(ptr: *anyopaque, db_id: DatabaseId) anyerror!?[]const u8 {
+        const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
+        if (self.closed) return error.StoreClosed;
+        const db = self.getDb(db_id);
+        var best: ?[]const u8 = null;
+        var it = db.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (best == null or std.mem.order(u8, key, best.?) == .gt) {
+                best = key;
+            }
+        }
+        if (best) |b| return try self.allocator.dupe(u8, b);
+        return null;
     }
 
     fn memClose(ptr: *anyopaque) void {

@@ -10,6 +10,32 @@
 //! - Peer balancing for root requests
 //! - Proper cleanup of resolved/expired entries
 //!
+//! ## Split with unknown_chain/
+//!
+//! There are TWO mechanisms for handling unknown block roots. They serve
+//! distinct use cases and should not be merged:
+//!
+//! ### UnknownBlockSync (this module)
+//! - Triggered by: gossip blocks with an unknown *parent* root
+//! - Has full block bytes in hand; only the parent chain is missing
+//! - Stores: full block bytes ([]const u8) per pending block
+//! - Resolves by: walking the parent chain by root until reaching a known block,
+//!   then recursively importing children
+//! - Use case: filling in the gap for a gossip block that arrived out of order
+//!
+//! ### UnknownChainSync (unknown_chain/)
+//! - Triggered by: unknown roots from attestations, peer status, getHeader
+//! - Has only the root; no block bytes at all
+//! - Stores: minimal headers (slot + parent_root) to reconstruct chain order
+//! - Resolves by: building a backward header chain until it links to fork choice,
+//!   then triggering forward range sync via SyncService
+//! - Use case: bootstrapping from a completely unknown chain tip (e.g. attestations
+//!   to a block we have never seen)
+//!
+//! The key distinction: UnknownBlockSync has the block, UnknownChainSync does not.
+//! TS Lodestar is migrating from the former to the latter (PR #8221), but both
+//! co-exist here as they address different edge cases.
+//!
 //! Reference: Lodestar `packages/beacon-node/src/sync/unknownBlock.ts`
 
 const std = @import("std");
