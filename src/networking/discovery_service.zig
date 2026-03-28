@@ -219,7 +219,7 @@ pub const DiscoveryService = struct {
         const ip = parsed.ip orelse [4]u8{ 0, 0, 0, 0 };
         const port = parsed.udp orelse parsed.tcp orelse 0;
 
-        self.protocol.addNode(node_id, .{ .ip = ip, .port = port });
+        self.protocol.addNode(node_id, null, .{ .ip = ip, .port = port });
         return true;
     }
 
@@ -479,8 +479,8 @@ test "DiscoveryService: discoverPeers disabled" {
 test "DiscoveryService: drainDiscoveredPeers returns and clears queue" {
     var svc = try DiscoveryService.init(std.testing.allocator, .{});
     defer svc.deinit();
-    svc.protocol.addNode([_]u8{0x11} ** 32, .{ .ip = [4]u8{ 1, 2, 3, 4 }, .port = 9000 });
-    svc.protocol.addNode([_]u8{0x22} ** 32, .{ .ip = [4]u8{ 5, 6, 7, 8 }, .port = 9001 });
+    svc.protocol.addNode([_]u8{0x11} ** 32, null, .{ .ip = [4]u8{ 1, 2, 3, 4 }, .port = 9000 });
+    svc.protocol.addNode([_]u8{0x22} ** 32, null, .{ .ip = [4]u8{ 5, 6, 7, 8 }, .port = 9001 });
     svc.discoverPeers();
     const peers = svc.drainDiscoveredPeers();
     defer svc.allocator.free(peers);
