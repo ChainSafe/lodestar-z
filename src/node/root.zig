@@ -61,3 +61,14 @@ pub const DataDir = data_dir_mod.DataDir;
 pub const defaultDataRoot = data_dir_mod.defaultRoot;
 
 pub const jwt_mod = @import("jwt.zig");
+
+pub const block_import_mod = @import("block_import.zig");
+// BlockImporter re-exported via beacon_node.BlockImporter (which imports from block_import.zig)
+
+pub const sync_bridge_mod = @import("sync_bridge.zig");
+// SyncCallbackCtx re-exported via beacon_node.SyncCallbackCtx
+
+pub const reqresp_callbacks_mod = @import("reqresp_callbacks.zig");
+pub const RequestContext = reqresp_callbacks_mod.RequestContext;
+
+pub const gossip_node_callbacks_mod = @import("gossip_node_callbacks.zig");

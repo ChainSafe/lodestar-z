@@ -683,10 +683,17 @@ fn resolveBlockSlotAndRoot(ctx: *ApiContext, block_id: types.BlockId) !SlotAndRo
                 return error.BlockNotFound;
             defer ctx.allocator.free(block_bytes);
 
-            // Determine fork from head slot as a best approximation (we don't
-            // know the block's slot before deserializing it). For a proper
-            // implementation we'd store a root->slot index in the DB.
-            const fork_seq = ctx.beacon_config.forkSeq(ctx.head_tracker.head_slot);
+            // Read the block's actual slot from raw SSZ to determine the correct fork.
+            // SignedBeaconBlock SSZ layout: signature(96) + slot(8) + ...
+            // slot is at byte offset 96 in the serialized bytes.
+            const raw_slot: u64 = if (block_bytes.len >= 104)
+                std.mem.readInt(u64, block_bytes[96..104], .little)
+            else
+                ctx.head_tracker.head_slot; // fallback — block too short (shouldn't happen)
+
+            // Use the block's actual slot for fork determination instead of head slot.
+            // This correctly handles archived blocks from earlier forks.
+            const fork_seq = ctx.beacon_config.forkSeq(raw_slot);
             const any_block = try AnySignedBeaconBlock.deserialize(ctx.allocator, .full, fork_seq, block_bytes);
             defer any_block.deinit(ctx.allocator);
 

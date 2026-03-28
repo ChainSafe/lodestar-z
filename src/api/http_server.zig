@@ -626,23 +626,11 @@ pub const HttpServer = struct {
             } else null;
 
             const handler_res = try handlers.validator.produceBlock(ctx, slot, randao_reveal, graffiti);
-            // Return the SSZ bytes wrapped in JSON data envelope
-            // Hex-encode ssz_bytes (runtime-length slice) manually
-            const ssz_hex = blk: {
-                const buf = try alloc.alloc(u8, handler_res.data.ssz_bytes.len * 2);
-                for (handler_res.data.ssz_bytes, 0..) |byte, bi| {
-                    const hi = bi * 2;
-                    const hi_nibble: u8 = (byte >> 4) & 0xf;
-                    const lo_nibble: u8 = byte & 0xf;
-                    buf[hi] = if (hi_nibble < 10) '0' + hi_nibble else 'a' + hi_nibble - 10;
-                    buf[hi + 1] = if (lo_nibble < 10) '0' + lo_nibble else 'a' + lo_nibble - 10;
-                }
-                break :blk buf;
-            };
-            defer alloc.free(ssz_hex);
+            // Return the SSZ bytes wrapped in JSON data envelope.
+            // Use std.fmt.fmtSliceHexLower to hex-encode runtime-length SSZ bytes.
             const body_json = try std.fmt.allocPrint(alloc,
                 "{{\"data\":\"0x{s}\",\"version\":\"{s}\"}}",
-                .{ ssz_hex, handler_res.data.fork });
+                .{ std.fmt.fmtSliceHexLower(handler_res.data.ssz_bytes), handler_res.data.fork });
             return .{
                 .status = 200,
                 .content_type = "application/json",

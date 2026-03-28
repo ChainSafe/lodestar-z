@@ -52,12 +52,16 @@ pub const ChainState = struct {
     /// Mutable reference to the node's dedup caches.
     seen_cache: *SeenCache,
 
+    /// Type-erased context pointer passed through to each callback.
+    /// The concrete type is known only to the caller (e.g. *BeaconNode).
+    ptr: *anyopaque,
+
     /// Returns expected block proposer for `slot`, or null if cache miss.
-    getProposerIndex: *const fn (slot: u64) ?u32,
+    getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
     /// Returns true if `root` is a known block in our fork choice.
-    isKnownBlockRoot: *const fn (root: [32]u8) bool,
+    isKnownBlockRoot: *const fn (ptr: *anyopaque, root: [32]u8) bool,
     /// Returns the total validator count for bounds checking.
-    getValidatorCount: *const fn () u32,
+    getValidatorCount: *const fn (ptr: *anyopaque) u32,
 };
 
 // ── Block validation ────────────────────────────────────────────────────────
@@ -89,11 +93,11 @@ pub fn validateGossipBlock(
     state.seen_cache.markBlockSeen(block_root, block_slot) catch return .ignore;
 
     // [REJECT] Proposer index within validator set bounds.
-    const validator_count = state.getValidatorCount();
+    const validator_count = state.getValidatorCount(state.ptr);
     if (proposer_index >= validator_count) return .reject;
 
     // [REJECT] Proposer matches expected for this slot.
-    if (state.getProposerIndex(block_slot)) |expected| {
+    if (state.getProposerIndex(state.ptr, block_slot)) |expected| {
         if (proposer_index != expected) return .reject;
     } else {
         // Can't determine expected proposer — inconclusive, don't penalize.
@@ -101,7 +105,7 @@ pub fn validateGossipBlock(
     }
 
     // [IGNORE] Parent root is known in our fork choice.
-    if (!state.isKnownBlockRoot(parent_root)) return .ignore;
+    if (!state.isKnownBlockRoot(state.ptr, parent_root)) return .ignore;
 
     return .accept;
 }
@@ -139,7 +143,7 @@ pub fn validateGossipAttestation(
     // [IGNORE] Target block root must be known.
     // If unknown, the message may be valid but we can't process it yet.
     // Callers should queue for reprocessing when the target block arrives.
-    if (!state.isKnownBlockRoot(target_root)) return .ignore;
+    if (!state.isKnownBlockRoot(state.ptr, target_root)) return .ignore;
 
     return .accept;
 }
@@ -163,7 +167,7 @@ pub fn validateGossipAggregate(
     state: *const ChainState,
 ) GossipAction {
     // [REJECT] Aggregator index within validator set.
-    const validator_count = state.getValidatorCount();
+    const validator_count = state.getValidatorCount(state.ptr);
     if (aggregator_index >= validator_count) return .reject;
 
     const attestation_epoch = attestation_slot / preset.SLOTS_PER_EPOCH;
@@ -190,17 +194,19 @@ pub fn validateGossipAggregate(
 // Tests
 // ============================================================
 
-fn mockGetProposerIndex(slot: u64) ?u32 {
+var mock_dummy_ctx: u8 = 0;
+
+fn mockGetProposerIndex(_: *anyopaque, slot: u64) ?u32 {
     if (slot == 100) return 5;
     return 0;
 }
 
-fn mockIsKnownBlockRoot(root: [32]u8) bool {
+fn mockIsKnownBlockRoot(_: *anyopaque, root: [32]u8) bool {
     // Zero root = unknown, everything else = known.
     return !std.mem.eql(u8, &root, &([_]u8{0} ** 32));
 }
 
-fn mockGetValidatorCount() u32 {
+fn mockGetValidatorCount(_: *anyopaque) u32 {
     return 1000;
 }
 
@@ -210,6 +216,7 @@ fn makeMockChainState(seen_cache: *SeenCache) ChainState {
         .current_epoch = 3, // slot 100 / 32 = 3
         .finalized_slot = 64, // epoch 2 start
         .seen_cache = seen_cache,
+        .ptr = &mock_dummy_ctx,
         .getProposerIndex = &mockGetProposerIndex,
         .isKnownBlockRoot = &mockIsKnownBlockRoot,
         .getValidatorCount = &mockGetValidatorCount,
@@ -439,11 +446,11 @@ pub fn validateGossipDataColumnSidecar(
     state.seen_cache.markDataColumnSeen(block_root, column_index) catch return .ignore;
 
     // [REJECT] Proposer index within validator set bounds.
-    const validator_count = state.getValidatorCount();
+    const validator_count = state.getValidatorCount(state.ptr);
     if (proposer_index >= validator_count) return .reject;
 
     // [IGNORE] Parent root is known in our fork choice.
-    if (!state.isKnownBlockRoot(parent_root)) return .ignore;
+    if (!state.isKnownBlockRoot(state.ptr, parent_root)) return .ignore;
 
     return .accept;
 }
@@ -555,11 +562,11 @@ pub fn validateGossipBlobSidecar(
     if (block_slot <= state.finalized_slot) return .ignore;
 
     // [REJECT] Proposer index within validator set bounds.
-    const validator_count = state.getValidatorCount();
+    const validator_count = state.getValidatorCount(state.ptr);
     if (proposer_index >= validator_count) return .reject;
 
     // [IGNORE] Parent root is known in our fork choice.
-    if (!state.isKnownBlockRoot(parent_root)) return .ignore;
+    if (!state.isKnownBlockRoot(state.ptr, parent_root)) return .ignore;
 
     return .accept;
 }
@@ -578,7 +585,7 @@ pub fn validateGossipVoluntaryExit(
     state: *const ChainState,
 ) GossipAction {
     // [REJECT] Validator index within known set.
-    const validator_count = state.getValidatorCount();
+    const validator_count = state.getValidatorCount(state.ptr);
     if (validator_index >= validator_count) return .reject;
 
     // [IGNORE] Deduplicate: first valid exit for this validator.
@@ -609,7 +616,7 @@ pub fn validateGossipProposerSlashing(
     state: *const ChainState,
 ) GossipAction {
     // [REJECT] Proposer index within known validator set.
-    const validator_count = state.getValidatorCount();
+    const validator_count = state.getValidatorCount(state.ptr);
     if (proposer_index >= validator_count) return .reject;
 
     // [IGNORE] Deduplicate: first valid slashing for this proposer.
@@ -660,7 +667,7 @@ pub fn validateGossipBlsToExecutionChange(
     state: *const ChainState,
 ) GossipAction {
     // [REJECT] Validator index within known set.
-    const validator_count = state.getValidatorCount();
+    const validator_count = state.getValidatorCount(state.ptr);
     if (validator_index >= validator_count) return .reject;
 
     // [IGNORE] Deduplicate: first valid change for this validator.
@@ -685,7 +692,7 @@ pub fn validateGossipSyncCommitteeMessage(
     state: *const ChainState,
 ) GossipAction {
     // [REJECT] Validator index within known set.
-    const validator_count = state.getValidatorCount();
+    const validator_count = state.getValidatorCount(state.ptr);
     if (validator_index >= validator_count) return .reject;
 
     // [IGNORE] Not from a future slot.
@@ -712,7 +719,7 @@ pub fn validateGossipSyncContributionAndProof(
     state: *const ChainState,
 ) GossipAction {
     // [REJECT] Aggregator index within known set.
-    const validator_count = state.getValidatorCount();
+    const validator_count = state.getValidatorCount(state.ptr);
     if (aggregator_index >= validator_count) return .reject;
 
     // [IGNORE] Not from a future slot.

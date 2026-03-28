@@ -152,9 +152,9 @@ pub const GossipHandler = struct {
     finalized_slot: u64,
 
     /// Vtable for state queries (proposer schedule, known roots, etc.).
-    getProposerIndex: *const fn (slot: u64) ?u32,
-    isKnownBlockRoot: *const fn (root: [32]u8) bool,
-    getValidatorCount: *const fn () u32,
+    getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
+    isKnownBlockRoot: *const fn (ptr: *anyopaque, root: [32]u8) bool,
+    getValidatorCount: *const fn (ptr: *anyopaque) u32,
 
     /// Optional metrics pointer — records gossip accept/reject/ignore counts.
     metrics: ?*BeaconMetrics = null,
@@ -170,9 +170,9 @@ pub const GossipHandler = struct {
         allocator: Allocator,
         node: *anyopaque,
         importBlockFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
-        getProposerIndex: *const fn (slot: u64) ?u32,
-        isKnownBlockRoot: *const fn (root: [32]u8) bool,
-        getValidatorCount: *const fn () u32,
+        getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
+        isKnownBlockRoot: *const fn (ptr: *anyopaque, root: [32]u8) bool,
+        getValidatorCount: *const fn (ptr: *anyopaque) u32,
     ) !*GossipHandler {
         const self = try allocator.create(GossipHandler);
         self.* = .{
@@ -225,6 +225,7 @@ pub const GossipHandler = struct {
             .current_epoch = self.current_epoch,
             .finalized_slot = self.finalized_slot,
             .seen_cache = &self.seen_cache,
+            .ptr = self.node,
             .getProposerIndex = self.getProposerIndex,
             .isKnownBlockRoot = self.isKnownBlockRoot,
             .getValidatorCount = self.getValidatorCount,

@@ -136,6 +136,11 @@ const BlockSource = chain_mod.blocks.BlockSource;
 const gossip_handler_mod = @import("gossip_handler.zig");
 pub const GossipHandler = gossip_handler_mod.GossipHandler;
 
+const block_import_mod = @import("block_import.zig");
+const sync_bridge_mod = @import("sync_bridge.zig");
+const reqresp_callbacks_mod = @import("reqresp_callbacks.zig");
+const gossip_node_callbacks_mod = @import("gossip_node_callbacks.zig");
+
 
 // BeaconProcessor — central priority scheduling loop.
 const processor_mod = @import("processor");
@@ -145,447 +150,17 @@ const WorkItem = processor_mod.WorkItem;
 const WorkQueues = processor_mod.WorkQueues;
 // HeadTracker, ImportResult, ImportError are in chain_mod (src/chain/block_import.zig).
 
-/// Dummy JustifiedBalancesGetter for fork choice initialization.
-/// Returns an empty balances list. Will be replaced with a real getter
-/// that queries the state regen cache once that integration is complete.
-fn dummyBalancesGetterFn(_: ?*anyopaque, _: CheckpointWithPayloadStatus, _: *CachedBeaconState) JustifiedBalances {
-    return JustifiedBalances.init(std.heap.page_allocator);
-}
+// BlockImporter and dummyBalancesGetterFn are defined in block_import.zig.
+pub const BlockImporter = block_import_mod.BlockImporter;
+pub const dummyBalancesGetterFn = block_import_mod.dummyBalancesGetterFn;
 
-// BlockImporter lives here because it depends on db, fork_choice, and state_transition
-// directly — extracting it would require either circular deps or vtable indirection.
+// ---------------------------------------------------------------------------
+// SyncCallbackCtx — bridging sync pipeline callbacks to P2P transport.
+// Defined in sync_bridge.zig; re-exported here for backwards compatibility.
+// ---------------------------------------------------------------------------
 
-pub const BlockImporter = struct {
-    allocator: Allocator,
-    block_cache: *BlockStateCache,
-    cp_cache: *CheckpointStateCache,
-    regen: *StateRegen,
-    db: *BeaconDB,
-    head_tracker: *HeadTracker,
-    fork_choice: ?*ForkChoice,
-
-    /// Engine API client for EL communication.
-    /// When null, execution payload verification is skipped (pre-merge).
-    engine_api: ?EngineApi = null,
-
-    /// Data availability check callback (PeerDAS / Fulu).
-    /// Returns true if sufficient data columns are available for the block root.
-    /// When null, data is assumed available (pre-fulu behavior).
-    isDataAvailableFn: ?*const fn (root: [32]u8) bool = null,
-
-    /// When true, BLS signatures are verified in processBlock.
-    verify_signatures: bool,
-
-    /// Optional BLS thread pool for parallel batch signature verification.
-    /// When set, BatchVerifier dispatches to multiple threads (~3-10x speedup).
-    /// Initialized by BeaconNode.setIo() once std.Io is available.
-    bls_thread_pool: ?*BlsThreadPool = null,
-
-    /// Optional metrics pointer for execution layer timing.
-    metrics: ?*BeaconMetrics = null,
-
-    /// Maps block root → state root for state lookup in block cache.
-    block_to_state: std.AutoArrayHashMap([32]u8, [32]u8),
-
-    pub fn init(
-        allocator: Allocator,
-        block_cache: *BlockStateCache,
-        cp_cache: *CheckpointStateCache,
-        regen: *StateRegen,
-        db: *BeaconDB,
-        head_tracker: *HeadTracker,
-    ) BlockImporter {
-        return .{
-            .allocator = allocator,
-            .block_cache = block_cache,
-            .cp_cache = cp_cache,
-            .regen = regen,
-            .db = db,
-            .head_tracker = head_tracker,
-            .fork_choice = null,
-            .verify_signatures = false,
-            .block_to_state = std.AutoArrayHashMap([32]u8, [32]u8).init(allocator),
-        };
-    }
-
-    pub fn deinit(self: *BlockImporter) void {
-        self.block_to_state.deinit();
-    }
-
-    pub fn registerGenesisRoot(self: *BlockImporter, block_root: [32]u8, state_root: [32]u8) !void {
-        try self.block_to_state.put(block_root, state_root);
-    }
-
-    fn getStateByBlockRoot(self: *BlockImporter, block_root: [32]u8) ?*CachedBeaconState {
-        const state_root = self.block_to_state.get(block_root) orelse return null;
-        return self.block_cache.get(state_root);
-    }
-
-    /// Full block import pipeline: sanity → STFN → fork choice → persist → head.
-    ///
-    /// Returns `error.UnknownParentBlock` when the parent root is not in
-    /// the chain — callers should catch this to trigger unknown block sync.
-    /// Returns `error.BlockAlreadyKnown` / `error.BlockAlreadyFinalized` /
-    /// `error.GenesisBlock` for other sanity failures.
-    pub fn importBlock(
-        self: *BlockImporter,
-        signed_block: *const types.electra.SignedBeaconBlock.Type,
-    ) !ImportResult {
-        const block_slot = signed_block.message.slot;
-        const parent_root = signed_block.message.parent_root;
-
-        const prev_epoch = computeEpochAtSlot(if (block_slot > 0) block_slot - 1 else 0);
-        const target_epoch = computeEpochAtSlot(block_slot);
-        const is_epoch_transition = target_epoch != prev_epoch;
-
-        // Compute block root for sanity checks and persistence.
-        var body_root: [32]u8 = undefined;
-        try types.electra.BeaconBlockBody.hashTreeRoot(self.allocator, &signed_block.message.body, &body_root);
-        const header = types.phase0.BeaconBlockHeader.Type{
-            .slot = block_slot,
-            .proposer_index = signed_block.message.proposer_index,
-            .parent_root = parent_root,
-            .state_root = signed_block.message.state_root,
-            .body_root = body_root,
-        };
-        var block_root: [32]u8 = undefined;
-        try types.phase0.BeaconBlockHeader.hashTreeRoot(&header, &block_root);
-
-        // Stage 1: Sanity checks (cheap, before any state transition work).
-        chain_mod.block_import.verifySanity(
-            block_slot,
-            parent_root,
-            block_root,
-            self.head_tracker.finalized_epoch,
-            &self.block_to_state,
-        ) catch |err| {
-            switch (err) {
-                ImportError.UnknownParentBlock => {
-                    std.log.info("Unknown parent for slot {d} parent={s}...", .{
-                        block_slot, &std.fmt.bytesToHex(parent_root[0..4], .lower),
-                    });
-                },
-                ImportError.BlockAlreadyKnown, ImportError.BlockAlreadyFinalized => {},
-                else => {
-                    std.log.warn("Sanity check failed for slot {d}: {}", .{ block_slot, err });
-                },
-            }
-            return err;
-        };
-
-        // Stage 2: State transition.
-        const pre_state = self.getStateByBlockRoot(parent_root) orelse {
-            std.log.warn("NoPreStateAvailable: parent_root={s}... block_to_state has {d} entries", .{
-                &std.fmt.bytesToHex(parent_root[0..4], .lower),
-                self.block_to_state.count(),
-            });
-            return error.NoPreStateAvailable;
-        };
-
-        const stfn_result = try self.runStateTransition(pre_state, signed_block, block_slot);
-        const post_state = stfn_result.post_state;
-
-        // Stage 2b: Verify execution payload via Engine API.
-        const execution_status = try self.verifyExecutionPayload(signed_block, stfn_result.block_root);
-        if (execution_status == .invalid or execution_status == .invalid_block_hash) {
-            std.log.err("Block at slot {d} has INVALID execution payload, rejecting", .{block_slot});
-            return error.InvalidExecutionPayload;
-        }
-
-        // Stage 3: Cache post-state + persist block.
-        _ = try self.regen.onNewBlock(post_state, true);
-        try self.block_to_state.put(stfn_result.block_root, stfn_result.state_root);
-
-        const any_signed = AnySignedBeaconBlock{ .full_electra = @constCast(signed_block) };
-        const block_bytes = try any_signed.serialize(self.allocator);
-        defer self.allocator.free(block_bytes);
-        try self.db.putBlock(stfn_result.block_root, block_bytes);
-
-        // Checkpoint caching at epoch boundaries.
-        if (is_epoch_transition) {
-            const cp_state = try post_state.clone(self.allocator, .{ .transfer_cache = false });
-            errdefer {
-                cp_state.deinit();
-                self.allocator.destroy(cp_state);
-            }
-            try self.regen.onCheckpoint(
-                .{ .epoch = target_epoch, .root = stfn_result.block_root },
-                cp_state,
-            );
-        }
-
-        // Stage 4: Head tracking + fork choice update.
-        try self.head_tracker.onBlock(stfn_result.block_root, block_slot, stfn_result.state_root);
-        if (is_epoch_transition) {
-            try self.head_tracker.onEpochTransition(post_state);
-        }
-
-        // Use onBlockFromState for proper checkpoint extraction,
-        // unrealized checkpoint computation, proposer boost, and target root.
-        if (self.fork_choice) |fc| {
-            // Map execution status to fork choice types.
-            const fc_exec_status: fork_choice_mod.ExecutionStatus = switch (execution_status) {
-                .valid => .valid,
-                .syncing, .accepted => .syncing,
-                .invalid, .invalid_block_hash => .invalid,
-            };
-            const fc_da_status: fork_choice_mod.DataAvailabilityStatus = if (self.isDataAvailableFn != null)
-                (if (self.isDataAvailableFn.?(stfn_result.block_root)) .available else .pre_data)
-            else
-                .pre_data;
-
-            // Build execution metadata.
-            const extra_meta: BlockExtraMeta = switch (execution_status) {
-                .valid, .syncing, .accepted => .{
-                    .post_merge = BlockExtraMeta.PostMergeMeta.init(
-                        signed_block.message.body.execution_payload.block_hash,
-                        signed_block.message.body.execution_payload.block_number,
-                        fc_exec_status,
-                        fc_da_status,
-                    ),
-                },
-                else => .{ .pre_merge = {} },
-            };
-
-            // Advance fork choice clock to at least the block's slot.
-            if (block_slot > fc.getTime()) {
-                fc.updateTime(self.allocator, block_slot) catch {};
-            }
-
-            _ = fork_choice_mod.onBlockFromState(
-                fc,
-                self.allocator,
-                block_slot,
-                stfn_result.block_root,
-                parent_root,
-                stfn_result.state_root,
-                post_state,
-                0, // block_delay_sec: 0 = timely (real delay tracking is TODO)
-                fc.getTime(),
-                extra_meta,
-            ) catch |err| {
-                std.log.warn("ForkChoice.onBlockFromState failed for slot {d}: {}", .{ block_slot, err });
-            };
-        }
-
-        return .{
-            .block_root = stfn_result.block_root,
-            .state_root = stfn_result.state_root,
-            .slot = block_slot,
-            .epoch_transition = is_epoch_transition,
-            .execution_optimistic = execution_status == .syncing or execution_status == .accepted,
-        };
-    }
-
-    /// Verify the block's execution payload via the Engine API.
-    ///
-    /// Calls engine_newPayloadV3 with the execution payload from the block.
-    /// Returns the EL's verdict: valid, invalid, syncing, etc.
-    /// When no Engine API is configured, returns .valid (mock/pre-merge).
-    fn verifyExecutionPayload(
-        self: *BlockImporter,
-        signed_block: *const types.electra.SignedBeaconBlock.Type,
-        block_root: [32]u8,
-    ) !ExecutionPayloadStatus {
-        const engine = self.engine_api orelse return .valid;
-
-        const payload = &signed_block.message.body.execution_payload;
-
-        // Convert transactions: ArrayListUnmanaged(ArrayListUnmanaged(u8)) -> []const []const u8.
-        // Each SSZ transaction is an ArrayListUnmanaged(u8); the Engine API needs []const u8 slices.
-        const ssz_txs = payload.transactions.items;
-        const tx_slices = try self.allocator.alloc([]const u8, ssz_txs.len);
-        defer self.allocator.free(tx_slices);
-        for (ssz_txs, 0..) |tx, i| {
-            tx_slices[i] = tx.items;
-        }
-
-        // Compute versioned hashes from blob_kzg_commitments.
-        // Each versioned hash = SHA256(commitment) with byte 0 set to VERSIONED_HASH_VERSION_KZG.
-        const commitments = signed_block.message.body.blob_kzg_commitments.items;
-        const versioned_hashes = try self.allocator.alloc([32]u8, commitments.len);
-        defer self.allocator.free(versioned_hashes);
-        for (commitments, 0..) |commitment, i| {
-            Sha256.hash(&commitment, &versioned_hashes[i], .{});
-            versioned_hashes[i][0] = constants.VERSIONED_HASH_VERSION_KZG;
-        }
-
-        // Build the Engine API payload from the SSZ block body payload.
-        const engine_payload = execution_mod.ExecutionPayloadV3{
-            .parent_hash = payload.parent_hash,
-            .fee_recipient = payload.fee_recipient,
-            .state_root = payload.state_root,
-            .receipts_root = payload.receipts_root,
-            .logs_bloom = payload.logs_bloom,
-            .prev_randao = payload.prev_randao,
-            .block_number = payload.block_number,
-            .gas_limit = payload.gas_limit,
-            .gas_used = payload.gas_used,
-            .timestamp = payload.timestamp,
-            .extra_data = payload.extra_data.items,
-            .base_fee_per_gas = payload.base_fee_per_gas,
-            .block_hash = payload.block_hash,
-            .transactions = tx_slices,
-            // Withdrawals: same memory layout as engine_api_types.Withdrawal.
-            .withdrawals = if (payload.withdrawals.items.len > 0)
-                @as([]const execution_mod.engine_api_types.Withdrawal, @ptrCast(payload.withdrawals.items))
-            else
-                &.{},
-            .blob_gas_used = payload.blob_gas_used,
-            .excess_blob_gas = payload.excess_blob_gas,
-        };
-
-        const parent_beacon_root = signed_block.message.parent_root;
-
-        // TODO: timing for 0.16 (nanoTimestamp removed)
-        const result = engine.newPayload(engine_payload, versioned_hashes, parent_beacon_root) catch |err| {
-            std.log.warn("Engine API newPayload failed for root={s}...: {}", .{
-                &std.fmt.bytesToHex(block_root[0..4], .lower), err,
-            });
-            if (self.metrics) |m| m.execution_errors_total.incr();
-            // On EL communication failure, accept optimistically and track EL offline.
-            return .syncing;
-        };
-            // TODO: record EL timing
-
-        if (self.metrics) |m| {
-            // m.execution_new_payload_seconds.observe(0); // TODO: timing
-            switch (result.status) {
-                .valid => m.execution_payload_valid_total.incr(),
-                .invalid => m.execution_payload_invalid_total.incr(),
-                .syncing, .accepted => m.execution_payload_syncing_total.incr(),
-                else => {},
-            }
-        }
-
-        std.log.info("Engine API newPayload slot {d}: status={s}", .{
-            signed_block.message.slot, @tagName(result.status),
-        });
-
-        // When EL reports INVALID, propagate invalidity through the fork choice DAG.
-        // This marks all descendants of the latest valid hash as invalid,
-        // preventing them from being selected as head.
-        if (result.status == .invalid or result.status == .invalid_block_hash) {
-            if (self.fork_choice) |fc| {
-                const lvh_response = LVHExecResponse{
-                    .invalid = .{
-                        .latest_valid_exec_hash = result.latest_valid_hash,
-                        .invalidate_from_parent_block_root = signed_block.message.parent_root,
-                    },
-                };
-                fc.validateLatestHash(self.allocator, lvh_response, signed_block.message.slot);
-                std.log.warn("Marked fork choice branch as INVALID: block_root={s}... lvh={s}", .{
-                    &std.fmt.bytesToHex(block_root[0..4], .lower),
-                    if (result.latest_valid_hash) |h| &std.fmt.bytesToHex(h[0..4], .lower) else "null",
-                });
-            }
-        }
-
-        return result.status;
-    }
-
-    const StfnResult = struct {
-        post_state: *CachedBeaconState,
-        state_root: [32]u8,
-        block_root: [32]u8,
-    };
-
-    fn runStateTransition(
-        self: *BlockImporter,
-        pre_state: *CachedBeaconState,
-        signed_block: *const types.electra.SignedBeaconBlock.Type,
-        block_slot: u64,
-    ) !StfnResult {
-        const post_state = try pre_state.clone(self.allocator, .{ .transfer_cache = false });
-        errdefer {
-            post_state.deinit();
-            self.allocator.destroy(post_state);
-        }
-
-        try state_transition.processSlots(self.allocator, post_state, block_slot, .{});
-
-        const any_signed = AnySignedBeaconBlock{ .full_electra = @constCast(signed_block) };
-        const block = any_signed.beaconBlock();
-
-        switch (post_state.state.forkSeq()) {
-            inline else => |f| {
-                switch (block.blockType()) {
-                    inline else => |bt| {
-                        if (comptime bt == .blinded and f.lt(.bellatrix)) {
-                            return error.InvalidBlockTypeForFork;
-                        }
-                        // Use batch verification when signatures are enabled for ~3-10x speedup.
-                        // Collect all signature sets during processBlock, then verify in one shot.
-                        // When a BLS thread pool is available, verification is parallelized across workers.
-                        var batch = BatchVerifier.init(self.bls_thread_pool);
-                        const opts = state_transition.ProcessBlockOpts{
-                            .verify_signature = self.verify_signatures,
-                            .batch_verifier = if (self.verify_signatures) &batch else null,
-                        };
-                        try state_transition.processBlock(
-                            f,
-                            self.allocator,
-                            post_state.config,
-                            post_state.epoch_cache,
-                            post_state.state.castToFork(f),
-                            &post_state.slashings_cache,
-                            bt,
-                            block.castToFork(bt, f),
-                            .{
-                                .execution_payload_status = .valid,
-                                .data_availability_status = .available,
-                            },
-                            opts,
-                        );
-                        // Batch-verify all collected signatures
-                        if (self.verify_signatures and batch.len() > 0) {
-                            const valid = batch.verifyAll() catch false;
-                            if (!valid) return error.InvalidBatchSignature;
-                        }
-                    },
-                }
-            },
-        }
-
-        try post_state.state.commit();
-        const state_root = (try post_state.state.hashTreeRoot()).*;
-
-        // Log state root comparison.
-        if (!std.mem.eql(u8, &state_root, &signed_block.message.state_root)) {
-            std.log.warn("STFN state_root mismatch at slot {d}: ours={s}... block={s}...", .{
-                block_slot,
-                &std.fmt.bytesToHex(state_root[0..8], .lower),
-                &std.fmt.bytesToHex(signed_block.message.state_root[0..8], .lower),
-            });
-        } else {
-            std.log.info("STFN state_root MATCHES at slot {d}", .{block_slot});
-        }
-
-        // Compute block root from header.
-        // Per spec (process_slot), the next block's parent_root is computed from
-        // state.latest_block_header AFTER filling in the actual state_root
-        // (state_root=0 gets replaced by the computed post-state root in processSlot).
-        // We must use the computed state_root here so the stored block_root
-        // matches what the next block generator will use as parent_root.
-        var br_body_root: [32]u8 = undefined;
-        try types.electra.BeaconBlockBody.hashTreeRoot(self.allocator, &signed_block.message.body, &br_body_root);
-        const hdr = types.phase0.BeaconBlockHeader.Type{
-            .slot = block_slot,
-            .proposer_index = signed_block.message.proposer_index,
-            .parent_root = signed_block.message.parent_root,
-            .state_root = state_root, // Use computed post-state root, not block's declared (possibly 0)
-            .body_root = br_body_root,
-        };
-        var computed_block_root: [32]u8 = undefined;
-        try types.phase0.BeaconBlockHeader.hashTreeRoot(&hdr, &computed_block_root);
-
-        return .{
-            .post_state = post_state,
-            .state_root = state_root,
-            .block_root = computed_block_root,
-        };
-    }
-};
+pub const PendingBatchRequest = sync_bridge_mod.PendingBatchRequest;
+pub const SyncCallbackCtx = sync_bridge_mod.SyncCallbackCtx;
 
 // ---------------------------------------------------------------------------
 // SyncStatus
@@ -612,20 +187,10 @@ pub const HeadInfo = struct {
 };
 
 // ---------------------------------------------------------------------------
-// BeaconNode
+// loadJwtSecret
 // ---------------------------------------------------------------------------
 
-
-/// Load a JWT secret from a hex-encoded file.
-///
-/// The file must contain a 0x-prefixed (or bare) hex string of exactly
-/// 32 bytes (64 hex chars). Whitespace and newlines are stripped.
-/// This matches the format used by Geth, Nethermind, Besu, etc.
 /// Load a JWT secret from a hex-encoded file using std.Io.
-///
-/// The file must contain a 0x-prefixed (or bare) hex string of exactly
-/// 32 bytes (64 hex chars). Whitespace and newlines are stripped.
-/// This matches the format used by Geth, Nethermind, Besu, etc.
 fn loadJwtSecret(_: Allocator, io: std.Io, file_path: []const u8) ![32]u8 {
     const file = std.Io.Dir.cwd().openFile(io, file_path, .{}) catch
         return error.JwtFileNotFound;
@@ -639,10 +204,7 @@ fn loadJwtSecret(_: Allocator, io: std.Io, file_path: []const u8) ![32]u8 {
         return error.JwtFileReadError;
     const file_content = buf[0..total];
 
-    // Strip whitespace and newlines.
     const trimmed = std.mem.trim(u8, file_content, " \t\n\r");
-
-    // Strip optional "0x" prefix.
     const hex_str = if (trimmed.len >= 2 and trimmed[0] == '0' and trimmed[1] == 'x')
         trimmed[2..]
     else
@@ -654,122 +216,6 @@ fn loadJwtSecret(_: Allocator, io: std.Io, file_path: []const u8) ![32]u8 {
     _ = std.fmt.hexToBytes(&secret, hex_str) catch return error.InvalidJwtSecretHex;
     return secret;
 }
-
-// ---------------------------------------------------------------------------
-// SyncCallbackCtx — bridges sync pipeline callbacks to the P2P transport.
-//
-// The sync state machine (RangeSyncManager) fires callbacks synchronously,
-// but P2P operations require cooperative I/O. This context queues batch
-// requests for the main loop to drain via actual network calls.
-// ---------------------------------------------------------------------------
-
-pub const PendingBatchRequest = struct {
-    batch_id: u32,
-    start_slot: u64,
-    count: u64,
-    peer_id_buf: [128]u8,
-    peer_id_len: u8,
-
-    pub fn peerId(self: *const PendingBatchRequest) []const u8 {
-        return self.peer_id_buf[0..self.peer_id_len];
-    }
-};
-
-pub const SyncCallbackCtx = struct {
-    node: *BeaconNode,
-
-    /// Pending batch requests queued by the sync state machine.
-    /// Drained by processSyncBatches() in the main loop.
-    pending_requests: [32]PendingBatchRequest = undefined,
-    pending_count: u8 = 0,
-
-    /// Create a SyncServiceCallbacks that bridges to this context.
-    pub fn syncServiceCallbacks(self: *SyncCallbackCtx) SyncServiceCallbacks {
-        return .{
-            .ptr = @ptrCast(self),
-            .importBlockFn = &syncImportBlock,
-            .requestBlocksByRangeFn = &syncRequestBlocksByRange,
-            .requestBlockByRootFn = &syncRequestBlockByRoot,
-            .reportPeerFn = &syncReportPeer,
-            .getConnectedPeersFn = &syncGetConnectedPeers,
-            .setGossipEnabledFn = &syncSetGossipEnabled,
-        };
-    }
-
-    fn syncImportBlock(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
-        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
-        const node = ctx.node;
-        const allocator = node.allocator;
-
-        // Determine the active fork for deserialization.
-        const fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
-
-        const any_signed = AnySignedBeaconBlock.deserialize(
-            allocator, .full, fork_seq, block_bytes,
-        ) catch |err| {
-            std.log.warn("SyncCallbackCtx: block deserialize error: {}", .{err});
-            return err;
-        };
-        defer any_signed.deinit(allocator);
-
-        const result = node.importBlock(any_signed, .range_sync) catch |err| {
-            if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
-                std.log.warn("SyncCallbackCtx: import error: {}", .{err});
-            }
-            return err;
-        };
-        std.log.info("SyncCallbackCtx: imported slot={d}", .{result.slot});
-    }
-
-    fn syncRequestBlocksByRange(
-        ptr: *anyopaque,
-        chain_id: u32,
-        batch_id: u32,
-        generation: u32,
-        peer_id: []const u8,
-        start_slot: u64,
-        count: u64,
-    ) void {
-        _ = chain_id;
-        _ = generation;
-        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
-        if (ctx.pending_count >= 32) {
-            std.log.warn("SyncCallbackCtx: pending request queue full, dropping batch {d}", .{batch_id});
-            return;
-        }
-        var req = PendingBatchRequest{
-            .batch_id = batch_id,
-            .start_slot = start_slot,
-            .count = count,
-            .peer_id_buf = undefined,
-            .peer_id_len = @intCast(@min(peer_id.len, 128)),
-        };
-        @memcpy(req.peer_id_buf[0..req.peer_id_len], peer_id[0..req.peer_id_len]);
-        ctx.pending_requests[ctx.pending_count] = req;
-        ctx.pending_count += 1;
-        std.log.debug("SyncCallbackCtx: queued batch {d} slots {d}..{d} for peer {s}", .{
-            batch_id, start_slot, start_slot + count - 1, peer_id,
-        });
-    }
-
-    fn syncRequestBlockByRoot(_: *anyopaque, _: [32]u8, _: []const u8) void {
-        // TODO: implement block-by-root request via P2P
-    }
-
-    fn syncReportPeer(_: *anyopaque, _: []const u8) void {
-        // TODO: integrate with networking peer scoring
-    }
-
-    fn syncGetConnectedPeers(_: *anyopaque) []const []const u8 {
-        // TODO: return connected peer IDs from networking PeerManager
-        return &.{};
-    }
-
-    fn syncSetGossipEnabled(_: *anyopaque, enabled: bool) void {
-        // TODO: subscribe/unsubscribe gossip topics based on sync state
-        std.log.info("Gossip {s}", .{if (enabled) "enabled" else "disabled"});
-    }
-};
 
 pub const BeaconNode = struct {
     allocator: Allocator,
@@ -839,7 +285,7 @@ pub const BeaconNode = struct {
     // Uses self.allocator as scratch; block bytes returned by callbacks are copied
     // by the handler before the callback returns.
     p2p_req_resp_ctx: ?*ReqRespContext = null,
-    p2p_request_ctx: ?*RequestContext = null,
+    p2p_request_ctx: ?*reqresp_callbacks_mod.RequestContext = null,
 
     // Sync controller — wires P2P events into the sync pipeline.
     // Optional: nil until initialized (e.g. when running without P2P).
@@ -1945,28 +1391,14 @@ pub const BeaconNode = struct {
         // Build a persistent RequestContext (heap-allocated, stable for P2P lifetime).
         // Uses self.allocator as scratch so returned block slices outlive callbacks;
         // they are copied into response chunks by the handler before use.
-        const p2p_req_ctx = try self.allocator.create(RequestContext);
+        const p2p_req_ctx = try self.allocator.create(reqresp_callbacks_mod.RequestContext);
         errdefer self.allocator.destroy(p2p_req_ctx);
-        p2p_req_ctx.* = .{ .node = self, .scratch = self.allocator };
+        p2p_req_ctx.* = .{ .node = @ptrCast(self), .scratch = self.allocator };
         self.p2p_request_ctx = p2p_req_ctx;
 
         const req_resp_ctx = try self.allocator.create(ReqRespContext);
         errdefer self.allocator.destroy(req_resp_ctx);
-        req_resp_ctx.* = ReqRespContext{
-            .ptr = @ptrCast(p2p_req_ctx),
-            .getStatus = &reqRespGetStatus,
-            .getMetadata = &reqRespGetMetadata,
-            .getPingSequence = &reqRespGetPingSequence,
-            .getBlockByRoot = &reqRespGetBlockByRoot,
-            .getBlocksByRange = &reqRespGetBlocksByRange,
-            .getBlobByRoot = &reqRespGetBlobByRoot,
-            .getBlobsByRange = &reqRespGetBlobsByRange,
-            .getDataColumnByRoot = &reqRespGetDataColumnByRoot,
-            .getDataColumnsByRange = &reqRespGetDataColumnsByRange,
-            .getForkDigest = &reqRespGetForkDigest,
-            .onGoodbye = &reqRespOnGoodbye,
-            .onPeerStatus = &reqRespOnPeerStatus,
-        };
+        req_resp_ctx.* = reqresp_callbacks_mod.makeReqRespContext(p2p_req_ctx);
         self.p2p_req_resp_ctx = req_resp_ctx;
 
         // Passthrough gossip validator — heap-allocated so its internal pointers
@@ -2698,16 +2130,16 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         fn initGossipHandler(self: *BeaconNode) void {
             if (self.gossip_handler != null) return;
 
-            // Set module-level node pointer for ptr-free vtable callbacks.
-            gossip_node = self;
-
+            // Use gossip_node_callbacks_mod for all callbacks — no module-level global.
+            // The node pointer is threaded through GossipHandler.node (*anyopaque).
+            const gcb = gossip_node_callbacks_mod;
             self.gossip_handler = GossipHandler.create(
                 self.allocator,
                 @ptrCast(self),
-                &gossipImportBlockFromGossip,
-                &gossipGetProposerIndex,
-                &gossipIsKnownBlockRoot,
-                &gossipGetValidatorCount,
+                &gcb.importBlockFromGossip,
+                &gcb.getProposerIndex,
+                &gcb.isKnownBlockRoot,
+                &gcb.getValidatorCount,
             ) catch |err| {
                 std.log.warn("Failed to create GossipHandler: {}", .{err});
                 return;
@@ -2715,27 +2147,25 @@ fn parseIp4(s: []const u8) ?[4]u8 {
 
             // Wire all import callbacks.
             if (self.gossip_handler) |gh| {
-                gh.importAttestationFn = &gossipImportAttestation;
-                gh.importVoluntaryExitFn = &gossipImportVoluntaryExit;
-                gh.importProposerSlashingFn = &gossipImportProposerSlashing;
-                gh.importAttesterSlashingFn = &gossipImportAttesterSlashing;
-                gh.importBlsChangeFn = &gossipImportBlsChange;
+                gh.importAttestationFn = &gcb.importAttestation;
+                gh.importVoluntaryExitFn = &gcb.importVoluntaryExit;
+                gh.importProposerSlashingFn = &gcb.importProposerSlashing;
+                gh.importAttesterSlashingFn = &gcb.importAttesterSlashing;
+                gh.importBlsChangeFn = &gcb.importBlsChange;
 
                 // Wire BLS signature verification callbacks.
-                // These are called between Phase 1 (cheap checks) and Phase 2 (import)
-                // to verify BLS signatures before accepting gossip messages.
-                gh.verifyBlockSignatureFn = &gossipVerifyBlockSignature;
-                gh.verifyVoluntaryExitSignatureFn = &gossipVerifyVoluntaryExitSignature;
-                gh.verifyProposerSlashingSignatureFn = &gossipVerifyProposerSlashingSignature;
-                gh.verifyAttesterSlashingSignatureFn = &gossipVerifyAttesterSlashingSignature;
-                gh.verifyBlsChangeSignatureFn = &gossipVerifyBlsChangeSignature;
-                gh.verifyAttestationSignatureFn = &gossipVerifyAttestationSignature;
-                gh.verifyAggregateSignatureFn = &gossipVerifyAggregateSignature;
-                gh.verifySyncCommitteeSignatureFn = &gossipVerifySyncCommitteeSignature;
+                gh.verifyBlockSignatureFn = &gcb.verifyBlockSignature;
+                gh.verifyVoluntaryExitSignatureFn = &gcb.verifyVoluntaryExitSignature;
+                gh.verifyProposerSlashingSignatureFn = &gcb.verifyProposerSlashingSignature;
+                gh.verifyAttesterSlashingSignatureFn = &gcb.verifyAttesterSlashingSignature;
+                gh.verifyBlsChangeSignatureFn = &gcb.verifyBlsChangeSignature;
+                gh.verifyAttestationSignatureFn = &gcb.verifyAttestationSignature;
+                gh.verifyAggregateSignatureFn = &gcb.verifyAggregateSignature;
+                gh.verifySyncCommitteeSignatureFn = &gcb.verifySyncCommitteeSignature;
 
                 // Sync committee pool import callbacks.
-                gh.importSyncContributionFn = &gossipImportSyncContribution;
-                gh.importSyncCommitteeMessageFn = &gossipImportSyncCommitteeMessage;
+                gh.importSyncContributionFn = &gcb.importSyncContribution;
+                gh.importSyncCommitteeMessageFn = &gcb.importSyncCommitteeMessage;
 
                 // Wire metrics so gossip accept/reject/ignore are counted.
                 gh.metrics = self.metrics;
@@ -3607,26 +3037,11 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
 
-        var req_ctx = RequestContext{
-            .node = self,
+        var req_ctx = reqresp_callbacks_mod.RequestContext{
+            .node = @ptrCast(self),
             .scratch = scratch.allocator(),
         };
-
-        const ctx = ReqRespContext{
-            .ptr = &req_ctx,
-            .getStatus = &reqRespGetStatus,
-            .getMetadata = &reqRespGetMetadata,
-            .getPingSequence = &reqRespGetPingSequence,
-            .getBlockByRoot = &reqRespGetBlockByRoot,
-            .getBlocksByRange = &reqRespGetBlocksByRange,
-            .getBlobByRoot = &reqRespGetBlobByRoot,
-            .getBlobsByRange = &reqRespGetBlobsByRange,
-            .getDataColumnByRoot = &reqRespGetDataColumnByRoot,
-            .getDataColumnsByRange = &reqRespGetDataColumnsByRange,
-            .getForkDigest = &reqRespGetForkDigest,
-            .onGoodbye = &reqRespOnGoodbye,
-            .onPeerStatus = &reqRespOnPeerStatus,
-        };
+        const ctx = reqresp_callbacks_mod.makeReqRespContext(&req_ctx);
         return handleRequest(self.allocator, method, request_bytes, &ctx);
     }
 };
@@ -3797,41 +3212,6 @@ fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
     }
 }
 
-// For ptr-free vtable functions (getProposerIndex, isKnownBlockRoot,
-// getValidatorCount), we use a module-level node pointer set during
-// initGossipHandler. This is safe because there is exactly one
-// BeaconNode instance per process.
-// ---------------------------------------------------------------------------
-
-/// Module-level BeaconNode pointer for ptr-free gossip callbacks.
-/// Set once in initGossipHandler, read by the static vtable functions below.
-var gossip_node: ?*BeaconNode = null;
-
-fn gossipImportBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    // Decompress is already done by GossipHandler; block_bytes are raw SSZ.
-    const fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
-    const any_signed = AnySignedBeaconBlock.deserialize(
-        node.allocator, .full, fork_seq, block_bytes,
-    ) catch |err| {
-        std.log.warn("Gossip block import deserialize: {}", .{err});
-        return err;
-    };
-    defer any_signed.deinit(node.allocator);
-
-    const result = node.importBlock(any_signed, .gossip) catch |err| {
-        if (err == error.UnknownParentBlock) {
-            node.queueOrphanBlock(any_signed, block_bytes);
-        } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
-            std.log.warn("Gossip block import: {}", .{err});
-        }
-        return err;
-    };
-    node.processPendingChildren(result.block_root);
-    std.log.info("GOSSIP BLOCK IMPORTED (via handler) slot={d}", .{result.slot});
-}
-
-
 /// Convert an Engine API ExecutionPayloadV3 to the SSZ ExecutionPayload type.
 ///
 /// The Engine API types use raw slices ([]const []const u8 for transactions,
@@ -3844,7 +3224,6 @@ fn convertEnginePayload(
     const bellatrix = @import("consensus_types").bellatrix;
     const capella = @import("consensus_types").capella;
 
-    // Convert transactions: []const []const u8 → VariableList of ByteList
     var transactions = try std.ArrayListUnmanaged(
         bellatrix.Transactions.Element.Type,
     ).initCapacity(allocator, engine_payload.transactions.len);
@@ -3861,7 +3240,6 @@ fn convertEnginePayload(
         transactions.appendAssumeCapacity(tx_data);
     }
 
-    // Convert withdrawals: []const engine Withdrawal → FixedList of SSZ Withdrawal
     var withdrawals = try std.ArrayListUnmanaged(
         capella.Withdrawal.Type,
     ).initCapacity(allocator, engine_payload.withdrawals.len);
@@ -3876,7 +3254,6 @@ fn convertEnginePayload(
         });
     }
 
-    // Convert extra_data: []const u8 → ArrayListUnmanaged(u8)
     var extra_data = std.ArrayListUnmanaged(u8){};
     if (engine_payload.extra_data.len > 0) {
         try extra_data.appendSlice(allocator, engine_payload.extra_data);
@@ -3902,654 +3279,11 @@ fn convertEnginePayload(
         .excess_blob_gas = engine_payload.excess_blob_gas,
     };
 }
-fn gossipGetProposerIndex(slot: u64) ?u32 {
-    const node = gossip_node orelse return null;
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return null;
-    const proposer = cached.getBeaconProposer(slot) catch return null;
-    return @intCast(proposer);
-}
 
-fn gossipIsKnownBlockRoot(root: [32]u8) bool {
-    const node = gossip_node orelse return true;
-    // Check head tracker slot→root map (bounded, ~SLOTS_PER_EPOCH entries).
-    var it = node.head_tracker.slot_roots.iterator();
-    while (it.next()) |entry| {
-        if (std.mem.eql(u8, entry.value_ptr, &root)) return true;
-    }
-    // Also check fork choice if available.
-    if (node.chain.fork_choice) |fc| {
-        return fc.hasBlock(root);
-    }
-    return false;
-}
-
-fn gossipGetValidatorCount() u32 {
-    const node = gossip_node orelse return 0;
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return 0;
-    return @intCast(cached.epoch_cache.index_to_pubkey.items.len);
-}
-
-/// Import a validated attestation into fork choice and op pool.
-///
-/// Called by GossipHandler after Phase 1 validation passes.
-fn gossipImportAttestation(
-    ptr: *anyopaque,
-    attestation_slot: u64,
-    committee_index: u64,
-    target_root: [32]u8,
-    target_epoch: u64,
-    validator_index: u64,
-    beacon_block_root: [32]u8,
-    source_epoch: u64,
-    source_root: [32]u8,
-) anyerror!void {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-
-    // Build a minimal Attestation for the op pool.
-    const att = types.phase0.Attestation.Type{
-        .aggregation_bits = .{ .data = std.ArrayListUnmanaged(u8).empty, .bit_len = 0 },
-        .data = .{
-            .slot = attestation_slot,
-            .index = committee_index,
-            .beacon_block_root = beacon_block_root,
-            .source = .{ .epoch = source_epoch, .root = source_root },
-            .target = .{ .epoch = target_epoch, .root = target_root },
-        },
-        .signature = [_]u8{0} ** 96,
-    };
-
-    try node.chain.importAttestation(
-        attestation_slot,
-        committee_index,
-        target_root,
-        target_epoch,
-        validator_index,
-        att,
-    );
-}
-
-/// Import a validated voluntary exit into the op pool.
-fn gossipImportVoluntaryExit(ptr: *anyopaque, validator_index: u64, epoch: u64) anyerror!void {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const exit = types.phase0.SignedVoluntaryExit.Type{
-        .message = .{
-            .epoch = epoch,
-            .validator_index = validator_index,
-        },
-        .signature = [_]u8{0} ** 96,
-    };
-    try node.chain.op_pool.voluntary_exit_pool.add(exit);
-}
-
-/// Import a validated proposer slashing from raw SSZ bytes into the op pool.
-fn gossipImportProposerSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    var slashing: types.phase0.ProposerSlashing.Type = undefined;
-    types.phase0.ProposerSlashing.deserializeFromBytes(ssz_bytes, &slashing) catch |err| {
-        std.log.warn("Proposer slashing SSZ decode failed: {}", .{err});
-        return err;
-    };
-    try node.chain.op_pool.proposer_slashing_pool.add(slashing);
-}
-
-/// Import a validated attester slashing from raw SSZ bytes into the op pool.
-fn gossipImportAttesterSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    var slashing: types.phase0.AttesterSlashing.Type = undefined;
-    types.phase0.AttesterSlashing.deserializeFromBytes(node.allocator, ssz_bytes, &slashing) catch |err| {
-        std.log.warn("Attester slashing SSZ decode failed: {}", .{err});
-        return err;
-    };
-    try node.chain.op_pool.attester_slashing_pool.add(slashing);
-}
-
-/// Import a validated BLS-to-execution change from raw SSZ bytes into the op pool.
-fn gossipImportBlsChange(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    var change: types.capella.SignedBLSToExecutionChange.Type = undefined;
-    types.capella.SignedBLSToExecutionChange.deserializeFromBytes(ssz_bytes, &change) catch |err| {
-        std.log.warn("BLS change SSZ decode failed: {}", .{err});
-        return err;
-    };
-    try node.chain.op_pool.bls_change_pool.add(change);
-}
-
-/// Import a validated sync committee contribution into the pool.
-///
-/// Deserializes a SignedContributionAndProof, extracts the inner contribution,
-/// and adds it to the SyncContributionAndProofPool.
-fn gossipImportSyncContribution(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const pool = node.sync_contribution_pool orelse return;
-
-    var signed_cap: types.altair.SignedContributionAndProof.Type = undefined;
-    types.altair.SignedContributionAndProof.deserializeFromBytes(ssz_bytes, &signed_cap) catch |err| {
-        std.log.warn("SignedContributionAndProof SSZ decode failed: {}", .{err});
-        return err;
-    };
-
-    try pool.add(&signed_cap.message.contribution);
-}
-
-/// Import a validated sync committee message into the pool.
-///
-/// Deserializes a SyncCommitteeMessage and adds it to the SyncCommitteeMessagePool.
-/// The subnet_id determines the subcommittee index.
-///
-/// Note: Computing `index_in_subcommittee` requires knowing the validator's position
-/// within the sync committee for this epoch. For now, we use `validator_index % subcommittee_size`
-/// as a placeholder — the full implementation needs the sync committee cache from the epoch cache.
-fn gossipImportSyncCommitteeMessage(ptr: *anyopaque, ssz_bytes: []const u8, subnet: u64) anyerror!void {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const pool = node.sync_committee_message_pool orelse return;
-
-    var msg: types.altair.SyncCommitteeMessage.Type = undefined;
-    types.altair.SyncCommitteeMessage.deserializeFromBytes(ssz_bytes, &msg) catch |err| {
-        std.log.warn("SyncCommitteeMessage SSZ decode failed: {}", .{err});
-        return err;
-    };
-
-    // Compute the index within the subcommittee.
-    // The full implementation should look up the validator's position in the
-    // sync committee from the epoch cache. For now, derive from validator_index.
-    const subcommittee_size = preset.SYNC_COMMITTEE_SIZE / constants.SYNC_COMMITTEE_SUBNET_COUNT;
-    const index_in_subcommittee = msg.validator_index % subcommittee_size;
-
-    try pool.add(
-        subnet,
-        msg.slot,
-        msg.beacon_block_root,
-        index_in_subcommittee,
-        msg.signature,
-    );
-}
-
-// ---------------------------------------------------------------------------
-// BLS signature verification callbacks for gossip messages.
-//
-// Each callback receives raw decompressed SSZ bytes, deserializes the message,
-// constructs the appropriate signature set(s) using the head state's epoch
-// cache + config, and returns true if all signatures are valid.
-//
-// These are called between Phase 1 (cheap checks) and Phase 2 (import) in
-// the GossipHandler, matching TS Lodestar's validation ordering.
-// ---------------------------------------------------------------------------
-
-/// Verify the proposer BLS signature on a gossip beacon block.
-fn gossipVerifyBlockSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return true; // no state = skip check
-
-    const fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
-    const any_signed = fork_types.AnySignedBeaconBlock.deserialize(
-        node.allocator, .full, fork_seq, ssz_bytes,
-    ) catch return false;
-    defer any_signed.deinit(node.allocator);
-
-    const sig_set = state_transition.signature_sets.proposer.getBlockProposerSignatureSet(
-        node.allocator,
-        node.config,
-        cached.epoch_cache,
-        any_signed,
-    ) catch return false;
-
-    return state_transition.signature_sets.verifySingleSignatureSet(&sig_set) catch false;
-}
-
-/// Verify the BLS signature on a gossip voluntary exit.
-fn gossipVerifyVoluntaryExitSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return true;
-
-    var signed_exit: types.phase0.SignedVoluntaryExit.Type = undefined;
-    types.phase0.SignedVoluntaryExit.deserializeFromBytes(ssz_bytes, &signed_exit) catch return false;
-
-    return state_transition.signature_sets.voluntary_exits.verifyVoluntaryExitSignature(
-        node.config,
-        cached.epoch_cache,
-        &signed_exit,
-    ) catch false;
-}
-
-/// Verify the BLS signatures on a gossip proposer slashing (both signed headers).
-fn gossipVerifyProposerSlashingSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return true;
-
-    var slashing: types.phase0.ProposerSlashing.Type = undefined;
-    types.phase0.ProposerSlashing.deserializeFromBytes(ssz_bytes, &slashing) catch return false;
-
-    const sig_sets = state_transition.signature_sets.proposer_slashings.getProposerSlashingSignatureSets(
-        node.config,
-        cached.epoch_cache,
-        &slashing,
-    ) catch return false;
-
-    // Both header signatures must be valid.
-    const valid1 = state_transition.signature_sets.verifySingleSignatureSet(&sig_sets[0]) catch return false;
-    if (!valid1) return false;
-    return state_transition.signature_sets.verifySingleSignatureSet(&sig_sets[1]) catch false;
-}
-
-/// Verify the BLS signatures on a gossip attester slashing (both indexed attestations).
-fn gossipVerifyAttesterSlashingSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return true;
-
-    var slashing: types.phase0.AttesterSlashing.Type = undefined;
-    types.phase0.AttesterSlashing.deserializeFromBytes(node.allocator, ssz_bytes, &slashing) catch return false;
-
-    // Verify both indexed attestation signatures.
-    const sig_set1 = state_transition.signature_sets.indexed_attestation.getAttestationWithIndicesSignatureSet(
-        node.allocator,
-        node.config,
-        cached.epoch_cache,
-        &slashing.attestation_1.data,
-        slashing.attestation_1.signature,
-        slashing.attestation_1.attesting_indices.items,
-    ) catch return false;
-    defer node.allocator.free(sig_set1.pubkeys);
-
-    const valid1 = state_transition.signature_sets.verifyAggregatedSignatureSet(&sig_set1) catch return false;
-    if (!valid1) return false;
-
-    const sig_set2 = state_transition.signature_sets.indexed_attestation.getAttestationWithIndicesSignatureSet(
-        node.allocator,
-        node.config,
-        cached.epoch_cache,
-        &slashing.attestation_2.data,
-        slashing.attestation_2.signature,
-        slashing.attestation_2.attesting_indices.items,
-    ) catch return false;
-    defer node.allocator.free(sig_set2.pubkeys);
-
-    return state_transition.signature_sets.verifyAggregatedSignatureSet(&sig_set2) catch false;
-}
-
-/// Verify the BLS signature on a gossip BLS-to-execution change.
-fn gossipVerifyBlsChangeSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-
-    var signed_change: types.capella.SignedBLSToExecutionChange.Type = undefined;
-    types.capella.SignedBLSToExecutionChange.deserializeFromBytes(ssz_bytes, &signed_change) catch return false;
-
-    // BLS-to-execution change uses the validator's BLS pubkey from the message itself
-    // (from_bls_pubkey field), not from the epoch cache.
-    return state_transition.signature_sets.bls_to_execution_change.verifyBlsToExecutionChangeSignature(
-        node.config,
-        &signed_change,
-    ) catch false;
-}
-
-/// Verify the BLS signature on a gossip attestation (SingleAttestation in Electra).
-fn gossipVerifyAttestationSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return true;
-
-    var att: types.electra.SingleAttestation.Type = undefined;
-    types.electra.SingleAttestation.deserializeFromBytes(ssz_bytes, &att) catch return false;
-
-    // SingleAttestation has a single attester_index — construct a single-pubkey signature set.
-    if (att.attester_index >= cached.epoch_cache.index_to_pubkey.items.len) return false;
-
-    var signing_root: [32]u8 = undefined;
-    state_transition.signature_sets.indexed_attestation.getAttestationDataSigningRoot(
-        node.config,
-        cached.epoch_cache.epoch,
-        &att.data,
-        &signing_root,
-    ) catch return false;
-
-    const sig_set = state_transition.signature_sets.SingleSignatureSet{
-        .pubkey = cached.epoch_cache.index_to_pubkey.items[att.attester_index],
-        .signing_root = signing_root,
-        .signature = att.signature,
-    };
-
-    return state_transition.signature_sets.verifySingleSignatureSet(&sig_set) catch false;
-}
-
-/// Verify all BLS signatures on a gossip SignedAggregateAndProof.
-///
-/// Per the consensus spec (p2p-interface.md) this checks three signatures:
-/// 1. selection_proof — aggregator signed over `slot` with DOMAIN_SELECTION_PROOF
-/// 2. aggregator signature — outer SignedAggregateAndProof.signature over
-///    AggregateAndProof with DOMAIN_AGGREGATE_AND_PROOF
-/// 3. aggregate attestation — aggregate BLS signature over AttestationData
-///    with DOMAIN_BEACON_ATTESTER
-///
-/// Additionally validates:
-/// - aggregator_index is within the committee for the attestation's slot/index
-/// - aggregator is selected via is_aggregator check on committee length
-fn gossipVerifyAggregateSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return true;
-
-    var signed_agg: types.phase0.SignedAggregateAndProof.Type = undefined;
-    types.phase0.SignedAggregateAndProof.deserializeFromBytes(node.allocator, ssz_bytes, &signed_agg) catch return false;
-    defer signed_agg.message.aggregate.aggregation_bits.data.deinit(node.allocator);
-
-    const agg = signed_agg.message;
-    const att_data = agg.aggregate.data;
-    const att_slot = att_data.slot;
-    const committee_index = att_data.index;
-    const epoch = cached.epoch_cache.epoch;
-
-    // [REJECT] aggregator_index must be within the validator set.
-    if (agg.aggregator_index >= cached.epoch_cache.index_to_pubkey.items.len) return false;
-    const aggregator_pubkey = cached.epoch_cache.index_to_pubkey.items[agg.aggregator_index];
-
-    // Get the beacon committee for the attestation's slot + committee_index.
-    const committee = cached.epoch_cache.getBeaconCommittee(att_slot, committee_index) catch return false;
-
-    // [REJECT] The aggregator's validator index is within the committee.
-    var aggregator_in_committee = false;
-    for (committee) |vi| {
-        if (vi == agg.aggregator_index) {
-            aggregator_in_committee = true;
-            break;
-        }
-    }
-    if (!aggregator_in_committee) return false;
-
-    // [REJECT] aggregate_and_proof.selection_proof selects the validator as an aggregator.
-    // is_aggregator: hash(selection_proof)[0:8] as u64 % max(1, committee_len / TARGET_AGGREGATORS) == 0
-    const isAggregatorFromCommitteeLength = @import("state_transition").isAggregatorFromCommitteeLength;
-    if (!isAggregatorFromCommitteeLength(committee.len, agg.selection_proof)) return false;
-
-    const computeSigningRoot = state_transition.computeSigningRoot;
-    const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
-
-    // --- Signature 1: selection_proof ---
-    // signing_root = compute_signing_root(Slot, att_slot, getDomain(DOMAIN_SELECTION_PROOF, att_slot))
-    const selection_domain = node.config.getDomain(epoch, constants.DOMAIN_SELECTION_PROOF, att_slot) catch return false;
-    var selection_signing_root: [32]u8 = undefined;
-    computeSigningRoot(types.primitive.Slot, &att_slot, selection_domain, &selection_signing_root) catch return false;
-
-    const selection_sig_set = state_transition.signature_sets.SingleSignatureSet{
-        .pubkey = aggregator_pubkey,
-        .signing_root = selection_signing_root,
-        .signature = agg.selection_proof,
-    };
-    const selection_valid = state_transition.signature_sets.verifySingleSignatureSet(&selection_sig_set) catch return false;
-    if (!selection_valid) return false;
-
-    // --- Signature 2: aggregator signature (outer SignedAggregateAndProof.signature) ---
-    // signing_root = compute_signing_root(AggregateAndProof, agg, getDomain(DOMAIN_AGGREGATE_AND_PROOF, start_slot))
-    const computeSigningRootAlloc = state_transition.computeSigningRootAlloc;
-    const target_epoch_start_slot = computeStartSlotAtEpoch(att_data.target.epoch);
-    const agg_domain = node.config.getDomain(epoch, constants.DOMAIN_AGGREGATE_AND_PROOF, target_epoch_start_slot) catch return false;
-    var agg_signing_root: [32]u8 = undefined;
-    computeSigningRootAlloc(types.phase0.AggregateAndProof, node.allocator, &agg, agg_domain, &agg_signing_root) catch return false;
-
-    const agg_sig_set = state_transition.signature_sets.SingleSignatureSet{
-        .pubkey = aggregator_pubkey,
-        .signing_root = agg_signing_root,
-        .signature = signed_agg.signature,
-    };
-    const agg_valid = state_transition.signature_sets.verifySingleSignatureSet(&agg_sig_set) catch return false;
-    if (!agg_valid) return false;
-
-    // --- Signature 3: aggregate attestation signature ---
-    // The aggregate attestation is a BLS aggregate over AttestationData signed by all
-    // attesting validators with DOMAIN_BEACON_ATTESTER.
-    // Get attesting indices from aggregation_bits intersected with committee.
-    var attesting_indices = agg.aggregate.aggregation_bits.intersectValues(
-        u64,
-        node.allocator,
-        committee,
-    ) catch return false;
-    defer attesting_indices.deinit();
-
-    if (attesting_indices.items.len == 0) return false;
-
-    // Build aggregated signature set with all attesting pubkeys.
-    const att_sig_set = state_transition.signature_sets.indexed_attestation.getAttestationWithIndicesSignatureSet(
-        node.allocator,
-        node.config,
-        cached.epoch_cache,
-        &att_data,
-        agg.aggregate.signature,
-        attesting_indices.items,
-    ) catch return false;
-    defer node.allocator.free(att_sig_set.pubkeys);
-
-    return state_transition.signature_sets.verifyAggregatedSignatureSet(&att_sig_set) catch false;
-}
-
-/// Verify the BLS signature on a gossip sync committee message.
-fn gossipVerifySyncCommitteeSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return true;
-
-    var msg: types.altair.SyncCommitteeMessage.Type = undefined;
-    types.altair.SyncCommitteeMessage.deserializeFromBytes(ssz_bytes, &msg) catch return false;
-
-    // SyncCommitteeMessage signature signs over beacon_block_root with DOMAIN_SYNC_COMMITTEE.
-    if (msg.validator_index >= cached.epoch_cache.index_to_pubkey.items.len) return false;
-
-    const slot = msg.slot;
-    const domain = node.config.getDomain(cached.epoch_cache.epoch, @import("constants").DOMAIN_SYNC_COMMITTEE, slot) catch return false;
-
-    var signing_root: [32]u8 = undefined;
-    // The signing root for a sync committee message is computed over the beacon_block_root.
-    // signing_root = compute_signing_root(beacon_block_root, domain)
-    const computeSigningRoot = state_transition.computeSigningRoot;
-    computeSigningRoot(types.primitive.Root, &msg.beacon_block_root, domain, &signing_root) catch return false;
-
-    const sig_set = state_transition.signature_sets.SingleSignatureSet{
-        .pubkey = cached.epoch_cache.index_to_pubkey.items[msg.validator_index],
-        .signing_root = signing_root,
-        .signature = msg.signature,
-    };
-
-    return state_transition.signature_sets.verifySingleSignatureSet(&sig_set) catch false;
-}
-
-// ---------------------------------------------------------------------------
-// RequestContext — wraps *BeaconNode + scratch arena for req/resp callbacks.
-//
-// Lives on the stack of BeaconNode.onReqResp(). Each callback receives this
-// as ptr: *anyopaque and casts it back to access the node and scratch allocator.
-// ---------------------------------------------------------------------------
-
-const RequestContext = struct {
-    node: *BeaconNode,
-    /// Scratch allocator for temporary DB-fetched bytes.
-    /// Freed by the arena after handleRequest returns.
-    scratch: Allocator,
-};
-
-// ---------------------------------------------------------------------------
-// Real ReqRespContext callbacks — cast ptr to *RequestContext, then read node.
-// ---------------------------------------------------------------------------
-
-fn reqRespGetStatus(ptr: *anyopaque) StatusMessage.Type {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node = ctx.node;
-    return .{
-        .fork_digest = node.config.forkDigestAtSlot(node.head_tracker.head_slot, node.genesis_validators_root),
-        .finalized_root = node.head_tracker.getBlockRoot(
-            node.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH,
-        ) orelse [_]u8{0} ** 32,
-        .finalized_epoch = node.head_tracker.finalized_epoch,
-        .head_root = node.head_tracker.head_root,
-        .head_slot = node.head_tracker.head_slot,
-    };
-}
-
-fn reqRespGetMetadata(ptr: *anyopaque) networking.messages.MetadataV2.Type {
-    _ = ptr;
-    return .{
-        .seq_number = 0,
-        .attnets = .{ .data = std.mem.zeroes([8]u8) },
-        .syncnets = .{ .data = std.mem.zeroes([1]u8) },
-    };
-}
-
-fn reqRespGetPingSequence(ptr: *anyopaque) u64 {
-    _ = ptr;
-    return 0;
-}
-
-/// Look up a block by root. Returns a scratch-backed copy of the SSZ bytes,
-/// or null if the block is not in the DB.
-fn reqRespGetBlockByRoot(ptr: *anyopaque, root: [32]u8) ?[]const u8 {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node = ctx.node;
-
-    // getBlock allocates with node.allocator; copy to scratch then free.
-    const maybe_bytes = node.db.getBlock(root) catch return null;
-    const bytes = maybe_bytes orelse return null;
-    defer node.allocator.free(bytes);
-
-    const copy = ctx.scratch.alloc(u8, bytes.len) catch return null;
-    @memcpy(copy, bytes);
-    return copy;
-}
-
-/// Returns blocks for a slot range. Each element is scratch-backed SSZ bytes.
-/// Iterates slots, looks up block roots from HeadTracker, then fetches from DB.
-fn reqRespGetBlocksByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8 {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node = ctx.node;
-
-    var results: std.ArrayList([]const u8) = .empty;
-    // No defer deinit — scratch arena owns the memory.
-
-    var slot: u64 = start_slot;
-    while (slot < start_slot + count) : (slot += 1) {
-        const root = node.head_tracker.getBlockRoot(slot) orelse continue;
-        const maybe_bytes = node.db.getBlock(root) catch continue;
-        const bytes = maybe_bytes orelse continue;
-        defer node.allocator.free(bytes);
-
-        const copy = ctx.scratch.alloc(u8, bytes.len) catch continue;
-        @memcpy(copy, bytes);
-        results.append(ctx.scratch, copy) catch continue;
-    }
-
-    return results.toOwnedSlice(ctx.scratch) catch &.{};
-}
-
-fn reqRespGetBlobByRoot(ptr: *anyopaque, root: [32]u8, index: u64) ?[]const u8 {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node = ctx.node;
-
-    const maybe_bytes = node.db.getBlobSidecars(root) catch return null;
-    const bytes = maybe_bytes orelse return null;
-    defer node.allocator.free(bytes);
-
-    // Stored data is a concatenation of fixed-size BlobSidecars.
-    // Extract the individual sidecar at the requested index.
-    const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
-    const start = index * sidecar_size;
-    const end = start + sidecar_size;
-    if (end > bytes.len) return null;
-
-    const copy = ctx.scratch.alloc(u8, sidecar_size) catch return null;
-    @memcpy(copy, bytes[start..end]);
-    return copy;
-}
-
-fn reqRespGetDataColumnByRoot(ptr: *anyopaque, root: [32]u8, index: u64) ?[]const u8 {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node = ctx.node;
-
-    const maybe_bytes = node.db.getDataColumn(root, index) catch return null;
-    const bytes = maybe_bytes orelse return null;
-    defer node.allocator.free(bytes);
-
-    const copy = ctx.scratch.alloc(u8, bytes.len) catch return null;
-    @memcpy(copy, bytes);
-    return copy;
-}
-
-fn reqRespGetDataColumnsByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8 {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node = ctx.node;
-
-    var results: std.ArrayList([]const u8) = .empty;
-
-    var slot: u64 = start_slot;
-    while (slot < start_slot + count) : (slot += 1) {
-        const root = node.head_tracker.getBlockRoot(slot) orelse continue;
-        // Return all stored columns for this slot's block.
-        var col_idx: u64 = 0;
-        while (col_idx < 128) : (col_idx += 1) {
-            const maybe_bytes = node.db.getDataColumn(root, col_idx) catch continue;
-            const bytes = maybe_bytes orelse continue;
-            defer node.allocator.free(bytes);
-
-            const copy = ctx.scratch.alloc(u8, bytes.len) catch continue;
-            @memcpy(copy, bytes);
-            results.append(ctx.scratch, copy) catch continue;
-        }
-    }
-
-    return results.toOwnedSlice(ctx.scratch) catch &.{};
-}
-
-fn reqRespGetBlobsByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8 {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node = ctx.node;
-
-    var results: std.ArrayList([]const u8) = .empty;
-    // No defer deinit — scratch arena owns the memory.
-    const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
-
-    var slot: u64 = start_slot;
-    while (slot < start_slot + count) : (slot += 1) {
-        const root = node.head_tracker.getBlockRoot(slot) orelse continue;
-        const maybe_bytes = node.db.getBlobSidecars(root) catch continue;
-        const bytes = maybe_bytes orelse continue;
-        defer node.allocator.free(bytes);
-
-        // Split concatenated blob sidecars into individual entries.
-        var offset: usize = 0;
-        while (offset + sidecar_size <= bytes.len) : (offset += sidecar_size) {
-            const copy = ctx.scratch.alloc(u8, sidecar_size) catch continue;
-            @memcpy(copy, bytes[offset..][0..sidecar_size]);
-            results.append(ctx.scratch, copy) catch continue;
-        }
-    }
-
-    return results.toOwnedSlice(ctx.scratch) catch &.{};
-}
-
-fn reqRespGetForkDigest(ptr: *anyopaque, slot: u64) [4]u8 {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node = ctx.node;
-    return node.config.forkDigestAtSlot(slot, node.genesis_validators_root);
-}
-
-fn reqRespOnGoodbye(ptr: *anyopaque, reason: u64) void {
-    _ = ptr;
-    _ = reason;
-    // TODO: log in future.
-}
-
-fn reqRespOnPeerStatus(ptr: *anyopaque, status: StatusMessage.Type) void {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    if (ctx.node.sync_service_inst) |sync_svc| {
-        sync_svc.onPeerStatus("unknown", status) catch |err| {
-            std.log.warn("SyncService.onPeerStatus failed: {}", .{err});
-        };
-    }
-    // Feed peer's head root to unknown chain sync — if it's not in our
-    // fork choice, this starts a backwards chain to discover the fork.
-    ctx.node.unknown_chain_sync.onPeerConnected("unknown", status.head_root) catch {};
-}
-
+// Gossip callbacks are defined in gossip_node_callbacks.zig.
+// Req/resp callbacks are defined in reqresp_callbacks.zig.
+// The gossip_node module-level global has been removed — BeaconNode pointer
+// is now threaded through GossipHandler.node (*anyopaque).
 
 // ---------------------------------------------------------------------------
 // BlockImportCallbackCtx + importBlockCallback
