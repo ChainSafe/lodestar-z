@@ -513,30 +513,33 @@ pub const Chain = struct {
         else
             self.head_tracker.finalized_epoch;
 
-        // Static function closures — ChainGossipState requires *anyopaque first param
-        // matching the ptr: *anyopaque field signature in gossip_validation.zig.
+        // Callbacks wired to real Chain state — ChainGossipState requires *anyopaque
+        // first param matching the ptr: *anyopaque field signature in gossip_validation.zig.
         const Callbacks = struct {
+            /// Returns the expected block proposer for `slot` from the head state's epoch cache.
+            /// Returns null on cache miss (gossip validator falls back gracefully).
             fn getProposerIndex(_ptr: *anyopaque, _slot: u64) ?u32 {
-                // TODO: integrate BeaconProposerCache when available on Chain.
-                // Currently returns null (cache miss) — gossip validator falls back
-                // to non-proposer-specific checks.
-                _ = _ptr;
-                _ = _slot;
-                return null;
+                const self_: *const Chain = @ptrCast(@alignCast(_ptr));
+                const head_state_root = self_.head_tracker.head_state_root;
+                const cached = self_.block_state_cache.get(head_state_root) orelse return null;
+                const proposer = cached.getBeaconProposer(_slot) catch return null;
+                return @intCast(proposer);
             }
+            /// Returns true if `root` is tracked in fork choice.
             fn isKnownBlockRoot(_ptr: *anyopaque, root: [32]u8) bool {
-                // Stateless stub — real implementation should query fork choice.
-                // The gossip validator also checks seen_cache, so this is an
-                // additional (optional) fast path.
-                _ = _ptr;
-                _ = root;
-                return false;
+                const self_: *const Chain = @ptrCast(@alignCast(_ptr));
+                if (self_.fork_choice) |fc| {
+                    return fc.hasBlock(root);
+                }
+                return self_.block_to_state.contains(root);
             }
+            /// Returns the total validator count from the head state's epoch cache.
+            /// Returns 0 if head state is unavailable (gossip validator skips bounds check).
             fn getValidatorCount(_ptr: *anyopaque) u32 {
-                // TODO: read from head state epoch_cache when available.
-                // Returns 0 = unknown (gossip validator skips proposer-index bounds check).
-                _ = _ptr;
-                return 0;
+                const self_: *const Chain = @ptrCast(@alignCast(_ptr));
+                const head_state_root = self_.head_tracker.head_state_root;
+                const cached = self_.block_state_cache.get(head_state_root) orelse return 0;
+                return @intCast(cached.epoch_cache.index_to_pubkey.items.len);
             }
         };
 
