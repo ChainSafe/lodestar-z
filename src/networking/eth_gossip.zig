@@ -15,6 +15,9 @@ const gossip_topics = @import("gossip_topics.zig");
 const gossip_validation = @import("gossip_validation.zig");
 const gossip_decoding = @import("gossip_decoding.zig");
 
+const config_mod = @import("config");
+const ForkSeq = config_mod.ForkSeq;
+
 pub const GossipTopicType = gossip_topics.GossipTopicType;
 const GossipTopic = gossip_topics.GossipTopic;
 const ValidationResult = gossip_validation.ValidationResult;
@@ -56,6 +59,9 @@ pub const EthGossipAdapter = struct {
     gossipsub: *GossipsubService,
     validator: *GossipValidationContext,
     fork_digest: [4]u8,
+    /// Active fork sequence, used for fork-aware gossip deserialization.
+    /// Must be kept in sync with fork_digest via updateForkSeq().
+    fork_seq: ForkSeq,
     /// Optional peer scorer for tracking validation outcomes.
     peer_scorer: ?*PeerScorer,
     /// Optional callback invoked for each ACCEPT-validated gossip message.
@@ -77,16 +83,24 @@ pub const EthGossipAdapter = struct {
         gossipsub: *GossipsubService,
         validator: *GossipValidationContext,
         fork_digest: [4]u8,
+        fork_seq: ForkSeq,
     ) Self {
         return .{
             .allocator = allocator,
             .gossipsub = gossipsub,
             .validator = validator,
             .fork_digest = fork_digest,
+            .fork_seq = fork_seq,
             .peer_scorer = null,
             .on_validated_message = null,
             .subscribed_topics = .empty,
         };
+    }
+
+    /// Update the active fork sequence when a fork transition occurs.
+    /// Call this alongside onForkTransition() when the fork digest changes.
+    pub fn updateForkSeq(self: *Self, new_fork_seq: ForkSeq) void {
+        self.fork_seq = new_fork_seq;
     }
 
     /// Attach a peer scorer for tracking validation outcomes.
@@ -217,11 +231,12 @@ pub const EthGossipAdapter = struct {
             return .{ .validation = .reject, .decoded = null };
         };
 
-        // 2. Decode (decompress + SSZ deserialize).
+        // 2. Decode (decompress + SSZ deserialize) using the active fork's schema.
         const decoded = gossip_decoding.decodeGossipMessage(
             self.allocator,
             parsed_topic.topic_type,
             data,
+            self.fork_seq,
         ) catch {
             log.warn("Failed to decode gossip message for topic {s}", .{
                 parsed_topic.topic_type.topicName(),
@@ -501,6 +516,7 @@ const TestAdapter = struct {
             self.gossipsub,
             &self.ctx,
             .{ 0xab, 0xcd, 0xef, 0x01 },
+            .electra, // Use electra for tests as it's the most recent non-fulu fork
         );
 
         return self;

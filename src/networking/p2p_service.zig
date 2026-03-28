@@ -40,6 +40,8 @@ const eth2_protocols = @import("eth2_protocols.zig");
 const eth_gossip = @import("eth_gossip.zig");
 const req_resp_handler = @import("req_resp_handler.zig");
 const gossip_validation = @import("gossip_validation.zig");
+const config_mod = @import("config");
+const ForkSeq = config_mod.ForkSeq;
 
 const EthGossipAdapter = eth_gossip.EthGossipAdapter;
 pub const GossipTopicType = eth_gossip.GossipTopicType;
@@ -171,6 +173,8 @@ pub const PassthroughValidator = struct {
 pub const P2pConfig = struct {
     /// Current fork digest (4-byte prefix for gossip topics).
     fork_digest: [4]u8,
+    /// Active fork sequence, determines which SSZ schemas to use for gossip deserialization.
+    fork_seq: ForkSeq,
     /// Req/resp handler callbacks (provides blocks, status, etc.).
     req_resp_context: *const ReqRespContext,
     /// Gossip message validator. Use `createPassthroughValidator` for a no-op stub.
@@ -249,6 +253,7 @@ pub const P2pService = struct {
             gossipsub,
             config.validator,
             config.fork_digest,
+            config.fork_seq,
         );
 
         return .{
@@ -324,7 +329,8 @@ pub const P2pService = struct {
     ///
     /// After calling this, also resubscribe to active attestation/sync subnets
     /// via `subscribeSubnet` — those are not handled here.
-    pub fn onForkTransition(self: *Self, new_fork_digest: [4]u8) !void {
+    pub fn onForkTransition(self: *Self, new_fork_digest: [4]u8, new_fork_seq: ForkSeq) !void {
+        self.gossip_adapter.updateForkSeq(new_fork_seq);
         try self.gossip_adapter.onForkTransition(new_fork_digest);
     }
 

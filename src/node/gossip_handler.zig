@@ -18,6 +18,8 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 const networking = @import("networking");
+const config_mod = @import("config");
+const ForkSeq = config_mod.ForkSeq;
 const GossipTopicType = networking.GossipTopicType;
 const gossip_decoding = networking.gossip_decoding;
 const DecodedGossipMessage = networking.DecodedGossipMessage;
@@ -150,6 +152,9 @@ pub const GossipHandler = struct {
     current_slot: u64,
     current_epoch: u64,
     finalized_slot: u64,
+    /// Active fork sequence for fork-aware gossip deserialization.
+    /// Must be updated on fork transitions via updateForkSeq().
+    current_fork_seq: ForkSeq,
 
     /// Vtable for state queries (proposer schedule, known roots, etc.).
     getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
@@ -198,6 +203,7 @@ pub const GossipHandler = struct {
             .current_slot = 0,
             .current_epoch = 0,
             .finalized_slot = 0,
+            .current_fork_seq = .phase0,
             .getProposerIndex = getProposerIndex,
             .isKnownBlockRoot = isKnownBlockRoot,
             .getValidatorCount = getValidatorCount,
@@ -216,6 +222,12 @@ pub const GossipHandler = struct {
         self.current_slot = slot;
         self.current_epoch = epoch;
         self.finalized_slot = finalized_slot;
+    }
+
+    /// Update the active fork sequence for fork-aware deserialization.
+    /// Call on fork transitions (e.g., when the fork digest changes).
+    pub fn updateForkSeq(self: *GossipHandler, fork_seq: ForkSeq) void {
+        self.current_fork_seq = fork_seq;
     }
 
     /// Build a ChainState snapshot for fast Phase 1 validation.
@@ -254,7 +266,7 @@ pub const GossipHandler = struct {
         defer self.allocator.free(ssz_bytes);
 
         // Phase 1a: Decode from already-decompressed SSZ bytes.
-        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .beacon_block, ssz_bytes) catch
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .beacon_block, ssz_bytes, self.current_fork_seq) catch
             return GossipHandlerError.DecodeFailed;
         const blk = decoded.beacon_block;
 
@@ -308,7 +320,7 @@ pub const GossipHandler = struct {
         defer self.allocator.free(ssz_bytes);
 
         // Phase 1a: Decode from already-decompressed SSZ bytes.
-        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .beacon_attestation, ssz_bytes) catch
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .beacon_attestation, ssz_bytes, self.current_fork_seq) catch
             return GossipHandlerError.DecodeFailed;
         const att = decoded.beacon_attestation;
 
@@ -388,7 +400,7 @@ pub const GossipHandler = struct {
         defer self.allocator.free(ssz_bytes);
 
         // Phase 1a: Decode from already-decompressed SSZ bytes.
-        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .beacon_aggregate_and_proof, ssz_bytes) catch
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .beacon_aggregate_and_proof, ssz_bytes, self.current_fork_seq) catch
             return GossipHandlerError.DecodeFailed;
         const agg = decoded.beacon_aggregate_and_proof;
 
@@ -446,7 +458,7 @@ pub const GossipHandler = struct {
         defer self.allocator.free(ssz_bytes);
 
         // Phase 1a: Decode from already-decompressed SSZ bytes.
-        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .voluntary_exit, ssz_bytes) catch
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .voluntary_exit, ssz_bytes, self.current_fork_seq) catch
             return GossipHandlerError.DecodeFailed;
         const exit = decoded.voluntary_exit;
 
@@ -505,7 +517,7 @@ pub const GossipHandler = struct {
         defer self.allocator.free(ssz_bytes);
 
         // Phase 1a: Decode from already-decompressed SSZ bytes.
-        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .proposer_slashing, ssz_bytes) catch
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .proposer_slashing, ssz_bytes, self.current_fork_seq) catch
             return GossipHandlerError.DecodeFailed;
         const ps = decoded.proposer_slashing;
 
@@ -567,7 +579,7 @@ pub const GossipHandler = struct {
         defer self.allocator.free(ssz_bytes);
 
         // Phase 1a: Decode from already-decompressed SSZ bytes.
-        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .attester_slashing, ssz_bytes) catch
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .attester_slashing, ssz_bytes, self.current_fork_seq) catch
             return GossipHandlerError.DecodeFailed;
         const as = decoded.attester_slashing;
 
@@ -628,7 +640,7 @@ pub const GossipHandler = struct {
         defer self.allocator.free(ssz_bytes);
 
         // Phase 1a: Decode from already-decompressed SSZ bytes.
-        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .bls_to_execution_change, ssz_bytes) catch
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .bls_to_execution_change, ssz_bytes, self.current_fork_seq) catch
             return GossipHandlerError.DecodeFailed;
         const change = decoded.bls_to_execution_change;
 
@@ -686,7 +698,7 @@ pub const GossipHandler = struct {
         defer self.allocator.free(ssz_bytes);
 
         // Phase 1a: Decode from already-decompressed SSZ bytes.
-        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .sync_committee_contribution_and_proof, ssz_bytes) catch
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .sync_committee_contribution_and_proof, ssz_bytes, self.current_fork_seq) catch
             return GossipHandlerError.DecodeFailed;
         const contrib = decoded.sync_committee_contribution_and_proof;
 
@@ -737,7 +749,7 @@ pub const GossipHandler = struct {
         defer self.allocator.free(ssz_bytes);
 
         // Phase 1a: Decode from already-decompressed SSZ bytes.
-        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .sync_committee, ssz_bytes) catch
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .sync_committee, ssz_bytes, self.current_fork_seq) catch
             return GossipHandlerError.DecodeFailed;
         const msg = decoded.sync_committee;
 
@@ -798,7 +810,7 @@ pub const GossipHandler = struct {
         defer self.allocator.free(ssz_bytes);
 
         // Phase 1a: Decode from already-decompressed SSZ bytes.
-        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .blob_sidecar, ssz_bytes) catch
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .blob_sidecar, ssz_bytes, self.current_fork_seq) catch
             return GossipHandlerError.DecodeFailed;
         const blob = decoded.blob_sidecar;
 
@@ -986,6 +998,7 @@ test "GossipHandler: onAttestation decodes and validates" {
     defer handler.deinit();
 
     handler.updateClock(100, 3, 64);
+    handler.updateForkSeq(.electra); // SingleAttestation format requires Electra+
 
     // Create a valid SingleAttestation, serialize, compress.
     var att: consensus_types.electra.SingleAttestation.Type = consensus_types.electra.SingleAttestation.default_value;
@@ -1013,6 +1026,7 @@ test "GossipHandler: onAttestation rejects stale epoch" {
     defer handler.deinit();
 
     handler.updateClock(100, 3, 64);
+    handler.updateForkSeq(.electra); // SingleAttestation format requires Electra+
 
     // Attestation from epoch 0 — outside current/previous window.
     var att: consensus_types.electra.SingleAttestation.Type = consensus_types.electra.SingleAttestation.default_value;
