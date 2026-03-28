@@ -41,6 +41,10 @@ pub const BlockService = struct {
     /// Duties for the current epoch.
     duties: [MAX_DUTIES_PER_EPOCH]?ProposerDuty,
     duties_epoch: ?u64,
+    /// Slots for which we had a duty and produced a block (bitmask per epoch).
+    produced_slots: [MAX_DUTIES_PER_EPOCH]bool,
+    /// Count of missed block proposals this session.
+    missed_block_count: u64,
 
     pub fn init(
         allocator: Allocator,
@@ -55,6 +59,8 @@ pub const BlockService = struct {
             .signing_ctx = signing_ctx,
             .duties = [_]?ProposerDuty{null} ** MAX_DUTIES_PER_EPOCH,
             .duties_epoch = null,
+            .produced_slots = [_]bool{false} ** MAX_DUTIES_PER_EPOCH,
+            .missed_block_count = 0,
         };
     }
 
@@ -94,8 +100,17 @@ pub const BlockService = struct {
         const fetched = try self.api.getProposerDuties(io, epoch);
         defer self.allocator.free(fetched);
 
+        // Before clearing: check if any slot from the previous epoch was missed.
+        if (self.duties_epoch) |prev_epoch| {
+            if (prev_epoch + 1 == epoch) {
+                // We have complete info for prev_epoch — check for misses.
+                self.checkMissedSlots(prev_epoch);
+            }
+        }
+
         // Clear existing duties.
         for (&self.duties) |*d| d.* = null;
+        for (&self.produced_slots) |*p| p.* = false;
         self.duties_epoch = epoch;
 
         // Index duties by slot (within-epoch offset).
@@ -216,7 +231,37 @@ pub const BlockService = struct {
         }
 
         try self.api.publishBlock(io, signed_json.items);
-        log.info("published block slot={d}", .{slot});
+        log.info("published block slot={d} validator_index={d}", .{ slot, duty.validator_index });
+
+        // Mark this slot as successfully produced.
+        if (self.duties_epoch) |ep| {
+            const ep_start = ep * MAX_DUTIES_PER_EPOCH;
+            if (slot >= ep_start and slot < ep_start + MAX_DUTIES_PER_EPOCH) {
+                self.produced_slots[slot - ep_start] = true;
+            }
+        }
+    }
+
+    /// Check for missed block proposals in a completed epoch.
+    ///
+    /// Called at the start of each new epoch with the previous epoch number.
+    ///
+    /// TS: BlockDutiesService marks missed blocks via blockDuties tracking.
+    fn checkMissedSlots(self: *BlockService, epoch: u64) void {
+        const epoch_start = epoch * MAX_DUTIES_PER_EPOCH;
+        for (self.duties, self.produced_slots, 0..) |maybe_duty, produced, i| {
+            if (maybe_duty) |duty| {
+                if (!produced) {
+                    // We had a duty for this slot but did not produce.
+                    const missed_slot = epoch_start + i;
+                    self.missed_block_count += 1;
+                    log.warn(
+                        "missed block proposal slot={d} validator_index={d} (total_missed={d})",
+                        .{ missed_slot, duty.validator_index, self.missed_block_count },
+                    );
+                }
+            }
+        }
     }
 
     fn getDutyAtSlot(self: *const BlockService, slot: u64) ?ProposerDuty {

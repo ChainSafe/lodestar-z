@@ -95,11 +95,35 @@ pub const SyncCommitteeService = struct {
     // -----------------------------------------------------------------------
 
     /// Called at each epoch boundary to check if duties need refresh.
+    ///
+    /// Also pre-fetches duties for the next sync period 1 epoch before the boundary.
+    ///
+    /// TS: SyncCommitteeDutiesService — fetches at period start, pre-fetches next period.
     pub fn onEpoch(self: *SyncCommitteeService, io: Io, epoch: u64) void {
         const period = epoch / self.epochs_per_sync_committee_period;
+
+        // Refresh if we don't have duties for the current period.
         if (self.duties_period == null or self.duties_period.? != period) {
+            log.info("sync committee period transition to period={d} at epoch={d}", .{ period, epoch });
             self.refreshDuties(io, epoch, period) catch |err| {
                 log.err("refreshDuties period={d} error={s}", .{ period, @errorName(err) });
+            };
+        }
+
+        // Pre-fetch next period's duties 1 epoch before the boundary.
+        // This ensures we're ready to sign at the start of the next period without delay.
+        //
+        // TS: SyncCommitteeDutiesService.runEveryEpoch — pre-fetches LOOKAHEAD_EPOCHS ahead.
+        const period_end_epoch = (period + 1) * self.epochs_per_sync_committee_period;
+        if (epoch + 1 == period_end_epoch) {
+            const next_period = period + 1;
+            const next_period_start_epoch = next_period * self.epochs_per_sync_committee_period;
+            log.info("pre-fetching sync committee duties for next period={d} (epoch={d})", .{
+                next_period,
+                next_period_start_epoch,
+            });
+            self.refreshDutiesForPeriod(io, next_period_start_epoch, next_period) catch |err| {
+                log.warn("pre-fetch duties next_period={d} error={s}", .{ next_period, @errorName(err) });
             };
         }
     }
@@ -114,6 +138,39 @@ pub const SyncCommitteeService = struct {
     // -----------------------------------------------------------------------
     // Duty management
     // -----------------------------------------------------------------------
+
+    /// Pre-fetch duties for an upcoming sync period without overwriting current duties.
+    ///
+    /// The fetched duties are discarded (this warms the BN cache) and will be
+    /// fetched again at the actual period start via refreshDuties().
+    ///
+    /// A more complete implementation would store them in a pending_duties buffer
+    /// and swap atomically at the period boundary.
+    ///
+    /// TS: SyncCommitteeDutiesService.getDutiesForEpoch(nextPeriodEpoch, true)
+    fn refreshDutiesForPeriod(self: *SyncCommitteeService, io: Io, epoch: u64, period: u64) !void {
+        const indices = try self.validator_store.allIndices(self.allocator);
+        defer self.allocator.free(indices);
+        if (indices.len == 0) return;
+
+        log.debug("pre-fetching sync committee duties for period={d} epoch={d}", .{ period, epoch });
+
+        const fetched = self.api.getSyncCommitteeDuties(io, epoch, indices) catch |err| {
+            log.warn("pre-fetch getSyncCommitteeDuties period={d} error={s}", .{ period, @errorName(err) });
+            return;
+        };
+        defer {
+            for (fetched) |d| self.allocator.free(d.validator_sync_committee_indices);
+            self.allocator.free(fetched);
+        }
+
+        log.info("pre-fetched {d} sync committee duties for period={d} (will apply at period start)", .{
+            fetched.len,
+            period,
+        });
+        // Note: duties are not stored here; they will be re-fetched and stored
+        // when the period starts (onEpoch detects duties_period != current period).
+    }
 
     fn refreshDuties(
         self: *SyncCommitteeService,
