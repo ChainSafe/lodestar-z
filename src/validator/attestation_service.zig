@@ -159,7 +159,7 @@ pub const AttestationService = struct {
 
         if (!prev_changed and !curr_changed) return;
 
-        const epoch = info.slot / 32; // approximate; slots_per_epoch not stored
+        const epoch = info.slot / self.signing_ctx.slots_per_epoch;
         log.warn(
             "reorg detected at slot={d}: dependent_root changed — re-fetching attester duties for epoch={d}",
             .{ info.slot, epoch },
@@ -286,7 +286,7 @@ pub const AttestationService = struct {
     // -----------------------------------------------------------------------
 
     fn runAttestationTasks(self: *AttestationService, io: Io, slot: u64) !void {
-        const duties_at_slot = self.getDutiesAtSlot(slot);
+        const duties_at_slot = self.allDuties();
         if (duties_at_slot.len == 0) return;
 
         // Sub-slot timing per Ethereum spec:
@@ -329,11 +329,9 @@ pub const AttestationService = struct {
         try self.produceAndPublishAggregates(io, slot, duties_at_slot, att_data_root);
     }
 
-    fn getDutiesAtSlot(self: *const AttestationService, slot: u64) []const AttesterDutyWithProof {
-        // Return duties for this specific slot.
-        // We'll filter in-place rather than allocating a sub-slice.
-        // Callee will re-check duty.slot == slot.
-        _ = slot;
+    fn allDuties(self: *const AttestationService) []const AttesterDutyWithProof {
+        // Returns all cached duties regardless of slot.
+        // Callers filter by duty.slot == target_slot.
         return self.duties.items;
     }
 

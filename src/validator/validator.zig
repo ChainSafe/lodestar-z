@@ -177,7 +177,7 @@ pub const ValidatorClient = struct {
             &validator_store,
             signing_ctx,
             config.slots_per_epoch,
-            256, // EPOCHS_PER_SYNC_COMMITTEE_PERIOD (mainnet)
+            256, // TODO: add epochs_per_sync_committee_period to ValidatorConfig (mainnet=256, minimal=8)
             config.seconds_per_slot,
             config.genesis_time, // BUG-5 fix: pass genesis_time for correct sub-slot timing
         );
@@ -374,8 +374,8 @@ pub const ValidatorClient = struct {
         self.attestation_service.setHeaderTracker(&self.header_tracker);
 
         // Wire safety checkers (doppelganger + syncing) into all signing services.
-        const dopple_ptr: ?*@import("doppelganger.zig").DoppelgangerService = if (self.doppelganger != null) &self.doppelganger.? else null;
-        const syncing_ptr: ?*@import("syncing_tracker.zig").SyncingTracker = &self.syncing_tracker;
+        const dopple_ptr: ?*DoppelgangerService = if (self.doppelganger != null) &self.doppelganger.? else null;
+        const syncing_ptr: ?*SyncingTracker = &self.syncing_tracker;
         self.block_service.setSafetyCheckers(dopple_ptr, syncing_ptr);
         self.attestation_service.setSafetyCheckers(dopple_ptr, syncing_ptr);
         self.sync_committee_service.setSafetyCheckers(dopple_ptr, syncing_ptr);
@@ -447,7 +447,7 @@ pub const ValidatorClient = struct {
                 }
             }
             log.info("doppelganger protection enabled — signing blocked until {d} clean epoch(s) observed", .{
-                @import("doppelganger.zig").DEFAULT_REMAINING_DETECTION_EPOCHS,
+                dopple_mod.DEFAULT_REMAINING_DETECTION_EPOCHS,
             });
         }
 
