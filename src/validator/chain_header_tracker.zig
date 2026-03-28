@@ -36,6 +36,11 @@ pub const HeadInfo = struct {
     block_root: [32]u8,
     /// Latest known finalized epoch.
     finalized_epoch: u64,
+    /// Dependent root for attester duty lookups (previous epoch).
+    /// Changes when a reorg affects attester duty assignments.
+    previous_duty_dependent_root: [32]u8,
+    /// Dependent root for current epoch attester duties.
+    current_duty_dependent_root: [32]u8,
 };
 
 // ---------------------------------------------------------------------------
@@ -80,6 +85,8 @@ pub const ChainHeaderTracker = struct {
                 .slot = 0,
                 .block_root = [_]u8{0} ** 32,
                 .finalized_epoch = 0,
+                .previous_duty_dependent_root = [_]u8{0} ** 32,
+                .current_duty_dependent_root = [_]u8{0} ** 32,
             },
             .head_callbacks = undefined,
             .head_callback_count = 0,
@@ -166,10 +173,25 @@ pub const ChainHeaderTracker = struct {
             _ = std.fmt.hexToBytes(&block_root, block_hex) catch {};
         }
 
+        // Parse dependent roots for reorg detection.
+        var previous_duty_dependent_root: [32]u8 = self.head.previous_duty_dependent_root;
+        var current_duty_dependent_root: [32]u8 = self.head.current_duty_dependent_root;
+
+        if (ev.previous_duty_dependent_root) |pdr| {
+            const pdr_hex = if (std.mem.startsWith(u8, pdr, "0x")) pdr[2..] else pdr;
+            if (pdr_hex.len == 64) _ = std.fmt.hexToBytes(&previous_duty_dependent_root, pdr_hex) catch {};
+        }
+        if (ev.current_duty_dependent_root) |cdr| {
+            const cdr_hex = if (std.mem.startsWith(u8, cdr, "0x")) cdr[2..] else cdr;
+            if (cdr_hex.len == 64) _ = std.fmt.hexToBytes(&current_duty_dependent_root, cdr_hex) catch {};
+        }
+
         const info = HeadInfo{
             .slot = slot,
             .block_root = block_root,
             .finalized_epoch = self.head.finalized_epoch, // preserve existing
+            .previous_duty_dependent_root = previous_duty_dependent_root,
+            .current_duty_dependent_root = current_duty_dependent_root,
         };
 
         // Update under lock.
@@ -218,7 +240,11 @@ pub const ChainHeaderTracker = struct {
 const HeadEventJson = struct {
     slot: []const u8,
     block: []const u8,
-    // state, epoch_transition, previous_duty_dependent_root, etc. — ignored
+    /// Dependent roots for attester duty reorg detection.
+    /// Present in head SSE events per the Beacon API spec.
+    previous_duty_dependent_root: ?[]const u8 = null,
+    current_duty_dependent_root: ?[]const u8 = null,
+    // state, epoch_transition, etc. — ignored
 };
 
 const FinalizedEventJson = struct {
