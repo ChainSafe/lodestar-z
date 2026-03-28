@@ -246,6 +246,11 @@ pub const ValidatorStore = struct {
         signing_root: [32]u8,
         slot: u64,
     ) !Signature {
+        // Hold mutex for the entire check-and-sign sequence to prevent TOCTOU races
+        // between the slashing protection check and the actual signing operation.
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
 
         // Slashing protection: double-proposal check (persistent DB).
@@ -270,6 +275,8 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
@@ -293,6 +300,11 @@ pub const ValidatorStore = struct {
         source_epoch: u64,
         target_epoch: u64,
     ) !Signature {
+        // Hold mutex for the entire check-and-sign sequence to prevent TOCTOU races
+        // between the slashing protection check and the actual signing operation.
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
 
         // Slashing protection: double-vote / surround vote check (persistent DB).
@@ -317,6 +329,8 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
@@ -329,6 +343,8 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
@@ -341,6 +357,8 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }
@@ -353,6 +371,8 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
         return validator.secret_key.sign(&signing_root, bls.DST, null);
     }

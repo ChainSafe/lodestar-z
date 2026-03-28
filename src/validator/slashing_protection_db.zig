@@ -11,6 +11,11 @@
 //!
 //! TS equivalent: packages/validator/src/slashingProtection/
 //!               (SlashingProtectionLevelDB in TS uses LevelDB; we use a simple append-only file)
+//!
+//! Thread safety: this struct does NOT provide internal locking. Callers are
+//! responsible for serializing access. In production, ValidatorStore holds a
+//! single mutex that is locked for the full check-and-sign sequence, which
+//! prevents TOCTOU races between the protection check and the signing call.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
