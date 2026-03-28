@@ -7,6 +7,12 @@
 //! 3. Deserializing the message
 //!
 //! Reference: https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/p2p-interface.md#encodings
+//!
+//! Security note (CL-2024-08): Snappy frame format requires per-chunk CRC32C checksum
+//! verification to prevent acceptance of corrupted or maliciously crafted data. This was
+//! a known vulnerability in Lodestar TS (https://github.com/sigp/beacon-fuzz/blob/master/reports/CL-2024-08.md).
+//! Our snappy.zig dependency (snappy.frame) verifies checksums on both compressed and
+//! uncompressed chunks in `uncompress()`. Verified present: see snappy/src/frame.zig.
 
 const std = @import("std");
 const testing = std.testing;
