@@ -103,6 +103,7 @@ const ForkChoiceInit = fork_choice_mod.fork_choice.InitOpts;
 const ProtoBlock = fork_choice_mod.ProtoBlock;
 const BlockExtraMeta = fork_choice_mod.BlockExtraMeta;
 const ForkChoiceCheckpoint = fork_choice_mod.Checkpoint;
+const LVHExecResponse = fork_choice_mod.LVHExecResponse;
 
 const execution_mod = @import("execution");
 const EngineApi = execution_mod.EngineApi;
@@ -436,6 +437,27 @@ pub const BlockImporter = struct {
         std.log.info("Engine API newPayload slot {d}: status={s}", .{
             signed_block.message.slot, @tagName(result.status),
         });
+
+        // When EL reports INVALID, propagate invalidity through the fork choice DAG.
+        // This marks all descendants of the latest valid hash as invalid,
+        // preventing them from being selected as head.
+        if (result.status == .invalid or result.status == .invalid_block_hash) {
+            if (self.fork_choice) |fc| {
+                const lvh_response = LVHExecResponse{
+                    .invalid = .{
+                        .latest_valid_exec_hash = result.latest_valid_hash,
+                        .invalidate_from_parent_block_root = signed_block.message.parent_root,
+                    },
+                };
+                fc.validateLatestHash(self.allocator, lvh_response, signed_block.message.slot) catch |err| {
+                    std.log.warn("fc.validateLatestHash failed for invalid block: {}", .{err});
+                };
+                std.log.warn("Marked fork choice branch as INVALID: block_root={s}... lvh={s}", .{
+                    &std.fmt.bytesToHex(block_root[0..4], .lower),
+                    if (result.latest_valid_hash) |h| &std.fmt.bytesToHex(h[0..4], .lower) else "null",
+                });
+            }
+        }
 
         return result.status;
     }
@@ -4856,4 +4878,125 @@ test "BeaconNode: archiveState is no-op for unknown state root" {
     // Nothing stored.
     const retrieved = try node.db.getStateArchive(64);
     try std.testing.expectEqual(@as(?[]const u8, null), retrieved);
+}
+
+test "BeaconNode: forkchoiceUpdated called after block import for post-merge head" {
+    // Verify that notifyForkchoiceUpdate sends engine_forkchoiceUpdatedV3 to the EL
+    // when the fork choice head has an execution payload block hash.
+    //
+    // Setup:
+    //   1. Init BeaconNode from genesis (sets up fork choice with pre-merge anchor)
+    //   2. Add a fake post-merge block to fork choice (has executionPayloadBlockHash)
+    //   3. Call notifyForkchoiceUpdate with that block root
+    //   4. Assert MockEngine.last_forkchoice_state is populated (FCU was sent)
+
+    const TreeNode = @import("persistent_merkle_tree").Node;
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try TreeNode.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    const node = try BeaconNode.init(allocator, test_state.cached_state.config, .{
+        .engine_mock = true,
+    });
+    defer node.deinit();
+
+    // Clone genesis state and register it.
+    const genesis_state = try test_state.cached_state.clone(allocator, .{});
+    try genesis_state.state.setSlot(0);
+    try node.initFromGenesis(genesis_state);
+
+    // Verify MockEngine is wired.
+    const mock = node.mock_engine orelse return error.TestFailed;
+
+    // Get the genesis block root so we can use it as parent.
+    const genesis_root = node.head_tracker.head_root;
+
+    // Add a fake post-merge block to fork choice.
+    // This block has an execution payload block hash — FCU will actually fire.
+    const fake_exec_hash = [_]u8{0xab} ** 32;
+    const post_merge_root = [_]u8{0xcd} ** 32;
+
+    const fc = node.fork_choice.?;
+
+    // Build a post-merge ProtoBlock and insert it into the fork choice DAG.
+    // Slot must be > finalized_slot; use finalized_epoch + a few slots to be safe.
+    const finalized_cp = fc.getFinalizedCheckpoint();
+    const post_merge_slot = finalized_cp.epoch * preset.SLOTS_PER_EPOCH + 10;
+    const current_test_slot = post_merge_slot;
+
+    const post_merge_block = ProtoBlock{
+        .slot = post_merge_slot,
+        .block_root = post_merge_root,
+        .parent_root = genesis_root,
+        .state_root = [_]u8{0xef} ** 32,
+        .target_root = post_merge_root,
+        .justified_epoch = finalized_cp.epoch,
+        .justified_root = finalized_cp.root,
+        .finalized_epoch = finalized_cp.epoch,
+        .finalized_root = finalized_cp.root,
+        .unrealized_justified_epoch = finalized_cp.epoch,
+        .unrealized_justified_root = finalized_cp.root,
+        .unrealized_finalized_epoch = finalized_cp.epoch,
+        .unrealized_finalized_root = finalized_cp.root,
+        .extra_meta = .{
+            .post_merge = BlockExtraMeta.PostMergeMeta.init(
+                fake_exec_hash,
+                1, // block_number
+                .valid,
+                .available,
+            ),
+        },
+        .timeliness = true,
+    };
+
+    try fc.onBlock(allocator, post_merge_block, current_test_slot);
+
+    // Before FCU: mock has not received any forkchoice state.
+    try std.testing.expect(mock.last_forkchoice_state == null);
+
+    // Call notifyForkchoiceUpdate — this should send FCU to the mock engine.
+    try node.notifyForkchoiceUpdate(post_merge_root);
+
+    // After FCU: mock's last_forkchoice_state should be populated.
+    try std.testing.expect(mock.last_forkchoice_state != null);
+
+    // The head_block_hash should match our fake execution hash.
+    const fcu_state = mock.last_forkchoice_state.?;
+    try std.testing.expectEqual(fake_exec_hash, fcu_state.head_block_hash);
+}
+
+test "BeaconNode: forkchoiceUpdated not called for pre-merge head" {
+    // For pre-merge blocks (no execution payload), FCU should NOT be sent.
+    const TreeNode = @import("persistent_merkle_tree").Node;
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try TreeNode.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    const node = try BeaconNode.init(allocator, test_state.cached_state.config, .{
+        .engine_mock = true,
+    });
+    defer node.deinit();
+
+    const genesis_state = try test_state.cached_state.clone(allocator, .{});
+    try genesis_state.state.setSlot(0);
+    try node.initFromGenesis(genesis_state);
+
+    const mock = node.mock_engine orelse return error.TestFailed;
+
+    // Call FCU with the genesis root (pre-merge block, no exec hash).
+    const genesis_root = node.head_tracker.head_root;
+    try node.notifyForkchoiceUpdate(genesis_root);
+
+    // FCU should NOT have been sent — pre-merge blocks skip FCU.
+    try std.testing.expect(mock.last_forkchoice_state == null);
 }
