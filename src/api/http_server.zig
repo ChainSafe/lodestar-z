@@ -85,9 +85,10 @@ pub const HttpServer = struct {
     pub const max_keepalive_requests: u32 = 100;
     /// Maximum concurrent TCP connections.
     pub const max_concurrent_connections: u32 = 256;
-    // TODO(SSE): Add a separate sse_connections counter when real SSE streaming
-    // is implemented.  SSE connections are long-lived and should be accounted
-    // separately so they cannot exhaust the general connection budget.
+    // TODO(SSE): SSE connections are now streaming but share the general
+    // active_connections budget. Consider a separate sse_connections counter
+    // with its own limit so long-lived SSE clients cannot exhaust the
+    // general connection budget for short-lived API requests.
 
     pub fn init(
         allocator: Allocator,
@@ -208,7 +209,7 @@ pub const HttpServer = struct {
                     return;
                 },
             };
-            self.handleHttpRequest(&request) catch |err| {
+            self.handleHttpRequest(&request, io) catch |err| {
                 log.err("handle request failed: {s}", .{@errorName(err)});
                 return;
             };
@@ -216,7 +217,7 @@ pub const HttpServer = struct {
         }
     }
 
-    fn handleHttpRequest(self: *HttpServer, request: *http.Server.Request) !void {
+    fn handleHttpRequest(self: *HttpServer, request: *http.Server.Request, io: Io) !void {
         const target = request.head.target;
 
         // Split target into path and query.
@@ -269,6 +270,15 @@ pub const HttpServer = struct {
             });
             return;
         };
+
+        // SSE streaming: intercept the events endpoint before normal dispatch.
+        // SSE needs streaming response, which bypasses the HandlerResult path.
+        if (std.mem.eql(u8, match.route.operation_id, "getEvents")) {
+            self.handleSseEvents(request, target, io) catch |err| {
+                log.debug("SSE stream ended: {s}", .{@errorName(err)});
+            };
+            return;
+        }
 
         // Content negotiation.
         const accept = findHeader(request, "accept");
@@ -763,13 +773,165 @@ pub const HttpServer = struct {
     }
 
 
-    fn hGetEvents(self: *HttpServer, dc: DispatchContext) !HandlerResult {
-        const alloc = self.allocator;
-        // /eth/v1/events?topics=head,block — topics come from query params, not path params.
-        const topics = dc.getQuery("topics") orelse "";
-        handlers.events.getEvents(self.api_context, topics) catch |err| return err;
-        const body = try alloc.dupe(u8, "{}");
-        return .{ .status = 200, .content_type = "application/json", .body = body };
+
+    // ── SSE streaming handler ────────────────────────────────────────────
+
+    /// Maximum time an SSE connection is kept alive (5 minutes).
+    /// After this, the client must reconnect. Prevents resource exhaustion.
+    const sse_max_duration_sec: i64 = 300;
+
+    /// Poll interval between EventBus checks (1 second).
+    const sse_poll_interval_ms: i64 = 1000;
+
+    /// Handle SSE streaming for GET /eth/v1/events.
+    ///
+    /// This bypasses the normal HandlerResult dispatch path because SSE
+    /// requires a long-lived streaming response. Uses chunked transfer
+    /// encoding with `text/event-stream` content type.
+    ///
+    /// SSE frame format per the W3C spec:
+    ///   event: <topic>\n
+    ///   data: <json>\n
+    ///   \n
+    fn handleSseEvents(
+        self: *HttpServer,
+        request: *http.Server.Request,
+        target: []const u8,
+        io: Io,
+    ) !void {
+        const handlers_events = @import("handlers/events.zig");
+
+        // Parse query string for topics parameter.
+        const query = if (std.mem.indexOfScalar(u8, target, '?')) |idx| target[idx + 1 ..] else "";
+        const topics_value = blk: {
+            var pairs = std.mem.splitScalar(u8, query, '&');
+            while (pairs.next()) |pair| {
+                if (std.mem.indexOfScalar(u8, pair, '=')) |eq| {
+                    const k = pair[0..eq];
+                    const v = pair[eq + 1 ..];
+                    if (std.mem.eql(u8, k, "topics")) break :blk v;
+                }
+            }
+            break :blk "";
+        };
+
+        const filter = handlers_events.TopicFilter.parse(topics_value);
+
+        // If no valid topics, return 400 Bad Request.
+        if (!filter.hasAny()) {
+            try request.respond(
+                "{\"statusCode\":400,\"message\":\"No valid topics specified\"}",
+                .{
+                    .status = .bad_request,
+                    .extra_headers = &.{
+                        .{ .name = "Content-Type", .value = "application/json" },
+                    },
+                },
+            );
+            return;
+        }
+
+        // Require a live event bus.
+        const bus = self.api_context.event_bus orelse {
+            try request.respond(
+                "{\"statusCode\":503,\"message\":\"Event bus not available\"}",
+                .{
+                    .status = .service_unavailable,
+                    .extra_headers = &.{
+                        .{ .name = "Content-Type", .value = "application/json" },
+                    },
+                },
+            );
+            return;
+        };
+
+        // Start streaming response with SSE headers.
+        // Use chunked transfer encoding (no content-length for streaming).
+        // Set Connection: keep-alive and Cache-Control: no-cache per SSE spec.
+        var stream_buf: [4096]u8 = undefined;
+        var body_writer = try request.respondStreaming(&stream_buf, .{
+            .respond_options = .{
+                .status = .ok,
+                .keep_alive = false, // SSE connections close when done
+                .extra_headers = &.{
+                    .{ .name = "Content-Type", .value = "text/event-stream" },
+                    .{ .name = "Cache-Control", .value = "no-cache" },
+                    .{ .name = "Connection", .value = "keep-alive" },
+                    .{ .name = "Access-Control-Allow-Origin", .value = "*" },
+                },
+            },
+        });
+        // Flush headers immediately so client knows the stream started.
+        try body_writer.flush();
+
+        // Start polling the EventBus from the current write position.
+        // This means the client only sees events emitted after connecting.
+        var since_idx = bus.write_idx;
+        var polls_remaining: i64 = @divTrunc(sse_max_duration_sec * 1000, sse_poll_interval_ms);
+
+        log.info("SSE client connected, topics: {s}", .{topics_value});
+
+        while (polls_remaining > 0 and !self.shutdown_requested.load(.acquire)) {
+            polls_remaining -= 1;
+
+            // Check for new events.
+            const events = bus.getRecent(since_idx);
+
+            if (events.len > 0) {
+                // Update cursor.
+                since_idx = bus.write_idx;
+
+                // Write matching events as SSE frames.
+                for (events) |event| {
+                    if (!filter.matches(event)) continue;
+
+                    const topic_name = event.eventType().topicName();
+
+                    // Format JSON data payload.
+                    var json_buf: [2048]u8 = undefined;
+                    const json_data = event.writeJson(&json_buf) catch |err| {
+                        log.warn("SSE event JSON format failed: {s}", .{@errorName(err)});
+                        continue;
+                    };
+
+                    // Write SSE frame: "event: <topic>\ndata: <json>\n\n"
+                    body_writer.writer.print("event: {s}\ndata: {s}\n\n", .{
+                        topic_name,
+                        json_data,
+                    }) catch |err| {
+                        log.debug("SSE write failed (client disconnect?): {s}", .{@errorName(err)});
+                        return;
+                    };
+                }
+
+                // Flush after writing all events in this batch.
+                body_writer.flush() catch |err| {
+                    log.debug("SSE flush failed (client disconnect?): {s}", .{@errorName(err)});
+                    return;
+                };
+            } else if (since_idx > bus.write_idx) {
+                // Ring buffer wrapped — reset cursor to catch up.
+                since_idx = bus.write_idx;
+            }
+
+            // Sleep before next poll.
+            io.sleep(Io.Duration.fromMilliseconds(sse_poll_interval_ms), .awake) catch {
+                // Sleep cancelled (e.g. shutdown) — exit gracefully.
+                return;
+            };
+        }
+
+        // Max duration reached or shutdown — end the stream.
+        body_writer.end() catch {};
+        log.info("SSE stream ended (max duration or shutdown)", .{});
+    }
+
+    fn hGetEvents(self: *HttpServer, _: DispatchContext) !HandlerResult {
+        // SSE streaming is handled directly in handleHttpRequest before
+        // dispatch reaches here. If we get here, it means SSE was bypassed
+        // (e.g. via handleRequest test path) — return 501.
+        _ = self;
+        return error.NotImplemented;
     }
 
     fn hGetProposerDuties(self: *HttpServer, dc: DispatchContext) !HandlerResult {

@@ -3,10 +3,13 @@
 //! Implements the Server-Sent Events (SSE) endpoint:
 //!   GET /eth/v1/events?topics=head,block,finalized_checkpoint,...
 //!
-//! SSE delivers a stream of newline-delimited `data: {...}` payloads over an
-//! HTTP/1.1 keep-alive connection.  Full SSE support requires asynchronous
-//! I/O; for now the handler returns recent events from the EventBus as a
-//! single JSON array (polling mode), laying the groundwork for true streaming.
+//! SSE delivers a stream of newline-delimited `event: <type>\ndata: {...}\n\n`
+//! payloads over an HTTP/1.1 chunked-transfer keep-alive connection.
+//!
+//! The actual streaming is handled in `http_server.zig` via `handleSseEvents`
+//! which uses `respondStreaming` for long-lived connections. This module
+//! provides the topic parsing, filtering, and event type definitions used by
+//! both the streaming handler and any polling fallback.
 //!
 //! Reference: https://ethereum.github.io/beacon-APIs/#/Events
 
@@ -147,33 +150,17 @@ pub const TopicFilter = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Handler
+// Handler (fallback — SSE streaming is in http_server.zig)
 // ---------------------------------------------------------------------------
 
 /// GET /eth/v1/events
 ///
-/// Returns recent beacon chain events from the EventBus that match the
-/// requested topics.
-///
-/// The `topics` query parameter is a comma-separated list of event topic
-/// names (e.g. `topics=head,finalized_checkpoint`).  Events that don't
-/// match any requested topic are filtered out.
-///
-/// This implementation polls the EventBus from index 0 and returns all
-/// available matching events.  True long-lived SSE streaming requires
-/// async I/O and is a future enhancement; this handler provides the
-/// event bus integration foundation.
+/// This handler is only reached if the SSE streaming path in http_server.zig
+/// is somehow bypassed (e.g. via the test-only `handleRequest` method).
+/// Returns 501 Not Implemented since SSE requires streaming.
 pub fn getEvents(ctx: *ApiContext, query: []const u8) !void {
-    // Require a live event bus; fail fast if not configured.
-    if (ctx.event_bus == null) return error.NotImplemented;
-
-    // Require at least one valid topic; unknown-only requests are a client error.
-    if (!TopicFilter.parse(query).hasAny()) return error.NotImplemented;
-
-    // SSE streaming requires long-lived connections (async I/O).
-    // The event bus is now wired and topic filtering is implemented;
-    // full streaming will replace this stub once std.Io fiber support
-    // is used for the HTTP server.
+    _ = ctx;
+    _ = query;
     return error.NotImplemented;
 }
 
@@ -183,10 +170,9 @@ pub fn getEvents(ctx: *ApiContext, query: []const u8) !void {
 
 const test_helpers = @import("../test_helpers.zig");
 
-test "getEvents returns NotImplemented when no event bus" {
+test "getEvents returns NotImplemented (SSE handled in http_server)" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    // api_context.event_bus is null by default in test context
     const result = getEvents(&tc.ctx, "topics=head");
     try std.testing.expectError(error.NotImplemented, result);
 }

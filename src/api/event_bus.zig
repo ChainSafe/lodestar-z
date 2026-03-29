@@ -18,6 +18,16 @@ pub const EventType = enum {
     block,
     finalized_checkpoint,
     chain_reorg,
+
+    /// Returns the SSE topic name for this event type.
+    pub fn topicName(self: EventType) []const u8 {
+        return switch (self) {
+            .head => "head",
+            .block => "block",
+            .finalized_checkpoint => "finalized_checkpoint",
+            .chain_reorg => "chain_reorg",
+        };
+    }
 };
 
 pub const Event = union(EventType) {
@@ -25,6 +35,54 @@ pub const Event = union(EventType) {
     block: BlockEvent,
     finalized_checkpoint: FinalizedCheckpointEvent,
     chain_reorg: ChainReorgEvent,
+
+    /// Returns the active event type tag.
+    pub fn eventType(self: Event) EventType {
+        return std.meta.activeTag(self);
+    }
+
+    /// Format the JSON `data` payload for this event into `buf`.
+    /// Returns the written slice. Uses `std.fmt.bufPrint`.
+    pub fn writeJson(self: Event, buf: []u8) std.fmt.BufPrintError![]const u8 {
+        return switch (self) {
+            .head => |e| std.fmt.bufPrint(buf,
+                "{{\"slot\":\"{d}\",\"block\":\"0x{s}\",\"state\":\"0x{s}\",\"epoch_transition\":{s}}}",
+                .{
+                    e.slot,
+                    std.fmt.bytesToHex(&e.block_root, .lower),
+                    std.fmt.bytesToHex(&e.state_root, .lower),
+                    if (e.epoch_transition) @as([]const u8, "true") else @as([]const u8, "false"),
+                },
+            ),
+            .block => |e| std.fmt.bufPrint(buf,
+                "{{\"slot\":\"{d}\",\"block\":\"0x{s}\"}}",
+                .{
+                    e.slot,
+                    std.fmt.bytesToHex(&e.block_root, .lower),
+                },
+            ),
+            .finalized_checkpoint => |e| std.fmt.bufPrint(buf,
+                "{{\"block\":\"0x{s}\",\"state\":\"0x{s}\",\"epoch\":\"{d}\"}}",
+                .{
+                    std.fmt.bytesToHex(&e.root, .lower),
+                    std.fmt.bytesToHex(&e.state_root, .lower),
+                    e.epoch,
+                },
+            ),
+            .chain_reorg => |e| std.fmt.bufPrint(buf,
+                "{{\"slot\":\"{d}\",\"depth\":\"{d}\",\"old_head_block\":\"0x{s}\",\"new_head_block\":\"0x{s}\",\"old_head_state\":\"0x{s}\",\"new_head_state\":\"0x{s}\",\"epoch\":\"{d}\"}}",
+                .{
+                    e.slot,
+                    e.depth,
+                    std.fmt.bytesToHex(&e.old_head_root, .lower),
+                    std.fmt.bytesToHex(&e.new_head_root, .lower),
+                    std.fmt.bytesToHex(&e.old_state_root, .lower),
+                    std.fmt.bytesToHex(&e.new_state_root, .lower),
+                    e.epoch,
+                },
+            ),
+        };
+    }
 };
 
 pub const HeadEvent = struct {
@@ -182,4 +240,63 @@ test "EventBus: finalized_checkpoint event" {
     const recent = bus.getRecent(0);
     try std.testing.expectEqual(@as(usize, 1), recent.len);
     try std.testing.expectEqual(@as(u64, 5), recent[0].finalized_checkpoint.epoch);
+}
+
+test "Event.writeJson: head event" {
+    var buf: [512]u8 = undefined;
+    const ev = Event{ .head = .{
+        .slot = 42,
+        .block_root = [_]u8{0xAA} ** 32,
+        .state_root = [_]u8{0xBB} ** 32,
+        .epoch_transition = true,
+    } };
+    const json = try ev.writeJson(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"slot\":\"42\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"epoch_transition\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "0xaaaa") != null);
+}
+
+test "Event.writeJson: block event" {
+    var buf: [512]u8 = undefined;
+    const ev = Event{ .block = .{
+        .slot = 100,
+        .block_root = [_]u8{0xFF} ** 32,
+    } };
+    const json = try ev.writeJson(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"slot\":\"100\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "0xffff") != null);
+}
+
+test "Event.writeJson: finalized_checkpoint event" {
+    var buf: [512]u8 = undefined;
+    const ev = Event{ .finalized_checkpoint = .{
+        .epoch = 10,
+        .root = [_]u8{0x11} ** 32,
+        .state_root = [_]u8{0x22} ** 32,
+    } };
+    const json = try ev.writeJson(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"epoch\":\"10\"") != null);
+}
+
+test "Event.writeJson: chain_reorg event" {
+    var buf: [512]u8 = undefined;
+    const ev = Event{ .chain_reorg = .{
+        .slot = 99,
+        .depth = 3,
+        .old_head_root = [_]u8{0xAA} ** 32,
+        .new_head_root = [_]u8{0xBB} ** 32,
+        .old_state_root = [_]u8{0xCC} ** 32,
+        .new_state_root = [_]u8{0xDD} ** 32,
+        .epoch = 12,
+    } };
+    const json = try ev.writeJson(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"depth\":\"3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"epoch\":\"12\"") != null);
+}
+
+test "EventType.topicName" {
+    try std.testing.expectEqualStrings("head", EventType.head.topicName());
+    try std.testing.expectEqualStrings("block", EventType.block.topicName());
+    try std.testing.expectEqualStrings("finalized_checkpoint", EventType.finalized_checkpoint.topicName());
+    try std.testing.expectEqualStrings("chain_reorg", EventType.chain_reorg.topicName());
 }
