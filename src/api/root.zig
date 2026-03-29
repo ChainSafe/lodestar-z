@@ -49,6 +49,7 @@ test {
     testing.refAllDecls(context);
     testing.refAllDecls(routes);
     testing.refAllDecls(response);
+    testing.refAllDecls(json_response);
     testing.refAllDecls(handlers);
     testing.refAllDecls(http_server);
     _ = test_helpers;
@@ -69,3 +70,4 @@ pub const ApiError = error_response.ApiError;
 pub const ErrorCode = error_response.ErrorCode;
 pub const handler_result = @import("handler_result.zig");
 pub const HandlerResult = handler_result.HandlerResult;
+pub const json_response = @import("json_response.zig");

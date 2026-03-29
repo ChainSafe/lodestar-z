@@ -26,6 +26,11 @@ const handlers = @import("handlers/root.zig");
 const context = @import("context.zig");
 const ApiContext = context.ApiContext;
 const types = @import("types.zig");
+const json_response = @import("json_response.zig");
+const fork_types = @import("fork_types");
+const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
+const ForkSeq = @import("config").ForkSeq;
+const consensus_types = @import("consensus_types");
 
 const log = std.log.scoped(.http_server);
 
@@ -557,23 +562,10 @@ pub const HttpServer = struct {
         const alloc = self.allocator;
         const peer_id_str = dc.match.getParam("peer_id") orelse return error.InvalidRequest;
         const handler_res = try handlers.node.getPeer(self.api_context, peer_id_str);
-        const d = handler_res.data;
-        const body = try std.fmt.allocPrint(alloc,
-            "{{\"data\":{{\"peer_id\":\"{s}\",\"enr\":{s},\"last_seen_p2p_address\":\"{s}\",\"state\":\"{s}\",\"direction\":\"{s}\"}}}}",
-            .{
-                d.peer_id,
-                if (d.enr) |enr| enr else "null",
-                d.last_seen_p2p_address,
-                d.state.toString(),
-                d.direction.toString(),
-            });
-        return .{
-            .status = 200,
-            .content_type = "application/json",
-            .body = body,
-            .meta = handler_res.meta,
-        };
+        const body = try json_response.writeApiObjectEnvelope(alloc, types.PeerDetail, &handler_res.data, handler_res.meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
+
 
     fn hGetGenesis(self: *HttpServer, _: DispatchContext) !HandlerResult {
         const resp = handlers.beacon.getGenesis(self.api_context);
@@ -601,21 +593,13 @@ pub const HttpServer = struct {
             const ssz_copy = try alloc.dupe(u8, block_result.data);
             return .{ .status = 200, .content_type = "application/octet-stream", .body = ssz_copy, .meta = meta };
         }
-        var body_buf = std.ArrayListUnmanaged(u8).empty;
-        errdefer body_buf.deinit(alloc);
-        try std.fmt.format(body_buf.writer(alloc), "{{\"data\":\"0x{s}\"", .{std.fmt.fmtSliceHexLower(block_result.data)});
-        if (meta.version) |fork| {
-            try std.fmt.format(body_buf.writer(alloc), ",\"version\":\"{s}\"", .{fork.toString()});
-        }
-        if (meta.execution_optimistic) |opt| {
-            try body_buf.appendSlice(alloc, if (opt) ",\"execution_optimistic\":true" else ",\"execution_optimistic\":false");
-        }
-        if (meta.finalized) |fin| {
-            try body_buf.appendSlice(alloc, if (fin) ",\"finalized\":true" else ",\"finalized\":false");
-        }
-        try body_buf.appendSlice(alloc, "}");
-        return .{ .status = 200, .content_type = "application/json", .body = try body_buf.toOwnedSlice(alloc), .meta = meta };
+        // Deserialize SSZ bytes into typed block, then serialize to JSON via SSZ type system
+        const fork_seq = self.api_context.beacon_config.forkSeq(block_result.slot);
+        const any_block = try AnySignedBeaconBlock.deserialize(alloc, .full, fork_seq, block_result.data);
+        const body = try json_response.writeBlockEnvelope(alloc, any_block, meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = meta };
     }
+
 
     fn hGetStateValidatorV2(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const state_id_str = dc.match.getParam("state_id") orelse return error.InvalidStateId;
@@ -743,23 +727,11 @@ pub const HttpServer = struct {
         const alloc = self.allocator;
         const handler_res = try handlers.debug.getHeads(self.api_context);
         defer alloc.free(handler_res.data);
-        var buf = std.ArrayListUnmanaged(u8).empty;
-        errdefer buf.deinit(alloc);
-        try buf.appendSlice(alloc, "{\"data\":[");
-        for (handler_res.data, 0..) |h, i| {
-            if (i > 0) try buf.appendSlice(alloc, ",");
-            const entry = try std.fmt.allocPrint(alloc, "{{\"slot\":{d},\"root\":\"0x{s}\"}}", .{
-                h.slot, std.fmt.bytesToHex(h.root, .lower),
-            });
-            defer alloc.free(entry);
-            try buf.appendSlice(alloc, entry);
-        }
-        try buf.appendSlice(alloc, "]}");
-        // Eth-Consensus-Version is intentionally omitted: this endpoint returns
-        // multiple chain heads potentially spanning different forks, so a single
-        // fork version cannot represent the full response.
-        return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc), .meta = handler_res.meta };
+        // Eth-Consensus-Version intentionally omitted: multiple chain heads may span forks.
+        const body = try json_response.writeApiArrayEnvelope(alloc, handlers.debug.DebugChainHead, handler_res.data, handler_res.meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
+
 
     fn hGetEvents(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
@@ -776,31 +748,10 @@ pub const HttpServer = struct {
         const epoch = std.fmt.parseInt(u64, epoch_str, 10) catch return error.InvalidRequest;
         const handler_res = try handlers.validator.getProposerDuties(self.api_context, epoch);
         defer alloc.free(handler_res.data);
-        var buf = std.ArrayListUnmanaged(u8).empty;
-        errdefer buf.deinit(alloc);
-        try buf.appendSlice(alloc, "{\"data\":[");
-        for (handler_res.data, 0..) |d, i| {
-            if (i > 0) try buf.appendSlice(alloc, ",");
-            const entry = try std.fmt.allocPrint(alloc,
-                "{{\"pubkey\":\"0x{s}\",\"validator_index\":\"{d}\",\"slot\":\"{d}\"}}",
-                .{ std.fmt.bytesToHex(d.pubkey, .lower), d.validator_index, d.slot });
-            defer alloc.free(entry);
-            try buf.appendSlice(alloc, entry);
-        }
-        try buf.appendSlice(alloc, "]");
-        const meta = handler_res.meta;
-        if (meta.dependent_root) |root| {
-            const hex = std.fmt.bytesToHex(&root, .lower);
-            const dep_root = try std.fmt.allocPrint(alloc, ",\"dependent_root\":\"0x{s}\"", .{hex});
-            defer alloc.free(dep_root);
-            try buf.appendSlice(alloc, dep_root);
-        }
-        if (meta.execution_optimistic) |opt| {
-            try buf.appendSlice(alloc, if (opt) ",\"execution_optimistic\":true" else ",\"execution_optimistic\":false");
-        }
-        try buf.appendSlice(alloc, "}");
-        return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc), .meta = handler_res.meta };
+        const body = try json_response.writeApiArrayEnvelope(alloc, handlers.validator.ProposerDuty, handler_res.data, handler_res.meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
+
 
     fn hGetAttesterDuties(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
@@ -815,31 +766,10 @@ pub const HttpServer = struct {
         }
         const handler_res = try handlers.validator.getAttesterDuties(self.api_context, epoch, validator_indices.items);
         defer alloc.free(handler_res.data);
-        var buf = std.ArrayListUnmanaged(u8).empty;
-        errdefer buf.deinit(alloc);
-        try buf.appendSlice(alloc, "{\"data\":[");
-        for (handler_res.data, 0..) |d, i| {
-            if (i > 0) try buf.appendSlice(alloc, ",");
-            const entry = try std.fmt.allocPrint(alloc,
-                "{{\"pubkey\":\"0x{s}\",\"validator_index\":\"{d}\",\"committee_index\":\"{d}\",\"committee_length\":\"{d}\",\"committees_at_slot\":\"{d}\",\"validator_committee_index\":\"{d}\",\"slot\":\"{d}\"}}",
-                .{ std.fmt.bytesToHex(d.pubkey, .lower), d.validator_index, d.committee_index, d.committee_length, d.committees_at_slot, d.validator_committee_index, d.slot });
-            defer alloc.free(entry);
-            try buf.appendSlice(alloc, entry);
-        }
-        try buf.appendSlice(alloc, "]");
-        const meta = handler_res.meta;
-        if (meta.dependent_root) |root| {
-            const hex = std.fmt.bytesToHex(&root, .lower);
-            const dep_root = try std.fmt.allocPrint(alloc, ",\"dependent_root\":\"0x{s}\"", .{hex});
-            defer alloc.free(dep_root);
-            try buf.appendSlice(alloc, dep_root);
-        }
-        if (meta.execution_optimistic) |v| {
-            try buf.appendSlice(alloc, if (v) ",\"execution_optimistic\":true" else ",\"execution_optimistic\":false");
-        }
-        try buf.appendSlice(alloc, "}");
-        return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc), .meta = handler_res.meta };
+        const body = try json_response.writeApiArrayEnvelope(alloc, handlers.validator.AttesterDuty, handler_res.data, handler_res.meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
+
 
     fn hGetSyncDuties(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
@@ -857,33 +787,10 @@ pub const HttpServer = struct {
             for (handler_res.data) |d| alloc.free(d.validator_sync_committee_indices);
             alloc.free(handler_res.data);
         }
-        var buf = std.ArrayListUnmanaged(u8).empty;
-        errdefer buf.deinit(alloc);
-        try buf.appendSlice(alloc, "{\"data\":[");
-        for (handler_res.data, 0..) |d, i| {
-            if (i > 0) try buf.appendSlice(alloc, ",");
-            var indices_buf = std.ArrayListUnmanaged(u8).empty;
-            defer indices_buf.deinit(alloc);
-            for (d.validator_sync_committee_indices, 0..) |idx, j| {
-                if (j > 0) try indices_buf.appendSlice(alloc, ",");
-                const s = try std.fmt.allocPrint(alloc, "{d}", .{idx});
-                defer alloc.free(s);
-                try indices_buf.appendSlice(alloc, s);
-            }
-            const entry = try std.fmt.allocPrint(alloc,
-                "{{\"pubkey\":\"0x{s}\",\"validator_index\":\"{d}\",\"validator_sync_committee_indices\":[{s}]}}",
-                .{ std.fmt.bytesToHex(d.pubkey, .lower), d.validator_index, indices_buf.items });
-            defer alloc.free(entry);
-            try buf.appendSlice(alloc, entry);
-        }
-        const meta = handler_res.meta;
-        if (meta.execution_optimistic) |v| {
-            try buf.appendSlice(alloc, if (v) "],\"execution_optimistic\":true}" else "],\"execution_optimistic\":false}");
-        } else {
-            try buf.appendSlice(alloc, "]}");
-        }
-        return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc), .meta = handler_res.meta };
+        const body = try json_response.writeApiArrayEnvelope(alloc, handlers.validator.SyncDuty, handler_res.data, handler_res.meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
+
 
     fn hGetSpec(self: *HttpServer, _: DispatchContext) !HandlerResult {
         const result = handlers.config.getSpec(self.api_context);
@@ -922,18 +829,19 @@ pub const HttpServer = struct {
             break :blk null;
         } else null;
         const handler_res = try handlers.validator.produceBlock(self.api_context, slot, randao_reveal, graffiti);
-        // Populate Eth-Consensus-Version header from the fork name returned with the block data.
         var block_meta = handler_res.meta;
         block_meta.version = response_meta.Fork.fromString(handler_res.data.fork);
         if (dc.format == .ssz) {
             const ssz_copy = try alloc.dupe(u8, handler_res.data.ssz_bytes);
             return .{ .status = 200, .content_type = "application/octet-stream", .body = ssz_copy, .meta = block_meta };
         }
-        const body_json = try std.fmt.allocPrint(alloc,
-            "{{\"data\":\"0x{s}\",\"version\":\"{s}\"}}",
-            .{ std.fmt.fmtSliceHexLower(handler_res.data.ssz_bytes), handler_res.data.fork });
+        // Deserialize SSZ bytes into typed block, then serialize to JSON via SSZ type system
+        const fork_seq = ForkSeq.fromName(handler_res.data.fork);
+        const any_block = try AnySignedBeaconBlock.deserialize(alloc, .full, fork_seq, handler_res.data.ssz_bytes);
+        const body_json = try json_response.writeBlockEnvelope(alloc, any_block, block_meta);
         return .{ .status = 200, .content_type = "application/json", .body = body_json, .meta = block_meta };
     }
+
 
     fn hGetAttestationData(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
@@ -1008,25 +916,10 @@ pub const HttpServer = struct {
             for (handler_res.data) |item| alloc.free(item.validators);
             alloc.free(handler_res.data);
         }
-        var buf = std.ArrayListUnmanaged(u8).empty;
-        errdefer buf.deinit(alloc);
-        try buf.appendSlice(alloc, "{\"data\":[");
-        for (handler_res.data, 0..) |committee, ci| {
-            if (ci > 0) try buf.appendSlice(alloc, ",");
-            const header = try std.fmt.allocPrint(alloc, "{{\"index\":{d},\"slot\":{d},\"validators\":[", .{ committee.index, committee.slot });
-            defer alloc.free(header);
-            try buf.appendSlice(alloc, header);
-            for (committee.validators, 0..) |vi, i| {
-                if (i > 0) try buf.appendSlice(alloc, ",");
-                const vi_str = try std.fmt.allocPrint(alloc, "{d}", .{vi});
-                defer alloc.free(vi_str);
-                try buf.appendSlice(alloc, vi_str);
-            }
-            try buf.appendSlice(alloc, "]}");
-        }
-        try buf.appendSlice(alloc, "]}");
-        return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc), .meta = handler_res.meta };
+        const body = try json_response.writeApiArrayEnvelope(alloc, types.CommitteeData, handler_res.data, handler_res.meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
+
 
     fn hGetStateSyncCommittees(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
@@ -1039,30 +932,10 @@ pub const HttpServer = struct {
             for (handler_res.data.validator_aggregates) |agg| alloc.free(agg);
             alloc.free(handler_res.data.validator_aggregates);
         }
-        var buf = std.ArrayListUnmanaged(u8).empty;
-        errdefer buf.deinit(alloc);
-        try buf.appendSlice(alloc, "{\"data\":{\"validators\":[");
-        for (handler_res.data.validators, 0..) |vi, i| {
-            if (i > 0) try buf.appendSlice(alloc, ",");
-            const vi_str = try std.fmt.allocPrint(alloc, "{d}", .{vi});
-            defer alloc.free(vi_str);
-            try buf.appendSlice(alloc, vi_str);
-        }
-        try buf.appendSlice(alloc, "],\"validator_aggregates\":[");
-        for (handler_res.data.validator_aggregates, 0..) |agg, ai| {
-            if (ai > 0) try buf.appendSlice(alloc, ",");
-            try buf.appendSlice(alloc, "[");
-            for (agg, 0..) |vi, i| {
-                if (i > 0) try buf.appendSlice(alloc, ",");
-                const vi_str = try std.fmt.allocPrint(alloc, "{d}", .{vi});
-                defer alloc.free(vi_str);
-                try buf.appendSlice(alloc, vi_str);
-            }
-            try buf.appendSlice(alloc, "]");
-        }
-        try buf.appendSlice(alloc, "]}}");
-        return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc), .meta = handler_res.meta };
+        const body = try json_response.writeApiObjectEnvelope(alloc, types.SyncCommitteeData, &handler_res.data, handler_res.meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
+
 
     fn hGetStateRandao(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
@@ -1070,12 +943,10 @@ pub const HttpServer = struct {
         const state_id = try types.StateId.parse(state_id_str);
         const epoch_opt: ?u64 = if (dc.getQuery("epoch")) |s| std.fmt.parseInt(u64, s, 10) catch null else null;
         const handler_res = try handlers.beacon.getStateRandao(self.api_context, state_id, epoch_opt);
-        const hex = std.fmt.bytesToHex(&handler_res.data.randao, .lower);
-        const data_json = try std.fmt.allocPrint(alloc, "{{\"randao\":\"0x{s}\"}}", .{hex});
-        defer alloc.free(data_json);
-        const body = try HttpServer.jsonEnvelope(alloc, data_json, handler_res.meta);
+        const body = try json_response.writeApiObjectEnvelope(alloc, types.RandaoData, &handler_res.data, handler_res.meta);
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
+
 
     fn hGetBlockHeaders(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
@@ -1091,29 +962,6 @@ pub const HttpServer = struct {
         } else null;
         const handler_res = try handlers.beacon.getBlockHeaders(self.api_context, slot_opt, parent_root_opt);
         defer alloc.free(handler_res.data);
-        var buf = std.ArrayListUnmanaged(u8).empty;
-        errdefer buf.deinit(alloc);
-        try buf.appendSlice(alloc, "{\"data\":[");
-        for (handler_res.data, 0..) |h, i| {
-            if (i > 0) try buf.appendSlice(alloc, ",");
-            const entry = try std.fmt.allocPrint(alloc,
-                "{{\"root\":\"0x{s}\",\"canonical\":{s},\"header\":{{\"message\":{{\"slot\":{d},\"proposer_index\":{d},\"parent_root\":\"0x{s}\",\"state_root\":\"0x{s}\",\"body_root\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}}}",
-                .{
-                    std.fmt.bytesToHex(&h.root, .lower),
-                    if (h.canonical) "true" else "false",
-                    h.header.message.slot,
-                    h.header.message.proposer_index,
-                    std.fmt.bytesToHex(&h.header.message.parent_root, .lower),
-                    std.fmt.bytesToHex(&h.header.message.state_root, .lower),
-                    std.fmt.bytesToHex(&h.header.message.body_root, .lower),
-                    std.fmt.bytesToHex(&h.header.signature, .lower),
-                });
-            defer alloc.free(entry);
-            try buf.appendSlice(alloc, entry);
-        }
-        try buf.appendSlice(alloc, "]}");
-        // Derive Eth-Consensus-Version from the first block's slot (all headers
-        // in a single response share the same slot or are within the same fork).
         var meta = handler_res.meta;
         if (handler_res.data.len > 0) {
             const first_slot = handler_res.data[0].header.message.slot;
@@ -1123,8 +971,10 @@ pub const HttpServer = struct {
             const fork_seq = self.api_context.beacon_config.forkSeq(slot);
             meta.version = @enumFromInt(@intFromEnum(fork_seq));
         }
-        return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc), .meta = meta };
+        const body = try json_response.writeApiArrayEnvelope(alloc, types.BlockHeaderData, handler_res.data, meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = meta };
     }
+
 
     fn hGetBlobSidecars(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
@@ -1146,20 +996,18 @@ pub const HttpServer = struct {
         const block_id_str = dc.match.getParam("block_id") orelse return error.InvalidBlockId;
         const block_id = try types.BlockId.parse(block_id_str);
         const block_result = try handlers.beacon.getBlock(self.api_context, block_id);
-        const body = try std.fmt.allocPrint(alloc,
-            "{{\"data\":\"0x{s}\",\"version\":\"{s}\"}}",
-            .{ std.fmt.fmtSliceHexLower(block_result.data), @tagName(block_result.fork_name) });
-        return .{
-            .status = 200,
-            .content_type = "application/json",
-            .body = body,
-            .meta = .{
-                .version = block_result.fork_name,
-                .execution_optimistic = block_result.execution_optimistic,
-                .finalized = block_result.finalized,
-            },
+        const meta = response_meta.ResponseMeta{
+            .version = block_result.fork_name,
+            .execution_optimistic = block_result.execution_optimistic,
+            .finalized = block_result.finalized,
         };
+        // TODO(stub): returns full block, not blinded. Blinding requires fork-specific payload stripping.
+        const fork_seq = self.api_context.beacon_config.forkSeq(block_result.slot);
+        const any_block = try AnySignedBeaconBlock.deserialize(alloc, .full, fork_seq, block_result.data);
+        const body = try json_response.writeBlockEnvelope(alloc, any_block, meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = meta };
     }
+
 
     fn hGetBlockRewards(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const block_id_str = dc.match.getParam("block_id") orelse return error.InvalidBlockId;

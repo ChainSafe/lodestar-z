@@ -68,10 +68,10 @@ pub fn getForkSchedule(ctx: *ApiContext) HandlerResult([]const types.ForkSchedul
     // Build entries from the config's ascending fork order.
     // Use ArrayList + toOwnedSlice so the returned slice retains the full base pointer.
     const forks = ctx.beacon_config.forks_ascending_epoch_order;
-    var list = std.ArrayList(types.ForkScheduleEntry).init(ctx.allocator);
+    var list: std.ArrayListUnmanaged(types.ForkScheduleEntry) = .empty;
     for (forks) |fork| {
         if (fork.epoch < std.math.maxInt(u64)) {
-            list.append(.{
+            list.append(ctx.allocator, .{
                 .previous_version = fork.prev_version,
                 .current_version = fork.version,
                 .epoch = fork.epoch,
@@ -79,7 +79,7 @@ pub fn getForkSchedule(ctx: *ApiContext) HandlerResult([]const types.ForkSchedul
         }
     }
     return .{
-        .data = list.toOwnedSlice() catch &[_]types.ForkScheduleEntry{},
+        .data = list.toOwnedSlice(ctx.allocator) catch &[_]types.ForkScheduleEntry{},
     };
 }
 
@@ -100,6 +100,7 @@ test "getForkSchedule returns non-empty schedule" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const resp = getForkSchedule(&tc.ctx);
+    defer std.testing.allocator.free(resp.data);
     // Mainnet has at least genesis fork (phase0)
     try std.testing.expect(resp.data.len > 0);
 }
@@ -108,6 +109,7 @@ test "getForkSchedule entries are ordered by epoch" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const resp = getForkSchedule(&tc.ctx);
+    defer std.testing.allocator.free(resp.data);
     if (resp.data.len > 1) {
         for (0..resp.data.len - 1) |i| {
             try std.testing.expect(resp.data[i].epoch <= resp.data[i + 1].epoch);

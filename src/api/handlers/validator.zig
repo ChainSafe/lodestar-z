@@ -599,12 +599,11 @@ fn serializeRegistrationsToJson(
     allocator: std.mem.Allocator,
     registrations: []const types.SignedValidatorRegistrationV1,
 ) ![]const u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    errdefer buf.deinit();
-    var writer = buf.writer();
-    try writer.writeByte('[');
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    errdefer buf.deinit(allocator);
+    try buf.append(allocator, '[');
     for (registrations, 0..) |r, i| {
-        if (i > 0) try writer.writeByte(',');
+        if (i > 0) try buf.append(allocator, ',');
         const fee_hex = std.fmt.bytesToHex(&r.message.fee_recipient, .lower);
         const pk_hex = std.fmt.bytesToHex(&r.message.pubkey, .lower);
         const sig_hex = std.fmt.bytesToHex(&r.signature, .lower);
@@ -621,8 +620,8 @@ fn serializeRegistrationsToJson(
             },
         );
         defer allocator.free(entry);
-        try writer.writeAll(entry);
+        try buf.appendSlice(allocator, entry);
     }
-    try writer.writeByte(']');
-    return buf.toOwnedSlice();
+    try buf.append(allocator, ']');
+    return buf.toOwnedSlice(allocator);
 }
