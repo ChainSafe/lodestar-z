@@ -2339,7 +2339,8 @@ test "init and deinit" {
 
 // Tree: 0 (genesis, FULL)
 test "onBlock adds genesis" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -2357,7 +2358,8 @@ test "onBlock adds genesis" {
 
 // Tree: 0 (genesis, FULL) — second insert is skipped
 test "onBlock duplicate is no-op" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -2368,7 +2370,8 @@ test "onBlock duplicate is no-op" {
 
 // Tree: (empty — block rejected)
 test "onBlock rejects invalid execution status" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     var block = TestBlock.withRoot(makeRoot(1));
@@ -2384,7 +2387,8 @@ test "onBlock rejects invalid execution status" {
 
 // Tree: 0x01 (orphan, parent 0x63 not in tree)
 test "onBlock unknown parent stays null" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const unknown_parent = makeRoot(99);
@@ -2401,7 +2405,8 @@ test "onBlock unknown parent stays null" {
 //     |
 //   0x02
 test "onBlock links parent and updates best_child" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const parent_root = makeRoot(1);
@@ -2424,7 +2429,8 @@ test "onBlock links parent and updates best_child" {
 //   / \
 // 0x02 0x03   (0x03 wins tiebreak: higher root)
 test "onBlock multiple children root tiebreak" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const parent_root = makeRoot(1);
@@ -2445,7 +2451,8 @@ test "onBlock multiple children root tiebreak" {
 //     |
 //   0x01.EMPTY(idx=1)
 test "onBlock Gloas creates PENDING and EMPTY with VariantIndices" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -2484,7 +2491,8 @@ test "onBlock Gloas creates PENDING and EMPTY with VariantIndices" {
 //     |
 //   0x02.EMPTY
 test "onBlock Gloas with parent links correctly" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const parent_root = makeRoot(1);
@@ -2513,7 +2521,8 @@ test "onBlock Gloas with parent links correctly" {
 //       / \
 // 0x01.EMPTY 0x01.FULL
 test "onExecutionPayload adds FULL variant" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -2546,7 +2555,8 @@ test "onExecutionPayload adds FULL variant" {
 //       / \
 // 0x01.EMPTY 0x01.FULL
 test "onExecutionPayload duplicate is no-op" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -2559,7 +2569,8 @@ test "onExecutionPayload duplicate is no-op" {
 
 // Tree: 0x01 (pre-Gloas FULL) — onPayload is no-op
 test "onExecutionPayload for pre-Gloas returns PreGloasBlock error" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -2574,7 +2585,8 @@ test "onExecutionPayload for pre-Gloas returns PreGloasBlock error" {
 
 // Tree: (empty — unknown root lookup fails)
 test "onExecutionPayload for unknown block returns UnknownBlock error" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try testing.expectError(
@@ -2589,7 +2601,8 @@ test "onExecutionPayload for unknown block returns UnknownBlock error" {
 //   0x02(valid)
 //   propagation: 0x01 becomes valid
 test "propagateValidExecutionStatusByIndex marks syncing ancestors" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_a = makeRoot(1);
@@ -2652,7 +2665,8 @@ test "VariantIndices allIndices" {
 
 // Tree: (empty — pre-Gloas parent_block_hash is null → always FULL)
 test "getParentPayloadStatus pre-Gloas returns full" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     // Pre-Gloas block (no parent_block_hash) → always FULL.
@@ -2668,7 +2682,8 @@ test "getParentPayloadStatus pre-Gloas returns full" {
 //   EMPTY = bid.parentBlockHash (0x00), FULL = actual payload hash (= bid.blockHash).
 // getParentPayloadStatus matches by executionPayloadBlockHash on variants.
 test "getParentPayloadStatus matching bid hash returns full" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const parent_root = makeRoot(1);
@@ -2693,7 +2708,8 @@ test "getParentPayloadStatus matching bid hash returns full" {
 // Only EMPTY exists; matching by executionPayloadBlockHash.
 // If no variant matches, returns UNKNOWN_PARENT_BLOCK.
 test "getParentPayloadStatus without FULL variant" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const parent_root = makeRoot(1);
@@ -2717,7 +2733,8 @@ test "getParentPayloadStatus without FULL variant" {
 //   child_a.parent_block_hash = 0xAA (matches FULL's execHash) → links to parent.FULL
 //   child_b.parent_block_hash = 0x00 (matches EMPTY's execHash) → links to parent.EMPTY
 test "onBlockGloas links to correct parent variant via parent_block_hash" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const parent_root = makeRoot(1);
@@ -2764,7 +2781,8 @@ test "onBlockGloas links to correct parent variant via parent_block_hash" {
 //       |
 //     B.EMPTY
 test "child builds on EMPTY when parent_block_hash matches EMPTY execHash" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     // Genesis (pre-Gloas).
@@ -2805,7 +2823,8 @@ test "child builds on EMPTY when parent_block_hash matches EMPTY execHash" {
 //                                |
 //                              B.EMPTY
 test "child builds on FULL when parent_block_hash matches FULL execHash" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     // Genesis (pre-Gloas).
@@ -2852,7 +2871,8 @@ test "child builds on FULL when parent_block_hash matches FULL execHash" {
 //   B.parent_block_hash=0x00 (matches A.EMPTY's execHash) → links to A.EMPTY
 //   C.parent_block_hash=0x64 (matches A.FULL's execHash)  → links to A.FULL
 test "children of both EMPTY and FULL parent variants" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -2910,7 +2930,8 @@ test "children of both EMPTY and FULL parent variants" {
 //   B builds on EMPTY(A), C builds on FULL(A).
 //   Attestations shift head from B to C and back.
 test "forked branches with EMPTY and FULL parent linkage and weight propagation" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -2999,7 +3020,8 @@ test "forked branches with EMPTY and FULL parent linkage and weight propagation"
 //
 //   C builds on B.EMPTY, D builds on B.FULL.
 test "deep fork weight propagation across EMPTY and FULL variants" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3108,7 +3130,8 @@ test "deep fork weight propagation across EMPTY and FULL variants" {
 //     |
 //   0x01.EMPTY
 test "onBlockGloas initializes PTC votes" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -3124,7 +3147,8 @@ test "onBlockGloas initializes PTC votes" {
 //     |
 //   0x01.EMPTY
 test "notifyPtcMessages sets votes" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -3147,7 +3171,8 @@ test "notifyPtcMessages sets votes" {
 //     |
 //   0x01.EMPTY
 test "isPayloadTimely without FULL returns false" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -3164,7 +3189,8 @@ test "isPayloadTimely without FULL returns false" {
 //       / \
 // 0x01.EMPTY 0x01.FULL
 test "isPayloadTimely with FULL and supermajority returns true" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -3184,7 +3210,8 @@ test "isPayloadTimely with FULL and supermajority returns true" {
 //       / \
 // 0x01.EMPTY 0x01.FULL
 test "shouldExtendPayload timely payload returns true" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -3203,7 +3230,8 @@ test "shouldExtendPayload timely payload returns true" {
 //     |
 //   0x01.EMPTY
 test "shouldExtendPayload no proposer boost returns true" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -3219,7 +3247,8 @@ test "shouldExtendPayload no proposer boost returns true" {
 //     |
 //   0x01
 test "applyScoreChanges proposer boost does not accumulate across repeated calls" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const child_root = makeRoot(1);
@@ -3252,7 +3281,8 @@ test "applyScoreChanges proposer boost does not accumulate across repeated calls
 //      5   6
 //
 test "findHead tiebreak without votes" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3293,7 +3323,8 @@ test "findHead tiebreak without votes" {
 //     1   2
 //
 test "votes shift head between branches" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3328,7 +3359,8 @@ test "findHead with ffg checkpoint updates" {
     const root_2 = makeRoot(2);
     const root_3 = makeRoot(3);
 
-    var pa = ProtoArray.init(0, root_0, 0, root_0, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, root_0, 0, root_0, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3380,7 +3412,8 @@ test "votes shift head in binary tree" {
     const root_3 = makeRoot(3);
     const root_4 = makeRoot(4);
 
-    var pa = ProtoArray.init(0, root_0, 0, root_0, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, root_0, 0, root_0, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3417,7 +3450,8 @@ test "isFinalizedRootOrDescendant" {
     const root_2 = makeRoot(2);
     const root_3 = makeRoot(3);
 
-    var pa = ProtoArray.init(0, finalized_root, 0, finalized_root, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, finalized_root, 0, finalized_root, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3453,7 +3487,8 @@ test "isFinalizedRootOrDescendant" {
 //     1   2
 //
 test "invalid execution status zeroes weight and moves head" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3491,7 +3526,8 @@ test "invalid execution status zeroes weight and moves head" {
 //     |
 //   0x01(syncing)
 test "invalid execution status reverts proposer boost" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3516,7 +3552,8 @@ test "invalid execution status reverts proposer boost" {
 
 // Tree: 0 (genesis) — query with unknown justified root
 test "findHead unknown justified root returns error" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3526,7 +3563,8 @@ test "findHead unknown justified root returns error" {
 
 // Tree: 0x01 (syncing, then mutated to invalid)
 test "nodeIsViableForHead rejects invalid execution" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     // Can't insert invalid directly, so insert as syncing then mutate.
@@ -3547,7 +3585,8 @@ test "nodeIsViableForHead rejects invalid execution" {
 //     |
 //   0x01
 test "negative weight delta propagation" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3573,7 +3612,8 @@ test "negative weight delta propagation" {
 //   |
 //   3
 test "getAncestor returns ancestor at slot" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_0 = ZERO_HASH;
@@ -3598,7 +3638,8 @@ test "getAncestor returns ancestor at slot" {
 //     |
 //   0x01(s=5)
 test "getAncestor at own slot returns self" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_1 = makeRoot(1);
@@ -3614,7 +3655,8 @@ test "getAncestor at own slot returns self" {
 //     |     gap(s=1..4)
 //   0x01(s=5)
 test "getAncestor skips slot gap" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_0 = ZERO_HASH;
@@ -3636,7 +3678,8 @@ test "getAncestor skips slot gap" {
 //      3   4
 //
 test "getAncestor finds common ancestor" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_0 = ZERO_HASH;
@@ -3675,7 +3718,8 @@ test "getAncestor finds common ancestor" {
 test "ffg updates two branches with votes and justified epoch switch" {
     const root_0 = ZERO_HASH;
 
-    var pa = ProtoArray.init(0, root_0, 0, root_0, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, root_0, 0, root_0, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3838,7 +3882,8 @@ test "nodeIsViableForHead table-driven epoch combinations" {
     for (cases) |tc| {
         // Use a previous-epoch slot so that nodeIsViableForHead uses
         // unrealized_justified_epoch (which we set equal to justified_epoch).
-        var pa = ProtoArray.init(
+        var pa: ProtoArray = undefined;
+        pa.init(
             tc.store_justified_epoch,
             ZERO_HASH,
             0,
@@ -3878,7 +3923,8 @@ test "weight propagation with positive deltas" {
     const root_2 = makeRoot(2);
     const root_3 = makeRoot(3);
 
-    var pa = ProtoArray.init(0, root_0, 0, root_0, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, root_0, 0, root_0, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3931,7 +3977,8 @@ test "weight propagation with positive deltas" {
 }
 
 test "NodeCount returns number of unique block roots" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3943,7 +3990,8 @@ test "NodeCount returns number of unique block roots" {
 
 // Tree: genesis(0x00), child 0x01
 test "NodeByRoot returns correct node or null" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3967,7 +4015,8 @@ test "NodeByRoot returns correct node or null" {
 
 // Tree: genesis(0x00)
 test "HasNode returns true for known roots" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3990,7 +4039,8 @@ test "HasNode returns true for known roots" {
 // Head is 6 (longest chain from genesis). Canonical = on the head chain.
 // 1 and 3 are NOT canonical because they're on a different branch.
 test "IsCanonical identifies head chain via isDescendant" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_0 = ZERO_HASH;
@@ -4026,7 +4076,8 @@ test "IsCanonical identifies head chain via isDescendant" {
 //                   |
 //                  j(9)
 test "CommonAncestor table-driven two-branch tree" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_a = makeRoot('a');
@@ -4091,7 +4142,8 @@ test "CommonAncestor table-driven two-branch tree" {
 //     |
 //   0x03(slot=5)
 test "AncestorRoot returns correct ancestor at slot" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4117,7 +4169,8 @@ test "AncestorRoot returns correct ancestor at slot" {
 //     |
 //   '3'(slot=101)
 test "AncestorRoot equal slot returns parent" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4136,7 +4189,8 @@ test "AncestorRoot equal slot returns parent" {
 //   '3'(slot=200)
 // Ancestor at slot 150 should return parent at slot 100.
 test "AncestorRoot lower slot returns nearest parent" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4151,7 +4205,8 @@ test "AncestorRoot lower slot returns nearest parent" {
 
 // 100 nodes in a chain, finalize node 99 -> only 1 node remains.
 test "Prune MoreThanThreshold leaves only finalized node" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     // Insert genesis + 99 children in a chain.
@@ -4181,7 +4236,8 @@ test "Prune MoreThanThreshold leaves only finalized node" {
 
 // 100 nodes chain. Prune to 10, then prune to 20.
 test "Prune MoreThanOnce prunes incrementally" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     // Build chain of 100 nodes.
@@ -4226,7 +4282,8 @@ test "Prune MoreThanOnce prunes incrementally" {
 // (node 2 survives because its index > finalized_index). It becomes unreachable
 // but stays in the array until a future prune removes it.
 test "Prune NoDanglingBranch keeps dangling node in flat array" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_0 = ZERO_HASH;
@@ -4246,7 +4303,8 @@ test "Prune NoDanglingBranch keeps dangling node in flat array" {
 
 // Finalized root is genesis (index 0) -> nothing to prune, node count unchanged.
 test "Prune ReturnEarly when finalized is at index 0" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4260,7 +4318,8 @@ test "Prune ReturnEarly when finalized is at index 0" {
 
 // Unknown finalized root -> error.
 test "Prune unknown finalized root returns error" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4280,7 +4339,8 @@ test "Prune unknown finalized root returns error" {
 // validateLatestHash(valid, latestValidExecHash=0xA1)
 // -> 0x01 becomes valid.
 test "SetOptimisticToValid propagates up from matching hash" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4319,7 +4379,8 @@ test "SetOptimisticToValid propagates up from matching hash" {
 //
 // Invalidate D with LVH=A. Only D becomes invalid; B and C stay syncing.
 test "SetOptimisticToInvalid only invalidates target not siblings" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4384,7 +4445,8 @@ test "SetOptimisticToInvalid only invalidates target not siblings" {
 // Invalidate from d with LVH=ZERO_HASH (pre-merge boundary).
 // -> b, c, d, e become invalid; a, r stay pre-merge; f, g stay syncing.
 test "SetOptimisticToInvalid ForkAtMerge invalidates post-merge chain" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4463,7 +4525,8 @@ test "SetOptimisticToInvalid ForkAtMerge invalidates post-merge chain" {
 //     |
 //   0x01(syncing)
 test "SetOptimisticToInvalid with null LVH returns error" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4491,7 +4554,8 @@ test "SetOptimisticToInvalid with null LVH returns error" {
 //     |
 //   0x01(valid)
 test "SetOptimisticToInvalid on valid node stores lvh_error" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4624,7 +4688,8 @@ test "ProtoNode.toBlock round-trip" {
 // ── Gloas PTC edge cases ──
 
 test "notifyPtcMessages ignores unknown block root" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const unknown_root = makeRoot(0xFF);
@@ -4634,7 +4699,8 @@ test "notifyPtcMessages ignores unknown block root" {
 }
 
 test "isPayloadTimely threshold boundary (exactly 50% returns false)" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -4658,7 +4724,8 @@ test "isPayloadTimely threshold boundary (exactly 50% returns false)" {
 }
 
 test "isPayloadTimely counts only true votes with mixed yes/no" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -4680,7 +4747,8 @@ test "isPayloadTimely counts only true votes with mixed yes/no" {
 }
 
 test "isPayloadTimely returns false for unknown block" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try testing.expect(!pa.isPayloadTimely(makeRoot(0xFF)));
@@ -4693,7 +4761,8 @@ test "isPayloadTimely returns false for unknown block" {
 // For FULL to be demoted, shouldExtendPayload must return false.
 // That requires: not timely, boost_root exists, boost parent == block, boost extends EMPTY (not FULL).
 test "Gloas tiebreaker: EMPTY beats FULL for slot n-1 blocks (effectiveWeight zeroed)" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -4735,7 +4804,8 @@ test "Gloas tiebreaker: EMPTY beats FULL for slot n-1 blocks (effectiveWeight ze
 // isPayloadTimely → true → shouldExtendPayload returns true → FULL ordinal stays 2.
 // FULL (2) > EMPTY (1) → FULL wins.
 test "Gloas tiebreaker: FULL beats EMPTY when payload is timely at slot n-1" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -4762,7 +4832,8 @@ test "Gloas tiebreaker: FULL beats EMPTY when payload is timely at slot n-1" {
 // Block at slot 3, current_slot=6 (not n-1: 3+1 != 6).
 // effectiveWeight returns actual node.weight, not 0.
 test "Gloas tiebreaker: older slots (n-2) use weight comparison not tiebreaker" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -4797,7 +4868,8 @@ test "Gloas tiebreaker: older slots (n-2) use weight comparison not tiebreaker" 
 // ── Gloas additional tests ──
 
 test "shouldExtendPayload returns false for untimely full" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -4840,7 +4912,8 @@ test "shouldExtendPayload returns false for untimely full" {
 }
 
 test "shouldExtendPayload returns true when slot has passed (no boost root)" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -4851,7 +4924,8 @@ test "shouldExtendPayload returns true when slot has passed (no boost root)" {
 }
 
 test "shouldExtendPayload returns error for unknown root" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     // isPayloadTimely returns false for unknown block → goes to condition 2.

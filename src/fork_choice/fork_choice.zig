@@ -2211,7 +2211,7 @@ fn initTestForkChoiceWithOpts(
 
     const fc_store = try allocator.create(ForkChoiceStore);
     errdefer allocator.destroy(fc_store);
-    fc_store.* = try ForkChoiceStore.init(allocator, current_slot, justified_checkpoint, finalized_checkpoint, justified_balances, test_balances_getter, .{});
+    try fc_store.init(allocator, current_slot, justified_checkpoint, finalized_checkpoint, justified_balances, test_balances_getter, .{});
     errdefer fc_store.deinit(allocator);
 
     const fc = try allocator.create(ForkChoice);

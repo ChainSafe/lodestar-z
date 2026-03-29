@@ -316,7 +316,8 @@ test "setFinalizedCheckpoint updates and fires event" {
     };
 
     var tracker: Tracker = .{};
-    var store = try ForkChoiceStore.init(
+    var store: ForkChoiceStore = undefined;
+    try store.init(
         testing.allocator,
         0,
         makeCheckpoint(0, hashFromByte(0x01)),
@@ -348,7 +349,8 @@ test "setJustified fires onJustified event" {
     };
 
     var tracker: Tracker = .{};
-    var store = try ForkChoiceStore.init(
+    var store: ForkChoiceStore = undefined;
+    try store.init(
         testing.allocator,
         0,
         makeCheckpoint(0, hashFromByte(0x01)),
