@@ -273,17 +273,19 @@ fn calcSnappyFrameSize(data: []const u8, expected_uncompressed: usize) !usize {
 
         switch (chunk_type) {
             0x00 => { // compressed
-                // frame = crc(4) + compressed_data
-                // We can't know exact uncompressed size without decompressing.
-                // frame_size - 4 is the compressed-data size (subtract CRC).
-                // No expansion factor: we just need the compressed byte count to
-                // track how many frames cover the requested uncompressed size.
-                if (frame_size >= 4) {
-                    uncompressed_so_far += frame_size - 4;
+                // Frame layout: [crc32:4][snappy_raw_block...]
+                // The snappy raw block starts with a preamble varint encoding
+                // the EXACT uncompressed length. Read it directly — no estimation.
+                if (frame_size > 4) {
+                    const payload = data[pos + 4 + 4 .. pos + 4 + frame_size];
+                    const preamble = readSnappyPreambleVarint(payload) catch
+                        return error.InsufficientData;
+                    uncompressed_so_far += preamble;
                 }
             },
             0x01 => { // uncompressed
-                // frame = crc(4) + raw_data
+                // Frame layout: [crc32:4][raw_data...]
+                // For uncompressed chunks, frame_size - 4 IS the exact uncompressed size.
                 if (frame_size >= 4) {
                     uncompressed_so_far += frame_size - 4;
                 }
@@ -300,6 +302,29 @@ fn calcSnappyFrameSize(data: []const u8, expected_uncompressed: usize) !usize {
     }
 
     return pos;
+}
+
+/// Read the preamble varint from a Snappy raw compressed block.
+///
+/// Per the Snappy format spec, each raw block starts with a little-endian
+/// varint encoding the uncompressed length (up to 2^32 - 1). This uses the
+/// same LEB128 encoding as our protocol varints, but capped at 5 bytes (32-bit).
+fn readSnappyPreambleVarint(data: []const u8) !usize {
+    if (data.len == 0) return error.InsufficientData;
+
+    var value: u32 = 0;
+    var i: usize = 0;
+
+    while (i < data.len and i < 5) {
+        const byte = data[i];
+        value |= @as(u32, byte & 0x7F) << @intCast(i * 7);
+        i += 1;
+        if (byte & 0x80 == 0) {
+            return @intCast(value);
+        }
+    }
+
+    return error.InsufficientData;
 }
 
 // === Tests ===
