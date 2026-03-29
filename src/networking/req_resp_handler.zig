@@ -303,7 +303,7 @@ fn handleBeaconBlocksByRange(
     // Look up blocks.
     const blocks = context.getBlocksByRange(context.ptr, request.start_slot, request.count);
     if (blocks.len == 0) {
-        return .{ .chunks = &.{} };
+        return &.{};
     }
 
     // Build response chunks with context bytes.
@@ -421,7 +421,7 @@ fn handleBlobSidecarsByRange(
     // Look up blob sidecars.
     const blobs = context.getBlobsByRange(context.ptr, request.start_slot, request.count);
     if (blobs.len == 0) {
-        return .{ .chunks = &.{} };
+        return &.{};
     }
 
     // Build response chunks with context bytes.
@@ -604,7 +604,7 @@ fn handleDataColumnSidecarsByRange(
 
     const data_columns = getDataColumns(context.ptr, start_slot, count);
     if (data_columns.len == 0) {
-        return .{ .chunks = &.{} };
+        return &.{};
     }
 
     const chunks = try allocator.alloc(ResponseChunk, data_columns.len);
@@ -673,9 +673,9 @@ fn makeErrorResponse(
 /// It is safe to call with an empty slice (e.g. Goodbye returns 0 chunks).
 pub fn freeResponseChunks(allocator: Allocator, chunks: []const ResponseChunk) void {
     for (chunks) |chunk| {
-        allocator.free(chunk.ssz_payload);
+        if (chunk.ssz_payload.len > 0) allocator.free(chunk.ssz_payload);
     }
-    allocator.free(chunks);
+    if (chunks.len > 0) allocator.free(chunks);
 }
 
 // === Tests ===

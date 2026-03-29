@@ -52,11 +52,11 @@ pub const ProducedBlockBody = struct {
 
     /// Free all owned slices.
     pub fn deinit(self: *ProducedBlockBody, allocator: Allocator) void {
-        allocator.free(self.attestations);
-        allocator.free(self.voluntary_exits);
-        allocator.free(self.proposer_slashings);
-        allocator.free(self.attester_slashings);
-        allocator.free(self.bls_to_execution_changes);
+        if (self.attestations.len > 0) allocator.free(self.attestations);
+        if (self.voluntary_exits.len > 0) allocator.free(self.voluntary_exits);
+        if (self.proposer_slashings.len > 0) allocator.free(self.proposer_slashings);
+        if (self.attester_slashings.len > 0) allocator.free(self.attester_slashings);
+        if (self.bls_to_execution_changes.len > 0) allocator.free(self.bls_to_execution_changes);
     }
 };
 

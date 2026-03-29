@@ -121,7 +121,7 @@ pub const PeerSyncInfo = struct {
 
     /// Free the owned peer_id.
     pub fn deinit(self: *PeerSyncInfo, allocator: Allocator) void {
-        allocator.free(self.peer_id);
+        if (self.peer_id.len > 0) allocator.free(self.peer_id);
         self.peer_id = &.{};
     }
 

@@ -591,9 +591,9 @@ pub fn decodeResponseChunks(
 /// Frees both the ssz_bytes within each chunk and the slice itself.
 pub fn freeDecodedResponseChunks(allocator: std.mem.Allocator, chunks: []DecodedResponseChunk) void {
     for (chunks) |chunk| {
-        allocator.free(chunk.ssz_bytes);
+        if (chunk.ssz_bytes.len > 0) allocator.free(chunk.ssz_bytes);
     }
-    allocator.free(chunks);
+    if (chunks.len > 0) allocator.free(chunks);
 }
 
 test "decodeRequest rejects declared length > MAX_REQ_RESP_SIZE" {

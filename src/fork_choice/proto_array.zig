@@ -4179,7 +4179,7 @@ test "Prune MoreThanThreshold leaves only finalized node" {
 
     // Prune to node 99.
     const pruned = try pa.maybePrune(testing.allocator, makeRoot(99));
-    defer testing.allocator.free(pruned);
+    defer if (pruned.len > 0) testing.allocator.free(pruned);
     try testing.expect(pruned.len > 0);
     try testing.expectEqual(@as(usize, 1), pa.length());
 }
@@ -4208,7 +4208,7 @@ test "Prune MoreThanOnce prunes incrementally" {
 
     // First prune to node 10.
     const pruned1 = try pa.maybePrune(testing.allocator, makeRoot(10));
-    testing.allocator.free(pruned1);
+    if (pruned1.len > 0) testing.allocator.free(pruned1);
     try testing.expectEqual(@as(usize, 90), pa.length());
 
     // Reallocate zero_deltas for new node count.
@@ -4219,7 +4219,7 @@ test "Prune MoreThanOnce prunes incrementally" {
 
     // Second prune to node 20.
     const pruned2 = try pa.maybePrune(testing.allocator, makeRoot(20));
-    testing.allocator.free(pruned2);
+    if (pruned2.len > 0) testing.allocator.free(pruned2);
     try testing.expectEqual(@as(usize, 80), pa.length());
 }
 
@@ -4243,7 +4243,7 @@ test "Prune NoDanglingBranch keeps dangling node in flat array" {
     try pa.applyScoreChanges(&deltas, null, 0, root_0, 0, root_0, 2);
 
     const pruned = try pa.maybePrune(testing.allocator, makeRoot(1));
-    defer testing.allocator.free(pruned);
+    defer if (pruned.len > 0) testing.allocator.free(pruned);
     // 2 nodes remain (node 1 + dangling node 2). Proto_array does not remove
     // unreachable branches -- they are pruned when a future finalized root passes them.
     try testing.expectEqual(@as(usize, 2), pa.length());

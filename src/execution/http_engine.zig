@@ -489,9 +489,9 @@ pub const HttpEngine = struct {
     /// and any Electra execution request slices.
     pub fn freeGetPayloadResponse(self: *HttpEngine, resp: GetPayloadResponse) void {
         const ep = resp.execution_payload;
-        self.allocator.free(ep.extra_data);
+        if (ep.extra_data.len > 0) self.allocator.free(ep.extra_data);
         for (ep.transactions) |tx| self.allocator.free(tx);
-        self.allocator.free(ep.transactions);
+        if (ep.transactions.len > 0) self.allocator.free(ep.transactions);
         if (ep.withdrawals.len > 0) self.allocator.free(ep.withdrawals);
         if (resp.blobs_bundle.commitments.len > 0) self.allocator.free(resp.blobs_bundle.commitments);
         if (resp.blobs_bundle.proofs.len > 0) self.allocator.free(resp.blobs_bundle.proofs);
@@ -1457,7 +1457,7 @@ fn encodeBasePayloadFields(allocator: Allocator, p: anytype) !BasePayloadEncoded
     const timestamp = try hexEncodeQuantity(allocator, p.timestamp);
     errdefer allocator.free(timestamp);
     const extra_data = try hexEncode(allocator, p.extra_data);
-    errdefer allocator.free(extra_data);
+    errdefer if (extra_data.len > 0) allocator.free(extra_data);
     const base_fee = try hexEncodeQuantityU256(allocator, p.base_fee_per_gas);
     errdefer allocator.free(base_fee);
     const block_hash = try hexEncodeFixed(allocator, &p.block_hash);
@@ -1846,25 +1846,25 @@ fn decodeGetPayloadResponse(allocator: Allocator, j: GetPayloadJson) !GetPayload
 
     // Deep-copy extra_data: decode hex bytes into owned memory.
     const extra_data = try decodeExtraData(allocator, ep.extraData);
-    errdefer allocator.free(extra_data);
+    errdefer if (extra_data.len > 0) allocator.free(extra_data);
 
     // Deep-copy transactions from arena.
     const transactions = try decodeTransactions(allocator, ep.transactions);
     errdefer {
         for (transactions) |tx| allocator.free(tx);
-        allocator.free(transactions);
+        if (transactions.len > 0) allocator.free(transactions);
     }
 
     // Decode and deep-copy withdrawals from arena.
     const withdrawals = try decodeWithdrawalsOwned(allocator, ep.withdrawals);
-    errdefer allocator.free(withdrawals);
+    errdefer if (withdrawals.len > 0) allocator.free(withdrawals);
 
     // Decode blobs bundle.
     const blobs_bundle = try decodeBlobsBundle(allocator, j.blobsBundle);
     errdefer {
-        allocator.free(blobs_bundle.commitments);
-        allocator.free(blobs_bundle.proofs);
-        allocator.free(blobs_bundle.blobs);
+        if (blobs_bundle.commitments.len > 0) allocator.free(blobs_bundle.commitments);
+        if (blobs_bundle.proofs.len > 0) allocator.free(blobs_bundle.proofs);
+        if (blobs_bundle.blobs.len > 0) allocator.free(blobs_bundle.blobs);
     }
 
     const payload = ExecutionPayloadV3{
@@ -1926,12 +1926,12 @@ fn decodeGetPayloadResponseV1(allocator: Allocator, j: GetPayloadV1Json) !GetPay
     const ep = j.executionPayload;
 
     const extra_data = try decodeExtraData(allocator, ep.extraData);
-    errdefer allocator.free(extra_data);
+    errdefer if (extra_data.len > 0) allocator.free(extra_data);
 
     const transactions = try decodeTransactions(allocator, ep.transactions);
     errdefer {
         for (transactions) |tx| allocator.free(tx);
-        allocator.free(transactions);
+        if (transactions.len > 0) allocator.free(transactions);
     }
 
     return GetPayloadResponseV1{
@@ -1983,16 +1983,16 @@ fn decodeGetPayloadResponseV2(allocator: Allocator, j: GetPayloadV2Json) !GetPay
     const ep = j.executionPayload;
 
     const extra_data = try decodeExtraData(allocator, ep.extraData);
-    errdefer allocator.free(extra_data);
+    errdefer if (extra_data.len > 0) allocator.free(extra_data);
 
     const transactions = try decodeTransactions(allocator, ep.transactions);
     errdefer {
         for (transactions) |tx| allocator.free(tx);
-        allocator.free(transactions);
+        if (transactions.len > 0) allocator.free(transactions);
     }
 
     const withdrawals = try decodeWithdrawalsOwned(allocator, ep.withdrawals);
-    errdefer allocator.free(withdrawals);
+    errdefer if (withdrawals.len > 0) allocator.free(withdrawals);
 
     return GetPayloadResponseV2{
         .execution_payload = ExecutionPayloadV2{
@@ -2116,31 +2116,31 @@ fn decodeGetPayloadResponseV4(allocator: Allocator, j: GetPayloadV4Json) !GetPay
     const ep = j.executionPayload;
 
     const extra_data = try decodeExtraData(allocator, ep.extraData);
-    errdefer allocator.free(extra_data);
+    errdefer if (extra_data.len > 0) allocator.free(extra_data);
 
     const transactions = try decodeTransactions(allocator, ep.transactions);
     errdefer {
         for (transactions) |tx| allocator.free(tx);
-        allocator.free(transactions);
+        if (transactions.len > 0) allocator.free(transactions);
     }
 
     const withdrawals = try decodeWithdrawalsOwned(allocator, ep.withdrawals);
-    errdefer allocator.free(withdrawals);
+    errdefer if (withdrawals.len > 0) allocator.free(withdrawals);
 
     const deposit_requests = try decodeDepositRequests(allocator, ep.depositRequests);
-    errdefer allocator.free(deposit_requests);
+    errdefer if (deposit_requests.len > 0) allocator.free(deposit_requests);
 
     const withdrawal_requests = try decodeWithdrawalRequests(allocator, ep.withdrawalRequests);
-    errdefer allocator.free(withdrawal_requests);
+    errdefer if (withdrawal_requests.len > 0) allocator.free(withdrawal_requests);
 
     const consolidation_requests = try decodeConsolidationRequests(allocator, ep.consolidationRequests);
-    errdefer allocator.free(consolidation_requests);
+    errdefer if (consolidation_requests.len > 0) allocator.free(consolidation_requests);
 
     const blobs_bundle = try decodeBlobsBundle(allocator, j.blobsBundle);
     errdefer {
-        allocator.free(blobs_bundle.commitments);
-        allocator.free(blobs_bundle.proofs);
-        allocator.free(blobs_bundle.blobs);
+        if (blobs_bundle.commitments.len > 0) allocator.free(blobs_bundle.commitments);
+        if (blobs_bundle.proofs.len > 0) allocator.free(blobs_bundle.proofs);
+        if (blobs_bundle.blobs.len > 0) allocator.free(blobs_bundle.blobs);
     }
 
     const payload = ExecutionPayloadV4{

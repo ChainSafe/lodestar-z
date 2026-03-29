@@ -391,7 +391,7 @@ pub const AggregatedAttestationPool = struct {
         state_slot: Slot,
         max_attestations: u32,
     ) ![]Phase0Attestation.Type {
-        if (max_attestations == 0) return &[_]Phase0Attestation.Type{};
+        if (max_attestations == 0) return allocator.alloc(Phase0Attestation.Type, 0);
 
         const state_epoch = computeEpochAtSlot(state_slot);
         const prev_epoch = if (state_epoch > 0) state_epoch - 1 else 0;

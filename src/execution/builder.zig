@@ -695,8 +695,8 @@ fn parseExecutionPayload(allocator: Allocator, json_bytes: []const u8) !types.Ex
 /// Ownership: parseSignedBuilderBid allocates header.extra_data and
 /// message.blob_kzg_commitments. Callers must call freeBid when done.
 pub fn freeBid(allocator: Allocator, bid: *SignedBuilderBid) void {
-    allocator.free(bid.message.header.extra_data);
-    allocator.free(bid.message.blob_kzg_commitments);
+    if (bid.message.header.extra_data.len > 0) allocator.free(bid.message.header.extra_data);
+    if (bid.message.blob_kzg_commitments.len > 0) allocator.free(bid.message.blob_kzg_commitments);
 }
 
 /// Free the heap-allocated fields of an ExecutionPayloadV3 produced by parseExecutionPayload.
@@ -705,10 +705,10 @@ pub fn freeBid(allocator: Allocator, bid: *SignedBuilderBid) void {
 /// element and the slice), and withdrawals. Callers must call freeExecutionPayload
 /// when done with the returned payload.
 pub fn freeExecutionPayload(allocator: Allocator, payload: *types.ExecutionPayloadV3) void {
-    allocator.free(payload.extra_data);
+    if (payload.extra_data.len > 0) allocator.free(payload.extra_data);
     for (payload.transactions) |tx| allocator.free(tx);
-    allocator.free(payload.transactions);
-    allocator.free(payload.withdrawals);
+    if (payload.transactions.len > 0) allocator.free(payload.transactions);
+    if (payload.withdrawals.len > 0) allocator.free(payload.withdrawals);
 }
 
 // ── MockBuilderTransport ──────────────────────────────────────────────────────
