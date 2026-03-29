@@ -265,6 +265,10 @@ pub const ValidatorStore = struct {
 
     /// Return all known public keys as an owned slice (caller must free).
     pub fn allPubkeys(self: *const ValidatorStore, allocator: Allocator) ![][48]u8 {
+        const mutex_ptr: *std.Thread.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lock();
+        defer mutex_ptr.unlock();
+
         const result = try allocator.alloc([48]u8, self.validators.items.len);
         for (self.validators.items, result) |v, *out| {
             out.* = v.pubkey;
@@ -289,6 +293,12 @@ pub const ValidatorStore = struct {
     ///
     /// TS: indicesService.getAllLocalIndices()
     pub fn allIndices(self: *const ValidatorStore, allocator: Allocator) ![]u64 {
+        // Lock mutex for thread-safe access. Cast away const — mutex is logically
+        // interior-mutable and doesn't change observable ValidatorStore state.
+        const mutex_ptr: *std.Thread.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lock();
+        defer mutex_ptr.unlock();
+
         var result = try allocator.alloc(u64, self.validators.items.len);
         var count: usize = 0;
         for (self.validators.items) |v| {
@@ -442,19 +452,24 @@ pub const ValidatorStore = struct {
 
     /// Sign a selection proof for aggregation eligibility.
     ///
-    /// TS: validatorStore.signAttestationSelectionProof(pubkey, slot, fork, ...)
+    /// `signing_type` distinguishes attestation aggregation (`.AGGREGATION_SLOT`)
+    /// from sync committee aggregation (`.SYNC_COMMITTEE_SELECTION_PROOF`) so the
+    /// remote signer receives the correct Web3Signer type.
+    ///
+    /// TS: validatorStore.signAttestationSelectionProof / signSyncCommitteeSelectionProof
     pub fn signSelectionProof(
         self: *ValidatorStore,
         io: Io,
         pubkey: [48]u8,
         signing_root: [32]u8,
+        signing_type: SigningType,
     ) !Signature {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
         if (validator.is_remote) {
             const rs = self.remote_signer orelse return error.RemoteSignerRequired;
-            return rs.sign(io, pubkey, signing_root, .AGGREGATION_SLOT) catch |err| {
+            return rs.sign(io, pubkey, signing_root, signing_type) catch |err| {
                 log.warn("remote signer signSelectionProof error={s}", .{@errorName(err)});
                 return err;
             };

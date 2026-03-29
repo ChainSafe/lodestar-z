@@ -81,7 +81,16 @@ pub const BuilderRegistrationService = struct {
     fn registerValidators(self: *BuilderRegistrationService, io: Io, epoch: u64) !void {
         _ = epoch;
 
-        const validators = self.validator_store.validators.items;
+        // Snapshot validators under mutex to prevent data races with concurrent
+        // Keymanager API add/remove operations (ArrayList reallocation → dangling ptr).
+        self.validator_store.mutex.lock();
+        const validators = try self.allocator.dupe(
+            @import("validator_store.zig").ValidatorRecord,
+            self.validator_store.validators.items,
+        );
+        self.validator_store.mutex.unlock();
+        defer self.allocator.free(validators);
+
         if (validators.len == 0) {
             log.debug("no validators — skipping builder registration", .{});
             return;

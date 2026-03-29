@@ -243,7 +243,7 @@ pub const AttestationService = struct {
             signing_mod.attestationSelectionProofSigningRoot(self.signing_ctx, duty.slot, &sel_root) catch |err| {
                 log.warn("selection proof signing root error: {s}", .{@errorName(err)});
             };
-            if (self.validator_store.signSelectionProof(io, duty.pubkey, sel_root)) |sig| {
+            if (self.validator_store.signSelectionProof(io, duty.pubkey, sel_root, .AGGREGATION_SLOT)) |sig| {
                 sel_proof = sig.compress();
             } else |_| {}
 
@@ -278,7 +278,7 @@ pub const AttestationService = struct {
             var sel_proof: ?[96]u8 = null;
             var sel_root: [32]u8 = undefined;
             signing_mod.attestationSelectionProofSigningRoot(self.signing_ctx, duty.slot, &sel_root) catch {};
-            if (self.validator_store.signSelectionProof(io, duty.pubkey, sel_root)) |sig| {
+            if (self.validator_store.signSelectionProof(io, duty.pubkey, sel_root, .AGGREGATION_SLOT)) |sig| {
                 sel_proof = sig.compress();
             } else |_| {}
             self.next_duties.append(.{ .duty = duty, .selection_proof = sel_proof }) catch {};

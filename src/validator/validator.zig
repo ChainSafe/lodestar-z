@@ -276,15 +276,15 @@ pub const ValidatorClient = struct {
                     for (recs) |rec| {
                         // Feed highest signed block slot into slashing DB.
                         if (rec.last_signed_block_slot) |slot| {
-                            _ = validator_store.slashing_db.checkAndInsertBlock(rec.pubkey, slot) catch {};
+                            _ = try validator_store.slashing_db.checkAndInsertBlock(rec.pubkey, slot);
                             imported_count += 1;
                         }
                         // Feed highest signed attestation epochs into slashing DB.
                         if (rec.last_signed_attestation_source_epoch) |src| {
                             if (rec.last_signed_attestation_target_epoch) |tgt| {
-                                _ = validator_store.slashing_db.checkAndInsertAttestation(
+                                _ = try validator_store.slashing_db.checkAndInsertAttestation(
                                     rec.pubkey, src, tgt,
-                                ) catch {};
+                                );
                             }
                         }
                     }

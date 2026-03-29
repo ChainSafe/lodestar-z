@@ -434,7 +434,7 @@ pub const SyncCommitteeService = struct {
                         log.warn("sync selection proof signing root error slot={d}: {s}", .{ slot, @errorName(err) });
                         continue;
                     };
-                    if (self.validator_store.signSelectionProof(io, dp.duty.pubkey, sel_root)) |sig| {
+                    if (self.validator_store.signSelectionProof(io, dp.duty.pubkey, sel_root, .SYNC_COMMITTEE_SELECTION_PROOF)) |sig| {
                         cached_proof.* = sig.compress();
                     } else |_| {
                         continue;

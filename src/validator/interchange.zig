@@ -140,7 +140,10 @@ pub fn importInterchangeVerified(
     };
     var genesis_validators_root: [32]u8 = [_]u8{0} ** 32;
     const gvr_hex = if (std.mem.startsWith(u8, gvr_str, "0x")) gvr_str[2..] else gvr_str;
-    _ = std.fmt.hexToBytes(&genesis_validators_root, gvr_hex) catch {};
+    _ = std.fmt.hexToBytes(&genesis_validators_root, gvr_hex) catch {
+        log.err("interchange: invalid genesis_validators_root hex: {s}", .{gvr_str});
+        return error.InvalidInterchangeJson;
+    };
 
     // Verify genesis_validators_root matches our chain before importing.
     // This is a critical safety check: importing slashing protection data from
@@ -185,7 +188,17 @@ pub fn importInterchangeVerified(
         };
         var pubkey: [48]u8 = [_]u8{0} ** 48;
         const pk_hex = if (std.mem.startsWith(u8, pk_str, "0x")) pk_str[2..] else pk_str;
-        _ = std.fmt.hexToBytes(&pubkey, pk_hex) catch {};
+        _ = std.fmt.hexToBytes(&pubkey, pk_hex) catch {
+            log.warn("interchange: skipping entry with invalid pubkey hex: {s}", .{pk_str});
+            // Initialize to empty record that will be filtered out below.
+            record.* = .{
+                .pubkey = [_]u8{0} ** 48,
+                .last_signed_block_slot = null,
+                .last_signed_attestation_source_epoch = null,
+                .last_signed_attestation_target_epoch = null,
+            };
+            continue;
+        };
 
         record.pubkey = pubkey;
         record.last_signed_block_slot = null;
