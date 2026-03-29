@@ -542,14 +542,14 @@ pub const ProtoArray = struct {
     ) ProtoArray {
         return .{
             .nodes = .empty,
-            .indices = .{},
+            .indices = .empty,
             .prune_threshold = prune_threshold,
             .justified_epoch = justified_epoch,
             .justified_root = justified_root,
             .finalized_epoch = finalized_epoch,
             .finalized_root = finalized_root,
             .previous_proposer_boost = null,
-            .ptc_votes = .{},
+            .ptc_votes = .empty,
             .lvh_error = null,
         };
     }

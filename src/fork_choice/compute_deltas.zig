@@ -168,7 +168,7 @@ fn sortEquivocatingKeys(allocator: Allocator, indices: EquivocatingIndices) ![]c
 // ── Tests ──
 
 const TestContext = struct {
-    dc: DeltasCache = .{},
+    dc: DeltasCache = .empty,
     votes: Votes = .{},
 
     fn init(count: usize) !TestContext {

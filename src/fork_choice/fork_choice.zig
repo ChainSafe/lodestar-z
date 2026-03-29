@@ -1939,7 +1939,7 @@ pub const ForkChoice = struct {
         const block_index = self.pa.getNodeIndexByRootAndStatus(block_root, status) orelse
             return error.MissingProtoArrayBlock;
 
-        var roots_in_chain: std.AutoHashMapUnmanaged(Root, void) = .{};
+        var roots_in_chain: std.AutoHashMapUnmanaged(Root, void) = .empty;
         try roots_in_chain.put(allocator, block_root, {});
 
         return .{
