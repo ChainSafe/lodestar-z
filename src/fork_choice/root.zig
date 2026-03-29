@@ -19,7 +19,7 @@ pub const LVHInvalidResponse = proto_array.LVHInvalidResponse;
 pub const LVHExecErrorCode = proto_array.LVHExecErrorCode;
 
 pub const ProtoArrayError = proto_array.ProtoArrayError;
-pub const ForkChoiceError = proto_array.ForkChoiceError;
+pub const ForkChoiceError = fork_choice.ForkChoiceError;
 pub const InvalidBlockCode = proto_array.InvalidBlockCode;
 pub const InvalidAttestationCode = proto_array.InvalidAttestationCode;
 

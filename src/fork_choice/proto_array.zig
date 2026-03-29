@@ -370,35 +370,6 @@ pub const ProtoArrayError = error{
     MissingProtoArrayBlock,
     UnknownAncestor,
 };
-
-pub const ForkChoiceError = ProtoArrayError || error{
-    // InvalidAttestation inner codes (TS: InvalidAttestationCode)
-    InvalidAttestationEmptyAggregationBitfield,
-    InvalidAttestationUnknownHeadBlock,
-    InvalidAttestationBadTargetEpoch,
-    InvalidAttestationUnknownTargetRoot,
-    InvalidAttestationFutureEpoch,
-    InvalidAttestationPastEpoch,
-    InvalidAttestationInvalidTarget,
-    InvalidAttestationAttestsToFutureBlock,
-    InvalidAttestationFutureSlot,
-    InvalidAttestationInvalidDataIndex,
-    // InvalidBlock inner codes (TS: InvalidBlockCode)
-    InvalidBlockUnknownParent,
-    InvalidBlockFutureSlot,
-    InvalidBlockFinalizedSlot,
-    InvalidBlockNotFinalizedDescendant,
-    // Other errors
-    InvalidProtoArrayBytes,
-    InconsistentOnTick,
-    BeaconStateErr,
-    AttemptToRevertJustification,
-    ForkChoiceStoreErr,
-    UnableToSetJustifiedCheckpoint,
-    AfterBlockFailed,
-    GenesisBlockNotAvailable,
-    DependentRootNotFound,
-};
 const GENESIS_EPOCH = preset_mod.GENESIS_EPOCH;
 
 /// PTC (Payload Timeliness Committee) vote threshold.

@@ -22,7 +22,35 @@ const ValidatorIndex = primitives.ValidatorIndex.Type;
 const proto_array = @import("proto_array.zig");
 const ProtoArray = proto_array.ProtoArray;
 const ProtoArrayError = proto_array.ProtoArrayError;
-const ForkChoiceError = proto_array.ForkChoiceError;
+
+pub const ForkChoiceError = ProtoArrayError || error{
+    // InvalidAttestation inner codes (TS: InvalidAttestationCode)
+    InvalidAttestationEmptyAggregationBitfield,
+    InvalidAttestationUnknownHeadBlock,
+    InvalidAttestationBadTargetEpoch,
+    InvalidAttestationUnknownTargetRoot,
+    InvalidAttestationFutureEpoch,
+    InvalidAttestationPastEpoch,
+    InvalidAttestationInvalidTarget,
+    InvalidAttestationAttestsToFutureBlock,
+    InvalidAttestationFutureSlot,
+    InvalidAttestationInvalidDataIndex,
+    // InvalidBlock inner codes (TS: InvalidBlockCode)
+    InvalidBlockUnknownParent,
+    InvalidBlockFutureSlot,
+    InvalidBlockFinalizedSlot,
+    InvalidBlockNotFinalizedDescendant,
+    // Other errors
+    InvalidProtoArrayBytes,
+    InconsistentOnTick,
+    BeaconStateErr,
+    AttemptToRevertJustification,
+    ForkChoiceStoreErr,
+    UnableToSetJustifiedCheckpoint,
+    AfterBlockFailed,
+    GenesisBlockNotAvailable,
+    DependentRootNotFound,
+};
 const ProtoBlock = proto_array.ProtoBlock;
 const ProtoNode = proto_array.ProtoNode;
 const LVHExecResponse = proto_array.LVHExecResponse;
