@@ -303,7 +303,7 @@ fn handleBeaconBlocksByRange(
     // Look up blocks.
     const blocks = context.getBlocksByRange(context.ptr, request.start_slot, request.count);
     if (blocks.len == 0) {
-        return makeErrorResponse(allocator, .resource_unavailable, "No blocks available in requested range");
+        return .{ .chunks = &.{} };
     }
 
     // Build response chunks with context bytes.
@@ -421,7 +421,7 @@ fn handleBlobSidecarsByRange(
     // Look up blob sidecars.
     const blobs = context.getBlobsByRange(context.ptr, request.start_slot, request.count);
     if (blobs.len == 0) {
-        return makeErrorResponse(allocator, .resource_unavailable, "No blob sidecars available in requested range");
+        return .{ .chunks = &.{} };
     }
 
     // Build response chunks with context bytes.
@@ -604,7 +604,7 @@ fn handleDataColumnSidecarsByRange(
 
     const data_columns = getDataColumns(context.ptr, start_slot, count);
     if (data_columns.len == 0) {
-        return makeErrorResponse(allocator, .resource_unavailable, "No data column sidecars available in requested range");
+        return .{ .chunks = &.{} };
     }
 
     const chunks = try allocator.alloc(ResponseChunk, data_columns.len);

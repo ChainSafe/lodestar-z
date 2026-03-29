@@ -131,12 +131,12 @@ pub const SyncService = struct {
     local_head_slot: u64,
     /// Our local finalized epoch.
     local_finalized_epoch: u64,
-    /// Set of known connected peers (deduplicated by peer_id string key).
-    /// Heap-allocated string keys; freed on remove/deinit.
-    known_peers: std.StringHashMap(void),
+    /// Map of known connected peers: peer_id (heap-alloc) -> head_slot.
+    /// Tracks per-peer head_slot so best_peer_slot can be recomputed on disconnect.
+    known_peers: std.StringHashMap(u64),
     /// Number of connected peers — derived from known_peers.count().
     peer_count: usize,
-    /// Highest known peer slot.
+    /// Highest known peer slot — recomputed from known_peers on disconnect.
     best_peer_slot: u64,
 
     pub fn init(
@@ -171,7 +171,7 @@ pub const SyncService = struct {
             .callbacks = callbacks,
             .local_head_slot = local_head_slot,
             .local_finalized_epoch = local_finalized_epoch,
-            .known_peers = std.StringHashMap(void).init(allocator),
+            .known_peers = std.StringHashMap(u64).init(allocator),
             .peer_count = 0,
             .best_peer_slot = 0,
         };
@@ -193,10 +193,14 @@ pub const SyncService = struct {
         peer_id: []const u8,
         status: StatusMessage.Type,
     ) !void {
-        // Track peers in a set to avoid double-counting repeated Status messages.
-        if (!self.known_peers.contains(peer_id)) {
+        // Track peers and their head_slot so best_peer_slot can be recomputed on disconnect.
+        if (self.known_peers.getPtr(peer_id)) |slot_ptr| {
+            // Update head_slot for already-known peer.
+            slot_ptr.* = status.head_slot;
+        } else {
             const owned_key = try self.allocator.dupe(u8, peer_id);
-            try self.known_peers.put(owned_key, {});
+            errdefer self.allocator.free(owned_key);
+            try self.known_peers.put(owned_key, status.head_slot);
         }
         self.peer_count = @intCast(self.known_peers.count());
         if (status.head_slot > self.best_peer_slot) {
@@ -230,6 +234,13 @@ pub const SyncService = struct {
             self.allocator.free(kv.key);
         }
         self.peer_count = @intCast(self.known_peers.count());
+        // Recompute best_peer_slot: the disconnected peer may have been the highest.
+        var best: u64 = 0;
+        var it = self.known_peers.valueIterator();
+        while (it.next()) |slot| {
+            if (slot.* > best) best = slot.*;
+        }
+        self.best_peer_slot = best;
         self.range_sync.removePeer(peer_id);
         self.updateMode();
     }

@@ -181,13 +181,12 @@ pub const AttestationGroup = struct {
                 continue;
             }
 
-            // Case 3: exclusive → aggregate into existing
+            // Case 3: exclusive — do NOT aggregate until BLS sig aggregation is implemented.
+            // Merging aggregation_bits without aggregating the BLS signature produces an
+            // invalid attestation that will fail verification on block proposal.
+            // TODO: implement BLS aggregate_signatures() via blst bindings, then re-enable.
             if (isExclusive(new_bytes, existing_bytes)) {
-                orBitsInto(entry.attestation.aggregation_bits.data.items, new_bytes);
-                entry.bit_count = countBits(entry.attestation.aggregation_bits.data.items);
-                // Also aggregate the signature (BLS aggregate). For now store as-is.
-                // Full BLS aggregation requires blst bindings — deferred.
-                return .Aggregated;
+                return .Duplicate;
             }
         }
 

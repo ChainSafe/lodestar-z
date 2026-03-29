@@ -275,11 +275,11 @@ fn calcSnappyFrameSize(data: []const u8, expected_uncompressed: usize) !usize {
             0x00 => { // compressed
                 // frame = crc(4) + compressed_data
                 // We can't know exact uncompressed size without decompressing.
-                // Use an upper bound: (frame_size - 4) * 4 accounts for snappy's
-                // worst-case expansion ratio and avoids under-counting, which would
-                // cause us to consume too few frames and miss the chunk boundary.
+                // frame_size - 4 is the compressed-data size (subtract CRC).
+                // No expansion factor: we just need the compressed byte count to
+                // track how many frames cover the requested uncompressed size.
                 if (frame_size >= 4) {
-                    uncompressed_so_far += (frame_size - 4) * 4;
+                    uncompressed_so_far += frame_size - 4;
                 }
             },
             0x01 => { // uncompressed

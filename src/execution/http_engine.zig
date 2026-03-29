@@ -492,10 +492,10 @@ pub const HttpEngine = struct {
         self.allocator.free(ep.extra_data);
         for (ep.transactions) |tx| self.allocator.free(tx);
         self.allocator.free(ep.transactions);
-        self.allocator.free(ep.withdrawals);
-        self.allocator.free(resp.blobs_bundle.commitments);
-        self.allocator.free(resp.blobs_bundle.proofs);
-        self.allocator.free(resp.blobs_bundle.blobs);
+        if (ep.withdrawals.len > 0) self.allocator.free(ep.withdrawals);
+        if (resp.blobs_bundle.commitments.len > 0) self.allocator.free(resp.blobs_bundle.commitments);
+        if (resp.blobs_bundle.proofs.len > 0) self.allocator.free(resp.blobs_bundle.proofs);
+        if (resp.blobs_bundle.blobs.len > 0) self.allocator.free(resp.blobs_bundle.blobs);
         // Electra execution requests (empty slices are safe to free).
         if (resp.deposit_requests.len > 0) self.allocator.free(resp.deposit_requests);
         if (resp.withdrawal_requests.len > 0) self.allocator.free(resp.withdrawal_requests);
@@ -671,7 +671,7 @@ pub const HttpEngine = struct {
         var parsed = try json_rpc.decodeResponse(ForkchoiceUpdatedJson, self.allocator, response);
         defer parsed.deinit();
 
-        return decodeForkchoiceUpdatedResponse(parsed.value);
+        return decodeForkchoiceUpdatedResponse(self.allocator, parsed.value);
     }
 
 
@@ -808,7 +808,7 @@ pub const HttpEngine = struct {
         var parsed = try json_rpc.decodeResponse(PayloadStatusJson, self.allocator, response);
         defer parsed.deinit();
 
-        return decodePayloadStatus(parsed.value);
+        return decodePayloadStatus(self.allocator, parsed.value);
     }
 
     fn forkchoiceUpdatedV3(
@@ -847,7 +847,7 @@ pub const HttpEngine = struct {
         var parsed = try json_rpc.decodeResponse(ForkchoiceUpdatedJson, self.allocator, response);
         defer parsed.deinit();
 
-        return decodeForkchoiceUpdatedResponse(parsed.value);
+        return decodeForkchoiceUpdatedResponse(self.allocator, parsed.value);
     }
 
     fn getPayloadV3(
@@ -907,7 +907,7 @@ pub const HttpEngine = struct {
         var parsed = try json_rpc.decodeResponse(PayloadStatusJson, self.allocator, response);
         defer parsed.deinit();
 
-        return decodePayloadStatus(parsed.value);
+        return decodePayloadStatus(self.allocator, parsed.value);
     }
 
     fn newPayloadV2(
@@ -936,7 +936,7 @@ pub const HttpEngine = struct {
         var parsed = try json_rpc.decodeResponse(PayloadStatusJson, self.allocator, response);
         defer parsed.deinit();
 
-        return decodePayloadStatus(parsed.value);
+        return decodePayloadStatus(self.allocator, parsed.value);
     }
 
     fn newPayloadV4(
@@ -973,7 +973,7 @@ pub const HttpEngine = struct {
         var parsed = try json_rpc.decodeResponse(PayloadStatusJson, self.allocator, response);
         defer parsed.deinit();
 
-        return decodePayloadStatus(parsed.value);
+        return decodePayloadStatus(self.allocator, parsed.value);
     }
 
     // ── forkchoiceUpdated V1 / V2 ─────────────────────────────────────────────
@@ -1012,7 +1012,7 @@ pub const HttpEngine = struct {
         var parsed = try json_rpc.decodeResponse(ForkchoiceUpdatedJson, self.allocator, response);
         defer parsed.deinit();
 
-        return decodeForkchoiceUpdatedResponse(parsed.value);
+        return decodeForkchoiceUpdatedResponse(self.allocator, parsed.value);
     }
 
     fn forkchoiceUpdatedV2(
@@ -1049,7 +1049,7 @@ pub const HttpEngine = struct {
         var parsed = try json_rpc.decodeResponse(ForkchoiceUpdatedJson, self.allocator, response);
         defer parsed.deinit();
 
-        return decodeForkchoiceUpdatedResponse(parsed.value);
+        return decodeForkchoiceUpdatedResponse(self.allocator, parsed.value);
     }
 
     // ── getPayload V1 / V2 / V4 ──────────────────────────────────────────────
@@ -1751,7 +1751,7 @@ const PayloadStatusJson = struct {
     validationError: ?[]const u8 = null,
 };
 
-fn decodePayloadStatus(j: PayloadStatusJson) !PayloadStatusV1 {
+fn decodePayloadStatus(allocator: Allocator, j: PayloadStatusJson) !PayloadStatusV1 {
     const status = blk: {
         if (std.mem.eql(u8, j.status, "VALID")) break :blk ExecutionPayloadStatus.valid;
         if (std.mem.eql(u8, j.status, "INVALID")) break :blk ExecutionPayloadStatus.invalid;
@@ -1763,10 +1763,16 @@ fn decodePayloadStatus(j: PayloadStatusJson) !PayloadStatusV1 {
 
     const lvh: ?[32]u8 = if (j.latestValidHash) |h| try hexDecode32(h) else null;
 
+    // Dupe validationError to avoid dangling pointer into the parsed JSON arena.
+    const validation_error: ?[]const u8 = if (j.validationError) |ve|
+        try allocator.dupe(u8, ve)
+    else
+        null;
+
     return PayloadStatusV1{
         .status = status,
         .latest_valid_hash = lvh,
-        .validation_error = j.validationError,
+        .validation_error = validation_error,
     };
 }
 
@@ -1776,8 +1782,8 @@ const ForkchoiceUpdatedJson = struct {
     payloadId: ?[]const u8 = null,
 };
 
-fn decodeForkchoiceUpdatedResponse(j: ForkchoiceUpdatedJson) !ForkchoiceUpdatedResponse {
-    const payload_status = try decodePayloadStatus(j.payloadStatus);
+fn decodeForkchoiceUpdatedResponse(allocator: Allocator, j: ForkchoiceUpdatedJson) !ForkchoiceUpdatedResponse {
+    const payload_status = try decodePayloadStatus(allocator, j.payloadStatus);
 
     const payload_id: ?[8]u8 = if (j.payloadId) |pid| blk: {
         if (pid.len < 2 or (pid[0] != '0' or pid[1] != 'x')) return error.InvalidPayloadId;

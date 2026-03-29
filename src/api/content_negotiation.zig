@@ -73,6 +73,8 @@ pub fn parseAcceptHeader(accept: ?[]const u8) NegotiationResult {
             }
         }
 
+        // RFC 7231 §5.3.2: q=0 means explicitly NOT acceptable.
+        if (q == 0.0) continue;
         // Skip if this q-value is not better than our current best
         if (q <= best_q) continue;
 

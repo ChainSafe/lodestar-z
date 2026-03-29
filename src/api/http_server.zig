@@ -34,6 +34,18 @@ const consensus_types = @import("consensus_types");
 
 const log = std.log.scoped(.http_server);
 
+// Comptime assertion: ForkSeq and response_meta.Fork must have matching ordinals
+// so that the @enumFromInt(@intFromEnum(fork_seq)) cast used in API handlers is safe.
+comptime {
+    const fork_seq_fields = @typeInfo(ForkSeq).@"enum".fields;
+    const fork_fields = @typeInfo(response_meta.Fork).@"enum".fields;
+    if (fork_seq_fields.len != fork_fields.len) @compileError("ForkSeq and response_meta.Fork have different numbers of variants");
+    for (fork_seq_fields, fork_fields) |fs, f| {
+        if (fs.value != f.value) @compileError("ForkSeq and response_meta.Fork ordinals do not match");
+        if (!std.mem.eql(u8, fs.name, f.name)) @compileError("ForkSeq and response_meta.Fork field names do not match");
+    }
+}
+
 /// Keymanager path prefixes that must never receive wildcard CORS.
 const keymanager_paths: []const []const u8 = &.{
     "/eth/v1/keystores",
@@ -584,6 +596,7 @@ pub const HttpServer = struct {
         const block_id_str = dc.match.getParam("block_id") orelse return error.InvalidBlockId;
         const block_id = try types.BlockId.parse(block_id_str);
         const block_result = try handlers.beacon.getBlock(self.api_context, block_id);
+        defer alloc.free(block_result.data);
         const meta = response_meta.ResponseMeta{
             .version = block_result.fork_name,
             .execution_optimistic = block_result.execution_optimistic,
@@ -996,6 +1009,7 @@ pub const HttpServer = struct {
         const block_id_str = dc.match.getParam("block_id") orelse return error.InvalidBlockId;
         const block_id = try types.BlockId.parse(block_id_str);
         const block_result = try handlers.beacon.getBlock(self.api_context, block_id);
+        defer alloc.free(block_result.data);
         const meta = response_meta.ResponseMeta{
             .version = block_result.fork_name,
             .execution_optimistic = block_result.execution_optimistic,
@@ -1257,7 +1271,7 @@ pub const HttpServer = struct {
             // Dupe onto heap — err_buf is stack-local and would dangle after return.
             // On OOM, fall back to a static string literal (safe to return by reference).
             const err_json_heap = self.allocator.dupe(u8, err_json) catch
-                "{\"code\":500,\"message\":\"internal server error\"}";
+                "{\"statusCode\":500,\"message\":\"internal server error\"}";
             return .{
                 .status = api_err.code.statusCode(),
                 .status_text = api_err.code.phrase(),

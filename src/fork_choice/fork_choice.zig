@@ -1221,7 +1221,7 @@ pub const ForkChoice = struct {
         // TODO: Wire BeaconConfig.getProposerReorgCutoffMs when available.
         // Default from Lodestar TS: REORG_OFFSETS_OF_SECS_INTO_SLOT = 2 sec for phase0+
         const proposer_reorg_cutoff: u64 = 2000; // 2 seconds in ms
-        return @as(u64, sec_from_slot) * 1000 <= proposer_reorg_cutoff;
+        return @as(u64, sec_from_slot) * 1000 < proposer_reorg_cutoff;
     }
 
     /// A multiplexer to wrap around the traditional `updateHead()` according to the scenario.
@@ -1581,8 +1581,6 @@ pub const ForkChoice = struct {
                         ) catch continue;
                     }
 
-                    if (att_slot == current_slot - 1) {
-                    }
                     block_entry.value_ptr.deinit(allocator);
                 }
                 entry.value_ptr.deinit(allocator);

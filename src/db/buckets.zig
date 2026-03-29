@@ -13,33 +13,33 @@ const std = @import("std");
 pub const DatabaseId = enum {
     // ---- Beacon chain core ----
 
-    /// Finalized states: Slot (8B LE) -> SSZ BeaconState
+    /// Finalized states: Slot (8B BE) -> SSZ BeaconState
     state_archive,
     /// Unfinalized blocks: Root (32B) -> SSZ SignedBeaconBlock
     block,
-    /// Finalized blocks: Slot (8B LE) -> SSZ SignedBeaconBlock
+    /// Finalized blocks: Slot (8B BE) -> SSZ SignedBeaconBlock
     block_archive,
 
     // ---- Block archive indices ----
 
-    /// Parent Root (32B) -> Slot (8B LE)
+    /// Parent Root (32B) -> Slot (8B BE)
     idx_block_parent_root,
-    /// Root (32B) -> Slot (8B LE)
+    /// Root (32B) -> Slot (8B BE)
     idx_block_root,
-    /// Slot (8B LE) -> Root (32B)
+    /// Slot (8B BE) -> Root (32B)
     idx_main_chain,
     /// Mixed metadata: short string keys -> variable values
     chain_info,
 
     // ---- Op pool ----
 
-    /// ValidatorIndex (8B LE) -> SSZ VoluntaryExit
+    /// ValidatorIndex (8B BE) -> SSZ VoluntaryExit
     exit,
-    /// ValidatorIndex (8B LE) -> SSZ ProposerSlashing
+    /// ValidatorIndex (8B BE) -> SSZ ProposerSlashing
     proposer_slashing,
     /// Root (32B) -> SSZ AttesterSlashing
     attester_slashing,
-    /// ValidatorIndex (8B LE) -> SSZ SignedBLSToExecutionChange
+    /// ValidatorIndex (8B BE) -> SSZ SignedBLSToExecutionChange
     bls_change,
 
     // ---- Checkpoint states ----
@@ -49,19 +49,19 @@ pub const DatabaseId = enum {
 
     // ---- State archive index ----
 
-    /// State Root (32B) -> Slot (8B LE)
+    /// State Root (32B) -> Slot (8B BE)
     idx_state_root,
 
     // ---- Blob sidecars ----
 
     /// Root (32B) -> SSZ BlobSidecars (hot)
     blob_sidecar,
-    /// Slot (8B LE) -> SSZ BlobSidecars (archive)
+    /// Slot (8B BE) -> SSZ BlobSidecars (archive)
     blob_sidecar_archive,
 
     // ---- Backfill ----
 
-    /// From (8B LE) -> To (8B LE)
+    /// From (8B BE) -> To (8B BE)
     backfill_ranges,
 
     // ---- Light client ----
@@ -72,30 +72,30 @@ pub const DatabaseId = enum {
     lc_sync_committee,
     /// BlockRoot (32B) -> SSZ BeaconBlockHeader
     lc_checkpoint_header,
-    /// SyncPeriod (8B LE) -> [Slot, LightClientUpdate]
+    /// SyncPeriod (8B BE) -> [Slot, LightClientUpdate]
     lc_best_update,
 
     // ---- Data columns (PeerDAS / Fulu) ----
 
     /// Root (32B) -> SSZ DataColumnSidecars (hot)
     data_column,
-    /// Slot (8B LE) -> SSZ DataColumnSidecars (archive)
+    /// Slot (8B BE) -> SSZ DataColumnSidecars (archive)
     data_column_archive,
-    /// Root(32B) ++ ColumnIndex(8B LE) -> single DataColumnSidecar (hot)
+    /// Root(32B) ++ ColumnIndex(8B BE) -> single DataColumnSidecar (hot)
     data_column_single,
 
     // ---- ePBS (Gloas) ----
 
     /// Root (32B) -> SSZ SignedExecutionPayloadEnvelope (hot)
     epbs_payload,
-    /// Slot (8B LE) -> SSZ SignedExecutionPayloadEnvelope (archive)
+    /// Slot (8B BE) -> SSZ SignedExecutionPayloadEnvelope (archive)
     epbs_payload_archive,
 
     // ---- Internal ----
 
     /// Fork choice persistence: short string -> serialized data
     fork_choice,
-    /// Pubkey (48B) -> ValidatorIndex (8B LE)
+    /// Pubkey (48B) -> ValidatorIndex (8B BE)
     validator_index,
 
     /// Get the DBI name string for mdb_dbi_open().
@@ -156,7 +156,7 @@ pub fn encodeU64BE(value: u64) [8]u8 {
     return buf;
 }
 
-/// Encode a composite key: root(32) ++ column_index(8 LE).
+/// Encode a composite key: root(32) ++ column_index(8 BE).
 pub fn rootColumnKey(root: [32]u8, column_index: u64) [40]u8 {
     var key: [40]u8 = undefined;
     @memcpy(key[0..32], &root);

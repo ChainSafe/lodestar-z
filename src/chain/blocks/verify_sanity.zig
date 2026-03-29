@@ -112,10 +112,10 @@ pub fn verifySanity(
     }
 
     // 2. Not finalized — block slot must be strictly after the finalized slot.
-    // C-finalized fix: spec says reject slot < finalized_slot, not <=.
-    // Using <= would incorrectly reject the finalized block itself (e.g. during checkpoint sync).
+    // Spec: block.slot > finalized_slot, i.e. reject block_slot <= finalized_slot.
+    // Note: the finalized block itself has block_slot == finalized_slot, so rejecting <= is correct.
     const finalized_slot = fork_choice.getFinalizedCheckpoint().epoch * preset.SLOTS_PER_EPOCH;
-    if (block_slot < finalized_slot) {
+    if (block_slot <= finalized_slot) {
         if (opts.ignore_if_finalized) return .{ .skipped = {} };
         return BlockImportError.WouldRevertFinalizedSlot;
     }

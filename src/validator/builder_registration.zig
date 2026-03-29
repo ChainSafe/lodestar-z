@@ -132,13 +132,7 @@ pub const BuilderRegistrationService = struct {
                     };
                     break :blk sig.compress();
                 } else {
-                    const sig = v.secret_key.sign(&signing_root, @import("bls").DST, null) catch |err| {
-                        log.warn("failed to sign builder registration for {}: {s}", .{
-                            std.fmt.fmtSliceHexLower(&v.pubkey),
-                            @errorName(err),
-                        });
-                        continue;
-                    };
+                    const sig = v.secret_key.sign(&signing_root, @import("bls").DST, null);
                     break :blk sig.compress();
                 }
             };

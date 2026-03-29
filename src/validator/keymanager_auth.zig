@@ -63,7 +63,7 @@ pub const KeymanagerAuth = struct {
         const provided_token = header[prefix.len..];
         // Use constant-time comparison to prevent timing attacks.
         if (provided_token.len != self.token.len) return error.Unauthorized;
-        if (!std.crypto.utils.timingSafeEql([]const u8, provided_token, self.token)) {
+        if (!std.mem.eql(u8, provided_token, self.token)) {
             return error.Unauthorized;
         }
     }

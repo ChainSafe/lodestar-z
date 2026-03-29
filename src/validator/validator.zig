@@ -579,8 +579,7 @@ pub const ValidatorClient = struct {
         // Graceful shutdown sequence.
         log.info("validator client stopping...", .{});
 
-        // Flush slashing protection DB.
-        self.validator_store.slashing_db.close();
+        // Note: slashing_db.close() is called by validator_store.deinit() — do NOT call it here.
 
         // Log session summary.
         const session_end_ns: u64 = @intCast(std.time.nanoTimestamp());
