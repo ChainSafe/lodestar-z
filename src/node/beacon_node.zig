@@ -1041,6 +1041,7 @@ pub const BeaconNode = struct {
         const genesis_time = try genesis_state.state.genesisTime();
         self.clock = SlotClock.fromGenesis(genesis_time, self.config.chain);
         self.chain.genesis_time_s = genesis_time;
+        self.api_context.genesis_time = genesis_time;
 
         // Initialize fork choice with genesis anchor block.
         // Get justified/finalized checkpoints from genesis state.
@@ -1178,6 +1179,7 @@ pub const BeaconNode = struct {
         const genesis_time = try checkpoint_state.state.genesisTime();
         self.clock = SlotClock.fromGenesis(genesis_time, self.config.chain);
         self.chain.genesis_time_s = genesis_time;
+        self.api_context.genesis_time = genesis_time;
 
         // Initialize fork choice with checkpoint as anchor.
         var justified_cp: types.phase0.Checkpoint.Type = undefined;
@@ -3547,7 +3549,7 @@ fn getAggregateAttestationCallback(
     errdefer out.deinit();
     const writer = &out.writer;
 
-    try writer.writeAll("{\"data\":{");
+    try writer.writeAll("{");
     try writer.print("\"aggregation_bits\":\"0x", .{});
     for (best.aggregation_bits.data.items) |byte| {
         try writer.print("{x:0>2}", .{byte});
@@ -3569,7 +3571,7 @@ fn getAggregateAttestationCallback(
     try writer.writeAll("\"signature\":\"0x");
     for (best.signature) |byte| try writer.print("{x:0>2}", .{byte});
     try writer.writeAll("\"");
-    try writer.writeAll("}}");
+    try writer.writeAll("}");
 
     return out.toOwnedSlice();
 }
@@ -3585,9 +3587,13 @@ fn importBlockCallback(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
     const node = cb_ctx.node;
     const allocator = node.allocator;
 
-    // Infer fork from head slot.
-    const head_slot = node.head_tracker.head_slot;
-    const fork_seq = cb_ctx.beacon_config.forkSeq(head_slot);
+    // Infer fork from the block's actual slot (SSZ offset 96-104, after 96-byte signature).
+    // Using head_slot would misidentify the fork for blocks from earlier forks.
+    const block_slot: u64 = if (block_bytes.len >= 104)
+        std.mem.readInt(u64, block_bytes[96..104], .little)
+    else
+        node.head_tracker.head_slot; // fallback for malformed blocks
+    const fork_seq = cb_ctx.beacon_config.forkSeq(block_slot);
 
     const any_signed = try AnySignedBeaconBlock.deserialize(allocator, .full, fork_seq, block_bytes);
     defer any_signed.deinit(allocator);

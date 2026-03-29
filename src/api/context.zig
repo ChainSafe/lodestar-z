@@ -334,6 +334,9 @@ pub const ApiContext = struct {
     /// Beacon chain configuration.
     beacon_config: *const BeaconConfig,
 
+    /// Actual genesis time (set from genesis state or checkpoint, NOT config minimum).
+    genesis_time: u64 = 0,
+
     /// Allocator for dynamic responses.
 
     /// Event bus for SSE beacon chain events.

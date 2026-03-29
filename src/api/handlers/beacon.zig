@@ -21,9 +21,12 @@ const consensus_types = @import("consensus_types");
 /// Returns genesis time, genesis validators root, and genesis fork version.
 pub fn getGenesis(ctx: *ApiContext) HandlerResult(types.GenesisData) {
     const cfg = ctx.beacon_config;
+    // Use actual genesis time (set from genesis/checkpoint state) if available;
+    // fall back to config minimum for compatibility when genesis_time is not yet set.
+    const genesis_time = if (ctx.genesis_time != 0) ctx.genesis_time else cfg.chain.MIN_GENESIS_TIME;
     return .{
         .data = .{
-            .genesis_time = cfg.chain.MIN_GENESIS_TIME,
+            .genesis_time = genesis_time,
             .genesis_validators_root = cfg.genesis_validator_root,
             .genesis_fork_version = cfg.chain.GENESIS_FORK_VERSION,
         },

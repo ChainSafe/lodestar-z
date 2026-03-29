@@ -15,8 +15,10 @@ const std = @import("std");
 
 /// HTTP status codes used by the Beacon API.
 pub const ErrorCode = enum(u16) {
+    accepted = 202,
     bad_request = 400,
     unauthorized = 401,
+    forbidden = 403,
     not_found = 404,
     method_not_allowed = 405,
     not_acceptable = 406,
@@ -31,8 +33,10 @@ pub const ErrorCode = enum(u16) {
 
     pub fn phrase(self: ErrorCode) []const u8 {
         return switch (self) {
+            .accepted => "Accepted",
             .bad_request => "Bad Request",
             .unauthorized => "Unauthorized",
+            .forbidden => "Forbidden",
             .not_found => "Not Found",
             .method_not_allowed => "Method Not Allowed",
             .not_acceptable => "Not Acceptable",
@@ -70,20 +74,39 @@ pub const ApiError = struct {
 /// Any unrecognized error maps to 500 Internal Server Error.
 pub fn fromZigError(err: anyerror) ApiError {
     return switch (err) {
+        // 202 Accepted (block already known — not an error, but returned through error path)
+        error.BlockAlreadyKnown,
+        => .{ .code = .accepted, .message = "Block already known" },
+
         // 400 Bad Request
         error.InvalidBlockId,
         error.InvalidStateId,
         error.InvalidValidatorId,
         error.BadRequest,
         error.InvalidInput,
+        error.InvalidRequest,
+        error.InvalidHex,
+        error.InvalidRequestBody,
+        error.MissingField,
+        error.MismatchedCounts,
         => .{ .code = .bad_request, .message = "Bad request: invalid parameter" },
+
+        // 401 Unauthorized
+        error.Unauthorized,
+        => .{ .code = .unauthorized, .message = "Unauthorized" },
+
+        // 403 Forbidden
+        error.KeymanagerDisabled,
+        => .{ .code = .forbidden, .message = "Keymanager is disabled" },
 
         // 404 Not Found
         error.BlockNotFound,
         error.StateNotFound,
+        error.StateNotAvailable,
         error.ValidatorNotFound,
         error.SlotNotFound,
         error.NotFound,
+        error.PeerNotFound,
         => .{ .code = .not_found, .message = "Resource not found" },
 
         // 405 Method Not Allowed
@@ -100,6 +123,7 @@ pub fn fromZigError(err: anyerror) ApiError {
 
         // 501 Not Implemented
         error.NotImplemented,
+        error.ValidatorMonitorNotConfigured,
         => .{ .code = .not_implemented, .message = "Not implemented" },
 
         // 503 Service Unavailable

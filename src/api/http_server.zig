@@ -573,7 +573,14 @@ pub const HttpServer = struct {
     }
 
     fn hGetPeers(self: *HttpServer, _: DispatchContext) !HandlerResult {
+        const alloc = self.allocator;
         const result = handlers.node.getPeers(self.api_context);
+        defer {
+            for (result.data) |info| {
+                if (info.peer_id.len > 0) alloc.free(@constCast(info.peer_id));
+            }
+            alloc.free(result.data);
+        }
         return self.makeJsonResult([]const types.PeerInfo, result);
     }
 
@@ -621,6 +628,7 @@ pub const HttpServer = struct {
         // Deserialize SSZ bytes into typed block, then serialize to JSON via SSZ type system
         const fork_seq = self.api_context.beacon_config.forkSeq(block_result.slot);
         const any_block = try AnySignedBeaconBlock.deserialize(alloc, .full, fork_seq, block_result.data);
+        defer any_block.deinit(alloc);
         const body = try json_response.writeBlockEnvelope(alloc, any_block, meta);
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = meta };
     }
@@ -1049,6 +1057,7 @@ pub const HttpServer = struct {
         // Deserialize SSZ bytes into typed block, then serialize to JSON via SSZ type system
         const fork_seq = ForkSeq.fromName(handler_res.data.fork);
         const any_block = try AnySignedBeaconBlock.deserialize(alloc, .full, fork_seq, handler_res.data.ssz_bytes);
+        defer any_block.deinit(alloc);
         const body_json = try json_response.writeBlockEnvelope(alloc, any_block, block_meta);
         return .{ .status = 200, .content_type = "application/json", .body = body_json, .meta = block_meta };
     }
@@ -1216,6 +1225,7 @@ pub const HttpServer = struct {
         // TODO(stub): returns full block, not blinded. Blinding requires fork-specific payload stripping.
         const fork_seq = self.api_context.beacon_config.forkSeq(block_result.slot);
         const any_block = try AnySignedBeaconBlock.deserialize(alloc, .full, fork_seq, block_result.data);
+        defer any_block.deinit(alloc);
         const body = try json_response.writeBlockEnvelope(alloc, any_block, meta);
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = meta };
     }
