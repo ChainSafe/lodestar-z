@@ -4,6 +4,7 @@
 //! Measures performance across varying validator counts and inactive-validator percentages.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zbench = @import("zbench");
 const fork_choice = @import("fork_choice");
 
@@ -24,7 +25,6 @@ const ComputeDeltasBench = struct {
     /// Snapshot of initial current_indices for reset before each iteration.
     /// computeDeltas mutates current_indices (sets current = next after processing),
     /// so without reset, subsequent iterations hit the unchanged fast path (no-op).
-    /// This matches TS beforeEach which resets both arrays every iteration.
     initial_current_indices: []const VoteIndex,
 
     pub fn run(self: ComputeDeltasBench, allocator: std.mem.Allocator) void {
@@ -42,6 +42,15 @@ const ComputeDeltasBench = struct {
             self.equivocating,
         ) catch unreachable;
         _ = result;
+    }
+
+    pub fn deinit(self: *ComputeDeltasBench, allocator: std.mem.Allocator) void {
+        allocator.free(self.current_indices);
+        allocator.free(self.next_indices);
+        allocator.free(self.old_balances);
+        allocator.free(self.new_balances);
+        allocator.free(self.initial_current_indices);
+        self.deltas_cache.deinit(allocator);
     }
 };
 
@@ -99,11 +108,14 @@ fn setupBench(
 }
 
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.c_allocator;
+    defer if (builtin.mode == .Debug) {
+        std.debug.assert(debug_allocator.deinit() == .ok);
+    };
     const stdout = std.io.getStdOut().writer();
 
     var bench = zbench.Benchmark.init(allocator, .{});
-    defer bench.deinit();
 
     const num_proto_nodes: u32 = 300;
     const inactive_pcts = [_]u32{ 0, 10, 20, 50 };
@@ -111,10 +123,20 @@ pub fn main() !void {
 
     // Shared equivocating indices: {1, 2, 3, 4, 5}
     const equivocating = try allocator.create(EquivocatingIndices);
-    equivocating.* = EquivocatingIndices.init(allocator);
-    for ([_]u64{ 1, 2, 3, 4, 5 }) |idx| {
-        try equivocating.put(idx, {});
+    defer {
+        equivocating.deinit(allocator);
+        allocator.destroy(equivocating);
     }
+    equivocating.* = .empty;
+    for ([_]u64{ 1, 2, 3, 4, 5 }) |idx| {
+        try equivocating.put(allocator, idx, {});
+    }
+
+    // Track benchmark instances for cleanup after bench.run().
+    const BENCH_COUNT = validator_counts.len * inactive_pcts.len;
+    var delta_caches: [BENCH_COUNT]*DeltasCache = undefined;
+    var bench_instances: [BENCH_COUNT]*ComputeDeltasBench = undefined;
+    var bench_idx: usize = 0;
 
     // Register each benchmark combination.
     inline for (validator_counts) |vc| {
@@ -123,14 +145,23 @@ pub fn main() !void {
             dc.* = .empty;
             const b = try allocator.create(ComputeDeltasBench);
             b.* = try setupBench(allocator, vc, num_proto_nodes, pct, equivocating, dc);
+            delta_caches[bench_idx] = dc;
+            bench_instances[bench_idx] = b;
+            bench_idx += 1;
             const b_const: *const ComputeDeltasBench = b;
             try bench.addParam(
-                std.fmt.comptimePrint("computeDeltas vc={d} inactive={d}%", .{ vc, pct }),
+                std.fmt.comptimePrint("deltas {d}k i{d}%", .{ vc / 1000, pct }),
                 b_const,
                 .{},
             );
         }
     }
+    defer for (0..BENCH_COUNT) |i| {
+        bench_instances[i].deinit(allocator);
+        allocator.destroy(delta_caches[i]);
+        allocator.destroy(bench_instances[i]);
+    };
 
+    defer bench.deinit();
     try bench.run(stdout);
 }

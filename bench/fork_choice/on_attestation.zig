@@ -1,24 +1,20 @@
 //! Benchmark for fork-choice `onAttestation` operation.
 //!
 //! Measures how fast the fork choice can process indexed attestations.
-//! Ported from the Lodestar TS `onAttestation.test.ts` benchmark.
 //!
 //! Setup: 600K validators, 64-block linear chain, 0 equivocated.
 //!   - Unaggregated: 3 committees x 135 validators = 405 single-validator attestations.
 //!   - Aggregated: 64 committees x 11 aggregators x 135 validators = 704 aggregated attestations.
 //!   - Total: 1109 attestations per iteration.
 //!
-//! Fairness notes vs TS benchmark:
-//!   - TS computes SSZ hashTreeRoot + toHexString per attestation inside the measured loop.
-//!     Zig uses precomputed roots (no SSZ hashing measured). This is a known difference —
-//!     Zig does not include SSZ hashing overhead.
-//!   - TS has 64 unique attestation data roots (one per committee index), so the
+//!   - Computes SSZ hashTreeRoot per attestation inside the measured loop (matching TS).
+//!   - 64 unique attestation data roots (one per committee index), so the
 //!     validation cache hits ~1045 times and misses ~64 times per iteration.
-//!     Zig matches this by generating per-committee unique roots.
-//!   - TS creates a fresh ForkChoice in beforeEach (clean cache each iteration).
-//!     Zig clears the validation cache at the start of each run() to match.
+//!   - Clears the validation cache at the start of each run() to match TS
+//!     beforeEach behavior (fresh ForkChoice per iteration).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zbench = @import("zbench");
 const fork_choice = @import("fork_choice");
 const consensus_types = @import("consensus_types");
@@ -27,6 +23,7 @@ const fork_types = @import("fork_types");
 const ForkChoice = fork_choice.ForkChoiceStruct;
 const AnyIndexedAttestation = fork_types.AnyIndexedAttestation;
 const Phase0IndexedAttestation = consensus_types.phase0.IndexedAttestation.Type;
+const AttestationData = consensus_types.phase0.AttestationData;
 
 const util = @import("util.zig");
 
@@ -43,38 +40,34 @@ const UNAGG_COUNT: u32 = UNAGG_COMMITTEES * VALIDATORS_PER_COMMITTEE; // 405
 const AGG_COUNT: u32 = AGG_COMMITTEES * AGGREGATORS_PER_COMMITTEE; // 704
 const TOTAL_ATT_COUNT: u32 = UNAGG_COUNT + AGG_COUNT; // 1109
 
-/// Generate a unique attestation data root for a given committee index.
-/// In TS, each committee index produces a different hashTreeRoot because the
-/// AttestationData.index field differs. We simulate this with deterministic roots.
-fn makeAttDataRoot(committee_index: u32) [32]u8 {
-    var root: [32]u8 = [_]u8{0xAA} ** 32;
-    std.mem.writeInt(u32, root[0..4], committee_index, .little);
-    return root;
-}
-
 /// Benchmark struct for onAttestation.
 ///
-/// Pre-builds all 1109 attestations during setup so the benchmark loop
-/// measures only `onAttestation` processing time.
-///
-/// Per-attestation roots match TS behavior: attestations within the same
-/// committee share the same root (validation cache hit), but different
-/// committees have different roots (cache miss → full validation).
+/// Pre-builds all 1109 attestations during setup. Each run() iteration
+/// computes SSZ hashTreeRoot per attestation inside the loop (matching TS).
 const OnAttestationBench = struct {
     fc: *ForkChoice,
     phase0_atts: []Phase0IndexedAttestation,
     any_atts: []AnyIndexedAttestation,
-    /// Per-attestation data roots. Attestations in the same committee share
-    /// the same root (64 unique roots total, matching TS).
-    att_data_roots: [][32]u8,
 
     pub fn run(self: OnAttestationBench, allocator: std.mem.Allocator) void {
         // Clear validation cache to match TS behavior (fresh ForkChoice per iteration).
         self.fc.validated_attestation_datas.clearRetainingCapacity();
 
-        for (self.any_atts, 0..) |*att, i| {
-            self.fc.onAttestation(allocator, att, self.att_data_roots[i], false) catch unreachable;
+        for (self.any_atts, self.phase0_atts) |*att, *phase0_att| {
+            // Compute hashTreeRoot of AttestationData inside the loop, matching TS behavior.
+            var att_data_root: [32]u8 = undefined;
+            AttestationData.hashTreeRoot(&phase0_att.data, &att_data_root) catch unreachable;
+            self.fc.onAttestation(allocator, att, att_data_root, false) catch unreachable;
         }
+    }
+
+    pub fn deinit(self: *OnAttestationBench, allocator: std.mem.Allocator) void {
+        for (self.phase0_atts) |*att| {
+            att.attesting_indices.deinit(allocator);
+        }
+        allocator.free(self.phase0_atts);
+        allocator.free(self.any_atts);
+        util.deinitForkChoice(allocator, self.fc);
     }
 };
 
@@ -108,10 +101,9 @@ fn setupBench(allocator: std.mem.Allocator) !OnAttestationBench {
     const att_slot: u64 = 63;
     const target_epoch: u64 = 1; // floor(63 / SLOTS_PER_EPOCH=32)
 
-    // Allocate attestation and root storage.
+    // Allocate attestation storage.
     const phase0_atts = try allocator.alloc(Phase0IndexedAttestation, TOTAL_ATT_COUNT);
     const any_atts = try allocator.alloc(AnyIndexedAttestation, TOTAL_ATT_COUNT);
-    const att_data_roots = try allocator.alloc([32]u8, TOTAL_ATT_COUNT);
 
     var att_idx: u32 = 0;
 
@@ -119,7 +111,6 @@ fn setupBench(allocator: std.mem.Allocator) !OnAttestationBench {
     // Each attestation has exactly one attesting index.
     // TS: index = committeeIndex, so committees 0-2 have unique data.
     for (0..UNAGG_COMMITTEES) |c| {
-        const committee_root = makeAttDataRoot(@intCast(c));
         for (0..VALIDATORS_PER_COMMITTEE) |v| {
             const vi: u64 = @as(u64, c) * VALIDATORS_PER_COMMITTEE + @as(u64, v);
 
@@ -136,7 +127,6 @@ fn setupBench(allocator: std.mem.Allocator) !OnAttestationBench {
             };
             try phase0_atts[att_idx].attesting_indices.append(allocator, vi);
             any_atts[att_idx] = .{ .phase0 = &phase0_atts[att_idx] };
-            att_data_roots[att_idx] = committee_root;
             att_idx += 1;
         }
     }
@@ -146,7 +136,6 @@ fn setupBench(allocator: std.mem.Allocator) !OnAttestationBench {
     // TS: index = committeeIndex, so committees 0-63 have unique data.
     // Committees 0-2 share roots with unaggregated attestations above.
     for (0..AGG_COMMITTEES) |c| {
-        const committee_root = makeAttDataRoot(@intCast(c));
         for (0..AGGREGATORS_PER_COMMITTEE) |a| {
             const start_index: u64 = @as(u64, c) * VALIDATORS_PER_COMMITTEE * AGGREGATORS_PER_COMMITTEE +
                 @as(u64, a) * VALIDATORS_PER_COMMITTEE;
@@ -166,7 +155,6 @@ fn setupBench(allocator: std.mem.Allocator) !OnAttestationBench {
                 try phase0_atts[att_idx].attesting_indices.append(allocator, start_index + @as(u64, v));
             }
             any_atts[att_idx] = .{ .phase0 = &phase0_atts[att_idx] };
-            att_data_roots[att_idx] = committee_root;
             att_idx += 1;
         }
     }
@@ -177,19 +165,33 @@ fn setupBench(allocator: std.mem.Allocator) !OnAttestationBench {
         .fc = fc,
         .phase0_atts = phase0_atts,
         .any_atts = any_atts,
-        .att_data_roots = att_data_roots,
     };
 }
 
+fn deinitBench(allocator: std.mem.Allocator, b: OnAttestationBench) void {
+    for (b.phase0_atts) |att| {
+        var a = att.attesting_indices;
+        a.deinit(allocator);
+    }
+    allocator.free(b.phase0_atts);
+    allocator.free(b.any_atts);
+    util.deinitForkChoice(allocator, b.fc);
+}
+
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.c_allocator;
+    defer if (builtin.mode == .Debug) {
+        std.debug.assert(debug_allocator.deinit() == .ok);
+    };
     const stdout = std.io.getStdOut().writer();
 
     var bench = zbench.Benchmark.init(allocator, .{});
-    defer bench.deinit();
 
     const b = try setupBench(allocator);
+    defer deinitBench(allocator, b);
     try bench.addParam("onAttestation 1109 attestations (vc=600000 bc=64)", &b, .{});
 
+    defer bench.deinit();
     try bench.run(stdout);
 }

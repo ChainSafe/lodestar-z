@@ -1023,9 +1023,11 @@ pub const ProtoArray = struct {
         parent_block_hash: ?Root,
     ) ?*const ProtoNode {
         const parent_bh = parent_block_hash orelse {
-            // Pre-Gloas path: look up by root with FULL status.
-            const idx = self.getNodeIndexByRootAndStatus(parent_root, .full) orelse return null;
-            return &self.nodes.items[idx];
+            // Pre-Gloas path: parent must be a pre-Gloas single-variant entry.
+            // Fork sequence is monotonic — a pre-Gloas block cannot have a Gloas parent.
+            const vi = self.indices.get(parent_root) orelse return null;
+            assert(vi == .pre_gloas);
+            return &self.nodes.items[vi.pre_gloas];
         };
 
         // Post-Gloas path: find by root + block hash.
@@ -4483,7 +4485,6 @@ test "SetOptimisticToInvalid with null LVH returns error" {
     try testing.expectError(error.InvalidLVHExecutionResponse, result);
 }
 
-// Prysm: ValidToInvalid stores lvh_error
 // Tree:
 //   genesis(0x00)
 //     |

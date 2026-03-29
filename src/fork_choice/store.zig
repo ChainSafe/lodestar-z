@@ -164,7 +164,7 @@ pub const ForkChoiceStore = struct {
             },
             .finalized_checkpoint = finalized_checkpoint,
             .unrealized_finalized_checkpoint = finalized_checkpoint,
-            .equivocating_indices = EquivocatingIndices.init(allocator),
+            .equivocating_indices = .empty,
             .justified_balances_getter = justified_balances_getter,
             .events = events,
         };
@@ -197,8 +197,8 @@ pub const ForkChoiceStore = struct {
         if (self.events.on_finalized) |cb| cb.call(checkpoint);
     }
 
-    pub fn deinit(self: *ForkChoiceStore) void {
-        self.equivocating_indices.deinit();
+    pub fn deinit(self: *ForkChoiceStore, allocator: Allocator) void {
+        self.equivocating_indices.deinit(allocator);
         self.justified.balances.release();
         self.unrealized_justified.balances.release();
     }

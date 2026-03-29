@@ -110,7 +110,7 @@ pub fn initializeForkChoice(allocator: Allocator, opts: Opts) !*ForkChoice {
         dummy_getter,
         .{},
     );
-    errdefer fc_store.deinit();
+    errdefer fc_store.deinit(allocator);
 
     // -- ForkChoice (in-place init) --
     const fc = try allocator.create(ForkChoice);
@@ -138,7 +138,7 @@ pub fn initializeForkChoice(allocator: Allocator, opts: Opts) !*ForkChoice {
 
     // -- Mark equivocating validators --
     for (0..opts.initial_equivocated_count) |i| {
-        try fc.fc_store.equivocating_indices.put(@intCast(i), {});
+        try fc.fc_store.equivocating_indices.put(allocator, @intCast(i), {});
     }
 
     return fc;
@@ -146,18 +146,22 @@ pub fn initializeForkChoice(allocator: Allocator, opts: Opts) !*ForkChoice {
 
 /// Release all resources allocated by `initializeForkChoice`.
 pub fn deinitForkChoice(allocator: Allocator, fc: *ForkChoice) void {
+    // Save pointers before fc.deinit() sets self.* = undefined.
+    const fc_store = fc.fc_store;
+    const pa = fc.pa;
+
     // ForkChoice.deinit releases votes, caches, queued attestations, and
     // the balances Rc reference held by ForkChoice itself.
     fc.deinit(allocator);
 
     // ForkChoiceStore.deinit releases equivocating_indices and both
     // justified/unrealized_justified balance Rc references.
-    fc.fc_store.deinit();
-    allocator.destroy(fc.fc_store);
+    fc_store.deinit(allocator);
+    allocator.destroy(fc_store);
 
     // ProtoArray.deinit releases nodes, indices, and ptc_votes.
-    fc.proto_array.deinit(allocator);
-    allocator.destroy(fc.proto_array);
+    pa.deinit(allocator);
+    allocator.destroy(pa);
 
     // Finally free the ForkChoice struct itself.
     allocator.destroy(fc);

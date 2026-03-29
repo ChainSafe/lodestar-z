@@ -4,6 +4,7 @@
 //! Ported from the Lodestar TS `updateHead.test.ts` benchmark.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zbench = @import("zbench");
 const fork_choice = @import("fork_choice");
 const ForkChoice = fork_choice.ForkChoiceStruct;
@@ -36,8 +37,8 @@ const UpdateHeadBench = struct {
 fn setupBench(allocator: std.mem.Allocator, opts: util.Opts) !UpdateHeadBench {
     const fc = try util.initializeForkChoice(allocator, opts);
 
-    const vote1 = fc.proto_array.getDefaultNodeIndex(fc.head.block_root).?;
-    const vote2 = fc.proto_array.getDefaultNodeIndex(fc.head.parent_root).?;
+    const vote1 = fc.pa.getDefaultNodeIndex(fc.head.block_root).?;
+    const vote2 = fc.pa.getDefaultNodeIndex(fc.head.parent_root).?;
 
     // Set all validators' initial next_index to vote1 so the first iteration
     // that flips to vote2 produces a full set of deltas.
@@ -58,11 +59,19 @@ fn setupBench(allocator: std.mem.Allocator, opts: util.Opts) !UpdateHeadBench {
     };
 }
 
+fn deinitBench(allocator: std.mem.Allocator, b: UpdateHeadBench) void {
+    allocator.destroy(b.flip);
+    util.deinitForkChoice(allocator, b.fc);
+}
+
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.c_allocator;
+    defer if (builtin.mode == .Debug) {
+        std.debug.assert(debug_allocator.deinit() == .ok);
+    };
     const stdout = std.io.getStdOut().writer();
     var bench = zbench.Benchmark.init(allocator, .{});
-    defer bench.deinit();
 
     // ── Validator count sweep (block_count=64, equivocated=0) ──
 
@@ -71,6 +80,7 @@ pub fn main() !void {
         .initial_validator_count = 100_000,
         .initial_equivocated_count = 0,
     });
+    defer deinitBench(allocator, vc_100k);
     try bench.addParam("updateHead vc=100000 bc=64 eq=0", &vc_100k, .{});
 
     const vc_600k = try setupBench(allocator, .{
@@ -78,6 +88,7 @@ pub fn main() !void {
         .initial_validator_count = 600_000,
         .initial_equivocated_count = 0,
     });
+    defer deinitBench(allocator, vc_600k);
     try bench.addParam("updateHead vc=600000 bc=64 eq=0", &vc_600k, .{});
 
     const vc_1m = try setupBench(allocator, .{
@@ -85,6 +96,7 @@ pub fn main() !void {
         .initial_validator_count = 1_000_000,
         .initial_equivocated_count = 0,
     });
+    defer deinitBench(allocator, vc_1m);
     try bench.addParam("updateHead vc=1000000 bc=64 eq=0", &vc_1m, .{});
 
     // ── Block count sweep (validators=600_000, equivocated=0) ──
@@ -94,6 +106,7 @@ pub fn main() !void {
         .initial_validator_count = 600_000,
         .initial_equivocated_count = 0,
     });
+    defer deinitBench(allocator, bc_320);
     try bench.addParam("updateHead vc=600000 bc=320 eq=0", &bc_320, .{});
 
     const bc_1200 = try setupBench(allocator, .{
@@ -101,6 +114,7 @@ pub fn main() !void {
         .initial_validator_count = 600_000,
         .initial_equivocated_count = 0,
     });
+    defer deinitBench(allocator, bc_1200);
     try bench.addParam("updateHead vc=600000 bc=1200 eq=0", &bc_1200, .{});
 
     const bc_7200 = try setupBench(allocator, .{
@@ -108,6 +122,7 @@ pub fn main() !void {
         .initial_validator_count = 600_000,
         .initial_equivocated_count = 0,
     });
+    defer deinitBench(allocator, bc_7200);
     try bench.addParam("updateHead vc=600000 bc=7200 eq=0", &bc_7200, .{});
 
     // ── Equivocated count sweep (validators=600_000, blocks=64) ──
@@ -117,6 +132,7 @@ pub fn main() !void {
         .initial_validator_count = 600_000,
         .initial_equivocated_count = 1_000,
     });
+    defer deinitBench(allocator, eq_1k);
     try bench.addParam("updateHead vc=600000 bc=64 eq=1000", &eq_1k, .{});
 
     const eq_10k = try setupBench(allocator, .{
@@ -124,6 +140,7 @@ pub fn main() !void {
         .initial_validator_count = 600_000,
         .initial_equivocated_count = 10_000,
     });
+    defer deinitBench(allocator, eq_10k);
     try bench.addParam("updateHead vc=600000 bc=64 eq=10000", &eq_10k, .{});
 
     const eq_300k = try setupBench(allocator, .{
@@ -131,7 +148,9 @@ pub fn main() !void {
         .initial_validator_count = 600_000,
         .initial_equivocated_count = 300_000,
     });
+    defer deinitBench(allocator, eq_300k);
     try bench.addParam("updateHead vc=600000 bc=64 eq=300000", &eq_300k, .{});
 
+    defer bench.deinit();
     try bench.run(stdout);
 }
