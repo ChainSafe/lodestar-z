@@ -642,53 +642,61 @@ pub fn submitPoolSyncCommittees(ctx: *ApiContext, body: []const u8) !HandlerResu
 // Pool endpoints
 // ---------------------------------------------------------------------------
 
+const OpPoolCallback = context.OpPoolCallback;
+
 /// GET /eth/v1/beacon/pool/attestations
 ///
-/// Returns pending attestation group count from the operation pool.
-/// The full response with attestation data requires the op pool callback.
-pub fn getPoolAttestations(ctx: *ApiContext) HandlerResult(types.PoolCounts) {
-    const counts = getPoolCountsFromCtx(ctx);
-    return .{
-        .data = .{
-            .attestation_groups = counts[0],
-            .voluntary_exits = counts[1],
-            .proposer_slashings = counts[2],
-            .attester_slashings = counts[3],
-            .bls_to_execution_changes = counts[4],
-        },
-    };
+/// Returns pending attestations from the operation pool.
+/// Supports optional `slot` and `committee_index` query parameter filters.
+pub fn getPoolAttestations(
+    ctx: *ApiContext,
+    slot_filter: ?u64,
+    committee_index_filter: ?u64,
+) !HandlerResult([]const OpPoolCallback.Phase0Attestation) {
+    const cb = ctx.op_pool orelse return .{ .data = &.{} };
+    const get_fn = cb.getAttestationsFn orelse return .{ .data = &.{} };
+    const items = try get_fn(cb.ptr, ctx.allocator, slot_filter, committee_index_filter);
+    return .{ .data = items };
 }
 
 /// GET /eth/v1/beacon/pool/voluntary_exits
 ///
-/// Returns the count of pending voluntary exits.
-pub fn getPoolVoluntaryExits(ctx: *ApiContext) HandlerResult(usize) {
-    const counts = getPoolCountsFromCtx(ctx);
-    return .{ .data = counts[1] };
+/// Returns pending signed voluntary exits from the operation pool.
+pub fn getPoolVoluntaryExits(ctx: *ApiContext) !HandlerResult([]const OpPoolCallback.SignedVoluntaryExit) {
+    const cb = ctx.op_pool orelse return .{ .data = &.{} };
+    const get_fn = cb.getVoluntaryExitsFn orelse return .{ .data = &.{} };
+    const items = try get_fn(cb.ptr, ctx.allocator);
+    return .{ .data = items };
 }
 
 /// GET /eth/v1/beacon/pool/proposer_slashings
 ///
-/// Returns the count of pending proposer slashings.
-pub fn getPoolProposerSlashings(ctx: *ApiContext) HandlerResult(usize) {
-    const counts = getPoolCountsFromCtx(ctx);
-    return .{ .data = counts[2] };
+/// Returns pending proposer slashings from the operation pool.
+pub fn getPoolProposerSlashings(ctx: *ApiContext) !HandlerResult([]const OpPoolCallback.ProposerSlashing) {
+    const cb = ctx.op_pool orelse return .{ .data = &.{} };
+    const get_fn = cb.getProposerSlashingsFn orelse return .{ .data = &.{} };
+    const items = try get_fn(cb.ptr, ctx.allocator);
+    return .{ .data = items };
 }
 
 /// GET /eth/v1/beacon/pool/attester_slashings
 ///
-/// Returns the count of pending attester slashings.
-pub fn getPoolAttesterSlashings(ctx: *ApiContext) HandlerResult(usize) {
-    const counts = getPoolCountsFromCtx(ctx);
-    return .{ .data = counts[3] };
+/// Returns pending attester slashings from the operation pool.
+pub fn getPoolAttesterSlashings(ctx: *ApiContext) !HandlerResult([]const OpPoolCallback.Phase0AttesterSlashing) {
+    const cb = ctx.op_pool orelse return .{ .data = &.{} };
+    const get_fn = cb.getAttesterSlashingsFn orelse return .{ .data = &.{} };
+    const items = try get_fn(cb.ptr, ctx.allocator);
+    return .{ .data = items };
 }
 
 /// GET /eth/v1/beacon/pool/bls_to_execution_changes
 ///
-/// Returns the count of pending BLS-to-execution changes.
-pub fn getPoolBlsToExecutionChanges(ctx: *ApiContext) HandlerResult(usize) {
-    const counts = getPoolCountsFromCtx(ctx);
-    return .{ .data = counts[4] };
+/// Returns pending signed BLS-to-execution changes from the operation pool.
+pub fn getPoolBlsToExecutionChanges(ctx: *ApiContext) !HandlerResult([]const OpPoolCallback.SignedBLSToExecutionChange) {
+    const cb = ctx.op_pool orelse return .{ .data = &.{} };
+    const get_fn = cb.getBlsToExecutionChangesFn orelse return .{ .data = &.{} };
+    const items = try get_fn(cb.ptr, ctx.allocator);
+    return .{ .data = items };
 }
 
 fn getPoolCountsFromCtx(ctx: *ApiContext) [5]usize {
@@ -1138,14 +1146,14 @@ test "submitBlock propagates error from callback" {
     try std.testing.expectError(error.BlockAlreadyKnown, result);
 }
 
-test "getPoolAttestations returns zero counts when no op_pool" {
+test "getPoolAttestations returns empty when no op_pool" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    const resp = getPoolAttestations(&tc.ctx);
-    try std.testing.expectEqual(@as(usize, 0), resp.data.attestation_groups);
+    const resp = try getPoolAttestations(&tc.ctx, null, null);
+    try std.testing.expectEqual(@as(usize, 0), resp.data.len);
 }
 
-test "getPoolAttestations returns counts from callback" {
+test "getPoolAttestations returns items from callback" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
@@ -1153,18 +1161,65 @@ test "getPoolAttestations returns counts from callback" {
         fn getPoolCounts(_: *anyopaque) [5]usize {
             return .{ 10, 3, 1, 2, 5 };
         }
+        fn getAttestations(_: *anyopaque, allocator: std.mem.Allocator, _: ?u64, _: ?u64) anyerror![]OpPoolCallback.Phase0Attestation {
+            var result = try allocator.alloc(OpPoolCallback.Phase0Attestation, 2);
+            result[0] = .{
+                .aggregation_bits = .{ .data = std.ArrayListUnmanaged(u8).empty, .bit_len = 0 },
+                .data = .{
+                    .slot = 42,
+                    .index = 0,
+                    .beacon_block_root = [_]u8{0} ** 32,
+                    .source = .{ .epoch = 0, .root = [_]u8{0} ** 32 },
+                    .target = .{ .epoch = 1, .root = [_]u8{0} ** 32 },
+                },
+                .signature = [_]u8{0} ** 96,
+            };
+            result[1] = result[0];
+            result[1].data.slot = 43;
+            return result;
+        }
     };
 
     var dummy: u8 = 0;
     tc.ctx.op_pool = .{
         .ptr = &dummy,
         .getPoolCountsFn = &MockOpPool.getPoolCounts,
+        .getAttestationsFn = &MockOpPool.getAttestations,
     };
 
-    const resp = getPoolAttestations(&tc.ctx);
-    try std.testing.expectEqual(@as(usize, 10), resp.data.attestation_groups);
-    try std.testing.expectEqual(@as(usize, 3), resp.data.voluntary_exits);
-    try std.testing.expectEqual(@as(usize, 1), resp.data.proposer_slashings);
+    const resp = try getPoolAttestations(&tc.ctx, null, null);
+    defer std.testing.allocator.free(resp.data);
+    try std.testing.expectEqual(@as(usize, 2), resp.data.len);
+    try std.testing.expectEqual(@as(u64, 42), resp.data[0].data.slot);
+    try std.testing.expectEqual(@as(u64, 43), resp.data[1].data.slot);
+}
+
+test "getPoolVoluntaryExits returns empty when no op_pool" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const resp = try getPoolVoluntaryExits(&tc.ctx);
+    try std.testing.expectEqual(@as(usize, 0), resp.data.len);
+}
+
+test "getPoolProposerSlashings returns empty when no op_pool" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const resp = try getPoolProposerSlashings(&tc.ctx);
+    try std.testing.expectEqual(@as(usize, 0), resp.data.len);
+}
+
+test "getPoolAttesterSlashings returns empty when no op_pool" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const resp = try getPoolAttesterSlashings(&tc.ctx);
+    try std.testing.expectEqual(@as(usize, 0), resp.data.len);
+}
+
+test "getPoolBlsToExecutionChanges returns empty when no op_pool" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const resp = try getPoolBlsToExecutionChanges(&tc.ctx);
+    try std.testing.expectEqual(@as(usize, 0), resp.data.len);
 }
 
 // ---------------------------------------------------------------------------

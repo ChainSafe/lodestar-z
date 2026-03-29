@@ -251,6 +251,7 @@ pub const BeaconNode = struct {
     block_import_ctx: *BlockImportCallbackCtx,
     head_state_cb_ctx: *HeadStateCallbackCtx,
     agg_att_cb_ctx: *AggregateAttestationCallbackCtx,
+    op_pool_cb_ctx: *OpPoolCallbackCtx,
     /// EventBus for SSE beacon chain events. Owned by BeaconNode, wired into
     /// ApiContext.event_bus and Chain.event_callback.
     event_bus: *api_mod.EventBus,
@@ -532,6 +533,11 @@ pub const BeaconNode = struct {
             .op_pool = op_pool,
         };
 
+        const op_pool_cb_ctx = try allocator.create(OpPoolCallbackCtx);
+        op_pool_cb_ctx.* = .{
+            .op_pool = op_pool,
+        };
+
         // W4: Instantiate EventBus for SSE beacon chain events.
         const event_bus_ptr = try allocator.create(api_mod.EventBus);
         event_bus_ptr.* = api_mod.EventBus.init(allocator);
@@ -569,6 +575,16 @@ pub const BeaconNode = struct {
             .aggregate_attestation = .{
                 .ptr = @ptrCast(agg_att_cb_ctx),
                 .getAggregateAttestationFn = &getAggregateAttestationCallback,
+            },
+            // Wire op_pool callback for pool GET endpoints
+            .op_pool = .{
+                .ptr = @ptrCast(op_pool_cb_ctx),
+                .getPoolCountsFn = &opPoolGetCountsCallback,
+                .getAttestationsFn = &opPoolGetAttestationsCallback,
+                .getVoluntaryExitsFn = &opPoolGetVoluntaryExitsCallback,
+                .getProposerSlashingsFn = &opPoolGetProposerSlashingsCallback,
+                .getAttesterSlashingsFn = &opPoolGetAttesterSlashingsCallback,
+                .getBlsToExecutionChangesFn = &opPoolGetBlsToExecutionChangesCallback,
             },
             // W4: wire EventBus
             .event_bus = event_bus_ptr,
@@ -647,6 +663,7 @@ pub const BeaconNode = struct {
             .block_import_ctx = block_import_ctx,
             .head_state_cb_ctx = head_state_cb_ctx,
             .agg_att_cb_ctx = agg_att_cb_ctx,
+            .op_pool_cb_ctx = op_pool_cb_ctx,
             .event_bus = event_bus_ptr,
             .event_callback_ctx = event_cb_ctx,
             .unknown_block_sync = UnknownBlockSync.init(allocator),
@@ -791,6 +808,7 @@ pub const BeaconNode = struct {
         allocator.destroy(self.block_import_ctx);
         allocator.destroy(self.head_state_cb_ctx);
         allocator.destroy(self.agg_att_cb_ctx);
+        allocator.destroy(self.op_pool_cb_ctx);
 
         // W4: deinit EventBus
         allocator.destroy(self.event_bus);
@@ -4648,4 +4666,67 @@ fn builderRegisterValidatorsCallback(ptr: *anyopaque, registrations_json: []cons
     // TODO: extend BuilderApi with a registerValidatorsJson([]const u8) method to
     // avoid the JSON → struct → JSON round-trip.
     std.log.info("builder: received validator registration request (forwarding not yet implemented, VC uses direct relay path)", .{});
+}
+
+// ---------------------------------------------------------------------------
+// OpPoolCallbackCtx + callbacks
+// — glue between ApiContext.OpPoolCallback and the concrete op pools
+// ---------------------------------------------------------------------------
+
+/// Context for the op_pool API callback.
+pub const OpPoolCallbackCtx = struct {
+    op_pool: *OpPool,
+};
+
+fn opPoolGetCountsCallback(ptr: *anyopaque) [5]usize {
+    const ctx: *OpPoolCallbackCtx = @ptrCast(@alignCast(ptr));
+    return .{
+        ctx.op_pool.attestation_pool.groupCount(),
+        ctx.op_pool.voluntary_exit_pool.size(),
+        ctx.op_pool.proposer_slashing_pool.size(),
+        ctx.op_pool.attester_slashing_pool.size(),
+        ctx.op_pool.bls_change_pool.size(),
+    };
+}
+
+fn opPoolGetAttestationsCallback(
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+    slot_filter: ?u64,
+    committee_index_filter: ?u64,
+) anyerror![]types.phase0.Attestation.Type {
+    const ctx: *OpPoolCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.op_pool.attestation_pool.getAll(allocator, slot_filter, committee_index_filter);
+}
+
+fn opPoolGetVoluntaryExitsCallback(
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+) anyerror![]types.phase0.SignedVoluntaryExit.Type {
+    const ctx: *OpPoolCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.op_pool.voluntary_exit_pool.getAll(allocator);
+}
+
+fn opPoolGetProposerSlashingsCallback(
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+) anyerror![]types.phase0.ProposerSlashing.Type {
+    const ctx: *OpPoolCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.op_pool.proposer_slashing_pool.getAll(allocator);
+}
+
+fn opPoolGetAttesterSlashingsCallback(
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+) anyerror![]types.phase0.AttesterSlashing.Type {
+    const ctx: *OpPoolCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.op_pool.attester_slashing_pool.getAll(allocator);
+}
+
+fn opPoolGetBlsToExecutionChangesCallback(
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+) anyerror![]types.capella.SignedBLSToExecutionChange.Type {
+    const ctx: *OpPoolCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.op_pool.bls_change_pool.getAll(allocator);
 }

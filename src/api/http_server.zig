@@ -658,29 +658,46 @@ pub const HttpServer = struct {
         return self.makeVoidResult(result);
     }
 
-    fn hGetPoolAttestations(self: *HttpServer, _: DispatchContext) !HandlerResult {
-        const result = handlers.beacon.getPoolAttestations(self.api_context);
-        return self.makeJsonResult(types.PoolCounts, result);
+    fn hGetPoolAttestations(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const alloc = self.allocator;
+        const slot_filter: ?u64 = if (dc.getQuery("slot")) |s| std.fmt.parseInt(u64, s, 10) catch null else null;
+        const ci_filter: ?u64 = if (dc.getQuery("committee_index")) |s| std.fmt.parseInt(u64, s, 10) catch null else null;
+        const handler_res = try handlers.beacon.getPoolAttestations(self.api_context, slot_filter, ci_filter);
+        defer alloc.free(handler_res.data);
+        const body = try json_response.writeBeaconArrayEnvelope(alloc, consensus_types.phase0.Attestation, handler_res.data, handler_res.meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
 
     fn hGetPoolVoluntaryExits(self: *HttpServer, _: DispatchContext) !HandlerResult {
-        const result = handlers.beacon.getPoolVoluntaryExits(self.api_context);
-        return self.makeJsonResult(usize, result);
+        const alloc = self.allocator;
+        const handler_res = try handlers.beacon.getPoolVoluntaryExits(self.api_context);
+        defer alloc.free(handler_res.data);
+        const body = try json_response.writeBeaconArrayEnvelope(alloc, consensus_types.phase0.SignedVoluntaryExit, handler_res.data, handler_res.meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
 
     fn hGetPoolProposerSlashings(self: *HttpServer, _: DispatchContext) !HandlerResult {
-        const result = handlers.beacon.getPoolProposerSlashings(self.api_context);
-        return self.makeJsonResult(usize, result);
+        const alloc = self.allocator;
+        const handler_res = try handlers.beacon.getPoolProposerSlashings(self.api_context);
+        defer alloc.free(handler_res.data);
+        const body = try json_response.writeBeaconArrayEnvelope(alloc, consensus_types.phase0.ProposerSlashing, handler_res.data, handler_res.meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
 
     fn hGetPoolAttesterSlashings(self: *HttpServer, _: DispatchContext) !HandlerResult {
-        const result = handlers.beacon.getPoolAttesterSlashings(self.api_context);
-        return self.makeJsonResult(usize, result);
+        const alloc = self.allocator;
+        const handler_res = try handlers.beacon.getPoolAttesterSlashings(self.api_context);
+        defer alloc.free(handler_res.data);
+        const body = try json_response.writeBeaconArrayEnvelope(alloc, consensus_types.phase0.AttesterSlashing, handler_res.data, handler_res.meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
 
     fn hGetPoolBlsToExecutionChanges(self: *HttpServer, _: DispatchContext) !HandlerResult {
-        const result = handlers.beacon.getPoolBlsToExecutionChanges(self.api_context);
-        return self.makeJsonResult(usize, result);
+        const alloc = self.allocator;
+        const handler_res = try handlers.beacon.getPoolBlsToExecutionChanges(self.api_context);
+        defer alloc.free(handler_res.data);
+        const body = try json_response.writeBeaconArrayEnvelope(alloc, consensus_types.capella.SignedBLSToExecutionChange, handler_res.data, handler_res.meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
 
     fn hSubmitPoolAttestations(self: *HttpServer, dc: DispatchContext) !HandlerResult {

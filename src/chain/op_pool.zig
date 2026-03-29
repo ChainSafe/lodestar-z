@@ -189,6 +189,34 @@ pub const AttestationPool = struct {
         return self.pool.count();
     }
 
+    /// Return all attestations in the pool, optionally filtered by slot and
+    /// committee index. Caller owns the returned slice.
+    ///
+    /// Used by GET /eth/v1/beacon/pool/attestations.
+    pub fn getAll(
+        self: *AttestationPool,
+        allocator: Allocator,
+        slot_filter: ?Slot,
+        committee_index_filter: ?u64,
+    ) ![]Phase0Attestation.Type {
+        var result = std.ArrayListUnmanaged(Phase0Attestation.Type).empty;
+        errdefer result.deinit(allocator);
+
+        var it = self.pool.iterator();
+        while (it.next()) |entry| {
+            for (entry.value_ptr.items) |att| {
+                if (slot_filter) |s| {
+                    if (att.data.slot != s) continue;
+                }
+                if (committee_index_filter) |ci| {
+                    if (att.data.index != ci) continue;
+                }
+                try result.append(allocator, att);
+            }
+        }
+        return result.toOwnedSlice(allocator);
+    }
+
     /// Alias for groupCount — total unique AttestationData entries.
     pub fn count(self: *const AttestationPool) usize {
         return self.pool.count();
@@ -264,6 +292,19 @@ pub const VoluntaryExitPool = struct {
         for (remove_buf[0..remove_len]) |key| {
             _ = self.pool.remove(key);
         }
+    }
+
+    /// Return all pending voluntary exits. Caller owns the returned slice.
+    ///
+    /// Used by GET /eth/v1/beacon/pool/voluntary_exits.
+    pub fn getAll(self: *VoluntaryExitPool, allocator: Allocator) ![]SignedVoluntaryExit.Type {
+        var result = std.ArrayListUnmanaged(SignedVoluntaryExit.Type).empty;
+        errdefer result.deinit(allocator);
+        var it = self.pool.iterator();
+        while (it.next()) |entry| {
+            try result.append(allocator, entry.value_ptr.*);
+        }
+        return result.toOwnedSlice(allocator);
     }
 
     pub fn size(self: *const VoluntaryExitPool) usize {
@@ -346,6 +387,19 @@ pub const ProposerSlashingPool = struct {
         }
     }
 
+    /// Return all pending proposer slashings. Caller owns the returned slice.
+    ///
+    /// Used by GET /eth/v1/beacon/pool/proposer_slashings.
+    pub fn getAll(self: *ProposerSlashingPool, allocator: Allocator) ![]ProposerSlashing.Type {
+        var result = std.ArrayListUnmanaged(ProposerSlashing.Type).empty;
+        errdefer result.deinit(allocator);
+        var it = self.pool.iterator();
+        while (it.next()) |entry| {
+            try result.append(allocator, entry.value_ptr.*);
+        }
+        return result.toOwnedSlice(allocator);
+    }
+
     pub fn size(self: *const ProposerSlashingPool) usize {
         return self.pool.count();
     }
@@ -417,6 +471,19 @@ pub const AttesterSlashingPool = struct {
         self.pool.clearAndFree();
     }
 
+    /// Return all pending attester slashings. Caller owns the returned slice.
+    ///
+    /// Used by GET /eth/v1/beacon/pool/attester_slashings.
+    pub fn getAll(self: *AttesterSlashingPool, allocator: Allocator) ![]Phase0AttesterSlashing {
+        var result = std.ArrayListUnmanaged(Phase0AttesterSlashing).empty;
+        errdefer result.deinit(allocator);
+        var it = self.pool.iterator();
+        while (it.next()) |entry| {
+            try result.append(allocator, entry.value_ptr.*);
+        }
+        return result.toOwnedSlice(allocator);
+    }
+
     pub fn size(self: *const AttesterSlashingPool) usize {
         return self.pool.count();
     }
@@ -474,6 +541,19 @@ pub const BlsChangePool = struct {
     /// Remove entries whose validator index was already processed.
     pub fn remove(self: *BlsChangePool, validator_index: ValidatorIndex) void {
         _ = self.pool.remove(validator_index);
+    }
+
+    /// Return all pending BLS-to-execution changes. Caller owns the returned slice.
+    ///
+    /// Used by GET /eth/v1/beacon/pool/bls_to_execution_changes.
+    pub fn getAll(self: *BlsChangePool, allocator: Allocator) ![]SignedBLSToExecutionChange.Type {
+        var result = std.ArrayListUnmanaged(SignedBLSToExecutionChange.Type).empty;
+        errdefer result.deinit(allocator);
+        var it = self.pool.iterator();
+        while (it.next()) |entry| {
+            try result.append(allocator, entry.value_ptr.*);
+        }
+        return result.toOwnedSlice(allocator);
     }
 
     pub fn size(self: *const BlsChangePool) usize {
