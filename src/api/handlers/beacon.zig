@@ -1515,17 +1515,7 @@ pub fn getBlockRewards(
     _: types.BlockId,
 ) !HandlerResult(types.BlockRewards) {
     // TODO: wire reward computation from block processor.
-    return .{
-        .data = .{
-            .proposer_index = 0,
-            .total = 0,
-            .attestations = 0,
-            .sync_aggregate = 0,
-            .proposer_slashings = 0,
-            .attester_slashings = 0,
-        },
-        .meta = .{ .execution_optimistic = false, .finalized = false },
-    };
+    return error.NotImplemented;
 }
 
 /// POST /eth/v1/beacon/rewards/attestations/{epoch}
@@ -1533,19 +1523,12 @@ pub fn getBlockRewards(
 /// Returns per-validator attestation rewards for the epoch.
 /// Stub until reward computation is wired.
 pub fn getAttestationRewards(
-    ctx: *ApiContext,
+    _: *ApiContext,
     _: u64,
     _: []const u64,
 ) !HandlerResult(types.AttestationRewardsData) {
-    const ideal = try ctx.allocator.alloc(types.IdealAttestationReward, 0);
-    const total = try ctx.allocator.alloc(types.TotalAttestationReward, 0);
-    return .{
-        .data = .{
-            .ideal_rewards = ideal,
-            .total_rewards = total,
-        },
-        .meta = .{ .execution_optimistic = false, .finalized = false },
-    };
+    // TODO: wire reward computation from block processor.
+    return error.NotImplemented;
 }
 
 /// POST /eth/v1/beacon/rewards/sync_committee/{block_id}
@@ -1553,13 +1536,10 @@ pub fn getAttestationRewards(
 /// Returns sync committee rewards per validator for the given block.
 /// Stub until reward computation is wired.
 pub fn getSyncCommitteeRewards(
-    ctx: *ApiContext,
+    _: *ApiContext,
     _: types.BlockId,
     _: []const u64,
 ) !HandlerResult([]const types.SyncCommitteeReward) {
-    const rewards = try ctx.allocator.alloc(types.SyncCommitteeReward, 0);
-    return .{
-        .data = rewards,
-        .meta = .{ .execution_optimistic = false, .finalized = false },
-    };
+    // TODO: wire reward computation from block processor.
+    return error.NotImplemented;
 }

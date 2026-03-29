@@ -522,7 +522,6 @@ test "response chunk roundtrip with context bytes and BeaconBlocksByRange" {
     const request: messages.BeaconBlocksByRangeRequest.Type = .{
         .start_slot = 1000,
         .count = 64,
-        .step = 1,
     };
 
     var ssz_buf: [messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
@@ -543,7 +542,6 @@ test "response chunk roundtrip with context bytes and BeaconBlocksByRange" {
     try messages.BeaconBlocksByRangeRequest.deserializeFromBytes(decoded.ssz_bytes, &decoded_req);
     try testing.expectEqual(request.start_slot, decoded_req.start_slot);
     try testing.expectEqual(request.count, decoded_req.count);
-    try testing.expectEqual(request.step, decoded_req.step);
 }
 
 /// Decode all response chunks from a complete response wire buffer.

@@ -286,12 +286,6 @@ fn handleBeaconBlocksByRange(
         return makeErrorResponse(allocator, .invalid_request, "Malformed BeaconBlocksByRangeRequest");
     };
 
-    // Validate step: per Altair+ the step field must be 1.
-    // Reference: consensus-specs/specs/phase0/p2p-interface.md#beaconblocksbyrange-v2
-    if (request.step != 1) {
-        return makeErrorResponse(allocator, .invalid_request, "BlocksByRange step must be 1");
-    }
-
     // Validate count.
     if (request.count == 0) {
         return makeErrorResponse(allocator, .invalid_request, "Count must be greater than zero");
@@ -308,6 +302,11 @@ fn handleBeaconBlocksByRange(
 
     // Build response chunks with context bytes.
     const chunks = try allocator.alloc(ResponseChunk, blocks.len);
+    var filled: usize = 0;
+    errdefer {
+        for (chunks[0..filled]) |c| allocator.free(c.ssz_payload);
+        allocator.free(chunks);
+    }
     for (blocks, 0..) |block_ssz, i| {
         const payload = try allocator.alloc(u8, block_ssz.len);
         @memcpy(payload, block_ssz);
@@ -333,6 +332,7 @@ fn handleBeaconBlocksByRange(
             .context_bytes = context.getForkDigest(context.ptr, actual_slot),
             .ssz_payload = payload,
         };
+        filled += 1;
     }
     return chunks;
 }
@@ -889,7 +889,6 @@ test "BeaconBlocksByRange: request 3 blocks, get 3 response chunks with context 
     const request: BeaconBlocksByRangeRequest.Type = .{
         .start_slot = 100,
         .count = 3,
-        .step = 1,
     };
     var request_bytes: [BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
     _ = BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &request_bytes);
@@ -919,7 +918,6 @@ test "BeaconBlocksByRange: count exceeding MAX_REQUEST_BLOCKS returns InvalidReq
     const request: BeaconBlocksByRangeRequest.Type = .{
         .start_slot = 0,
         .count = max_request_blocks + 1,
-        .step = 1,
     };
     var request_bytes: [BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
     _ = BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &request_bytes);
@@ -1038,7 +1036,6 @@ test "BeaconBlocksByRange: zero count returns InvalidRequest" {
     const request: BeaconBlocksByRangeRequest.Type = .{
         .start_slot = 0,
         .count = 0,
-        .step = 1,
     };
     var request_bytes: [BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
     _ = BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &request_bytes);

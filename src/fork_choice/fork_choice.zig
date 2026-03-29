@@ -1578,7 +1578,10 @@ pub const ForkChoice = struct {
                             att_slot,
                             block_root,
                             vote_entry.value_ptr.*,
-                        ) catch continue;
+                        ) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            else => continue,
+                        };
                     }
 
                     block_entry.value_ptr.deinit(allocator);
