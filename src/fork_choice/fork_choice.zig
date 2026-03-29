@@ -2152,7 +2152,7 @@ fn initTestForkChoice(
     const pa = try allocator.create(ProtoArray);
     errdefer allocator.destroy(pa);
 
-    pa.* = try ProtoArray.initialize(
+    try pa.initialize(
         allocator,
         anchor_block,
         current_slot,
@@ -2162,7 +2162,7 @@ fn initTestForkChoice(
     const fc_store = try allocator.create(ForkChoiceStore);
     errdefer allocator.destroy(fc_store);
 
-    fc_store.* = try ForkChoiceStore.init(
+    try fc_store.init(
         allocator,
         current_slot,
         justified_checkpoint,
@@ -2206,7 +2206,7 @@ fn initTestForkChoiceWithOpts(
 ) !*ForkChoice {
     const pa = try allocator.create(ProtoArray);
     errdefer allocator.destroy(pa);
-    pa.* = try ProtoArray.initialize(allocator, anchor_block, current_slot);
+    try pa.initialize(allocator, anchor_block, current_slot);
     errdefer pa.deinit(allocator);
 
     const fc_store = try allocator.create(ForkChoiceStore);

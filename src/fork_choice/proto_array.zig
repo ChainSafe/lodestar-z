@@ -533,14 +533,15 @@ pub const ProtoArray = struct {
         score: u64,
     };
 
-    pub fn init(
+    fn init(
+        self: *ProtoArray,
         justified_epoch: Epoch,
         justified_root: Root,
         finalized_epoch: Epoch,
         finalized_root: Root,
         prune_threshold: u32,
-    ) ProtoArray {
-        return .{
+    ) void {
+        self.* = .{
             .nodes = .empty,
             .indices = .empty,
             .prune_threshold = prune_threshold,
@@ -564,26 +565,25 @@ pub const ProtoArray = struct {
     /// Create a ProtoArray from a genesis/anchor block.
     /// The block's block_root is used as its target_root since it lies on an epoch boundary.
     pub fn initialize(
+        self: *ProtoArray,
         allocator: Allocator,
         block: ProtoBlock,
         current_slot: Slot,
-    ) (Allocator.Error || ProtoArrayError)!ProtoArray {
-        var proto_array = ProtoArray.init(
+    ) (Allocator.Error || ProtoArrayError)!void {
+        self.init(
             block.justified_epoch,
             block.justified_root,
             block.finalized_epoch,
             block.finalized_root,
             DEFAULT_PRUNE_THRESHOLD,
         );
-        errdefer proto_array.deinit(allocator);
+        errdefer self.deinit(allocator);
 
         // Use block_root as target_root — genesis/anchor always sits on an epoch boundary.
         var anchor = block;
         anchor.target_root = block.block_root;
 
-        try proto_array.onBlock(allocator, anchor, current_slot, null);
-
-        return proto_array;
+        try self.onBlock(allocator, anchor, current_slot, null);
     }
 
     // ── Accessors ──
@@ -2327,7 +2327,8 @@ fn makeRoot(byte: u8) Root {
 
 // Tree: (empty — no blocks inserted)
 test "init and deinit" {
-    var pa = ProtoArray.init(1, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(1, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 0), pa.nodes.items.len);

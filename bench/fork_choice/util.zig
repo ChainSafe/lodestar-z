@@ -95,13 +95,13 @@ pub fn initializeForkChoice(allocator: Allocator, opts: Opts) !*ForkChoice {
     // -- ProtoArray from genesis --
     const pa = try allocator.create(ProtoArray);
     errdefer allocator.destroy(pa);
-    pa.* = try ProtoArray.initialize(allocator, genesis_block, 0);
+    try pa.initialize(allocator, genesis_block, 0);
     errdefer pa.deinit(allocator);
 
     // -- ForkChoiceStore --
     const fc_store = try allocator.create(ForkChoiceStore);
     errdefer allocator.destroy(fc_store);
-    fc_store.* = try ForkChoiceStore.init(
+    try fc_store.init(
         allocator,
         0,
         genesis_cp,

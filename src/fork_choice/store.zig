@@ -129,6 +129,7 @@ pub const ForkChoiceStore = struct {
     };
 
     pub fn init(
+        self: *ForkChoiceStore,
         allocator: Allocator,
         current_slot: Slot,
         justified_checkpoint: CheckpointWithPayloadStatus,
@@ -136,7 +137,7 @@ pub const ForkChoiceStore = struct {
         justified_balances: []const u16,
         justified_balances_getter: JustifiedBalancesGetter,
         events: ForkChoiceStoreEvents,
-    ) !ForkChoiceStore {
+    ) !void {
         var balances_list = JustifiedBalances.init(allocator);
         errdefer balances_list.deinit();
 
@@ -150,7 +151,7 @@ pub const ForkChoiceStore = struct {
         // referenced by `unrealized_justified`
         _ = balances_rc.acquire();
 
-        return .{
+        self.* = .{
             .current_slot = current_slot,
             .justified = .{
                 .checkpoint = justified_checkpoint,
@@ -227,7 +228,8 @@ fn dummyBalancesGetter(_: ?*anyopaque, _: CheckpointWithPayloadStatus, _: *Cache
 const test_getter: JustifiedBalancesGetter = .{ .getFn = dummyBalancesGetter };
 
 fn initTestStore(balances: []const u16) !ForkChoiceStore {
-    return ForkChoiceStore.init(
+    var store: ForkChoiceStore = undefined;
+    try store.init(
         testing.allocator,
         0,
         makeCheckpoint(0, hashFromByte(0x01)),
@@ -236,6 +238,7 @@ fn initTestStore(balances: []const u16) !ForkChoiceStore {
         test_getter,
         .{},
     );
+    return store;
 }
 
 test "computeTotalBalance" {
@@ -270,7 +273,7 @@ test "CheckpointWithPayloadStatus.fromCheckpoint" {
 
 test "init shares Rc between justified and unrealized_justified" {
     var store = try initTestStore(&.{ 10, 20, 30 });
-    defer store.deinit();
+    defer store.deinit(testing.allocator);
 
     // Both point to the same Rc (ref_count = 2).
     try testing.expectEqual(store.justified.balances, store.unrealized_justified.balances);
@@ -283,7 +286,7 @@ test "init shares Rc between justified and unrealized_justified" {
 
 test "setJustified separates Rc from unrealized_justified" {
     var store = try initTestStore(&.{ 10, 20 });
-    defer store.deinit();
+    defer store.deinit(testing.allocator);
 
     const old_rc = store.justified.balances;
     const new_cp = makeCheckpoint(1, hashFromByte(0x02));
@@ -322,7 +325,7 @@ test "setFinalizedCheckpoint updates and fires event" {
         test_getter,
         .{ .on_finalized = .{ .context = @ptrCast(&tracker), .callFn = Tracker.onFinalized } },
     );
-    defer store.deinit();
+    defer store.deinit(testing.allocator);
 
     const new_cp = makeCheckpoint(3, hashFromByte(0x0F));
     store.setFinalizedCheckpoint(new_cp);
@@ -354,7 +357,7 @@ test "setJustified fires onJustified event" {
         test_getter,
         .{ .on_justified = .{ .context = @ptrCast(&tracker), .callFn = Tracker.onJustified } },
     );
-    defer store.deinit();
+    defer store.deinit(testing.allocator);
 
     try store.setJustified(testing.allocator, makeCheckpoint(2, hashFromByte(0x0A)), &.{ 7, 8 });
 
@@ -365,5 +368,5 @@ test "setJustified fires onJustified event" {
 test "deinit releases all Rc without leak" {
     // If deinit leaks, testing.allocator will report it.
     var store = try initTestStore(&.{ 1, 2, 3 });
-    store.deinit();
+    store.deinit(testing.allocator);
 }
