@@ -166,6 +166,9 @@ pub const ValidatorConfig = struct {
     suggested_fee_recipient: [20]u8 = [_]u8{0} ** 20,
     /// Default gas limit for builder registrations (default: 30_000_000).
     gas_limit: u64 = 30_000_000,
+    /// Graffiti bytes (32 bytes) included in proposed blocks.
+    /// Defaults to all-zeros. Operators can set a custom string (UTF-8, right-padded).
+    graffiti: [32]u8 = std.mem.zeroes([32]u8),
     /// Builder boost factor: percentage advantage given to builder bids.
     /// 100 = neutral (builder wins if bid >= local). 200 = builder needs 2x.
     /// Per-spec default is 100. Set null to disable builder path.

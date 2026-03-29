@@ -57,7 +57,16 @@ pub const PayloadStatusV1 = struct {
     /// and its ancestors. null when status is syncing or accepted.
     latest_valid_hash: ?[32]u8 = null,
     /// Validation error message. null when status is valid.
+    /// Heap-allocated by the JSON decoder — must be freed via `deinit()`.
     validation_error: ?[]const u8 = null,
+
+    /// Free the heap-allocated `validation_error` string (if any).
+    /// Must be called when the caller is done with the payload status.
+    pub fn deinit(self: *const PayloadStatusV1, allocator: std.mem.Allocator) void {
+        if (self.validation_error) |ve| {
+            allocator.free(ve);
+        }
+    }
 };
 
 /// The current head, safe, and finalized block hashes of the beacon chain,
@@ -100,6 +109,11 @@ pub const ForkchoiceUpdatedResponse = struct {
     payload_status: PayloadStatusV1,
     /// Identifier of the payload build process; null when no build was requested.
     payload_id: ?[8]u8 = null,
+
+    /// Free heap-allocated fields (validation_error in payload_status).
+    pub fn deinit(self: *const ForkchoiceUpdatedResponse, allocator: std.mem.Allocator) void {
+        self.payload_status.deinit(allocator);
+    }
 };
 
 // ── Execution Payloads ────────────────────────────────────────────────────────

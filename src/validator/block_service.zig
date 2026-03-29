@@ -63,6 +63,8 @@ pub const BlockService = struct {
     syncing_tracker: ?*SyncingTracker,
     /// Slots per epoch (from chain config).
     slots_per_epoch: u64,
+    /// Graffiti bytes (32 bytes) included in proposed blocks.
+    graffiti: [32]u8,
     /// Builder boost factor (from ValidatorConfig). Null = builder disabled.
     /// When set, the BN is asked for a blinded block; if blinded, use blinded signing path.
     builder_boost_factor: ?u64,
@@ -73,6 +75,7 @@ pub const BlockService = struct {
         validator_store: *ValidatorStore,
         signing_ctx: SigningContext,
         slots_per_epoch: u64,
+        graffiti: [32]u8,
         builder_boost_factor: ?u64,
     ) BlockService {
         return .{
@@ -89,6 +92,7 @@ pub const BlockService = struct {
             .doppelganger = null,
             .syncing_tracker = null,
             .slots_per_epoch = slots_per_epoch,
+            .graffiti = graffiti,
             .builder_boost_factor = builder_boost_factor,
         };
     }
@@ -243,8 +247,7 @@ pub const BlockService = struct {
         //    When builder is enabled, the BN may return a blinded block
         //    (Eth-Execution-Payload-Blinded: true header) if the builder relay
         //    provided a better bid than the local execution payload.
-        const graffiti: [32]u8 = std.mem.zeroes([32]u8);
-        const block_resp = try self.api.produceBlockSsz(io, slot, randao_reveal, graffiti);
+        const block_resp = try self.api.produceBlockSsz(io, slot, randao_reveal, self.graffiti);
         defer self.allocator.free(block_resp.block_ssz);
 
         const fork_name = block_resp.forkNameStr();

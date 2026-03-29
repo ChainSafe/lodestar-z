@@ -181,12 +181,15 @@ pub const AttestationGroup = struct {
                 continue;
             }
 
-            // Case 3: exclusive — do NOT aggregate until BLS sig aggregation is implemented.
+            // Case 3: exclusive — store separately until BLS sig aggregation is implemented.
             // Merging aggregation_bits without aggregating the BLS signature produces an
             // invalid attestation that will fail verification on block proposal.
-            // TODO: implement BLS aggregate_signatures() via blst bindings, then re-enable.
+            // TODO: implement BLS aggregate_signatures() via blst bindings, then re-enable
+            // actual aggregation (OR bits + aggregate sigs).
+            // For now, exclusive attestations are stored as separate entries and the
+            // greedy selector in getAttestationsForBlock picks the best coverage.
             if (isExclusive(new_bytes, existing_bytes)) {
-                return .Duplicate;
+                continue;
             }
         }
 
@@ -628,7 +631,7 @@ test "AggregatedAttestationPool: add duplicate is AlreadyKnown" {
     try std.testing.expectEqual(@as(usize, 1), pool.entryCount());
 }
 
-test "AggregatedAttestationPool: exclusive attestations are aggregated" {
+test "AggregatedAttestationPool: exclusive attestations stored separately" {
     const allocator = std.testing.allocator;
     var pool = AggregatedAttestationPool.init(allocator);
     defer pool.deinit();
@@ -642,15 +645,12 @@ test "AggregatedAttestationPool: exclusive attestations are aggregated" {
 
     _ = try pool.add(att1);
     const outcome = try pool.add(att2);
-    try std.testing.expectEqual(InsertOutcome.Aggregated, outcome);
-    // Still one entry (merged)
-    try std.testing.expectEqual(@as(usize, 1), pool.entryCount());
-
-    // The merged entry should have both bits set
-    var data_root: [32]u8 = undefined;
-    try AttestationData.hashTreeRoot(&att1.data, &data_root);
-    const group = pool.getAggregate(10, data_root).?;
-    try std.testing.expectEqual(@as(u32, 2), countBits(group.aggregation_bits.data.items));
+    // Without BLS signature aggregation, exclusive attestations are stored as
+    // separate entries (NewData). Once BLS aggregate_signatures is implemented,
+    // they should be merged and the outcome should be Aggregated.
+    try std.testing.expectEqual(InsertOutcome.NewData, outcome);
+    // Two separate entries (not merged — BLS aggregation not yet available)
+    try std.testing.expectEqual(@as(usize, 2), pool.entryCount());
 }
 
 test "AggregatedAttestationPool: superset replaces subset" {
@@ -775,10 +775,11 @@ test "AggregatedAttestationPool: getAggregate returns best" {
     var pool = AggregatedAttestationPool.init(allocator);
     defer pool.deinit();
 
-    // Add two non-overlapping attestations — they'll be merged
-    var att1 = try makeTestAttAlloc(allocator, 10, 0, &[_]u8{0b00000001}, 8);
+    // Add a superset attestation — bits 0,1,2 set
+    var att1 = try makeTestAttAlloc(allocator, 10, 0, &[_]u8{0b00000111}, 8);
     defer freeTestAtt(allocator, &att1);
-    var att2 = try makeTestAttAlloc(allocator, 10, 0, &[_]u8{0b00000010}, 8);
+    // Add a subset attestation — only bit 0 set
+    var att2 = try makeTestAttAlloc(allocator, 10, 0, &[_]u8{0b00000001}, 8);
     defer freeTestAtt(allocator, &att2);
 
     _ = try pool.add(att1);
@@ -789,6 +790,6 @@ test "AggregatedAttestationPool: getAggregate returns best" {
 
     const best = pool.getAggregate(10, data_root);
     try std.testing.expect(best != null);
-    // Merged: should have 2 bits
-    try std.testing.expectEqual(@as(u32, 2), countBits(best.?.aggregation_bits.data.items));
+    // Best should have 3 bits (the superset)
+    try std.testing.expectEqual(@as(u32, 3), countBits(best.?.aggregation_bits.data.items));
 }

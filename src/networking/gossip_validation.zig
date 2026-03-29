@@ -207,10 +207,6 @@ pub fn validateBeaconBlock(
     // [IGNORE] The block is from a slot greater than the latest finalized slot.
     if (block_slot <= ctx.finalized_slot) return .ignore;
 
-    // [IGNORE] The block is the first block with valid signature received for the proposer for the slot.
-    const was_new = ctx.seen_block_roots.insert(block_root) catch return .ignore;
-    if (!was_new) return .ignore;
-
     // [REJECT] The proposer_index is valid (within known validator set).
     const validator_count = ctx.getValidatorCount(ctx.ptr);
     if (proposer_index >= validator_count) return .reject;
@@ -226,6 +222,13 @@ pub fn validateBeaconBlock(
 
     // [IGNORE] The block's parent has been seen.
     if (!ctx.isKnownBlockRoot(ctx.ptr, parent_root)) return .ignore;
+
+    // [IGNORE] The block is the first block with valid signature received for the proposer for the slot.
+    // NOTE: This MUST be after all reject/ignore checks. If we inserted into the seen cache
+    // before proposer validation and the block was rejected, the root would be permanently
+    // poisoned — a subsequent valid gossip message for the same root would be incorrectly ignored.
+    const was_new = ctx.seen_block_roots.insert(block_root) catch return .ignore;
+    if (!was_new) return .ignore;
 
     return .accept;
 }
