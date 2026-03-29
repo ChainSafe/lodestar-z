@@ -152,9 +152,9 @@ pub const SyncChain = struct {
     /// The peer_id string is deep-copied into owned memory so the caller's
     /// buffer can be freed or reused after this call.
     pub fn addPeer(self: *SyncChain, peer_id: []const u8, target: ChainTarget) !void {
-        // If the key already exists, reuse the owned copy.
-        if (self.peers.contains(peer_id)) {
-            try self.peers.put(peer_id, target);
+        // If the key already exists, update value only — keep the owned key.
+        if (self.peers.getPtr(peer_id)) |value_ptr| {
+            value_ptr.* = target;
             self.computeTarget();
             return;
         }

@@ -55,7 +55,19 @@ pub const SeenSet = struct {
 
     pub fn initWithCapacity(allocator: std.mem.Allocator, max_capacity: u32) SeenSet {
         const cap: usize = @intCast(max_capacity);
-        const ring = allocator.alloc(Key, cap) catch &[_]Key{};
+        const ring = allocator.alloc(Key, cap) catch |err| {
+            std.log.err("SeenSet: ring buffer alloc failed (cap={d}): {s} — eviction disabled, map may grow unbounded", .{
+                cap, @errorName(err),
+            });
+            return .{
+                .map = Map.init(allocator),
+                .ring = &[_]Key{},
+                .head = 0,
+                .tail = 0,
+                .ring_len = 0,
+                .max_capacity = 0,
+            };
+        };
         return .{
             .map = Map.init(allocator),
             .ring = ring,
@@ -68,7 +80,7 @@ pub const SeenSet = struct {
 
     pub fn deinit(self: *SeenSet) void {
         const alloc = self.map.allocator;
-        alloc.free(self.ring);
+        if (self.ring.len > 0) alloc.free(self.ring);
         self.map.deinit();
     }
 

@@ -382,8 +382,8 @@ pub const P2pService = struct {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-test "P2pService: Eth2Switch compiles with 15 protocols" {
-    // 14 req/resp + 1 gossipsub = 15 protocols.
+test "P2pService: Eth2Switch compiles with 16 protocols" {
+    // 14 req/resp + 1 gossipsub + 1 identify = 16 protocols.
     const protocols = [_]type{
         StatusProtocol,
         GoodbyeProtocol,
@@ -400,8 +400,9 @@ test "P2pService: Eth2Switch compiles with 15 protocols" {
         LightClientFinalityUpdateProtocol,
         LightClientOptimisticUpdateProtocol,
         GossipsubHandler,
+        IdentifyHandler,
     };
-    try std.testing.expectEqual(@as(usize, 15), protocols.len);
+    try std.testing.expectEqual(@as(usize, 16), protocols.len);
 }
 
 test "P2pService: all eth2 protocol IDs are unique" {
@@ -421,6 +422,7 @@ test "P2pService: all eth2 protocol IDs are unique" {
         LightClientFinalityUpdateProtocol.id,
         LightClientOptimisticUpdateProtocol.id,
         GossipsubHandler.id,
+        IdentifyHandler.id,
     };
     for (ids, 0..) |id_a, i| {
         for (ids, 0..) |id_b, j| {

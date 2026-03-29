@@ -374,13 +374,13 @@ pub const PeerScoreService = struct {
     /// Prune peers with zero interactions that haven't been seen recently.
     /// Returns number of pruned entries.
     pub fn pruneInactive(self: *PeerScoreService) u32 {
-        var to_remove = std.ArrayList([]const u8).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer to_remove.deinit(self.allocator);
 
         var it = self.stats.iterator();
         while (it.next()) |entry| {
             if (entry.value_ptr.totalInteractions() == 0) {
-                to_remove.append(entry.key_ptr.*) catch continue;
+                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
             }
         }
 

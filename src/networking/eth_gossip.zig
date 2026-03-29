@@ -518,8 +518,9 @@ const TestAdapter = struct {
     gossipsub: *GossipsubService,
     adapter: EthGossipAdapter,
 
-    fn create(allocator: Allocator) !TestAdapter {
-        var self: TestAdapter = undefined;
+    fn create(allocator: Allocator) !*TestAdapter {
+        const self = try allocator.create(TestAdapter);
+        errdefer allocator.destroy(self);
 
         self.seen_blocks = gossip_validation.SeenSet.init(allocator);
         self.seen_aggs = gossip_validation.SeenSet.init(allocator);
@@ -528,14 +529,7 @@ const TestAdapter = struct {
         self.seen_as = gossip_validation.SeenSet.init(allocator);
         self.seen_bls = gossip_validation.SeenSet.init(allocator);
 
-        self.ctx = testValidationContext(
-            &self.seen_blocks,
-            &self.seen_aggs,
-            &self.seen_exits,
-            &self.seen_ps,
-            &self.seen_as,
-            &self.seen_bls,
-        );
+        self.fixupPointers();
 
         self.gossipsub = try GossipsubService.init(allocator, .{});
 
@@ -544,13 +538,25 @@ const TestAdapter = struct {
             self.gossipsub,
             &self.ctx,
             .{ 0xab, 0xcd, 0xef, 0x01 },
-            .electra, // Use electra for tests as it's the most recent non-fulu fork
+            .electra, // Use electra for tests as it is the most recent non-fulu fork
         );
 
         return self;
     }
 
-    fn destroy(self: *TestAdapter) void {
+    /// Wire self-referential ctx pointers after the struct is in its final location.
+    fn fixupPointers(self: *TestAdapter) void {
+        self.ctx = testValidationContext(
+            &self.seen_blocks,
+            &self.seen_aggs,
+            &self.seen_exits,
+            &self.seen_ps,
+            &self.seen_as,
+            &self.seen_bls,
+        );
+    }
+
+    fn destroy(self: *TestAdapter, allocator: Allocator) void {
         self.adapter.deinit();
         self.gossipsub.deinit();
         self.seen_blocks.deinit();
@@ -559,13 +565,14 @@ const TestAdapter = struct {
         self.seen_ps.deinit();
         self.seen_as.deinit();
         self.seen_bls.deinit();
+        allocator.destroy(self);
     }
 };
 
 test "EthGossipAdapter: handleMessage rejects malformed topic" {
     const allocator = testing.allocator;
-    var t = try TestAdapter.create(allocator);
-    defer t.destroy();
+    const t = try TestAdapter.create(allocator);
+    defer t.destroy(allocator);
 
     const result = t.adapter.handleMessage("/bad/topic/string", "some-data", null);
     try testing.expectEqual(ValidationResult.reject, result.validation);
@@ -574,8 +581,8 @@ test "EthGossipAdapter: handleMessage rejects malformed topic" {
 
 test "EthGossipAdapter: handleMessage rejects invalid snappy data" {
     const allocator = testing.allocator;
-    var t = try TestAdapter.create(allocator);
-    defer t.destroy();
+    const t = try TestAdapter.create(allocator);
+    defer t.destroy(allocator);
 
     const result = t.adapter.handleMessage(
         "/eth2/abcdef01/beacon_block/ssz_snappy",
@@ -588,8 +595,8 @@ test "EthGossipAdapter: handleMessage rejects invalid snappy data" {
 
 test "EthGossipAdapter: subscribeEthTopics formats correct topic strings" {
     const allocator = testing.allocator;
-    var t = try TestAdapter.create(allocator);
-    defer t.destroy();
+    const t = try TestAdapter.create(allocator);
+    defer t.destroy(allocator);
 
     try t.adapter.subscribeEthTopics();
 
@@ -605,8 +612,8 @@ test "EthGossipAdapter: subscribeEthTopics formats correct topic strings" {
 
 test "EthGossipAdapter: publish compresses with snappy" {
     const allocator = testing.allocator;
-    var t = try TestAdapter.create(allocator);
-    defer t.destroy();
+    const t = try TestAdapter.create(allocator);
+    defer t.destroy(allocator);
 
     try t.adapter.subscribeEthTopics();
 
@@ -620,8 +627,8 @@ test "EthGossipAdapter: publish compresses with snappy" {
 test "EthGossipAdapter: handleMessage with valid snappy beacon_block" {
     // Verify the full pipeline: compress → handleMessage → decompress → decode → validate.
     const allocator = testing.allocator;
-    var t = try TestAdapter.create(allocator);
-    defer t.destroy();
+    const t = try TestAdapter.create(allocator);
+    defer t.destroy(allocator);
 
     // Create a minimal fake SSZ payload that would fail SSZ deserialization.
     // This tests that the decode failure path works correctly.
