@@ -265,12 +265,8 @@ pub fn writeApiValue(stream: *std.json.Stringify, comptime T: type, value: *cons
             try stream.write(value.*);
         },
         .int => {
-            // Beacon API: u64 and larger are quoted decimals
-            if (@bitSizeOf(T) >= 64) {
-                try stream.print("\"{d}\"", .{value.*});
-            } else {
-                try stream.write(value.*);
-            }
+            // Beacon API: all integers are quoted decimal strings
+            try stream.print("\"{d}\"", .{value.*});
         },
         .@"enum" => {
             try stream.write(@tagName(value.*));

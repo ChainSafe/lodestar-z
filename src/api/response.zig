@@ -172,12 +172,8 @@ fn writeJsonValue(writer: *IoWriter, comptime T: type, value: *const T) IoError!
             }
         },
         .int, .comptime_int => {
-            // Beacon API: u64 and larger are quoted decimal strings
-            if (@bitSizeOf(T) >= 64) {
-                try print(writer, "\"{d}\"", .{value.*});
-            } else {
-                try print(writer, "{d}", .{value.*});
-            }
+            // Beacon API: all integers are quoted decimal strings
+            try print(writer, "\"{d}\"", .{value.*});
         },
         .pointer => |ptr| {
             if (ptr.size == .slice) {

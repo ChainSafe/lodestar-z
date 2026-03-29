@@ -732,7 +732,7 @@ pub const HttpServer = struct {
         const fork_version: response_meta.Fork = @enumFromInt(@intFromEnum(fork_seq));
         var meta = handler_res.meta;
         meta.version = fork_version;
-        const body = try std.fmt.allocPrint(alloc, "{{\"data\":\"ssz_omitted\",\"size\":{d}}}", .{handler_res.data.len});
+        const body = try std.fmt.allocPrint(alloc, "{{\"data\":\"ssz_omitted\",\"size\":\"{d}\"}}", .{handler_res.data.len});
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = meta };
     }
 
