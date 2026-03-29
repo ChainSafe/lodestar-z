@@ -477,7 +477,7 @@ test "gossip aggregate: reject mismatched target epoch" {
 /// 2. [REJECT] Attestation slot is within propagation range.
 /// 3. [REJECT] Attestation epoch matches target epoch.
 /// 4. [REJECT] data.index must be 0.
-/// 5. [REJECT] committee_bits must have at least one bit set.
+/// 5. [REJECT] committee_bits must have exactly one bit set.
 /// 6. [REJECT] Aggregate has at least one participant.
 /// 7. [IGNORE] (aggregator_index, epoch) pair has not been seen before.
 pub fn validateGossipElectraAggregate(
@@ -506,8 +506,8 @@ pub fn validateGossipElectraAggregate(
     // [REJECT] data.index must be 0 in Electra.
     if (data_index != 0) return .reject;
 
-    // [REJECT] committee_bits must have at least one bit set.
-    if (committee_bits_count == 0) return .reject;
+    // [REJECT] committee_bits must have exactly one bit set (Electra spec).
+    if (committee_bits_count != 1) return .reject;
 
     // [REJECT] Aggregate has participants.
     if (aggregation_bits_count == 0) return .reject;
@@ -1092,7 +1092,7 @@ test "gossip electra aggregate: accept valid aggregate" {
     var cache = SeenCache.init(testing.allocator);
     defer cache.deinit();
     const state = makeMockChainState(&cache);
-    const result = validateGossipElectraAggregate(5, 96, 3, 0, 2, 10, &state);
+    const result = validateGossipElectraAggregate(5, 96, 3, 0, 1, 10, &state);
     try testing.expectEqual(GossipAction.accept, result);
 }
 
@@ -1120,12 +1120,21 @@ test "gossip electra aggregate: reject zero aggregation bits" {
     try testing.expectEqual(GossipAction.reject, result);
 }
 
+test "gossip electra aggregate: reject multiple committee bits" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    // 2 committee bits set — spec requires exactly 1
+    const result = validateGossipElectraAggregate(5, 96, 3, 0, 2, 10, &state);
+    try testing.expectEqual(GossipAction.reject, result);
+}
+
 test "gossip electra aggregate: ignore duplicate aggregator" {
     var cache = SeenCache.init(testing.allocator);
     defer cache.deinit();
     const state = makeMockChainState(&cache);
-    const r1 = validateGossipElectraAggregate(5, 96, 3, 0, 2, 10, &state);
+    const r1 = validateGossipElectraAggregate(5, 96, 3, 0, 1, 10, &state);
     try testing.expectEqual(GossipAction.accept, r1);
-    const r2 = validateGossipElectraAggregate(5, 96, 3, 0, 2, 10, &state);
+    const r2 = validateGossipElectraAggregate(5, 96, 3, 0, 1, 10, &state);
     try testing.expectEqual(GossipAction.ignore, r2);
 }

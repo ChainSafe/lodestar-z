@@ -477,17 +477,39 @@ pub const AttestationService = struct {
             const agg_bits_hex_slice = agg_bits_hex_buf[0 .. ssz_byte_count * 2];
 
             if (signed_count > 0) try attestations_json.append(',');
-            try attestations_json.writer().print(
-                "{{\"aggregation_bits\":\"0x{s}\",\"data\":{{\"slot\":\"{d}\",\"index\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}},\"signature\":\"0x{s}\"}}",
-                .{
-                    agg_bits_hex_slice,
-                    slot, dp.duty.committee_index,
-                    bbr_hex,
-                    att_data_resp.source_epoch, src_root_hex,
-                    att_data_resp.target_epoch, tgt_root_hex,
-                    sig_hex,
-                },
-            );
+
+            // Fork-aware JSON format:
+            // - Pre-Electra: phase0 Attestation {aggregation_bits, data, signature}
+            // - Electra+: SingleAttestation {committee_index, attester_index, data, signature}
+            const att_epoch = slot / self.signing_ctx.slots_per_epoch;
+            if (att_epoch >= self.electra_fork_epoch) {
+                // Electra: SingleAttestation format for v2 endpoint
+                try attestations_json.writer().print(
+                    "{{\"committee_index\":\"{d}\",\"attester_index\":\"{d}\",\"data\":{{\"slot\":\"{d}\",\"index\":\"0\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}},\"signature\":\"0x{s}\"}}",
+                    .{
+                        dp.duty.committee_index,
+                        dp.duty.validator_index,
+                        slot,
+                        bbr_hex,
+                        att_data_resp.source_epoch, src_root_hex,
+                        att_data_resp.target_epoch, tgt_root_hex,
+                        sig_hex,
+                    },
+                );
+            } else {
+                // Pre-Electra: phase0 Attestation format
+                try attestations_json.writer().print(
+                    "{{\"aggregation_bits\":\"0x{s}\",\"data\":{{\"slot\":\"{d}\",\"index\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}},\"signature\":\"0x{s}\"}}",
+                    .{
+                        agg_bits_hex_slice,
+                        slot, dp.duty.committee_index,
+                        bbr_hex,
+                        att_data_resp.source_epoch, src_root_hex,
+                        att_data_resp.target_epoch, tgt_root_hex,
+                        sig_hex,
+                    },
+                );
+            }
             signed_pubkeys.append(dp.duty.pubkey) catch {};
             signed_count += 1;
         }
