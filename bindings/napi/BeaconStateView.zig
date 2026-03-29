@@ -219,6 +219,38 @@ pub fn BeaconStateView_latestExecutionPayloadHeader(env: napi.Env, cb: napi.Call
     };
 }
 
+/// Get the block hash from the latest execution payload header (bellatrix+).
+/// Returns: Bytes32 (Uint8Array)
+pub fn BeaconStateView_latestBlockHash(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const block_hash = cached_state.state.latestExecutionPayloadHeaderBlockHash() catch |err| {
+        switch (err) {
+            error.InvalidAtFork => {
+                try env.throwError("INVALID_FORK", "latestBlockHash not available before bellatrix");
+                return env.getNull();
+            },
+            else => return err,
+        }
+    };
+    return sszValueToNapiValue(env, ct.primitive.Bytes32, block_hash);
+}
+
+/// Get the block number from the latest execution payload header (bellatrix+).
+/// Returns: number
+pub fn BeaconStateView_payloadBlockNumber(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const block_number = cached_state.state.latestExecutionPayloadHeaderBlockNumber() catch |err| {
+        switch (err) {
+            error.InvalidAtFork => {
+                try env.throwError("INVALID_FORK", "payloadBlockNumber not available before bellatrix");
+                return env.getNull();
+            },
+            else => return err,
+        }
+    };
+    return env.createInt64(@intCast(block_number));
+}
+
 /// Get the historical summaries from the state (Capella+).
 /// Returns: array of {blockSummaryRoot: Uint8Array, stateSummaryRoot: Uint8Array}
 pub fn BeaconStateView_historicalSummaries(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
@@ -1012,6 +1044,8 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             getter(BeaconStateView_previousEpochParticipation),
             getter(BeaconStateView_currentEpochParticipation),
             getter(BeaconStateView_latestExecutionPayloadHeader),
+            getter(BeaconStateView_latestBlockHash),
+            getter(BeaconStateView_payloadBlockNumber),
             getter(BeaconStateView_historicalSummaries),
             getter(BeaconStateView_pendingDeposits),
             getter(BeaconStateView_pendingDepositsCount),
