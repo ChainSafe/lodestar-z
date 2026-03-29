@@ -357,7 +357,7 @@ fn handleBeaconBlocksByRoot(
     }
 
     // Collect found blocks into a dynamic list.
-    var found: std.ArrayList(ResponseChunk) = .empty;
+    var found: std.ArrayListUnmanaged(ResponseChunk) = .empty;
     errdefer {
         for (found.items) |chunk| allocator.free(chunk.ssz_payload);
         found.deinit(allocator);
@@ -482,7 +482,7 @@ fn handleBlobSidecarsByRoot(
         return makeErrorResponse(allocator, .invalid_request, "Too many blob identifiers requested");
     }
 
-    var found: std.ArrayList(ResponseChunk) = .empty;
+    var found: std.ArrayListUnmanaged(ResponseChunk) = .empty;
     errdefer {
         for (found.items) |chunk| allocator.free(chunk.ssz_payload);
         found.deinit(allocator);
@@ -540,7 +540,7 @@ fn handleDataColumnSidecarsByRoot(
         return makeErrorResponse(allocator, .invalid_request, "Too many data column identifiers requested");
     }
 
-    var found: std.ArrayList(ResponseChunk) = .empty;
+    var found: std.ArrayListUnmanaged(ResponseChunk) = .empty;
     errdefer {
         for (found.items) |chunk| allocator.free(chunk.ssz_payload);
         found.deinit(allocator);
