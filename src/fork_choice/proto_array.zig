@@ -365,11 +365,29 @@ pub const ForkChoiceError = error{
     InvalidBlockFutureSlot,
     InvalidBlockFinalizedSlot,
     InvalidBlockNotFinalizedDescendant,
-    // Other errors
-    ProtoArrayErr,
-    InvalidProtoArrayBytes,
+    // ProtoArray errors
+    FinalizedNodeUnknown,
+    JustifiedNodeUnknown,
+    InvalidFinalizedRootChange,
+    InvalidNodeIndex,
+    InvalidParentIndex,
+    InvalidBestChildIndex,
+    InvalidJustifiedIndex,
+    InvalidBestDescendantIndex,
+    DeltaOverflow,
+    IndexOverflow,
+    RevertedFinalizedEpoch,
+    InvalidBestNode,
+    InvalidBlockExecutionStatus,
+    InvalidJustifiedExecutionStatus,
+    InvalidLVHExecutionResponse,
+    UnknownParentBlock,
+    UnknownBlock,
+    PreGloasBlock,
     MissingProtoArrayBlock,
     UnknownAncestor,
+    // Other errors
+    InvalidProtoArrayBytes,
     InconsistentOnTick,
     BeaconStateErr,
     AttemptToRevertJustification,
@@ -465,32 +483,6 @@ pub const VariantIndices = union(enum) {
     }
 };
 
-// ── ProtoArray errors ──
-
-/// Errors from the ProtoArray (low-level DAG operations).
-pub const ProtoArrayError = error{
-    FinalizedNodeUnknown,
-    JustifiedNodeUnknown,
-    InvalidFinalizedRootChange,
-    InvalidNodeIndex,
-    InvalidParentIndex,
-    InvalidBestChildIndex,
-    InvalidJustifiedIndex,
-    InvalidBestDescendantIndex,
-    DeltaOverflow,
-    IndexOverflow,
-    RevertedFinalizedEpoch,
-    InvalidBestNode,
-    InvalidBlockExecutionStatus,
-    InvalidJustifiedExecutionStatus,
-    InvalidLVHExecutionResponse,
-    UnknownParentBlock,
-    UnknownBlock,
-    PreGloasBlock,
-    MissingProtoArrayBlock,
-    UnknownAncestor,
-};
-
 // ── ProtoArray ──
 
 pub const ProtoArray = struct {
@@ -569,7 +561,7 @@ pub const ProtoArray = struct {
         allocator: Allocator,
         block: ProtoBlock,
         current_slot: Slot,
-    ) (Allocator.Error || ProtoArrayError)!void {
+    ) (Allocator.Error || ForkChoiceError)!void {
         self.init(
             block.justified_epoch,
             block.justified_root,
@@ -637,7 +629,7 @@ pub const ProtoArray = struct {
         block: ProtoBlock,
         current_slot: Slot,
         proposer_boost_root: ?Root,
-    ) (Allocator.Error || ProtoArrayError)!void {
+    ) (Allocator.Error || ForkChoiceError)!void {
         // Skip duplicate blocks.
         if (self.hasBlock(block.block_root)) return;
 
@@ -659,7 +651,7 @@ pub const ProtoArray = struct {
         block: ProtoBlock,
         current_slot: Slot,
         proposer_boost_root: ?Root,
-    ) (Allocator.Error || ProtoArrayError)!void {
+    ) (Allocator.Error || ForkChoiceError)!void {
         var node = ProtoNode.fromBlock(block);
         assert(node.payload_status == .full);
         assert(block.parent_block_hash == null);
@@ -690,7 +682,7 @@ pub const ProtoArray = struct {
         block: ProtoBlock,
         current_slot: Slot,
         proposer_boost_root: ?Root,
-    ) (Allocator.Error || ProtoArrayError)!void {
+    ) (Allocator.Error || ForkChoiceError)!void {
         // Gloas: Create PENDING + EMPTY nodes with correct parent relationships
         // Parent of new PENDING node = parent block's EMPTY or FULL (inter-block edge)
         // Parent of new EMPTY node = own PENDING node (intra-block edge)
@@ -780,7 +772,7 @@ pub const ProtoArray = struct {
         execution_payload_number: u64,
         execution_payload_state_root: Root,
         proposer_boost_root: ?Root,
-    ) (Allocator.Error || ProtoArrayError)!void {
+    ) (Allocator.Error || ForkChoiceError)!void {
         const vi_ptr = self.indices.getPtr(block_root) orelse return error.UnknownBlock;
 
         switch (vi_ptr.*) {
@@ -841,7 +833,7 @@ pub const ProtoArray = struct {
         finalized_epoch: Epoch,
         finalized_root: Root,
         current_slot: Slot,
-    ) ProtoArrayError!void {
+    ) ForkChoiceError!void {
         assert(deltas.len == self.nodes.items.len);
         if (finalized_epoch < self.finalized_epoch) return error.RevertedFinalizedEpoch;
 
@@ -898,7 +890,7 @@ pub const ProtoArray = struct {
         self: *ProtoArray,
         deltas: []i64,
         proposer_boost: ?ProposerBoost,
-    ) ProtoArrayError!void {
+    ) ForkChoiceError!void {
         assert(deltas.len == self.nodes.items.len);
 
         // Iterate backwards through all indices in self.nodes
@@ -984,7 +976,7 @@ pub const ProtoArray = struct {
         self: *const ProtoArray,
         justified_root: Root,
         current_slot: Slot,
-    ) ProtoArrayError!*const ProtoNode {
+    ) ForkChoiceError!*const ProtoNode {
         if (self.lvh_error != null) return error.InvalidLVHExecutionResponse;
 
         const justified_index = self.getDefaultNodeIndex(justified_root) orelse return error.JustifiedNodeUnknown;
@@ -1092,7 +1084,7 @@ pub const ProtoArray = struct {
         self: *const ProtoArray,
         parent_root: Root,
         parent_block_hash: ?Root,
-    ) ProtoArrayError!PayloadStatus {
+    ) ForkChoiceError!PayloadStatus {
         // Pre-Gloas blocks have payloads embedded, so parents are always FULL.
         const parent_bh = parent_block_hash orelse return .full;
 
@@ -1109,7 +1101,7 @@ pub const ProtoArray = struct {
         self: *const ProtoArray,
         parent_root: Root,
         parent_block_hash: ?Root,
-    ) ProtoArrayError!bool {
+    ) ForkChoiceError!bool {
         return (try self.getParentPayloadStatus(parent_root, parent_block_hash)) == .full;
     }
 
@@ -1449,7 +1441,7 @@ pub const ProtoArray = struct {
         self: *const ProtoArray,
         block_root: Root,
         ancestor_slot: Slot,
-    ) ProtoArrayError!*const ProtoNode {
+    ) ForkChoiceError!*const ProtoNode {
         // Get any variant to check the block (use defaultIndex)
         const vi = self.indices.get(block_root) orelse
             return error.MissingProtoArrayBlock;
@@ -1520,7 +1512,7 @@ pub const ProtoArray = struct {
     fn propagateValidExecutionStatusByIndex(
         self: *ProtoArray,
         valid_node_index: u32,
-    ) ProtoArrayError!void {
+    ) ForkChoiceError!void {
         assert(valid_node_index < self.nodes.items.len);
 
         var node_index: ?u32 = valid_node_index;
@@ -1553,7 +1545,7 @@ pub const ProtoArray = struct {
     fn validateNodeByIndex(
         self: *ProtoArray,
         node_index: u32,
-    ) ProtoArrayError!void {
+    ) ForkChoiceError!void {
         assert(node_index < self.nodes.items.len);
 
         const node = &self.nodes.items[node_index];
@@ -1585,7 +1577,7 @@ pub const ProtoArray = struct {
     fn invalidateNodeByIndex(
         self: *ProtoArray,
         node_index: u32,
-    ) ProtoArrayError!void {
+    ) ForkChoiceError!void {
         assert(node_index < self.nodes.items.len);
 
         const node = &self.nodes.items[node_index];
@@ -1653,7 +1645,7 @@ pub const ProtoArray = struct {
         invalidate_from_index: u32,
         latest_valid_hash_index: u32,
         current_slot: Slot,
-    ) (Allocator.Error || ProtoArrayError)!void {
+    ) (Allocator.Error || ForkChoiceError)!void {
         assert(invalidate_from_index < self.nodes.items.len);
         assert(latest_valid_hash_index < self.nodes.items.len);
 
@@ -1753,7 +1745,7 @@ pub const ProtoArray = struct {
         self: *const ProtoArray,
         block_root: Root,
         proposer_boost_root: ?Root,
-    ) ProtoArrayError!bool {
+    ) ForkChoiceError!bool {
         // Condition 1: Payload is timely.
         if (self.isPayloadTimely(block_root)) return true;
 
@@ -1826,7 +1818,7 @@ pub const ProtoArray = struct {
         self: *const ProtoArray,
         root: Root,
         status: PayloadStatus,
-    ) ProtoArrayError!*const ProtoNode {
+    ) ForkChoiceError!*const ProtoNode {
         return self.getNode(root, status) orelse error.MissingProtoArrayBlock;
     }
 
@@ -1834,7 +1826,7 @@ pub const ProtoArray = struct {
     ///
     /// Pre-Gloas: uses raw node.parent index.
     /// Gloas: resolves the correct parent variant (EMPTY or FULL) via getParentPayloadStatus.
-    fn getParentNodeIndex(self: *const ProtoArray, node: *const ProtoNode) ProtoArrayError!?u32 {
+    fn getParentNodeIndex(self: *const ProtoArray, node: *const ProtoNode) ForkChoiceError!?u32 {
         if (node.parent_block_hash) |parent_bh| {
             // Gloas: resolve parent variant via block hash matching.
             const parent_status = try self.getParentPayloadStatus(node.parent_root, parent_bh);
@@ -1851,7 +1843,7 @@ pub const ProtoArray = struct {
         proto_array: *const ProtoArray,
         current: ?*const ProtoNode,
 
-        pub fn next(self_iter: *AncestorIterator) ProtoArrayError!?*const ProtoNode {
+        pub fn next(self_iter: *AncestorIterator) ForkChoiceError!?*const ProtoNode {
             const node = self_iter.current orelse return null;
             const parent_idx = (try self_iter.proto_array.getParentNodeIndex(node)) orelse {
                 self_iter.current = null;
@@ -1885,7 +1877,7 @@ pub const ProtoArray = struct {
         allocator: Allocator,
         root: Root,
         status: PayloadStatus,
-    ) (Allocator.Error || ProtoArrayError)!std.ArrayListUnmanaged(ProtoBlock) {
+    ) (Allocator.Error || ForkChoiceError)!std.ArrayListUnmanaged(ProtoBlock) {
         const start_node = self.getNode(root, status) orelse return .empty;
 
         var result: std.ArrayListUnmanaged(ProtoBlock) = .empty;
@@ -1930,7 +1922,7 @@ pub const ProtoArray = struct {
         allocator: Allocator,
         root: Root,
         status: PayloadStatus,
-    ) (Allocator.Error || ProtoArrayError)!std.ArrayListUnmanaged(ProtoBlock) {
+    ) (Allocator.Error || ForkChoiceError)!std.ArrayListUnmanaged(ProtoBlock) {
         const start_idx = self.getNodeIndexByRootAndStatus(root, status) orelse return .empty;
         assert(start_idx < self.nodes.items.len);
 
@@ -1973,7 +1965,7 @@ pub const ProtoArray = struct {
         allocator: Allocator,
         root: Root,
         status: PayloadStatus,
-    ) (Allocator.Error || ProtoArrayError)!AncestorAndNonAncestorResult {
+    ) (Allocator.Error || ForkChoiceError)!AncestorAndNonAncestorResult {
         const start_idx = self.getNodeIndexByRootAndStatus(root, status) orelse
             return .{ .allocator = allocator, .ancestors = .empty, .non_ancestors = .empty };
 
@@ -2020,7 +2012,7 @@ pub const ProtoArray = struct {
         ancestor_status: PayloadStatus,
         descendant_root: Root,
         descendant_status: PayloadStatus,
-    ) ProtoArrayError!bool {
+    ) ForkChoiceError!bool {
         const ancestor_node = self.getNode(ancestor_root, ancestor_status) orelse return false;
 
         // Same identity check.
@@ -2081,7 +2073,7 @@ pub const ProtoArray = struct {
         allocator: Allocator,
         response: LVHExecResponse,
         current_slot: Slot,
-    ) (Allocator.Error || ProtoArrayError)!void {
+    ) (Allocator.Error || ForkChoiceError)!void {
         switch (response) {
             .valid => |v| {
                 var latest_valid_index: ?u32 = null;
@@ -2138,7 +2130,7 @@ pub const ProtoArray = struct {
         self: *ProtoArray,
         allocator: Allocator,
         finalized_root: Root,
-    ) (ProtoArrayError || Allocator.Error)![]ProtoBlock {
+    ) (Allocator.Error || ForkChoiceError)![]ProtoBlock {
         const entry = self.indices.get(finalized_root) orelse
             return error.FinalizedNodeUnknown;
 
@@ -2721,8 +2713,8 @@ test "getParentPayloadStatus without FULL variant" {
     // parent_block_hash matches EMPTY's executionPayloadBlockHash (ZERO_HASH) → EMPTY.
     try testing.expectEqual(PayloadStatus.empty, try pa.getParentPayloadStatus(parent_root, ZERO_HASH));
     // parent_block_hash doesn't match any variant → error.
-    try testing.expectError(ProtoArrayError.UnknownParentBlock, pa.getParentPayloadStatus(parent_root, bid_hash));
-    try testing.expectError(ProtoArrayError.UnknownParentBlock, pa.getParentPayloadStatus(parent_root, makeRoot(0xBB)));
+    try testing.expectError(ForkChoiceError.UnknownParentBlock, pa.getParentPayloadStatus(parent_root, bid_hash));
+    try testing.expectError(ForkChoiceError.UnknownParentBlock, pa.getParentPayloadStatus(parent_root, makeRoot(0xBB)));
 }
 
 // Tree (Gloas):

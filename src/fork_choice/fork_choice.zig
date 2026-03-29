@@ -21,11 +21,10 @@ const ValidatorIndex = primitives.ValidatorIndex.Type;
 
 const proto_array = @import("proto_array.zig");
 const ProtoArray = proto_array.ProtoArray;
-const ProtoArrayError = proto_array.ProtoArrayError;
+const ForkChoiceError = proto_array.ForkChoiceError;
 const ProtoBlock = proto_array.ProtoBlock;
 const ProtoNode = proto_array.ProtoNode;
 const LVHExecResponse = proto_array.LVHExecResponse;
-const ForkChoiceError = proto_array.ForkChoiceError;
 const PayloadStatus = proto_array.PayloadStatus;
 const RootContext = proto_array.RootContext;
 const ExecutionStatus = proto_array.ExecutionStatus;
@@ -282,7 +281,7 @@ pub const ForkChoice = struct {
     // and propagating it on subsequent calls. Revisit once callers are wired up — a more
     // idiomatic Zig approach (e.g. returning error unions directly) may be cleaner.
     // ── Error state ──
-    irrecoverable_error: ?(Allocator.Error || ProtoArrayError),
+    irrecoverable_error: ?(Allocator.Error || ForkChoiceError),
 
     /// Initialize ForkChoice in-place from pre-built components.
     /// The caller is responsible for the memory backing `self`, `pa`, and `fc_store`.
@@ -480,7 +479,7 @@ pub const ForkChoice = struct {
         slot: Slot,
         parent_root: Root,
         parent_block_hash: ?Root,
-    ) (ProtoArrayError || ForkChoiceError)!*const ProtoNode {
+    ) ForkChoiceError!*const ProtoNode {
         // 1. Parent block must be known (state_transition would have failed otherwise).
         const parent_block = self.pa.getParent(parent_root, parent_block_hash) orelse
             return error.InvalidBlockUnknownParent;
@@ -794,7 +793,7 @@ pub const ForkChoice = struct {
         target_epoch: Epoch,
         att_data_root: Root,
         force_import: bool,
-    ) (ForkChoiceError || Allocator.Error)!void {
+    ) (Allocator.Error || ForkChoiceError)!void {
         const current_epoch = computeEpochAtSlot(self.fc_store.current_slot);
         const target_root = attestation.targetRoot();
 
@@ -1547,7 +1546,7 @@ pub const ForkChoice = struct {
         self: *ForkChoice,
         allocator: Allocator,
         finalized_root: Root,
-    ) (Allocator.Error || ProtoArrayError)![]ProtoBlock {
+    ) (Allocator.Error || ForkChoiceError)![]ProtoBlock {
         const pruned = try self.pa.maybePrune(allocator, finalized_root);
         const pruned_count: u32 = @intCast(pruned.len);
 
@@ -1676,7 +1675,7 @@ pub const ForkChoice = struct {
     ///
     /// Equivalent to:
     /// https://github.com/ethereum/consensus-specs/blob/v1.1.10/specs/phase0/fork-choice.md#get_ancestor
-    pub fn getAncestor(self: *const ForkChoice, block_root: Root, ancestor_slot: Slot) ProtoArrayError!ProtoNode {
+    pub fn getAncestor(self: *const ForkChoice, block_root: Root, ancestor_slot: Slot) ForkChoiceError!ProtoNode {
         const node = try self.pa.getAncestor(block_root, ancestor_slot);
         return node.*;
     }
@@ -1688,7 +1687,7 @@ pub const ForkChoice = struct {
         ancestor_status: PayloadStatus,
         descendant_root: Root,
         descendant_status: PayloadStatus,
-    ) ProtoArrayError!bool {
+    ) ForkChoiceError!bool {
         return try self.pa.isDescendant(
             ancestor_root,
             ancestor_status,
@@ -1698,7 +1697,7 @@ pub const ForkChoice = struct {
     }
 
     /// Get the canonical block matching the given root.
-    pub fn getCanonicalBlockByRoot(self: *const ForkChoice, block_root: Root) ProtoArrayError!?ProtoBlock {
+    pub fn getCanonicalBlockByRoot(self: *const ForkChoice, block_root: Root) ForkChoiceError!?ProtoBlock {
         if (std.mem.eql(u8, &self.head.block_root, &block_root)) return self.head;
 
         var iter = self.pa.iterateAncestors(self.head.block_root, self.head.payload_status);
@@ -1709,7 +1708,7 @@ pub const ForkChoice = struct {
     }
 
     /// Get the canonical block at a given slot.
-    pub fn getCanonicalBlockAtSlot(self: *const ForkChoice, slot: Slot) ProtoArrayError!?ProtoBlock {
+    pub fn getCanonicalBlockAtSlot(self: *const ForkChoice, slot: Slot) ForkChoiceError!?ProtoBlock {
         if (slot > self.head.slot) return null;
         if (slot == self.head.slot) return self.head;
 
@@ -1721,7 +1720,7 @@ pub const ForkChoice = struct {
     }
 
     /// Get the canonical block at or before a given slot.
-    pub fn getCanonicalBlockClosestLteSlot(self: *const ForkChoice, slot: Slot) ProtoArrayError!?ProtoBlock {
+    pub fn getCanonicalBlockClosestLteSlot(self: *const ForkChoice, slot: Slot) ForkChoiceError!?ProtoBlock {
         if (slot >= self.head.slot) return self.head;
 
         var iter = self.pa.iterateAncestors(self.head.block_root, self.head.payload_status);
@@ -1995,7 +1994,7 @@ pub const ForkChoice = struct {
         execution_payload_block_hash: Root,
         execution_payload_number: u64,
         execution_payload_state_root: Root,
-    ) (Allocator.Error || ProtoArrayError)!void {
+    ) (Allocator.Error || ForkChoiceError)!void {
         try self.pa.onExecutionPayload(
             allocator,
             block_root,
@@ -2060,7 +2059,7 @@ pub fn onBlockFromProto(
     allocator: Allocator,
     block: ProtoBlock,
     current_slot: Slot,
-) (Allocator.Error || ProtoArrayError || ForkChoiceError)!void {
+) (Allocator.Error || ForkChoiceError)!void {
     if (block.slot > current_slot) return error.InvalidBlockFutureSlot;
 
     const finalized_slot = computeStartSlotAtEpoch(fc.fc_store.finalized_checkpoint.epoch);
