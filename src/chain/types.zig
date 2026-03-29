@@ -73,6 +73,11 @@ pub const SseEventType = enum {
     block,
     finalized_checkpoint,
     chain_reorg,
+    attestation,
+    voluntary_exit,
+    contribution_and_proof,
+    payload_attributes,
+    blob_sidecar,
 };
 
 pub const SseEvent = union(SseEventType) {
@@ -80,6 +85,11 @@ pub const SseEvent = union(SseEventType) {
     block: BlockEvent,
     finalized_checkpoint: FinalizedCheckpointEvent,
     chain_reorg: ChainReorgEvent,
+    attestation: AttestationEvent,
+    voluntary_exit: VoluntaryExitEvent,
+    contribution_and_proof: ContributionAndProofEvent,
+    payload_attributes: PayloadAttributesEvent,
+    blob_sidecar: BlobSidecarEvent,
 };
 
 pub const HeadEvent = struct {
@@ -113,6 +123,58 @@ pub const ChainReorgEvent = struct {
     new_state_root: Root,
     /// Epoch of the new head slot.
     epoch: Epoch,
+};
+
+/// Emitted when a new attestation is received (gossip or API).
+pub const AttestationEvent = struct {
+    aggregation_bits: [8]u8,
+    slot: Slot,
+    committee_index: u64,
+    beacon_block_root: Root,
+    source_epoch: Epoch,
+    source_root: Root,
+    target_epoch: Epoch,
+    target_root: Root,
+    signature: [96]u8,
+};
+
+/// Emitted when a signed voluntary exit is received.
+pub const VoluntaryExitEvent = struct {
+    epoch: Epoch,
+    validator_index: u64,
+    signature: [96]u8,
+};
+
+/// Emitted when a sync committee contribution and proof is received.
+pub const ContributionAndProofEvent = struct {
+    aggregator_index: u64,
+    slot: Slot,
+    beacon_block_root: Root,
+    subcommittee_index: u64,
+    aggregation_bits: [16]u8,
+    contribution_signature: [96]u8,
+    selection_proof: [96]u8,
+};
+
+/// Emitted when forkchoiceUpdated provides payload attributes.
+pub const PayloadAttributesEvent = struct {
+    proposer_index: u64,
+    proposal_slot: Slot,
+    parent_block_number: u64,
+    parent_block_root: Root,
+    parent_block_hash: Root,
+    timestamp: u64,
+    prev_randao: Root,
+    suggested_fee_recipient: [20]u8,
+};
+
+/// Emitted when a blob sidecar is received.
+pub const BlobSidecarEvent = struct {
+    block_root: Root,
+    index: u64,
+    slot: Slot,
+    kzg_commitment: [48]u8,
+    versioned_hash: Root,
 };
 
 // ---------------------------------------------------------------------------

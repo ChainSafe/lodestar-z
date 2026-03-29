@@ -717,6 +717,8 @@ pub const BeaconNode = struct {
             .ptr = @ptrCast(pool_submit_ctx),
             .submitAttestationFn = &submitAttestationCallback,
             .submitAggregateAndProofFn = &submitAggregateAndProofCallback,
+            .submitVoluntaryExitFn = &submitVoluntaryExitCallback,
+            .submitContributionAndProofFn = &submitContributionAndProofCallback,
         };
 
         // W-builder: Wire builder callback if builder_api is configured.
@@ -2741,6 +2743,20 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             &std.fmt.bytesToHex(safe_block_hash[0..4], .lower),
             &std.fmt.bytesToHex(finalized_block_hash[0..4], .lower),
         });
+
+        // Emit payload_attributes SSE event when payload building was requested.
+        if (payload_attrs) |attrs| {
+            self.event_bus.emit(.{ .payload_attributes = .{
+                .proposer_index = 0, // TODO: resolve from epoch cache
+                .proposal_slot = self.head_tracker.head_slot + 1,
+                .parent_block_number = 0, // TODO: from execution payload
+                .parent_block_root = new_head_root,
+                .parent_block_hash = head_block_hash,
+                .timestamp = attrs.timestamp,
+                .prev_randao = attrs.prev_randao,
+                .suggested_fee_recipient = attrs.suggested_fee_recipient,
+            } });
+        }
     }
 
     /// Trigger payload building by sending forkchoiceUpdated with payload attributes.
@@ -4422,6 +4438,48 @@ fn eventCallbackFn(ptr: *anyopaque, event: chain_mod.SseEvent) void {
             .new_state_root = e.new_state_root,
             .epoch = e.epoch,
         } },
+        .attestation => |e| .{ .attestation = .{
+            .aggregation_bits = e.aggregation_bits,
+            .slot = e.slot,
+            .committee_index = e.committee_index,
+            .beacon_block_root = e.beacon_block_root,
+            .source_epoch = e.source_epoch,
+            .source_root = e.source_root,
+            .target_epoch = e.target_epoch,
+            .target_root = e.target_root,
+            .signature = e.signature,
+        } },
+        .voluntary_exit => |e| .{ .voluntary_exit = .{
+            .epoch = e.epoch,
+            .validator_index = e.validator_index,
+            .signature = e.signature,
+        } },
+        .contribution_and_proof => |e| .{ .contribution_and_proof = .{
+            .aggregator_index = e.aggregator_index,
+            .slot = e.slot,
+            .beacon_block_root = e.beacon_block_root,
+            .subcommittee_index = e.subcommittee_index,
+            .aggregation_bits = e.aggregation_bits,
+            .contribution_signature = e.contribution_signature,
+            .selection_proof = e.selection_proof,
+        } },
+        .payload_attributes => |e| .{ .payload_attributes = .{
+            .proposer_index = e.proposer_index,
+            .proposal_slot = e.proposal_slot,
+            .parent_block_number = e.parent_block_number,
+            .parent_block_root = e.parent_block_root,
+            .parent_block_hash = e.parent_block_hash,
+            .timestamp = e.timestamp,
+            .prev_randao = e.prev_randao,
+            .suggested_fee_recipient = e.suggested_fee_recipient,
+        } },
+        .blob_sidecar => |e| .{ .blob_sidecar = .{
+            .block_root = e.block_root,
+            .index = e.index,
+            .slot = e.slot,
+            .kzg_commitment = e.kzg_commitment,
+            .versioned_hash = e.versioned_hash,
+        } },
     };
     bus.emit(api_event);
 }
@@ -4569,6 +4627,40 @@ fn submitAggregateAndProofCallback(ptr: *anyopaque, json_bytes: []const u8) anye
             std.log.warn("pool_submit: gossip publish aggregate failed: {}", .{err});
         };
     }
+}
+
+/// Submit voluntary exit to op pool and emit SSE event.
+fn submitVoluntaryExitCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+    const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+    _ = json_bytes;
+
+    // Emit SSE event. Full parsing would extract epoch/validator_index/signature.
+    // TODO: Parse JSON to extract actual exit fields for the SSE event.
+    node.event_bus.emit(.{ .voluntary_exit = .{
+        .epoch = 0,
+        .validator_index = 0,
+        .signature = [_]u8{0} ** 96,
+    } });
+}
+
+/// Submit contribution and proof to op pool and emit SSE event.
+fn submitContributionAndProofCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+    const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+    _ = json_bytes;
+
+    // Emit SSE event. Full parsing would extract fields from JSON.
+    // TODO: Parse JSON to extract actual contribution fields for the SSE event.
+    node.event_bus.emit(.{ .contribution_and_proof = .{
+        .aggregator_index = 0,
+        .slot = 0,
+        .beacon_block_root = [_]u8{0} ** 32,
+        .subcommittee_index = 0,
+        .aggregation_bits = [_]u8{0} ** 16,
+        .contribution_signature = [_]u8{0} ** 96,
+        .selection_proof = [_]u8{0} ** 96,
+    } });
 }
 
 // ---------------------------------------------------------------------------

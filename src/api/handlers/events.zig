@@ -100,7 +100,12 @@ pub const EventTopic = enum {
             .block => .block,
             .finalized_checkpoint => .finalized_checkpoint,
             .chain_reorg => .chain_reorg,
-            else => null,
+            .attestation => .attestation,
+            .voluntary_exit => .voluntary_exit,
+            .contribution_and_proof => .contribution_and_proof,
+            .payload_attributes => .payload_attributes,
+            .blob_sidecar => .blob_sidecar,
+            .bls_to_execution_change => null,
         };
     }
 };
@@ -112,6 +117,11 @@ pub const TopicFilter = struct {
     want_block: bool = false,
     want_finalized_checkpoint: bool = false,
     want_chain_reorg: bool = false,
+    want_attestation: bool = false,
+    want_voluntary_exit: bool = false,
+    want_contribution_and_proof: bool = false,
+    want_payload_attributes: bool = false,
+    want_blob_sidecar: bool = false,
 
     /// Parse a comma-separated topics query string.
     /// Unknown topics are silently ignored (per spec).
@@ -126,7 +136,12 @@ pub const TopicFilter = struct {
                     .block => filter.want_block = true,
                     .finalized_checkpoint => filter.want_finalized_checkpoint = true,
                     .chain_reorg => filter.want_chain_reorg = true,
-                    else => {}, // topics without EventBus backing are ignored
+                    .attestation => filter.want_attestation = true,
+                    .voluntary_exit => filter.want_voluntary_exit = true,
+                    .contribution_and_proof => filter.want_contribution_and_proof = true,
+                    .payload_attributes => filter.want_payload_attributes = true,
+                    .blob_sidecar => filter.want_blob_sidecar = true,
+                    .bls_to_execution_change => {}, // not yet backed by EventBus
                 }
             }
         }
@@ -135,7 +150,9 @@ pub const TopicFilter = struct {
 
     /// Returns true if any topics are subscribed.
     pub fn hasAny(self: TopicFilter) bool {
-        return self.want_head or self.want_block or self.want_finalized_checkpoint or self.want_chain_reorg;
+        return self.want_head or self.want_block or self.want_finalized_checkpoint or
+            self.want_chain_reorg or self.want_attestation or self.want_voluntary_exit or
+            self.want_contribution_and_proof or self.want_payload_attributes or self.want_blob_sidecar;
     }
 
     /// Returns true if the given event matches the filter.
@@ -145,6 +162,11 @@ pub const TopicFilter = struct {
             .block => self.want_block,
             .finalized_checkpoint => self.want_finalized_checkpoint,
             .chain_reorg => self.want_chain_reorg,
+            .attestation => self.want_attestation,
+            .voluntary_exit => self.want_voluntary_exit,
+            .contribution_and_proof => self.want_contribution_and_proof,
+            .payload_attributes => self.want_payload_attributes,
+            .blob_sidecar => self.want_blob_sidecar,
         };
     }
 };
@@ -182,6 +204,11 @@ test "EventTopic.fromString known topics" {
     try std.testing.expectEqual(EventTopic.block, EventTopic.fromString("block").?);
     try std.testing.expectEqual(EventTopic.finalized_checkpoint, EventTopic.fromString("finalized_checkpoint").?);
     try std.testing.expectEqual(EventTopic.chain_reorg, EventTopic.fromString("chain_reorg").?);
+    try std.testing.expectEqual(EventTopic.attestation, EventTopic.fromString("attestation").?);
+    try std.testing.expectEqual(EventTopic.voluntary_exit, EventTopic.fromString("voluntary_exit").?);
+    try std.testing.expectEqual(EventTopic.contribution_and_proof, EventTopic.fromString("contribution_and_proof").?);
+    try std.testing.expectEqual(EventTopic.payload_attributes, EventTopic.fromString("payload_attributes").?);
+    try std.testing.expectEqual(EventTopic.blob_sidecar, EventTopic.fromString("blob_sidecar").?);
 }
 
 test "EventTopic.fromString unknown topic returns null" {
@@ -244,4 +271,58 @@ test "TopicFilter.matches filters correctly" {
 test "TopicFilter empty query has nothing" {
     const f = TopicFilter.parse("");
     try std.testing.expect(!f.hasAny());
+}
+
+test "TopicFilter.parse new event types" {
+    const f = TopicFilter.parse("attestation,voluntary_exit,contribution_and_proof,payload_attributes,blob_sidecar");
+    try std.testing.expect(f.want_attestation);
+    try std.testing.expect(f.want_voluntary_exit);
+    try std.testing.expect(f.want_contribution_and_proof);
+    try std.testing.expect(f.want_payload_attributes);
+    try std.testing.expect(f.want_blob_sidecar);
+    try std.testing.expect(!f.want_head);
+    try std.testing.expect(f.hasAny());
+}
+
+test "TopicFilter.matches new event types" {
+    const f = TopicFilter.parse("attestation,blob_sidecar");
+
+    // attestation event should match
+    try std.testing.expect(f.matches(.{ .attestation = .{
+        .aggregation_bits = [_]u8{0x01} ++ [_]u8{0} ** 7,
+        .slot = 1,
+        .committee_index = 0,
+        .beacon_block_root = [_]u8{0} ** 32,
+        .source_epoch = 0,
+        .source_root = [_]u8{0} ** 32,
+        .target_epoch = 0,
+        .target_root = [_]u8{0} ** 32,
+        .signature = [_]u8{0} ** 96,
+    } }));
+
+    // blob_sidecar event should match
+    try std.testing.expect(f.matches(.{ .blob_sidecar = .{
+        .block_root = [_]u8{0} ** 32,
+        .index = 0,
+        .slot = 1,
+        .kzg_commitment = [_]u8{0} ** 48,
+        .versioned_hash = [_]u8{0} ** 32,
+    } }));
+
+    // voluntary_exit should NOT match (not subscribed)
+    try std.testing.expect(!f.matches(.{ .voluntary_exit = .{
+        .epoch = 1,
+        .validator_index = 0,
+        .signature = [_]u8{0} ** 96,
+    } }));
+}
+
+test "EventTopic.toEventType maps new topics" {
+    try std.testing.expectEqual(event_bus.EventType.attestation, EventTopic.attestation.toEventType().?);
+    try std.testing.expectEqual(event_bus.EventType.voluntary_exit, EventTopic.voluntary_exit.toEventType().?);
+    try std.testing.expectEqual(event_bus.EventType.contribution_and_proof, EventTopic.contribution_and_proof.toEventType().?);
+    try std.testing.expectEqual(event_bus.EventType.payload_attributes, EventTopic.payload_attributes.toEventType().?);
+    try std.testing.expectEqual(event_bus.EventType.blob_sidecar, EventTopic.blob_sidecar.toEventType().?);
+    // bls_to_execution_change has no EventBus backing yet
+    try std.testing.expect(EventTopic.bls_to_execution_change.toEventType() == null);
 }

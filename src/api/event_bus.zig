@@ -18,6 +18,11 @@ pub const EventType = enum {
     block,
     finalized_checkpoint,
     chain_reorg,
+    attestation,
+    voluntary_exit,
+    contribution_and_proof,
+    payload_attributes,
+    blob_sidecar,
 
     /// Returns the SSE topic name for this event type.
     pub fn topicName(self: EventType) []const u8 {
@@ -26,6 +31,11 @@ pub const EventType = enum {
             .block => "block",
             .finalized_checkpoint => "finalized_checkpoint",
             .chain_reorg => "chain_reorg",
+            .attestation => "attestation",
+            .voluntary_exit => "voluntary_exit",
+            .contribution_and_proof => "contribution_and_proof",
+            .payload_attributes => "payload_attributes",
+            .blob_sidecar => "blob_sidecar",
         };
     }
 };
@@ -35,6 +45,11 @@ pub const Event = union(EventType) {
     block: BlockEvent,
     finalized_checkpoint: FinalizedCheckpointEvent,
     chain_reorg: ChainReorgEvent,
+    attestation: AttestationEvent,
+    voluntary_exit: VoluntaryExitEvent,
+    contribution_and_proof: ContributionAndProofEvent,
+    payload_attributes: PayloadAttributesEvent,
+    blob_sidecar: BlobSidecarEvent,
 
     /// Returns the active event type tag.
     pub fn eventType(self: Event) EventType {
@@ -81,6 +96,63 @@ pub const Event = union(EventType) {
                     e.epoch,
                 },
             ),
+            .attestation => |e| std.fmt.bufPrint(buf,
+                "{{\"aggregation_bits\":\"0x{s}\",\"data\":{{\"slot\":\"{d}\",\"index\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}},\"signature\":\"0x{s}\"}}",
+                .{
+                    std.fmt.bytesToHex(&e.aggregation_bits, .lower),
+                    e.slot,
+                    e.committee_index,
+                    std.fmt.bytesToHex(&e.beacon_block_root, .lower),
+                    e.source_epoch,
+                    std.fmt.bytesToHex(&e.source_root, .lower),
+                    e.target_epoch,
+                    std.fmt.bytesToHex(&e.target_root, .lower),
+                    std.fmt.bytesToHex(&e.signature, .lower),
+                },
+            ),
+            .voluntary_exit => |e| std.fmt.bufPrint(buf,
+                "{{\"message\":{{\"epoch\":\"{d}\",\"validator_index\":\"{d}\"}},\"signature\":\"0x{s}\"}}",
+                .{
+                    e.epoch,
+                    e.validator_index,
+                    std.fmt.bytesToHex(&e.signature, .lower),
+                },
+            ),
+            .contribution_and_proof => |e| std.fmt.bufPrint(buf,
+                "{{\"aggregator_index\":\"{d}\",\"contribution\":{{\"slot\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"subcommittee_index\":\"{d}\",\"aggregation_bits\":\"0x{s}\",\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}}",
+                .{
+                    e.aggregator_index,
+                    e.slot,
+                    std.fmt.bytesToHex(&e.beacon_block_root, .lower),
+                    e.subcommittee_index,
+                    std.fmt.bytesToHex(&e.aggregation_bits, .lower),
+                    std.fmt.bytesToHex(&e.contribution_signature, .lower),
+                    std.fmt.bytesToHex(&e.selection_proof, .lower),
+                },
+            ),
+            .payload_attributes => |e| std.fmt.bufPrint(buf,
+                "{{\"proposer_index\":\"{d}\",\"proposal_slot\":\"{d}\",\"parent_block_number\":\"{d}\",\"parent_block_root\":\"0x{s}\",\"parent_block_hash\":\"0x{s}\",\"payload_attributes\":{{\"timestamp\":\"{d}\",\"prev_randao\":\"0x{s}\",\"suggested_fee_recipient\":\"0x{s}\"}}}}",
+                .{
+                    e.proposer_index,
+                    e.proposal_slot,
+                    e.parent_block_number,
+                    std.fmt.bytesToHex(&e.parent_block_root, .lower),
+                    std.fmt.bytesToHex(&e.parent_block_hash, .lower),
+                    e.timestamp,
+                    std.fmt.bytesToHex(&e.prev_randao, .lower),
+                    std.fmt.bytesToHex(&e.suggested_fee_recipient, .lower),
+                },
+            ),
+            .blob_sidecar => |e| std.fmt.bufPrint(buf,
+                "{{\"block_root\":\"0x{s}\",\"index\":\"{d}\",\"slot\":\"{d}\",\"kzg_commitment\":\"0x{s}\",\"versioned_hash\":\"0x{s}\"}}",
+                .{
+                    std.fmt.bytesToHex(&e.block_root, .lower),
+                    e.index,
+                    e.slot,
+                    std.fmt.bytesToHex(&e.kzg_commitment, .lower),
+                    std.fmt.bytesToHex(&e.versioned_hash, .lower),
+                },
+            ),
         };
     }
 };
@@ -114,6 +186,62 @@ pub const ChainReorgEvent = struct {
     new_state_root: [32]u8,
     /// Epoch of the new head slot.
     epoch: u64,
+};
+
+/// Emitted when a new attestation is received (gossip or API).
+pub const AttestationEvent = struct {
+    /// Hex-encoded aggregation bitfield.
+    aggregation_bits: [8]u8,
+    slot: u64,
+    committee_index: u64,
+    beacon_block_root: [32]u8,
+    source_epoch: u64,
+    source_root: [32]u8,
+    target_epoch: u64,
+    target_root: [32]u8,
+    signature: [96]u8,
+};
+
+/// Emitted when a signed voluntary exit is received.
+pub const VoluntaryExitEvent = struct {
+    epoch: u64,
+    validator_index: u64,
+    signature: [96]u8,
+};
+
+/// Emitted when a sync committee contribution and proof is received.
+pub const ContributionAndProofEvent = struct {
+    aggregator_index: u64,
+    slot: u64,
+    beacon_block_root: [32]u8,
+    subcommittee_index: u64,
+    /// Hex-encoded aggregation bits for the subcommittee.
+    aggregation_bits: [16]u8,
+    /// Signature on the SyncCommitteeContribution.
+    contribution_signature: [96]u8,
+    /// Selection proof for the aggregator.
+    selection_proof: [96]u8,
+};
+
+/// Emitted when forkchoiceUpdated provides payload attributes for block building.
+pub const PayloadAttributesEvent = struct {
+    proposer_index: u64,
+    proposal_slot: u64,
+    parent_block_number: u64,
+    parent_block_root: [32]u8,
+    parent_block_hash: [32]u8,
+    timestamp: u64,
+    prev_randao: [32]u8,
+    suggested_fee_recipient: [20]u8,
+};
+
+/// Emitted when a blob sidecar is received.
+pub const BlobSidecarEvent = struct {
+    block_root: [32]u8,
+    index: u64,
+    slot: u64,
+    kzg_commitment: [48]u8,
+    versioned_hash: [32]u8,
 };
 
 // ---------------------------------------------------------------------------
@@ -299,4 +427,126 @@ test "EventType.topicName" {
     try std.testing.expectEqualStrings("block", EventType.block.topicName());
     try std.testing.expectEqualStrings("finalized_checkpoint", EventType.finalized_checkpoint.topicName());
     try std.testing.expectEqualStrings("chain_reorg", EventType.chain_reorg.topicName());
+    try std.testing.expectEqualStrings("attestation", EventType.attestation.topicName());
+    try std.testing.expectEqualStrings("voluntary_exit", EventType.voluntary_exit.topicName());
+    try std.testing.expectEqualStrings("contribution_and_proof", EventType.contribution_and_proof.topicName());
+    try std.testing.expectEqualStrings("payload_attributes", EventType.payload_attributes.topicName());
+    try std.testing.expectEqualStrings("blob_sidecar", EventType.blob_sidecar.topicName());
+}
+
+test "Event.writeJson: attestation event" {
+    var buf: [2048]u8 = undefined;
+    const ev = Event{ .attestation = .{
+        .aggregation_bits = [_]u8{0x01} ++ [_]u8{0} ** 7,
+        .slot = 100,
+        .committee_index = 1,
+        .beacon_block_root = [_]u8{0xAA} ** 32,
+        .source_epoch = 3,
+        .source_root = [_]u8{0xBB} ** 32,
+        .target_epoch = 4,
+        .target_root = [_]u8{0xCC} ** 32,
+        .signature = [_]u8{0xDD} ** 96,
+    } };
+    const json = try ev.writeJson(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"slot\":\"100\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"index\":\"1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"source\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"target\"") != null);
+}
+
+test "Event.writeJson: voluntary_exit event" {
+    var buf: [1024]u8 = undefined;
+    const ev = Event{ .voluntary_exit = .{
+        .epoch = 42,
+        .validator_index = 1234,
+        .signature = [_]u8{0xEE} ** 96,
+    } };
+    const json = try ev.writeJson(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"epoch\":\"42\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"validator_index\":\"1234\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "0xeeee") != null);
+}
+
+test "Event.writeJson: contribution_and_proof event" {
+    var buf: [2048]u8 = undefined;
+    const ev = Event{ .contribution_and_proof = .{
+        .aggregator_index = 99,
+        .slot = 200,
+        .beacon_block_root = [_]u8{0xAA} ** 32,
+        .subcommittee_index = 1,
+        .aggregation_bits = [_]u8{0xFF} ** 16,
+        .contribution_signature = [_]u8{0xBB} ** 96,
+        .selection_proof = [_]u8{0xCC} ** 96,
+    } };
+    const json = try ev.writeJson(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"aggregator_index\":\"99\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"subcommittee_index\":\"1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"selection_proof\"") != null);
+}
+
+test "Event.writeJson: payload_attributes event" {
+    var buf: [2048]u8 = undefined;
+    const ev = Event{ .payload_attributes = .{
+        .proposer_index = 42,
+        .proposal_slot = 100,
+        .parent_block_number = 50,
+        .parent_block_root = [_]u8{0x11} ** 32,
+        .parent_block_hash = [_]u8{0x22} ** 32,
+        .timestamp = 1700000000,
+        .prev_randao = [_]u8{0x33} ** 32,
+        .suggested_fee_recipient = [_]u8{0x44} ** 20,
+    } };
+    const json = try ev.writeJson(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"proposer_index\":\"42\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"proposal_slot\":\"100\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"payload_attributes\"") != null);
+}
+
+test "Event.writeJson: blob_sidecar event" {
+    var buf: [1024]u8 = undefined;
+    const ev = Event{ .blob_sidecar = .{
+        .block_root = [_]u8{0xAA} ** 32,
+        .index = 3,
+        .slot = 999,
+        .kzg_commitment = [_]u8{0xBB} ** 48,
+        .versioned_hash = [_]u8{0xCC} ** 32,
+    } };
+    const json = try ev.writeJson(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"index\":\"3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"slot\":\"999\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"kzg_commitment\"") != null);
+}
+
+test "EventBus: new event types round-trip" {
+    var bus = EventBus.init(std.testing.allocator);
+
+    bus.emit(.{ .attestation = .{
+        .aggregation_bits = [_]u8{0x03} ++ [_]u8{0} ** 7,
+        .slot = 500,
+        .committee_index = 2,
+        .beacon_block_root = [_]u8{0xAA} ** 32,
+        .source_epoch = 15,
+        .source_root = [_]u8{0xBB} ** 32,
+        .target_epoch = 16,
+        .target_root = [_]u8{0xCC} ** 32,
+        .signature = [_]u8{0xDD} ** 96,
+    } });
+    bus.emit(.{ .voluntary_exit = .{
+        .epoch = 10,
+        .validator_index = 42,
+        .signature = [_]u8{0xEE} ** 96,
+    } });
+    bus.emit(.{ .blob_sidecar = .{
+        .block_root = [_]u8{0x11} ** 32,
+        .index = 0,
+        .slot = 600,
+        .kzg_commitment = [_]u8{0x22} ** 48,
+        .versioned_hash = [_]u8{0x33} ** 32,
+    } });
+
+    const recent = bus.getRecent(0);
+    try std.testing.expectEqual(@as(usize, 3), recent.len);
+    try std.testing.expectEqual(@as(u64, 500), recent[0].attestation.slot);
+    try std.testing.expectEqual(@as(u64, 42), recent[1].voluntary_exit.validator_index);
+    try std.testing.expectEqual(@as(u64, 0), recent[2].blob_sidecar.index);
 }

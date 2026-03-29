@@ -332,11 +332,8 @@ pub const Chain = struct {
         target_root: [32]u8,
         target_epoch: u64,
         validator_index: u64,
-        attestation: consensus_types.phase0.Attestation.Type,
+        attestation: fork_types.AnyAttestation,
     ) !void {
-        _ = committee_index;
-        _ = target_root;
-
         // Apply vote weight to fork choice.
         if (self.fork_choice) |fc| {
             fc.onSingleVote(
@@ -354,7 +351,23 @@ pub const Chain = struct {
         }
 
         // Insert into attestation pool for block production.
-        try self.op_pool.attestation_pool.add(attestation);
+        // Both formats are accepted; the pool handles fork-aware storage.
+        try self.op_pool.attestation_pool.addAny(attestation);
+
+        // Emit SSE attestation event.
+        if (self.event_callback) |cb| {
+            cb.emit(.{ .attestation = .{
+                .aggregation_bits = [_]u8{0x01} ++ [_]u8{0} ** 7, // simplified; real impl extracts from bitfield
+                .slot = attestation_slot,
+                .committee_index = committee_index,
+                .beacon_block_root = beacon_block_root,
+                .source_epoch = target_epoch -| 1,
+                .source_root = [_]u8{0} ** 32, // TODO: extract from attestation data
+                .target_epoch = target_epoch,
+                .target_root = target_root,
+                .signature = [_]u8{0} ** 96, // TODO: extract from attestation
+            } });
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -697,6 +710,18 @@ pub const Chain = struct {
     /// Store a blob sidecar received via gossip or req/resp.
     pub fn importBlobSidecar(self: *Chain, root: [32]u8, data: []const u8) !void {
         try self.db.putBlobSidecars(root, data);
+
+        // Emit SSE blob_sidecar event.
+        // TODO: Parse actual blob fields (index, slot, kzg_commitment) from data.
+        if (self.event_callback) |cb| {
+            cb.emit(.{ .blob_sidecar = .{
+                .block_root = root,
+                .index = 0,
+                .slot = 0,
+                .kzg_commitment = [_]u8{0} ** 48,
+                .versioned_hash = [_]u8{0} ** 32,
+            } });
+        }
     }
 
     /// Advance the head state by one empty slot (no block).
