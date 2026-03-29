@@ -36,6 +36,7 @@ pub const BeaconDB = struct {
     exit_db: Database,
     proposer_slashing_db: Database,
     attester_slashing_db: Database,
+    bls_change_db: Database,
 
     pub fn init(allocator: Allocator, kv: KVStore) BeaconDB {
         return .{
@@ -58,6 +59,7 @@ pub const BeaconDB = struct {
             .exit_db = kv.getDatabase(.exit),
             .proposer_slashing_db = kv.getDatabase(.proposer_slashing),
             .attester_slashing_db = kv.getDatabase(.attester_slashing),
+            .bls_change_db = kv.getDatabase(.bls_change),
         };
     }
 
@@ -317,5 +319,15 @@ pub const BeaconDB = struct {
 
     pub fn getAttesterSlashing(self: *BeaconDB, root: [32]u8) !?[]const u8 {
         return self.attester_slashing_db.get(&root);
+    }
+
+    pub fn putBlsChange(self: *BeaconDB, validator_index: u64, data: []const u8) !void {
+        const key = buckets.slotKey(validator_index);
+        try self.bls_change_db.put(&key, data);
+    }
+
+    pub fn getBlsChange(self: *BeaconDB, validator_index: u64) !?[]const u8 {
+        const key = buckets.slotKey(validator_index);
+        return self.bls_change_db.get(&key);
     }
 };

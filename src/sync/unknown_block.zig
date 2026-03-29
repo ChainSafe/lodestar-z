@@ -129,7 +129,7 @@ pub const UnknownBlockSync = struct {
         return .{
             .allocator = allocator,
             .pending = std.AutoArrayHashMap([32]u8, PendingBlock).init(allocator),
-            .parents_needed = std.AutoArrayHashMap([32]u8, std.ArrayList([32]u8)).init(allocator),
+            .parents_needed = std.AutoArrayHashMap([32]u8, std.ArrayListUnmanaged([32]u8)).init(allocator),
             .bad_roots = std.AutoArrayHashMap([32]u8, void).init(allocator),
             .in_flight = 0,
             .peer_index = 0,

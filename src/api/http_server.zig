@@ -722,8 +722,21 @@ pub const HttpServer = struct {
         const state_id = try types.StateId.parse(state_id_str);
         const handler_res = try handlers.debug.getState(self.api_context, state_id);
         defer alloc.free(handler_res.data);
+        // Derive Eth-Consensus-Version from the state's slot.
+        const state_slot: u64 = switch (state_id) {
+            .slot => |s| s,
+            .head => self.api_context.head_tracker.head_slot,
+            .finalized => self.api_context.head_tracker.finalized_slot,
+            .justified => self.api_context.head_tracker.justified_slot,
+            .genesis => 0,
+            .root => self.api_context.head_tracker.head_slot,
+        };
+        const fork_seq = self.api_context.beacon_config.forkSeq(state_slot);
+        const fork_version: response_meta.Fork = @enumFromInt(@intFromEnum(fork_seq));
+        var meta = handler_res.meta;
+        meta.version = fork_version;
         const body = try std.fmt.allocPrint(alloc, "{{\"data\":\"ssz_omitted\",\"size\":{d}}}", .{handler_res.data.len});
-        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = meta };
     }
 
     fn hGetDebugHeads(self: *HttpServer, _: DispatchContext) !HandlerResult {
@@ -742,6 +755,9 @@ pub const HttpServer = struct {
             try buf.appendSlice(alloc, entry);
         }
         try buf.appendSlice(alloc, "]}");
+        // Eth-Consensus-Version is intentionally omitted: this endpoint returns
+        // multiple chain heads potentially spanning different forks, so a single
+        // fork version cannot represent the full response.
         return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc), .meta = handler_res.meta };
     }
 
@@ -1096,7 +1112,18 @@ pub const HttpServer = struct {
             try buf.appendSlice(alloc, entry);
         }
         try buf.appendSlice(alloc, "]}");
-        return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc), .meta = handler_res.meta };
+        // Derive Eth-Consensus-Version from the first block's slot (all headers
+        // in a single response share the same slot or are within the same fork).
+        var meta = handler_res.meta;
+        if (handler_res.data.len > 0) {
+            const first_slot = handler_res.data[0].header.message.slot;
+            const fork_seq = self.api_context.beacon_config.forkSeq(first_slot);
+            meta.version = @enumFromInt(@intFromEnum(fork_seq));
+        } else if (slot_opt) |slot| {
+            const fork_seq = self.api_context.beacon_config.forkSeq(slot);
+            meta.version = @enumFromInt(@intFromEnum(fork_seq));
+        }
+        return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc), .meta = meta };
     }
 
     fn hGetBlobSidecars(self: *HttpServer, dc: DispatchContext) !HandlerResult {
