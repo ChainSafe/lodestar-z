@@ -490,11 +490,13 @@ pub const HttpServer = struct {
         .{ "getFinalityCheckpoints",        &hGetFinalityCheckpoints },
         .{ "publishBlockV2",               &hPublishBlockV2 },
         .{ "getPoolAttestations",           &hGetPoolAttestations },
+        .{ "getPoolAttestationsV2",         &hGetPoolAttestationsV2 },
         .{ "getPoolVoluntaryExits",         &hGetPoolVoluntaryExits },
         .{ "getPoolProposerSlashings",      &hGetPoolProposerSlashings },
         .{ "getPoolAttesterSlashings",      &hGetPoolAttesterSlashings },
         .{ "getPoolBlsToExecutionChanges",  &hGetPoolBlsToExecutionChanges },
         .{ "submitPoolAttestations",        &hSubmitPoolAttestations },
+        .{ "submitPoolAttestationsV2",      &hSubmitPoolAttestationsV2 },
         .{ "submitPoolVoluntaryExits",      &hSubmitPoolVoluntaryExits },
         .{ "submitPoolProposerSlashings",   &hSubmitPoolProposerSlashings },
         .{ "submitPoolAttesterSlashings",   &hSubmitPoolAttesterSlashings },
@@ -678,6 +680,18 @@ pub const HttpServer = struct {
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
 
+    fn hGetPoolAttestationsV2(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const alloc = self.allocator;
+        const slot_filter: ?u64 = if (dc.getQuery("slot")) |s| std.fmt.parseInt(u64, s, 10) catch null else null;
+        const ci_filter: ?u64 = if (dc.getQuery("committee_index")) |s| std.fmt.parseInt(u64, s, 10) catch null else null;
+        const handler_res = try handlers.beacon.getPoolAttestationsV2(self.api_context, slot_filter, ci_filter);
+        defer alloc.free(handler_res.data);
+        // V2: returns versioned response. For now, still uses phase0 Attestation SSZ type.
+        // TODO: return electra.Attestation when the stored attestation is from an Electra slot.
+        const body = try json_response.writeBeaconArrayEnvelope(alloc, consensus_types.phase0.Attestation, handler_res.data, handler_res.meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
+    }
+
     fn hGetPoolVoluntaryExits(self: *HttpServer, _: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
         const handler_res = try handlers.beacon.getPoolVoluntaryExits(self.api_context);
@@ -712,6 +726,11 @@ pub const HttpServer = struct {
 
     fn hSubmitPoolAttestations(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const result = try handlers.beacon.submitPoolAttestations(self.api_context, dc.body);
+        return self.makeVoidResult(result);
+    }
+
+    fn hSubmitPoolAttestationsV2(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const result = try handlers.beacon.submitPoolAttestationsV2(self.api_context, dc.body);
         return self.makeVoidResult(result);
     }
 

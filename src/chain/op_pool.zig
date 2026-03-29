@@ -15,6 +15,7 @@ const Allocator = std.mem.Allocator;
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
+const fork_types = @import("fork_types");
 
 pub const AggregatedAttestationPool = @import("aggregated_attestation_pool.zig").AggregatedAttestationPool;
 
@@ -24,6 +25,8 @@ const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 
 const AttestationData = types.phase0.AttestationData;
 const Phase0Attestation = types.phase0.Attestation;
+const ElectraAttestation = types.electra.Attestation;
+const AnyAttestation = fork_types.AnyAttestation;
 const ProposerSlashing = types.phase0.ProposerSlashing;
 const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit;
 
@@ -182,6 +185,64 @@ pub const AttestationPool = struct {
         for (to_remove.items) |key| {
             _ = self.pool.remove(key);
         }
+    }
+
+    /// Add an attestation in any fork format.
+    ///
+    /// For phase0 attestations, delegates to `add`.
+    /// For electra attestations, groups by AttestationData hash (ignoring committee_bits for grouping).
+    pub fn addAny(self: *AttestationPool, attestation: AnyAttestation) !void {
+        switch (attestation) {
+            .phase0 => |att| try self.add(att),
+            .electra => |att| try self.addElectra(att),
+        }
+    }
+
+    /// Add an Electra-format attestation to the pool.
+    ///
+    /// Electra attestations have committee_bits and wider aggregation_bits.
+    /// For the simple pool, we store them converted to phase0 format using
+    /// the first committee index from committee_bits.
+    fn addElectra(self: *AttestationPool, attestation: ElectraAttestation.Type) !void {
+        // Capacity limit
+        if (self.pool.count() >= MAX_ATTESTATION_POOL_SIZE) return;
+
+        // Compute data root (AttestationData is the same struct).
+        var data_root: [32]u8 = undefined;
+        try AttestationData.hashTreeRoot(&attestation.data, &data_root);
+
+        const gop = try self.pool.getOrPut(data_root);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = std.ArrayListUnmanaged(Phase0Attestation.Type).empty;
+        }
+
+        // Convert to phase0 format for storage.
+        // Extract committee index from committee_bits.
+        var committee_index: u64 = 0;
+        for (0..preset.MAX_COMMITTEES_PER_SLOT) |i| {
+            if (attestation.committee_bits.get(i)) {
+                committee_index = @intCast(i);
+                break;
+            }
+        }
+
+        var cloned_data = attestation.data;
+        cloned_data.index = committee_index;
+
+        // Clone aggregation bits.
+        const src = attestation.aggregation_bits.data.items;
+        var new_data: std.ArrayListUnmanaged(u8) = .empty;
+        if (src.len > 0) {
+            new_data = try std.ArrayListUnmanaged(u8).initCapacity(self.allocator, src.len);
+            new_data.appendSliceAssumeCapacity(src);
+        }
+
+        const phase0_att = Phase0Attestation.Type{
+            .aggregation_bits = .{ .data = new_data, .bit_len = attestation.aggregation_bits.bit_len },
+            .data = cloned_data,
+            .signature = attestation.signature,
+        };
+        try gop.value_ptr.append(self.allocator, phase0_att);
     }
 
     /// Number of distinct attestation-data groups in the pool.

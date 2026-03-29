@@ -18,6 +18,7 @@ const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
+const fork_types = @import("fork_types");
 
 const Slot = types.primitive.Slot.Type;
 const Epoch = types.primitive.Epoch.Type;
@@ -25,6 +26,8 @@ const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 
 const AttestationData = types.phase0.AttestationData;
 const Phase0Attestation = types.phase0.Attestation;
+const ElectraAttestation = types.electra.Attestation;
+const AnyAttestation = fork_types.AnyAttestation;
 
 const CachedBeaconState = state_transition.CachedBeaconState;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
@@ -378,6 +381,61 @@ pub const AggregatedAttestationPool = struct {
         }
 
         return group_gop.value_ptr.add(attestation);
+    }
+
+    /// Add an attestation in any fork format.
+    pub fn addAny(self: *AggregatedAttestationPool, attestation: AnyAttestation) !InsertOutcome {
+        return switch (attestation) {
+            .phase0 => |att| self.add(att),
+            .electra => |att| self.addElectra(att),
+        };
+    }
+
+    /// Add an Electra-format attestation.
+    ///
+    /// Electra attestations use committee_bits to identify the committee(s)
+    /// and have wider aggregation_bits spanning all committees in the slot.
+    /// We convert to phase0 format for storage (extracting committee index
+    /// from committee_bits) since the pool grouping is by AttestationData root.
+    pub fn addElectra(self: *AggregatedAttestationPool, attestation: ElectraAttestation.Type) !InsertOutcome {
+        const slot = attestation.data.slot;
+        if (slot < self.lowest_permissible_slot) {
+            return .Old;
+        }
+
+        // For Electra, data.index is always 0.  Extract the real committee
+        // index from committee_bits and set it in the data for hashing,
+        // so attestations for different committees get different data roots.
+        var modified_data = attestation.data;
+        var committee_index: u64 = 0;
+        for (0..preset.MAX_COMMITTEES_PER_SLOT) |i| {
+            if (attestation.committee_bits.get(i)) {
+                committee_index = @intCast(i);
+                break;
+            }
+        }
+        modified_data.index = committee_index;
+
+        var data_root: [32]u8 = undefined;
+        try AttestationData.hashTreeRoot(&modified_data, &data_root);
+
+        const slot_gop = try self.by_slot.getOrPut(slot);
+        if (!slot_gop.found_existing) {
+            slot_gop.value_ptr.* = SlotMap.init(self.allocator);
+        }
+
+        const group_gop = try slot_gop.value_ptr.getOrPut(data_root);
+        if (!group_gop.found_existing) {
+            group_gop.value_ptr.* = AttestationGroup.init(self.allocator, modified_data);
+        }
+
+        // Convert to phase0 format for the group.
+        const phase0_att = Phase0Attestation.Type{
+            .aggregation_bits = attestation.aggregation_bits,
+            .data = modified_data,
+            .signature = attestation.signature,
+        };
+        return group_gop.value_ptr.add(phase0_att);
     }
 
     /// Get the best attestations for block production.

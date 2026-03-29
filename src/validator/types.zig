@@ -131,6 +131,9 @@ pub const ValidatorConfig = struct {
     sync_committee_size: u64 = 512,
     /// Sync committee subnet count (default: 4).
     sync_committee_subnet_count: u64 = 4,
+    /// Electra fork epoch (EIP-7549). Attestation format changes at this epoch.
+    /// Default: maxInt(u64) = Electra not scheduled.
+    electra_fork_epoch: u64 = std.math.maxInt(u64),
     /// Whether doppelganger protection is enabled.
     doppelganger_protection: bool = true,
     /// Path to slashing protection DB file (null = in-memory only).

@@ -53,6 +53,9 @@ pub const AttestationService = struct {
     seconds_per_slot: u64,
     /// Genesis time (Unix seconds) — for correct sub-slot timing (BUG-5 fix).
     genesis_time_unix_secs: u64,
+    /// Electra fork epoch — attestation format changes at this epoch (EIP-7549).
+    /// Set to maxInt(u64) if Electra is not scheduled.
+    electra_fork_epoch: u64,
 
     /// Duties indexed by slot (rolling window across epochs).
     duties: std.ArrayList(AttesterDutyWithProof),
@@ -84,6 +87,7 @@ pub const AttestationService = struct {
         signing_ctx: SigningContext,
         seconds_per_slot: u64,
         genesis_time_unix_secs: u64,
+        electra_fork_epoch: u64,
     ) AttestationService {
         return .{
             .allocator = allocator,
@@ -92,6 +96,7 @@ pub const AttestationService = struct {
             .signing_ctx = signing_ctx,
             .seconds_per_slot = seconds_per_slot,
             .genesis_time_unix_secs = genesis_time_unix_secs,
+            .electra_fork_epoch = electra_fork_epoch,
             .duties = std.ArrayList(AttesterDutyWithProof).init(allocator),
             .duties_epoch = null,
             .next_duties = std.ArrayList(AttesterDutyWithProof).init(allocator),
@@ -415,8 +420,12 @@ pub const AttestationService = struct {
                 continue;
             }
 
-            // Pre-Electra: committee_index is part of the signing root.
-            att_data.index = dp.duty.committee_index;
+            // Fork-aware: Pre-Electra uses committee_index in data for signing.
+            // Electra: data.index is always 0 (committee encoded in committee_bits).
+            {
+                const sign_epoch = slot / self.signing_ctx.slots_per_epoch;
+                att_data.index = if (sign_epoch >= self.electra_fork_epoch) 0 else dp.duty.committee_index;
+            }
             var signing_root: [32]u8 = undefined;
             try signing_mod.attestationSigningRoot(self.signing_ctx, &att_data, &signing_root);
 

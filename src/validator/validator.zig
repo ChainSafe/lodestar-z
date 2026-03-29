@@ -178,6 +178,7 @@ pub const ValidatorClient = struct {
             signing_ctx,
             config.seconds_per_slot,
             config.genesis_time, // BUG-5 fix: pass genesis_time for correct sub-slot timing
+            config.electra_fork_epoch, // EIP-7549: Electra attestation format support
         );
         const sync_committee_service = SyncCommitteeService.init(
             allocator,

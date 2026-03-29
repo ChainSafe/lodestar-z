@@ -19,6 +19,9 @@ pub const AnyExecutionPayloadHeader = @import("./any_execution_payload.zig").Any
 pub const AnyAttesterSlashing = @import("./any_attester_slashing.zig").AnyAttesterSlashing;
 pub const AnyAttesterSlashings = @import("./any_attester_slashing.zig").AnyAttesterSlashings;
 pub const AnyAttesterSlashingItems = @import("./any_attester_slashing.zig").AnyAttesterSlashingItems;
+pub const AnyAttestation = @import("./any_attestation.zig").AnyAttestation;
+pub const AnyAttestations = @import("./any_attestation.zig").AnyAttestations;
+pub const AnyAttestationItems = @import("./any_attestation.zig").AnyAttestationItems;
 
 const testing = @import("std").testing;
 test {

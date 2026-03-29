@@ -139,6 +139,11 @@ pub const routes = [_]Route{
     },
     .{
         .method = .POST,
+        .path = "/eth/v2/beacon/pool/attestations",
+        .operation_id = "submitPoolAttestationsV2",
+    },
+    .{
+        .method = .POST,
         .path = "/eth/v1/beacon/pool/voluntary_exits",
         .operation_id = "submitPoolVoluntaryExits",
     },
@@ -168,6 +173,11 @@ pub const routes = [_]Route{
         .method = .GET,
         .path = "/eth/v1/beacon/pool/attestations",
         .operation_id = "getPoolAttestations",
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v2/beacon/pool/attestations",
+        .operation_id = "getPoolAttestationsV2",
     },
     .{
         .method = .GET,
