@@ -442,6 +442,19 @@ pub const SyncCommitteeService = struct {
                 }
                 const sel_proof = cached_proof.* orelse continue;
 
+                // Aggregation eligibility check per consensus spec:
+                //   is_sync_committee_aggregator = (SHA256(sel_proof)[0:8] as little-endian u64)
+                //       % max(1, SYNC_COMMITTEE_SIZE / SYNC_COMMITTEE_SUBNET_COUNT / TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE) == 0
+                // Same pattern as attestation_service.zig's aggregator check.
+                const subcommittee_size = self.sync_committee_size / self.sync_committee_subnet_count;
+                const TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE: u64 = 16;
+                const modulo = @max(1, subcommittee_size / TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE);
+                const Sha256 = std.crypto.hash.sha2.Sha256;
+                var sel_hash: [32]u8 = undefined;
+                Sha256.hash(&sel_proof, &sel_hash, .{});
+                const hash_val = std.mem.readInt(u64, sel_hash[0..8], .little);
+                if (hash_val % modulo != 0) continue; // not selected as aggregator for this subcommittee
+
                 // 1. Fetch contribution from BN.
                 const contrib = try self.api.produceSyncCommitteeContribution(
                     io,
@@ -455,7 +468,7 @@ pub const SyncCommitteeService = struct {
                 // Set the correct bit for our validator's position in the sync subcommittee.
                 // sc_idx is the full sync committee index (0..SYNC_COMMITTEE_SIZE-1).
                 // The bit position within the subcommittee is sc_idx % subcommittee_size.
-                const subcommittee_size = self.sync_committee_size / self.sync_committee_subnet_count;
+                // (subcommittee_size already computed above for the aggregator check.)
                 const bit_index = sc_idx % subcommittee_size; // position within subcommittee
                 var agg_bits_buf = [_]u8{0} ** MAX_SUBCOMMITTEE_BYTES;
                 const subcommittee_bytes = (subcommittee_size + 7) / 8;

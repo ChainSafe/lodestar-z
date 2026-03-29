@@ -194,11 +194,24 @@ pub const ValidatorClient = struct {
 
         const header_tracker = ChainHeaderTracker.init(allocator, &api);
 
+        // Convert suggested_fee_recipient (20 raw bytes) to hex string [42]u8 ("0x" + 40 hex).
+        // Falls back to ZERO_FEE_RECIPIENT when config has the default zero address.
+        const fee_recipient_hex: [42]u8 = blk: {
+            var buf: [42]u8 = undefined;
+            buf[0] = '0';
+            buf[1] = 'x';
+            const hex_chars = "0123456789abcdef";
+            for (config.suggested_fee_recipient, 0..) |byte, i| {
+                buf[2 + i * 2] = hex_chars[(byte >> 4) & 0xF];
+                buf[2 + i * 2 + 1] = hex_chars[byte & 0xF];
+            }
+            break :blk buf;
+        };
         const prepare_proposer = PrepareBeaconProposerService.init(
             allocator,
             &api,
             &validator_store,
-            ZERO_FEE_RECIPIENT,
+            fee_recipient_hex,
         );
 
         // Initialize builder registration service if builder is configured.

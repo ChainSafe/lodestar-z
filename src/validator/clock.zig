@@ -7,7 +7,7 @@
 //!
 //! Design (Zig 0.16):
 //!   - All timing is wall-clock based (std.time.nanoTimestamp).
-//!   - Callbacks are registered and called synchronously in the run loop.
+//!   - Callbacks are dispatched concurrently via std.Thread.spawn in the run loop.
 //!   - `run()` drives the clock loop using std.Io for sleeping.
 
 const std = @import("std");
@@ -151,20 +151,57 @@ pub const ValidatorSlotTicker = struct {
                 }
                 log.debug("slot {d}", .{slot});
 
-                // Fire per-slot callbacks.
-                for (self.slot_callbacks[0..self.slot_callback_count]) |cb| {
-                    cb.call(slot);
+                // Fire per-slot callbacks concurrently.
+                // Each service (block, attestation, sync committee) runs in its own thread
+                // so long-running services (e.g., attestation sleeps ~8s) don't block others.
+                // TS Lodestar runs each as an independent async task; we use threads.
+                var slot_threads: [MAX_CALLBACKS]?std.Thread = .{null} ** MAX_CALLBACKS;
+                for (self.slot_callbacks[0..self.slot_callback_count], 0..) |cb, i| {
+                    slot_threads[i] = std.Thread.spawn(.{}, struct {
+                        fn run(callback: SlotCallback, s: u64) void {
+                            callback.call(s);
+                        }
+                    }.run, .{ cb, slot }) catch |err| blk: {
+                        log.err("failed to spawn slot callback thread: {s}", .{@errorName(err)});
+                        // Fallback: run synchronously if thread spawn fails.
+                        cb.call(slot);
+                        break :blk null;
+                    };
                 }
 
-                // Fire per-epoch callbacks:
+                // Fire per-epoch callbacks concurrently:
                 //   - At epoch boundary (slot % slots_per_epoch == 0), OR
                 //   - On the very first iteration regardless of slot position.
                 //     Mid-epoch startup must still fire epoch callbacks so duties
                 //     are fetched immediately rather than waiting for the next epoch.
+                var epoch_threads: [MAX_CALLBACKS]?std.Thread = .{null} ** MAX_CALLBACKS;
                 if (first_iteration or slot % self.slots_per_epoch == 0) {
                     const epoch = slot / self.slots_per_epoch;
-                    for (self.epoch_callbacks[0..self.epoch_callback_count]) |cb| {
-                        cb.call(epoch);
+                    for (self.epoch_callbacks[0..self.epoch_callback_count], 0..) |cb, i| {
+                        epoch_threads[i] = std.Thread.spawn(.{}, struct {
+                            fn run(callback: EpochCallback, e: u64) void {
+                                callback.call(e);
+                            }
+                        }.run, .{ cb, epoch }) catch |err| blk: {
+                            log.err("failed to spawn epoch callback thread: {s}", .{@errorName(err)});
+                            cb.call(epoch);
+                            break :blk null;
+                        };
+                    }
+                }
+
+                // Join all spawned threads before sleeping until the next slot.
+                // This ensures all callbacks complete within the slot window.
+                for (&slot_threads) |*t| {
+                    if (t.*) |thread| {
+                        thread.join();
+                        t.* = null;
+                    }
+                }
+                for (&epoch_threads) |*t| {
+                    if (t.*) |thread| {
+                        thread.join();
+                        t.* = null;
                     }
                 }
 
