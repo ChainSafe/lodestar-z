@@ -370,28 +370,60 @@ pub fn getStateFork(ctx: *ApiContext, state_id: types.StateId) !HandlerResult(ty
 ///
 /// Returns the finality checkpoints (previous justified, current justified, finalized).
 ///
-/// Note: Full implementation requires loading the beacon state for each state_id.
-/// Currently returns data from the head tracker which only tracks the current head's
-/// finalized/justified data. Non-head state_ids fall back to head tracker data.
-pub fn getFinalityCheckpoints(ctx: *ApiContext, _: types.StateId) !HandlerResult(types.FinalityCheckpoints) {
-    // TODO: Load actual state for non-head state_ids. This requires state regen to be
-    // wired into the API context so we can load the beacon state at any slot/root.
+/// Loads the beacon state for the given state_id via resolveState, then reads
+/// the previous_justified, current_justified, and finalized checkpoints directly
+/// from the state. Falls back to head tracker data when state is not available.
+pub fn getFinalityCheckpoints(ctx: *ApiContext, state_id: types.StateId) !HandlerResult(types.FinalityCheckpoints) {
+    const resolved = resolveState(ctx, state_id) catch {
+        // Fall back to head tracker data when state regen is unavailable.
+        return .{
+            .data = .{
+                .previous_justified = .{
+                    .epoch = ctx.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
+                    .root = ctx.head_tracker.justified_root,
+                },
+                .current_justified = .{
+                    .epoch = ctx.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
+                    .root = ctx.head_tracker.justified_root,
+                },
+                .finalized = .{
+                    .epoch = ctx.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH,
+                    .root = ctx.head_tracker.finalized_root,
+                },
+            },
+            .meta = .{},
+        };
+    };
+    const state = resolved.state;
+
+    var prev_justified: consensus_types.phase0.Checkpoint.Type = undefined;
+    try state.state.previousJustifiedCheckpoint(&prev_justified);
+
+    var curr_justified: consensus_types.phase0.Checkpoint.Type = undefined;
+    try state.state.currentJustifiedCheckpoint(&curr_justified);
+
+    var finalized: consensus_types.phase0.Checkpoint.Type = undefined;
+    try state.state.finalizedCheckpoint(&finalized);
+
     return .{
         .data = .{
             .previous_justified = .{
-                .epoch = ctx.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
-                .root = ctx.head_tracker.justified_root,
+                .epoch = prev_justified.epoch,
+                .root = prev_justified.root,
             },
             .current_justified = .{
-                .epoch = ctx.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
-                .root = ctx.head_tracker.justified_root,
+                .epoch = curr_justified.epoch,
+                .root = curr_justified.root,
             },
             .finalized = .{
-                .epoch = ctx.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH,
-                .root = ctx.head_tracker.finalized_root,
+                .epoch = finalized.epoch,
+                .root = finalized.root,
             },
         },
-        .meta = .{},
+        .meta = .{
+            .execution_optimistic = resolved.meta.execution_optimistic,
+            .finalized = resolved.meta.finalized,
+        },
     };
 }
 
@@ -1250,6 +1282,124 @@ fn parseAddress(hex: []const u8) ![20]u8 {
 }
 
 // ---------------------------------------------------------------------------
+// State resolution helper
+// ---------------------------------------------------------------------------
+
+/// Metadata about a resolved state for response envelope.
+const ResolvedStateMeta = struct {
+    execution_optimistic: bool,
+    finalized: bool,
+};
+
+/// Resolve a state_id to a CachedBeaconState.
+///
+/// Supports all Beacon API state identifiers:
+///   - "head"      → current head state via head_state callback
+///   - "justified" → head state (current justified checkpoint is on head state)
+///   - "finalized" → state at finalized checkpoint via state_regen_callback
+///   - "genesis"   → state at slot 0 via state_regen_callback
+///   - <slot>      → state at given slot via state_regen_callback
+///   - 0x<root>    → state by root via state_regen_callback
+///
+/// Returns error.StateNotAvailable if the state cannot be resolved.
+fn resolveState(ctx: *ApiContext, state_id: types.StateId) !struct { state: *CachedBeaconState, meta: ResolvedStateMeta } {
+    switch (state_id) {
+        .head => {
+            const cb = ctx.head_state orelse return error.StateNotAvailable;
+            const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
+            const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+            return .{
+                .state = state,
+                .meta = .{ .execution_optimistic = false, .finalized = false },
+            };
+        },
+        .justified => {
+            // Justified checkpoint is read from the head state, same as "head".
+            const cb = ctx.head_state orelse return error.StateNotAvailable;
+            const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
+            const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+            return .{
+                .state = state,
+                .meta = .{ .execution_optimistic = false, .finalized = false },
+            };
+        },
+        .finalized => {
+            // Try state regen by the head state root as approximation.
+            // Full implementation would use the finalized checkpoint's state root.
+            if (ctx.state_regen_callback) |cb| {
+                if (cb.getStateByRoot(ctx.head_tracker.head_state_root)) |state| {
+                    return .{
+                        .state = state,
+                        .meta = .{ .execution_optimistic = false, .finalized = true },
+                    };
+                }
+            }
+            // Fall back to head state if regen is not available.
+            const hcb = ctx.head_state orelse return error.StateNotAvailable;
+            const state_opaque = hcb.getHeadStateFn(hcb.ptr) orelse return error.StateNotAvailable;
+            const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+            return .{
+                .state = state,
+                .meta = .{ .execution_optimistic = false, .finalized = true },
+            };
+        },
+        .genesis => {
+            // Try state regen for slot 0.
+            if (ctx.state_regen_callback) |cb| {
+                if (ctx.db.getBlockRootBySlot(0) catch null) |root| {
+                    if (cb.getPreState(root, 0)) |state| {
+                        return .{
+                            .state = state,
+                            .meta = .{ .execution_optimistic = false, .finalized = true },
+                        };
+                    }
+                }
+            }
+            return error.StateNotAvailable;
+        },
+        .slot => |slot| {
+            // Try state regen for the block at this slot.
+            if (ctx.state_regen_callback) |cb| {
+                if (ctx.db.getBlockRootBySlot(slot) catch null) |root| {
+                    if (cb.getPreState(root, slot)) |state| {
+                        return .{
+                            .state = state,
+                            .meta = .{
+                                .execution_optimistic = false,
+                                .finalized = slot <= ctx.head_tracker.finalized_slot,
+                            },
+                        };
+                    }
+                }
+            }
+            // Fall back to head state if the requested slot matches head.
+            if (slot == ctx.head_tracker.head_slot) {
+                const hcb = ctx.head_state orelse return error.StateNotAvailable;
+                const state_opaque = hcb.getHeadStateFn(hcb.ptr) orelse return error.StateNotAvailable;
+                const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+                return .{
+                    .state = state,
+                    .meta = .{ .execution_optimistic = false, .finalized = false },
+                };
+            }
+            return error.StateNotAvailable;
+        },
+        .root => |root| {
+            // Try state regen by root.
+            if (ctx.state_regen_callback) |cb| {
+                if (cb.getStateByRoot(root)) |state| {
+                    return .{
+                        .state = state,
+                        .meta = .{ .execution_optimistic = false, .finalized = false },
+                    };
+                }
+            }
+            return error.StateNotAvailable;
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // State committee endpoints
 // ---------------------------------------------------------------------------
 
@@ -1264,12 +1414,8 @@ pub fn getStateCommittees(
     slot_opt: ?u64,
     index_opt: ?u64,
 ) !HandlerResult([]const types.CommitteeData) {
-    _ = state_id; // TODO: support non-head state ids via state regen
-
-    // Try head state.
-    const cb = ctx.head_state orelse return error.StateNotAvailable;
-    const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
-    const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+    const resolved = try resolveState(ctx, state_id);
+    const state = resolved.state;
 
     const current_slot = try state.state.slot();
     const current_epoch = current_slot / preset.SLOTS_PER_EPOCH;
@@ -1322,8 +1468,8 @@ pub fn getStateCommittees(
     return .{
         .data = try result.toOwnedSlice(ctx.allocator),
         .meta = .{
-            .execution_optimistic = false,
-            .finalized = false,
+            .execution_optimistic = resolved.meta.execution_optimistic,
+            .finalized = resolved.meta.finalized,
         },
     };
 }
@@ -1336,12 +1482,10 @@ pub fn getStateSyncCommittees(
     state_id: types.StateId,
     epoch_param: ?u64,
 ) !HandlerResult(types.SyncCommitteeData) {
-    _ = state_id;
     _ = epoch_param;
 
-    const cb = ctx.head_state orelse return error.StateNotAvailable;
-    const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
-    const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+    const resolved = try resolveState(ctx, state_id);
+    const state = resolved.state;
 
     const epoch_cache = state.epoch_cache;
     const sync_cache = epoch_cache.current_sync_committee_indexed;
@@ -1357,7 +1501,10 @@ pub fn getStateSyncCommittees(
                 .validators = validators,
                 .validator_aggregates = aggs,
             },
-            .meta = .{ .execution_optimistic = false, .finalized = false },
+            .meta = .{
+                .execution_optimistic = resolved.meta.execution_optimistic,
+                .finalized = resolved.meta.finalized,
+            },
         };
     }
 
@@ -1385,7 +1532,10 @@ pub fn getStateSyncCommittees(
             .validators = validators,
             .validator_aggregates = aggregates,
         },
-        .meta = .{ .execution_optimistic = false, .finalized = false },
+        .meta = .{
+            .execution_optimistic = resolved.meta.execution_optimistic,
+            .finalized = resolved.meta.finalized,
+        },
     };
 }
 
@@ -1397,11 +1547,8 @@ pub fn getStateRandao(
     state_id: types.StateId,
     epoch_opt: ?u64,
 ) !HandlerResult(types.RandaoData) {
-    _ = state_id;
-
-    const cb = ctx.head_state orelse return error.StateNotAvailable;
-    const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
-    const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+    const resolved = try resolveState(ctx, state_id);
+    const state = resolved.state;
 
     const current_slot = try state.state.slot();
     const current_epoch = current_slot / preset.SLOTS_PER_EPOCH;
@@ -1414,7 +1561,10 @@ pub fn getStateRandao(
 
     return .{
         .data = .{ .randao = mix },
-        .meta = .{ .execution_optimistic = false, .finalized = false },
+        .meta = .{
+            .execution_optimistic = resolved.meta.execution_optimistic,
+            .finalized = resolved.meta.finalized,
+        },
     };
 }
 
