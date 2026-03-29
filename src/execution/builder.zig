@@ -662,10 +662,10 @@ fn parseExecutionPayload(allocator: Allocator, json_bytes: []const u8) !types.Ex
     for (wd_array, 0..) |wd_val, i| {
         const wd = wd_val.object;
         withdrawals[i] = types.Withdrawal{
-            .index = try parseQuantityU64(wd.get("index").?.string),
-            .validator_index = try parseQuantityU64(wd.get("validator_index").?.string),
-            .address = try parseHex20(wd.get("address").?.string),
-            .amount = try parseQuantityU64(wd.get("amount").?.string),
+            .index = try parseQuantityU64((wd.get("index") orelse return error.MissingField).string),
+            .validator_index = try parseQuantityU64((wd.get("validator_index") orelse return error.MissingField).string),
+            .address = try parseHex20((wd.get("address") orelse return error.MissingField).string),
+            .amount = try parseQuantityU64((wd.get("amount") orelse return error.MissingField).string),
         };
     }
 

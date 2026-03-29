@@ -225,7 +225,14 @@ pub const HttpEngine = struct {
         self.io = io;
     }
 
-    pub fn deinit(_: *HttpEngine) void {}
+    pub fn deinit(self: *HttpEngine) void {
+        if (self.client_version) |cv| {
+            self.allocator.free(cv.code);
+            self.allocator.free(cv.name);
+            self.allocator.free(cv.version);
+            self.allocator.free(cv.commit);
+        }
+    }
 
     /// Return an EngineApi vtable interface backed by this client.
     pub fn engine(self: *HttpEngine) EngineApi {
@@ -504,6 +511,14 @@ pub const HttpEngine = struct {
         self.allocator.free(versions);
     }
 
+    /// Free a capabilities slice returned by exchangeCapabilities.
+    pub fn freeExchangeCapabilities(self: *HttpEngine, capabilities: [][]const u8) void {
+        for (capabilities) |cap| {
+            self.allocator.free(cap);
+        }
+        self.allocator.free(capabilities);
+    }
+
 
     /// Free all allocator-owned fields of a GetPayloadResponse.
     ///
@@ -523,6 +538,35 @@ pub const HttpEngine = struct {
         if (resp.deposit_requests.len > 0) self.allocator.free(resp.deposit_requests);
         if (resp.withdrawal_requests.len > 0) self.allocator.free(resp.withdrawal_requests);
         if (resp.consolidation_requests.len > 0) self.allocator.free(resp.consolidation_requests);
+    }
+
+    /// Free allocator-owned fields of a GetPayloadResponseV1 (Bellatrix).
+    pub fn freeGetPayloadResponseV1(self: *HttpEngine, resp: GetPayloadResponseV1) void {
+        const ep = resp.execution_payload;
+        if (ep.extra_data.len > 0) self.allocator.free(ep.extra_data);
+        for (ep.transactions) |tx| self.allocator.free(tx);
+        if (ep.transactions.len > 0) self.allocator.free(ep.transactions);
+    }
+
+    /// Free allocator-owned fields of a GetPayloadResponseV2 (Capella).
+    pub fn freeGetPayloadResponseV2(self: *HttpEngine, resp: GetPayloadResponseV2) void {
+        const ep = resp.execution_payload;
+        if (ep.extra_data.len > 0) self.allocator.free(ep.extra_data);
+        for (ep.transactions) |tx| self.allocator.free(tx);
+        if (ep.transactions.len > 0) self.allocator.free(ep.transactions);
+        if (ep.withdrawals.len > 0) self.allocator.free(ep.withdrawals);
+    }
+
+    /// Free allocator-owned fields of a GetPayloadResponseV4 (Electra).
+    pub fn freeGetPayloadResponseV4(self: *HttpEngine, resp: GetPayloadResponseV4) void {
+        const ep = resp.execution_payload;
+        if (ep.extra_data.len > 0) self.allocator.free(ep.extra_data);
+        for (ep.transactions) |tx| self.allocator.free(tx);
+        if (ep.transactions.len > 0) self.allocator.free(ep.transactions);
+        if (ep.withdrawals.len > 0) self.allocator.free(ep.withdrawals);
+        if (resp.blobs_bundle.commitments.len > 0) self.allocator.free(resp.blobs_bundle.commitments);
+        if (resp.blobs_bundle.proofs.len > 0) self.allocator.free(resp.blobs_bundle.proofs);
+        if (resp.blobs_bundle.blobs.len > 0) self.allocator.free(resp.blobs_bundle.blobs);
     }
 
 
@@ -834,12 +878,19 @@ pub const HttpEngine = struct {
     }
 
     /// Send forkchoiceUpdated using the fork-appropriate version.
+    ///
+    /// Unlike newPayloadForFork (which uses comptime dispatch on typed payloads),
+    /// this accepts pre-encoded JSON for the attributes parameter. This avoids
+    /// needing a comptime `anytype` for attrs (which would require callers to
+    /// know the concrete PayloadAttributes variant at comptime). The individual
+    /// forkchoiceUpdatedV1/V2/V3 methods accept typed attributes; use those
+    /// when the fork is known at comptime.
     pub fn forkchoiceUpdatedForFork(
         self: *HttpEngine,
         fork: Fork,
         state: ForkchoiceStateV1,
-        /// Must be null or the appropriate PayloadAttributes variant for the fork.
-        /// Pass PayloadAttributesV1 for bellatrix, V2 for capella, V3 for deneb+.
+        /// Pre-encoded JSON payload attributes, or null.
+        /// Use encodePayloadAttributesV1/V2/V3 to produce this from typed values.
         attrs_json: ?[]const u8,
     ) !ForkchoiceUpdatedResponse {
         const method = switch (fork) {
@@ -3412,7 +3463,7 @@ pub const IoHttpTransport = struct {
         const reader = response.reader(&transfer_buf);
         // allocRemaining reads until EOF and returns an owned slice.
         return reader.allocRemaining(self.allocator, std.Io.Limit.limited(4 * 1024 * 1024)) catch |err| switch (err) {
-            error.ReadFailed => return response.bodyErr().?,
+            error.ReadFailed => return response.bodyErr() orelse error.ReadFailed,
             else => |e| return e,
         };
     }
