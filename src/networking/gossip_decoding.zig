@@ -507,15 +507,16 @@ pub fn decodeFromSszBytes(
             //   kzg_commitment:    48 bytes  @ offset 131080
             //   kzg_proof:         48 bytes  @ offset 131128
             //   signed_block_header:         @ offset 131176
-            //     BLSSignature:    96 bytes  @ offset 131176 (signature)
-            //     BeaconBlockHeader:          @ offset 131272
-            //       slot:           8 bytes  @ offset 131272
-            //       proposer_index: 8 bytes  @ offset 131280
-            //       parent_root:   32 bytes  @ offset 131288
-            //       state_root:    32 bytes  @ offset 131320
-            //       body_root:     32 bytes  @ offset 131352
+            //     BeaconBlockHeader (message):@ offset 131176  (message is first field)
+            //       slot:           8 bytes  @ offset 131176
+            //       proposer_index: 8 bytes  @ offset 131184
+            //       parent_root:   32 bytes  @ offset 131192
+            //       state_root:    32 bytes  @ offset 131224
+            //       body_root:     32 bytes  @ offset 131256
+            //     BLSSignature:    96 bytes  @ offset 131288 (signature is second field)
             //
             // These offsets are derived from SSZ fixed-size field layout.
+            // SignedBeaconBlockHeader = { message: BeaconBlockHeader, signature: BLSSignature }
             // IMPORTANT: If FIELD_ELEMENTS_PER_BLOB changes (e.g. in future forks),
             // these offsets must be updated. A compile-time assert guards this.
             const FIELD_ELEMENTS_PER_BLOB: usize = 4096;
@@ -523,21 +524,19 @@ pub fn decodeFromSszBytes(
             const blob_size = FIELD_ELEMENTS_PER_BLOB * BYTES_PER_FIELD_ELEMENT; // 131072
             const kzg_commitment_size: usize = 48;
             const kzg_proof_size: usize = 48;
-            const bls_signature_size: usize = 96;
 
             const signed_block_header_offset = 8 + blob_size + kzg_commitment_size + kzg_proof_size;
-            const beacon_block_header_offset = signed_block_header_offset + bls_signature_size;
-            const slot_offset = beacon_block_header_offset; // slot is first field
+            // message (BeaconBlockHeader) is the first field of SignedBeaconBlockHeader
+            const slot_offset = signed_block_header_offset; // slot is first field of BeaconBlockHeader
             const proposer_index_offset = slot_offset + 8;
             const parent_root_offset = proposer_index_offset + 8;
 
             // Compile-time assertion: verify our computed offsets match what we hardcoded.
             comptime {
                 std.debug.assert(signed_block_header_offset == 131176);
-                std.debug.assert(beacon_block_header_offset == 131272);
-                std.debug.assert(slot_offset == 131272);
-                std.debug.assert(proposer_index_offset == 131280);
-                std.debug.assert(parent_root_offset == 131288);
+                std.debug.assert(slot_offset == 131176);
+                std.debug.assert(proposer_index_offset == 131184);
+                std.debug.assert(parent_root_offset == 131192);
             }
 
             const min_size = parent_root_offset + 32; // need through parent_root
