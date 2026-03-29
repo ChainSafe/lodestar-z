@@ -29,4 +29,6 @@ pub fn hasMarkers(flags: u8, markers: u8) bool {
     return (flags & markers) == markers;
 }
 
-// TODOs: implement missing functions
+// Note: TS lodestar also has parseAttesterFlags, toAttesterFlags, parseParticipationFlags
+// These are used for validator monitoring and debug tooling, not STF correctness.
+// Add them when implementing the validator monitor (beacon-node layer).

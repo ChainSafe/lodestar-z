@@ -27,6 +27,6 @@ pub fn getBlockRoot(comptime fork: ForkSeq, state: *BeaconState(fork), epoch: Ep
     return getBlockRootAtSlot(fork, state, computeStartSlotAtEpoch(epoch));
 }
 
-// TODO: getTemporaryBlockHeader
+// Note: getTemporaryBlockHeader is implemented via blockToHeader in process_block_header.zig
 
-// TODO: signedBlockToSignedHeader
+// Note: signedBlockToSignedHeader — implement when needed for beacon-node layer
