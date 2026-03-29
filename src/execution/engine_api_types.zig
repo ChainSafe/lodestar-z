@@ -387,3 +387,57 @@ test "ConsolidationRequest struct" {
     };
     try testing.expectEqual([_]u8{0x01} ** 20, cr.source_address);
 }
+
+// ── Payload bodies (getPayloadBodies) ─────────────────────────────────────────
+
+/// Execution payload body V1 (returned by engine_getPayloadBodiesByHash/RangeV1).
+/// Contains only transactions and optional withdrawals.
+pub const ExecutionPayloadBodyV1 = struct {
+    /// RLP-encoded transactions.
+    transactions: []const []const u8,
+    /// Withdrawals; null for pre-Capella blocks.
+    withdrawals: ?[]const Withdrawal,
+};
+
+/// Execution payload body V2 (returned by engine_getPayloadBodiesByHash/RangeV2).
+/// Adds Electra execution requests (EIP-6110/7002/7251).
+pub const ExecutionPayloadBodyV2 = struct {
+    /// RLP-encoded transactions.
+    transactions: []const []const u8,
+    /// Withdrawals; null for pre-Capella blocks.
+    withdrawals: ?[]const Withdrawal,
+    /// Deposit requests (EIP-6110); null for pre-Electra blocks.
+    deposit_requests: ?[]const DepositRequest,
+    /// Withdrawal requests (EIP-7002); null for pre-Electra blocks.
+    withdrawal_requests: ?[]const WithdrawalRequest,
+    /// Consolidation requests (EIP-7251); null for pre-Electra blocks.
+    consolidation_requests: ?[]const ConsolidationRequest,
+};
+
+test "ExecutionPayloadBodyV1 struct" {
+    const body = ExecutionPayloadBodyV1{
+        .transactions = &.{},
+        .withdrawals = null,
+    };
+    try testing.expect(body.withdrawals == null);
+    try testing.expectEqual(@as(usize, 0), body.transactions.len);
+}
+
+test "ExecutionPayloadBodyV2 struct" {
+    const body = ExecutionPayloadBodyV2{
+        .transactions = &.{},
+        .withdrawals = null,
+        .deposit_requests = null,
+        .withdrawal_requests = null,
+        .consolidation_requests = null,
+    };
+    try testing.expect(body.deposit_requests == null);
+    try testing.expect(body.withdrawal_requests == null);
+    try testing.expect(body.consolidation_requests == null);
+}
+
+test "ExecutionPayloadBodyV2 has Electra request fields" {
+    try testing.expect(@hasField(ExecutionPayloadBodyV2, "deposit_requests"));
+    try testing.expect(@hasField(ExecutionPayloadBodyV2, "withdrawal_requests"));
+    try testing.expect(@hasField(ExecutionPayloadBodyV2, "consolidation_requests"));
+}

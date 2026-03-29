@@ -37,6 +37,8 @@ const Withdrawal = types.Withdrawal;
 const DepositRequest = types.DepositRequest;
 const WithdrawalRequest = types.WithdrawalRequest;
 const ConsolidationRequest = types.ConsolidationRequest;
+const ExecutionPayloadBodyV1 = types.ExecutionPayloadBodyV1;
+const ExecutionPayloadBodyV2 = types.ExecutionPayloadBodyV2;
 
 // ── Connection state ──────────────────────────────────────────────────────────
 
@@ -137,6 +139,27 @@ pub const TransitionConfiguration = struct {
 /// Uses a pluggable Transport for the actual HTTP layer, making the encoding,
 /// JWT generation, and response decoding fully testable without a real EL.
 pub const HttpEngine = struct {
+    /// All Engine API methods supported by this CL client.
+    /// Pass to exchangeCapabilities() during EL handshake.
+    pub const supported_capabilities = [_][]const u8{
+        "engine_newPayloadV1",
+        "engine_newPayloadV2",
+        "engine_newPayloadV3",
+        "engine_newPayloadV4",
+        "engine_forkchoiceUpdatedV1",
+        "engine_forkchoiceUpdatedV2",
+        "engine_forkchoiceUpdatedV3",
+        "engine_getPayloadV1",
+        "engine_getPayloadV2",
+        "engine_getPayloadV3",
+        "engine_getPayloadV4",
+        "engine_getPayloadBodiesByHashV1",
+        "engine_getPayloadBodiesByHashV2",
+        "engine_getPayloadBodiesByRangeV1",
+        "engine_getPayloadBodiesByRangeV2",
+        "engine_exchangeTransitionConfigurationV1",
+        "engine_getClientVersionV1",
+    };
     allocator: Allocator,
     /// Execution engine endpoint URL (e.g. "http://localhost:8551").
     endpoint: []const u8,
@@ -502,6 +525,182 @@ pub const HttpEngine = struct {
         if (resp.consolidation_requests.len > 0) self.allocator.free(resp.consolidation_requests);
     }
 
+
+    // ── getPayloadBodies ──────────────────────────────────────────────────────
+
+    /// engine_getPayloadBodiesByHashV1: fetch payload bodies for a list of block hashes.
+    ///
+    /// Returns an array of nullable ExecutionPayloadBodyV1. A null entry means
+    /// the block was not found by the EL. Caller owns the returned slice and
+    /// each body's inner allocations.
+    pub fn getPayloadBodiesByHashV1(
+        self: *HttpEngine,
+        block_hashes: []const [32]u8,
+    ) ![]?ExecutionPayloadBodyV1 {
+        return self.getPayloadBodiesByHashImpl(ExecutionPayloadBodyV1, PayloadBodyV1Json, "engine_getPayloadBodiesByHashV1", block_hashes);
+    }
+
+    /// engine_getPayloadBodiesByHashV2: V2 variant with Electra execution requests.
+    pub fn getPayloadBodiesByHashV2(
+        self: *HttpEngine,
+        block_hashes: []const [32]u8,
+    ) ![]?ExecutionPayloadBodyV2 {
+        return self.getPayloadBodiesByHashImpl(ExecutionPayloadBodyV2, PayloadBodyV2Json, "engine_getPayloadBodiesByHashV2", block_hashes);
+    }
+
+    /// engine_getPayloadBodiesByRangeV1: fetch payload bodies for a range of block numbers.
+    ///
+    /// Returns an array of nullable ExecutionPayloadBodyV1. A null entry means
+    /// the block was not available. Caller owns the returned slice.
+    pub fn getPayloadBodiesByRangeV1(
+        self: *HttpEngine,
+        start: u64,
+        count: u64,
+    ) ![]?ExecutionPayloadBodyV1 {
+        return self.getPayloadBodiesByRangeImpl(ExecutionPayloadBodyV1, PayloadBodyV1Json, "engine_getPayloadBodiesByRangeV1", start, count);
+    }
+
+    /// engine_getPayloadBodiesByRangeV2: V2 variant with Electra execution requests.
+    pub fn getPayloadBodiesByRangeV2(
+        self: *HttpEngine,
+        start: u64,
+        count: u64,
+    ) ![]?ExecutionPayloadBodyV2 {
+        return self.getPayloadBodiesByRangeImpl(ExecutionPayloadBodyV2, PayloadBodyV2Json, "engine_getPayloadBodiesByRangeV2", start, count);
+    }
+
+    /// Shared implementation for getPayloadBodiesByHash V1/V2.
+    fn getPayloadBodiesByHashImpl(
+        self: *HttpEngine,
+        comptime BodyT: type,
+        comptime JsonT: type,
+        method: []const u8,
+        block_hashes: []const [32]u8,
+    ) ![]?BodyT {
+        const id = self.nextId();
+
+        // Encode block hashes as JSON array of hex strings.
+        var hash_parts: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer {
+            for (hash_parts.items) |p| self.allocator.free(p);
+            hash_parts.deinit(self.allocator);
+        }
+        for (block_hashes) |h| {
+            const hex = try hexEncodeFixed(self.allocator, &h);
+            defer self.allocator.free(hex);
+            const quoted = try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{hex});
+            try hash_parts.append(self.allocator, quoted);
+        }
+        const hashes_json = try joinJsonArray(self.allocator, hash_parts.items);
+        defer self.allocator.free(hashes_json);
+
+        const params_json = try std.fmt.allocPrint(self.allocator, "[{s}]", .{hashes_json});
+        defer self.allocator.free(params_json);
+
+        const body = try encodeRawRequest(self.allocator, method, params_json, id);
+        defer self.allocator.free(body);
+
+        const response = try self.sendRequest(body);
+        defer self.allocator.free(response);
+
+        return decodePayloadBodiesResponse(BodyT, JsonT, self.allocator, response);
+    }
+
+    /// Shared implementation for getPayloadBodiesByRange V1/V2.
+    fn getPayloadBodiesByRangeImpl(
+        self: *HttpEngine,
+        comptime BodyT: type,
+        comptime JsonT: type,
+        method: []const u8,
+        start: u64,
+        count: u64,
+    ) ![]?BodyT {
+        const id = self.nextId();
+
+        const start_hex = try hexEncodeQuantity(self.allocator, start);
+        defer self.allocator.free(start_hex);
+        const count_hex = try hexEncodeQuantity(self.allocator, count);
+        defer self.allocator.free(count_hex);
+
+        const params_json = try std.fmt.allocPrint(
+            self.allocator,
+            "[\"{s}\",\"{s}\"]",
+            .{ start_hex, count_hex },
+        );
+        defer self.allocator.free(params_json);
+
+        const body = try encodeRawRequest(self.allocator, method, params_json, id);
+        defer self.allocator.free(body);
+
+        const response = try self.sendRequest(body);
+        defer self.allocator.free(response);
+
+        return decodePayloadBodiesResponse(BodyT, JsonT, self.allocator, response);
+    }
+
+    /// Free a nullable payload body V1 slice returned by getPayloadBodiesByHash/RangeV1.
+    pub fn freePayloadBodiesV1(self: *HttpEngine, bodies: []?ExecutionPayloadBodyV1) void {
+        for (bodies) |maybe_body| {
+            if (maybe_body) |b| {
+                for (b.transactions) |tx| self.allocator.free(tx);
+                if (b.transactions.len > 0) self.allocator.free(b.transactions);
+                if (b.withdrawals) |ws| {
+                    if (ws.len > 0) self.allocator.free(ws);
+                }
+            }
+        }
+        self.allocator.free(bodies);
+    }
+
+    /// Free a nullable payload body V2 slice returned by getPayloadBodiesByHash/RangeV2.
+    pub fn freePayloadBodiesV2(self: *HttpEngine, bodies: []?ExecutionPayloadBodyV2) void {
+        for (bodies) |maybe_body| {
+            if (maybe_body) |b| {
+                for (b.transactions) |tx| self.allocator.free(tx);
+                if (b.transactions.len > 0) self.allocator.free(b.transactions);
+                if (b.withdrawals) |ws| {
+                    if (ws.len > 0) self.allocator.free(ws);
+                }
+                if (b.deposit_requests) |drs| {
+                    if (drs.len > 0) self.allocator.free(drs);
+                }
+                if (b.withdrawal_requests) |wrs| {
+                    if (wrs.len > 0) self.allocator.free(wrs);
+                }
+                if (b.consolidation_requests) |crs| {
+                    if (crs.len > 0) self.allocator.free(crs);
+                }
+            }
+        }
+        self.allocator.free(bodies);
+    }
+
+    /// Get payload bodies by hash using the fork-appropriate version.
+    pub fn getPayloadBodiesByHashForFork(
+        self: *HttpEngine,
+        fork: Fork,
+        block_hashes: []const [32]u8,
+    ) !union(enum) { v1: []?ExecutionPayloadBodyV1, v2: []?ExecutionPayloadBodyV2 } {
+        return switch (fork) {
+            .phase0, .altair => error.UnsupportedFork,
+            .bellatrix, .capella, .deneb => .{ .v1 = try self.getPayloadBodiesByHashV1(block_hashes) },
+            .electra, .fulu => .{ .v2 = try self.getPayloadBodiesByHashV2(block_hashes) },
+        };
+    }
+
+    /// Get payload bodies by range using the fork-appropriate version.
+    pub fn getPayloadBodiesByRangeForFork(
+        self: *HttpEngine,
+        fork: Fork,
+        start: u64,
+        count: u64,
+    ) !union(enum) { v1: []?ExecutionPayloadBodyV1, v2: []?ExecutionPayloadBodyV2 } {
+        return switch (fork) {
+            .phase0, .altair => error.UnsupportedFork,
+            .bellatrix, .capella, .deneb => .{ .v1 = try self.getPayloadBodiesByRangeV1(start, count) },
+            .electra, .fulu => .{ .v2 = try self.getPayloadBodiesByRangeV2(start, count) },
+        };
+    }
     // ── Health monitoring ─────────────────────────────────────────────────────
 
     /// EL syncing result from eth_syncing.
@@ -614,22 +813,22 @@ pub const HttpEngine = struct {
             .bellatrix => blk: {
                 // payload must be ExecutionPayloadV1
                 const p: ExecutionPayloadV1 = payload;
-                break :blk self.newPayloadV1(p);
+                break :blk newPayloadV1(@ptrCast(self), p);
             },
             .capella => blk: {
                 // payload must be ExecutionPayloadV2
                 const p: ExecutionPayloadV2 = payload;
-                break :blk self.newPayloadV2(p);
+                break :blk newPayloadV2(@ptrCast(self), p);
             },
             .deneb => blk: {
                 // payload must be ExecutionPayloadV3
                 const p: ExecutionPayloadV3 = payload;
-                break :blk self.newPayloadV3(p, versioned_hashes, parent_beacon_root);
+                break :blk newPayloadV3(@ptrCast(self), p, versioned_hashes, parent_beacon_root);
             },
             .electra, .fulu => blk: {
                 // payload must be ExecutionPayloadV4
                 const p: ExecutionPayloadV4 = payload;
-                break :blk self.newPayloadV4(p, versioned_hashes, parent_beacon_root);
+                break :blk newPayloadV4(@ptrCast(self), p, versioned_hashes, parent_beacon_root);
             },
         };
     }
@@ -719,7 +918,7 @@ pub const HttpEngine = struct {
         return switch (fork) {
             .phase0, .altair => error.UnsupportedFork,
             .bellatrix => blk: {
-                const r = try self.getPayloadV1(payload_id);
+                const r = try getPayloadV1(@ptrCast(self), payload_id);
                 break :blk GetPayloadResponse{
                     .execution_payload = promoteToV3(r.execution_payload),
                     .block_value = r.block_value,
@@ -728,7 +927,7 @@ pub const HttpEngine = struct {
                 };
             },
             .capella => blk: {
-                const r = try self.getPayloadV2(payload_id);
+                const r = try getPayloadV2(@ptrCast(self), payload_id);
                 break :blk GetPayloadResponse{
                     .execution_payload = promoteToV3(r.execution_payload),
                     .block_value = r.block_value,
@@ -736,11 +935,11 @@ pub const HttpEngine = struct {
                     .should_override_builder = false,
                 };
             },
-            .deneb => self.getPayloadV3(payload_id),
+            .deneb => getPayloadV3(@ptrCast(self), payload_id),
             .electra, .fulu => blk: {
                 // Fix 2: For Electra/Fulu, call V4 and preserve execution requests.
                 // promoteToV3() would discard deposit/withdrawal/consolidation requests.
-                const r = try self.getPayloadV4(payload_id);
+                const r = try getPayloadV4(@ptrCast(self), payload_id);
                 break :blk GetPayloadResponse{
                     .execution_payload = promoteToV3(r.execution_payload),
                     .block_value = r.block_value,
@@ -2243,6 +2442,166 @@ fn decodeBlobsBundle(allocator: Allocator, j: BlobsBundleJson) !BlobsBundle {
     return BlobsBundle{ .commitments = commitments, .proofs = proofs, .blobs = blobs };
 }
 
+
+// ── Payload body JSON types and decoding ──────────────────────────────────────
+
+/// JSON representation of an ExecutionPayloadBody V1.
+const PayloadBodyV1Json = struct {
+    transactions: []const []const u8,
+    withdrawals: ?[]const WithdrawalJson,
+};
+
+/// JSON representation of an ExecutionPayloadBody V2 (with Electra requests).
+const PayloadBodyV2Json = struct {
+    transactions: []const []const u8,
+    withdrawals: ?[]const WithdrawalJson,
+    depositRequests: ?[]const DepositRequestJson = null,
+    withdrawalRequests: ?[]const WithdrawalRequestJson = null,
+    consolidationRequests: ?[]const ConsolidationRequestJson = null,
+};
+
+/// Decode a JSON-RPC response containing an array of nullable payload bodies.
+/// Handles both V1 and V2 body types via comptime dispatch.
+fn decodePayloadBodiesResponse(
+    comptime BodyT: type,
+    comptime JsonT: type,
+    allocator: Allocator,
+    response: []const u8,
+) ![]?BodyT {
+    // The response is an array of nullable objects.
+    // std.json can't directly parse ?JsonT inside an array via decodeResponse,
+    // so we use std.json.Value and walk the array manually.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var source_parsed = try std.json.parseFromSlice(std.json.Value, arena_alloc, response, .{});
+    defer source_parsed.deinit();
+
+    const root = source_parsed.value;
+
+    // Check for JSON-RPC error.
+    if (root.object.get("error")) |err_val| {
+        if (err_val != .null) {
+            if (err_val == .object) {
+                const code = if (err_val.object.get("code")) |c| c.integer else -1;
+                return json_rpc.mapErrorCode(code);
+            }
+            return error.UnknownErrorCode;
+        }
+    }
+
+    const result_val = root.object.get("result") orelse return error.MissingResult;
+    if (result_val == .null) return error.NullResult;
+
+    const items = result_val.array.items;
+    const result = try allocator.alloc(?BodyT, items.len);
+    errdefer allocator.free(result);
+
+    var decoded_count: usize = 0;
+    errdefer {
+        // Free already-decoded bodies on error.
+        for (result[0..decoded_count]) |maybe_body| {
+            if (maybe_body) |b| freePayloadBodyInner(BodyT, allocator, b);
+        }
+    }
+
+    for (items, 0..) |item, i| {
+        if (item == .null) {
+            result[i] = null;
+        } else {
+            // Re-serialize this element, then parse as JsonT.
+            var out: std.Io.Writer.Allocating = .init(arena_alloc);
+            var writer: std.json.Stringify = .{ .writer = &out.writer };
+            try item.jsonStringify(&writer);
+
+            const json_entry = try std.json.parseFromSliceLeaky(JsonT, arena_alloc, out.written(), .{});
+            result[i] = try decodePayloadBody(BodyT, JsonT, allocator, json_entry);
+        }
+        decoded_count = i + 1;
+    }
+
+    return result;
+}
+
+/// Decode a single payload body JSON into the Zig type.
+fn decodePayloadBody(
+    comptime BodyT: type,
+    comptime JsonT: type,
+    allocator: Allocator,
+    j: JsonT,
+) !BodyT {
+    const transactions = try decodeTransactions(allocator, j.transactions);
+    errdefer {
+        for (transactions) |tx| allocator.free(tx);
+        if (transactions.len > 0) allocator.free(transactions);
+    }
+
+    const withdrawals: ?[]const Withdrawal = if (j.withdrawals) |ws|
+        try decodeWithdrawalsOwned(allocator, ws)
+    else
+        null;
+    errdefer if (withdrawals) |ws| {
+        if (ws.len > 0) allocator.free(ws);
+    };
+
+    if (BodyT == ExecutionPayloadBodyV1) {
+        return ExecutionPayloadBodyV1{
+            .transactions = transactions,
+            .withdrawals = withdrawals,
+        };
+    } else {
+        // V2: also decode Electra request fields.
+        const deposit_requests: ?[]const DepositRequest = if (j.depositRequests) |drs|
+            try decodeDepositRequests(allocator, drs)
+        else
+            null;
+        errdefer if (deposit_requests) |drs| {
+            if (drs.len > 0) allocator.free(drs);
+        };
+
+        const withdrawal_requests: ?[]const WithdrawalRequest = if (j.withdrawalRequests) |wrs|
+            try decodeWithdrawalRequests(allocator, wrs)
+        else
+            null;
+        errdefer if (withdrawal_requests) |wrs| {
+            if (wrs.len > 0) allocator.free(wrs);
+        };
+
+        const consolidation_requests: ?[]const ConsolidationRequest = if (j.consolidationRequests) |crs|
+            try decodeConsolidationRequests(allocator, crs)
+        else
+            null;
+
+        return ExecutionPayloadBodyV2{
+            .transactions = transactions,
+            .withdrawals = withdrawals,
+            .deposit_requests = deposit_requests,
+            .withdrawal_requests = withdrawal_requests,
+            .consolidation_requests = consolidation_requests,
+        };
+    }
+}
+
+/// Free inner allocations of a payload body (used in error cleanup).
+fn freePayloadBodyInner(comptime BodyT: type, allocator: Allocator, b: BodyT) void {
+    for (b.transactions) |tx| allocator.free(tx);
+    if (b.transactions.len > 0) allocator.free(b.transactions);
+    if (b.withdrawals) |ws| {
+        if (ws.len > 0) allocator.free(ws);
+    }
+    if (BodyT == ExecutionPayloadBodyV2) {
+        if (b.deposit_requests) |drs| {
+            if (drs.len > 0) allocator.free(drs);
+        }
+        if (b.withdrawal_requests) |wrs| {
+            if (wrs.len > 0) allocator.free(wrs);
+        }
+        if (b.consolidation_requests) |crs| {
+            if (crs.len > 0) allocator.free(crs);
+        }
+    }
+}
 // ── Hex decoding helpers ──────────────────────────────────────────────────────
 
 fn hexStrip0x(hex: []const u8) ![]const u8 {
@@ -3074,7 +3433,8 @@ test "getPayloadV1: parses ExecutionPayload response" {
     var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
-    const result = try engine.getPayloadV1([_]u8{0xab} ** 8);
+    const api1 = engine.engine();
+    const result = try api1.getPayloadV1([_]u8{0xab} ** 8);
 
     // Verify payload fields
     try testing.expectEqual(@as(u64, 1), result.execution_payload.block_number);
@@ -3100,7 +3460,8 @@ test "getPayloadV2: parses ExecutionPayload + blockValue response" {
     var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
-    const result = try engine.getPayloadV2([_]u8{0xcd} ** 8);
+    const api2 = engine.engine();
+    const result = try api2.getPayloadV2([_]u8{0xcd} ** 8);
 
     try testing.expectEqual(@as(u64, 2), result.execution_payload.block_number);
     try testing.expectEqual([_]u8{0x02} ** 32, result.execution_payload.block_hash);
@@ -3124,7 +3485,8 @@ test "getPayloadV3: parses ExecutionPayload + blockValue + BlobsBundle response"
     var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
-    const result = try engine.getPayloadV3([_]u8{0xef} ** 8);
+    const api3 = engine.engine();
+    const result = try api3.getPayload([_]u8{0xef} ** 8);
 
     try testing.expectEqual(@as(u64, 3), result.execution_payload.block_number);
     try testing.expectEqual([_]u8{0x03} ** 32, result.execution_payload.block_hash);
@@ -3150,7 +3512,8 @@ test "getPayloadV4: parses ExecutionPayload + blockValue + BlobsBundle + executi
     var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
-    const result = try engine.getPayloadV4([_]u8{0x12} ** 8);
+    const api4 = engine.engine();
+    const result = try api4.getPayloadV4([_]u8{0x12} ** 8);
 
     try testing.expectEqual(@as(u64, 4), result.execution_payload.block_number);
     try testing.expectEqual([_]u8{0x04} ** 32, result.execution_payload.block_hash);
@@ -3179,7 +3542,8 @@ test "getPayloadV1: payload id is hex-encoded in request" {
 
     // Payload ID with known bytes
     const pid = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
-    _ = try engine.getPayloadV1(pid);
+    const api5 = engine.engine();
+    _ = try api5.getPayloadV1(pid);
 
     const body = mock.last_body orelse return error.NoRequest;
     // Payload ID must appear as 0x0102030405060708
@@ -3502,4 +3866,238 @@ test "checkHealth: offline→online transition logs" {
     const status = try engine.checkHealth();
     try testing.expectEqual(HttpEngine.SyncingStatus.synced, status);
     try testing.expectEqual(EngineState.online, engine.state);
+}
+
+// ── getPayloadBodies tests ────────────────────────────────────────────────────
+
+test "getPayloadBodiesByHashV1: empty array" {
+    const allocator = testing.allocator;
+
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":[]}
+    ;
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const result = try engine.getPayloadBodiesByHashV1(&.{});
+    defer engine.freePayloadBodiesV1(result);
+
+    try testing.expectEqual(@as(usize, 0), result.len);
+
+    const body = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, body, "engine_getPayloadBodiesByHashV1") != null);
+}
+
+test "getPayloadBodiesByHashV1: mixed null and present entries" {
+    const allocator = testing.allocator;
+
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":[{"transactions":["0xdeadbeef"],"withdrawals":[{"index":"0x0","validatorIndex":"0x1","address":"0x0000000000000000000000000000000000000001","amount":"0x3b9aca00"}]},null,{"transactions":[],"withdrawals":null}]}
+    ;
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const hashes = [_][32]u8{ [_]u8{0x01} ** 32, [_]u8{0x02} ** 32, [_]u8{0x03} ** 32 };
+    const result = try engine.getPayloadBodiesByHashV1(&hashes);
+    defer engine.freePayloadBodiesV1(result);
+
+    try testing.expectEqual(@as(usize, 3), result.len);
+
+    // First entry: 1 transaction, 1 withdrawal
+    const body0 = result[0].?;
+    try testing.expectEqual(@as(usize, 1), body0.transactions.len);
+    try testing.expectEqual(@as(usize, 4), body0.transactions[0].len); // 0xdeadbeef = 4 bytes
+    try testing.expect(body0.withdrawals != null);
+    try testing.expectEqual(@as(usize, 1), body0.withdrawals.?.len);
+    try testing.expectEqual(@as(u64, 1_000_000_000), body0.withdrawals.?[0].amount);
+
+    // Second entry: null (block not found)
+    try testing.expect(result[1] == null);
+
+    // Third entry: no transactions, no withdrawals (pre-Capella)
+    const body2 = result[2].?;
+    try testing.expectEqual(@as(usize, 0), body2.transactions.len);
+    try testing.expect(body2.withdrawals == null);
+
+    // Verify hashes encoded in request
+    const req_body = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, req_body, "engine_getPayloadBodiesByHashV1") != null);
+    try testing.expect(std.mem.indexOf(u8, req_body, "0x0101010101010101010101010101010101010101010101010101010101010101") != null);
+}
+
+test "getPayloadBodiesByRangeV1: parses range response" {
+    const allocator = testing.allocator;
+
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":[{"transactions":["0xaa","0xbb"],"withdrawals":[]},null]}
+    ;
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const result = try engine.getPayloadBodiesByRangeV1(100, 2);
+    defer engine.freePayloadBodiesV1(result);
+
+    try testing.expectEqual(@as(usize, 2), result.len);
+
+    // First entry present
+    const body0 = result[0].?;
+    try testing.expectEqual(@as(usize, 2), body0.transactions.len);
+    try testing.expect(body0.withdrawals != null);
+    try testing.expectEqual(@as(usize, 0), body0.withdrawals.?.len);
+
+    // Second entry null
+    try testing.expect(result[1] == null);
+
+    // Verify request uses QUANTITY encoding for start/count
+    const body = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, body, "engine_getPayloadBodiesByRangeV1") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "0x64") != null); // 100 = 0x64
+    try testing.expect(std.mem.indexOf(u8, body, "0x2") != null); // count = 2
+}
+
+test "getPayloadBodiesByHashV2: parses Electra requests" {
+    const allocator = testing.allocator;
+
+    // V2 response with deposit/withdrawal/consolidation requests
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":[{"transactions":[],"withdrawals":[],"depositRequests":[{"pubkey":"0x010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101","withdrawalCredentials":"0x0202020202020202020202020202020202020202020202020202020202020202","amount":"0x773593ff","signature":"0x030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303","index":"0x0"}],"withdrawalRequests":[{"sourceAddress":"0x0404040404040404040404040404040404040404","validatorPubkey":"0x050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505","amount":"0x3b9aca00"}],"consolidationRequests":[{"sourceAddress":"0x0606060606060606060606060606060606060606","sourcePubkey":"0x070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707","targetPubkey":"0x080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808080808"}]}]}
+    ;
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const hashes = [_][32]u8{[_]u8{0xaa} ** 32};
+    const result = try engine.getPayloadBodiesByHashV2(&hashes);
+    defer engine.freePayloadBodiesV2(result);
+
+    try testing.expectEqual(@as(usize, 1), result.len);
+    const b = result[0].?;
+    try testing.expectEqual(@as(usize, 0), b.transactions.len);
+    try testing.expect(b.withdrawals != null);
+    try testing.expectEqual(@as(usize, 0), b.withdrawals.?.len);
+
+    // Deposit requests
+    try testing.expect(b.deposit_requests != null);
+    try testing.expectEqual(@as(usize, 1), b.deposit_requests.?.len);
+    try testing.expectEqual([_]u8{0x01} ** 48, b.deposit_requests.?[0].pubkey);
+
+    // Withdrawal requests
+    try testing.expect(b.withdrawal_requests != null);
+    try testing.expectEqual(@as(usize, 1), b.withdrawal_requests.?.len);
+    try testing.expectEqual([_]u8{0x04} ** 20, b.withdrawal_requests.?[0].source_address);
+
+    // Consolidation requests
+    try testing.expect(b.consolidation_requests != null);
+    try testing.expectEqual(@as(usize, 1), b.consolidation_requests.?.len);
+    try testing.expectEqual([_]u8{0x06} ** 20, b.consolidation_requests.?[0].source_address);
+
+    const body = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, body, "engine_getPayloadBodiesByHashV2") != null);
+}
+
+test "getPayloadBodiesByRangeV2: parses V2 range response" {
+    const allocator = testing.allocator;
+
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":[{"transactions":[],"withdrawals":null,"depositRequests":null,"withdrawalRequests":null,"consolidationRequests":null},null]}
+    ;
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const result = try engine.getPayloadBodiesByRangeV2(1, 2);
+    defer engine.freePayloadBodiesV2(result);
+
+    try testing.expectEqual(@as(usize, 2), result.len);
+    const b = result[0].?;
+    try testing.expect(b.withdrawals == null);
+    try testing.expect(b.deposit_requests == null);
+    try testing.expect(b.withdrawal_requests == null);
+    try testing.expect(b.consolidation_requests == null);
+    try testing.expect(result[1] == null);
+
+    const body = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, body, "engine_getPayloadBodiesByRangeV2") != null);
+}
+
+test "getPayloadBodiesByHashV1: JSON-RPC error propagates" {
+    const allocator = testing.allocator;
+
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"error":{"code":-38004,"message":"too large"}}
+    ;
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const result = engine.getPayloadBodiesByHashV1(&.{[_]u8{0x01} ** 32});
+    try testing.expectError(error.TooLargeRequest, result);
+}
+
+test "supported_capabilities includes payload bodies methods" {
+    const caps = HttpEngine.supported_capabilities;
+    var found_hash_v1 = false;
+    var found_hash_v2 = false;
+    var found_range_v1 = false;
+    var found_range_v2 = false;
+    for (caps) |c| {
+        if (std.mem.eql(u8, c, "engine_getPayloadBodiesByHashV1")) found_hash_v1 = true;
+        if (std.mem.eql(u8, c, "engine_getPayloadBodiesByHashV2")) found_hash_v2 = true;
+        if (std.mem.eql(u8, c, "engine_getPayloadBodiesByRangeV1")) found_range_v1 = true;
+        if (std.mem.eql(u8, c, "engine_getPayloadBodiesByRangeV2")) found_range_v2 = true;
+    }
+    try testing.expect(found_hash_v1);
+    try testing.expect(found_hash_v2);
+    try testing.expect(found_range_v1);
+    try testing.expect(found_range_v2);
+}
+
+test "getPayloadBodiesByHashForFork: deneb uses V1, electra uses V2" {
+    const allocator = testing.allocator;
+
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":[]}
+    ;
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    // Deneb → V1
+    const r1 = try engine.getPayloadBodiesByHashForFork(.deneb, &.{});
+    switch (r1) {
+        .v1 => |v| engine.freePayloadBodiesV1(v),
+        .v2 => return error.ExpectedV1,
+    }
+    const body1 = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, body1, "engine_getPayloadBodiesByHashV1") != null);
+
+    // Electra → V2
+    const r2 = try engine.getPayloadBodiesByHashForFork(.electra, &.{});
+    switch (r2) {
+        .v1 => return error.ExpectedV2,
+        .v2 => |v| engine.freePayloadBodiesV2(v),
+    }
+    const body2 = mock.last_body orelse return error.NoRequest;
+    try testing.expect(std.mem.indexOf(u8, body2, "engine_getPayloadBodiesByHashV2") != null);
+}
+
+test "getPayloadBodiesByRangeForFork: pre-merge returns error" {
+    const allocator = testing.allocator;
+    var mock = MockTransport.init(allocator, "{}");
+    defer mock.deinit();
+    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    defer engine.deinit();
+
+    const result = engine.getPayloadBodiesByRangeForFork(.phase0, 1, 10);
+    try testing.expectError(error.UnsupportedFork, result);
 }
