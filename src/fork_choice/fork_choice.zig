@@ -21,6 +21,7 @@ const ValidatorIndex = primitives.ValidatorIndex.Type;
 
 const proto_array = @import("proto_array.zig");
 const ProtoArray = proto_array.ProtoArray;
+const ProtoArrayError = proto_array.ProtoArrayError;
 const ForkChoiceError = proto_array.ForkChoiceError;
 const ProtoBlock = proto_array.ProtoBlock;
 const ProtoNode = proto_array.ProtoNode;
@@ -281,7 +282,7 @@ pub const ForkChoice = struct {
     // and propagating it on subsequent calls. Revisit once callers are wired up — a more
     // idiomatic Zig approach (e.g. returning error unions directly) may be cleaner.
     // ── Error state ──
-    irrecoverable_error: ?(Allocator.Error || ForkChoiceError),
+    irrecoverable_error: ?(Allocator.Error || ProtoArrayError),
 
     /// Initialize ForkChoice in-place from pre-built components.
     /// The caller is responsible for the memory backing `self`, `pa`, and `fc_store`.
