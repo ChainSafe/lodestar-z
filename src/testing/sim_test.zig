@@ -76,7 +76,7 @@ test "sim: deterministic replay — same seed produces identical state history" 
 
     const num_slots = 3;
     var final_roots: [2][32]u8 = undefined;
-    var history_storage: [2]std.ArrayList(StateHistoryEntry) = .{ .empty, .empty };
+    var history_storage: [2]std.ArrayListUnmanaged(StateHistoryEntry) = .{ .empty, .empty };
     defer history_storage[0].deinit(allocator);
     defer history_storage[1].deinit(allocator);
 
@@ -180,7 +180,7 @@ test "sim: deterministic attestation replay — same seed same finality" {
 
     var final_roots: [2][32]u8 = undefined;
     var finalized_epochs: [2]u64 = undefined;
-    var history_storage: [2]std.ArrayList(StateHistoryEntry) = .{ .empty, .empty };
+    var history_storage: [2]std.ArrayListUnmanaged(StateHistoryEntry) = .{ .empty, .empty };
     defer history_storage[0].deinit(allocator);
     defer history_storage[1].deinit(allocator);
 

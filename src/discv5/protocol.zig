@@ -118,7 +118,7 @@ pub const Protocol = struct {
     config: Config,
     routing_table: kbucket.RoutingTable,
     sessions: std.AutoHashMap(NodeId, Session),
-    pending_requests: std.ArrayList(PendingRequest),
+    pending_requests: std.ArrayListUnmanaged(PendingRequest),
     whoareyou_rate: std.AutoHashMap([4]u8, WhoareyouRateEntry),
     rng: std.Random.DefaultPrng,
     /// Known static public keys for peers, keyed by node-id.

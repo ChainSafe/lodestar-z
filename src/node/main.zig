@@ -820,7 +820,7 @@ fn runBeacon(
 
     // Parse bootnodes
     const bootnodes: []const []const u8 = if (opts.bootnodes) |raw| blk: {
-        var list: std.ArrayList([]const u8) = .empty;
+        var list: std.ArrayListUnmanaged([]const u8) = .empty;
         var it = std.mem.splitScalar(u8, raw, ',');
         while (it.next()) |enr| {
             const trimmed = std.mem.trim(u8, enr, " \t");
@@ -858,7 +858,7 @@ fn runBeacon(
 
     // Parse direct peers
     const direct_peers: []const []const u8 = if (opts.direct_peers) |raw| blk: {
-        var list: std.ArrayList([]const u8) = .empty;
+        var list: std.ArrayListUnmanaged([]const u8) = .empty;
         var it = std.mem.splitScalar(u8, raw, ',');
         while (it.next()) |addr| {
             const trimmed = std.mem.trim(u8, addr, " \t");

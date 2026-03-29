@@ -51,7 +51,7 @@ pub fn loadConfigFromYaml(
     // Parse BLOB_SCHEDULE from raw YAML before the complex-value filter strips it.
     // Format:  BLOB_SCHEDULE:\n  - EPOCH: <n>\n    MAX_BLOBS_PER_BLOCK: <n>
     {
-        var blob_entries: std.ArrayList(ChainConfig.BlobScheduleEntry) = .empty;
+        var blob_entries: std.ArrayListUnmanaged(ChainConfig.BlobScheduleEntry) = .empty;
         var line_iter = std.mem.splitSequence(u8, yaml_bytes, "\n");
         var in_blob_schedule = false;
         var current_epoch: ?u64 = null;
@@ -303,7 +303,7 @@ pub fn loadConfigFromYaml(
 /// with '[' — these are complex list/object values our parser cannot handle.
 /// Returns a newly-allocated slice with the offending lines removed.
 fn filterComplexYamlValues(alloc: Allocator, yaml_bytes: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
     var lines = std.mem.splitScalar(u8, yaml_bytes, '\n');
     var first = true;
     while (lines.next()) |line| {

@@ -115,8 +115,8 @@ pub const Packet = struct {
 
 pub const MockTransport = struct {
     alloc: Allocator,
-    sent: std.ArrayList(Packet),
-    recv_queue: std.ArrayList(Packet),
+    sent: std.ArrayListUnmanaged(Packet),
+    recv_queue: std.ArrayListUnmanaged(Packet),
     local_addr: Address,
     closed: bool,
 

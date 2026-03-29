@@ -151,7 +151,7 @@ pub const FindNode = struct {
         const req_id = try ReqId.fromSlice(req_id_bytes);
 
         var dist_list = list.readList() catch return Error.InvalidEncoding;
-        var distances: std.ArrayList(u16) = .empty;
+        var distances: std.ArrayListUnmanaged(u16) = .empty;
         errdefer distances.deinit(alloc);
         while (!dist_list.atEnd()) {
             const d = dist_list.readUint64() catch return Error.InvalidEncoding;

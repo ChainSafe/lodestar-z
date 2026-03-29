@@ -168,7 +168,7 @@ pub const ValidatorMonitor = struct {
     /// Monitored validator index → state.
     monitored: std.AutoHashMap(u64, MonitoredValidator),
     /// Rolling epoch summaries (newest at end).
-    epoch_summaries: std.ArrayList(EpochSummary) = .empty,
+    epoch_summaries: std.ArrayListUnmanaged(EpochSummary) = .empty,
     /// Maximum epoch summaries to retain.
     max_epochs: u32,
     /// Last epoch that was processed.
@@ -459,7 +459,7 @@ pub const ValidatorMonitor = struct {
 
     /// Get indices of all monitored validators.
     pub fn getMonitoredIndices(self: *const ValidatorMonitor, allocator: Allocator) ![]u64 {
-        var indices: std.ArrayList(u64) = .empty;
+        var indices: std.ArrayListUnmanaged(u64) = .empty;
         var it = self.monitored.iterator();
         while (it.next()) |entry| {
             try indices.append(allocator, entry.key_ptr.*);

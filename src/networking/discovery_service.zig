@@ -92,8 +92,8 @@ pub const DiscoveryService = struct {
     protocol: Protocol,
     enr_seq: u64,
     current_fork_digest: [4]u8,
-    discovered_peers: std.ArrayList(DiscoveredPeer),
-    pending_subnet_queries: std.ArrayList(SubnetQuery),
+    discovered_peers: std.ArrayListUnmanaged(DiscoveredPeer),
+    pending_subnet_queries: std.ArrayListUnmanaged(SubnetQuery),
     /// ENR cache for subnet-targeted queries.
     /// Stores parsed ENR records indexed by node ID (hex string ownership).
     enr_cache: std.StringHashMap(CachedEnr),

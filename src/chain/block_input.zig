@@ -440,10 +440,10 @@ pub const GossipBlockInput = struct {
         now_ns: i128,
         io: ?Io,
     ) ![]Root {
-        var timed_out: std.ArrayList(Root) = .empty;
+        var timed_out: std.ArrayListUnmanaged(Root) = .empty;
         errdefer timed_out.deinit(self.allocator);
 
-        var to_remove: std.ArrayList(Root) = .empty;
+        var to_remove: std.ArrayListUnmanaged(Root) = .empty;
         defer to_remove.deinit(self.allocator);
 
         var it = self.pending.iterator();

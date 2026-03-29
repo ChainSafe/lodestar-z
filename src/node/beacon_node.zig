@@ -2052,7 +2052,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         }
 
         // Read response chunks into BatchBlock array.
-        var result: std.ArrayList(BatchBlock) = .empty;
+        var result: std.ArrayListUnmanaged(BatchBlock) = .empty;
         errdefer {
             for (result.items) |blk| self.allocator.free(blk.block_bytes);
             result.deinit(self.allocator);

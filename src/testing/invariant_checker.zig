@@ -27,7 +27,7 @@ pub const InvariantChecker = struct {
     /// Justified epoch must never decrease.
     justified_epoch: u64 = 0,
     /// State root history for deterministic replay comparison.
-    state_history: std.ArrayList(StateHistoryEntry) = .empty,
+    state_history: std.ArrayListUnmanaged(StateHistoryEntry) = .empty,
 
     pub fn init(allocator: Allocator) InvariantChecker {
         return .{

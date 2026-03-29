@@ -388,7 +388,7 @@ fn encodeRegistrations(
     allocator: Allocator,
     registrations: []const SignedValidatorRegistration,
 ) ![]const u8 {
-    var parts: std.ArrayList([]const u8) = .empty;
+    var parts: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
         for (parts.items) |p| allocator.free(p);
         parts.deinit(allocator);

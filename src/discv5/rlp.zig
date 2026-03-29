@@ -15,7 +15,7 @@ pub const Error = error{
 // =========== Writer ===========
 
 pub const Writer = struct {
-    buf: std.ArrayList(u8),
+    buf: std.ArrayListUnmanaged(u8),
     alloc: Allocator,
 
     pub fn init(alloc: Allocator) Writer {

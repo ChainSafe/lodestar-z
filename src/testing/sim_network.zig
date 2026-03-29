@@ -73,7 +73,7 @@ pub const SimNetwork = struct {
     partition_set: [256][256]bool = [_][256]bool{[_]bool{false} ** 256} ** 256,
 
     /// Delivered messages buffer (reused across tick calls).
-    delivered_buf: std.ArrayList(DeliveredMessage),
+    delivered_buf: std.ArrayListUnmanaged(DeliveredMessage),
 
     /// Stats for test assertions.
     stats: Stats = .{},

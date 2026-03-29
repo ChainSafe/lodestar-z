@@ -327,7 +327,7 @@ pub const HttpEngine = struct {
         const id = self.nextId();
 
         // Encode capabilities as a JSON array of strings.
-        var caps_parts: std.ArrayList([]const u8) = .empty;
+        var caps_parts: std.ArrayListUnmanaged([]const u8) = .empty;
         defer {
             for (caps_parts.items) |p| self.allocator.free(p);
             caps_parts.deinit(self.allocator);
@@ -1293,7 +1293,7 @@ fn encodeWithdrawal(allocator: Allocator, w: Withdrawal) ![]const u8 {
 }
 
 fn encodeWithdrawals(allocator: Allocator, withdrawals: []const Withdrawal) ![]const u8 {
-    var parts: std.ArrayList([]const u8) = .empty;
+    var parts: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
         for (parts.items) |p| allocator.free(p);
         parts.deinit(allocator);
@@ -1332,7 +1332,7 @@ fn joinJsonArray(allocator: Allocator, items: []const []const u8) ![]const u8 {
 }
 
 fn encodeTransactions(allocator: Allocator, txs: []const []const u8) ![]const u8 {
-    var parts: std.ArrayList([]const u8) = .empty;
+    var parts: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
         for (parts.items) |p| allocator.free(p);
         parts.deinit(allocator);
@@ -1349,7 +1349,7 @@ fn encodeTransactions(allocator: Allocator, txs: []const []const u8) ![]const u8
 }
 
 fn encodeVersionedHashes(allocator: Allocator, hashes: []const [32]u8) ![]const u8 {
-    var parts: std.ArrayList([]const u8) = .empty;
+    var parts: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
         for (parts.items) |p| allocator.free(p);
         parts.deinit(allocator);
@@ -1588,7 +1588,7 @@ fn encodeConsolidationRequest(allocator: Allocator, cr: ConsolidationRequest) ![
 }
 
 fn encodeDepositRequests(allocator: Allocator, requests: []const DepositRequest) ![]const u8 {
-    var parts: std.ArrayList([]const u8) = .empty;
+    var parts: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
         for (parts.items) |p| allocator.free(p);
         parts.deinit(allocator);
@@ -1600,7 +1600,7 @@ fn encodeDepositRequests(allocator: Allocator, requests: []const DepositRequest)
 }
 
 fn encodeWithdrawalRequests(allocator: Allocator, requests: []const WithdrawalRequest) ![]const u8 {
-    var parts: std.ArrayList([]const u8) = .empty;
+    var parts: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
         for (parts.items) |p| allocator.free(p);
         parts.deinit(allocator);
@@ -1612,7 +1612,7 @@ fn encodeWithdrawalRequests(allocator: Allocator, requests: []const WithdrawalRe
 }
 
 fn encodeConsolidationRequests(allocator: Allocator, requests: []const ConsolidationRequest) ![]const u8 {
-    var parts: std.ArrayList([]const u8) = .empty;
+    var parts: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
         for (parts.items) |p| allocator.free(p);
         parts.deinit(allocator);

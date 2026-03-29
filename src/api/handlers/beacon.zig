@@ -169,7 +169,7 @@ fn buildValidatorResponse(
 
     const epoch = (try state.state.slot()) / preset.SLOTS_PER_EPOCH;
 
-    var result = std.ArrayList(types.ValidatorData).empty;
+    var result = std.ArrayListUnmanaged(types.ValidatorData).empty;
     errdefer result.deinit(ctx.allocator);
 
     for (validators, 0..) |v, i| {
@@ -1280,7 +1280,7 @@ pub fn getStateCommittees(
     // Determine which slots to enumerate.
     const epoch_start_slot = epoch * preset.SLOTS_PER_EPOCH;
 
-    var result = std.ArrayList(types.CommitteeData).empty;
+    var result = std.ArrayListUnmanaged(types.CommitteeData).empty;
     errdefer {
         for (result.items) |item| ctx.allocator.free(item.validators);
         result.deinit(ctx.allocator);
@@ -1433,7 +1433,7 @@ pub fn getBlockHeaders(
     // Return single head header or filtered set.
     // Full implementation requires a slot→root index in the DB.
     // For now, return the head header (or the requested slot's header).
-    var headers = std.ArrayList(types.BlockHeaderData).empty;
+    var headers = std.ArrayListUnmanaged(types.BlockHeaderData).empty;
     errdefer headers.deinit(ctx.allocator);
 
     const target_block_id: types.BlockId = if (slot_opt) |slot|

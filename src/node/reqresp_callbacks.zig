@@ -97,7 +97,7 @@ fn reqRespGetBlocksByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const
     const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
     const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
 
-    var results: std.ArrayList([]const u8) = .empty;
+    var results: std.ArrayListUnmanaged([]const u8) = .empty;
 
     const end_slot = std.math.add(u64, start_slot, count) catch return &.{};
     var slot: u64 = start_slot;
@@ -150,7 +150,7 @@ fn reqRespGetDataColumnsByRange(ptr: *anyopaque, start_slot: u64, count: u64) []
     const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
     const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
 
-    var results: std.ArrayList([]const u8) = .empty;
+    var results: std.ArrayListUnmanaged([]const u8) = .empty;
 
     const end_slot = std.math.add(u64, start_slot, count) catch return &.{};
     var slot: u64 = start_slot;
@@ -175,7 +175,7 @@ fn reqRespGetBlobsByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const 
     const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
     const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
 
-    var results: std.ArrayList([]const u8) = .empty;
+    var results: std.ArrayListUnmanaged([]const u8) = .empty;
     const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
 
     const end_slot = std.math.add(u64, start_slot, count) catch return &.{};

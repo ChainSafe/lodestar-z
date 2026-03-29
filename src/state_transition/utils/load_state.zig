@@ -34,7 +34,7 @@ pub fn findModifiedItems(
     new_bytes: []const u8,
     item_size: usize,
 ) ![]u32 {
-    var result: std.ArrayList(u32) = .empty;
+    var result: std.ArrayListUnmanaged(u32) = .empty;
     errdefer result.deinit(allocator);
 
     // Only compare the common range (shorter of the two)
@@ -67,7 +67,7 @@ pub fn findModifiedItems(
 
 fn findModifiedItemsRecursive(
     allocator: Allocator,
-    result: *std.ArrayList(u32),
+    result: *std.ArrayListUnmanaged(u32),
     seed_bytes: []const u8,
     new_bytes: []const u8,
     item_size: usize,

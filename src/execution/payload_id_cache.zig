@@ -44,7 +44,7 @@ const Entry = struct {
 /// `max_entries` items (oldest evicted first when full).
 pub const PayloadIdCache = struct {
     allocator: Allocator,
-    entries: std.ArrayList(Entry) = .empty,
+    entries: std.ArrayListUnmanaged(Entry) = .empty,
     /// Maximum number of live entries.
     max_entries: usize,
     /// TTL in seconds. Entries older than this are considered stale.

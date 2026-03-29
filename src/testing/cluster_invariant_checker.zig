@@ -25,7 +25,7 @@ pub const ClusterInvariantChecker = struct {
 
     /// Per-node state root history indexed by slot offset.
     /// node_state_roots[node_id] is an ArrayList of (slot, root) pairs.
-    node_state_roots: []std.ArrayList(SlotRoot),
+    node_state_roots: []std.ArrayListUnmanaged(SlotRoot),
 
     /// Per-node finalized epoch (latest known).
     node_finalized_epochs: []u64,
@@ -70,7 +70,7 @@ pub const ClusterInvariantChecker = struct {
     };
 
     pub fn init(allocator: Allocator, num_nodes: u8) !ClusterInvariantChecker {
-        const roots = try allocator.alloc(std.ArrayList(SlotRoot), num_nodes);
+        const roots = try allocator.alloc(std.ArrayListUnmanaged(SlotRoot), num_nodes);
         for (roots) |*r| r.* = .empty;
 
         const epochs = try allocator.alloc(u64, num_nodes);
