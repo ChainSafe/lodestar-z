@@ -172,7 +172,12 @@ fn writeJsonValue(writer: *IoWriter, comptime T: type, value: *const T) IoError!
             }
         },
         .int, .comptime_int => {
-            try print(writer, "{d}", .{value.*});
+            // Beacon API: u64 and larger are quoted decimal strings
+            if (@bitSizeOf(T) >= 64) {
+                try print(writer, "\"{d}\"", .{value.*});
+            } else {
+                try print(writer, "{d}", .{value.*});
+            }
         },
         .pointer => |ptr| {
             if (ptr.size == .slice) {
@@ -292,7 +297,7 @@ test "encodeJsonResponse simple struct" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"finalized\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"data\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"test\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"value\":42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"value\":\"42\"") != null);
 }
 
 test "encodeJsonResponse byte array as hex" {
@@ -348,7 +353,7 @@ test "encodeHandlerResultJson with metadata" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"version\":\"deneb\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"execution_optimistic\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"finalized\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"value\":123") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"value\":\"123\"") != null);
 }
 
 test "encodeHandlerResultJson without metadata" {

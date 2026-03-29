@@ -1128,7 +1128,7 @@ pub const HttpServer = struct {
         for (handler_res.data, 0..) |lv, i| {
             if (i > 0) try buf.appendSlice(alloc, ",");
             const entry = try std.fmt.allocPrint(alloc,
-                "{{\"index\":{d},\"epoch\":{d},\"is_live\":{s}}}",
+                "{{\"index\":\"{d}\",\"epoch\":\"{d}\",\"is_live\":{s}}}",
                 .{ lv.index, lv.epoch, if (lv.is_live) "true" else "false" });
             defer alloc.free(entry);
             try buf.appendSlice(alloc, entry);
@@ -1175,7 +1175,7 @@ pub const HttpServer = struct {
         errdefer buf.deinit(alloc);
         const fc = handler_res.data;
         const header = try std.fmt.allocPrint(alloc,
-            "{{\"data\":{{\"justified_checkpoint\":{{\"epoch\":{d},\"root\":\"0x{s}\"}},\"finalized_checkpoint\":{{\"epoch\":{d},\"root\":\"0x{s}\"}},\"fork_choice_nodes\":[",
+            "{{\"data\":{{\"justified_checkpoint\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"finalized_checkpoint\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"fork_choice_nodes\":[",
             .{
                 fc.justified_checkpoint.epoch,
                 std.fmt.bytesToHex(&fc.justified_checkpoint.root, .lower),
@@ -1192,7 +1192,7 @@ pub const HttpServer = struct {
                 try alloc.dupe(u8, "null");
             defer alloc.free(parent_root_str);
             const node_entry = try std.fmt.allocPrint(alloc,
-                "{{\"slot\":{d},\"block_root\":\"0x{s}\",\"parent_root\":{s},\"justified_epoch\":{d},\"finalized_epoch\":{d},\"weight\":{d},\"validity\":\"{s}\",\"execution_block_hash\":\"0x{s}\"}}",
+                "{{\"slot\":\"{d}\",\"block_root\":\"0x{s}\",\"parent_root\":{s},\"justified_epoch\":\"{d}\",\"finalized_epoch\":\"{d}\",\"weight\":\"{d}\",\"validity\":\"{s}\",\"execution_block_hash\":\"0x{s}\"}}",
                 .{
                     node.slot,
                     std.fmt.bytesToHex(&node.block_root, .lower),
