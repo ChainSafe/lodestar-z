@@ -1217,10 +1217,11 @@ pub const ForkChoice = struct {
 
     /// Check if the proposer is proposing on time.
     /// https://github.com/ethereum/consensus-specs/blob/v1.5.0/specs/phase0/fork-choice.md#is_proposing_on_time
-    fn isProposingOnTime(_: *const ForkChoice, sec_from_slot: u32, _: Slot) bool {
-        // TODO: Wire BeaconConfig.getProposerReorgCutoffMs when available.
-        // Default from Lodestar TS: REORG_OFFSETS_OF_SECS_INTO_SLOT = 2 sec for phase0+
-        const proposer_reorg_cutoff: u64 = 2000; // 2 seconds in ms
+    ///
+    /// Cutoff = SECONDS_PER_SLOT * 1000 / 6  (1/6 of slot duration in ms).
+    /// For 12s mainnet slots: 2000ms. For 6s minimal slots: 1000ms.
+    fn isProposingOnTime(self: *const ForkChoice, sec_from_slot: u32, _: Slot) bool {
+        const proposer_reorg_cutoff: u64 = self.config.chain.SECONDS_PER_SLOT * 1000 / 6;
         return @as(u64, sec_from_slot) * 1000 < proposer_reorg_cutoff;
     }
 
@@ -2569,8 +2570,7 @@ test "getProposerHead no reorg: parent block not strong" {
 }
 
 test "getProposerHead no reorg: not proposing on time" {
-    // Minimal ChainConfig: PROPOSER_REORG_CUTOFF_BPS=1667, SLOT_DURATION_MS=6000
-    // cutoff = (1667 * 6000 + 5000) / 10000 = 1000ms
+    // Minimal preset: SECONDS_PER_SLOT=6 → cutoff = 6 * 1000 / 6 = 1000ms
     // sec_from_slot=2 → 2000ms > 1000ms → not on time
     var ctx = try initReorgTest(testing.allocator, .{});
     defer deinitTestForkChoice(testing.allocator, ctx.fc);

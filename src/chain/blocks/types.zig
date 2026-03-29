@@ -135,6 +135,9 @@ pub const ImportBlockOpts = struct {
 
 /// Result of the sanity check stage.
 pub const SanityResult = struct {
+    /// Computed body root (hash-tree-root of BeaconBlockBody).
+    /// Threaded through the pipeline to avoid redundant recomputation.
+    body_root: Root,
     /// Computed block root (hash-tree-root of BeaconBlockHeader).
     block_root: Root,
     /// The block's slot.

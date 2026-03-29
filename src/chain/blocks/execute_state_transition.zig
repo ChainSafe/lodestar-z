@@ -71,6 +71,7 @@ pub fn executeStateTransition(
     pre_state: *CachedBeaconState,
     da_status: DataAvailabilityStatus,
     opts: ImportBlockOpts,
+    precomputed_body_root: ?[32]u8,
 ) BlockImportError!StfResult {
     const any_signed_block = block_input.block;
     const block = any_signed_block.beaconBlock();
@@ -180,8 +181,13 @@ pub fn executeStateTransition(
     // BeaconBlockHeader.state_root = the computed post-state root (not the placeholder 0x00...).
     // This ensures the block root matches what the state stores in block_roots[] and
     // what child blocks use as parent_root.
+    // Reuse precomputed body_root from sanity stage when available.
     var body_root: [32]u8 = undefined;
-    block.beaconBlockBody().hashTreeRoot(allocator, &body_root) catch return BlockImportError.InternalError;
+    if (precomputed_body_root) |br| {
+        body_root = br;
+    } else {
+        block.beaconBlockBody().hashTreeRoot(allocator, &body_root) catch return BlockImportError.InternalError;
+    }
     const block_header = consensus_types.phase0.BeaconBlockHeader.Type{
         .slot = block_slot,
         .proposer_index = block.proposerIndex(),

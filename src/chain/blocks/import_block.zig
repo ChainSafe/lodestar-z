@@ -153,7 +153,12 @@ pub fn importVerifiedBlock(
             // the chain has advanced faster than the fork choice clock (e.g., range sync,
             // test replay, or blocks imported before the first onSlot tick).
             if (block_slot > fc.getTime()) {
-                fc.updateTime(ctx.allocator, block_slot) catch {};
+                fc.updateTime(ctx.allocator, block_slot) catch |err| switch (err) {
+                    error.OutOfMemory => return BlockImportError.InternalError,
+                    else => {
+                        std.log.warn("FC updateTime failed at slot {d}: {}", .{ block_slot, err });
+                    },
+                };
             }
 
             // Map pipeline execution/DA status to fork choice BlockExtraMeta.
@@ -236,7 +241,10 @@ pub fn importVerifiedBlock(
                                     att_slot,
                                     att_block_root,
                                     att_target_epoch,
-                                ) catch {};
+                                ) catch |err| switch (err) {
+                                    error.OutOfMemory => return BlockImportError.InternalError,
+                                    else => {},
+                                };
                             }
                         }
                     },
@@ -254,7 +262,10 @@ pub fn importVerifiedBlock(
                                     att_slot,
                                     att_block_root,
                                     att_target_epoch,
-                                ) catch {};
+                                ) catch |err| switch (err) {
+                                    error.OutOfMemory => return BlockImportError.InternalError,
+                                    else => {},
+                                };
                             }
                         }
                     },
@@ -269,13 +280,17 @@ pub fn importVerifiedBlock(
                 .phase0 => |slashings| {
                     for (slashings.items) |*slashing| {
                         const any_slashing = fork_types.AnyAttesterSlashing{ .phase0 = slashing.* };
-                        fc.onAttesterSlashing(&any_slashing) catch {};
+                        fc.onAttesterSlashing(&any_slashing) catch |err| return switch (err) {
+                            error.OutOfMemory => BlockImportError.InternalError,
+                        };
                     }
                 },
                 .electra => |slashings| {
                     for (slashings.items) |*slashing| {
                         const any_slashing = fork_types.AnyAttesterSlashing{ .electra = slashing.* };
-                        fc.onAttesterSlashing(&any_slashing) catch {};
+                        fc.onAttesterSlashing(&any_slashing) catch |err| return switch (err) {
+                            error.OutOfMemory => BlockImportError.InternalError,
+                        };
                     }
                 },
             }

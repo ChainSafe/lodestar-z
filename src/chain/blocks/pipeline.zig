@@ -194,6 +194,7 @@ pub fn processBlock(
                 pre_state,
                 da_status,
                 opts,
+                sanity.body_root,
             );
 
             // Stage 5: Execution payload verification.

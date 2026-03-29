@@ -148,6 +148,7 @@ pub fn verifySanity(
     const parent_slot = if (parent_node_opt) |pn| pn.slot else 0;
 
     return .{ .valid = .{
+        .body_root = body_root,
         .block_root = block_root,
         .block_slot = block_slot,
         .parent_root = parent_root,
