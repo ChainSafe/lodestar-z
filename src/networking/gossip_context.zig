@@ -1,6 +1,6 @@
 //! NodeGossipContext: type-erased gossip validation vtable.
 //!
-//! Provides a concrete `NodeGossipContext` struct that owns the five SeenSets
+//! Provides a concrete `NodeGossipContext` struct that owns the six SeenSets
 //! and holds a `GossipValidationContext` wired to caller-supplied callbacks.
 //!
 //! The actual callback implementations that read from BeaconNode live in
@@ -33,7 +33,7 @@ pub const GossipCallbacks = struct {
     getValidatorCount: *const fn (ptr: *anyopaque) u32,
 };
 
-/// Gossip validation context that owns all five SeenSets.
+/// Gossip validation context that owns all six SeenSets.
 ///
 /// The `ctx` field is the `GossipValidationContext` suitable for passing to
 /// `P2pConfig.validator`.
@@ -54,6 +54,7 @@ pub const NodeGossipContext = struct {
     seen_exits: SeenSet,
     seen_proposer_slashings: SeenSet,
     seen_attester_slashings: SeenSet,
+    seen_bls_changes: SeenSet,
 
     /// Ready-to-use context.  Valid only after `fixupPointers`.
     ctx: GossipValidationContext,
@@ -66,6 +67,7 @@ pub const NodeGossipContext = struct {
             .seen_exits = SeenSet.init(allocator),
             .seen_proposer_slashings = SeenSet.init(allocator),
             .seen_attester_slashings = SeenSet.init(allocator),
+            .seen_bls_changes = SeenSet.init(allocator),
             .ctx = undefined,
         };
     }
@@ -76,6 +78,7 @@ pub const NodeGossipContext = struct {
         self.seen_exits.deinit();
         self.seen_proposer_slashings.deinit();
         self.seen_attester_slashings.deinit();
+        self.seen_bls_changes.deinit();
     }
 
     /// Wire self-referential SeenSet pointers and the callback vtable.
@@ -97,6 +100,7 @@ pub const NodeGossipContext = struct {
             .seen_voluntary_exits = &self.seen_exits,
             .seen_proposer_slashings = &self.seen_proposer_slashings,
             .seen_attester_slashings = &self.seen_attester_slashings,
+            .seen_bls_changes = &self.seen_bls_changes,
             .getProposerIndex = callbacks.getProposerIndex,
             .isKnownBlockRoot = callbacks.isKnownBlockRoot,
             .isValidatorActive = callbacks.isValidatorActive,
