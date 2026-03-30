@@ -9,6 +9,9 @@ const Depth = @import("hashing").Depth;
 const Gindex = @import("gindex.zig").Gindex;
 
 hash: [32]u8,
+// `left` and `right` are child node IDs for leaf/zero/regular branch nodes.
+// For branch-struct nodes, `left` stores the high pointer bits and `right`
+// stores the low pointer bits of the packed BranchStructRef pointer.
 left: Id,
 right: Id,
 state: State,
@@ -146,6 +149,8 @@ pub const Pool = struct {
     pub const BranchStructRef = struct {
         ptr: *anyopaque,
         get_root: *const fn (ptr: *const anyopaque, out: *[32]u8) void,
+        // Proof generation may need a traversable tree even though branch-struct
+        // nodes are normally opaque to left/right navigation.
         to_tree: *const fn (ptr: *const anyopaque, pool: *Pool) Error!Id,
         deinit: *const fn (ptr: *anyopaque, allocator: Allocator) void,
     };
@@ -305,6 +310,9 @@ pub const Pool = struct {
 
         const node_id = try self.create();
         const ptr_usize = @intFromPtr(branch_struct_ref);
+        // branch-struct nodes do not store child node IDs in left/right. Instead we
+        // pack the BranchStructRef pointer into those fields and rely on noChild()
+        // to keep generic traversal from treating them as normal branches.
         const right_ptr_value: u32 = @intCast(ptr_usize & 0xFFFFFFFF);
         self.nodes.items(.right)[@intFromEnum(node_id)] = @enumFromInt(right_ptr_value);
         if (comptime @sizeOf(usize) == 8) {
@@ -417,6 +425,8 @@ pub const Pool = struct {
     pub fn getBranchStructRefUnsafe(self: *Pool, node_id: Id) *BranchStructRef {
         const left_ptr_value: u32 = @intFromEnum(self.nodes.items(.left)[@intFromEnum(node_id)]);
         const right_ptr_value: u32 = @intFromEnum(self.nodes.items(.right)[@intFromEnum(node_id)]);
+        // This reverses the packing performed in createBranchStruct(). Callers must
+        // ensure node_id is a branch-struct node before decoding pointer bits.
         const ptr_int: usize = if (comptime @sizeOf(usize) == 8)
             @as(u64, left_ptr_value) << 32 | @as(u64, right_ptr_value)
         else
@@ -429,6 +439,8 @@ pub const Pool = struct {
         if (!state.isBranchStruct()) {
             return Error.InvalidNode;
         }
+        // Materialization is only for specialized flows such as proof generation.
+        // Generic tree navigation should keep branch-struct nodes opaque.
         const struct_ref = self.getBranchStructRefUnsafe(node_id);
         return try struct_ref.to_tree(struct_ref.ptr, self);
     }
@@ -503,6 +515,7 @@ pub const Id = enum(u32) {
 
     /// Returns true if navigation to the child node is not possible
     pub inline fn noChild(node_id: Id, state: State) bool {
+        // branch-struct nodes keep packed pointer bits in left/right, not child IDs.
         return state.isLeaf() or state.isBranchStruct() or @intFromEnum(node_id) == 0;
     }
 

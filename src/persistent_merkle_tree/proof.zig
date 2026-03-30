@@ -105,6 +105,8 @@ pub fn createSingleProof(
         const witness_index = path_len - 1 - depth_idx;
         if (node_id.getState(pool).isBranchStruct()) {
             if (materialized_root) |_| {
+                // Single proofs only support one branch-struct hop. If the
+                // materialized subtree would require another one, fail fast.
                 return error.NestedBranchStruct;
             }
             materialized_root = try pool.materializeBranchStruct(node_id);
