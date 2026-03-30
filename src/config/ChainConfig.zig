@@ -36,10 +36,10 @@ DENEB_FORK_EPOCH: u64,
 // ELECTRA
 ELECTRA_FORK_VERSION: [4]u8,
 ELECTRA_FORK_EPOCH: u64,
-// FULU (assuming it's a future fork, standard pattern)
+// FULU
 FULU_FORK_VERSION: [4]u8,
 FULU_FORK_EPOCH: u64,
-// GLOAS (EIP-7732: Enshrined Proposer-Builder Separation)
+// GLOAS
 GLOAS_FORK_VERSION: [4]u8,
 GLOAS_FORK_EPOCH: u64,
 

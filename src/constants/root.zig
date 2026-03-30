@@ -120,7 +120,7 @@ pub const CURRENT_SYNC_COMMITTEE_GINDEX_ELECTRA = 86;
 
 pub const G2_POINT_AT_INFINITY: [96]u8 = [_]u8{0xc0} ++ [_]u8{0} ** 95;
 
-// Gloas (EIP-7732) constants
+// Gloas
 pub const BUILDER_INDEX_FLAG: u64 = 1 << 40;
 pub const BUILDER_INDEX_SELF_BUILD: u64 = std.math.maxInt(u64);
 pub const BUILDER_PAYMENT_THRESHOLD_NUMERATOR: u64 = 6;
