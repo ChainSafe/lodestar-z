@@ -93,15 +93,6 @@ pub const ForkChoiceError = ProtoArrayError || error{
     DependentRootNotFound,
 };
 
-/// Checkpoint results extracted from state during onBlock.
-/// Contains both realized and unrealized checkpoints needed for ProtoBlock construction.
-const CheckpointResult = struct {
-    justified: CheckpointWithPayloadStatus,
-    finalized: CheckpointWithPayloadStatus,
-    unrealized_justified: CheckpointWithPayloadStatus,
-    unrealized_finalized: CheckpointWithPayloadStatus,
-};
-
 /// Epoch offset for dependent root computation.
 ///
 /// Spec: fork-choice.md (get_dependent_root)
@@ -440,23 +431,142 @@ pub const ForkChoice = struct {
         else
             null;
 
-        // 1-4. Validate block and get parent.
-        const parent_block = try self.validateBlock(slot, parent_root, parent_block_hash);
+        // 1. Parent block must be known (state_transition would have failed otherwise).
+        const parent_block = self.proto_array.getParent(parent_root, parent_block_hash) orelse
+            return error.InvalidBlockUnknownParent;
+
+        // 2. Blocks cannot be in the future. If they are, their consideration must be delayed until
+        // they are in the past.
+        // Note: presently, we do not delay consideration. We just drop the block.
+        if (slot > self.fc_store.current_slot) return error.InvalidBlockFutureSlot;
+
+        // 3. Check that block is later than the finalized epoch slot (optimization to reduce calls to
+        // getAncestor).
+        const finalized_slot = computeStartSlotAtEpoch(self.fc_store.finalized_checkpoint.epoch);
+        if (slot <= finalized_slot) return error.InvalidBlockFinalizedSlot;
+
+        // 4. Check block is a descendant of the finalized block at checkpoint finalized slot.
+        const block_ancestor_node = try self.proto_array.getAncestor(parent_root, finalized_slot);
+        const fc_store_finalized = self.fc_store.finalized_checkpoint;
+        if (!std.mem.eql(u8, &block_ancestor_node.block_root, &fc_store_finalized.root) or
+            // Gloas (ePBS): finalized checkpoints carry payload status (empty/full) that must also match.
+            block_ancestor_node.payload_status != fc_store_finalized.payload_status)
+        {
+            return error.InvalidBlockNotFinalizedDescendant;
+        }
 
         // 5. Compute block root.
         var block_root: Root = undefined;
         try block.hashTreeRoot(allocator, &block_root);
 
-        // 6. Assign proposer score boost if the block is timely.
+        // 6. Assign proposer score boost if the block is timely
+        // (before attesting interval = before 1st interval).
         const is_timely = self.isBlockTimely(slot, block_delay_sec);
+        // Only boost the first block we see.
         if (self.opts.proposer_boost and is_timely and self.proposer_boost_root == null) {
             self.proposer_boost_root = block_root;
         }
 
         const block_epoch = computeEpochAtSlot(slot);
 
-        // 7-11. Extract and update checkpoints.
-        const checkpoints = try self.extractAndUpdateCheckpoints(allocator, state, parent_block, block_epoch, current_slot);
+        // 7. Extract checkpoints from state with payload status.
+        var justified_ssz: consensus_types.phase0.Checkpoint.Type = undefined;
+        try state.state.currentJustifiedCheckpoint(&justified_ssz);
+        const justified_checkpoint: CheckpointWithPayloadStatus = .{
+            .epoch = justified_ssz.epoch,
+            .root = justified_ssz.root,
+            .payload_status = getCheckpointPayloadStatus(state, justified_ssz.epoch),
+        };
+
+        var finalized_ssz: consensus_types.phase0.Checkpoint.Type = undefined;
+        try state.state.finalizedCheckpoint(&finalized_ssz);
+        const finalized_checkpoint: CheckpointWithPayloadStatus = .{
+            .epoch = finalized_ssz.epoch,
+            .root = finalized_ssz.root,
+            .payload_status = getCheckpointPayloadStatus(state, finalized_ssz.epoch),
+        };
+
+        // 8. Update realized checkpoints.
+        var realized_ctx = OnBlockBalancesCtx{
+            .getter = self.fc_store.justified_balances_getter,
+            .checkpoint = justified_checkpoint,
+            .state = state,
+        };
+        try self.updateCheckpoints(justified_checkpoint, finalized_checkpoint, .{
+            .context = @ptrCast(&realized_ctx),
+            .getFn = OnBlockBalancesCtx.call,
+        });
+
+        // 9-10. Same logic as compute_pulled_up_tip in the spec, inlined to reuse variables.
+        // If the parent checkpoints are already at the same epoch as the block being imported,
+        // it's impossible for the unrealized checkpoints to differ from the parent's. This
+        // holds true because:
+        //   1. A child block cannot have lower FFG checkpoints than its parent.
+        //   2. A block in epoch N cannot contain attestations which would justify an epoch higher than N.
+        //   3. A block in epoch N cannot contain attestations which would finalize an epoch higher than N - 1.
+        // This is an optimization. It should reduce the amount of times we run
+        // computeUnrealizedCheckpoints by approximately 1/3rd when the chain is performing optimally.
+        var unrealized_justified: CheckpointWithPayloadStatus = undefined;
+        var unrealized_finalized: CheckpointWithPayloadStatus = undefined;
+
+        if (self.opts.compute_unrealized) {
+            if (parent_block.unrealized_justified_epoch == block_epoch and
+                parent_block.unrealized_finalized_epoch + 1 >= block_epoch)
+            {
+                // Reuse from parent, happens at ~1/3 last blocks of epoch as monitored in mainnet.
+                unrealized_justified = .{
+                    .epoch = parent_block.unrealized_justified_epoch,
+                    .root = parent_block.unrealized_justified_root,
+                    .payload_status = getCheckpointPayloadStatus(state, parent_block.unrealized_justified_epoch),
+                };
+                unrealized_finalized = .{
+                    .epoch = parent_block.unrealized_finalized_epoch,
+                    .root = parent_block.unrealized_finalized_root,
+                    .payload_status = getCheckpointPayloadStatus(state, parent_block.unrealized_finalized_epoch),
+                };
+            } else {
+                // Compute new, happens ~2/3 first blocks of epoch as monitored in mainnet.
+                const unrealized = try state_transition.computeUnrealizedCheckpoints(state, allocator);
+                unrealized_justified = .{
+                    .epoch = unrealized.justified_checkpoint.epoch,
+                    .root = unrealized.justified_checkpoint.root,
+                    .payload_status = getCheckpointPayloadStatus(state, unrealized.justified_checkpoint.epoch),
+                };
+                unrealized_finalized = .{
+                    .epoch = unrealized.finalized_checkpoint.epoch,
+                    .root = unrealized.finalized_checkpoint.root,
+                    .payload_status = getCheckpointPayloadStatus(state, unrealized.finalized_checkpoint.epoch),
+                };
+            }
+        } else {
+            unrealized_justified = justified_checkpoint;
+            unrealized_finalized = finalized_checkpoint;
+        }
+
+        // Update best known unrealized justified & finalized checkpoints.
+        var unrealized_balances_ctx = OnBlockBalancesCtx{
+            .getter = self.fc_store.justified_balances_getter,
+            .checkpoint = unrealized_justified,
+            .state = state,
+        };
+        try self.updateUnrealizedCheckpoints(unrealized_justified, unrealized_finalized, .{
+            .context = @ptrCast(&unrealized_balances_ctx),
+            .getFn = OnBlockBalancesCtx.call,
+        });
+
+        // 11. If block is from a past epoch, try to update store's justified & finalized
+        // checkpoints right away.
+        if (block_epoch < computeEpochAtSlot(current_slot)) {
+            var past_epoch_ctx = OnBlockBalancesCtx{
+                .getter = self.fc_store.justified_balances_getter,
+                .checkpoint = unrealized_justified,
+                .state = state,
+            };
+            try self.updateCheckpoints(unrealized_justified, unrealized_finalized, .{
+                .context = @ptrCast(&past_epoch_ctx),
+                .getFn = OnBlockBalancesCtx.call,
+            });
+        }
 
         // 12. Compute target root.
         const target_slot = computeStartSlotAtEpoch(block_epoch);
@@ -482,14 +592,14 @@ pub const ForkChoice = struct {
             .parent_root = parent_root,
             .state_root = block.inner.state_root,
             .target_root = target_root,
-            .justified_epoch = checkpoints.justified.epoch,
-            .justified_root = checkpoints.justified.root,
-            .finalized_epoch = checkpoints.finalized.epoch,
-            .finalized_root = checkpoints.finalized.root,
-            .unrealized_justified_epoch = checkpoints.unrealized_justified.epoch,
-            .unrealized_justified_root = checkpoints.unrealized_justified.root,
-            .unrealized_finalized_epoch = checkpoints.unrealized_finalized.epoch,
-            .unrealized_finalized_root = checkpoints.unrealized_finalized.root,
+            .justified_epoch = justified_checkpoint.epoch,
+            .justified_root = justified_checkpoint.root,
+            .finalized_epoch = finalized_checkpoint.epoch,
+            .finalized_root = finalized_checkpoint.root,
+            .unrealized_justified_epoch = unrealized_justified.epoch,
+            .unrealized_justified_root = unrealized_justified.root,
+            .unrealized_finalized_epoch = unrealized_finalized.epoch,
+            .unrealized_finalized_root = unrealized_finalized.root,
             .extra_meta = extra_meta,
             .timeliness = is_timely,
             .payload_status = if (comptime fork.gte(.gloas)) .pending else .full,
@@ -497,171 +607,11 @@ pub const ForkChoice = struct {
         };
 
         // 15. Add to proto array.
+        // This does not apply a vote to the block, it just makes fork choice aware of the block so
+        // it can still be identified as the head even if it doesn't have any votes.
         try self.proto_array.onBlock(allocator, proto_block, current_slot, self.proposer_boost_root);
 
         return proto_block;
-    }
-
-    /// Validate block for fork choice: parent known, not future, not finalized, finalized descendant.
-    /// Returns the parent ProtoNode.
-    fn validateBlock(
-        self: *ForkChoice,
-        slot: Slot,
-        parent_root: Root,
-        parent_block_hash: ?Root,
-    ) ForkChoiceError!*const ProtoNode {
-        // 1. Parent block must be known (state_transition would have failed otherwise).
-        const parent_block = self.proto_array.getParent(parent_root, parent_block_hash) orelse
-            return error.InvalidBlockUnknownParent;
-
-        // 2. Blocks cannot be in the future.
-        if (slot > self.fc_store.current_slot) return error.InvalidBlockFutureSlot;
-
-        // 3. Block must be later than the finalized epoch slot.
-        const finalized_slot = computeStartSlotAtEpoch(self.fc_store.finalized_checkpoint.epoch);
-        if (slot <= finalized_slot) return error.InvalidBlockFinalizedSlot;
-
-        // 4. Check block is a descendant of the finalized block at checkpoint finalized slot.
-        const block_ancestor_node = try self.proto_array.getAncestor(parent_root, finalized_slot);
-        const fc_store_finalized = self.fc_store.finalized_checkpoint;
-        if (!std.mem.eql(u8, &block_ancestor_node.block_root, &fc_store_finalized.root) or
-            // Gloas (ePBS): finalized checkpoints carry payload status (empty/full) that must also match.
-            block_ancestor_node.payload_status != fc_store_finalized.payload_status)
-        {
-            return error.InvalidBlockNotFinalizedDescendant;
-        }
-
-        return parent_block;
-    }
-
-    /// Extract checkpoints from state, compute unrealized checkpoints, and update the store.
-    /// Returns all four checkpoints needed for ProtoBlock construction.
-    fn extractAndUpdateCheckpoints(
-        self: *ForkChoice,
-        allocator: Allocator,
-        state: *CachedBeaconState,
-        parent_block: *const ProtoNode,
-        block_epoch: Epoch,
-        current_slot: Slot,
-    ) !CheckpointResult {
-        // 7. Extract checkpoints from state with payload status.
-        const justified_checkpoint = try extractCheckpointFromState(state, .justified);
-        const finalized_checkpoint = try extractCheckpointFromState(state, .finalized);
-
-        // 8. Update realized checkpoints.
-        var realized_ctx = OnBlockBalancesCtx{
-            .getter = self.fc_store.justified_balances_getter,
-            .checkpoint = justified_checkpoint,
-            .state = state,
-        };
-        try self.updateCheckpoints(justified_checkpoint, finalized_checkpoint, .{
-            .context = @ptrCast(&realized_ctx),
-            .getFn = OnBlockBalancesCtx.call,
-        });
-
-        // 9–10. Compute unrealized checkpoints and update store.
-        const unrealized = try self.computeAndUpdateUnrealizedCheckpoints(
-            allocator,
-            state,
-            parent_block,
-            block_epoch,
-            justified_checkpoint,
-            finalized_checkpoint,
-        );
-
-        // 11. If block from past epoch: update realized with unrealized.
-        if (block_epoch < computeEpochAtSlot(current_slot)) {
-            var past_epoch_ctx = OnBlockBalancesCtx{
-                .getter = self.fc_store.justified_balances_getter,
-                .checkpoint = unrealized.justified,
-                .state = state,
-            };
-            try self.updateCheckpoints(unrealized.justified, unrealized.finalized, .{
-                .context = @ptrCast(&past_epoch_ctx),
-                .getFn = OnBlockBalancesCtx.call,
-            });
-        }
-
-        return .{
-            .justified = justified_checkpoint,
-            .finalized = finalized_checkpoint,
-            .unrealized_justified = unrealized.justified,
-            .unrealized_finalized = unrealized.finalized,
-        };
-    }
-
-    const CheckpointKind = enum { justified, finalized };
-
-    /// Extract a realized checkpoint from CachedBeaconState and attach payload status.
-    fn extractCheckpointFromState(state: *CachedBeaconState, kind: CheckpointKind) !CheckpointWithPayloadStatus {
-        var ssz_cp: consensus_types.phase0.Checkpoint.Type = undefined;
-        switch (kind) {
-            .justified => try state.state.currentJustifiedCheckpoint(&ssz_cp),
-            .finalized => try state.state.finalizedCheckpoint(&ssz_cp),
-        }
-        return .{
-            .epoch = ssz_cp.epoch,
-            .root = ssz_cp.root,
-            .payload_status = getCheckpointPayloadStatus(state, ssz_cp.epoch),
-        };
-    }
-
-    /// Compute or inherit unrealized checkpoints, then update the store.
-    fn computeAndUpdateUnrealizedCheckpoints(
-        self: *ForkChoice,
-        allocator: Allocator,
-        state: *CachedBeaconState,
-        parent_block: *const ProtoNode,
-        block_epoch: Epoch,
-        justified_checkpoint: CheckpointWithPayloadStatus,
-        finalized_checkpoint: CheckpointWithPayloadStatus,
-    ) !struct { justified: CheckpointWithPayloadStatus, finalized: CheckpointWithPayloadStatus } {
-        var unrealized_justified: CheckpointWithPayloadStatus = undefined;
-        var unrealized_finalized: CheckpointWithPayloadStatus = undefined;
-
-        if (self.opts.compute_unrealized) {
-            if (parent_block.unrealized_justified_epoch == block_epoch and
-                parent_block.unrealized_finalized_epoch + 1 >= block_epoch)
-            {
-                unrealized_justified = .{
-                    .epoch = parent_block.unrealized_justified_epoch,
-                    .root = parent_block.unrealized_justified_root,
-                    .payload_status = getCheckpointPayloadStatus(state, parent_block.unrealized_justified_epoch),
-                };
-                unrealized_finalized = .{
-                    .epoch = parent_block.unrealized_finalized_epoch,
-                    .root = parent_block.unrealized_finalized_root,
-                    .payload_status = getCheckpointPayloadStatus(state, parent_block.unrealized_finalized_epoch),
-                };
-            } else {
-                const unrealized = try state_transition.computeUnrealizedCheckpoints(state, allocator);
-                unrealized_justified = .{
-                    .epoch = unrealized.justified_checkpoint.epoch,
-                    .root = unrealized.justified_checkpoint.root,
-                    .payload_status = getCheckpointPayloadStatus(state, unrealized.justified_checkpoint.epoch),
-                };
-                unrealized_finalized = .{
-                    .epoch = unrealized.finalized_checkpoint.epoch,
-                    .root = unrealized.finalized_checkpoint.root,
-                    .payload_status = getCheckpointPayloadStatus(state, unrealized.finalized_checkpoint.epoch),
-                };
-            }
-        } else {
-            unrealized_justified = justified_checkpoint;
-            unrealized_finalized = finalized_checkpoint;
-        }
-
-        var unrealized_balances_ctx = OnBlockBalancesCtx{
-            .getter = self.fc_store.justified_balances_getter,
-            .checkpoint = unrealized_justified,
-            .state = state,
-        };
-        try self.updateUnrealizedCheckpoints(unrealized_justified, unrealized_finalized, .{
-            .context = @ptrCast(&unrealized_balances_ctx),
-            .getFn = OnBlockBalancesCtx.call,
-        });
-
-        return .{ .justified = unrealized_justified, .finalized = unrealized_finalized };
     }
 
     // ── Attestation processing ──
@@ -689,7 +639,19 @@ pub const ForkChoice = struct {
         const target_epoch = attestation.targetEpoch();
         const attesting_indices = attestation.attestingIndices();
 
-        // Ignore zero-hash beacon_block_root.
+        // Ignore any attestations to the zero hash.
+        //
+        // This is an edge case that results from the spec aliasing the zero hash to the genesis
+        // block. Attesters may attest to the zero hash if they have never seen a block.
+        //
+        // We have two options here:
+        //
+        //  1. Apply all zero-hash attestations to the genesis block.
+        //  2. Ignore all attestations to the zero hash.
+        //
+        // (1) becomes weird once we hit finality and fork choice drops the genesis block. (2) is
+        // fine because votes to the genesis block are not useful; all validators implicitly attest
+        // to genesis just by being present in the chain.
         if (std.mem.eql(u8, &block_root, &ZERO_HASH)) return;
 
         // Validate the attestation.
@@ -703,83 +665,57 @@ pub const ForkChoice = struct {
             force_import,
         );
 
-        const payload_status = self.resolveAttestationPayloadStatus(attestation, att_slot, block_root);
+        // Determine the payload status for this attestation.
+        // Pre-Gloas: payload is always present (FULL).
+        // Post-Gloas (ePBS):
+        //   - always add weight to PENDING
+        //   - if att_slot > block.slot, also add weight to FULL or EMPTY
+        // We need to retrieve block to check if it's Gloas and to compare slot.
+        const payload_status: PayloadStatus = ps_blk: {
+            const block = self.getBlockDefaultStatus(block_root);
+            if (block != null and block.?.isGloasBlock()) {
+                // Post-Gloas block: determine FULL/EMPTY/PENDING based on slot and committee index.
+                // If att_slot > block.slot, we can determine FULL or EMPTY. Else always PENDING.
+                if (att_slot > block.?.slot) {
+                    const att_index = attestation.index();
+                    if (att_index == 1) break :ps_blk .full;
+                    // att_index must be 0 here — validateAttestationData already
+                    // rejected any index other than 0 or 1 for Gloas blocks.
+                    std.debug.assert(att_index == 0);
+                    break :ps_blk .empty;
+                }
+                break :ps_blk .pending;
+            }
+            // Pre-Gloas block or block not found: always FULL.
+            break :ps_blk .full;
+        };
 
+        // The spec declares:
+        //   Attestations can only affect the fork choice of subsequent slots.
+        //   Delay consideration in the fork choice until their slot is in the past.
         if (att_slot < self.fc_store.current_slot) {
-            try self.applyVotesImmediately(allocator, attesting_indices, att_slot, block_root, payload_status);
+            for (attesting_indices) |validator_index| {
+                if (!self.fc_store.equivocating_indices.contains(validator_index)) {
+                    try self.addLatestMessage(allocator, validator_index, att_slot, block_root, payload_status);
+                }
+            }
         } else {
-            try self.queueVotesForSlot(allocator, attesting_indices, att_slot, block_root, payload_status);
-        }
-    }
+            const by_root_gop = try self.queued_attestations.getOrPut(allocator, att_slot);
+            if (!by_root_gop.found_existing) by_root_gop.value_ptr.* = .{};
+            const by_root = by_root_gop.value_ptr;
 
-    /// Determine the payload status for an attestation.
-    ///
-    /// Pre-Gloas: always FULL (payload embedded in block).
-    /// Post-Gloas (block has parent_block_hash):
-    ///   - att_slot > block.slot: index 1 → FULL, index 0 → EMPTY
-    ///   - att_slot <= block.slot: PENDING
-    fn resolveAttestationPayloadStatus(
-        self: *ForkChoice,
-        attestation: *const AnyIndexedAttestation,
-        att_slot: Slot,
-        block_root: Root,
-    ) PayloadStatus {
-        const block = self.getBlockDefaultStatus(block_root);
-        if (block != null and block.?.isGloasBlock()) {
-            // Gloas block
-            if (att_slot > block.?.slot) {
-                const att_index = attestation.index();
-                if (att_index == 1) return .full;
-                // att_index must be 0 here — validateAttestationData already
-                // rejected any index other than 0 or 1 for Gloas blocks.
-                std.debug.assert(att_index == 0);
-                return .empty;
-            }
-            return .pending;
-        }
-        return .full;
-    }
+            const validator_votes_gop = try by_root.getOrPut(allocator, block_root);
+            if (!validator_votes_gop.found_existing) validator_votes_gop.value_ptr.* = .{};
+            const validator_votes = validator_votes_gop.value_ptr;
 
-    /// Apply attestation votes immediately (for past-slot attestations).
-    fn applyVotesImmediately(
-        self: *ForkChoice,
-        allocator: Allocator,
-        attesting_indices: []const ValidatorIndex,
-        att_slot: Slot,
-        block_root: Root,
-        payload_status: PayloadStatus,
-    ) !void {
-        for (attesting_indices) |validator_index| {
-            if (!self.fc_store.equivocating_indices.contains(validator_index)) {
-                try self.addLatestMessage(allocator, validator_index, att_slot, block_root, payload_status);
-            }
-        }
-    }
+            // Pre-allocate capacity so the loop below cannot fail with OOM,
+            // avoiding partial state changes.
+            try validator_votes.ensureTotalCapacity(allocator, validator_votes.count() + @as(u32, @intCast(attesting_indices.len)));
 
-    /// Queue attestation votes for deferred processing (current-slot attestations).
-    fn queueVotesForSlot(
-        self: *ForkChoice,
-        allocator: Allocator,
-        attesting_indices: []const ValidatorIndex,
-        att_slot: Slot,
-        block_root: Root,
-        payload_status: PayloadStatus,
-    ) !void {
-        const by_root_gop = try self.queued_attestations.getOrPut(allocator, att_slot);
-        if (!by_root_gop.found_existing) by_root_gop.value_ptr.* = .{};
-        const by_root = by_root_gop.value_ptr;
-
-        const validator_votes_gop = try by_root.getOrPut(allocator, block_root);
-        if (!validator_votes_gop.found_existing) validator_votes_gop.value_ptr.* = .{};
-        const validator_votes = validator_votes_gop.value_ptr;
-
-        // Pre-allocate capacity so the loop below cannot fail with OOM,
-        // avoiding partial state changes.
-        try validator_votes.ensureTotalCapacity(allocator, validator_votes.count() + @as(u32, @intCast(attesting_indices.len)));
-
-        for (attesting_indices) |validator_index| {
-            if (!self.fc_store.equivocating_indices.contains(validator_index)) {
-                validator_votes.putAssumeCapacity(validator_index, payload_status);
+            for (attesting_indices) |validator_index| {
+                if (!self.fc_store.equivocating_indices.contains(validator_index)) {
+                    validator_votes.putAssumeCapacity(validator_index, payload_status);
+                }
             }
         }
     }
@@ -826,27 +762,39 @@ pub const ForkChoice = struct {
         const current_epoch = computeEpochAtSlot(self.fc_store.current_slot);
         const target_root = attestation.targetRoot();
 
-        // FUTURE_EPOCH: target epoch must not be in the future.
+        // FUTURE_EPOCH: Attestation must be from the current or previous epoch.
         if (target_epoch > current_epoch) return error.InvalidAttestationFutureEpoch;
 
-        // PAST_EPOCH: target epoch must be current or previous (unless force_import).
+        // PAST_EPOCH: Attestation must be from the current or previous epoch (unless force_import).
         if (!force_import and target_epoch + 1 < current_epoch) return error.InvalidAttestationPastEpoch;
 
         // BAD_TARGET_EPOCH: target epoch must match epoch of attestation slot.
         if (target_epoch != computeEpochAtSlot(slot)) return error.InvalidAttestationBadTargetEpoch;
 
-        // UNKNOWN_TARGET_ROOT: target root must be known.
+        // UNKNOWN_TARGET_ROOT: Attestation target must be for a known block.
+        // We do not delay the block for later processing to reduce complexity and DoS attack surface.
         if (!self.proto_array.hasBlock(target_root)) return error.InvalidAttestationUnknownTargetRoot;
 
-        // UNKNOWN_HEAD_BLOCK: retrieve block for beacon block root.
+        // UNKNOWN_HEAD_BLOCK: Load the block for attestation.data.beacon_block_root.
+        //
+        // This indirectly checks to see if the beacon_block_root is in our fork choice. Any known,
+        // non-finalized block should be in fork choice, so this check immediately filters out
+        // attestations that attest to a block that has not been processed.
+        //
+        // Attestations must be for a known block. If the block is unknown, we simply drop the
+        // attestation and do not delay consideration for later.
         const default_status = self.proto_array.getDefaultVariant(block_root) orelse return error.InvalidAttestationUnknownHeadBlock;
         const block = self.getBlock(block_root, default_status) orelse return error.InvalidAttestationUnknownHeadBlock;
 
-        // INVALID_TARGET: verify target root consistency.
+        // INVALID_TARGET: If an attestation points to a block that is from an earlier slot than
+        // the attestation, then all slots between the block and attestation must be skipped.
+        // Therefore if the block is from a prior epoch to the attestation, then the target root
+        // must be equal to the root of the block that is being attested to.
         const expected_target = if (target_epoch > computeEpochAtSlot(block.slot)) block_root else block.target_root;
         if (!std.mem.eql(u8, &expected_target, &target_root)) return error.InvalidAttestationInvalidTarget;
 
-        // ATTESTS_TO_FUTURE_BLOCK: block slot must not be after attestation slot.
+        // ATTESTS_TO_FUTURE_BLOCK: Attestations must not be for blocks in the future. If this is
+        // the case, the attestation should not be considered.
         if (block.slot > slot) return error.InvalidAttestationAttestsToFutureBlock;
 
         // INVALID_DATA_INDEX: For Gloas blocks, attestation index must be 0 or 1.
