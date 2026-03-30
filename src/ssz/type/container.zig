@@ -840,8 +840,8 @@ pub fn StructContainerType(comptime ST: type) type {
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                const wrapped_ptr: *const WrappedT = @ptrCast(value);
-                return try pool.createBranchStruct(WrappedT, wrapped_ptr);
+                const wrapped = WrappedT{ .value = value.* };
+                return try pool.createBranchStruct(WrappedT, &wrapped);
             }
 
             pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
