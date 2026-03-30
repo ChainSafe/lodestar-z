@@ -77,7 +77,8 @@ pub const State = enum(u32) {
     }
 
     pub inline fn isBranch(node: State) bool {
-        return @intFromEnum(node) & @intFromEnum(branch_lazy) != 0;
+        const nt = @intFromEnum(node) & node_type;
+        return nt == @intFromEnum(branch_lazy) or nt == @intFromEnum(branch_computed);
     }
 
     pub inline fn isBranchLazy(node: State) bool {
@@ -89,7 +90,8 @@ pub const State = enum(u32) {
     }
 
     pub inline fn isBranchStruct(node: State) bool {
-        return @intFromEnum(node) & @intFromEnum(branch_struct_lazy) != 0;
+        const nt = @intFromEnum(node) & node_type;
+        return nt == @intFromEnum(branch_struct_lazy) or nt == @intFromEnum(branch_struct_computed);
     }
 
     pub inline fn isBranchStructLazy(node: State) bool {
