@@ -65,10 +65,10 @@ pub fn getAttestationDeltas(epoch_cache: *const EpochCache, cache: *const EpochT
     const proposer_reward_quotient = PROPOSER_REWARD_QUOTIENT;
     const is_in_inactivity_leak = finality_delay > MIN_EPOCHS_TO_INACTIVITY_PENALTY;
 
-    // effectiveBalance is a multiple of EFFECTIVE_BALANCE_INCREMENT and bounded by max effective balance,
-    // so effective_balance_increment has a small range (0..max_increment). Use a fixed array for O(1) lookup
-    // instead of a HashMap — avoids allocation and hashing overhead in the hot validator loop.
-    const max_increment = comptime preset.MAX_EFFECTIVE_BALANCE_ELECTRA / preset.EFFECTIVE_BALANCE_INCREMENT + 1;
+    // Phase0 only: effectiveBalance is a multiple of EFFECTIVE_BALANCE_INCREMENT and bounded by
+    // MAX_EFFECTIVE_BALANCE (32 ETH), so effective_balance_increment is in range 0..32.
+    // Use a fixed array for O(1) lookup instead of a HashMap.
+    const max_increment = comptime preset.MAX_EFFECTIVE_BALANCE / preset.EFFECTIVE_BALANCE_INCREMENT + 1;
     var reward_penalty_item_cache: [max_increment]?RewardPenaltyItem = .{null} ** max_increment;
 
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();

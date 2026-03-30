@@ -53,10 +53,10 @@ pub fn getRewardsAndPenaltiesAltair(
     @memset(penalties, 0);
 
     const is_in_inactivity_leak = isInInactivityLeak(epoch_cache.epoch, try state.finalizedEpoch());
-    // effectiveBalance is a multiple of EFFECTIVE_BALANCE_INCREMENT and bounded by max effective balance,
-    // so effective_balance_increment has a small range (0..max_increment). Use a fixed array for O(1) lookup
-    // instead of a HashMap — avoids allocation and hashing overhead in the hot validator loop.
-    const max_increment = comptime preset.MAX_EFFECTIVE_BALANCE_ELECTRA / EFFECTIVE_BALANCE_INCREMENT + 1;
+    // effectiveBalance is a multiple of EFFECTIVE_BALANCE_INCREMENT and bounded by max effective balance
+    // (32 ETH pre-Electra, 2048 ETH post-Electra). Use a fixed array for O(1) lookup.
+    const max_effective = comptime if (fork.gte(.electra)) preset.MAX_EFFECTIVE_BALANCE_ELECTRA else preset.MAX_EFFECTIVE_BALANCE;
+    const max_increment = comptime max_effective / EFFECTIVE_BALANCE_INCREMENT + 1;
     var reward_penalty_item_cache: [max_increment]?RewardPenaltyItem = .{null} ** max_increment;
 
     const inactivity_penality_multiplier: u64 =
