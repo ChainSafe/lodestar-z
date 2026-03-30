@@ -6,8 +6,8 @@
 //! - The Switch is comptime-composed with QUIC transport and the 8 req/resp
 //!   protocol handlers plus gossipsub.
 //! - Gossip messages are handled by `EthGossipAdapter` (eth_gossip.zig).
-//! - Req/resp messages are dispatched by each `Eth2Protocol` handler through
-//!   `EthReqRespAdapter` (eth_reqresp.zig) into `req_resp_handler`.
+//! - Req/resp messages are dispatched by each `Eth2Protocol` handler into
+//!   `req_resp_handler`.
 //!
 //! Usage:
 //! ```zig
@@ -99,7 +99,6 @@ pub const Eth2Switch = swarm_mod.Switch(.{
 // ─── Stub validator (passthrough) ────────────────────────────────────────────
 //
 // Used when no real validator is provided. Accepts all messages.
-// TODO: remove once BeaconNode wires a real GossipValidationContext.
 
 fn stubGetProposerIndex(_: *anyopaque, _: u64) ?u32 {
     return null;

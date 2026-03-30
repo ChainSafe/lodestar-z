@@ -69,6 +69,12 @@ pub const QueuedAttestation = struct {
     }
 };
 
+pub const GossipIngressMetadata = struct {
+    peer_id: u64 = 0,
+    message_id: u64 = 0,
+    seen_timestamp_ns: i64 = 0,
+};
+
 pub const GossipHandler = struct {
     allocator: Allocator,
 
@@ -260,6 +266,15 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: fast validation (< 1 ms)
     /// 3. Phase 2: queue full import as a work item
     pub fn onBeaconBlock(self: *GossipHandler, message_data: []const u8) !void {
+        return self.onBeaconBlockWithMetadata(message_data, .{});
+    }
+
+    fn onBeaconBlockWithMetadata(
+        self: *GossipHandler,
+        message_data: []const u8,
+        metadata: GossipIngressMetadata,
+    ) !void {
+        _ = metadata;
         // Decompress once — reused for decode, BLS verify, and import.
         const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_BEACON_BLOCK) catch
             return GossipHandlerError.DecodeFailed;
@@ -309,11 +324,18 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: fast validation (< 1 ms) — slot range, committee bounds, dedup
     /// 3. Phase 2: import to fork choice + attestation pool
     pub fn onAttestation(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
+        return self.onAttestationWithMetadata(subnet_id, message_data, .{});
+    }
+
+    fn onAttestationWithMetadata(
+        self: *GossipHandler,
+        subnet_id: u64,
+        message_data: []const u8,
+        metadata: GossipIngressMetadata,
+    ) !void {
         // TODO: Validate attestation is on the correct subnet.
         // Spec: compute_subnet_for_attestation(committees_per_slot, slot, committee_index) == subnet_id
         // Requires epoch cache access (committee count per slot) — needs a callback or state query.
-        _ = subnet_id;
-
         // Decompress once — reused for decode, BLS verify, and import.
         const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_ATTESTATION) catch
             return GossipHandlerError.DecodeFailed;
@@ -351,11 +373,11 @@ pub const GossipHandler = struct {
                 .allocator = self.allocator,
             };
             bp.ingest(.{ .attestation = .{
-                .peer_id = 0, // TODO: wire real peer_id
-                .message_id = 0,
+                .peer_id = metadata.peer_id,
+                .message_id = metadata.message_id,
                 .data = @ptrCast(queued),
-                .subnet_id = 0,
-                .seen_timestamp_ns = 0,
+                .subnet_id = @intCast(subnet_id),
+                .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
         }
@@ -394,6 +416,14 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: fast validation (aggregator bounds, slot range, dedup)
     /// 3. Phase 2: import to fork choice + attestation pool
     pub fn onAggregateAndProof(self: *GossipHandler, message_data: []const u8) !void {
+        return self.onAggregateAndProofWithMetadata(message_data, .{});
+    }
+
+    fn onAggregateAndProofWithMetadata(
+        self: *GossipHandler,
+        message_data: []const u8,
+        metadata: GossipIngressMetadata,
+    ) !void {
         // Decompress once — reused for decode, BLS verify, and import.
         const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
             return GossipHandlerError.DecodeFailed;
@@ -429,10 +459,10 @@ pub const GossipHandler = struct {
         if (self.beacon_processor) |bp| {
             const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
             bp.ingest(.{ .aggregate = .{
-                .peer_id = 0,
-                .message_id = 0,
+                .peer_id = metadata.peer_id,
+                .message_id = metadata.message_id,
                 .data = dummy_handle,
-                .seen_timestamp_ns = 0,
+                .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
         }
@@ -452,6 +482,14 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: basic bounds check (validator index within set)
     /// 3. Phase 2: import to op pool
     pub fn onVoluntaryExit(self: *GossipHandler, message_data: []const u8) !void {
+        return self.onVoluntaryExitWithMetadata(message_data, .{});
+    }
+
+    fn onVoluntaryExitWithMetadata(
+        self: *GossipHandler,
+        message_data: []const u8,
+        metadata: GossipIngressMetadata,
+    ) !void {
         // Decompress once — reused for decode, BLS verify, and import.
         const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
             return GossipHandlerError.DecodeFailed;
@@ -484,10 +522,10 @@ pub const GossipHandler = struct {
         if (self.beacon_processor) |bp| {
             const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
             bp.ingest(.{ .gossip_voluntary_exit = .{
-                .peer_id = 0,
-                .message_id = 0,
+                .peer_id = metadata.peer_id,
+                .message_id = metadata.message_id,
                 .data = dummy_handle,
-                .seen_timestamp_ns = 0,
+                .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
         }
@@ -511,6 +549,14 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: headers must have same slot but different body roots (different blocks)
     /// 3. Phase 2: import to op pool
     pub fn onProposerSlashing(self: *GossipHandler, message_data: []const u8) !void {
+        return self.onProposerSlashingWithMetadata(message_data, .{});
+    }
+
+    fn onProposerSlashingWithMetadata(
+        self: *GossipHandler,
+        message_data: []const u8,
+        metadata: GossipIngressMetadata,
+    ) !void {
         // Decompress once — reused for decode, BLS verify, and import.
         const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
             return GossipHandlerError.DecodeFailed;
@@ -546,10 +592,10 @@ pub const GossipHandler = struct {
         if (self.beacon_processor) |bp| {
             const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
             bp.ingest(.{ .gossip_proposer_slashing = .{
-                .peer_id = 0,
-                .message_id = 0,
+                .peer_id = metadata.peer_id,
+                .message_id = metadata.message_id,
                 .data = dummy_handle,
-                .seen_timestamp_ns = 0,
+                .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
         }
@@ -573,6 +619,14 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: attestation data must be slashable (double vote or surround vote)
     /// 3. Phase 2: import raw SSZ to op pool (full deserialization happens at pool layer)
     pub fn onAttesterSlashing(self: *GossipHandler, message_data: []const u8) !void {
+        return self.onAttesterSlashingWithMetadata(message_data, .{});
+    }
+
+    fn onAttesterSlashingWithMetadata(
+        self: *GossipHandler,
+        message_data: []const u8,
+        metadata: GossipIngressMetadata,
+    ) !void {
         // Decompress once — reused for decode, BLS verify, and import.
         const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
             return GossipHandlerError.DecodeFailed;
@@ -609,10 +663,10 @@ pub const GossipHandler = struct {
         if (self.beacon_processor) |bp| {
             const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
             bp.ingest(.{ .gossip_attester_slashing = .{
-                .peer_id = 0,
-                .message_id = 0,
+                .peer_id = metadata.peer_id,
+                .message_id = metadata.message_id,
                 .data = dummy_handle,
-                .seen_timestamp_ns = 0,
+                .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
         }
@@ -634,6 +688,14 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: validator index must be within known set
     /// 3. Phase 2: import to op pool
     pub fn onBlsToExecutionChange(self: *GossipHandler, message_data: []const u8) !void {
+        return self.onBlsToExecutionChangeWithMetadata(message_data, .{});
+    }
+
+    fn onBlsToExecutionChangeWithMetadata(
+        self: *GossipHandler,
+        message_data: []const u8,
+        metadata: GossipIngressMetadata,
+    ) !void {
         // Decompress once — reused for decode, BLS verify, and import.
         const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
             return GossipHandlerError.DecodeFailed;
@@ -665,10 +727,10 @@ pub const GossipHandler = struct {
         if (self.beacon_processor) |bp| {
             const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
             bp.ingest(.{ .gossip_bls_to_exec = .{
-                .peer_id = 0,
-                .message_id = 0,
+                .peer_id = metadata.peer_id,
+                .message_id = metadata.message_id,
                 .data = dummy_handle,
-                .seen_timestamp_ns = 0,
+                .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
         }
@@ -692,6 +754,14 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: basic bounds check (aggregator within validator set)
     /// 3. Phase 2: log acceptance (no sync contribution pool yet)
     pub fn onSyncCommitteeContribution(self: *GossipHandler, message_data: []const u8) !void {
+        return self.onSyncCommitteeContributionWithMetadata(message_data, .{});
+    }
+
+    fn onSyncCommitteeContributionWithMetadata(
+        self: *GossipHandler,
+        message_data: []const u8,
+        metadata: GossipIngressMetadata,
+    ) !void {
         // Decompress once — reused for decode and import.
         const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
             return GossipHandlerError.DecodeFailed;
@@ -714,10 +784,10 @@ pub const GossipHandler = struct {
         // Phase 2: import to sync contribution pool.
         if (self.beacon_processor) |bp| {
             bp.ingest(.{ .sync_contribution = .{
-                .peer_id = 0,
-                .message_id = 0,
+                .peer_id = metadata.peer_id,
+                .message_id = metadata.message_id,
                 .slot = contrib.contribution_slot,
-                .seen_timestamp_ns = 0,
+                .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
         }
@@ -743,6 +813,15 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: basic bounds check
     /// 3. Phase 2: log acceptance (no sync committee message pool yet)
     pub fn onSyncCommitteeMessage(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
+        return self.onSyncCommitteeMessageWithMetadata(subnet_id, message_data, .{});
+    }
+
+    fn onSyncCommitteeMessageWithMetadata(
+        self: *GossipHandler,
+        subnet_id: u64,
+        message_data: []const u8,
+        metadata: GossipIngressMetadata,
+    ) !void {
         // Decompress once — reused for decode, BLS verify, and import.
         const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
             return GossipHandlerError.DecodeFailed;
@@ -774,11 +853,11 @@ pub const GossipHandler = struct {
         // Phase 2: import to sync committee message pool.
         if (self.beacon_processor) |bp| {
             bp.ingest(.{ .sync_message = .{
-                .peer_id = 0,
-                .message_id = 0,
+                .peer_id = metadata.peer_id,
+                .message_id = metadata.message_id,
                 .slot = msg.slot,
                 .subnet_id = @intCast(subnet_id),
-                .seen_timestamp_ns = 0,
+                .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
         }
@@ -859,16 +938,26 @@ pub const GossipHandler = struct {
 
     /// Route a gossip message by topic type, with optional subnet_id for subnet-indexed topics.
     pub fn onGossipMessageWithSubnet(self: *GossipHandler, topic: GossipTopicType, subnet_id: ?u8, data: []const u8) !void {
+        return self.onGossipMessageWithSubnetAndMetadata(topic, subnet_id, data, .{});
+    }
+
+    pub fn onGossipMessageWithSubnetAndMetadata(
+        self: *GossipHandler,
+        topic: GossipTopicType,
+        subnet_id: ?u8,
+        data: []const u8,
+        metadata: GossipIngressMetadata,
+    ) !void {
         switch (topic) {
-            .beacon_block => try self.onBeaconBlock(data),
-            .beacon_attestation => try self.onAttestation(@as(u64, subnet_id orelse 0), data),
-            .beacon_aggregate_and_proof => try self.onAggregateAndProof(data),
-            .voluntary_exit => try self.onVoluntaryExit(data),
-            .proposer_slashing => try self.onProposerSlashing(data),
-            .attester_slashing => try self.onAttesterSlashing(data),
-            .bls_to_execution_change => try self.onBlsToExecutionChange(data),
-            .sync_committee_contribution_and_proof => try self.onSyncCommitteeContribution(data),
-            .sync_committee => try self.onSyncCommitteeMessage(@as(u64, subnet_id orelse 0), data),
+            .beacon_block => try self.onBeaconBlockWithMetadata(data, metadata),
+            .beacon_attestation => try self.onAttestationWithMetadata(@as(u64, subnet_id orelse 0), data, metadata),
+            .beacon_aggregate_and_proof => try self.onAggregateAndProofWithMetadata(data, metadata),
+            .voluntary_exit => try self.onVoluntaryExitWithMetadata(data, metadata),
+            .proposer_slashing => try self.onProposerSlashingWithMetadata(data, metadata),
+            .attester_slashing => try self.onAttesterSlashingWithMetadata(data, metadata),
+            .bls_to_execution_change => try self.onBlsToExecutionChangeWithMetadata(data, metadata),
+            .sync_committee_contribution_and_proof => try self.onSyncCommitteeContributionWithMetadata(data, metadata),
+            .sync_committee => try self.onSyncCommitteeMessageWithMetadata(@as(u64, subnet_id orelse 0), data, metadata),
             .blob_sidecar => try self.onBlobSidecar(@as(u64, subnet_id orelse 0), data),
             .data_column_sidecar => {}, // Handled directly in BeaconNode.processGossipEventsFromSlice
         }

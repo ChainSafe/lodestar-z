@@ -13,7 +13,9 @@ const fork_types = @import("fork_types");
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 
 pub const PendingBatchRequest = struct {
+    chain_id: u32,
     batch_id: u32,
+    generation: u32,
     start_slot: u64,
     count: u64,
     peer_id_buf: [128]u8,
@@ -42,11 +44,13 @@ pub const SyncCallbackCtx = struct {
     /// Pending batch requests queued by the sync state machine.
     /// Drained by processSyncBatches() in the main loop.
     pending_requests: [32]PendingBatchRequest = undefined,
+    pending_head: u8 = 0,
     pending_count: u8 = 0,
 
     /// Pending by-root requests queued by unknown block sync.
     /// Drained by processSyncBatches() in the main loop.
     pending_by_root_requests: [32]PendingByRootRequest = undefined,
+    pending_by_root_head: u8 = 0,
     pending_by_root_count: u8 = 0,
 
     /// Scratch buffer for connected peer IDs (avoids allocation in hot path).
@@ -98,25 +102,26 @@ pub const SyncCallbackCtx = struct {
         start_slot: u64,
         count: u64,
     ) void {
-        _ = chain_id;
-        _ = generation;
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         if (ctx.pending_count >= 32) {
             std.log.warn("SyncCallbackCtx: pending request queue full, dropping batch {d}", .{batch_id});
             return;
         }
         var req = PendingBatchRequest{
+            .chain_id = chain_id,
             .batch_id = batch_id,
+            .generation = generation,
             .start_slot = start_slot,
             .count = count,
             .peer_id_buf = undefined,
             .peer_id_len = @intCast(@min(peer_id.len, 128)),
         };
         @memcpy(req.peer_id_buf[0..req.peer_id_len], peer_id[0..req.peer_id_len]);
-        ctx.pending_requests[ctx.pending_count] = req;
+        const write_index = (ctx.pending_head + ctx.pending_count) % ctx.pending_requests.len;
+        ctx.pending_requests[write_index] = req;
         ctx.pending_count += 1;
-        std.log.debug("SyncCallbackCtx: queued batch {d} slots {d}..{d} for peer {s}", .{
-            batch_id, start_slot, start_slot + count - 1, peer_id,
+        std.log.debug("SyncCallbackCtx: queued chain {d} batch {d}/gen {d} slots {d}..{d} for peer {s}", .{
+            chain_id, batch_id, generation, start_slot, start_slot + count - 1, peer_id,
         });
     }
 
@@ -134,11 +139,28 @@ pub const SyncCallbackCtx = struct {
             .peer_id_len = @intCast(@min(peer_id.len, 128)),
         };
         @memcpy(req.peer_id_buf[0..req.peer_id_len], peer_id[0..req.peer_id_len]);
-        ctx.pending_by_root_requests[ctx.pending_by_root_count] = req;
+        const write_index = (ctx.pending_by_root_head + ctx.pending_by_root_count) % ctx.pending_by_root_requests.len;
+        ctx.pending_by_root_requests[write_index] = req;
         ctx.pending_by_root_count += 1;
         std.log.debug("SyncCallbackCtx: queued by-root {x:0>2}{x:0>2}{x:0>2}{x:0>2}... for peer {s}", .{
             root[0], root[1], root[2], root[3], peer_id,
         });
+    }
+
+    pub fn popPendingRequest(self: *SyncCallbackCtx) ?PendingBatchRequest {
+        if (self.pending_count == 0) return null;
+        const req = self.pending_requests[self.pending_head];
+        self.pending_head = @intCast((self.pending_head + 1) % self.pending_requests.len);
+        self.pending_count -= 1;
+        return req;
+    }
+
+    pub fn popPendingByRootRequest(self: *SyncCallbackCtx) ?PendingByRootRequest {
+        if (self.pending_by_root_count == 0) return null;
+        const req = self.pending_by_root_requests[self.pending_by_root_head];
+        self.pending_by_root_head = @intCast((self.pending_by_root_head + 1) % self.pending_by_root_requests.len);
+        self.pending_by_root_count -= 1;
+        return req;
     }
 
     fn syncReportPeer(ptr: *anyopaque, peer_id: []const u8) void {

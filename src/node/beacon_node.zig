@@ -135,6 +135,7 @@ const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const BlockSource = chain_mod.blocks.BlockSource;
 const gossip_handler_mod = @import("gossip_handler.zig");
 pub const GossipHandler = gossip_handler_mod.GossipHandler;
+const GossipIngressMetadata = gossip_handler_mod.GossipIngressMetadata;
 
 const block_import_mod = @import("block_import.zig");
 const sync_bridge_mod = @import("sync_bridge.zig");
@@ -1614,7 +1615,7 @@ pub const BeaconNode = struct {
 
             // Poll gossipsub for all gossip messages (blocks, attestations, aggregates).
             if (self.p2p_service) |p2p| {
-                self.processGossipEvents(p2p);
+                self.processGossipEvents(io, p2p);
             }
 
             // Drain the BeaconProcessor work queues (up to 128 items per tick).
@@ -1911,25 +1912,18 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         const sync_svc = self.sync_service_inst orelse return;
         _ = sync_svc;
 
-        while (cb_ctx.pending_count > 0) {
-            // Pop the first pending request.
-            const req = cb_ctx.pending_requests[0];
-            cb_ctx.pending_count -= 1;
-            // Shift remaining requests left.
-            var j: u8 = 0;
-            while (j < cb_ctx.pending_count) : (j += 1) {
-                cb_ctx.pending_requests[j] = cb_ctx.pending_requests[j + 1];
-            }
-
+        while (cb_ctx.popPendingRequest()) |req| {
             const peer_id = req.peerId();
-            std.log.info("Processing sync batch {d}: slots {d}..{d} from peer {s}", .{
-                req.batch_id, req.start_slot, req.start_slot + req.count - 1, peer_id,
+            std.log.info("Processing sync chain {d} batch {d}/gen {d}: slots {d}..{d} from peer {s}", .{
+                req.chain_id, req.batch_id, req.generation, req.start_slot, req.start_slot + req.count - 1, peer_id,
             });
 
             // Fetch raw blocks via P2P.
             const blocks = self.fetchRawBlocksByRange(io, svc, peer_id, req.start_slot, req.count) catch |err| {
                 std.log.warn("Batch {d} fetch failed: {}", .{ req.batch_id, err });
-                if (self.sync_service_inst) |ssvc| ssvc.onBatchError(0, req.batch_id, 0, "");
+                if (self.sync_service_inst) |ssvc| {
+                    ssvc.onBatchError(req.chain_id, req.batch_id, req.generation, peer_id);
+                }
                 continue;
             };
             defer {
@@ -1941,14 +1935,15 @@ fn parseIp4(s: []const u8) ?[4]u8 {
 
             if (blocks.len == 0) {
                 std.log.warn("Batch {d}: empty response from peer", .{req.batch_id});
-                if (self.sync_service_inst) |ssvc| ssvc.onBatchError(0, req.batch_id, 0, "");
+                if (self.sync_service_inst) |ssvc| {
+                    ssvc.onBatchError(req.chain_id, req.batch_id, req.generation, peer_id);
+                }
                 continue;
             }
 
             // Route blocks through the SyncService.
             if (self.sync_service_inst) |ssvc| {
-                // TODO: wire chain_id and generation from the pending request
-                ssvc.onBatchResponse(0, req.batch_id, 0, blocks);
+                ssvc.onBatchResponse(req.chain_id, req.batch_id, req.generation, blocks);
             }
 
             std.log.info("Batch {d}: delivered {d} blocks to sync pipeline", .{
@@ -1965,14 +1960,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
     fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
         const cb_ctx = self.sync_callback_ctx orelse return;
 
-        while (cb_ctx.pending_by_root_count > 0) {
-            const req = cb_ctx.pending_by_root_requests[0];
-            cb_ctx.pending_by_root_count -= 1;
-            var j: u8 = 0;
-            while (j < cb_ctx.pending_by_root_count) : (j += 1) {
-                cb_ctx.pending_by_root_requests[j] = cb_ctx.pending_by_root_requests[j + 1];
-            }
-
+        while (cb_ctx.popPendingByRootRequest()) |req| {
             const peer_id = req.peerId();
             const root = req.root;
             std.log.info("processSyncByRoot: fetching root {x:0>2}{x:0>2}{x:0>2}{x:0>2}... from peer {s}", .{
@@ -2219,29 +2207,35 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         }
 
         /// Process gossip events from P2P service: parse topic, route to handler.
-        fn processGossipEvents(self: *BeaconNode, p2p: anytype) void {
+        fn processGossipEvents(self: *BeaconNode, io: std.Io, p2p: anytype) void {
             const events = p2p.gossipsub.drainEvents() catch &.{};
             defer self.allocator.free(events);
-            self.processGossipEventsFromSlice(events);
+            self.processGossipEventsFromSlice(io, events);
         }
 
         /// Process a slice of gossip events: parse topic, route to handler.
         ///
         /// For beacon_block: decompress, deserialize, import via STFN pipeline.
         /// For beacon_attestation / beacon_aggregate_and_proof: delegate to GossipHandler.
-        fn processGossipEventsFromSlice(self: *BeaconNode, events: anytype) void {
+        fn processGossipEventsFromSlice(self: *BeaconNode, io: std.Io, events: anytype) void {
             const gossip_topics_mod = networking.gossip_topics;
             const gossip_decoding = networking.gossip_decoding;
 
             for (events) |event| {
                 switch (event) {
                     .message => |msg| {
+                        const metadata = GossipIngressMetadata{
+                            .peer_id = hashOpaqueGossipBytes(0x70656572, msg.from),
+                            .message_id = hashGossipMessageId(msg.topic, msg.seqno, msg.data),
+                            .seen_timestamp_ns = currentUnixTimeNs(io),
+                        };
+
                         // Parse the gossip topic to determine message type.
                         const parsed = gossip_topics_mod.parseTopic(msg.topic) orelse continue;
 
                         switch (parsed.topic_type) {
                             .beacon_block => {
-                                self.handleGossipBlock(gossip_decoding, msg.data);
+                                self.handleGossipBlock(gossip_decoding, msg.data, metadata);
                             },
                             .data_column_sidecar => {
                                 // Route data column sidecars through decompress + import.
@@ -2257,7 +2251,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                                         const slot = self.head_tracker.head_slot;
                                         gh.updateClock(slot, computeEpochAtSlot(slot), self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH);
                                     }
-                                    gh.onGossipMessageWithSubnet(parsed.topic_type, parsed.subnet_id, msg.data) catch |err| {
+                                    gh.onGossipMessageWithSubnetAndMetadata(parsed.topic_type, parsed.subnet_id, msg.data, metadata) catch |err| {
                                         switch (err) {
                                             error.ValidationIgnored => {},
                                             error.ValidationRejected => {
@@ -2281,7 +2275,12 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         }
 
         /// Handle a gossip beacon_block message: decompress, deserialize, import.
-        fn handleGossipBlock(self: *BeaconNode, gossip_decoding: anytype, data: []const u8) void {
+        fn handleGossipBlock(
+            self: *BeaconNode,
+            gossip_decoding: anytype,
+            data: []const u8,
+            metadata: GossipIngressMetadata,
+        ) void {
             const ssz_bytes = gossip_decoding.decompressGossipPayload(
                 self.allocator, data,
                 gossip_decoding.MAX_GOSSIP_SIZE_BEACON_BLOCK,
@@ -2309,10 +2308,10 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                 // before the processor ingests the block. No UAF risk.
                 self.allocator.free(ssz_bytes);
                 bp.ingest(.{ .gossip_block = .{
-                    .peer_id = 0, // TODO: wire real peer_id from gossipsub event
-                    .message_id = 0,
+                    .peer_id = metadata.peer_id,
+                    .message_id = metadata.message_id,
                     .block = any_signed,
-                    .seen_timestamp_ns = 0, // TODO: use Io clock when available
+                    .seen_timestamp_ns = metadata.seen_timestamp_ns,
                 } });
                 return;
             }
@@ -2349,33 +2348,50 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             };
             defer self.allocator.free(ssz_bytes);
 
-            // Extract block root and column index from the sidecar.
-            // DataColumnSidecar layout: index(8) + variable fields...
-            // The signed_block_header is at offset after column, kzg_commitments, kzg_proofs.
-            // For validation we need the slot and proposer from the block header.
-            // Since this is a variable-size container, we'll store the raw bytes
-            // and do minimal validation for now.
-            if (ssz_bytes.len < 8) {
-                std.log.warn("Gossip: data column sidecar too short", .{});
+            var sidecar = types.fulu.DataColumnSidecar.default_value;
+            types.fulu.DataColumnSidecar.deserializeFromBytes(self.allocator, ssz_bytes, &sidecar) catch |err| {
+                std.log.warn("Gossip: failed to decode data column sidecar: {}", .{err});
                 return;
-            }
+            };
+            defer types.fulu.DataColumnSidecar.deinit(self.allocator, &sidecar);
 
-            const column_index = std.mem.readInt(u64, ssz_bytes[0..8], .little);
-
-            // TODO: Extract the real block root from DataColumnSidecar.signed_block_header
-            // via hashTreeRoot. The current synthetic root (first 8 bytes = column_index)
-            // causes all columns with the same index to collide, since column_index is the
-            // same across different blocks with identical indices.
-            // Full fix: decode the signed_block_header (a fixed-size 112-byte BeaconBlockHeader
-            // prefixed by a BLS signature), then call hashTreeRoot on the header.
-            // For now this is a known limitation; data column validation is not yet critical path.
-            var block_root: [32]u8 = std.mem.zeroes([32]u8);
-            @memcpy(block_root[0..8], ssz_bytes[0..8]);
+            const column_index = sidecar.index;
+            var block_root: [32]u8 = undefined;
+            types.phase0.BeaconBlockHeader.hashTreeRoot(&sidecar.signed_block_header.message, &block_root) catch |err| {
+                std.log.warn("Gossip: failed to hash data column block header: {}", .{err});
+                return;
+            };
 
             // Store the sidecar
             self.importDataColumnSidecar(block_root, column_index, ssz_bytes) catch |err| {
                 std.log.warn("Gossip data column import error: {}", .{err});
             };
+        }
+
+        fn currentUnixTimeNs(io: std.Io) i64 {
+            const ns = std.Io.Timestamp.now(io, .real).toNanoseconds();
+            return if (ns > std.math.maxInt(i64))
+                std.math.maxInt(i64)
+            else if (ns < std.math.minInt(i64))
+                std.math.minInt(i64)
+            else
+                @intCast(ns);
+        }
+
+        fn hashOpaqueGossipBytes(seed: u64, maybe_bytes: ?[]const u8) u64 {
+            const bytes = maybe_bytes orelse return 0;
+            return std.hash.Wyhash.hash(seed, bytes);
+        }
+
+        fn hashGossipMessageId(topic: []const u8, seqno: ?[]const u8, data: []const u8) u64 {
+            var hasher = std.hash.Wyhash.init(0x6D73674964);
+            hasher.update(topic);
+            if (seqno) |seq| {
+                hasher.update(seq);
+            } else {
+                hasher.update(data);
+            }
+            return hasher.final();
         }
 
         /// Request blocks by range from a connected peer via dialProtocol.

@@ -75,8 +75,8 @@ pub const EthGossipAdapter = struct {
         ctx: *anyopaque,
         callback: *const fn (ctx: *anyopaque, msg: DecodedGossipMessage) void,
     },
-    /// Tracks which topics we have subscribed to (for cleanup).
-    subscribed_topics: std.ArrayListUnmanaged([]const u8),
+    /// Tracks which topics we have subscribed to (for cleanup and idempotence).
+    subscribed_topics: std.StringHashMapUnmanaged(void),
 
     pub fn init(
         allocator: Allocator,
@@ -130,9 +130,7 @@ pub const EthGossipAdapter = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        for (self.subscribed_topics.items) |topic| {
-            self.allocator.free(topic);
-        }
+        self.clearSubscribedTopics();
         self.subscribed_topics.deinit(self.allocator);
     }
 
@@ -162,7 +160,9 @@ pub const EthGossipAdapter = struct {
     /// (e.g., Capella → Deneb, Deneb → Electra).
     pub fn onForkTransition(self: *Self, new_fork_digest: [4]u8) !void {
         // Unsubscribe from all current topics (old fork digest).
-        for (self.subscribed_topics.items) |topic| {
+        var iter = self.subscribed_topics.iterator();
+        while (iter.next()) |entry| {
+            const topic = entry.key_ptr.*;
             self.gossipsub.unsubscribe(topic) catch |err| {
                 log.warn("Failed to unsubscribe from {s} during fork transition: {}", .{ topic, err });
             };
@@ -203,12 +203,26 @@ pub const EthGossipAdapter = struct {
         var buf: [gossip_topics.MAX_TOPIC_LENGTH]u8 = undefined;
         const topic_slice = gossip_topics.formatTopic(&buf, self.fork_digest, topic_type, subnet_id);
 
+        if (self.subscribed_topics.contains(topic_slice)) {
+            return;
+        }
+
         // Dupe into allocator-owned memory for gossipsub + our tracking.
         const topic_str = try self.allocator.dupe(u8, topic_slice);
         errdefer self.allocator.free(topic_str);
 
+        try self.subscribed_topics.put(self.allocator, topic_str, {});
+        errdefer _ = self.subscribed_topics.remove(topic_str);
+
         try self.gossipsub.subscribe(topic_str);
-        try self.subscribed_topics.append(self.allocator, topic_str);
+    }
+
+    fn clearSubscribedTopics(self: *Self) void {
+        var iter = self.subscribed_topics.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.subscribed_topics.clearRetainingCapacity();
     }
 
     /// Process an incoming gossip message through the full Ethereum pipeline:
@@ -603,13 +617,28 @@ test "EthGossipAdapter: subscribeEthTopics formats correct topic strings" {
     try t.adapter.subscribeEthTopics();
 
     // Verify the expected number of global topics were subscribed.
-    try testing.expectEqual(global_topic_types.len, t.adapter.subscribed_topics.items.len);
+    try testing.expectEqual(global_topic_types.len, t.adapter.subscribed_topics.count());
 
     // Check that each topic is well-formed.
-    for (t.adapter.subscribed_topics.items) |topic| {
+    var iter = t.adapter.subscribed_topics.iterator();
+    while (iter.next()) |entry| {
+        const topic = entry.key_ptr.*;
         try testing.expect(std.mem.startsWith(u8, topic, "/eth2/abcdef01/"));
         try testing.expect(std.mem.endsWith(u8, topic, "/ssz_snappy"));
     }
+}
+
+test "EthGossipAdapter: duplicate subscriptions are idempotent" {
+    const allocator = testing.allocator;
+    const t = try TestAdapter.create(allocator);
+    defer t.destroy(allocator);
+
+    try t.adapter.subscribeEthTopics();
+    try t.adapter.subscribeEthTopics();
+    try t.adapter.subscribeSubnet(.beacon_attestation, 3);
+    try t.adapter.subscribeSubnet(.beacon_attestation, 3);
+
+    try testing.expectEqual(global_topic_types.len + 1, t.adapter.subscribed_topics.count());
 }
 
 test "EthGossipAdapter: publish compresses with snappy" {
