@@ -481,6 +481,8 @@ pub fn main() !void {
     defer allocator.free(block_bytes);
 
     inline for (comptime std.enums.values(ForkSeq)) |fork| {
+        // TODO: add gloas benchmark support
+        if (comptime fork == .gloas) continue;
         if (detected_fork == fork) return runBenchmark(fork, allocator, &pool, stdout, state_bytes, block_bytes, chain_config);
     }
     return error.NoBenchmarkRan;
