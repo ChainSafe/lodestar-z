@@ -67,6 +67,11 @@ const LightClientOptimisticUpdateProtocol = eth2_protocols.LightClientOptimistic
 
 const log = std.log.scoped(.p2p_service);
 
+fn unixTimeMs(io: Io) u64 {
+    const ms = std.Io.Timestamp.now(io, .real).toMilliseconds();
+    return if (ms >= 0) @intCast(ms) else 0;
+}
+
 // ─── Switch type ─────────────────────────────────────────────────────────────
 
 pub const Eth2Switch = swarm_mod.Switch(.{
@@ -272,8 +277,7 @@ pub const P2pService = struct {
     pub fn start(self: *Self, io: Io, listen_addr: Multiaddr) !void {
         // Set initial time for gossipsub router (PRUNE backoff, scoring).
         {
-            const ms: u64 = @intCast(@divFloor(std.time.nanoTimestamp(), std.time.ns_per_ms));
-            self.gossipsub.setTime(ms);
+            self.gossipsub.setTime(unixTimeMs(io));
         }
         try self.network.listen(io, listen_addr);
         try self.gossip_adapter.subscribeEthTopics();
@@ -367,8 +371,7 @@ pub const P2pService = struct {
             // Without this, PRUNE backoff timers and other time-based logic
             // see time_ms=0 and malfunction (backoff always expired, etc.).
             {
-                const ms: u64 = @intCast(@divFloor(std.time.nanoTimestamp(), std.time.ns_per_ms));
-                gs.setTime(ms);
+                gs.setTime(unixTimeMs(io));
             }
             gs.heartbeat() catch {};
         }

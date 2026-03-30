@@ -88,7 +88,7 @@ pub const SeenCache = struct {
     ///
     /// Uses a dynamic list to avoid the 256-entry silent truncation bug.
     pub fn pruneBlocks(self: *SeenCache, min_slot: Slot) void {
-        var to_remove = std.ArrayList([32]u8).init(self.allocator);
+        var to_remove = std.array_list.Managed([32]u8).init(self.allocator);
         defer to_remove.deinit();
 
         var it = self.seen_blocks.iterator();

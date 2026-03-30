@@ -126,9 +126,9 @@ pub const BeaconProcessor = struct {
 
         const wtype = item.workType();
 
-        const t0 = std.time.nanoTimestamp();
+        const t0 = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
         self.handler(item, self.handler_context);
-        const t1 = std.time.nanoTimestamp();
+        const t1 = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
         const elapsed: u64 = if (t1 > t0) @intCast(t1 - t0) else 0;
         self.metrics.recordProcessed(wtype, elapsed);
         self.metrics.items_dispatched += 1;

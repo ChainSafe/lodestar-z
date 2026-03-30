@@ -1325,7 +1325,7 @@ pub const ForkChoice = struct {
         else
             0;
         // Collect stale keys (slot < min_slot).
-        var to_remove = std.ArrayListUnmanaged(Slot){};
+        var to_remove: std.ArrayListUnmanaged(Slot) = .empty;
         defer to_remove.deinit(allocator);
         var iter = self.queued_attestations.iterator();
         while (iter.next()) |entry| {
@@ -1561,7 +1561,7 @@ pub const ForkChoice = struct {
         // We must iterate all entries (not break on first future slot) because a future-slot
         // attestation queued before a past-slot one would otherwise cause the past-slot one
         // to be skipped. Collect keys to remove in a separate pass.
-        var keys_to_remove = std.ArrayListUnmanaged(u64){};
+        var keys_to_remove: std.ArrayListUnmanaged(u64) = .empty;
         defer keys_to_remove.deinit(allocator);
         // Pre-allocate so that append() cannot fail after votes are applied (OOM safety).
         try keys_to_remove.ensureTotalCapacity(allocator, @intCast(self.queued_attestations.count()));

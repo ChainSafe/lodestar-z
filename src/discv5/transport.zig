@@ -53,7 +53,7 @@ pub const UdpTransport = struct {
             std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC,
             0,
         );
-        errdefer std.posix.close(sockfd);
+        errdefer closeSocket(sockfd);
 
         const addr = net.Address.initIp4(bind_ip, bind_port);
         try std.posix.bind(sockfd, &addr.any, addr.getOsSockLen());
@@ -62,7 +62,7 @@ pub const UdpTransport = struct {
     }
 
     pub fn deinit(self: *UdpTransport) void {
-        std.posix.close(self.socket);
+        closeSocket(self.socket);
     }
 
     pub fn transport(self: *UdpTransport) Transport {
@@ -97,9 +97,16 @@ pub const UdpTransport = struct {
 
     fn closeImpl(ptr: *anyopaque) void {
         const self: *UdpTransport = @ptrCast(@alignCast(ptr));
-        std.posix.close(self.socket);
+        closeSocket(self.socket);
     }
 };
+
+fn closeSocket(sockfd: std.posix.socket_t) void {
+    switch (std.posix.errno(std.posix.system.close(sockfd))) {
+        .SUCCESS, .INTR => {},
+        else => {},
+    }
+}
 
 // =========== Mock Transport ===========
 

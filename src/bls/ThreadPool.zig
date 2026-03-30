@@ -196,7 +196,9 @@ pub fn verifyMultipleAggregateSignatures(
         return BlstError.VerifyFail;
 
     // Acquire dispatch lock — serializes concurrent verification requests.
-    pool.dispatch_mutex.lock();
+    while (!pool.dispatch_mutex.tryLock()) {
+        std.atomic.spinLoopHint();
+    }
     defer pool.dispatch_mutex.unlock();
 
     // Single-threaded fallback for small inputs or single worker
@@ -299,7 +301,9 @@ pub fn aggregateVerify(
     if (n_elems == 0 or msgs.len != n_elems) return BlstError.VerifyFail;
 
     // Acquire dispatch lock (see comment in verifyMultipleAggregateSignatures).
-    pool.dispatch_mutex.lock();
+    while (!pool.dispatch_mutex.tryLock()) {
+        std.atomic.spinLoopHint();
+    }
     defer pool.dispatch_mutex.unlock();
 
     // Single-threaded fallback

@@ -959,7 +959,7 @@ fn runBeacon(
                 .trace => .trace,
             };
 
-        file_transport = log_mod.FileTransport.init(log_file_path, file_level, .{
+        file_transport = log_mod.FileTransport.init(io, log_file_path, file_level, .{
             .max_size_bytes = 100 * 1024 * 1024, // 100MB default
             .max_files = opts.log_file_daily_rotate,
             .daily = opts.log_file_daily_rotate > 0,

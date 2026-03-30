@@ -1726,10 +1726,12 @@ pub const BeaconNode = struct {
                 if (!std.mem.eql(u8, &current_digest, &self.last_active_fork_digest)) {
                     if (!std.mem.eql(u8, &self.last_active_fork_digest, &[4]u8{ 0, 0, 0, 0 })) {
                         // Genuine fork transition — old digest was non-zero.
-                        std.log.info("Fork transition detected at slot {d}: {x:0>8} → {x:0>8}", .{
+                        const last_digest_hex = std.fmt.bytesToHex(&self.last_active_fork_digest, .lower);
+                        const current_digest_hex = std.fmt.bytesToHex(&current_digest, .lower);
+                        std.log.info("Fork transition detected at slot {d}: {s} -> {s}", .{
                             head_slot,
-                            std.fmt.fmtSliceHexLower(&self.last_active_fork_digest),
-                            std.fmt.fmtSliceHexLower(&current_digest),
+                            &last_digest_hex,
+                            &current_digest_hex,
                         });
                         svc.onForkTransition(current_digest, self.config.forkSeq(head_slot)) catch |err| {
                             std.log.warn("onForkTransition failed: {}", .{err});
@@ -1762,7 +1764,7 @@ pub const BeaconNode = struct {
             }
 
             // W7: Check if local validator is next-slot proposer; if so, preparePayload.
-            self.maybePrepareProposerPayload(io);
+            maybePrepareProposerPayload(self, io);
 
             // Prune sync committee pools by current head slot.
             {
@@ -1984,7 +1986,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         svc: *networking.P2pService,
         peer_id: []const u8,
         root: [32]u8,
-    ) ![]u8 {
+    ) ![]const u8 {
         const protocol_id = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
         const req_resp_encoding = networking.req_resp_encoding;
 
@@ -2056,7 +2058,6 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         const request = networking.messages.BeaconBlocksByRangeRequest.Type{
             .start_slot = start_slot,
             .count = count,
-            .step = 1,
         };
         var req_ssz: [networking.messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
         _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &req_ssz);
@@ -2490,7 +2491,6 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             const request = networking.messages.BeaconBlocksByRangeRequest.Type{
                 .start_slot = start_slot,
                 .count = count,
-                .step = 1,
             };
             var req_ssz: [networking.messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
             _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &req_ssz);
@@ -2613,7 +2613,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
     /// Computes the block root and stores the raw SSZ bytes in the
     /// UnknownBlockSync pending set. The parent will be fetched via
     /// BeaconBlocksByRoot during the next sync cycle.
-    fn queueOrphanBlock(
+    pub fn queueOrphanBlock(
         self: *BeaconNode,
         any_signed: AnySignedBeaconBlock,
         ssz_bytes: []const u8,
@@ -2660,7 +2660,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
     /// After a block is successfully imported, check if any orphan children
     /// were waiting on it and try to import them. Also notifies the unknown
     /// chain sync so it can link any backwards chains.
-    fn processPendingChildren(self: *BeaconNode, parent_root: [32]u8) void {
+    pub fn processPendingChildren(self: *BeaconNode, parent_root: [32]u8) void {
         // Notify backwards chain sync — may link a chain.
         self.unknown_chain_sync.onBlockImported(parent_root);
         // Notify unknown block sync — handles recursive resolution internally.
@@ -3349,6 +3349,7 @@ fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                     fc.onSingleVote(
                         node.allocator,
                         @intCast(queued.att.attester_index),
+                        queued.att.slot,
                         queued.att.target_root,
                         queued.att.target_epoch,
                     ) catch |err| {
@@ -3392,6 +3393,7 @@ fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                 fc.onSingleVote(
                     node.allocator,
                     @intCast(queued.att.attester_index),
+                    queued.att.slot,
                     queued.att.target_root,
                     queued.att.target_epoch,
                 ) catch |err| {
@@ -3430,7 +3432,7 @@ fn convertEnginePayload(
     }
 
     for (engine_payload.transactions) |tx_bytes| {
-        var tx_data = std.ArrayListUnmanaged(u8){};
+        var tx_data: std.ArrayListUnmanaged(u8) = .empty;
         try tx_data.appendSlice(allocator, tx_bytes);
         transactions.appendAssumeCapacity(tx_data);
     }
@@ -3449,7 +3451,7 @@ fn convertEnginePayload(
         });
     }
 
-    var extra_data = std.ArrayListUnmanaged(u8){};
+    var extra_data: std.ArrayListUnmanaged(u8) = .empty;
     if (engine_payload.extra_data.len > 0) {
         try extra_data.appendSlice(allocator, engine_payload.extra_data);
     }
@@ -3970,7 +3972,6 @@ test "BeaconNode: onReqResp BeaconBlocksByRange returns blocks for known slots" 
     const request = networking.messages.BeaconBlocksByRangeRequest.Type{
         .start_slot = 10,
         .count = 3,
-        .step = 1,
     };
     var buf: [networking.messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
     _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &buf);
@@ -4516,10 +4517,6 @@ fn produceBlockCallback(
     // Produce the block (allocates a full ProducedBlock with all fields).
     var produced = try node.produceFullBlock(params.slot, prod_config);
     defer produced.deinit(allocator);
-
-    // Determine fork name for the produced block.
-    const fork_seq = node.config.forkSeq(params.slot);
-    const fork_name = fork_seq.name();
 
     // TODO: Full block serialization not yet implemented.
     // Return 501 Not Implemented until the full BeaconBlock SSZ serialization

@@ -543,7 +543,8 @@ const SpinLock = struct {
 /// Thread-safe: uses a spinlock for file writes.
 /// Uses raw Linux syscalls for I/O to avoid dependency on std.Io instance.
 pub const FileTransport = struct {
-    fd: std.posix.fd_t,
+    io: std.Io,
+    file: std.Io.File,
     path: []const u8,
     level: Level,
     rotation: RotationConfig,
@@ -561,14 +562,13 @@ pub const FileTransport = struct {
         }
     };
 
-    pub fn init(path: []const u8, level: Level, rotation: RotationConfig) !FileTransport {
-        const fd = try openLogFd(path);
-        // Seek to end to get current size
-        const size = std.posix.lseek_END_get(fd, 0) catch 0;
-        const bytes_written: u64 = @intCast(@max(0, size));
+    pub fn init(io: std.Io, path: []const u8, level: Level, rotation: RotationConfig) !FileTransport {
+        const file = try openLogFile(io, path);
+        const bytes_written = (try file.stat(io)).size;
 
         return .{
-            .fd = fd,
+            .io = io,
+            .file = file,
             .path = path,
             .level = level,
             .rotation = rotation,
@@ -594,7 +594,7 @@ pub const FileTransport = struct {
         w.writeAll("\n") catch {};
 
         const written = w.getWritten();
-        _ = std.posix.write(self.fd, written) catch {};
+        self.file.writePositionalAll(self.io, written, self.bytes_written) catch return;
         self.bytes_written += written.len;
     }
 
@@ -614,7 +614,7 @@ pub const FileTransport = struct {
         w.writeAll("\n") catch {};
 
         const written = w.getWritten();
-        _ = std.posix.write(self.fd, written) catch {};
+        self.file.writePositionalAll(self.io, written, self.bytes_written) catch return;
         self.bytes_written += written.len;
     }
 
@@ -633,8 +633,7 @@ pub const FileTransport = struct {
     }
 
     fn performRotation(self: *FileTransport, now: Date) void {
-        // Close current fd
-        std.posix.close(self.fd);
+        self.file.close(self.io);
 
         // Build dated name: path.YYYY-MM-DD
         var dated_buf: [512]u8 = undefined;
@@ -646,13 +645,13 @@ pub const FileTransport = struct {
         }) catch self.path;
 
         // Rename current → dated
-        renamePath(self.path, dated_name);
+        std.Io.Dir.rename(std.Io.Dir.cwd(), self.path, std.Io.Dir.cwd(), dated_name, self.io) catch {};
 
         // Clean up old rotated files
         self.cleanOldFiles();
 
         // Open new file
-        self.fd = openLogFd(self.path) catch return;
+        self.file = openLogFile(self.io, self.path) catch return;
         self.bytes_written = 0;
         self.current_date = now;
     }
@@ -661,9 +660,8 @@ pub const FileTransport = struct {
         const dir_path = std.fs.path.dirname(self.path) orelse ".";
         const base_name = std.fs.path.basename(self.path);
 
-        // Open directory using std.fs
-        var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
-        defer dir.close();
+        var dir = std.Io.Dir.cwd().openDir(self.io, dir_path, .{ .iterate = true }) catch return;
+        defer dir.close(self.io);
 
         // Collect matching rotated log filenames
         var names: [256][256]u8 = undefined;
@@ -671,7 +669,7 @@ pub const FileTransport = struct {
         var name_count: usize = 0;
 
         var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
+        while (iter.next(self.io) catch null) |entry| {
             const entry_name = entry.name;
             if (!std.mem.startsWith(u8, entry_name, base_name)) continue;
             if (entry_name.len <= base_name.len + 1) continue;
@@ -709,12 +707,12 @@ pub const FileTransport = struct {
         const to_delete = name_count - self.rotation.max_files;
         for (0..to_delete) |i| {
             const fname = names[i][0..name_lens[i]];
-            dir.deleteFile(fname) catch {};
+            dir.deleteFile(self.io, fname) catch {};
         }
     }
 
     pub fn close(self: *FileTransport) void {
-        std.posix.close(self.fd);
+        self.file.close(self.io);
     }
 };
 
@@ -725,34 +723,10 @@ pub const RotationConfig = struct {
 };
 
 
-/// Rename a file using std.posix.renameat.
-fn renamePath(old_path: []const u8, new_path: []const u8) void {
-    var old_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    var new_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (old_path.len >= old_buf.len or new_path.len >= new_buf.len) return;
-    @memcpy(old_buf[0..old_path.len], old_path);
-    old_buf[old_path.len] = 0;
-    @memcpy(new_buf[0..new_path.len], new_path);
-    new_buf[new_path.len] = 0;
-    const old_z: [*:0]const u8 = old_buf[0..old_path.len :0];
-    const new_z: [*:0]const u8 = new_buf[0..new_path.len :0];
-    std.posix.renameatZ(std.posix.AT.FDCWD, old_z, std.posix.AT.FDCWD, new_z) catch {};
-}
-
-/// Open a log file for append using std.posix.
-fn openLogFd(path: []const u8) !std.posix.fd_t {
-    var path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= path_buf.len) return error.NameTooLong;
-    @memcpy(path_buf[0..path.len], path);
-    path_buf[path.len] = 0;
-    const path_z: [*:0]const u8 = path_buf[0..path.len :0];
-
-    const flags: std.posix.O = .{
-        .ACCMODE = .WRONLY,
-        .APPEND = true,
-        .CREAT = true,
-    };
-    return std.posix.openatZ(std.posix.AT.FDCWD, path_z, flags, 0o644);
+fn openLogFile(io: std.Io, path: []const u8) !std.Io.File {
+    return std.Io.Dir.cwd().createFile(io, path, .{
+        .truncate = false,
+    });
 }
 
 
@@ -1085,9 +1059,11 @@ test "FileTransport size-based rotation" {
 
 /// Get current wall-clock time as epoch seconds.
 fn getRealtimeSeconds() struct { secs: u64 } {
-    const ts = std.time.timestamp();
-    if (ts >= 0) return .{ .secs = @intCast(ts) };
-    return .{ .secs = 0 };
+    var ts: std.posix.timespec = undefined;
+    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
+        .SUCCESS => return .{ .secs = if (ts.sec >= 0) @intCast(ts.sec) else 0 },
+        else => return .{ .secs = 0 },
+    }
 }
 
 fn getCurrentDate() FileTransport.Date {

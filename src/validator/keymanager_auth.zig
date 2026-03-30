@@ -80,7 +80,7 @@ pub const KeymanagerAuth = struct {
     /// Creates parent directories if needed.
     pub fn generateToken(allocator: Allocator, path: []const u8) ![]const u8 {
         var random_bytes: [TOKEN_BYTES]u8 = undefined;
-        std.crypto.random.bytes(&random_bytes);
+        std.Options.debug_io.random(&random_bytes);
 
         const token = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&random_bytes)});
         errdefer allocator.free(token);

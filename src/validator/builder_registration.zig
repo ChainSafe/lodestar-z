@@ -26,6 +26,14 @@ const SigningType = remote_signer_mod.SigningType;
 
 const log = std.log.scoped(.builder_registration);
 
+fn unixTimestampSeconds() u64 {
+    var ts: std.posix.timespec = undefined;
+    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
+        .SUCCESS => return if (ts.sec >= 0) @intCast(ts.sec) else 0,
+        else => return 0,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // BuilderRegistrationService
 // ---------------------------------------------------------------------------
@@ -103,7 +111,7 @@ pub const BuilderRegistrationService = struct {
         }
 
         // Current Unix timestamp (seconds).
-        const timestamp: u64 = @intCast(@max(0, std.time.timestamp()));
+        const timestamp = unixTimestampSeconds();
 
         // Build signed registrations.
         var registrations = try std.ArrayList(RegistrationEntry).initCapacity(

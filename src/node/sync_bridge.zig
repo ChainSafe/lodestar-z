@@ -145,7 +145,10 @@ pub const SyncCallbackCtx = struct {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
         const pm = node.peer_manager orelse return;
-        const now_ms: u64 = @intCast(@divFloor(std.time.nanoTimestamp(), std.time.ns_per_ms));
+        const now_ms = blk: {
+            const ms = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds();
+            break :blk if (ms >= 0) @as(u64, @intCast(ms)) else 0;
+        };
         _ = pm.reportPeer(peer_id, .mid_tolerance, .sync, now_ms);
         std.log.debug("SyncCallbackCtx: reported peer {s} for sync misbehavior", .{peer_id});
     }

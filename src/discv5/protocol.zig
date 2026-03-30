@@ -126,7 +126,7 @@ pub const Protocol = struct {
 
     pub fn init(alloc: Allocator, config: Config) !Protocol {
         var seed_bytes: [8]u8 = undefined;
-        std.crypto.random.bytes(&seed_bytes);
+        std.Options.debug_io.random(&seed_bytes);
         const seed = std.mem.readInt(u64, &seed_bytes, .little);
         return .{
             .alloc = alloc,
@@ -157,7 +157,7 @@ pub const Protocol = struct {
     ///
     /// Call periodically (e.g., every minute or at slot boundaries).
     pub fn pruneWhoareyouRate(self: *Protocol) void {
-        const now_ns = std.time.nanoTimestamp();
+        const now_ns: i128 = @intCast(std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds());
         const max_age_ns: i128 = 60 * std.time.ns_per_s;
 
         // Use a stack-bounded array to avoid heap allocation while iterating.
@@ -373,7 +373,7 @@ pub const Protocol = struct {
         const eph_pubkey = blk: {
             var attempt: u8 = 0;
             while (attempt < 32) : (attempt += 1) {
-                std.crypto.random.bytes(&eph_seckey);
+                std.Options.debug_io.random(&eph_seckey);
                 if (secp.pubkeyFromSecret(&eph_seckey)) |pk| break :blk pk else |_| {}
             }
             // Unreachable in practice; probability of failure is ~2^{-128} after 32 attempts.
@@ -559,7 +559,7 @@ pub const Protocol = struct {
         t: transport_mod.Transport,
     ) !void {
         // Rate-limit WHOAREYOU responses per source IP to prevent amplification (CL-2020-08).
-        const now_ns = std.time.nanoTimestamp();
+        const now_ns: i128 = @intCast(std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds());
         const gop = try self.whoareyou_rate.getOrPut(dest.ip);
         if (gop.found_existing) {
             const elapsed_ns = now_ns - gop.value_ptr.window_start_ns;

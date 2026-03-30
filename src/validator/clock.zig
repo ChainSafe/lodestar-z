@@ -16,6 +16,14 @@ const Io = std.Io;
 
 const log = std.log.scoped(.vc_clock);
 
+fn unixTimestampSeconds() u64 {
+    var ts: std.posix.timespec = undefined;
+    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
+        .SUCCESS => return if (ts.sec >= 0) @intCast(ts.sec) else 0,
+        else => return 0,
+    }
+}
+
 /// Maximum number of per-slot and per-epoch callbacks.
 const MAX_CALLBACKS = 16;
 
@@ -235,14 +243,14 @@ const testing = std.testing;
 
 test "ValidatorSlotTicker.currentSlot before genesis" {
     // Genesis in the far future → slot 0.
-    const future = @as(u64, @intCast(std.time.timestamp())) + 9999;
+    const future = unixTimestampSeconds() + 9999;
     const clock = ValidatorSlotTicker.init(future, 12, 32);
     try testing.expectEqual(@as(u64, 0), clock.currentSlot());
 }
 
 test "ValidatorSlotTicker.currentEpoch" {
     // Genesis 100 slots ago at 12 s/slot.
-    const now_secs: u64 = @intCast(std.time.timestamp());
+    const now_secs = unixTimestampSeconds();
     const genesis = now_secs -| (100 * 12);
     const clock = ValidatorSlotTicker.init(genesis, 12, 32);
     const slot = clock.currentSlot();

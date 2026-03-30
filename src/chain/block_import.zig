@@ -116,7 +116,7 @@ pub const HeadTracker = struct {
     /// fork choice lookups on the canonical chain).
     pub fn pruneBelow(self: *HeadTracker, finalized_slot: u64) void {
         if (finalized_slot == 0) return;
-        var keys_to_remove = std.ArrayList(u64).init(self.allocator);
+        var keys_to_remove = std.array_list.Managed(u64).init(self.allocator);
         defer keys_to_remove.deinit();
 
         var it = self.slot_roots.iterator();
@@ -176,4 +176,3 @@ test "HeadTracker: slot roots lookup" {
 
     try std.testing.expect(tracker.getBlockRoot(6) == null);
 }
-

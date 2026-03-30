@@ -119,7 +119,7 @@ pub fn importAttestation(
         target_root,
         target_epoch,
         validator_index,
-        att,
+        .{ .phase0 = att },
     );
 }
 

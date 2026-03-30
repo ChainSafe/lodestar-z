@@ -220,7 +220,7 @@ pub const AttestationPool = struct {
         // Extract committee index from committee_bits.
         var committee_index: u64 = 0;
         for (0..preset.MAX_COMMITTEES_PER_SLOT) |i| {
-            if (attestation.committee_bits.get(i)) {
+            if (attestation.committee_bits.get(i) catch false) {
                 committee_index = @intCast(i);
                 break;
             }

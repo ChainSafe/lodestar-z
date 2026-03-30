@@ -85,6 +85,13 @@ const DataAvailabilityManager = da_mod.DataAvailabilityManager;
 const reprocess_mod = @import("reprocess.zig");
 const ReprocessQueue = reprocess_mod.ReprocessQueue;
 
+fn unixTimestampSeconds() u64 {
+    var ts: std.posix.timespec = undefined;
+    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
+        .SUCCESS => return if (ts.sec >= 0) @intCast(ts.sec) else 0,
+        else => return 0,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Chain
@@ -480,7 +487,7 @@ pub const Chain = struct {
                 }
             }
 
-            var roots_to_remove = std.ArrayList([32]u8).init(self.allocator);
+            var roots_to_remove = std.array_list.Managed([32]u8).init(self.allocator);
             defer roots_to_remove.deinit();
 
             // Collect all roots in block_to_state that are not the finalized root
@@ -572,7 +579,7 @@ pub const Chain = struct {
             if (gt == 0) break :blk head_slot;
             const sps = self.config.chain.SECONDS_PER_SLOT;
             if (sps == 0) break :blk head_slot;
-            const now_s: u64 = @intCast(@max(0, std.time.timestamp()));
+            const now_s = unixTimestampSeconds();
             if (now_s < gt) break :blk head_slot;
             break :blk (now_s - gt) / sps;
         };

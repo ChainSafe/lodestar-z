@@ -768,6 +768,7 @@ pub fn build(b: *std.Build) void {
     module_networking.addImport("snappy", dep_snappy.module("snappy"));
     module_networking.addImport("ssz", module_ssz);
     module_networking.addImport("consensus_types", module_consensus_types);
+    module_networking.addImport("config", module_config);
     module_networking.addImport("preset", module_preset);
     module_networking.addImport("constants", module_constants);
     module_networking.addImport("zig-libp2p", dep_eth_p2p_z.module("zig-libp2p"));
@@ -861,10 +862,12 @@ pub fn build(b: *std.Build) void {
     module_chain.addImport("bls", module_bls);
     module_chain.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_chain.addImport("kzg", module_kzg);
+    module_chain.addImport("log", module_log);
 
     // sync module imports
     module_sync.addImport("db", module_db);
     module_sync.addImport("networking", module_networking);
+    module_sync.addImport("preset", module_preset);
 
     // api module imports
     module_api.addImport("fork_types", module_fork_types);
@@ -997,4 +1000,3 @@ pub fn build(b: *std.Build) void {
 }
 
 // NOTE: discv5 module is appended below — this comment is a sentinel
-

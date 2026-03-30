@@ -166,7 +166,7 @@ pub const ValidatorStore = struct {
         // a valid non-zero BLS scalar. Using random bytes avoids the scalar=1 pitfall
         // where all remote validators would share the same (trivially recoverable) key.
         var random_sk_bytes: [32]u8 = undefined;
-        std.crypto.random.bytes(&random_sk_bytes);
+        std.Options.debug_io.random(&random_sk_bytes);
         // Ensure non-zero (astronomically unlikely, but be safe).
         random_sk_bytes[31] |= 1;
         const placeholder_sk = SecretKey.deserialize(&random_sk_bytes) catch return error.InvalidPubkey;

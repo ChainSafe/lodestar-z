@@ -54,7 +54,7 @@ pub const CreatedKeystore = struct {
 pub fn createKeystore(allocator: Allocator, password: []const u8, params: ScryptParams) !CreatedKeystore {
     // Generate random 32-byte scalar.
     var sk_bytes: [32]u8 = undefined;
-    std.crypto.random.bytes(&sk_bytes);
+    std.Options.debug_io.random(&sk_bytes);
 
     // Create BLS secret key. Retry if we happen to generate zero (astronomically rare).
     const secret_key: SecretKey = sk: {
@@ -90,12 +90,12 @@ pub fn encryptKeystore(allocator: Allocator, secret_key: SecretKey, password: []
     // Generate random 32-byte salt and 16-byte IV.
     var salt: [32]u8 = undefined;
     var iv: [16]u8 = undefined;
-    std.crypto.random.bytes(&salt);
-    std.crypto.random.bytes(&iv);
+    std.Options.debug_io.random(&salt);
+    std.Options.debug_io.random(&iv);
 
     // Generate UUID (v4).
     var uuid_bytes: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid_bytes);
+    std.Options.debug_io.random(&uuid_bytes);
     // Set version (4) and variant bits per RFC 4122.
     uuid_bytes[6] = (uuid_bytes[6] & 0x0f) | 0x40;
     uuid_bytes[8] = (uuid_bytes[8] & 0x3f) | 0x80;

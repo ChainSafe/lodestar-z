@@ -173,9 +173,11 @@ pub const EthGossipAdapter = struct {
         // Update to new fork digest.
         const old_digest = self.fork_digest;
         self.fork_digest = new_fork_digest;
-        log.info("Fork transition: {x:0>8} → {x:0>8}", .{
-            std.fmt.fmtSliceHexLower(&old_digest),
-            std.fmt.fmtSliceHexLower(&new_fork_digest),
+        const old_digest_hex = std.fmt.bytesToHex(&old_digest, .lower);
+        const new_digest_hex = std.fmt.bytesToHex(&new_fork_digest, .lower);
+        log.info("Fork transition: {s} -> {s}", .{
+            &old_digest_hex,
+            &new_digest_hex,
         });
 
         // Resubscribe to global topics under the new fork digest.

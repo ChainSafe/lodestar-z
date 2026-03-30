@@ -160,7 +160,7 @@ pub const BatchVerifier = struct {
 /// ChaCha fallback provided only ~40 bits of entropy — cryptographically weak.
 fn fillRandomScalars(rands: [][32]u8) void {
     const bytes = std.mem.sliceAsBytes(rands);
-    std.crypto.random.bytes(bytes);
+    std.Options.debug_io.random(bytes);
 }
 
 // ---------------------------------------------------------------------------
