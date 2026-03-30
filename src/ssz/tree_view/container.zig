@@ -601,27 +601,41 @@ test "StructContainerTreeView" {
     };
 
     const root_node = try Validator.tree.fromValue(&pool, &validator_value);
-    var validator_view = try StructContainerTreeView(Validator).init(std.testing.allocator, &pool, root_node);
-    defer validator_view.deinit();
+    var committed_root: ?Node.Id = null;
+    {
+        var validator_view = try StructContainerTreeView(Validator).init(std.testing.allocator, &pool, root_node);
+        defer validator_view.deinit();
 
-    var tree_root: [32]u8 = undefined;
-    try validator_view.hashTreeRootInto(&tree_root);
-    var out: [32]u8 = undefined;
-    try Validator.hashTreeRoot(&validator_value, &out);
-    try std.testing.expectEqualSlices(u8, out[0..], tree_root[0..]);
+        var tree_root: [32]u8 = undefined;
+        try validator_view.hashTreeRootInto(&tree_root);
+        var out: [32]u8 = undefined;
+        try Validator.hashTreeRoot(&validator_value, &out);
+        try std.testing.expectEqualSlices(u8, out[0..], tree_root[0..]);
 
-    try std.testing.expectEqualSlices(u8, ([_]u8{0} ** 48)[0..], &(try validator_view.get("pubkey")));
-    try std.testing.expectEqual(32000000000, try validator_view.get("effective_balance"));
-    try std.testing.expectEqual(false, try validator_view.get("slashed"));
+        try std.testing.expectEqualSlices(u8, ([_]u8{0} ** 48)[0..], &(try validator_view.get("pubkey")));
+        try std.testing.expectEqual(32000000000, try validator_view.get("effective_balance"));
+        try std.testing.expectEqual(false, try validator_view.get("slashed"));
 
-    try validator_view.set("pubkey", [_]u8{2} ** 48);
-    try validator_view.set("effective_balance", 32100000000);
-    try validator_view.set("slashed", true);
-    try validator_view.commit();
+        try validator_view.set("pubkey", [_]u8{2} ** 48);
+        try validator_view.set("effective_balance", 32100000000);
+        try validator_view.set("slashed", true);
+        try validator_view.commit();
 
-    try std.testing.expectEqualSlices(u8, ([_]u8{2} ** 48)[0..], &(try validator_view.get("pubkey")));
-    try std.testing.expectEqual(32100000000, try validator_view.get("effective_balance"));
-    try std.testing.expectEqual(true, try validator_view.get("slashed"));
+        try std.testing.expect(root_node.getState(&pool).isFree());
+
+        try std.testing.expectEqualSlices(u8, ([_]u8{2} ** 48)[0..], &(try validator_view.get("pubkey")));
+        try std.testing.expectEqual(32100000000, try validator_view.get("effective_balance"));
+        try std.testing.expectEqual(true, try validator_view.get("slashed"));
+
+        committed_root = validator_view.getRoot();
+        try std.testing.expect(!committed_root.?.getState(&pool).isFree());
+    }
+
+    try std.testing.expect(committed_root.?.getState(&pool).isFree());
+    const reuse_hash: [32]u8 = [_]u8{9} ** 32;
+    const reused = try pool.createLeaf(&reuse_hash);
+    defer pool.unref(reused);
+    try std.testing.expectEqual(committed_root.?, reused);
 }
 
 test "ContainerTreeView" {
