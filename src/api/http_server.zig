@@ -817,26 +817,11 @@ pub const HttpServer = struct {
     }
 
     fn hGetDebugState(self: *HttpServer, dc: DispatchContext) !HandlerResult {
-        const alloc = self.allocator;
-        const state_id_str = dc.match.getParam("state_id") orelse return error.InvalidStateId;
-        const state_id = try types.StateId.parse(state_id_str);
-        const handler_res = try handlers.debug.getState(self.api_context, state_id);
-        defer alloc.free(handler_res.data);
-        // Derive Eth-Consensus-Version from the state's slot.
-        const state_slot: u64 = switch (state_id) {
-            .slot => |s| s,
-            .head => self.api_context.head_tracker.head_slot,
-            .finalized => self.api_context.head_tracker.finalized_slot,
-            .justified => self.api_context.head_tracker.justified_slot,
-            .genesis => 0,
-            .root => self.api_context.head_tracker.head_slot,
-        };
-        const fork_seq = self.api_context.beacon_config.forkSeq(state_slot);
-        const fork_version: response_meta.Fork = @enumFromInt(@intFromEnum(fork_seq));
-        var meta = handler_res.meta;
-        meta.version = fork_version;
-        const body = try std.fmt.allocPrint(alloc, "{{\"data\":\"ssz_omitted\",\"size\":\"{d}\"}}", .{handler_res.data.len});
-        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = meta };
+        // TODO: Full SSZ state serialization not yet implemented.
+        // Return 501 Not Implemented until debug state endpoint is wired up.
+        _ = self;
+        _ = dc;
+        return .{ .status = 501, .content_type = "application/json", .body = "{\"code\":501,\"message\":\"Debug state endpoint not yet implemented\"}", .meta = .{} };
     }
 
     fn hGetDebugHeads(self: *HttpServer, _: DispatchContext) !HandlerResult {

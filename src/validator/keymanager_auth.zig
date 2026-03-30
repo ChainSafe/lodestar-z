@@ -61,11 +61,17 @@ pub const KeymanagerAuth = struct {
         const prefix = "Bearer ";
         if (!std.mem.startsWith(u8, header, prefix)) return error.Unauthorized;
         const provided_token = header[prefix.len..];
-        // Use constant-time comparison to prevent timing attacks.
-        if (provided_token.len != self.token.len) return error.Unauthorized;
-        if (!std.mem.eql(u8, provided_token, self.token)) {
-            return error.Unauthorized;
+        // Constant-time comparison to prevent timing side-channel attacks.
+        // XOR-accumulator works for variable-length tokens: we compare the
+        // shorter length then reject if lengths differ.
+        const min_len = @min(provided_token.len, self.token.len);
+        var acc: u8 = 0;
+        for (0..min_len) |i| {
+            acc |= provided_token[i] ^ self.token[i];
         }
+        // Length mismatch is also a failure — fold it in constant-time.
+        acc |= @as(u8, @intFromBool(provided_token.len != self.token.len));
+        if (acc != 0) return error.Unauthorized;
     }
 
     /// Generate a random token, persist to file, and return it.

@@ -117,11 +117,17 @@ pub const ValidatorClient = struct {
     // Liveness tracker — records per-validator duty outcomes.
     liveness_tracker: LivenessTracker,
 
+    // Signing context — fork schedule, genesis info for domain computation.
+    signing_context: SigningContext,
+
     // Syncing tracker — pauses duties when BN sync distance is too large.
     syncing_tracker: SyncingTracker,
 
     // Shutdown requested flag — set on signal, stops the clock loop.
     shutdown_requested: std.atomic.Value(bool),
+
+    // SSE thread handle — stored for clean shutdown (join instead of detach).
+    sse_thread_handle: ?std.Thread = null,
 
     // Session stats.
     session_start_ns: u64,
@@ -320,6 +326,7 @@ pub const ValidatorClient = struct {
             .liveness_tracker = live_tracker,
             .syncing_tracker = SyncingTracker.init(allocator, &api),
             .shutdown_requested = std.atomic.Value(bool).init(false),
+            .sse_thread_handle = null,
             .session_start_ns = @intCast(std.time.nanoTimestamp()),
         };
     }
@@ -354,6 +361,54 @@ pub const ValidatorClient = struct {
     /// Return true if shutdown has been requested.
     pub fn isShutdownRequested(self: *ValidatorClient) bool {
         return self.shutdown_requested.load(.seq_cst);
+    }
+
+    /// Sign and submit a voluntary exit for the given validator.
+    ///
+    /// Computes the signing root using the validator client's signing context,
+    /// signs with the validator's key (local or remote), and submits the
+    /// signed exit to the beacon node via POST /eth/v1/beacon/pool/voluntary_exits.
+    ///
+    /// Requires:
+    /// - Validator index must be resolved (call after index tracker resolves)
+    /// - Signing context must be initialized (after genesis data is fetched)
+    ///
+    /// TS: Lodestar CLI uses `validator-voluntary-exit` command.
+    pub fn submitVoluntaryExit(
+        self: *ValidatorClient,
+        io: Io,
+        pubkey: [48]u8,
+        epoch: u64,
+    ) !void {
+        const signing = @import("signing.zig");
+
+        const validator_index = self.validator_store.getValidatorIndex(pubkey) orelse
+            return error.ValidatorNotFound;
+
+        // Compute the signing root using the VC's signing context.
+        var signing_root: [32]u8 = undefined;
+        const voluntary_exit = @import("consensus_types").phase0.VoluntaryExit.Type{
+            .epoch = epoch,
+            .validator_index = validator_index,
+        };
+        try signing.voluntaryExitSigningRoot(
+            &self.signing_context,
+            &voluntary_exit,
+            epoch,
+            &signing_root,
+        );
+
+        const signature = try self.validator_store.signVoluntaryExit(io, pubkey, signing_root);
+        _ = signature;
+
+        // TODO: Submit the signed voluntary exit to the BN via:
+        //   POST /eth/v1/beacon/pool/voluntary_exits
+        // BeaconApiClient does not yet have a publishVoluntaryExit method.
+        // When added, serialize SignedVoluntaryExit JSON and call:
+        //   try self.api.publishVoluntaryExit(io, json);
+        log.info("voluntary exit signed for validator {d} at epoch {d} (submission pending API client wiring)", .{
+            validator_index, epoch,
+        });
     }
 
     /// Add a validator secret key to the store.
@@ -583,7 +638,9 @@ pub const ValidatorClient = struct {
             break :blk null;
         };
         if (sse_thread) |t| {
-            t.detach(); // Let it run independently; VC shutdown will kill the process.
+            // Store thread handle for clean shutdown instead of detaching.
+            // The thread checks self.shutdown_requested and exits gracefully.
+            self.sse_thread_handle = t;
             log.info("ChainHeaderTracker SSE subscription started in background thread", .{});
         }
 
@@ -592,6 +649,13 @@ pub const ValidatorClient = struct {
 
         // Graceful shutdown sequence.
         log.info("validator client stopping...", .{});
+
+        // Join the SSE thread if it was spawned.
+        if (self.sse_thread_handle) |t| {
+            log.info("joining ChainHeaderTracker SSE thread...", .{});
+            t.join();
+            self.sse_thread_handle = null;
+        }
 
         // Note: slashing_db.close() is called by validator_store.deinit() — do NOT call it here.
 

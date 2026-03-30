@@ -84,8 +84,15 @@ pub const InterchangeMetadata = struct {
 /// only the *highest* signed slot/epoch from the interchange (conservative
 /// protection — same as what TS lodestar does for fast import).
 ///
-/// Skips genesis_validators_root verification — use importInterchangeVerified
-/// when the expected root is known (always preferred in production).
+/// ⚠️ WARNING: This function skips genesis_validators_root (GVR) verification.
+/// Importing interchange data without GVR verification risks loading protection
+/// records from a different chain (e.g., mainnet data into a testnet validator),
+/// which can lead to missed slashing protection or false double-sign blocks.
+///
+/// **Production code should always use `importInterchangeVerified` instead.**
+///
+/// This unverified variant exists only for testing and tools that handle
+/// GVR verification externally.
 ///
 /// TS: SlashingProtectionInterchange.importInterchange(interchange)
 pub fn importInterchange(allocator: Allocator, json: []const u8) ![]SlashingProtectionRecord {

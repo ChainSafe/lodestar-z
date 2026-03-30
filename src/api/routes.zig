@@ -25,18 +25,6 @@ pub const HttpMethod = enum {
 };
 
 
-/// Per-endpoint metadata flags — controls which metadata headers and JSON fields are emitted.
-pub const MetaFlags = struct {
-    /// Emit Eth-Consensus-Version header + "version" in JSON body.
-    version: bool = false,
-    /// Emit Eth-Execution-Optimistic header + "execution_optimistic" in JSON body.
-    execution_optimistic: bool = false,
-    /// Emit Eth-Consensus-Finalized header + "finalized" in JSON body.
-    finalized: bool = false,
-    /// Emit Eth-Consensus-Dependent-Root header + "dependent_root" in JSON body.
-    dependent_root: bool = false,
-};
-
 /// A route definition: method, path pattern, and metadata.
 pub const Route = struct {
     method: HttpMethod,
@@ -45,8 +33,6 @@ pub const Route = struct {
     operation_id: []const u8,
     /// Whether this endpoint supports SSZ responses.
     supports_ssz: bool = false,
-    /// Metadata flags: which fields to emit in headers and JSON body.
-    meta_flags: MetaFlags = .{},
 };
 
 /// Complete Beacon API route table.
@@ -91,25 +77,21 @@ pub const routes = [_]Route{
         .path = "/eth/v2/beacon/blocks/{block_id}",
         .operation_id = "getBlockV2",
         .supports_ssz = true,
-        .meta_flags = .{ .version = true, .execution_optimistic = true, .finalized = true },
     },
     .{
         .method = .GET,
         .path = "/eth/v1/beacon/headers/{block_id}",
         .operation_id = "getBlockHeader",
-        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
     },
     .{
         .method = .GET,
         .path = "/eth/v2/beacon/states/{state_id}/validators/{validator_id}",
         .operation_id = "getStateValidatorV2",
-        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
     },
     .{
         .method = .GET,
         .path = "/eth/v2/beacon/states/{state_id}/validators",
         .operation_id = "getStateValidatorsV2",
-        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
     },
     .{
         .method = .GET,
@@ -206,19 +188,16 @@ pub const routes = [_]Route{
         .method = .GET,
         .path = "/eth/v1/validator/duties/proposer/{epoch}",
         .operation_id = "getProposerDuties",
-        .meta_flags = .{ .execution_optimistic = true, .dependent_root = true },
     },
     .{
         .method = .POST,
         .path = "/eth/v1/validator/duties/attester/{epoch}",
         .operation_id = "getAttesterDuties",
-        .meta_flags = .{ .execution_optimistic = true, .dependent_root = true },
     },
     .{
         .method = .POST,
         .path = "/eth/v1/validator/duties/sync/{epoch}",
         .operation_id = "getSyncDuties",
-        .meta_flags = .{ .execution_optimistic = true },
     },
 
     .{
@@ -226,14 +205,12 @@ pub const routes = [_]Route{
         .path = "/eth/v1/validator/blocks/{slot}",
         .operation_id = "produceBlock",
         .supports_ssz = true,
-        .meta_flags = .{ .version = true },
     },
     .{
         .method = .GET,
         .path = "/eth/v3/validator/blocks/{slot}",
         .operation_id = "produceBlockV3",
         .supports_ssz = true,
-        .meta_flags = .{ .version = true },
     },
     .{
         .method = .GET,
@@ -267,7 +244,6 @@ pub const routes = [_]Route{
         .path = "/eth/v2/debug/beacon/states/{state_id}",
         .operation_id = "getDebugState",
         .supports_ssz = true,
-        .meta_flags = .{ .version = true, .execution_optimistic = true, .finalized = true },
     },
     .{
         .method = .GET,
@@ -294,39 +270,33 @@ pub const routes = [_]Route{
         .method = .GET,
         .path = "/eth/v1/beacon/states/{state_id}/committees",
         .operation_id = "getStateCommittees",
-        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
     },
     .{
         .method = .GET,
         .path = "/eth/v1/beacon/states/{state_id}/sync_committees",
         .operation_id = "getStateSyncCommittees",
-        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
     },
     .{
         .method = .GET,
         .path = "/eth/v1/beacon/states/{state_id}/randao",
         .operation_id = "getStateRandao",
-        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
     },
     .{
         .method = .GET,
         .path = "/eth/v1/beacon/headers",
         .operation_id = "getBlockHeaders",
-        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
     },
     .{
         .method = .GET,
         .path = "/eth/v1/beacon/blob_sidecars/{block_id}",
         .operation_id = "getBlobSidecars",
         .supports_ssz = true,
-        .meta_flags = .{ .version = true, .execution_optimistic = true, .finalized = true },
     },
     .{
         .method = .GET,
         .path = "/eth/v1/beacon/blinded_blocks/{block_id}",
         .operation_id = "getBlindedBlock",
         .supports_ssz = true,
-        .meta_flags = .{ .version = true, .execution_optimistic = true, .finalized = true },
     },
 
     // -- Rewards --
@@ -334,19 +304,16 @@ pub const routes = [_]Route{
         .method = .GET,
         .path = "/eth/v1/beacon/rewards/blocks/{block_id}",
         .operation_id = "getBlockRewards",
-        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
     },
     .{
         .method = .POST,
         .path = "/eth/v1/beacon/rewards/attestations/{epoch}",
         .operation_id = "getAttestationRewards",
-        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
     },
     .{
         .method = .POST,
         .path = "/eth/v1/beacon/rewards/sync_committee/{block_id}",
         .operation_id = "getSyncCommitteeRewards",
-        .meta_flags = .{ .execution_optimistic = true, .finalized = true },
     },
 
     // -- Validator (additional) --
@@ -364,7 +331,6 @@ pub const routes = [_]Route{
         .method = .POST,
         .path = "/eth/v1/validator/liveness/{epoch}",
         .operation_id = "getValidatorLiveness",
-        .meta_flags = .{ .execution_optimistic = true },
     },
 
     // -- Node (peer by id) --

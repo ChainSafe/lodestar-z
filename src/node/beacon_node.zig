@@ -4521,17 +4521,11 @@ fn produceBlockCallback(
     const fork_seq = node.config.forkSeq(params.slot);
     const fork_name = fork_seq.name();
 
-    // Return an 8-byte stub SSZ (slot encoded as little-endian u64) so the API
-    // can respond with the fork header and slot. A full implementation would
-    // serialize the entire BeaconBlock including all body fields.
-    // Note: in production the VC signs the block and submits it via POST /beacon/blocks.
-    const out_bytes = try allocator.alloc(u8, 8);
-    std.mem.writeInt(u64, out_bytes[0..8], params.slot, .little);
-
-    return .{
-        .ssz_bytes = out_bytes,
-        .fork = fork_name,
-    };
+    // TODO: Full block serialization not yet implemented.
+    // Return 501 Not Implemented until the full BeaconBlock SSZ serialization
+    // (including all body fields) is wired up. The VC should not attempt to
+    // sign a stub block.
+    return error.NotImplemented;
 }
 
 // ---------------------------------------------------------------------------

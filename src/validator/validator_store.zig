@@ -162,11 +162,14 @@ pub const ValidatorStore = struct {
             if (std.mem.eql(u8, &v.pubkey, &pubkey)) return; // already present
         }
 
-        // Build a zeroed SecretKey placeholder — never used for signing.
-        var zeroed_sk_bytes = [_]u8{0} ** 32;
-        // BLS scalar must be non-zero; use 1 as a safe placeholder.
-        zeroed_sk_bytes[31] = 1;
-        const placeholder_sk = SecretKey.deserialize(&zeroed_sk_bytes) catch return error.InvalidPubkey;
+        // Build a random SecretKey placeholder — never used for signing but must be
+        // a valid non-zero BLS scalar. Using random bytes avoids the scalar=1 pitfall
+        // where all remote validators would share the same (trivially recoverable) key.
+        var random_sk_bytes: [32]u8 = undefined;
+        std.crypto.random.bytes(&random_sk_bytes);
+        // Ensure non-zero (astronomically unlikely, but be safe).
+        random_sk_bytes[31] |= 1;
+        const placeholder_sk = SecretKey.deserialize(&random_sk_bytes) catch return error.InvalidPubkey;
 
         try self.validators.append(.{
             .pubkey = pubkey,
@@ -515,6 +518,41 @@ pub const ValidatorStore = struct {
             const rs = self.remote_signer orelse return error.RemoteSignerRequired;
             return rs.sign(io, pubkey, signing_root, .SYNC_COMMITTEE_CONTRIBUTION_AND_PROOF) catch |err| {
                 log.warn("remote signer signContributionAndProof error={s}", .{@errorName(err)});
+                return err;
+            };
+        }
+        return validator.secret_key.sign(&signing_root, bls.DST, null);
+    }
+
+    /// Get the on-chain validator index for a given pubkey, or null if not yet resolved.
+    pub fn getValidatorIndex(self: *ValidatorStore, pubkey: [48]u8) ?u64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const validator = self.findValidator(pubkey) orelse return null;
+        return validator.index;
+    }
+
+    /// Sign a voluntary exit message.
+    ///
+    /// The signing root must be pre-computed by the caller using
+    /// `signing.voluntaryExitSigningRoot()`. This method only performs
+    /// the BLS signing with slashing protection not applicable (exits
+    /// are not slashable, only the epoch is checked for domain correctness).
+    ///
+    /// TS: validatorStore.signVoluntaryExit(pubkey, signingRoot)
+    pub fn signVoluntaryExit(
+        self: *ValidatorStore,
+        io: Io,
+        pubkey: [48]u8,
+        signing_root: [32]u8,
+    ) !Signature {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
+        if (validator.is_remote) {
+            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
+            return rs.sign(io, pubkey, signing_root, .VOLUNTARY_EXIT) catch |err| {
+                log.warn("remote signer signVoluntaryExit error={s}", .{@errorName(err)});
                 return err;
             };
         }

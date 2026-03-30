@@ -27,40 +27,7 @@ const log = std.log.scoped(.eth2_protocols);
 /// Maximum wire bytes to read for a single request (10 MiB + framing overhead).
 const max_request_wire_bytes: usize = 11 * 1024 * 1024;
 
-// ─── Comptime ID generation ───────────────────────────────────────────────────
-//
-// Each protocol needs a stable comptime const []const u8 for `pub const id`.
-// We generate these as module-level constants so the slice pointer is stable.
 
-fn makeId(comptime method: protocol.Method) *const [64]u8 {
-    comptime {
-        var buf: [64]u8 = undefined;
-        const s = protocol.protocolId(&buf, method, .ssz_snappy);
-        var result: [64]u8 = undefined;
-        @memcpy(result[0..s.len], s);
-        @memset(result[s.len..], 0);
-        const static: [64]u8 = result;
-        return &static;
-    }
-}
-
-// Module-level constant protocol ID buffers.
-const status_id_buf = makeId(.status);
-const goodbye_id_buf = makeId(.goodbye);
-const ping_id_buf = makeId(.ping);
-const metadata_id_buf = makeId(.metadata);
-const blocks_by_range_id_buf = makeId(.beacon_blocks_by_range);
-const blocks_by_root_id_buf = makeId(.beacon_blocks_by_root);
-const blobs_by_range_id_buf = makeId(.blob_sidecars_by_range);
-const blobs_by_root_id_buf = makeId(.blob_sidecars_by_root);
-
-fn idSlice(comptime method: protocol.Method) []const u8 {
-    comptime {
-        var buf: [64]u8 = undefined;
-        const s = protocol.protocolId(&buf, method, .ssz_snappy);
-        return s;
-    }
-}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -342,23 +309,7 @@ test "eth2_protocols: all IDs are distinct" {
     }
 }
 
-test "eth2_protocols: IDs match what protocolId() generates" {
-    const testing = std.testing;
-    var buf: [128]u8 = undefined;
 
-    try testing.expectEqualStrings(
-        protocol.protocolId(&buf, .status, .ssz_snappy),
-        StatusProtocol.id,
-    );
-    try testing.expectEqualStrings(
-        protocol.protocolId(&buf, .beacon_blocks_by_range, .ssz_snappy),
-        BlocksByRangeProtocol.id,
-    );
-    try testing.expectEqualStrings(
-        protocol.protocolId(&buf, .blob_sidecars_by_root, .ssz_snappy),
-        BlobSidecarsByRootProtocol.id,
-    );
-}
 
 // ─── PeerDAS and LightClient protocol handlers ────────────────────────────────
 

@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const preset = @import("preset").preset;
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -129,9 +130,9 @@ pub const PeerSyncInfo = struct {
         return self.peer_id;
     }
 
-    /// The finalized slot (epoch * 32, assuming mainnet SLOTS_PER_EPOCH=32).
+    /// The finalized slot (epoch * SLOTS_PER_EPOCH).
     pub fn finalizedSlot(self: *const PeerSyncInfo) u64 {
-        return self.finalized_epoch * 32;
+        return self.finalized_epoch * preset.SLOTS_PER_EPOCH;
     }
 
     /// Derive the ChainTarget for finalized sync.

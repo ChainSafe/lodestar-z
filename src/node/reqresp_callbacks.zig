@@ -211,10 +211,17 @@ fn reqRespOnGoodbye(ptr: *anyopaque, reason: u64) void {
 fn reqRespOnPeerStatus(ptr: *anyopaque, status: StatusMessage.Type) void {
     const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
     const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
+    // TODO: ReqRespContext.onPeerStatus does not carry the peer_id — the networking
+    // layer's inbound handler dispatches here without propagating which peer sent the
+    // Status message.  To fix properly, extend ReqRespContext.onPeerStatus signature
+    // to include `peer_id: []const u8` and thread it through from the P2P layer.
+    // Until then, sync will attribute all inbound Status messages to "unknown" peer.
+    const peer_id = "unknown";
+    std.log.debug("reqRespOnPeerStatus: peer_id not available in callback (using \"{s}\")", .{peer_id});
     if (node.sync_service_inst) |sync_svc| {
-        sync_svc.onPeerStatus("unknown", status) catch |err| {
+        sync_svc.onPeerStatus(peer_id, status) catch |err| {
             std.log.warn("SyncService.onPeerStatus failed: {}", .{err});
         };
     }
-    node.unknown_chain_sync.onPeerConnected("unknown", status.head_root) catch {};
+    node.unknown_chain_sync.onPeerConnected(peer_id, status.head_root) catch {};
 }

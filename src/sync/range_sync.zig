@@ -14,6 +14,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const sync_types = @import("sync_types.zig");
+const preset = @import("preset").preset;
 const RangeSyncType = sync_types.RangeSyncType;
 const ChainTarget = sync_types.ChainTarget;
 const SyncState = sync_types.SyncState;
@@ -142,7 +143,7 @@ pub const RangeSync = struct {
         switch (sync_type) {
             .finalized => {
                 const target = ChainTarget{
-                    .slot = peer_finalized_epoch * 32,
+                    .slot = peer_finalized_epoch * preset.SLOTS_PER_EPOCH,
                     .root = peer_finalized_root,
                 };
                 if (self.finalized_chain) |*fc| {

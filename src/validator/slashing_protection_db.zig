@@ -309,7 +309,10 @@ pub const SlashingProtectionDb = struct {
                 RECORD_TYPE_BLOCK => {
                     const rest_size = BLOCK_RECORD_SIZE - 1; // already read type byte
                     const m = try file.readAll(buf[0..rest_size]);
-                    if (m != rest_size) break; // truncated record — stop
+                    if (m != rest_size) {
+                        log.warn("slashing_db: truncated block record at EOF (expected {d} bytes, got {d})", .{ rest_size, m });
+                        break;
+                    }
 
                     const slot = std.mem.readInt(u64, buf[0..8], .little);
                     var pubkey: [48]u8 = undefined;
@@ -325,7 +328,10 @@ pub const SlashingProtectionDb = struct {
                 RECORD_TYPE_ATTESTATION => {
                     const rest_size = ATTESTATION_RECORD_SIZE - 1;
                     const m = try file.readAll(buf[0..rest_size]);
-                    if (m != rest_size) break;
+                    if (m != rest_size) {
+                        log.warn("slashing_db: truncated attestation record at EOF (expected {d} bytes, got {d})", .{ rest_size, m });
+                        break;
+                    }
 
                     const source_epoch = std.mem.readInt(u64, buf[0..8], .little);
                     const target_epoch = std.mem.readInt(u64, buf[8..16], .little);

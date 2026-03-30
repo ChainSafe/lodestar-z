@@ -694,7 +694,7 @@ fn parseExecutionPayload(allocator: Allocator, json_bytes: []const u8) !types.Ex
 ///
 /// Ownership: parseSignedBuilderBid allocates header.extra_data and
 /// message.blob_kzg_commitments. Callers must call freeBid when done.
-pub fn freeBid(allocator: Allocator, bid: *SignedBuilderBid) void {
+pub fn freeBid(allocator: Allocator, bid: SignedBuilderBid) void {
     if (bid.message.header.extra_data.len > 0) allocator.free(bid.message.header.extra_data);
     if (bid.message.blob_kzg_commitments.len > 0) allocator.free(bid.message.blob_kzg_commitments);
 }
@@ -704,7 +704,7 @@ pub fn freeBid(allocator: Allocator, bid: *SignedBuilderBid) void {
 /// Ownership: parseExecutionPayload allocates extra_data, transactions (each
 /// element and the slice), and withdrawals. Callers must call freeExecutionPayload
 /// when done with the returned payload.
-pub fn freeExecutionPayload(allocator: Allocator, payload: *types.ExecutionPayloadV3) void {
+pub fn freeExecutionPayload(allocator: Allocator, payload: types.ExecutionPayloadV3) void {
     if (payload.extra_data.len > 0) allocator.free(payload.extra_data);
     for (payload.transactions) |tx| allocator.free(tx);
     if (payload.transactions.len > 0) allocator.free(payload.transactions);
@@ -731,8 +731,6 @@ pub const MockBuilderTransport = struct {
     last_url: ?[]const u8 = null,
     /// Last body sent.
     last_body: ?[]const u8 = null,
-    /// Last method used (GET/POST).
-    last_method: ?[]const u8 = null,
 
     pub fn init(allocator: Allocator, canned_response: []const u8) MockBuilderTransport {
         return .{

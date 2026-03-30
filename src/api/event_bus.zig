@@ -283,18 +283,24 @@ pub const EventBus = struct {
     /// Callers store `event_bus.write_idx` after consuming and pass it back
     /// on the next poll.  If `since_idx == write_idx`, returns an empty slice.
     ///
-    /// Note: this only returns a contiguous slice when the write position has
-    /// not wrapped past `since_idx`.  When a wrap-around has occurred (rare
-    /// in practice for slowly-advancing SSE streams) callers should reset
-    /// `since_idx` to 0 and re-subscribe.
+    /// On wrap-around (since_idx > write_idx), returns the tail portion from
+    /// since_idx to buffer end. Callers should then call `getRecent(0)` to
+    /// get the head portion from 0 to write_idx on their next poll.
     pub fn getRecent(self: *const EventBus, since_idx: u8) []const Event {
         if (since_idx == self.write_idx) return &.{};
         if (since_idx < self.write_idx) {
             return self.events[since_idx..self.write_idx];
         }
         // Wrapped around: since_idx > write_idx.
-        // Cannot return a contiguous slice; caller should reset to 0.
-        return &.{};
+        // Return the tail from since_idx to the end of the buffer.
+        // The caller's next poll with since_idx=0 will pick up [0..write_idx].
+        if (self.count >= 255) {
+            // Buffer is full — return from since_idx to end.
+            return self.events[since_idx..256];
+        }
+        // Buffer hasn't filled yet but indices wrapped (shouldn't happen in
+        // normal operation). Reset the caller by returning everything from 0.
+        return self.events[0..self.write_idx];
     }
 };
 

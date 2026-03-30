@@ -4,7 +4,7 @@
 //! of the PayloadAttributes. Used during block production: forkchoiceUpdated
 //! returns a payload_id, then getPayload uses it to retrieve the built block.
 //!
-//! LRU cache with TTL (default 2 slots = 24 seconds at 12s slot time).
+//! FIFO cache with TTL (default 2 slots = 24 seconds at 12s slot time).
 
 const std = @import("std");
 const testing = std.testing;
@@ -38,7 +38,7 @@ const Entry = struct {
     inserted_at: u64,
 };
 
-/// LRU cache mapping PayloadAttributes hash → PayloadId.
+/// FIFO cache with TTL mapping PayloadAttributes hash → PayloadId.
 ///
 /// Entries expire after `ttl_seconds` and the cache is bounded to
 /// `max_entries` items (oldest evicted first when full).
@@ -182,7 +182,7 @@ pub const PayloadIdCache = struct {
         key: [32]u8,
         now_seconds: u64,
     ) ?PayloadId {
-        // Search from most recent (end) to oldest (start) — LRU convention.
+        // Search from most recent (end) to oldest (start).
         var i: usize = self.entries.items.len;
         while (i > 0) {
             i -= 1;

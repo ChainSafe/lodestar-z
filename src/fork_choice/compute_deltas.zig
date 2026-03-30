@@ -13,8 +13,65 @@ const ValidatorIndex = consensus_types.primitive.ValidatorIndex.Type;
 
 pub const VoteIndex = u32;
 
-/// Set of equivocating validator indices.
-pub const EquivocatingIndices = std.AutoArrayHashMap(ValidatorIndex, void);
+/// Set of equivocating validator indices with cached sorted keys.
+///
+/// The sorted cache avoids re-allocating and re-sorting on every computeDeltas call.
+/// Only re-sorts when the set has been modified (is_dirty flag).
+pub const EquivocatingIndices = struct {
+    map: std.AutoArrayHashMap(ValidatorIndex, void),
+    sorted_cache: ?[]const ValidatorIndex = null,
+    is_dirty: bool = true,
+    cache_allocator: ?Allocator = null,
+
+    pub fn init(allocator: Allocator) EquivocatingIndices {
+        return .{ .map = std.AutoArrayHashMap(ValidatorIndex, void).init(allocator) };
+    }
+
+    pub fn deinit(self: *EquivocatingIndices) void {
+        self.freeSortedCache();
+        self.map.deinit();
+    }
+
+    pub fn put(self: *EquivocatingIndices, key: ValidatorIndex, value: void) !void {
+        try self.map.put(key, value);
+        self.is_dirty = true;
+    }
+
+    pub fn keys(self: *const EquivocatingIndices) []const ValidatorIndex {
+        return self.map.keys();
+    }
+
+    pub fn count(self: *const EquivocatingIndices) usize {
+        return self.map.count();
+    }
+
+    pub fn contains(self: *const EquivocatingIndices, key: ValidatorIndex) bool {
+        return self.map.contains(key);
+    }
+
+    fn freeSortedCache(self: *EquivocatingIndices) void {
+        if (self.sorted_cache) |cache| {
+            if (self.cache_allocator) |alloc| alloc.free(cache);
+            self.sorted_cache = null;
+        }
+    }
+
+    /// Return sorted keys, using cached version if not dirty.
+    pub fn getSortedKeys(self: *EquivocatingIndices, allocator: Allocator) ![]const ValidatorIndex {
+        if (!self.is_dirty) {
+            if (self.sorted_cache) |cache| return cache;
+        }
+        self.freeSortedCache();
+        const map_keys = self.map.keys();
+        const buf = try allocator.alloc(ValidatorIndex, map_keys.len);
+        @memcpy(buf, map_keys);
+        std.mem.sortUnstable(ValidatorIndex, buf, {}, std.sort.asc(ValidatorIndex));
+        self.sorted_cache = buf;
+        self.cache_allocator = allocator;
+        self.is_dirty = false;
+        return buf;
+    }
+};
 
 /// Diagnostic counters from a computeDeltas call.
 /// Used for monitoring fork choice health (not for correctness).
@@ -62,9 +119,9 @@ pub fn computeDeltas(
 
     const num_validators = vote_next_indices.len;
 
-    // Sort equivocating indices for pointer advancement in the loop.
-    const sorted_eq = try sortEquivocatingKeys(allocator, equivocating_indices.*);
-    defer allocator.free(sorted_eq);
+    // Use cached sorted keys from the equivocating indices set.
+    // The EquivocatingIndices tracks dirtiness; only re-sorts when modified.
+    const sorted_eq = try @constCast(equivocating_indices).getSortedKeys(allocator);
 
     var result: ComputeDeltasResult = .{ .deltas = deltas, .equivocating_validators = @intCast(sorted_eq.len) };
     // Pre-fetch the first equivocating validator index for pointer advancement comparison.
@@ -130,14 +187,7 @@ pub fn computeDeltas(
     return result;
 }
 
-/// Copies equivocating keys into a heap buffer and sorts ascending for pointer advancement.
-fn sortEquivocatingKeys(allocator: Allocator, indices: EquivocatingIndices) ![]const ValidatorIndex {
-    const keys = indices.keys();
-    const buf = try allocator.alloc(ValidatorIndex, keys.len);
-    @memcpy(buf, keys);
-    std.mem.sortUnstable(ValidatorIndex, buf, {}, std.sort.asc(ValidatorIndex));
-    return buf;
-}
+
 
 // ── Tests ──
 
