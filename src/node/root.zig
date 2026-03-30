@@ -64,6 +64,8 @@ pub const jwt_mod = @import("jwt.zig");
 pub const block_import_mod = @import("block_import.zig");
 // BlockImporter re-exported via beacon_node.BlockImporter (which imports from block_import.zig)
 
+pub const p2p_runtime_mod = @import("p2p_runtime.zig");
+
 pub const sync_bridge_mod = @import("sync_bridge.zig");
 // SyncCallbackCtx re-exported via beacon_node.SyncCallbackCtx
 

@@ -980,15 +980,15 @@ fn stubImportBlock(_: *anyopaque, _: []const u8) anyerror!void {
     g_imported_count += 1;
 }
 
-fn stubGetProposerIndex(slot: u64) ?u32 {
+fn stubGetProposerIndex(_: *anyopaque, slot: u64) ?u32 {
     return @intCast(slot % 100);
 }
 
-fn stubIsKnownBlockRoot(_: [32]u8) bool {
+fn stubIsKnownBlockRoot(_: *anyopaque, _: [32]u8) bool {
     return true; // all parents known
 }
 
-fn stubGetValidatorCount() u32 {
+fn stubGetValidatorCount(_: *anyopaque) u32 {
     return 1000;
 }
 
