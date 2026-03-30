@@ -436,9 +436,8 @@ pub fn StructContainerTreeView(comptime ST: type) type {
         allocator: Allocator,
         pool: *Node.Pool,
         root: Node.Id,
-        // owned by the pool; this view only borrows it
-        original_value: *const T,
-        changed: ?Optional(T),
+        value: T,
+        changed: std.StaticBitSet(ST.chunk_count),
 
         pub const SszType = ST;
 
@@ -448,22 +447,39 @@ pub fn StructContainerTreeView(comptime ST: type) type {
             try pool.ref(root);
             errdefer pool.unref(root);
 
-            const original_value = try pool.getStructPtr(root, T);
-
             const ptr = try allocator.create(Self);
-            ptr.* = .{
-                .allocator = allocator,
-                .pool = pool,
-                .root = root,
-                .original_value = original_value,
-                .changed = null,
-            };
+            errdefer allocator.destroy(ptr);
+
+            try ST.tree.toValue(root, pool, &ptr.value);
+
+            ptr.allocator = allocator;
+            ptr.pool = pool;
+            ptr.root = root;
+            ptr.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
             return ptr;
         }
 
         pub fn clone(self: *Self, opts: CloneOpts) !*Self {
-            _ = opts;
-            return try init(self.allocator, self.pool, self.root);
+            try self.commit();
+
+            try self.pool.ref(self.root);
+            errdefer self.pool.unref(self.root);
+
+            const ptr = try self.allocator.create(Self);
+            errdefer self.allocator.destroy(ptr);
+
+            ptr.allocator = self.allocator;
+            ptr.pool = self.pool;
+            ptr.root = self.root;
+            ptr.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
+
+            if (opts.transfer_cache) {
+                ptr.value = self.value;
+            } else {
+                try ST.tree.toValue(self.root, self.pool, &ptr.value);
+            }
+
+            return ptr;
         }
 
         pub fn deinit(self: *Self) void {
@@ -472,22 +488,15 @@ pub fn StructContainerTreeView(comptime ST: type) type {
         }
 
         pub fn commit(self: *Self) !void {
-            if (self.changed == null) {
+            if (self.changed.count() == 0) {
                 return;
             }
 
-            var new_value: T = undefined;
-            inline for (std.meta.fields(T)) |field| {
-                @field(new_value, field.name) = try self.get(field.name);
-            }
-
-            const wrapped_value_ptr: *const ST.WrappedT = @ptrCast(@alignCast(&new_value));
-            const new_root = try self.pool.createBranchStruct(ST.WrappedT, wrapped_value_ptr);
-            self.original_value = try self.pool.getStructPtr(new_root, T);
-            self.changed = null;
+            const new_root = try ST.tree.fromValue(self.pool, &self.value);
             try self.pool.ref(new_root);
             self.pool.unref(self.root);
             self.root = new_root;
+            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
         }
 
         pub fn getRoot(self: *const Self) Node.Id {
@@ -525,7 +534,7 @@ pub fn StructContainerTreeView(comptime ST: type) type {
         pub fn toValue(self: *Self, allocator: Allocator, out: *ST.Type) !void {
             _ = allocator;
             try self.commit();
-            out.* = self.original_value.*;
+            try ST.clone(&self.value, out);
         }
 
         pub fn Field(comptime field_name: []const u8) type {
@@ -534,19 +543,12 @@ pub fn StructContainerTreeView(comptime ST: type) type {
         }
 
         pub fn get(self: *Self, comptime field_name: []const u8) !Field(field_name) {
-            if (self.changed) |changed| {
-                if (@field(changed, field_name)) |new_value| {
-                    return new_value;
-                }
-            }
-            return @field(self.original_value, field_name);
+            return @field(self.value, field_name);
         }
 
         pub fn set(self: *Self, comptime field_name: []const u8, value: Field(field_name)) !void {
-            if (self.changed == null) {
-                self.changed = Empty(Optional(T));
-            }
-            @field(self.changed.?, field_name) = value;
+            @field(self.value, field_name) = value;
+            self.changed.set(comptime std.meta.fieldIndex(T, field_name).?);
         }
 
         pub fn getValue(self: *Self, allocator: Allocator, comptime field_name: []const u8, out: *Field(field_name)) !void {
@@ -560,7 +562,7 @@ pub fn StructContainerTreeView(comptime ST: type) type {
 
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
             try self.commit();
-            return ST.serializeIntoBytes(self.original_value, out);
+            return ST.serializeIntoBytes(&self.value, out);
         }
 
         pub fn serializedSize(_: *const Self) usize {
