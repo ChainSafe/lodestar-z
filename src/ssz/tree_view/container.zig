@@ -6,8 +6,6 @@ const isBasicType = @import("../type/type_kind.zig").isBasicType;
 const assertTreeViewType = @import("utils/assert.zig").assertTreeViewType;
 const isFixedType = @import("../type/type_kind.zig").isFixedType;
 const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
-const Optional = @import("utils/optional.zig").Optional;
-const Empty = @import("utils/optional.zig").Empty;
 
 /// A specialized tree view for SSZ container types, enabling efficient access and modification of container fields, given a backing merkle tree.
 ///
