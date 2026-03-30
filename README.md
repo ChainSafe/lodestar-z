@@ -137,11 +137,14 @@ git clone https://github.com/ChainSafe/lodestar-z.git
 After cloning:
 
 ```bash
-# Build the project
+# Build and install artifacts (library, executables, bindings)
 zig build
 
-# Run all unit tests
+# Run the full test suite
 zig build test
+
+# Run tests for one module (examples: ssz, spec_tests, consensus_types)
+zig build test:<target> [options]
 ```
 
 To run Ethereum consensus spec tests (recommended for contributors):
@@ -162,13 +165,10 @@ To run Ethereum consensus spec tests (recommended for contributors):
    ```
    For mainnet preset: replace `-Dpreset=minimal` with `-Dpreset=mainnet`.
 
-Alternatively use the [Makefile](Makefile) for common tasks: `make help`.
-
 ## Contributing
 
 - **Style:** Follow [.gemini/styleguide.md](.gemini/styleguide.md) (TigerStyle-based).
-- **Testing:** Run `zig build test` before submitting; run spec tests when changing consensus or SSZ behavior.
-- **First steps:** See the [Makefile](Makefile) (`make help`) for build, test, spec, and benchmark targets.
+- **Testing:** Run `zig build test` before submitting. When changing consensus or SSZ behavior, also run the spec-related steps in [Developer usage](#developer-usage) (after downloading or regenerating vectors).
 
 # License
 
