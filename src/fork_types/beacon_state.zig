@@ -3,7 +3,7 @@ const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const Node = @import("persistent_merkle_tree").Node;
 const isBasicType = @import("ssz").isBasicType;
-const BaseTreeView = @import("ssz").BaseTreeView;
+const CloneOpts = @import("ssz").CloneOpts;
 const ct = @import("consensus_types");
 
 const ForkTypes = @import("./fork_types.zig").ForkTypes;
@@ -12,23 +12,11 @@ pub fn BeaconState(comptime f: ForkSeq) type {
     return struct {
         const Self = @This();
 
-        inner: ForkTypes(f).BeaconState.TreeView,
+        inner: *ForkTypes(f).BeaconState.TreeView,
 
         pub const fork_seq = f;
 
-        pub fn fromBaseView(base_view: BaseTreeView) Self {
-            return .{
-                .inner = ForkTypes(f).BeaconState.TreeView{
-                    .base_view = base_view,
-                },
-            };
-        }
-
-        pub fn baseView(self: *Self) BaseTreeView {
-            return self.inner.base_view;
-        }
-
-        pub fn clone(self: *Self, opts: BaseTreeView.CloneOpts) !Self {
+        pub fn clone(self: *Self, opts: CloneOpts) !Self {
             return .{ .inner = try self.inner.clone(opts) };
         }
 
@@ -49,7 +37,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
         }
 
         pub fn genesisValidatorsRoot(self: *Self) !*const [32]u8 {
-            return try self.inner.getRoot("genesis_validators_root");
+            return try self.inner.getFieldRoot("genesis_validators_root");
         }
 
         pub fn slot(self: *Self) !u64 {
@@ -60,13 +48,13 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             try self.inner.set("slot", s);
         }
 
-        pub fn fork(self: *Self) !ForkTypes(f).Fork.TreeView {
+        pub fn fork(self: *Self) !*ForkTypes(f).Fork.TreeView {
             return try self.inner.get("fork");
         }
 
         pub fn forkCurrentVersion(self: *Self) ![4]u8 {
             var fork_view = try self.inner.getReadonly("fork");
-            const current_version_root = try fork_view.getRoot("current_version");
+            const current_version_root = try fork_view.getFieldRoot("current_version");
             var version: [4]u8 = undefined;
             @memcpy(&version, current_version_root[0..4]);
             return version;
@@ -76,7 +64,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             try self.inner.setValue("fork", new_fork);
         }
 
-        pub fn latestBlockHeader(self: *Self) !ForkTypes(f).BeaconBlockHeader.TreeView {
+        pub fn latestBlockHeader(self: *Self) !*ForkTypes(f).BeaconBlockHeader.TreeView {
             return try self.inner.get("latest_block_header");
         }
 
@@ -84,27 +72,27 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             try self.inner.setValue("latest_block_header", header);
         }
 
-        pub fn blockRoots(self: *Self) !ForkTypes(f).HistoricalBlockRoots.TreeView {
+        pub fn blockRoots(self: *Self) !*ForkTypes(f).HistoricalBlockRoots.TreeView {
             return try self.inner.get("block_roots");
         }
 
         pub fn blockRootsRoot(self: *Self) !*const [32]u8 {
-            return try self.inner.getRoot("block_roots");
+            return try self.inner.getFieldRoot("block_roots");
         }
 
-        pub fn stateRoots(self: *Self) !ForkTypes(f).HistoricalStateRoots.TreeView {
+        pub fn stateRoots(self: *Self) !*ForkTypes(f).HistoricalStateRoots.TreeView {
             return try self.inner.get("state_roots");
         }
 
         pub fn stateRootsRoot(self: *Self) !*const [32]u8 {
-            return try self.inner.getRoot("state_roots");
+            return try self.inner.getFieldRoot("state_roots");
         }
 
-        pub fn historicalRoots(self: *Self) !ct.phase0.HistoricalRoots.TreeView {
+        pub fn historicalRoots(self: *Self) !*ct.phase0.HistoricalRoots.TreeView {
             return try self.inner.get("historical_roots");
         }
 
-        pub fn eth1Data(self: *Self) !ForkTypes(f).Eth1Data.TreeView {
+        pub fn eth1Data(self: *Self) !*ForkTypes(f).Eth1Data.TreeView {
             return try self.inner.get("eth1_data");
         }
 
@@ -112,11 +100,11 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             try self.inner.setValue("eth1_data", eth1_data);
         }
 
-        pub fn eth1DataVotes(self: *Self) !ForkTypes(f).Eth1DataVotes.TreeView {
+        pub fn eth1DataVotes(self: *Self) !*ForkTypes(f).Eth1DataVotes.TreeView {
             return try self.inner.get("eth1_data_votes");
         }
 
-        pub fn setEth1DataVotes(self: *Self, eth1_data_votes: ForkTypes(f).Eth1DataVotes.TreeView) !void {
+        pub fn setEth1DataVotes(self: *Self, eth1_data_votes: *ForkTypes(f).Eth1DataVotes.TreeView) !void {
             try self.inner.set("eth1_data_votes", eth1_data_votes);
         }
 
@@ -141,7 +129,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             try self.setEth1DepositIndex(try self.eth1DepositIndex() + 1);
         }
 
-        pub fn validators(self: *Self) !ForkTypes(f).Validators.TreeView {
+        pub fn validators(self: *Self) !*ForkTypes(f).Validators.TreeView {
             return try self.inner.get("validators");
         }
 
@@ -155,7 +143,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             return validators_view.getAllReadonlyValues(allocator);
         }
 
-        pub fn balances(self: *Self) !ForkTypes(f).Balances.TreeView {
+        pub fn balances(self: *Self) !*ForkTypes(f).Balances.TreeView {
             return try self.inner.get("balances");
         }
 
@@ -169,7 +157,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             try self.inner.setValue("balances", b);
         }
 
-        pub fn randaoMixes(self: *Self) !ForkTypes(f).RandaoMixes.TreeView {
+        pub fn randaoMixes(self: *Self) !*ForkTypes(f).RandaoMixes.TreeView {
             return try self.inner.get("randao_mixes");
         }
 
@@ -178,16 +166,16 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             try mixes.setValue(epoch % preset.EPOCHS_PER_HISTORICAL_VECTOR, randao_mix);
         }
 
-        pub fn slashings(self: *Self) !ForkTypes(f).Slashings.TreeView {
+        pub fn slashings(self: *Self) !*ForkTypes(f).Slashings.TreeView {
             return try self.inner.get("slashings");
         }
 
-        pub fn previousEpochPendingAttestations(self: *Self) !ForkTypes(.phase0).EpochAttestations.TreeView {
+        pub fn previousEpochPendingAttestations(self: *Self) !*ForkTypes(.phase0).EpochAttestations.TreeView {
             if (comptime f != .phase0) return error.InvalidAtFork;
             return try self.inner.get("previous_epoch_attestations");
         }
 
-        pub fn currentEpochPendingAttestations(self: *Self) !ForkTypes(.phase0).EpochAttestations.TreeView {
+        pub fn currentEpochPendingAttestations(self: *Self) !*ForkTypes(.phase0).EpochAttestations.TreeView {
             if (comptime f != .phase0) return error.InvalidAtFork;
             return try self.inner.get("current_epoch_attestations");
         }
@@ -199,7 +187,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             try self.inner.setValue("current_epoch_attestations", &ForkTypes(.phase0).EpochAttestations.default_value);
         }
 
-        pub fn previousEpochParticipation(self: *Self) !ForkTypes(.altair).EpochParticipation.TreeView {
+        pub fn previousEpochParticipation(self: *Self) !*ForkTypes(.altair).EpochParticipation.TreeView {
             if (comptime f == .phase0) return error.InvalidAtFork;
             return try self.inner.get("previous_epoch_participation");
         }
@@ -209,7 +197,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             try self.inner.setValue("previous_epoch_participation", participations);
         }
 
-        pub fn currentEpochParticipation(self: *Self) !ForkTypes(.altair).EpochParticipation.TreeView {
+        pub fn currentEpochParticipation(self: *Self) !*ForkTypes(.altair).EpochParticipation.TreeView {
             if (comptime f == .phase0) return error.InvalidAtFork;
             return try self.inner.get("current_epoch_participation");
         }
@@ -225,20 +213,22 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             var current_epoch_participation = try self.inner.get("current_epoch_participation");
             try current_epoch_participation.commit();
             const length = try current_epoch_participation.length();
-            try self.inner.set(
-                "previous_epoch_participation",
-                try current_epoch_participation.clone(.{ .transfer_cache = true }),
-            );
+
+            // Clone the view to preserve any uncommitted in-memory updates while avoiding pointer aliasing
+            // between previous/current fields.
+            var current_epoch_participation_copy = try current_epoch_participation.clone(.{ .transfer_cache = true });
+            errdefer current_epoch_participation_copy.deinit();
+            try self.inner.set("previous_epoch_participation", current_epoch_participation_copy);
 
             const new_current_root = try ForkTypes(.altair).EpochParticipation.tree.zeros(
-                self.inner.base_view.pool,
+                self.inner.pool,
                 length,
             );
-            errdefer self.inner.base_view.pool.unref(new_current_root);
+            errdefer self.inner.pool.unref(new_current_root);
             try self.inner.setRootNode("current_epoch_participation", new_current_root);
         }
 
-        pub fn justificationBits(self: *Self) !ct.phase0.JustificationBits.TreeView {
+        pub fn justificationBits(self: *Self) !*ct.phase0.JustificationBits.TreeView {
             return try self.inner.get("justification_bits");
         }
 
@@ -275,12 +265,12 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             return try checkpoint_view.get("epoch");
         }
 
-        pub fn inactivityScores(self: *Self) !ForkTypes(.altair).InactivityScores.TreeView {
+        pub fn inactivityScores(self: *Self) !*ForkTypes(.altair).InactivityScores.TreeView {
             if (comptime f == .phase0) return error.InvalidAtFork;
             return try self.inner.get("inactivity_scores");
         }
 
-        pub fn currentSyncCommittee(self: *Self) !ForkTypes(.altair).SyncCommittee.TreeView {
+        pub fn currentSyncCommittee(self: *Self) !*ForkTypes(.altair).SyncCommittee.TreeView {
             if (comptime f == .phase0) return error.InvalidAtFork;
             return try self.inner.get("current_sync_committee");
         }
@@ -290,7 +280,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             try self.inner.setValue("current_sync_committee", sync_committee);
         }
 
-        pub fn nextSyncCommittee(self: *Self) !ForkTypes(.altair).SyncCommittee.TreeView {
+        pub fn nextSyncCommittee(self: *Self) !*ForkTypes(.altair).SyncCommittee.TreeView {
             if (comptime f == .phase0) return error.InvalidAtFork;
             return try self.inner.get("next_sync_committee");
         }
@@ -315,7 +305,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
         pub fn latestExecutionPayloadHeaderBlockHash(self: *Self) !*const [32]u8 {
             if (comptime (f.lt(.bellatrix))) return error.InvalidAtFork;
             var header = try self.inner.get("latest_execution_payload_header");
-            return try header.getRoot("block_hash");
+            return try header.getFieldRoot("block_hash");
         }
 
         pub fn setLatestExecutionPayloadHeader(self: *Self, header: *const ForkTypes(f).ExecutionPayloadHeader.Type) !void {
@@ -343,7 +333,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             try self.inner.set("next_withdrawal_validator_index", next_withdrawal_validator_index);
         }
 
-        pub fn historicalSummaries(self: *Self) !ForkTypes(.capella).HistoricalSummaries.TreeView {
+        pub fn historicalSummaries(self: *Self) !*ForkTypes(.capella).HistoricalSummaries.TreeView {
             if (comptime (f == .phase0 or f == .altair or f == .bellatrix)) return error.InvalidAtFork;
             return try self.inner.get("historical_summaries");
         }
@@ -408,37 +398,37 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             try self.inner.set("earliest_consolidation_epoch", epoch);
         }
 
-        pub fn pendingDeposits(self: *Self) !ForkTypes(.electra).PendingDeposits.TreeView {
+        pub fn pendingDeposits(self: *Self) !*ForkTypes(.electra).PendingDeposits.TreeView {
             if (comptime (f == .phase0 or f == .altair or f == .bellatrix or f == .capella or f == .deneb)) return error.InvalidAtFork;
             return try self.inner.get("pending_deposits");
         }
 
-        pub fn setPendingDeposits(self: *Self, deposits: ForkTypes(.electra).PendingDeposits.TreeView) !void {
+        pub fn setPendingDeposits(self: *Self, deposits: *ForkTypes(.electra).PendingDeposits.TreeView) !void {
             if (comptime (f == .phase0 or f == .altair or f == .bellatrix or f == .capella or f == .deneb)) return error.InvalidAtFork;
             try self.inner.set("pending_deposits", deposits);
         }
 
-        pub fn pendingPartialWithdrawals(self: *Self) !ForkTypes(.electra).PendingPartialWithdrawals.TreeView {
+        pub fn pendingPartialWithdrawals(self: *Self) !*ForkTypes(.electra).PendingPartialWithdrawals.TreeView {
             if (comptime (f == .phase0 or f == .altair or f == .bellatrix or f == .capella or f == .deneb)) return error.InvalidAtFork;
             return try self.inner.get("pending_partial_withdrawals");
         }
 
-        pub fn setPendingPartialWithdrawals(self: *Self, pending_partial_withdrawals: ForkTypes(.electra).PendingPartialWithdrawals.TreeView) !void {
+        pub fn setPendingPartialWithdrawals(self: *Self, pending_partial_withdrawals: *ForkTypes(.electra).PendingPartialWithdrawals.TreeView) !void {
             if (comptime (f == .phase0 or f == .altair or f == .bellatrix or f == .capella or f == .deneb)) return error.InvalidAtFork;
             try self.inner.set("pending_partial_withdrawals", pending_partial_withdrawals);
         }
 
-        pub fn pendingConsolidations(self: *Self) !ForkTypes(.electra).PendingConsolidations.TreeView {
+        pub fn pendingConsolidations(self: *Self) !*ForkTypes(.electra).PendingConsolidations.TreeView {
             if (comptime (f == .phase0 or f == .altair or f == .bellatrix or f == .capella or f == .deneb)) return error.InvalidAtFork;
             return try self.inner.get("pending_consolidations");
         }
 
-        pub fn setPendingConsolidations(self: *Self, consolidations: ForkTypes(.electra).PendingConsolidations.TreeView) !void {
+        pub fn setPendingConsolidations(self: *Self, consolidations: *ForkTypes(.electra).PendingConsolidations.TreeView) !void {
             if (comptime (f == .phase0 or f == .altair or f == .bellatrix or f == .capella or f == .deneb)) return error.InvalidAtFork;
             try self.inner.set("pending_consolidations", consolidations);
         }
 
-        pub fn proposerLookahead(self: *Self) !ForkTypes(.fulu).ProposerLookahead.TreeView {
+        pub fn proposerLookahead(self: *Self) !*ForkTypes(.fulu).ProposerLookahead.TreeView {
             if (comptime (f == .phase0 or f == .altair or f == .bellatrix or f == .capella or f == .deneb or f == .electra)) return error.InvalidAtFork;
             return try self.inner.get("proposer_lookahead");
         }
@@ -458,10 +448,9 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             comptime T: type,
             allocator: std.mem.Allocator,
             pool: *Node.Pool,
-            state: F.TreeView,
-        ) !T.TreeView {
-            var committed_state = state;
-            try committed_state.commit();
+            state: *F.TreeView,
+        ) !*T.TreeView {
+            try state.commit();
 
             var upgraded = try T.TreeView.fromValue(allocator, pool, &T.default_value);
             errdefer upgraded.deinit();
@@ -471,9 +460,9 @@ pub fn BeaconState(comptime f: ForkSeq) type {
                     if (T.getFieldType(fld.name) != fld.type) continue;
 
                     if (comptime isBasicType(fld.type)) {
-                        try upgraded.set(fld.name, try committed_state.get(fld.name));
+                        try upgraded.set(fld.name, try state.get(fld.name));
                     } else {
-                        var field_view = try committed_state.get(fld.name);
+                        var field_view = try state.get(fld.name);
                         var owned_field_view = try field_view.clone(.{ .transfer_cache = true });
                         errdefer owned_field_view.deinit();
                         try upgraded.set(fld.name, owned_field_view);
@@ -495,8 +484,8 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             .fulu => .fulu,
         }) {
             const cur = self.inner;
-            const allocator = cur.base_view.allocator;
-            const pool = cur.base_view.pool;
+            const allocator = cur.allocator;
+            const pool = cur.pool;
 
             return switch (comptime f) {
                 .phase0 => .{ .inner = try populateFields(ForkTypes(.phase0).BeaconState, ForkTypes(.altair).BeaconState, allocator, pool, cur) },

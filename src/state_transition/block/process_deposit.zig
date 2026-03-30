@@ -17,7 +17,7 @@ const DOMAIN_DEPOSIT = c.DOMAIN_DEPOSIT;
 const ZERO_HASH = @import("constants").ZERO_HASH;
 const computeDomain = @import("../utils/domain.zig").computeDomain;
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
-const blst = @import("blst");
+const bls = @import("bls");
 const verify = @import("../utils/bls.zig").verify;
 const getMaxEffectiveBalance = @import("../utils/validator.zig").getMaxEffectiveBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
@@ -69,7 +69,7 @@ pub fn processDeposit(
     try types.phase0.DepositData.hashTreeRoot(&deposit.data, &deposit_data_root);
 
     var eth1_data = try state.eth1Data();
-    const deposit_root = try eth1_data.getRoot("deposit_root");
+    const deposit_root = try eth1_data.getFieldRoot("deposit_root");
     if (!verifyMerkleBranch(
         deposit_data_root,
         &deposit.proof,
@@ -171,7 +171,7 @@ pub fn addValidatorToRegistry(
     try validators.pushValue(&validator);
 
     const validator_index = (try validators.length()) - 1;
-    // TODO Electra: Review this
+    // In Electra, new validators start with amount=0 (actual deposit goes through pendingDeposits)
     // Updating here is better than updating at once on epoch transition
     // - Simplify genesis fn applyDeposits(): effectiveBalanceIncrements is populated immediately
     // - Keep related code together to reduce risk of breaking this cache
@@ -220,9 +220,9 @@ pub fn validateDepositSignature(
     try computeSigningRoot(types.phase0.DepositMessage, &deposit_message, &domain, &signing_root);
 
     // Pubkeys must be checked for group + inf. This must be done only once when the validator deposit is processed
-    const public_key = try blst.PublicKey.uncompress(pubkey);
+    const public_key = try bls.PublicKey.uncompress(pubkey);
     try public_key.validate();
-    const signature = try blst.Signature.uncompress(&deposit_signature);
+    const signature = try bls.Signature.uncompress(&deposit_signature);
     try signature.validate(true);
     try verify(&signing_root, &public_key, &signature, null, null);
 }

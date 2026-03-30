@@ -35,7 +35,7 @@ pub fn processAttestationPhase0(
     };
 
     var justified_checkpoint: types.phase0.Checkpoint.Type = undefined;
-    var epoch_pending_attestations: types.phase0.EpochAttestations.TreeView = undefined;
+    var epoch_pending_attestations: *types.phase0.EpochAttestations.TreeView = undefined;
     if (data.target.epoch == epoch_cache.epoch) {
         try state.currentJustifiedCheckpoint(&justified_checkpoint);
         epoch_pending_attestations = try state.currentEpochPendingAttestations();

@@ -166,7 +166,7 @@ pub fn getExpectedWithdrawals(
             val_balance;
 
         const withdrawable_epoch = try validator.get("withdrawable_epoch");
-        const withdrawal_credentials = try validator.getRoot("withdrawal_credentials");
+        const withdrawal_credentials = try validator.getFieldRoot("withdrawal_credentials");
         const effective_balance = try validator.get("effective_balance");
         const has_withdrawable_credentials = if (comptime fork.gte(.electra)) hasExecutionWithdrawalCredential(withdrawal_credentials) else hasEth1WithdrawalCredential(withdrawal_credentials);
         // early skip for balance = 0 as its now more likely that validator has exited/slashed with

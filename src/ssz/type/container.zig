@@ -512,6 +512,7 @@ pub fn VariableContainerType(comptime ST: type) type {
         }
 
         pub fn getFieldType(comptime name: []const u8) type {
+            @setEvalBranchQuota(20000);
             inline for (fields) |field| {
                 if (std.mem.eql(u8, name, field.name)) {
                     return field.type;

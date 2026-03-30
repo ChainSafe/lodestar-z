@@ -79,7 +79,7 @@ pub fn getNextSyncCommitteeIndices(comptime fork: ForkSeq, allocator: Allocator,
 
 pub fn getRandaoMix(comptime fork: ForkSeq, state: *BeaconState(fork), epoch: Epoch) !*const [32]u8 {
     var randao_mixes = try state.randaoMixes();
-    return try randao_mixes.getRoot(epoch % EPOCHS_PER_HISTORICAL_VECTOR);
+    return try randao_mixes.getFieldRoot(epoch % EPOCHS_PER_HISTORICAL_VECTOR);
 }
 
 pub fn getSeed(comptime fork: ForkSeq, state: *BeaconState(fork), epoch: Epoch, domain_type: DomainType, out: *[32]u8) !void {

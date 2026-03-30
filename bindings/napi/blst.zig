@@ -1,18 +1,18 @@
 //! Contains the necessary bindings for blst operations in lodestar-ts.
 const std = @import("std");
 const napi = @import("zapi:napi");
-const blst = @import("blst");
+const bls = @import("bls");
 const builtin = @import("builtin");
 const getter = @import("napi_property_descriptor.zig").getter;
 const method = @import("napi_property_descriptor.zig").method;
 
-const PublicKey = blst.PublicKey;
-const Signature = blst.Signature;
-const SecretKey = blst.SecretKey;
-const Pairing = blst.Pairing;
-const AggregatePublicKey = blst.AggregatePublicKey;
-const AggregateSignature = blst.AggregateSignature;
-const DST = blst.DST;
+const PublicKey = bls.PublicKey;
+const Signature = bls.Signature;
+const SecretKey = bls.SecretKey;
+const Pairing = bls.Pairing;
+const AggregatePublicKey = bls.AggregatePublicKey;
+const AggregateSignature = bls.AggregateSignature;
+const DST = bls.DST;
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
@@ -546,7 +546,7 @@ pub fn blst_aggregateVerify(
         pks[i] = pk.*;
     }
 
-    var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
+    var pairing_buf: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined;
 
     const result = sig.aggregateVerify(
         sig_groupcheck,
@@ -596,7 +596,7 @@ pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.V
         pks[i] = pk.*;
     }
 
-    var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
+    var pairing_buf: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined;
     // `pks_validate` is always false here since we assume proof of possession for public keys.
     const result = sig.fastAggregateVerify(sigs_groupcheck, &pairing_buf, msg_info.data[0..32], DST, pks, false) catch {
         return try env.getBoolean(false);
@@ -662,8 +662,8 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
         rand.bytes(&rands[i]);
     }
 
-    var pairing_buf: [Pairing.sizeOf()]u8 = undefined;
-    const result = blst.verifyMultipleAggregateSignatures(
+    var pairing_buf: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined;
+    const result = bls.verifyMultipleAggregateSignatures(
         &pairing_buf,
         n_elems,
         msgs,
@@ -796,7 +796,7 @@ fn hexFromValue(value: napi.Value, buf: []u8) ![]const u8 {
     return hex;
 }
 
-const MAX_AGGREGATE_PER_JOB = blst.MAX_AGGREGATE_PER_JOB;
+const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 
 const AsyncAggregateData = struct {
     // Inputs (copied on main thread, freed in complete)
@@ -830,8 +830,8 @@ fn asyncAggregateExecute(_: napi.Env, data: *AsyncAggregateData) void {
     }
 
     // Per-call scratch allocation (safe for worker threads)
-    const p1_scratch_size = blst.c.blst_p1s_mult_pippenger_scratch_sizeof(n);
-    const p2_scratch_size = blst.c.blst_p2s_mult_pippenger_scratch_sizeof(n);
+    const p1_scratch_size = bls.c.blst_p1s_mult_pippenger_scratch_sizeof(n);
+    const p2_scratch_size = bls.c.blst_p2s_mult_pippenger_scratch_sizeof(n);
     const scratch_size = @max(p1_scratch_size, p2_scratch_size);
     const scratch = allocator.alloc(u64, scratch_size) catch {
         data.err = true;
