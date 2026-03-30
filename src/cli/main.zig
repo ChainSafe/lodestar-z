@@ -47,10 +47,11 @@ const state_transition = @import("state_transition");
 const preset = @import("preset").preset;
 const Node = @import("persistent_merkle_tree").Node;
 
+const bootnode_mod = @import("bootnode.zig");
 const genesis_util = @import("genesis_util.zig");
+const ShutdownHandler = @import("shutdown.zig").ShutdownHandler;
 const sync_mod = @import("sync");
 const checkpoint_sync = sync_mod.checkpoint_sync;
-const ShutdownHandler = node_mod.ShutdownHandler;
 
 // ============================================================================
 // Version
@@ -1237,7 +1238,7 @@ pub fn main(init: std.process.Init) !void {
             // TODO: implement dev mode
         },
         .bootnode => |opts| {
-            try node_mod.bootnode.run(io, allocator, .{
+            try bootnode_mod.run(io, allocator, .{
                 .listen_address = opts.listen_address,
                 .port = opts.bn_port,
                 .listen_address6 = opts.listen_address6,

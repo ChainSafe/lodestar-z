@@ -912,7 +912,7 @@ pub fn build(b: *std.Build) void {
 
     // === Beacon node executable ===
     const module_node_main = b.createModule(.{
-        .root_source_file = b.path("src/node/main.zig"),
+        .root_source_file = b.path("src/cli/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -925,6 +925,7 @@ pub fn build(b: *std.Build) void {
     module_node_main.addImport("sync", module_sync);
     module_node_main.addImport("preset", module_preset);
     module_node_main.addImport("log", module_log);
+    module_node_main.addImport("discv5", module_discv5);
 
     const exe_node = b.addExecutable(.{
         .name = "lodestar-z",
