@@ -40,6 +40,10 @@ test {
     testing.refAllDecls(@This());
 }
 
+test {
+    _ = @import("beacon_node_test.zig");
+}
+
 pub const gossip_handler_mod = @import("gossip_handler.zig");
 pub const GossipHandler = gossip_handler_mod.GossipHandler;
 
@@ -61,10 +65,13 @@ pub const defaultDataRoot = data_dir_mod.defaultRoot;
 
 pub const jwt_mod = @import("jwt.zig");
 
+pub const block_production_mod = @import("block_production.zig");
 pub const block_import_mod = @import("block_import.zig");
 // BlockImporter re-exported via beacon_node.BlockImporter (which imports from block_import.zig)
 
+pub const api_callbacks_mod = @import("api_callbacks.zig");
 pub const p2p_runtime_mod = @import("p2p_runtime.zig");
+pub const lifecycle_mod = @import("lifecycle.zig");
 
 pub const sync_bridge_mod = @import("sync_bridge.zig");
 // SyncCallbackCtx re-exported via beacon_node.SyncCallbackCtx
