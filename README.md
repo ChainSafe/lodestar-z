@@ -139,12 +139,34 @@ After cloning:
 ```bash
 # Build and install artifacts (library, executables, bindings)
 zig build
+```
 
-# Run the full test suite
-zig build test
+### Testing
 
-# Run tests for one module (examples: ssz, spec_tests, consensus_types)
-zig build test:<target> [options]
+Run tests for a single area with `zig build test:<name>`. Examples:
+
+```bash
+zig build test:hashing
+zig build test:ssz
+zig build test:consensus_types
+zig build test:state_transition
+```
+
+Run `zig build --help` and look under **Steps** for every `test:*` target.
+
+**`zig build test`** runs all Zig test targets defined in `build.zig` in one go. After a fresh clone it often **fails** until prerequisites are in place:
+
+1. **Generated spec code** — Some files under `test/spec/` are produced by the download/write scripts and are not in git. Complete the [Ethereum consensus spec tests](#ethereum-consensus-spec-tests) setup first if you want spec-related tests (including the full `zig build test`) to pass.
+2. **NAPI bindings** — The Zig `test:bindings` target does not link against Node’s NAPI runtime, so it does not exercise the addon the same way a Node process does. Build the library and run **`pnpm test`** as described under [JS/TS bindings](#js-ts-bindings).
+
+### JS/TS bindings
+
+From the repo root (after [pnpm](https://pnpm.io) install):
+
+```bash
+pnpm install
+zig build build-lib:bindings -Doptimize=ReleaseSafe
+pnpm test
 ```
 
 To run Ethereum consensus spec tests (recommended for contributors):
@@ -168,7 +190,7 @@ To run Ethereum consensus spec tests (recommended for contributors):
 ## Contributing
 
 - **Style:** Follow [.gemini/styleguide.md](.gemini/styleguide.md) (TigerStyle-based).
-- **Testing:** Run `zig build test` before submitting. When changing consensus or SSZ behavior, also run the spec-related steps in [Developer usage](#developer-usage) (after downloading or regenerating vectors).
+- **Testing:** Run the relevant `zig build test:*` steps for what you changed; use [JS/TS bindings](#js-ts-bindings) when touching NAPI. For consensus or SSZ behavior, run the [spec tests](#ethereum-consensus-spec-tests) after downloading and generating vectors. See [Testing](#testing) for limitations of `zig build test` on a fresh clone.
 
 # License
 
