@@ -203,7 +203,7 @@ pub fn importVerifiedBlock(
                 .gossip => 0, // timely — proposer boost applies
                 else => 5, // late — no proposer boost (threshold is >4s)
             };
-            _ = fork_choice_mod.onBlockFromState(
+            const fc_block_ok = if (fork_choice_mod.onBlockFromState(
                 fc,
                 ctx.allocator,
                 block_slot,
@@ -214,11 +214,15 @@ pub fn importVerifiedBlock(
                 block_delay_sec,
                 fc.getTime(),
                 extra_meta,
-            ) catch |err| {
+            )) |_| true else |err| blk: {
                 std.log.warn("ForkChoice.onBlockFromState failed for slot {d}: {}", .{ block_slot, err });
+                break :blk false;
             };
 
             // 3a. Wire attestations from the imported block into fork choice.
+            // Skip attestation/slashing wiring when onBlockFromState failed — the block
+            // is not in the fork choice DAG so votes and slashings cannot reference it.
+            if (fc_block_ok) {
             // Only process attestations when block epoch is recent enough:
             // blocks older than current_epoch - FORK_CHOICE_ATT_EPOCH_LIMIT have no
             // effect on fork choice head selection.
@@ -294,6 +298,7 @@ pub fn importVerifiedBlock(
                     }
                 },
             }
+            } // end if (fc_block_ok)
         }
     }
 

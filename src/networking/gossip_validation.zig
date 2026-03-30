@@ -297,8 +297,7 @@ pub fn validateVoluntaryExit(
 
     // [IGNORE] The voluntary exit is the first valid exit for this validator.
     const key = validatorKey(validator_index);
-    const was_new = ctx.seen_voluntary_exits.insert(key) catch return .ignore;
-    if (!was_new) return .ignore;
+    if (ctx.seen_voluntary_exits.contains(key)) return .ignore;
 
     // [REJECT] The validator is active at the current epoch.
     if (!ctx.isValidatorActive(ctx.ptr, validator_index, ctx.current_epoch)) return .reject;
@@ -306,6 +305,11 @@ pub fn validateVoluntaryExit(
     // [REJECT] The exit epoch is not in the future.
     // (The exit should be processable now or in the past.)
     if (exit_epoch > ctx.current_epoch) return .reject;
+
+    // Insert into seen set only after all reject checks pass — avoids
+    // poisoning the dedup cache with exits that would be rejected.
+    const was_new = ctx.seen_voluntary_exits.insert(key) catch return .ignore;
+    if (!was_new) return .ignore;
 
     return .accept;
 }

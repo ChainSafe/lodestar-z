@@ -463,7 +463,9 @@ pub const Chain = struct {
         // that is below the finalized slot can be removed. Since pruneBelow already
         // evicted pre-finalized entries from slot_roots, we iterate block_to_state
         // and remove roots that are no longer tracked by slot_roots (i.e., pre-fin).
-        {
+        // Skip the entire block_to_state prune on OOM — partial removal is
+        // worse than no removal (would drop entries still needed by slot_roots).
+        prune_b2s: {
             // Build a HashSet of live roots from slot_roots in O(n) first, then
             // check membership in O(1) per block_to_state entry — avoids O(n²).
             var live_roots = std.AutoArrayHashMap([32]u8, void).init(self.allocator);
@@ -471,7 +473,10 @@ pub const Chain = struct {
             {
                 var sr_it = self.head_tracker.slot_roots.iterator();
                 while (sr_it.next()) |sr_entry| {
-                    live_roots.put(sr_entry.value_ptr.*, {}) catch {};
+                    live_roots.put(sr_entry.value_ptr.*, {}) catch {
+                        log_mod.logger(.chain).warn("onFinalized: OOM building live_roots, skipping block_to_state prune", .{});
+                        break :prune_b2s;
+                    };
                 }
             }
 
@@ -487,7 +492,10 @@ pub const Chain = struct {
                 if (std.mem.eql(u8, &root, &finalized_root)) continue;
                 // Keep entries still referenced by slot_roots (post-finalization blocks).
                 if (!live_roots.contains(root)) {
-                    roots_to_remove.append(root) catch {};
+                    roots_to_remove.append(root) catch {
+                        log_mod.logger(.chain).warn("onFinalized: OOM collecting roots_to_remove, skipping block_to_state prune", .{});
+                        break :prune_b2s;
+                    };
                 }
             }
             for (roots_to_remove.items) |root| {

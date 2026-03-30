@@ -89,7 +89,13 @@ pub const BuilderRegistrationService = struct {
             self.validator_store.validators.items,
         );
         self.validator_store.mutex.unlock();
-        defer self.allocator.free(validators);
+        defer {
+            // Zero secret keys before freeing — defence in depth against heap scanning.
+            for (validators) |*v| {
+                std.crypto.utils.secureZero(u8, std.mem.asBytes(&v.secret_key));
+            }
+            self.allocator.free(validators);
+        }
 
         if (validators.len == 0) {
             log.debug("no validators — skipping builder registration", .{});

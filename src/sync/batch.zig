@@ -58,8 +58,10 @@ pub const Batch = struct {
     blocks: []const BatchBlock,
     /// The hash of the block content for this attempt (for duplicate detection).
     blocks_hash: u64,
+    /// Allocator used to own deep-copied block data.
+    allocator: std.mem.Allocator,
 
-    pub fn init(id: BatchId, start_slot: u64, count: u64) Batch {
+    pub fn init(id: BatchId, start_slot: u64, count: u64, allocator: std.mem.Allocator) Batch {
         return .{
             .id = id,
             .start_slot = start_slot,
@@ -71,7 +73,23 @@ pub const Batch = struct {
             .processing_failures = 0,
             .blocks = &.{},
             .blocks_hash = 0,
+            .allocator = allocator,
         };
+    }
+
+    /// Free owned block data.
+    fn freeBlocks(self: *Batch) void {
+        if (self.blocks.len == 0) return;
+        for (self.blocks) |blk| {
+            self.allocator.free(blk.block_bytes);
+        }
+        self.allocator.free(self.blocks);
+        self.blocks = &.{};
+    }
+
+    /// Release all owned resources.
+    pub fn deinit(self: *Batch) void {
+        self.freeBlocks();
     }
 
     /// The last slot covered by this batch (inclusive).
@@ -92,7 +110,21 @@ pub const Batch = struct {
     pub fn onDownloadSuccess(self: *Batch, generation: u32, blocks: []const BatchBlock) bool {
         if (generation != self.generation) return false;
         if (self.status != .downloading) return false;
-        self.blocks = blocks;
+
+        // Deep-copy blocks into owned memory so the caller can free the
+        // network buffer immediately.
+        const owned = self.allocator.alloc(BatchBlock, blocks.len) catch return false;
+        for (blocks, 0..) |blk, i| {
+            const bytes = self.allocator.dupe(u8, blk.block_bytes) catch {
+                // Rollback already-duped entries.
+                for (owned[0..i]) |prev| self.allocator.free(prev.block_bytes);
+                self.allocator.free(owned);
+                return false;
+            };
+            owned[i] = .{ .slot = blk.slot, .block_bytes = bytes };
+        }
+        self.freeBlocks(); // free any previous attempt's data
+        self.blocks = owned;
         self.blocks_hash = hashBlocks(blocks);
         self.status = .awaiting_processing;
         return true;
@@ -118,6 +150,7 @@ pub const Batch = struct {
     /// Called when processing succeeds — move to awaiting_validation.
     pub fn onProcessingSuccess(self: *Batch) void {
         std.debug.assert(self.status == .processing);
+        self.freeBlocks();
         self.status = .awaiting_validation;
     }
 
@@ -125,8 +158,8 @@ pub const Batch = struct {
     pub fn onProcessingError(self: *Batch) void {
         std.debug.assert(self.status == .processing);
         self.processing_failures += 1;
+        self.freeBlocks();
         self.status = .awaiting_download;
-        self.blocks = &.{};
         self.download_peer = null;
     }
 
@@ -161,7 +194,7 @@ fn hashBlocks(blocks: []const BatchBlock) u64 {
 // ── Tests ────────────────────────────────────────────────────────────
 
 test "Batch: lifecycle" {
-    var b = Batch.init(0, 100, 64);
+    var b = Batch.init(0, 100, 64, std.testing.allocator);
     try std.testing.expectEqual(BatchStatus.awaiting_download, b.status);
     try std.testing.expectEqual(@as(u64, 163), b.endSlot());
 
@@ -188,7 +221,7 @@ test "Batch: lifecycle" {
 }
 
 test "Batch: download error retry" {
-    var b = Batch.init(1, 0, 32);
+    var b = Batch.init(1, 0, 32, std.testing.allocator);
     b.startDownload("peer_b");
     const gen = b.generation;
     try std.testing.expect(b.onDownloadError(gen));
@@ -197,7 +230,7 @@ test "Batch: download error retry" {
 }
 
 test "Batch: generation prevents stale error" {
-    var b = Batch.init(2, 50, 10);
+    var b = Batch.init(2, 50, 10, std.testing.allocator);
     b.startDownload("peer_c");
     const old_gen = b.generation;
 

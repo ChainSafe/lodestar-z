@@ -390,8 +390,8 @@ pub const AttestationService = struct {
             });
             return std.mem.zeroes([32]u8);
         }
-        if (att_data_resp.source_epoch > att_data_resp.target_epoch) {
-            log.err("BN returned source_epoch={d} > target_epoch={d}: refusing to sign (invalid attestation data)", .{
+        if (att_data_resp.source_epoch >= att_data_resp.target_epoch) {
+            log.err("BN returned source_epoch={d} >= target_epoch={d}: refusing to sign (invalid attestation data)", .{
                 att_data_resp.source_epoch, att_data_resp.target_epoch,
             });
             return std.mem.zeroes([32]u8);

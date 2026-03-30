@@ -4611,7 +4611,7 @@ fn submitAttestationCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!v
     // Rebroadcast via gossip if P2P service is available.
     if (node.p2p_service) |*p2p| {
         p2p.publishGossip(
-            networking.gossip_topics.GossipTopicType.beacon_aggregate_and_proof,
+            networking.gossip_topics.GossipTopicType.beacon_attestation,
             null,
             json_bytes,
         ) catch |err| {

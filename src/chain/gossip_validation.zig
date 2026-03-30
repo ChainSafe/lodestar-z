@@ -90,7 +90,6 @@ pub fn validateGossipBlock(
 
     // [IGNORE] Not a duplicate — first block for this root.
     if (state.seen_cache.hasSeenBlock(block_root)) return .ignore;
-    state.seen_cache.markBlockSeen(block_root, block_slot) catch return .ignore;
 
     // [REJECT] Proposer index within validator set bounds.
     const validator_count = state.getValidatorCount(state.ptr);
@@ -106,6 +105,10 @@ pub fn validateGossipBlock(
 
     // [IGNORE] Parent root is known in our fork choice.
     if (!state.isKnownBlockRoot(state.ptr, parent_root)) return .ignore;
+
+    // Mark block as seen only after ALL checks pass — avoids poisoning the
+    // seen-cache with blocks that would be rejected/ignored.
+    state.seen_cache.markBlockSeen(block_root, block_slot) catch return .ignore;
 
     return .accept;
 }

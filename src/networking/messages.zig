@@ -84,7 +84,7 @@ pub const BlobSidecarsByRootRequest = ssz.FixedListType(
 // === Fulu / PeerDAS messages ===
 
 /// DataColumnSidecarsByRangeRequest requests data column sidecars for a slot range.
-pub const DataColumnSidecarsByRangeRequest = ssz.FixedContainerType(struct {
+pub const DataColumnSidecarsByRangeRequest = ssz.VariableContainerType(struct {
     start_slot: p.Slot,
     count: p.Uint64,
     columns: ssz.FixedListType(p.Uint64, 128),

@@ -206,6 +206,12 @@ pub const SlashingProtectionDb = struct {
         source_epoch: u64,
         target_epoch: u64,
     ) !bool {
+        // Reject if source >= target — this is always invalid per Casper FFG.
+        if (source_epoch >= target_epoch) {
+            log.warn("slashing protection: source_epoch={d} >= target_epoch={d}: invalid attestation", .{ source_epoch, target_epoch });
+            return false;
+        }
+
         if (self.attest_history.get(pubkey)) |history| {
             // Check all existing records.
             for (history.items) |rec| {

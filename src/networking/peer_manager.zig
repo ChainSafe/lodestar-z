@@ -112,6 +112,7 @@ pub const HeartbeatActions = struct {
     subnets_needing_peers: []u32 = &.{},
 
     pub fn deinit(self: *HeartbeatActions, allocator: Allocator) void {
+        for (self.peers_to_disconnect) |pid| allocator.free(pid);
         if (self.peers_to_disconnect.len > 0) allocator.free(self.peers_to_disconnect);
         if (self.peers_to_ban.len > 0) allocator.free(self.peers_to_ban);
         if (self.subnets_needing_peers.len > 0) allocator.free(self.subnets_needing_peers);
@@ -563,7 +564,12 @@ pub const PeerManager = struct {
 
         var i: u32 = 0;
         while (i < prune_count) : (i += 1) {
-            result[i] = candidates.items[i].peer_id;
+            result[i] = self.allocator.dupe(u8, candidates.items[i].peer_id) catch {
+                // Rollback already-duped entries on OOM.
+                for (result[0..i]) |prev| self.allocator.free(prev);
+                self.allocator.free(result);
+                return &.{};
+            };
         }
 
         return result;

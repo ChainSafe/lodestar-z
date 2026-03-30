@@ -311,7 +311,7 @@ pub const SyncChain = struct {
             const id = self.next_batch_id;
             self.next_batch_id +%= 1;
 
-            self.batches.append(self.allocator, Batch.init(id, self.next_batch_start, count)) catch return;
+            self.batches.append(self.allocator, Batch.init(id, self.next_batch_start, count, self.allocator)) catch return;
             self.next_batch_start += count;
         }
     }

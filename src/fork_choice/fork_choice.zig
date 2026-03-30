@@ -819,6 +819,9 @@ pub const ForkChoice = struct {
         const default_status = self.proto_array.getDefaultVariant(block_root) orelse return error.InvalidAttestationUnknownHeadBlock;
         const block = self.getBlock(block_root, default_status) orelse return error.InvalidAttestationUnknownHeadBlock;
 
+        // INVALID_EXECUTION_STATUS: reject attestations to blocks with invalid execution.
+        if (block.extra_meta.executionStatus() == .invalid) return error.InvalidAttestationUnknownHeadBlock;
+
         // INVALID_TARGET: verify target root consistency.
         const expected_target = if (target_epoch > computeEpochAtSlot(block.slot)) block_root else block.target_root;
         if (!std.mem.eql(u8, &expected_target, &target_root)) return error.InvalidAttestationInvalidTarget;
@@ -848,7 +851,7 @@ pub const ForkChoice = struct {
         // Timely if arrived before the attestation due time (1/3 of slot).
         // Derive from config rather than hardcoding: SECONDS_PER_SLOT / 3 * 1000 ms.
         const attestation_due_ms: u64 = self.config.chain.SECONDS_PER_SLOT * 1000 / 3;
-        return block_delay_sec * 1000 < attestation_due_ms;
+        return @as(u64, block_delay_sec) * 1000 < attestation_due_ms;
     }
 
     // ── BlockExtraMeta construction helpers ──
@@ -1588,7 +1591,7 @@ pub const ForkChoice = struct {
                     block_entry.value_ptr.deinit(allocator);
                 }
                 entry.value_ptr.deinit(allocator);
-                try keys_to_remove.append(allocator, att_slot);
+                keys_to_remove.appendAssumeCapacity(att_slot);
             }
             // No break here: map is insertion-ordered, not sorted — must scan all entries.
         }

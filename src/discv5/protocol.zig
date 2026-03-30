@@ -74,7 +74,6 @@ pub const Session = struct {
     challenge_data_len: usize,
     initiator_key: [16]u8,
     recipient_key: [16]u8,
-    next_nonce: [12]u8,
     /// Ring buffer of seen nonces — replay protection (CL-2020-nonce).
     seen_nonces: SeenNonces,
 };
@@ -468,7 +467,6 @@ pub const Protocol = struct {
             .challenge_data_len = 0,
             .initiator_key = keys.initiator_key,
             .recipient_key = keys.recipient_key,
-            .next_nonce = nonce,
             .seen_nonces = SeenNonces.init(),
         });
     }
@@ -631,7 +629,6 @@ pub const Protocol = struct {
             .challenge_data_len = @min(cd_total, CHALLENGE_DATA_SIZE),
             .initiator_key = undefined,
             .recipient_key = undefined,
-            .next_nonce = undefined,
             .seen_nonces = SeenNonces.init(),
         };
         @memcpy(s.challenge_data[0..16], &masking_iv);

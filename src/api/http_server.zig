@@ -576,10 +576,12 @@ pub const HttpServer = struct {
         const alloc = self.allocator;
         const result = handlers.node.getPeers(self.api_context);
         defer {
-            for (result.data) |info| {
-                if (info.peer_id.len > 0) alloc.free(@constCast(info.peer_id));
+            if (result.data.len > 0) {
+                for (result.data) |info| {
+                    if (info.peer_id.len > 0) alloc.free(@constCast(info.peer_id));
+                }
+                alloc.free(result.data);
             }
-            alloc.free(result.data);
         }
         return self.makeJsonResult([]const types.PeerInfo, result);
     }
@@ -593,6 +595,7 @@ pub const HttpServer = struct {
         const alloc = self.allocator;
         const peer_id_str = dc.match.getParam("peer_id") orelse return error.InvalidRequest;
         const handler_res = try handlers.node.getPeer(self.api_context, peer_id_str);
+        defer alloc.free(handler_res.data.peer_id);
         const body = try json_response.writeApiObjectEnvelope(alloc, types.PeerDetail, &handler_res.data, handler_res.meta);
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
@@ -930,7 +933,7 @@ pub const HttpServer = struct {
                     .{ .name = "Content-Type", .value = "text/event-stream" },
                     .{ .name = "Cache-Control", .value = "no-cache" },
                     .{ .name = "Connection", .value = "keep-alive" },
-                    .{ .name = "Access-Control-Allow-Origin", .value = "*" },
+                    .{ .name = "Access-Control-Allow-Origin", .value = self.cors_origin orelse "*" },
                 },
             },
         });
@@ -1560,7 +1563,7 @@ pub const HttpServer = struct {
 /// into the Electra wire format: aggregation_bits, data (with index=0),
 /// signature, and reconstructed committee_bits bitvector.
 fn writeElectraAttestationJson(
-    alloc: std.mem.Allocator,
+    _: std.mem.Allocator,
     stream: *std.json.Stringify,
     att: *const consensus_types.phase0.Attestation.Type,
 ) !void {
@@ -1601,7 +1604,11 @@ fn writeElectraAttestationJson(
     try stream.objectField("data");
     try stream.beginObject();
     try stream.objectField("slot");
-    try stream.write(try std.fmt.allocPrint(alloc, "{d}", .{att.data.slot}));
+    {
+        var buf: [20]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "{d}", .{att.data.slot}) catch unreachable;
+        try stream.write(s);
+    }
     try stream.objectField("index");
     try stream.write("0");
     try stream.objectField("beacon_block_root");
@@ -1617,7 +1624,11 @@ fn writeElectraAttestationJson(
     try stream.objectField("source");
     try stream.beginObject();
     try stream.objectField("epoch");
-    try stream.write(try std.fmt.allocPrint(alloc, "{d}", .{att.data.source.epoch}));
+    {
+        var buf: [20]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "{d}", .{att.data.source.epoch}) catch unreachable;
+        try stream.write(s);
+    }
     try stream.objectField("root");
     var src_hex: [66]u8 = undefined;
     src_hex[0] = '0';
@@ -1632,7 +1643,11 @@ fn writeElectraAttestationJson(
     try stream.objectField("target");
     try stream.beginObject();
     try stream.objectField("epoch");
-    try stream.write(try std.fmt.allocPrint(alloc, "{d}", .{att.data.target.epoch}));
+    {
+        var buf: [20]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "{d}", .{att.data.target.epoch}) catch unreachable;
+        try stream.write(s);
+    }
     try stream.objectField("root");
     var tgt_hex: [66]u8 = undefined;
     tgt_hex[0] = '0';

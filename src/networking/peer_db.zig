@@ -474,14 +474,18 @@ pub const PeerDB = struct {
     /// Caller owns the returned slice.
     pub fn getScoreDisconnectPeers(self: *PeerDB) ![][]const u8 {
         var result: std.ArrayListUnmanaged([]const u8) = .empty;
-        errdefer result.deinit(self.allocator);
+        errdefer {
+            for (result.items) |pid| self.allocator.free(pid);
+            result.deinit(self.allocator);
+        }
 
         var it = self.peers.iterator();
         while (it.next()) |entry| {
             if (entry.value_ptr.connection_state == .connected) {
                 const state = entry.value_ptr.peer_score.state();
                 if (state == .disconnected or state == .banned) {
-                    try result.append(self.allocator, entry.key_ptr.*);
+                    const owned = try self.allocator.dupe(u8, entry.key_ptr.*);
+                    try result.append(self.allocator, owned);
                 }
             }
         }
