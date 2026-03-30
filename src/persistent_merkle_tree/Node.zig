@@ -146,6 +146,7 @@ pub const Pool = struct {
     pub const BranchStructRef = struct {
         ptr: *anyopaque,
         get_root: *const fn (ptr: *const anyopaque, out: *[32]u8) void,
+        to_tree: *const fn (ptr: *const anyopaque, pool: *Pool) Error!Id,
         deinit: *const fn (ptr: *anyopaque, allocator: Allocator) void,
     };
 
@@ -288,6 +289,12 @@ pub const Pool = struct {
                     typed_ptr.getRoot(out);
                 }
             }.call,
+            .to_tree = struct {
+                fn call(ptr_erased: *const anyopaque, pool: *Pool) Error!Id {
+                    const typed_ptr: *const T = @ptrCast(@alignCast(ptr_erased));
+                    return try typed_ptr.toTree(pool);
+                }
+            }.call,
             .deinit = struct {
                 fn call(ptr_erased: *anyopaque, allocator: Allocator) void {
                     const typed_ptr: *T = @ptrCast(@alignCast(ptr_erased));
@@ -415,6 +422,15 @@ pub const Pool = struct {
         else
             right_ptr_value;
         return @ptrFromInt(ptr_int);
+    }
+
+    pub fn materializeBranchStruct(self: *Pool, node_id: Id) Error!Id {
+        const state = self.nodes.items(.state)[@intFromEnum(node_id)];
+        if (!state.isBranchStruct()) {
+            return Error.InvalidNode;
+        }
+        const struct_ref = self.getBranchStructRefUnsafe(node_id);
+        return try struct_ref.to_tree(struct_ref.ptr, self);
     }
 
     pub fn unref(self: *Pool, node_id: Id) void {

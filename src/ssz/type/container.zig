@@ -12,6 +12,7 @@ const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const Depth = @import("persistent_merkle_tree").Depth;
+const proof = @import("persistent_merkle_tree").proof;
 const ContainerTreeView = @import("../tree_view/root.zig").ContainerTreeView;
 const StructContainerTreeView = @import("../tree_view/root.zig").StructContainerTreeView;
 
@@ -791,6 +792,10 @@ pub fn StructContainerType(comptime ST: type) type {
                 hashTreeRoot(&self.value, out) catch unreachable;
             }
 
+            pub fn toTree(self: *const WrappedT, pool: *Node.Pool) !Node.Id {
+                return try FixedCT.tree.fromValue(pool, &self.value);
+            }
+
             pub fn init(allocator: std.mem.Allocator, wrapped: *const WrappedT) !*const WrappedT {
                 const ptr = try allocator.create(WrappedT);
                 errdefer allocator.destroy(ptr);
@@ -1068,6 +1073,71 @@ test "FixedContainerType - tree.deserializeFromBytes" {
     // sanity: same root as fromValue
     const node2 = try Container.tree.fromValue(&pool, &value);
     try std.testing.expectEqualSlices(u8, node2.getRoot(&pool), node.getRoot(&pool));
+}
+
+test "StructContainerType - single proof materializes a temporary tree for traversal" {
+    const StructValidator = StructContainerType(struct {
+        pubkey: ByteVectorType(48),
+        withdrawal_credentials: ByteVectorType(32),
+        effective_balance: UintType(64),
+        slashed: BoolType(),
+        activation_eligibility_epoch: UintType(64),
+        activation_epoch: UintType(64),
+        exit_epoch: UintType(64),
+        withdrawable_epoch: UintType(64),
+    });
+    const TreeValidator = FixedContainerType(struct {
+        pubkey: ByteVectorType(48),
+        withdrawal_credentials: ByteVectorType(32),
+        effective_balance: UintType(64),
+        slashed: BoolType(),
+        activation_eligibility_epoch: UintType(64),
+        activation_epoch: UintType(64),
+        exit_epoch: UintType(64),
+        withdrawable_epoch: UintType(64),
+    });
+
+    const validator_value: StructValidator.Type = .{
+        .pubkey = [_]u8{0} ** 48,
+        .withdrawal_credentials = [_]u8{1} ** 32,
+        .effective_balance = 32000000000,
+        .slashed = false,
+        .activation_eligibility_epoch = 1,
+        .activation_epoch = 2,
+        .exit_epoch = 3,
+        .withdrawable_epoch = 4,
+    };
+
+    var pool = try Node.Pool.init(std.testing.allocator, 256);
+    defer pool.deinit();
+
+    const struct_root = try StructValidator.tree.fromValue(&pool, &validator_value);
+    defer pool.unref(struct_root);
+
+    const tree_root = try TreeValidator.tree.fromValue(&pool, &validator_value);
+    defer pool.unref(tree_root);
+
+    const gindex = Gindex.fromDepth(StructValidator.chunk_depth, 2);
+
+    var struct_proof = try proof.createSingleProof(std.testing.allocator, &pool, struct_root, gindex);
+    defer struct_proof.deinit(std.testing.allocator);
+
+    var tree_proof = try proof.createSingleProof(std.testing.allocator, &pool, tree_root, gindex);
+    defer tree_proof.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualSlices(u8, &tree_proof.leaf, &struct_proof.leaf);
+    try std.testing.expectEqual(@as(usize, tree_proof.witnesses.len), struct_proof.witnesses.len);
+    for (tree_proof.witnesses, struct_proof.witnesses) |expected, actual| {
+        try std.testing.expectEqualSlices(u8, &expected, &actual);
+    }
+
+    var pool2 = try Node.Pool.init(std.testing.allocator, 256);
+    defer pool2.deinit();
+
+    const reconstructed = try proof.createNodeFromSingleProof(&pool2, gindex, struct_proof.leaf, struct_proof.witnesses);
+    defer pool2.unref(reconstructed);
+
+    try std.testing.expectEqualSlices(u8, struct_root.getRoot(&pool), reconstructed.getRoot(&pool2));
 }
 
 test "FixedContainerType - serializeIntoBytes (uint64 + ByteVector32)" {
