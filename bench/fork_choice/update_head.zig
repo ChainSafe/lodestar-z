@@ -7,7 +7,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const zbench = @import("zbench");
 const fork_choice = @import("fork_choice");
-const ForkChoice = fork_choice.ForkChoiceStruct;
+const ForkChoice = fork_choice.ForkChoice;
 
 const util = @import("util.zig");
 
@@ -37,8 +37,8 @@ const UpdateHeadBench = struct {
 fn setupBench(allocator: std.mem.Allocator, opts: util.Opts) !UpdateHeadBench {
     const fc = try util.initializeForkChoice(allocator, opts);
 
-    const vote1 = fc.pa.getDefaultNodeIndex(fc.head.block_root).?;
-    const vote2 = fc.pa.getDefaultNodeIndex(fc.head.parent_root).?;
+    const vote1 = fc.proto_array.getDefaultNodeIndex(fc.head.block_root).?;
+    const vote2 = fc.proto_array.getDefaultNodeIndex(fc.head.parent_root).?;
 
     // Set all validators' initial next_index to vote1 so the first iteration
     // that flips to vote2 produces a full set of deltas.

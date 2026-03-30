@@ -23,7 +23,7 @@ pub const ForkChoiceError = fork_choice.ForkChoiceError;
 pub const InvalidBlockCode = proto_array.InvalidBlockCode;
 pub const InvalidAttestationCode = proto_array.InvalidAttestationCode;
 
-pub const ProtoArrayStruct = proto_array.ProtoArray;
+pub const ProtoArray = proto_array.ProtoArray;
 pub const DEFAULT_PRUNE_THRESHOLD = proto_array.DEFAULT_PRUNE_THRESHOLD;
 pub const VariantIndices = proto_array.VariantIndices;
 pub const RootContext = proto_array.RootContext;
@@ -39,7 +39,7 @@ pub const DeltasCache = compute_deltas.DeltasCache;
 pub const EquivocatingIndices = compute_deltas.EquivocatingIndices;
 pub const VoteIndex = compute_deltas.VoteIndex;
 
-pub const ForkChoiceStruct = fork_choice.ForkChoice;
+pub const ForkChoice = fork_choice.ForkChoice;
 pub const ValidatorVoteMap = fork_choice.ValidatorVoteMap;
 pub const BlockAttestationMap = fork_choice.BlockAttestationMap;
 pub const QueuedAttestationMap = fork_choice.QueuedAttestationMap;

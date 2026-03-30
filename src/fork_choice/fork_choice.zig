@@ -19,47 +19,18 @@ const Epoch = primitives.Epoch.Type;
 const Root = primitives.Root.Type;
 const ValidatorIndex = primitives.ValidatorIndex.Type;
 
-const proto_array = @import("proto_array.zig");
-const ProtoArray = proto_array.ProtoArray;
-const ProtoArrayError = proto_array.ProtoArrayError;
-
-pub const ForkChoiceError = ProtoArrayError || error{
-    // InvalidAttestation inner codes (TS: InvalidAttestationCode)
-    InvalidAttestationEmptyAggregationBitfield,
-    InvalidAttestationUnknownHeadBlock,
-    InvalidAttestationBadTargetEpoch,
-    InvalidAttestationUnknownTargetRoot,
-    InvalidAttestationFutureEpoch,
-    InvalidAttestationPastEpoch,
-    InvalidAttestationInvalidTarget,
-    InvalidAttestationAttestsToFutureBlock,
-    InvalidAttestationFutureSlot,
-    InvalidAttestationInvalidDataIndex,
-    // InvalidBlock inner codes (TS: InvalidBlockCode)
-    InvalidBlockUnknownParent,
-    InvalidBlockFutureSlot,
-    InvalidBlockFinalizedSlot,
-    InvalidBlockNotFinalizedDescendant,
-    // Other errors
-    InvalidProtoArrayBytes,
-    InconsistentOnTick,
-    BeaconStateErr,
-    AttemptToRevertJustification,
-    ForkChoiceStoreErr,
-    UnableToSetJustifiedCheckpoint,
-    AfterBlockFailed,
-    GenesisBlockNotAvailable,
-    DependentRootNotFound,
-};
-const ProtoBlock = proto_array.ProtoBlock;
-const ProtoNode = proto_array.ProtoNode;
-const LVHExecResponse = proto_array.LVHExecResponse;
-const PayloadStatus = proto_array.PayloadStatus;
-const RootContext = proto_array.RootContext;
-const ExecutionStatus = proto_array.ExecutionStatus;
-const DataAvailabilityStatus = proto_array.DataAvailabilityStatus;
-const DEFAULT_PRUNE_THRESHOLD = proto_array.DEFAULT_PRUNE_THRESHOLD;
-const BlockExtraMeta = proto_array.BlockExtraMeta;
+const pa = @import("proto_array.zig");
+const ProtoArray = pa.ProtoArray;
+const ProtoArrayError = pa.ProtoArrayError;
+const ProtoBlock = pa.ProtoBlock;
+const ProtoNode = pa.ProtoNode;
+const LVHExecResponse = pa.LVHExecResponse;
+const PayloadStatus = pa.PayloadStatus;
+const RootContext = pa.RootContext;
+const ExecutionStatus = pa.ExecutionStatus;
+const DataAvailabilityStatus = pa.DataAvailabilityStatus;
+const DEFAULT_PRUNE_THRESHOLD = pa.DEFAULT_PRUNE_THRESHOLD;
+const BlockExtraMeta = pa.BlockExtraMeta;
 
 const vote_tracker = @import("vote_tracker.zig");
 const Votes = vote_tracker.Votes;
@@ -92,6 +63,35 @@ const CachedBeaconState = state_transition.CachedBeaconState;
 const UnrealizedCheckpoints = state_transition.UnrealizedCheckpoints;
 
 const ZERO_HASH = constants.ZERO_HASH;
+
+pub const ForkChoiceError = ProtoArrayError || error{
+    // InvalidAttestation inner codes
+    InvalidAttestationEmptyAggregationBitfield,
+    InvalidAttestationUnknownHeadBlock,
+    InvalidAttestationBadTargetEpoch,
+    InvalidAttestationUnknownTargetRoot,
+    InvalidAttestationFutureEpoch,
+    InvalidAttestationPastEpoch,
+    InvalidAttestationInvalidTarget,
+    InvalidAttestationAttestsToFutureBlock,
+    InvalidAttestationFutureSlot,
+    InvalidAttestationInvalidDataIndex,
+    // InvalidBlock inner codes
+    InvalidBlockUnknownParent,
+    InvalidBlockFutureSlot,
+    InvalidBlockFinalizedSlot,
+    InvalidBlockNotFinalizedDescendant,
+    // Other errors
+    InvalidProtoArrayBytes,
+    InconsistentOnTick,
+    BeaconStateErr,
+    AttemptToRevertJustification,
+    ForkChoiceStoreErr,
+    UnableToSetJustifiedCheckpoint,
+    AfterBlockFailed,
+    GenesisBlockNotAvailable,
+    DependentRootNotFound,
+};
 
 /// Checkpoint results extracted from state during onBlock.
 /// Contains both realized and unrealized checkpoints needed for ProtoBlock construction.
@@ -262,7 +262,7 @@ pub const ForkChoice = struct {
 
     // ── Core components (borrowed references — caller owns lifetime) ──
     /// The underlying representation of the block DAG.
-    pa: *ProtoArray,
+    proto_array: *ProtoArray,
     /// Votes currently tracked in the protoArray, stored as struct-of-arrays for performance.
     /// Decomposes VoteTracker {currentIndex, nextIndex, slot} into parallel arrays.
     ///
@@ -322,14 +322,14 @@ pub const ForkChoice = struct {
         allocator: Allocator,
         config: *const BeaconConfig,
         fc_store: *ForkChoiceStore,
-        pa: *ProtoArray,
+        proto_array: *ProtoArray,
         validator_count: u32,
         opts: ForkChoiceOpts,
     ) !void {
         self.* = .{
             .config = config,
             .opts = opts,
-            .pa = pa,
+            .proto_array = proto_array,
             .votes = .{},
             .fc_store = fc_store,
             .deltas_cache = .empty,
@@ -453,11 +453,12 @@ pub const ForkChoice = struct {
             self.proposer_boost_root = block_root;
         }
 
+        const block_epoch = computeEpochAtSlot(slot);
+
         // 7-11. Extract and update checkpoints.
-        const checkpoints = try self.extractAndUpdateCheckpoints(allocator, state, parent_block, slot, current_slot);
+        const checkpoints = try self.extractAndUpdateCheckpoints(allocator, state, parent_block, block_epoch, current_slot);
 
         // 12. Compute target root.
-        const block_epoch = computeEpochAtSlot(slot);
         const target_slot = computeStartSlotAtEpoch(block_epoch);
         const target_root: Root = if (slot == target_slot) block_root else tr_blk: {
             var block_roots = try state.state.blockRoots();
@@ -496,7 +497,7 @@ pub const ForkChoice = struct {
         };
 
         // 15. Add to proto array.
-        try self.pa.onBlock(allocator, proto_block, current_slot, self.proposer_boost_root);
+        try self.proto_array.onBlock(allocator, proto_block, current_slot, self.proposer_boost_root);
 
         return proto_block;
     }
@@ -510,7 +511,7 @@ pub const ForkChoice = struct {
         parent_block_hash: ?Root,
     ) ForkChoiceError!*const ProtoNode {
         // 1. Parent block must be known (state_transition would have failed otherwise).
-        const parent_block = self.pa.getParent(parent_root, parent_block_hash) orelse
+        const parent_block = self.proto_array.getParent(parent_root, parent_block_hash) orelse
             return error.InvalidBlockUnknownParent;
 
         // 2. Blocks cannot be in the future.
@@ -521,7 +522,7 @@ pub const ForkChoice = struct {
         if (slot <= finalized_slot) return error.InvalidBlockFinalizedSlot;
 
         // 4. Check block is a descendant of the finalized block at checkpoint finalized slot.
-        const block_ancestor_node = try self.pa.getAncestor(parent_root, finalized_slot);
+        const block_ancestor_node = try self.proto_array.getAncestor(parent_root, finalized_slot);
         const fc_store_finalized = self.fc_store.finalized_checkpoint;
         if (!std.mem.eql(u8, &block_ancestor_node.block_root, &fc_store_finalized.root) or
             // Gloas (ePBS): finalized checkpoints carry payload status (empty/full) that must also match.
@@ -540,7 +541,7 @@ pub const ForkChoice = struct {
         allocator: Allocator,
         state: *CachedBeaconState,
         parent_block: *const ProtoNode,
-        slot: Slot,
+        block_epoch: Epoch,
         current_slot: Slot,
     ) !CheckpointResult {
         // 7. Extract checkpoints from state with payload status.
@@ -563,13 +564,13 @@ pub const ForkChoice = struct {
             allocator,
             state,
             parent_block,
-            slot,
+            block_epoch,
             justified_checkpoint,
             finalized_checkpoint,
         );
 
         // 11. If block from past epoch: update realized with unrealized.
-        if (computeEpochAtSlot(slot) < computeEpochAtSlot(current_slot)) {
+        if (block_epoch < computeEpochAtSlot(current_slot)) {
             var past_epoch_ctx = OnBlockBalancesCtx{
                 .getter = self.fc_store.justified_balances_getter,
                 .checkpoint = unrealized.justified,
@@ -611,11 +612,10 @@ pub const ForkChoice = struct {
         allocator: Allocator,
         state: *CachedBeaconState,
         parent_block: *const ProtoNode,
-        slot: Slot,
+        block_epoch: Epoch,
         justified_checkpoint: CheckpointWithPayloadStatus,
         finalized_checkpoint: CheckpointWithPayloadStatus,
     ) !struct { justified: CheckpointWithPayloadStatus, finalized: CheckpointWithPayloadStatus } {
-        const block_epoch = computeEpochAtSlot(slot);
         var unrealized_justified: CheckpointWithPayloadStatus = undefined;
         var unrealized_finalized: CheckpointWithPayloadStatus = undefined;
 
@@ -725,7 +725,7 @@ pub const ForkChoice = struct {
         block_root: Root,
     ) PayloadStatus {
         const block = self.getBlockDefaultStatus(block_root);
-        if (block != null and block.?.parent_block_hash != null) {
+        if (block != null and block.?.isGloasBlock()) {
             // Gloas block
             if (att_slot > block.?.slot) {
                 const att_index = attestation.index();
@@ -836,10 +836,10 @@ pub const ForkChoice = struct {
         if (target_epoch != computeEpochAtSlot(slot)) return error.InvalidAttestationBadTargetEpoch;
 
         // UNKNOWN_TARGET_ROOT: target root must be known.
-        if (!self.pa.hasBlock(target_root)) return error.InvalidAttestationUnknownTargetRoot;
+        if (!self.proto_array.hasBlock(target_root)) return error.InvalidAttestationUnknownTargetRoot;
 
         // UNKNOWN_HEAD_BLOCK: retrieve block for beacon block root.
-        const default_status = self.pa.getDefaultVariant(block_root) orelse return error.InvalidAttestationUnknownHeadBlock;
+        const default_status = self.proto_array.getDefaultVariant(block_root) orelse return error.InvalidAttestationUnknownHeadBlock;
         const block = self.getBlock(block_root, default_status) orelse return error.InvalidAttestationUnknownHeadBlock;
 
         // INVALID_TARGET: verify target root consistency.
@@ -851,7 +851,7 @@ pub const ForkChoice = struct {
 
         // INVALID_DATA_INDEX: For Gloas blocks, attestation index must be 0 or 1.
         const att_index = attestation.index();
-        if (block.parent_block_hash != null and att_index != 0 and att_index != 1) return error.InvalidAttestationInvalidDataIndex;
+        if (block.isGloasBlock() and att_index != 0 and att_index != 1) return error.InvalidAttestationInvalidDataIndex;
 
         // Cache validated attestation data root.
         try self.validated_attestation_datas.put(
@@ -889,12 +889,12 @@ pub const ForkChoice = struct {
         _ = parent_block.extra_meta.executionPayloadBlockHash() orelse return 0;
 
         // If parent is pre-Gloas, it only has FULL variant.
-        if (parent_block.parent_block_hash == null) {
+        if (!parent_block.isGloasBlock()) {
             return parent_block.extra_meta.executionPayloadNumber();
         }
 
         // Parent is Gloas: get the variant matching the parentBlockHash from bid.
-        const parent_variant = self.pa.getNodeByRootAndBlockHash(parent_root, bid_parent_block_hash) orelse
+        const parent_variant = self.proto_array.getNodeByRootAndBlockHash(parent_root, bid_parent_block_hash) orelse
             return parent_block.extra_meta.executionPayloadNumber();
         // Only use variant's number if variant is post-merge.
         if (parent_variant.extra_meta.executionPayloadBlockHash()) |_| {
@@ -987,7 +987,7 @@ pub const ForkChoice = struct {
         const result = try computeDeltas(
             allocator,
             &self.deltas_cache,
-            @intCast(self.pa.nodes.items.len),
+            @intCast(self.proto_array.nodes.items.len),
             vote_fields.current_indices,
             vote_fields.next_indices,
             old_balances,
@@ -1011,7 +1011,7 @@ pub const ForkChoice = struct {
 
         const current_slot = self.fc_store.current_slot;
 
-        try self.pa.applyScoreChanges(
+        try self.proto_array.applyScoreChanges(
             result.deltas,
             proposer_boost,
             self.fc_store.justified.checkpoint.epoch,
@@ -1021,7 +1021,7 @@ pub const ForkChoice = struct {
             current_slot,
         );
 
-        const head_node = try self.pa.findHead(
+        const head_node = try self.proto_array.findHead(
             self.fc_store.justified.checkpoint.root,
             current_slot,
         );
@@ -1044,7 +1044,7 @@ pub const ForkChoice = struct {
         root: Root,
         score: u64,
     ) void {
-        self.pa.previous_proposer_boost = .{
+        self.proto_array.previous_proposer_boost = .{
             .root = root,
             .score = score,
         };
@@ -1053,7 +1053,7 @@ pub const ForkChoice = struct {
 
     /// Clear proposer boost (typically at start of new slot).
     pub fn clearProposerBoost(self: *ForkChoice) void {
-        self.pa.previous_proposer_boost = null;
+        self.proto_array.previous_proposer_boost = null;
         self.proposer_boost_root = null;
     }
 
@@ -1076,16 +1076,16 @@ pub const ForkChoice = struct {
             return .{ .should_not_override = .{ .reason = .proposer_boost_reorg_disabled } };
         }
 
-        const parent_status = self.pa.getParentPayloadStatus(
+        const parent_status = self.proto_array.getParentPayloadStatus(
             head_block.parent_root,
             head_block.parent_block_hash,
         ) catch {
             return .{ .should_not_override = .{ .reason = .parent_block_not_available } };
         };
-        const parent_idx = self.pa.getNodeIndexByRootAndStatus(head_block.parent_root, parent_status) orelse {
+        const parent_idx = self.proto_array.getNodeIndexByRootAndStatus(head_block.parent_root, parent_status) orelse {
             return .{ .should_not_override = .{ .reason = .parent_block_not_available } };
         };
-        const parent_node = &self.pa.nodes.items[parent_idx];
+        const parent_node = &self.proto_array.nodes.items[parent_idx];
         const proposal_slot = head_block.slot + 1;
 
         if (self.getPreliminaryProposerHead(head_block, parent_node, proposal_slot)) |reason| {
@@ -1121,16 +1121,16 @@ pub const ForkChoice = struct {
             return .{ .head = head_block.*, .is_head_timely = is_head_timely, .not_reorged_reason = .proposer_boost_reorg_disabled };
         }
 
-        const parent_status = self.pa.getParentPayloadStatus(
+        const parent_status = self.proto_array.getParentPayloadStatus(
             head_block.parent_root,
             head_block.parent_block_hash,
         ) catch {
             return .{ .head = head_block.*, .is_head_timely = is_head_timely, .not_reorged_reason = .parent_block_not_available };
         };
-        const parent_idx = self.pa.getNodeIndexByRootAndStatus(head_block.parent_root, parent_status) orelse {
+        const parent_idx = self.proto_array.getNodeIndexByRootAndStatus(head_block.parent_root, parent_status) orelse {
             return .{ .head = head_block.*, .is_head_timely = is_head_timely, .not_reorged_reason = .parent_block_not_available };
         };
-        const parent_node = &self.pa.nodes.items[parent_idx];
+        const parent_node = &self.proto_array.nodes.items[parent_idx];
 
         // Preliminary checks (timeliness, shuffling stability, FFG, finalization, slot distance)
         if (self.getPreliminaryProposerHead(head_block, parent_node, slot)) |reason| {
@@ -1157,16 +1157,16 @@ pub const ForkChoice = struct {
 
         // No reorg if headBlock is "not weak" — weight exceeds REORG_HEAD_WEIGHT_THRESHOLD% of committee
         const reorg_threshold = getCommitteeFraction(self.fc_store.justified.total_balance, preset.SLOTS_PER_EPOCH, self.config.chain.REORG_HEAD_WEIGHT_THRESHOLD);
-        const head_node_idx = self.pa.getNodeIndexByRootAndStatus(head_block.block_root, head_block.payload_status) orelse {
+        const head_node_idx = self.proto_array.getNodeIndexByRootAndStatus(head_block.block_root, head_block.payload_status) orelse {
             return .{ .head = head_block.*, .is_head_timely = is_head_timely, .not_reorged_reason = .head_block_not_weak };
         };
-        if (self.pa.nodes.items[head_node_idx].weight >= reorg_threshold) {
+        if (self.proto_array.nodes.items[head_node_idx].weight >= reorg_threshold) {
             return .{ .head = head_block.*, .is_head_timely = is_head_timely, .not_reorged_reason = .head_block_not_weak };
         }
 
         // No reorg if parentBlock is "not strong" — weight is <= REORG_PARENT_WEIGHT_THRESHOLD% of committee
         const parent_threshold = getCommitteeFraction(self.fc_store.justified.total_balance, preset.SLOTS_PER_EPOCH, self.config.chain.REORG_PARENT_WEIGHT_THRESHOLD);
-        if (self.pa.nodes.items[parent_idx].weight <= parent_threshold) {
+        if (self.proto_array.nodes.items[parent_idx].weight <= parent_threshold) {
             return .{ .head = head_block.*, .is_head_timely = is_head_timely, .not_reorged_reason = .parent_block_not_strong };
         }
 
@@ -1460,7 +1460,7 @@ pub const ForkChoice = struct {
         next_payload_status: PayloadStatus,
     ) !void {
         // Get the node index for the voted block.
-        const next_index = self.pa.getNodeIndexByRootAndStatus(next_root, next_payload_status) orelse
+        const next_index = self.proto_array.getNodeIndexByRootAndStatus(next_root, next_payload_status) orelse
             return error.MissingProtoArrayBlock;
 
         try self.votes.ensureValidatorCount(allocator, @intCast(validator_index + 1));
@@ -1576,7 +1576,7 @@ pub const ForkChoice = struct {
         allocator: Allocator,
         finalized_root: Root,
     ) (Allocator.Error || ForkChoiceError)![]ProtoBlock {
-        const pruned = try self.pa.maybePrune(allocator, finalized_root);
+        const pruned = try self.proto_array.maybePrune(allocator, finalized_root);
         const pruned_count: u32 = @intCast(pruned.len);
 
         if (pruned_count == 0) return pruned;
@@ -1613,7 +1613,7 @@ pub const ForkChoice = struct {
         response: LVHExecResponse,
         current_slot: Slot,
     ) void {
-        self.pa.validateLatestHash(allocator, response, current_slot) catch |err| {
+        self.proto_array.validateLatestHash(allocator, response, current_slot) catch |err| {
             self.irrecoverable_error = err;
         };
     }
@@ -1623,21 +1623,21 @@ pub const ForkChoice = struct {
     /// Returns `true` if the block is known **and** a descendant of the finalized root.
     /// Uses default variant (PENDING for Gloas, FULL for pre-Gloas).
     pub fn hasBlock(self: *const ForkChoice, block_root: Root) bool {
-        const idx = self.pa.getDefaultNodeIndex(block_root) orelse return false;
-        assert(idx < self.pa.nodes.items.len);
-        const node = &self.pa.nodes.items[idx];
-        return self.pa.isFinalizedRootOrDescendant(node);
+        const idx = self.proto_array.getDefaultNodeIndex(block_root) orelse return false;
+        assert(idx < self.proto_array.nodes.items.len);
+        const node = &self.proto_array.nodes.items[idx];
+        return self.proto_array.isFinalizedRootOrDescendant(node);
     }
 
     /// Same as hasBlock but without checking if the block is a descendant of the finalized root.
     pub fn hasBlockUnsafe(self: *const ForkChoice, block_root: Root) bool {
-        return self.pa.hasBlock(block_root);
+        return self.proto_array.hasBlock(block_root);
     }
 
     /// Returns a `ProtoBlock` if the block is known **and** a descendant of the finalized root.
     pub fn getBlock(self: *const ForkChoice, block_root: Root, payload_status: PayloadStatus) ?ProtoBlock {
-        const node = self.pa.getNode(block_root, payload_status) orelse return null;
-        if (!self.pa.isFinalizedRootOrDescendant(node)) return null;
+        const node = self.proto_array.getNode(block_root, payload_status) orelse return null;
+        if (!self.proto_array.isFinalizedRootOrDescendant(node)) return null;
         return node.toBlock();
     }
 
@@ -1646,13 +1646,13 @@ pub const ForkChoice = struct {
     /// Gloas blocks: returns PENDING variant.
     /// Use this when you need the canonical block reference regardless of payload status.
     pub fn getBlockDefaultStatus(self: *const ForkChoice, block_root: Root) ?ProtoBlock {
-        const default_status = self.pa.getDefaultVariant(block_root) orelse return null;
+        const default_status = self.proto_array.getDefaultVariant(block_root) orelse return null;
         return self.getBlock(block_root, default_status);
     }
 
     /// Returns EMPTY or FULL `ProtoBlock` that has matching block root and block hash.
     pub fn getBlockAndBlockHash(self: *const ForkChoice, block_root: Root, block_hash: Root) ?ProtoBlock {
-        return self.pa.getBlockAndBlockHash(block_root, block_hash);
+        return self.proto_array.getBlockAndBlockHash(block_root, block_hash);
     }
 
     /// Get the justified block from proto array.
@@ -1705,7 +1705,7 @@ pub const ForkChoice = struct {
     /// Equivalent to:
     /// https://github.com/ethereum/consensus-specs/blob/v1.1.10/specs/phase0/fork-choice.md#get_ancestor
     pub fn getAncestor(self: *const ForkChoice, block_root: Root, ancestor_slot: Slot) ForkChoiceError!ProtoNode {
-        const node = try self.pa.getAncestor(block_root, ancestor_slot);
+        const node = try self.proto_array.getAncestor(block_root, ancestor_slot);
         return node.*;
     }
 
@@ -1717,7 +1717,7 @@ pub const ForkChoice = struct {
         descendant_root: Root,
         descendant_status: PayloadStatus,
     ) ForkChoiceError!bool {
-        return try self.pa.isDescendant(
+        return try self.proto_array.isDescendant(
             ancestor_root,
             ancestor_status,
             descendant_root,
@@ -1729,7 +1729,7 @@ pub const ForkChoice = struct {
     pub fn getCanonicalBlockByRoot(self: *const ForkChoice, block_root: Root) ForkChoiceError!?ProtoBlock {
         if (std.mem.eql(u8, &self.head.block_root, &block_root)) return self.head;
 
-        var iter = self.pa.iterateAncestors(self.head.block_root, self.head.payload_status);
+        var iter = self.proto_array.iterateAncestors(self.head.block_root, self.head.payload_status);
         while (try iter.next()) |node| {
             if (std.mem.eql(u8, &node.block_root, &block_root)) return node.toBlock();
         }
@@ -1741,7 +1741,7 @@ pub const ForkChoice = struct {
         if (slot > self.head.slot) return null;
         if (slot == self.head.slot) return self.head;
 
-        var iter = self.pa.iterateAncestors(self.head.block_root, self.head.payload_status);
+        var iter = self.proto_array.iterateAncestors(self.head.block_root, self.head.payload_status);
         while (try iter.next()) |node| {
             if (node.slot == slot) return node.toBlock();
         }
@@ -1752,7 +1752,7 @@ pub const ForkChoice = struct {
     pub fn getCanonicalBlockClosestLteSlot(self: *const ForkChoice, slot: Slot) ForkChoiceError!?ProtoBlock {
         if (slot >= self.head.slot) return self.head;
 
-        var iter = self.pa.iterateAncestors(self.head.block_root, self.head.payload_status);
+        var iter = self.proto_array.iterateAncestors(self.head.block_root, self.head.payload_status);
         while (try iter.next()) |node| {
             if (slot >= node.slot) return node.toBlock();
         }
@@ -1766,7 +1766,7 @@ pub const ForkChoice = struct {
         block_root: Root,
         status: PayloadStatus,
     ) ProtoArray.AncestorIterator {
-        return self.pa.iterateAncestors(block_root, status);
+        return self.proto_array.iterateAncestors(block_root, status);
     }
 
     /// Returns all blocks backwards starting from a block root.
@@ -1778,7 +1778,7 @@ pub const ForkChoice = struct {
         block_root: Root,
         status: PayloadStatus,
     ) ![]ProtoBlock {
-        var blocks = try self.pa.getAllAncestorNodes(allocator, block_root, status);
+        var blocks = try self.proto_array.getAllAncestorNodes(allocator, block_root, status);
         // The last block is the previous finalized one, exclude it.
         if (blocks.items.len > 0) _ = blocks.pop();
         return blocks.toOwnedSlice(allocator);
@@ -1792,7 +1792,7 @@ pub const ForkChoice = struct {
         block_root: Root,
         status: PayloadStatus,
     ) ![]ProtoBlock {
-        var blocks = try self.pa.getAllNonAncestorNodes(allocator, block_root, status);
+        var blocks = try self.proto_array.getAllNonAncestorNodes(allocator, block_root, status);
         return blocks.toOwnedSlice(allocator);
     }
 
@@ -1805,7 +1805,7 @@ pub const ForkChoice = struct {
         block_root: Root,
         status: PayloadStatus,
     ) !struct { ancestors: []ProtoBlock, non_ancestors: []ProtoBlock } {
-        var pa_result = try self.pa.getAllAncestorAndNonAncestorNodes(allocator, block_root, status);
+        var pa_result = try self.proto_array.getAllAncestorAndNonAncestorNodes(allocator, block_root, status);
         // The last ancestor block is the previous finalized one, exclude it.
         if (pa_result.ancestors.items.len > 0) _ = pa_result.ancestors.pop();
 
@@ -1818,12 +1818,12 @@ pub const ForkChoice = struct {
     /// Get common ancestor depth between two blocks.
     /// Returns how deep the common ancestor is from the higher of the two blocks.
     pub fn getCommonAncestorDepth(self: *const ForkChoice, prev: *const ProtoBlock, new_block: *const ProtoBlock) AncestorResult {
-        const prev_node = self.pa.getNode(prev.block_root, prev.payload_status) orelse
+        const prev_node = self.proto_array.getNode(prev.block_root, prev.payload_status) orelse
             return .{ .block_unknown = {} };
-        const new_node = self.pa.getNode(new_block.block_root, new_block.payload_status) orelse
+        const new_node = self.proto_array.getNode(new_block.block_root, new_block.payload_status) orelse
             return .{ .block_unknown = {} };
 
-        const common_ancestor = self.pa.getCommonAncestor(prev_node, new_node) orelse
+        const common_ancestor = self.proto_array.getCommonAncestor(prev_node, new_node) orelse
             return .{ .no_common_ancestor = {} };
 
         // If common ancestor is one of both nodes, they are direct descendants.
@@ -1846,7 +1846,7 @@ pub const ForkChoice = struct {
 
         // Special case close to genesis block, return the genesis block root.
         if (before_slot_signed <= 0) {
-            const genesis_block = &self.pa.nodes.items[0];
+            const genesis_block = &self.proto_array.nodes.items[0];
             if (genesis_block.slot != 0) return error.GenesisBlockNotAvailable;
             return genesis_block.block_root;
         }
@@ -1869,9 +1869,9 @@ pub const ForkChoice = struct {
                 block.target_root;
 
             // Use default variant (PENDING for Gloas, FULL for pre-Gloas).
-            const default_status = self.pa.getDefaultVariant(next_root) orelse
+            const default_status = self.proto_array.getDefaultVariant(next_root) orelse
                 return error.MissingProtoArrayBlock;
-            block = (try self.pa.getBlockReadonly(next_root, default_status)).toBlock();
+            block = (try self.proto_array.getBlockReadonly(next_root, default_status)).toBlock();
         }
 
         return error.DependentRootNotFound;
@@ -1890,7 +1890,7 @@ pub const ForkChoice = struct {
 
     /// Set the prune threshold.
     pub fn setPruneThreshold(self: *ForkChoice, threshold: u32) void {
-        self.pa.prune_threshold = threshold;
+        self.proto_array.prune_threshold = threshold;
     }
 
     // ── Debug / metrics ──
@@ -1900,7 +1900,7 @@ pub const ForkChoice = struct {
         var result = std.ArrayList(ProtoBlock).init(allocator);
         errdefer result.deinit();
 
-        for (self.pa.nodes.items) |node| {
+        for (self.proto_array.nodes.items) |node| {
             if (node.best_child == null) {
                 try result.append(node.toBlock());
             }
@@ -1910,12 +1910,12 @@ pub const ForkChoice = struct {
 
     /// Get all nodes in the DAG.
     pub fn getAllNodes(self: *const ForkChoice) []ProtoNode {
-        return self.pa.nodes.items;
+        return self.proto_array.nodes.items;
     }
 
     /// Very expensive function, iterates the entire ProtoArray.
     pub fn forwardIterateAncestorBlocks(self: *const ForkChoice, allocator: Allocator) Allocator.Error![]ProtoBlock {
-        const nodes = self.pa.nodes.items;
+        const nodes = self.proto_array.nodes.items;
         const result = try allocator.alloc(ProtoBlock, nodes.len);
         for (nodes, 0..) |node, i| {
             result[i] = node.toBlock();
@@ -1926,7 +1926,7 @@ pub const ForkChoice = struct {
     /// Count slots present in a window.
     pub fn getSlotsPresent(self: *const ForkChoice, window_start: Slot) u32 {
         var count: u32 = 0;
-        for (self.pa.nodes.items) |node| {
+        for (self.proto_array.nodes.items) |node| {
             if (node.slot > window_start) count += 1;
         }
         return count;
@@ -1964,14 +1964,14 @@ pub const ForkChoice = struct {
         block_root: Root,
         status: PayloadStatus,
     ) (Allocator.Error || ForkChoiceError)!DescendantIterator {
-        const block_index = self.pa.getNodeIndexByRootAndStatus(block_root, status) orelse
+        const block_index = self.proto_array.getNodeIndexByRootAndStatus(block_root, status) orelse
             return error.MissingProtoArrayBlock;
 
         var roots_in_chain: std.AutoHashMapUnmanaged(Root, void) = .empty;
         try roots_in_chain.put(allocator, block_root, {});
 
         return .{
-            .nodes = self.pa.nodes.items,
+            .nodes = self.proto_array.nodes.items,
             .current_index = block_index + 1,
             .roots_in_chain = roots_in_chain,
         };
@@ -1986,7 +1986,7 @@ pub const ForkChoice = struct {
         var result = std.ArrayList(ProtoBlock).init(allocator);
         errdefer result.deinit();
 
-        for (self.pa.nodes.items) |node| {
+        for (self.proto_array.nodes.items) |node| {
             if (std.mem.eql(u8, &node.parent_root, &parent_root)) {
                 try result.append(node.toBlock());
             }
@@ -2003,7 +2003,7 @@ pub const ForkChoice = struct {
         var result = std.ArrayList(ProtoBlock).init(allocator);
         errdefer result.deinit();
 
-        for (self.pa.nodes.items) |node| {
+        for (self.proto_array.nodes.items) |node| {
             if (node.slot == slot) {
                 try result.append(node.toBlock());
             }
@@ -2024,7 +2024,7 @@ pub const ForkChoice = struct {
         execution_payload_number: u64,
         execution_payload_state_root: Root,
     ) (Allocator.Error || ForkChoiceError)!void {
-        try self.pa.onExecutionPayload(
+        try self.proto_array.onExecutionPayload(
             allocator,
             block_root,
             self.fc_store.current_slot,
@@ -2044,7 +2044,7 @@ pub const ForkChoice = struct {
         ptc_indices: []const u32,
         payload_present: bool,
     ) void {
-        self.pa.notifyPtcMessages(block_root, ptc_indices, payload_present);
+        self.proto_array.notifyPtcMessages(block_root, ptc_indices, payload_present);
     }
 };
 
@@ -2094,11 +2094,11 @@ pub fn onBlockFromProto(
     const finalized_slot = computeStartSlotAtEpoch(fc.fc_store.finalized_checkpoint.epoch);
     if (block.slot <= finalized_slot) return error.InvalidBlockFinalizedSlot;
 
-    const parent_idx = fc.pa.getDefaultNodeIndex(block.parent_root) orelse return error.InvalidBlockUnknownParent;
-    const parent_node = &fc.pa.nodes.items[parent_idx];
-    if (!fc.pa.isFinalizedRootOrDescendant(parent_node)) return error.InvalidBlockNotFinalizedDescendant;
+    const parent_idx = fc.proto_array.getDefaultNodeIndex(block.parent_root) orelse return error.InvalidBlockUnknownParent;
+    const parent_node = &fc.proto_array.nodes.items[parent_idx];
+    if (!fc.proto_array.isFinalizedRootOrDescendant(parent_node)) return error.InvalidBlockNotFinalizedDescendant;
 
-    try fc.pa.onBlock(allocator, block, current_slot, null);
+    try fc.proto_array.onBlock(allocator, block, current_slot, null);
 }
 
 // ── Tests ──
@@ -2177,15 +2177,15 @@ fn initTestForkChoice(
     finalized_checkpoint: CheckpointWithPayloadStatus,
     justified_balances: []const u16,
 ) !*ForkChoice {
-    const pa = try allocator.create(ProtoArray);
-    errdefer allocator.destroy(pa);
+    const proto_arr = try allocator.create(ProtoArray);
+    errdefer allocator.destroy(proto_arr);
 
-    try pa.initialize(
+    try proto_arr.initialize(
         allocator,
         anchor_block,
         current_slot,
     );
-    errdefer pa.deinit(allocator);
+    errdefer proto_arr.deinit(allocator);
 
     const fc_store = try allocator.create(ForkChoiceStore);
     errdefer allocator.destroy(fc_store);
@@ -2204,18 +2204,18 @@ fn initTestForkChoice(
     const fc = try allocator.create(ForkChoice);
     errdefer allocator.destroy(fc);
 
-    try fc.init(allocator, getTestConfig(), fc_store, pa, 0, .{});
+    try fc.init(allocator, getTestConfig(), fc_store, proto_arr, 0, .{});
     return fc;
 }
 
 /// Test-only: free ForkChoice + its heap-allocated ProtoArray and ForkChoiceStore.
 fn deinitTestForkChoice(allocator: Allocator, fc: *ForkChoice) void {
-    const pa = fc.pa;
+    const proto_arr = fc.proto_array;
     const fc_store = fc.fc_store;
     fc.deinit(allocator);
     allocator.destroy(fc);
-    pa.deinit(allocator);
-    allocator.destroy(pa);
+    proto_arr.deinit(allocator);
+    allocator.destroy(proto_arr);
     fc_store.deinit(allocator);
     allocator.destroy(fc_store);
 }
@@ -2232,10 +2232,10 @@ fn initTestForkChoiceWithOpts(
     justified_balances: []const u16,
     opts: ForkChoiceOpts,
 ) !*ForkChoice {
-    const pa = try allocator.create(ProtoArray);
-    errdefer allocator.destroy(pa);
-    try pa.initialize(allocator, anchor_block, current_slot);
-    errdefer pa.deinit(allocator);
+    const proto_arr = try allocator.create(ProtoArray);
+    errdefer allocator.destroy(proto_arr);
+    try proto_arr.initialize(allocator, anchor_block, current_slot);
+    errdefer proto_arr.deinit(allocator);
 
     const fc_store = try allocator.create(ForkChoiceStore);
     errdefer allocator.destroy(fc_store);
@@ -2244,14 +2244,14 @@ fn initTestForkChoiceWithOpts(
 
     const fc = try allocator.create(ForkChoice);
     errdefer allocator.destroy(fc);
-    try fc.init(allocator, getTestConfig(), fc_store, pa, 0, opts);
+    try fc.init(allocator, getTestConfig(), fc_store, proto_arr, 0, opts);
     return fc;
 }
 
 /// Test-only: set a node's weight directly by block root.
 fn setTestNodeWeight(fc: *ForkChoice, root: Root, weight: i64) void {
-    const idx = fc.pa.getDefaultNodeIndex(root) orelse return;
-    fc.pa.nodes.items[idx].weight = weight;
+    const idx = fc.proto_array.getDefaultNodeIndex(root) orelse return;
+    fc.proto_array.nodes.items[idx].weight = weight;
 }
 
 /// Common parameters for proposer reorg tests.
@@ -2840,7 +2840,7 @@ test "deep chain head selection follows longest weighted branch" {
     try fc.updateHead(testing.allocator);
 
     try testing.expectEqual(tip_root, fc.head.block_root);
-    try testing.expectEqual(@as(usize, 9), fc.pa.nodes.items.len); // genesis + 8 blocks
+    try testing.expectEqual(@as(usize, 9), fc.proto_array.nodes.items.len); // genesis + 8 blocks
 }
 
 // ── shouldOverrideForkChoiceUpdate tests (continued) ──
@@ -2943,12 +2943,12 @@ test "balance positive change: fresh votes with new balances" {
     try fc.updateHead(allocator);
 
     // Verify weights (back-propagated): node3=30, node2=20+30=50, node1=10+50=60.
-    const idx1 = fc.pa.getDefaultNodeIndex(root1) orelse return error.TestUnexpectedResult;
-    const idx2 = fc.pa.getDefaultNodeIndex(root2) orelse return error.TestUnexpectedResult;
-    const idx3 = fc.pa.getDefaultNodeIndex(root3) orelse return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(i64, 60), fc.pa.nodes.items[idx1].weight);
-    try testing.expectEqual(@as(i64, 50), fc.pa.nodes.items[idx2].weight);
-    try testing.expectEqual(@as(i64, 30), fc.pa.nodes.items[idx3].weight);
+    const idx1 = fc.proto_array.getDefaultNodeIndex(root1) orelse return error.TestUnexpectedResult;
+    const idx2 = fc.proto_array.getDefaultNodeIndex(root2) orelse return error.TestUnexpectedResult;
+    const idx3 = fc.proto_array.getDefaultNodeIndex(root3) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(i64, 60), fc.proto_array.nodes.items[idx1].weight);
+    try testing.expectEqual(@as(i64, 50), fc.proto_array.nodes.items[idx2].weight);
+    try testing.expectEqual(@as(i64, 30), fc.proto_array.nodes.items[idx3].weight);
 }
 
 // Tree:
@@ -3005,12 +3005,12 @@ test "balance negative change: existing balances decrease" {
 
     // After second updateHead, weights reflect the new lower balances.
     // node3: 30, node2: 20+30=50, node1: 10+50=60 (back-propagated).
-    const idx1 = fc.pa.getDefaultNodeIndex(root1) orelse return error.TestUnexpectedResult;
-    const idx2 = fc.pa.getDefaultNodeIndex(root2) orelse return error.TestUnexpectedResult;
-    const idx3 = fc.pa.getDefaultNodeIndex(root3) orelse return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(i64, 60), fc.pa.nodes.items[idx1].weight);
-    try testing.expectEqual(@as(i64, 50), fc.pa.nodes.items[idx2].weight);
-    try testing.expectEqual(@as(i64, 30), fc.pa.nodes.items[idx3].weight);
+    const idx1 = fc.proto_array.getDefaultNodeIndex(root1) orelse return error.TestUnexpectedResult;
+    const idx2 = fc.proto_array.getDefaultNodeIndex(root2) orelse return error.TestUnexpectedResult;
+    const idx3 = fc.proto_array.getDefaultNodeIndex(root3) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(i64, 60), fc.proto_array.nodes.items[idx1].weight);
+    try testing.expectEqual(@as(i64, 50), fc.proto_array.nodes.items[idx2].weight);
+    try testing.expectEqual(@as(i64, 30), fc.proto_array.nodes.items[idx3].weight);
 }
 
 // Tree:
@@ -3061,10 +3061,10 @@ test "balance same slot change: balance update without vote movement" {
     try fc.updateHead(allocator);
 
     // node2: 200, node1: 50+200=250 (back-propagated).
-    const idx1 = fc.pa.getDefaultNodeIndex(root1) orelse return error.TestUnexpectedResult;
-    const idx2 = fc.pa.getDefaultNodeIndex(root2) orelse return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(i64, 250), fc.pa.nodes.items[idx1].weight);
-    try testing.expectEqual(@as(i64, 200), fc.pa.nodes.items[idx2].weight);
+    const idx1 = fc.proto_array.getDefaultNodeIndex(root1) orelse return error.TestUnexpectedResult;
+    const idx2 = fc.proto_array.getDefaultNodeIndex(root2) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(i64, 250), fc.proto_array.nodes.items[idx1].weight);
+    try testing.expectEqual(@as(i64, 200), fc.proto_array.nodes.items[idx2].weight);
 }
 
 // Tree:
@@ -3122,12 +3122,12 @@ test "balance underflow clamping: old > new does not wrap unsigned" {
     try fc.updateHead(allocator);
 
     // All node weights should be non-negative (no underflow wrap).
-    const idx1 = fc.pa.getDefaultNodeIndex(root1) orelse return error.TestUnexpectedResult;
-    const idx2 = fc.pa.getDefaultNodeIndex(root2) orelse return error.TestUnexpectedResult;
-    const idx3 = fc.pa.getDefaultNodeIndex(root3) orelse return error.TestUnexpectedResult;
-    try testing.expect(fc.pa.nodes.items[idx1].weight >= 0);
-    try testing.expect(fc.pa.nodes.items[idx2].weight >= 0);
-    try testing.expect(fc.pa.nodes.items[idx3].weight >= 0);
+    const idx1 = fc.proto_array.getDefaultNodeIndex(root1) orelse return error.TestUnexpectedResult;
+    const idx2 = fc.proto_array.getDefaultNodeIndex(root2) orelse return error.TestUnexpectedResult;
+    const idx3 = fc.proto_array.getDefaultNodeIndex(root3) orelse return error.TestUnexpectedResult;
+    try testing.expect(fc.proto_array.nodes.items[idx1].weight >= 0);
+    try testing.expect(fc.proto_array.nodes.items[idx2].weight >= 0);
+    try testing.expect(fc.proto_array.nodes.items[idx3].weight >= 0);
 
     // Verify expected weights after underflow clamping.
     // computeDeltas: delta[node1]=-115, delta[node2]=-105, delta[node3]=-95
@@ -3135,9 +3135,9 @@ test "balance underflow clamping: old > new does not wrap unsigned" {
     //   node3: 125 + (-95) = 30, back-prop -95 → delta[node2] becomes -200
     //   node2: 250 + (-200) = 50, back-prop -200 → delta[node1] becomes -315
     //   node1: 375 + (-315) = 60
-    try testing.expectEqual(@as(i64, 60), fc.pa.nodes.items[idx1].weight);
-    try testing.expectEqual(@as(i64, 50), fc.pa.nodes.items[idx2].weight);
-    try testing.expectEqual(@as(i64, 30), fc.pa.nodes.items[idx3].weight);
+    try testing.expectEqual(@as(i64, 60), fc.proto_array.nodes.items[idx1].weight);
+    try testing.expectEqual(@as(i64, 50), fc.proto_array.nodes.items[idx2].weight);
+    try testing.expectEqual(@as(i64, 30), fc.proto_array.nodes.items[idx3].weight);
 }
 
 test "failed insertion cleanup: unknown parent does not leave dangling root" {
@@ -3162,7 +3162,7 @@ test "failed insertion cleanup: unknown parent does not leave dangling root" {
     try testing.expectError(error.InvalidBlockUnknownParent, onBlockFromProto(fc, allocator, orphan_block, 10));
 
     // Verify orphan root was NOT left in the indices map.
-    try testing.expectEqual(@as(?u32, null), fc.pa.getDefaultNodeIndex(orphan_root));
+    try testing.expectEqual(@as(?u32, null), fc.proto_array.getDefaultNodeIndex(orphan_root));
 }
 
 // ── IsCanonical / AncestorRoot tests ──
@@ -3256,15 +3256,15 @@ test "AncestorRoot: walks up to ancestor at or before given slot" {
     try onBlockFromProto(fc, testing.allocator, makeTestBlock(5, root3, root2), 10);
 
     // AncestorRoot(root3, slot=6) → root3 (slot 5 <= 6).
-    const a6 = try fc.pa.getAncestor(root3, 6);
+    const a6 = try fc.proto_array.getAncestor(root3, 6);
     try testing.expectEqual(root3, a6.block_root);
 
     // AncestorRoot(root3, slot=5) → root3 (exact match).
-    const a5 = try fc.pa.getAncestor(root3, 5);
+    const a5 = try fc.proto_array.getAncestor(root3, 5);
     try testing.expectEqual(root3, a5.block_root);
 
     // AncestorRoot(root3, slot=1) → root1.
-    const a1 = try fc.pa.getAncestor(root3, 1);
+    const a1 = try fc.proto_array.getAncestor(root3, 1);
     try testing.expectEqual(root1, a1.block_root);
 }
 
@@ -3294,7 +3294,7 @@ test "AncestorRoot: equal slot returns parent" {
     try onBlockFromProto(fc, testing.allocator, makeTestBlock(100, root1, genesis_root), 200);
     try onBlockFromProto(fc, testing.allocator, makeTestBlock(101, root3, root1), 200);
 
-    const ancestor = try fc.pa.getAncestor(root3, 100);
+    const ancestor = try fc.proto_array.getAncestor(root3, 100);
     try testing.expectEqual(root1, ancestor.block_root);
 }
 
@@ -3324,6 +3324,6 @@ test "AncestorRoot: lower slot with gap returns parent" {
     try onBlockFromProto(fc, testing.allocator, makeTestBlock(100, root1, genesis_root), 300);
     try onBlockFromProto(fc, testing.allocator, makeTestBlock(200, root3, root1), 300);
 
-    const ancestor = try fc.pa.getAncestor(root3, 150);
+    const ancestor = try fc.proto_array.getAncestor(root3, 150);
     try testing.expectEqual(root1, ancestor.block_root);
 }

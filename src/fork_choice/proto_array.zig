@@ -193,6 +193,12 @@ pub const ProtoBlock = struct {
     parent_block_hash: ?Root = null,
     /// Payload resolution status (Gloas ePBS). Pre-Gloas blocks are always .full.
     payload_status: PayloadStatus = .full,
+
+    /// Returns true if this is a Gloas (ePBS) block.
+    /// Gloas blocks have a non-null parent_block_hash.
+    pub fn isGloasBlock(self: ProtoBlock) bool {
+        return self.parent_block_hash != null;
+    }
 };
 
 /// A node in the ProtoArray DAG.
@@ -286,6 +292,12 @@ pub const ProtoNode = struct {
             @field(block, field.name) = @field(self, field.name);
         }
         return block;
+    }
+
+    /// Returns true if this is a Gloas (ePBS) block.
+    /// Gloas blocks have a non-null parent_block_hash.
+    pub fn isGloasBlock(self: ProtoNode) bool {
+        return self.parent_block_hash != null;
     }
 };
 
@@ -611,7 +623,7 @@ pub const ProtoArray = struct {
             return error.InvalidBlockExecutionStatus;
         }
 
-        if (block.parent_block_hash != null) {
+        if (block.isGloasBlock()) {
             try self.onBlockGloas(allocator, block, current_slot, proposer_boost_root);
         } else {
             try self.onBlockPreGloas(allocator, block, current_slot, proposer_boost_root);
@@ -627,7 +639,7 @@ pub const ProtoArray = struct {
     ) (Allocator.Error || ProtoArrayError)!void {
         var node = ProtoNode.fromBlock(block);
         assert(node.payload_status == .full);
-        assert(block.parent_block_hash == null);
+        assert(!block.isGloasBlock());
 
         // Look up parent index.
         node.parent = self.getNodeIndexByRootAndStatus(block.parent_root, .full);
@@ -659,7 +671,7 @@ pub const ProtoArray = struct {
         // Gloas: Create PENDING + EMPTY nodes with correct parent relationships
         // Parent of new PENDING node = parent block's EMPTY or FULL (inter-block edge)
         // Parent of new EMPTY node = own PENDING node (intra-block edge)
-        assert(block.parent_block_hash != null);
+        assert(block.isGloasBlock());
         assert(block.extra_meta.executionStatus() != .invalid);
 
         // For fork transition: if parent is pre-Gloas, point to parent's FULL
@@ -1246,7 +1258,7 @@ pub const ProtoArray = struct {
         node: *const ProtoNode,
         current_slot: Slot,
     ) i64 {
-        const is_gloas = node.parent_block_hash != null;
+        const is_gloas = node.isGloasBlock();
         const is_variant =
             node.payload_status != .pending;
         const is_prev_slot =
@@ -1447,7 +1459,7 @@ pub const ProtoArray = struct {
 
         // Now parent_block.slot <= ancestor_slot
         // Return the parent with the correct payload status based on current_block
-        if (current_block.parent_block_hash == null) {
+        if (!current_block.isGloasBlock()) {
             // Pre-Gloas: return FULL variant (only one that exists)
             return parent_block;
         }

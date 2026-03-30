@@ -20,7 +20,7 @@ const fork_choice = @import("fork_choice");
 const consensus_types = @import("consensus_types");
 const fork_types = @import("fork_types");
 
-const ForkChoice = fork_choice.ForkChoiceStruct;
+const ForkChoice = fork_choice.ForkChoice;
 const AnyIndexedAttestation = fork_types.AnyIndexedAttestation;
 const Phase0IndexedAttestation = consensus_types.phase0.IndexedAttestation.Type;
 const AttestationData = consensus_types.phase0.AttestationData;

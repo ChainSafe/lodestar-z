@@ -8,8 +8,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const fork_choice = @import("fork_choice");
-const ForkChoice = fork_choice.ForkChoiceStruct;
-const ProtoArray = fork_choice.ProtoArrayStruct;
+const ForkChoice = fork_choice.ForkChoice;
+const ProtoArray = fork_choice.ProtoArray;
 const ProtoBlock = fork_choice.ProtoBlock;
 const ForkChoiceStore = fork_choice.ForkChoiceStore;
 const CheckpointWithPayloadStatus = fork_choice.CheckpointWithPayloadStatus;
@@ -148,7 +148,7 @@ pub fn initializeForkChoice(allocator: Allocator, opts: Opts) !*ForkChoice {
 pub fn deinitForkChoice(allocator: Allocator, fc: *ForkChoice) void {
     // Save pointers before fc.deinit() sets self.* = undefined.
     const fc_store = fc.fc_store;
-    const pa = fc.pa;
+    const proto_arr = fc.proto_array;
 
     // ForkChoice.deinit releases votes, caches, queued attestations, and
     // the balances Rc reference held by ForkChoice itself.
@@ -160,8 +160,8 @@ pub fn deinitForkChoice(allocator: Allocator, fc: *ForkChoice) void {
     allocator.destroy(fc_store);
 
     // ProtoArray.deinit releases nodes, indices, and ptc_votes.
-    pa.deinit(allocator);
-    allocator.destroy(pa);
+    proto_arr.deinit(allocator);
+    allocator.destroy(proto_arr);
 
     // Finally free the ForkChoice struct itself.
     allocator.destroy(fc);
