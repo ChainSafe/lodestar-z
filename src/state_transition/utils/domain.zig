@@ -20,7 +20,7 @@ pub fn computeDomain(domain_type: DomainType, fork_version: Version, genesis_val
 
 /// Return the ForkVersion at an epoch from a Fork type
 pub fn forkVersion(fork: Fork, epoch: Epoch) Version {
-    return if (epoch < fork.epoch) fork.previousVersion else fork.currentVersion;
+    return if (epoch < fork.epoch) fork.previous_version else fork.current_version;
 }
 
 /// Used primarily in signature domains to avoid collisions across forks/chains.
@@ -49,7 +49,10 @@ test "computeDomain - domain type is first 4 bytes" {
     // Remaining 28 bytes should be from fork data root (non-zero due to hashing)
     var all_zero = true;
     for (domain[4..32]) |b| {
-        if (b != 0) { all_zero = false; break; }
+        if (b != 0) {
+            all_zero = false;
+            break;
+        }
     }
     try testing.expect(!all_zero);
 }
