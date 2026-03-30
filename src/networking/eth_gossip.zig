@@ -643,6 +643,10 @@ test "EthGossipAdapter: handleMessage with valid snappy beacon_block" {
         compressed,
         null,
     );
+    defer if (result.decoded) |decoded| switch (decoded) {
+        .beacon_block => |msg| allocator.free(msg.raw_ssz),
+        else => {},
+    };
 
     // SSZ deserialization should fail for this truncated payload.
     try testing.expectEqual(ValidationResult.reject, result.validation);

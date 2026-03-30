@@ -290,7 +290,8 @@ pub fn decodeGossipMessage(
         defer allocator.free(ssz_bytes);
         return decodeFromSszBytes(allocator, topic_type, ssz_bytes, fork_seq);
     }
-    // beacon_block: ssz_bytes ownership transferred into raw_ssz — caller frees.
+    // beacon_block: ownership transfers into raw_ssz on success.
+    errdefer allocator.free(ssz_bytes);
     return decodeFromSszBytes(allocator, topic_type, ssz_bytes, fork_seq);
 }
 

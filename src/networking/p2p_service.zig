@@ -281,6 +281,7 @@ pub const P2pService = struct {
         }
         try self.network.listen(io, listen_addr);
         try self.gossip_adapter.subscribeEthTopics();
+        self.startHeartbeat(io);
         log.info("P2P service started", .{});
     }
 
@@ -352,11 +353,12 @@ pub const P2pService = struct {
     pub fn deinit(self: *Self, io: Io) void {
         self.gossip_adapter.deinit();
         self.network.deinit(io);
+        self.network.getHandler(IdentifyHandler).deinit();
         self.gossipsub.deinit();
     }
 
     /// Spawn a background fiber for the gossipsub heartbeat timer.
-    pub fn startHeartbeat(self: *Self, io: Io) void {
+    fn startHeartbeat(self: *Self, io: Io) void {
         self.network.background.async(io, heartbeatLoop, .{ self.gossipsub, io });
     }
 

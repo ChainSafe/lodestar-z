@@ -471,7 +471,7 @@ pub const PeerDB = struct {
     }
 
     /// Collect connected peers that should be disconnected based on score.
-    /// Caller owns the returned slice.
+    /// Caller owns the returned slice and each duplicated peer ID within it.
     pub fn getScoreDisconnectPeers(self: *PeerDB) ![][]const u8 {
         var result: std.ArrayListUnmanaged([]const u8) = .empty;
         errdefer {
@@ -756,7 +756,10 @@ test "PeerDB: score-based disconnect collection" {
     }
 
     const to_disconnect = try db.getScoreDisconnectPeers();
-    defer allocator.free(to_disconnect);
+    defer {
+        for (to_disconnect) |peer_id| allocator.free(peer_id);
+        allocator.free(to_disconnect);
+    }
     try std.testing.expectEqual(@as(usize, 1), to_disconnect.len);
     try std.testing.expectEqualStrings("bad_peer", to_disconnect[0]);
 }

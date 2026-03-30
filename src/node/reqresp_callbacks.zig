@@ -1,69 +1,50 @@
 //! Req/resp callbacks for the P2P req/resp protocol.
 //!
-//! Implements `ReqRespContext` callbacks that bridge the type-erased
-//! vtable from the networking layer to BeaconNode internals.
-//!
-//! The `RequestContext` struct wraps a *BeaconNode and a scratch allocator.
-//! All DB-fetched byte slices are allocated on the scratch arena and freed
-//! after `handleRequest` copies them into response chunks.
+//! Bridges the type-erased networking vtable to BeaconNode internals using
+//! streaming payload emitters instead of eager slice materialization.
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 
 const preset_root = @import("preset");
 const networking = @import("networking");
 const StatusMessage = networking.messages.StatusMessage;
 const ReqRespContext = networking.ReqRespContext;
+const PayloadSink = networking.req_resp_handler.PayloadSink;
+const SlotPayload = networking.req_resp_handler.SlotPayload;
 
-/// Wraps a *BeaconNode + scratch arena for req/resp callbacks.
-///
-/// Lives on the stack of BeaconNode.onReqResp(). Each callback receives this
-/// as `ptr: *anyopaque` and casts it back to access the node and scratch allocator.
 pub const RequestContext = struct {
-    // Note: *BeaconNode is declared as *anyopaque here to break the circular
-    // dependency between this file and beacon_node.zig.
-    // Cast back with: const node: *BeaconNode = @ptrCast(@alignCast(self.node));
+    // Stored as *anyopaque to avoid a circular dependency in the type graph.
     node: *anyopaque,
-    /// Scratch allocator for temporary DB-fetched bytes.
-    /// Freed by the arena after handleRequest returns.
-    scratch: Allocator,
 };
 
-/// Build the ReqRespContext vtable wired to RequestContext callbacks.
 pub fn makeReqRespContext(ctx: *RequestContext) ReqRespContext {
     return .{
         .ptr = @ptrCast(ctx),
         .getStatus = &reqRespGetStatus,
         .getMetadata = &reqRespGetMetadata,
         .getPingSequence = &reqRespGetPingSequence,
-        .getBlockByRoot = &reqRespGetBlockByRoot,
-        .getBlocksByRange = &reqRespGetBlocksByRange,
-        .getBlobByRoot = &reqRespGetBlobByRoot,
-        .getBlobsByRange = &reqRespGetBlobsByRange,
-        .getDataColumnByRoot = &reqRespGetDataColumnByRoot,
-        .getDataColumnsByRange = &reqRespGetDataColumnsByRange,
+        .findBlockByRoot = &reqRespFindBlockByRoot,
+        .streamBlocksByRange = &reqRespStreamBlocksByRange,
+        .findBlobByRoot = &reqRespFindBlobByRoot,
+        .streamBlobsByRange = &reqRespStreamBlobsByRange,
+        .findDataColumnByRoot = &reqRespFindDataColumnByRoot,
+        .streamDataColumnsByRange = &reqRespStreamDataColumnsByRange,
         .getForkDigest = &reqRespGetForkDigest,
         .onGoodbye = &reqRespOnGoodbye,
         .onPeerStatus = &reqRespOnPeerStatus,
     };
 }
 
-// ---------------------------------------------------------------------------
-// Concrete callback implementations.
-// Each casts `ptr` to `*RequestContext`, then accesses the node.
-// ---------------------------------------------------------------------------
-
-// Import BeaconNode lazily via the beacon_node module to avoid circular deps.
-// We only use it for type-safe casts inside the callback bodies.
 const beacon_node_mod = @import("beacon_node.zig");
 const BeaconNode = beacon_node_mod.BeaconNode;
 
-fn reqRespGetStatus(ptr: *anyopaque) StatusMessage.Type {
+fn requestNode(ptr: *anyopaque) *BeaconNode {
     const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
-    // Delegate to node.getStatus() which uses the FC checkpoint for finalized_root,
-    // correctly handling skip slots where slot-based lookup would fail (C2 fix).
-    return node.getStatus();
+    return @ptrCast(@alignCast(ctx.node));
+}
+
+fn reqRespGetStatus(ptr: *anyopaque) StatusMessage.Type {
+    return requestNode(ptr).getStatus();
 }
 
 fn reqRespGetMetadata(ptr: *anyopaque) networking.messages.MetadataV2.Type {
@@ -80,106 +61,61 @@ fn reqRespGetPingSequence(ptr: *anyopaque) u64 {
     return 0;
 }
 
-fn reqRespGetBlockByRoot(ptr: *anyopaque, root: [32]u8) ?[]const u8 {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
-
-    const maybe_bytes = node.db.getBlock(root) catch return null;
-    const bytes = maybe_bytes orelse return null;
+fn reqRespFindBlockByRoot(ptr: *anyopaque, root: [32]u8, sink: *const PayloadSink) anyerror!void {
+    const node = requestNode(ptr);
+    const maybe_bytes = node.db.getBlock(root) catch return;
+    const bytes = maybe_bytes orelse return;
     defer node.allocator.free(bytes);
 
-    const copy = ctx.scratch.alloc(u8, bytes.len) catch return null;
-    @memcpy(copy, bytes);
-    return copy;
+    try sink.write(.{
+        .slot = readSignedBeaconBlockSlot(bytes) orelse 0,
+        .ssz_payload = bytes,
+    });
 }
 
-fn reqRespGetBlocksByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8 {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
+fn reqRespStreamBlocksByRange(ptr: *anyopaque, start_slot: u64, count: u64, sink: *const PayloadSink) anyerror!void {
+    const node = requestNode(ptr);
 
-    var results: std.ArrayListUnmanaged([]const u8) = .empty;
-
-    const end_slot = std.math.add(u64, start_slot, count) catch return &.{};
-    var slot: u64 = start_slot;
+    const end_slot = std.math.add(u64, start_slot, count) catch return;
+    var slot = start_slot;
     while (slot < end_slot) : (slot += 1) {
         const root = node.head_tracker.getBlockRoot(slot) orelse continue;
         const maybe_bytes = node.db.getBlock(root) catch continue;
         const bytes = maybe_bytes orelse continue;
         defer node.allocator.free(bytes);
 
-        const copy = ctx.scratch.alloc(u8, bytes.len) catch continue;
-        @memcpy(copy, bytes);
-        results.append(ctx.scratch, copy) catch continue;
+        try sink.write(.{
+            .slot = readSignedBeaconBlockSlot(bytes) orelse slot,
+            .ssz_payload = bytes,
+        });
     }
-
-    return results.toOwnedSlice(ctx.scratch) catch &.{};
 }
 
-fn reqRespGetBlobByRoot(ptr: *anyopaque, root: [32]u8, index: u64) ?[]const u8 {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
+fn reqRespFindBlobByRoot(ptr: *anyopaque, root: [32]u8, index: u64, sink: *const PayloadSink) anyerror!void {
+    const node = requestNode(ptr);
 
-    const maybe_bytes = node.db.getBlobSidecars(root) catch return null;
-    const bytes = maybe_bytes orelse return null;
+    const maybe_bytes = node.db.getBlobSidecars(root) catch return;
+    const bytes = maybe_bytes orelse return;
     defer node.allocator.free(bytes);
 
     const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
     const start = index * sidecar_size;
     const end = start + sidecar_size;
-    if (end > bytes.len) return null;
+    if (end > bytes.len) return;
 
-    const copy = ctx.scratch.alloc(u8, sidecar_size) catch return null;
-    @memcpy(copy, bytes[start..end]);
-    return copy;
+    const blob = bytes[start..end];
+    try sink.write(.{
+        .slot = readBlobSidecarSlot(blob) orelse 0,
+        .ssz_payload = blob,
+    });
 }
 
-fn reqRespGetDataColumnByRoot(ptr: *anyopaque, root: [32]u8, index: u64) ?[]const u8 {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
-
-    const maybe_bytes = node.db.getDataColumn(root, index) catch return null;
-    const bytes = maybe_bytes orelse return null;
-    defer node.allocator.free(bytes);
-
-    const copy = ctx.scratch.alloc(u8, bytes.len) catch return null;
-    @memcpy(copy, bytes);
-    return copy;
-}
-
-fn reqRespGetDataColumnsByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8 {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
-
-    var results: std.ArrayListUnmanaged([]const u8) = .empty;
-
-    const end_slot = std.math.add(u64, start_slot, count) catch return &.{};
-    var slot: u64 = start_slot;
-    while (slot < end_slot) : (slot += 1) {
-        const root = node.head_tracker.getBlockRoot(slot) orelse continue;
-        var col_idx: u64 = 0;
-        while (col_idx < 128) : (col_idx += 1) {
-            const maybe_bytes = node.db.getDataColumn(root, col_idx) catch continue;
-            const bytes = maybe_bytes orelse continue;
-            defer node.allocator.free(bytes);
-
-            const copy = ctx.scratch.alloc(u8, bytes.len) catch continue;
-            @memcpy(copy, bytes);
-            results.append(ctx.scratch, copy) catch continue;
-        }
-    }
-
-    return results.toOwnedSlice(ctx.scratch) catch &.{};
-}
-
-fn reqRespGetBlobsByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const []const u8 {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
-
-    var results: std.ArrayListUnmanaged([]const u8) = .empty;
+fn reqRespStreamBlobsByRange(ptr: *anyopaque, start_slot: u64, count: u64, sink: *const PayloadSink) anyerror!void {
+    const node = requestNode(ptr);
     const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
 
-    const end_slot = std.math.add(u64, start_slot, count) catch return &.{};
-    var slot: u64 = start_slot;
+    const end_slot = std.math.add(u64, start_slot, count) catch return;
+    var slot = start_slot;
     while (slot < end_slot) : (slot += 1) {
         const root = node.head_tracker.getBlockRoot(slot) orelse continue;
         const maybe_bytes = node.db.getBlobSidecars(root) catch continue;
@@ -188,40 +124,92 @@ fn reqRespGetBlobsByRange(ptr: *anyopaque, start_slot: u64, count: u64) []const 
 
         var offset: usize = 0;
         while (offset + sidecar_size <= bytes.len) : (offset += sidecar_size) {
-            const copy = ctx.scratch.alloc(u8, sidecar_size) catch continue;
-            @memcpy(copy, bytes[offset..][0..sidecar_size]);
-            results.append(ctx.scratch, copy) catch continue;
+            const blob = bytes[offset..][0..sidecar_size];
+            try sink.write(.{
+                .slot = readBlobSidecarSlot(blob) orelse slot,
+                .ssz_payload = blob,
+            });
         }
     }
+}
 
-    return results.toOwnedSlice(ctx.scratch) catch &.{};
+fn reqRespFindDataColumnByRoot(ptr: *anyopaque, root: [32]u8, index: u64, sink: *const PayloadSink) anyerror!void {
+    const node = requestNode(ptr);
+
+    const maybe_bytes = node.db.getDataColumn(root, index) catch return;
+    const bytes = maybe_bytes orelse return;
+    defer node.allocator.free(bytes);
+
+    try sink.write(.{
+        .slot = readDataColumnSidecarSlot(bytes) orelse 0,
+        .ssz_payload = bytes,
+    });
+}
+
+fn reqRespStreamDataColumnsByRange(
+    ptr: *anyopaque,
+    start_slot: u64,
+    count: u64,
+    columns: []const u64,
+    sink: *const PayloadSink,
+) anyerror!void {
+    const node = requestNode(ptr);
+
+    const end_slot = std.math.add(u64, start_slot, count) catch return;
+    var slot = start_slot;
+    while (slot < end_slot) : (slot += 1) {
+        const root = node.head_tracker.getBlockRoot(slot) orelse continue;
+        for (columns) |column_index| {
+            const maybe_bytes = node.db.getDataColumn(root, column_index) catch continue;
+            const bytes = maybe_bytes orelse continue;
+            defer node.allocator.free(bytes);
+
+            try sink.write(.{
+                .slot = readDataColumnSidecarSlot(bytes) orelse slot,
+                .ssz_payload = bytes,
+            });
+        }
+    }
 }
 
 fn reqRespGetForkDigest(ptr: *anyopaque, slot: u64) [4]u8 {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
+    const node = requestNode(ptr);
     return node.config.forkDigestAtSlot(slot, node.genesis_validators_root);
 }
 
-fn reqRespOnGoodbye(ptr: *anyopaque, reason: u64) void {
+fn reqRespOnGoodbye(ptr: *anyopaque, peer_id: ?[]const u8, reason: u64) void {
     _ = ptr;
+    _ = peer_id;
     _ = reason;
 }
 
-fn reqRespOnPeerStatus(ptr: *anyopaque, status: StatusMessage.Type) void {
-    const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
-    const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
-    // TODO: ReqRespContext.onPeerStatus does not carry the peer_id — the networking
-    // layer's inbound handler dispatches here without propagating which peer sent the
-    // Status message.  To fix properly, extend ReqRespContext.onPeerStatus signature
-    // to include `peer_id: []const u8` and thread it through from the P2P layer.
-    // Until then, sync will attribute all inbound Status messages to "unknown" peer.
-    const peer_id = "unknown";
-    std.log.debug("reqRespOnPeerStatus: peer_id not available in callback (using \"{s}\")", .{peer_id});
+fn reqRespOnPeerStatus(ptr: *anyopaque, peer_id: ?[]const u8, status: StatusMessage.Type) void {
+    const node = requestNode(ptr);
+    const effective_peer_id = peer_id orelse "unknown";
+
     if (node.sync_service_inst) |sync_svc| {
-        sync_svc.onPeerStatus(peer_id, status) catch |err| {
+        sync_svc.onPeerStatus(effective_peer_id, status) catch |err| {
             std.log.warn("SyncService.onPeerStatus failed: {}", .{err});
         };
     }
-    node.unknown_chain_sync.onPeerConnected(peer_id, status.head_root) catch {};
+    node.unknown_chain_sync.onPeerConnected(effective_peer_id, status.head_root) catch {};
+}
+
+fn readSignedBeaconBlockSlot(bytes: []const u8) ?u64 {
+    if (bytes.len < 4) return null;
+    const msg_offset = std.mem.readInt(u32, bytes[0..4], .little);
+    if (bytes.len < @as(usize, msg_offset) + 8) return null;
+    return std.mem.readInt(u64, bytes[msg_offset..][0..8], .little);
+}
+
+fn readBlobSidecarSlot(bytes: []const u8) ?u64 {
+    const slot_offset = 8 + (4096 * 32) + 48 + 48;
+    if (bytes.len < slot_offset + 8) return null;
+    return std.mem.readInt(u64, bytes[slot_offset..][0..8], .little);
+}
+
+fn readDataColumnSidecarSlot(bytes: []const u8) ?u64 {
+    const slot_offset = 8 + 4 + 4 + 4;
+    if (bytes.len < slot_offset + 8) return null;
+    return std.mem.readInt(u64, bytes[slot_offset..][0..8], .little);
 }

@@ -16,7 +16,6 @@ pub const gossip_topics = @import("gossip_topics.zig");
 pub const gossip_validation = @import("gossip_validation.zig");
 pub const gossip_decoding = @import("gossip_decoding.zig");
 pub const eth_gossip = @import("eth_gossip.zig");
-pub const eth_reqresp = @import("eth_reqresp.zig");
 
 // Re-export key types for convenience.
 pub const ResponseCode = protocol.ResponseCode;
@@ -55,7 +54,6 @@ pub const decodeGossipMessage = gossip_decoding.decodeGossipMessage;
 
 // eth-p2p-z adapter re-exports.
 pub const EthGossipAdapter = eth_gossip.EthGossipAdapter;
-pub const EthReqRespAdapter = eth_reqresp.EthReqRespAdapter;
 
 // eth-p2p-z integration layer.
 pub const eth2_protocols = @import("eth2_protocols.zig");

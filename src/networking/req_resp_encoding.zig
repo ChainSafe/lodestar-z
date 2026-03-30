@@ -22,6 +22,7 @@ const testing = std.testing;
 const snappy = @import("snappy").frame;
 const varint = @import("varint.zig");
 const protocol = @import("protocol.zig");
+const Io = std.Io;
 
 const ResponseCode = protocol.ResponseCode;
 
@@ -88,6 +89,17 @@ pub fn encodeRequest(
     return result;
 }
 
+pub fn writeRequestToStream(
+    allocator: std.mem.Allocator,
+    io: Io,
+    stream: anytype,
+    ssz_bytes: []const u8,
+) anyerror!void {
+    const wire_bytes = try encodeRequest(allocator, ssz_bytes);
+    defer allocator.free(wire_bytes);
+    try writeAll(io, stream, wire_bytes);
+}
+
 /// Decode a request payload from the wire.
 ///
 /// Parses: `<varint(len(ssz_bytes))> | <snappy_frame(ssz_bytes)>`
@@ -123,6 +135,28 @@ pub fn decodeRequest(
         .ssz_bytes = ssz_bytes,
         .bytes_consumed = wire_bytes.len,
     };
+}
+
+pub fn readRequestFromStream(
+    allocator: std.mem.Allocator,
+    io: Io,
+    stream: anytype,
+) anyerror![]const u8 {
+    const ssz_length = try readLengthPrefixFromStream(io, stream);
+    if (ssz_length > MAX_REQ_RESP_SIZE) return DecodeError.PayloadTooLarge;
+
+    const snappy_frame = try readSnappyFrameFromStream(allocator, io, stream, ssz_length);
+    defer allocator.free(snappy_frame);
+
+    const decompressed = try snappy.uncompress(allocator, snappy_frame);
+    const ssz_bytes = decompressed orelse return DecodeError.EmptyPayload;
+    errdefer allocator.free(ssz_bytes);
+
+    if (ssz_bytes.len != ssz_length) {
+        return DecodeError.LengthMismatch;
+    }
+
+    return ssz_bytes;
 }
 
 /// Encode a response chunk for the wire.
@@ -172,6 +206,19 @@ pub fn encodeResponseChunk(
     @memcpy(buf[offset..], compressed);
 
     return buf;
+}
+
+pub fn writeResponseChunkToStream(
+    allocator: std.mem.Allocator,
+    io: Io,
+    stream: anytype,
+    result_code: ResponseCode,
+    context_bytes: ?[4]u8,
+    ssz_bytes: []const u8,
+) anyerror!void {
+    const wire_bytes = try encodeResponseChunk(allocator, result_code, context_bytes, ssz_bytes);
+    defer allocator.free(wire_bytes);
+    try writeAll(io, stream, wire_bytes);
 }
 
 /// Decode a response chunk from the wire.
@@ -248,6 +295,46 @@ pub fn decodeResponseChunk(
     };
 }
 
+pub const ResponseChunkStreamReader = struct {
+    allocator: std.mem.Allocator,
+    has_context_bytes: bool,
+    buffer: std.ArrayListUnmanaged(u8) = .empty,
+    reached_eof: bool = false,
+
+    pub fn deinit(self: *ResponseChunkStreamReader) void {
+        self.buffer.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn next(self: *ResponseChunkStreamReader, io: Io, stream: anytype) anyerror!?DecodedResponseChunk {
+        while (true) {
+            if (self.buffer.items.len > 0) {
+                const decoded = decodeResponseChunk(self.allocator, self.buffer.items, self.has_context_bytes) catch |err| switch (err) {
+                    error.InsufficientData => null,
+                    else => return err,
+                };
+                if (decoded) |chunk| {
+                    discardPrefix(&self.buffer, chunk.bytes_consumed);
+                    return chunk;
+                }
+            }
+
+            if (self.reached_eof) {
+                if (self.buffer.items.len == 0) return null;
+                return error.UnexpectedEof;
+            }
+
+            var scratch: [4096]u8 = undefined;
+            const n = try stream.read(io, &scratch);
+            if (n == 0) {
+                self.reached_eof = true;
+                continue;
+            }
+            try self.buffer.appendSlice(self.allocator, scratch[0..n]);
+        }
+    }
+};
+
 /// Calculate the total size of snappy-framed data for one logical message.
 /// Walks the frame headers (identifier + data chunks) until enough uncompressed
 /// bytes have been accounted for.
@@ -302,6 +389,73 @@ fn calcSnappyFrameSize(data: []const u8, expected_uncompressed: usize) !usize {
     }
 
     return pos;
+}
+
+fn writeAll(io: Io, stream: anytype, data: []const u8) anyerror!void {
+    var total: usize = 0;
+    while (total < data.len) {
+        const n = try stream.write(io, data[total..]);
+        if (n == 0) return error.BrokenPipe;
+        total += n;
+    }
+}
+
+fn readLengthPrefixFromStream(io: Io, stream: anytype) anyerror!usize {
+    var buf: [varint.max_length]u8 = undefined;
+    var len: usize = 0;
+
+    while (len < buf.len) {
+        const n = try stream.read(io, buf[len .. len + 1]);
+        if (n == 0) return error.UnexpectedEof;
+        len += 1;
+
+        const decoded = varint.decode(buf[0..len]) catch |err| switch (err) {
+            error.EndOfInput => continue,
+            else => return err,
+        };
+        return @intCast(decoded.value);
+    }
+
+    return varint.DecodeError.Overflow;
+}
+
+fn readSnappyFrameFromStream(
+    allocator: std.mem.Allocator,
+    io: Io,
+    stream: anytype,
+    expected_uncompressed: usize,
+) anyerror![]u8 {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buffer.deinit(allocator);
+
+    while (true) {
+        const consumed = calcSnappyFrameSize(buffer.items, expected_uncompressed) catch |err| switch (err) {
+            error.InsufficientData => null,
+        };
+        if (consumed) |frame_len| {
+            const owned = try buffer.toOwnedSlice(allocator);
+            if (frame_len == owned.len) return owned;
+
+            const exact = try allocator.alloc(u8, frame_len);
+            @memcpy(exact, owned[0..frame_len]);
+            allocator.free(owned);
+            return exact;
+        }
+
+        var scratch: [4096]u8 = undefined;
+        const n = try stream.read(io, &scratch);
+        if (n == 0) return error.UnexpectedEof;
+        try buffer.appendSlice(allocator, scratch[0..n]);
+    }
+}
+
+fn discardPrefix(buffer: *std.ArrayListUnmanaged(u8), prefix_len: usize) void {
+    if (prefix_len >= buffer.items.len) {
+        buffer.items.len = 0;
+        return;
+    }
+    std.mem.copyForwards(u8, buffer.items[0 .. buffer.items.len - prefix_len], buffer.items[prefix_len..]);
+    buffer.items.len -= prefix_len;
 }
 
 /// Read the preamble varint from a Snappy raw compressed block.

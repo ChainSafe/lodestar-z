@@ -66,7 +66,6 @@ const DiscoveryService = networking.DiscoveryService;
 const DiscoveryConfig = networking.DiscoveryConfig;
 const PeerManager = networking.PeerManager;
 const PeerManagerConfig = networking.PeerManagerConfig;
-const eth2_protocols = networking.eth2_protocols;
 const discv5 = @import("discv5");
 const ssl = @import("ssl");
 const ReqRespContext = networking.ReqRespContext;
@@ -1464,11 +1463,9 @@ pub const BeaconNode = struct {
         defer listen_multiaddr.deinit();
 
         // Build a persistent RequestContext (heap-allocated, stable for P2P lifetime).
-        // Uses self.allocator as scratch so returned block slices outlive callbacks;
-        // they are copied into response chunks by the handler before use.
         const p2p_req_ctx = try self.allocator.create(reqresp_callbacks_mod.RequestContext);
         errdefer self.allocator.destroy(p2p_req_ctx);
-        p2p_req_ctx.* = .{ .node = @ptrCast(self), .scratch = self.allocator };
+        p2p_req_ctx.* = .{ .node = @ptrCast(self) };
         self.p2p_request_ctx = p2p_req_ctx;
 
         const req_resp_ctx = try self.allocator.create(ReqRespContext);
@@ -1516,8 +1513,11 @@ pub const BeaconNode = struct {
                 .heartbeat_interval_ms = 700,
             },
         });
+        defer self.deinitP2pService(io);
+
         var svc = &self.p2p_service.?;
         try svc.start(io, listen_multiaddr);
+        self.subscribeInitialP2pSubnets(svc);
 
         // Initialize discovery service.
         self.initDiscoveryService() catch |err| {
@@ -1538,15 +1538,181 @@ pub const BeaconNode = struct {
         };
 
         // Dial bootnodes: decode ENR → extract IP/port → build multiaddr → dial.
-        if (self.bootnodes.len > 0) {
-            std.log.info("Dialing {d} bootnode(s)...", .{self.bootnodes.len});
-            for (self.bootnodes) |enr_str| {
-                self.dialBootnodeEnr(io, svc, enr_str) catch |err| {
-                    std.log.warn("Failed to dial bootnode: {}", .{err});
+        self.bootstrapBootnodes(io, svc);
+
+        // Main P2P loop: discovery, gossip, sync, and fork transition handling.
+        self.runP2pLoop(io, svc);
+    }
+
+    fn deinitP2pService(self: *BeaconNode, io: std.Io) void {
+        if (self.p2p_service) |*svc| {
+            svc.deinit(io);
+            self.p2p_service = null;
+        }
+    }
+
+    fn subscribeInitialP2pSubnets(self: *BeaconNode, svc: *networking.P2pService) void {
+        const gossip_topics = networking.gossip_topics;
+
+        if (self.node_options.subscribe_all_subnets) {
+            var attestation_subnet: u8 = 0;
+            while (attestation_subnet < gossip_topics.MAX_ATTESTATION_SUBNET_ID) : (attestation_subnet += 1) {
+                svc.subscribeSubnet(.beacon_attestation, attestation_subnet) catch |err| {
+                    std.log.warn("Failed to subscribe to attestation subnet {d}: {}", .{ attestation_subnet, err });
                 };
+            }
+            std.log.info("Subscribed to all {d} attestation subnets", .{gossip_topics.MAX_ATTESTATION_SUBNET_ID});
+        } else {
+            std.log.info("Attestation subnet auto-subscribe disabled; duty-driven subnet management not yet wired", .{});
+        }
+
+        const custody_req = self.config.chain.CUSTODY_REQUIREMENT;
+        var data_column_subnet: u8 = 0;
+        while (data_column_subnet < custody_req and data_column_subnet < gossip_topics.MAX_DATA_COLUMN_SIDECAR_SUBNET_ID) : (data_column_subnet += 1) {
+            svc.subscribeSubnet(.data_column_sidecar, data_column_subnet) catch |err| {
+                std.log.warn("Failed to subscribe to data column subnet {d}: {}", .{ data_column_subnet, err });
+            };
+        }
+        std.log.info("Subscribed to {d} data column subnets (custody requirement)", .{custody_req});
+    }
+
+    fn closeOwnedQuicStream(io: std.Io, stream: *networking.QuicStream) void {
+        stream.close(io);
+        stream.deinit();
+    }
+
+    fn bootstrapBootnodes(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
+        if (self.bootnodes.len == 0) return;
+
+        std.log.info("Dialing {d} bootnode(s)...", .{self.bootnodes.len});
+        for (self.bootnodes) |enr_str| {
+            self.dialBootnodeEnr(io, svc, enr_str) catch |err| {
+                std.log.warn("Failed to dial bootnode: {}", .{err});
+            };
+        }
+    }
+
+    fn runP2pLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
+        std.log.info("Starting P2P maintenance loop...", .{});
+        while (!self.shutdown_requested.load(.acquire)) {
+            const slot_sleep: std.Io.Timeout = .{ .duration = .{
+                .raw = std.Io.Duration.fromNanoseconds(@as(i96, 6) * std.time.ns_per_s),
+                .clock = .awake,
+            } };
+            slot_sleep.sleep(io) catch break;
+
+            // Run discovery tick — find new peers if below target.
+            if (self.discovery_service) |ds| {
+                if (self.peer_manager) |pm| {
+                    const peer_count = pm.peerCount();
+                    ds.setConnectedPeers(peer_count);
+                    // Update peer count gauge each tick.
+                    if (self.metrics) |m| m.peers_connected.set(@intCast(peer_count));
+                }
+                ds.discoverPeers();
+            }
+
+            // Poll gossipsub for all gossip messages (blocks, attestations, aggregates).
+            if (self.p2p_service) |p2p| {
+                self.processGossipEvents(p2p);
+            }
+
+            // Drain the BeaconProcessor work queues (up to 128 items per tick).
+            // Items were enqueued by gossip/reqresp handlers above.
+            // Dispatches in strict priority order: blocks > attestations > slashings > etc.
+            // Capped at 128 to avoid monopolizing the event loop (matches TS Lodestar).
+            if (self.beacon_processor) |bp| {
+                const dispatched = bp.tick(128);
+                if (dispatched > 0) {
+                    std.log.debug("Processor: dispatched {d} items ({d} queued)", .{
+                        dispatched, bp.totalQueued(),
+                    });
+                }
+            }
+
+            // Tick the sync service state machine — evaluates mode, dispatches
+            // new batches, re-dispatches failed ones.
+            if (self.sync_service_inst) |sync_svc| {
+                sync_svc.tick() catch |err| {
+                    std.log.warn("SyncService.tick failed: {}", .{err});
+                };
+            }
+
+            // Detect fork transitions: if the active fork digest changed since
+            // the last tick, resubscribe gossip topics under the new digest.
+            {
+                const head_slot = self.head_tracker.head_slot;
+                const current_digest = self.config.forkDigestAtSlot(
+                    head_slot,
+                    self.genesis_validators_root,
+                );
+                if (!std.mem.eql(u8, &current_digest, &self.last_active_fork_digest)) {
+                    if (!std.mem.eql(u8, &self.last_active_fork_digest, &[4]u8{ 0, 0, 0, 0 })) {
+                        // Genuine fork transition — old digest was non-zero.
+                        const last_digest_hex = std.fmt.bytesToHex(&self.last_active_fork_digest, .lower);
+                        const current_digest_hex = std.fmt.bytesToHex(&current_digest, .lower);
+                        std.log.info("Fork transition detected at slot {d}: {s} -> {s}", .{
+                            head_slot,
+                            &last_digest_hex,
+                            &current_digest_hex,
+                        });
+                        svc.onForkTransition(current_digest, self.config.forkSeq(head_slot)) catch |err| {
+                            std.log.warn("onForkTransition failed: {}", .{err});
+                            continue;
+                        };
+                        self.subscribeInitialP2pSubnets(svc);
+                        // Keep gossip_handler fork_seq in sync.
+                        if (self.gossip_handler) |gh| {
+                            gh.updateForkSeq(self.config.forkSeq(head_slot));
+                        }
+                    }
+                    self.last_active_fork_digest = current_digest;
+                }
+            }
+
+            // Drain any batch requests queued by the sync tick.
+            self.processSyncBatches(io, svc);
+
+            // Drain any by-root requests queued by unknown block sync.
+            self.processSyncByRootRequests(io, svc);
+
+            // Update API sync status from the sync service.
+            self.updateApiSyncStatus();
+
+            // Update sync metrics.
+            if (self.metrics) |m| {
+                if (self.sync_service_inst) |sync_svc| {
+                    const status = sync_svc.getSyncStatus();
+                    m.sync_status.set(if (sync_svc.isSynced()) @as(u64, 0) else @as(u64, 1));
+                    m.sync_distance.set(status.sync_distance);
+                }
+            }
+
+            // W7: Check if local validator is next-slot proposer; if so, preparePayload.
+            maybePrepareProposerPayload(self, io);
+
+            // Prune sync committee pools by current head slot.
+            {
+                const head_slot = self.head_tracker.head_slot;
+                if (self.sync_contribution_pool) |pool| pool.prune(head_slot);
+                if (self.sync_committee_message_pool) |pool| pool.prune(head_slot);
+            }
+
+            // Advance the fork choice clock each tick so proposer boost decays
+            // correctly across slot boundaries. Without this, FC time never
+            // advances between block imports and proposer boost persists forever.
+            if (self.clock) |clk| {
+                if (clk.currentSlot(io)) |current_slot| {
+                    if (self.chain.fork_choice) |fc| {
+                        fc.updateTime(self.allocator, current_slot) catch |err| {
+                            std.log.warn("fork choice updateTime failed: {}", .{err});
+                        };
+                    }
+                }
             }
         }
     }
+
     /// Decode an ENR string and dial the peer via QUIC multiaddr.
     fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, enr_str: []const u8) !void {
         // Strip "enr:" prefix if present.
@@ -1632,160 +1798,11 @@ pub const BeaconNode = struct {
         // Open outbound gossipsub stream to send our subscriptions to the peer.
         // This triggers handleOutbound which stores the stream for writing
         // and sends our topic subscription announcements.
-        var p2p_svc = &self.p2p_service.?;
         const GossipsubHandler = @import("zig-libp2p").gossipsub.Handler;
         svc.newStream(io, peer_id, GossipsubHandler, null) catch |err| {
             std.log.warn("Failed to open outbound gossipsub stream: {}", .{err});
         };
         std.log.info("Opened outbound gossipsub stream to peer", .{});
-
-        // Subscribe to all 64 attestation subnets.
-        {
-            const gossip_topics = networking.gossip_topics;
-            var subnet_i: u8 = 0;
-            while (subnet_i < gossip_topics.MAX_ATTESTATION_SUBNET_ID) : (subnet_i += 1) {
-                p2p_svc.subscribeSubnet(.beacon_attestation, subnet_i) catch |err| {
-                    std.log.warn("Failed to subscribe to attestation subnet {d}: {}", .{ subnet_i, err });
-                };
-            }
-            std.log.info("Subscribed to {d} attestation subnets", .{gossip_topics.MAX_ATTESTATION_SUBNET_ID});
-        }
-
-        // Subscribe to data column sidecar subnets (PeerDAS / Fulu).
-        // In production, only custody subnets would be subscribed. For now, subscribe to a subset.
-        {
-            const gossip_topics = networking.gossip_topics;
-            const custody_req = self.config.chain.CUSTODY_REQUIREMENT;
-            var subnet_i: u8 = 0;
-            while (subnet_i < custody_req and subnet_i < gossip_topics.MAX_DATA_COLUMN_SIDECAR_SUBNET_ID) : (subnet_i += 1) {
-                p2p_svc.subscribeSubnet(.data_column_sidecar, subnet_i) catch |err| {
-                    std.log.warn("Failed to subscribe to data column subnet {d}: {}", .{ subnet_i, err });
-                };
-            }
-            std.log.info("Subscribed to {d} data column subnets (custody requirement)", .{custody_req});
-        }
-
-        // Start gossipsub heartbeat on a background fiber (runs every 700ms).
-        p2p_svc.startHeartbeat(io);
-        std.log.info("Gossipsub heartbeat started (700ms interval)", .{});
-
-        // Main sync + gossip loop: tick the sync state machine and poll gossip.
-        std.log.info("Starting sync-driven maintenance loop...", .{});
-        while (!self.shutdown_requested.load(.acquire)) {
-            const slot_sleep: std.Io.Timeout = .{ .duration = .{
-                .raw = std.Io.Duration.fromNanoseconds(@as(i96, 6) * std.time.ns_per_s),
-                .clock = .awake,
-            } };
-            slot_sleep.sleep(io) catch break;
-
-            // Run discovery tick — find new peers if below target.
-            if (self.discovery_service) |ds| {
-                if (self.peer_manager) |pm| {
-                    const peer_count = pm.peerCount();
-                    ds.setConnectedPeers(peer_count);
-                    // Update peer count gauge each tick.
-                    if (self.metrics) |m| m.peers_connected.set(@intCast(peer_count));
-                }
-                ds.discoverPeers();
-            }
-
-            // Poll gossipsub for all gossip messages (blocks, attestations, aggregates).
-            if (self.p2p_service) |p2p| {
-                self.processGossipEvents(p2p);
-            }
-
-            // Drain the BeaconProcessor work queues (up to 128 items per tick).
-            // Items were enqueued by gossip/reqresp handlers above.
-            // Dispatches in strict priority order: blocks > attestations > slashings > etc.
-            // Capped at 128 to avoid monopolizing the event loop (matches TS Lodestar).
-            if (self.beacon_processor) |bp| {
-                const dispatched = bp.tick(128);
-                if (dispatched > 0) {
-                    std.log.debug("Processor: dispatched {d} items ({d} queued)", .{
-                        dispatched, bp.totalQueued(),
-                    });
-                }
-            }
-
-            // Tick the sync service state machine — evaluates mode, dispatches
-            // new batches, re-dispatches failed ones.
-            if (self.sync_service_inst) |sync_svc| {
-                sync_svc.tick() catch |err| {
-                    std.log.warn("SyncService.tick failed: {}", .{err});
-                };
-            }
-
-            // Detect fork transitions: if the active fork digest changed since
-            // the last tick, resubscribe gossip topics under the new digest.
-            {
-                const head_slot = self.head_tracker.head_slot;
-                const current_digest = self.config.forkDigestAtSlot(
-                    head_slot,
-                    self.genesis_validators_root,
-                );
-                if (!std.mem.eql(u8, &current_digest, &self.last_active_fork_digest)) {
-                    if (!std.mem.eql(u8, &self.last_active_fork_digest, &[4]u8{ 0, 0, 0, 0 })) {
-                        // Genuine fork transition — old digest was non-zero.
-                        const last_digest_hex = std.fmt.bytesToHex(&self.last_active_fork_digest, .lower);
-                        const current_digest_hex = std.fmt.bytesToHex(&current_digest, .lower);
-                        std.log.info("Fork transition detected at slot {d}: {s} -> {s}", .{
-                            head_slot,
-                            &last_digest_hex,
-                            &current_digest_hex,
-                        });
-                        svc.onForkTransition(current_digest, self.config.forkSeq(head_slot)) catch |err| {
-                            std.log.warn("onForkTransition failed: {}", .{err});
-                        };
-                        // Keep gossip_handler fork_seq in sync.
-                        if (self.gossip_handler) |gh| {
-                            gh.updateForkSeq(self.config.forkSeq(head_slot));
-                        }
-                    }
-                    self.last_active_fork_digest = current_digest;
-                }
-            }
-
-            // Drain any batch requests queued by the sync tick.
-            self.processSyncBatches(io, svc);
-
-            // Drain any by-root requests queued by unknown block sync.
-            self.processSyncByRootRequests(io, svc);
-
-            // Update API sync status from the sync service.
-            self.updateApiSyncStatus();
-
-            // Update sync metrics.
-            if (self.metrics) |m| {
-                if (self.sync_service_inst) |sync_svc| {
-                    const status = sync_svc.getSyncStatus();
-                    m.sync_status.set(if (sync_svc.isSynced()) @as(u64, 0) else @as(u64, 1));
-                    m.sync_distance.set(status.sync_distance);
-                }
-            }
-
-            // W7: Check if local validator is next-slot proposer; if so, preparePayload.
-            maybePrepareProposerPayload(self, io);
-
-            // Prune sync committee pools by current head slot.
-            {
-                const head_slot = self.head_tracker.head_slot;
-                if (self.sync_contribution_pool) |pool| pool.prune(head_slot);
-                if (self.sync_committee_message_pool) |pool| pool.prune(head_slot);
-            }
-
-            // Advance the fork choice clock each tick so proposer boost decays
-            // correctly across slot boundaries. Without this, FC time never
-            // advances between block imports and proposer boost persists forever.
-            if (self.clock) |clk| {
-                if (clk.currentSlot(io)) |current_slot| {
-                    if (self.chain.fork_choice) |fc| {
-                        fc.updateTime(self.allocator, current_slot) catch |err| {
-                            std.log.warn("fork choice updateTime failed: {}", .{err});
-                        };
-                    }
-                }
-            }
-        }
     }
 
     /// Initialize the discovery service.
@@ -1991,50 +2008,24 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         const req_resp_encoding = networking.req_resp_encoding;
 
         var stream = try svc.dialProtocol(io, peer_id, protocol_id);
+        defer closeOwnedQuicStream(io, &stream);
 
-        // Encode request: one 32-byte root.
-        const wire_request = try req_resp_encoding.encodeRequest(self.allocator, &root);
-        defer self.allocator.free(wire_request);
+        try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, &root);
+        stream.closeWrite(io);
 
-        var written: usize = 0;
-        while (written < wire_request.len) {
-            written += stream.write(io, wire_request[written..]) catch |err| {
-                std.log.warn("fetchBlockByRoot: write error: {}", .{err});
-                return err;
-            };
+        var reader = req_resp_encoding.ResponseChunkStreamReader{
+            .allocator = self.allocator,
+            .has_context_bytes = true,
+        };
+        defer reader.deinit();
+
+        const decoded = (try reader.next(io, &stream)) orelse return error.NoBlockReturned;
+        if (decoded.result != .success) {
+            self.allocator.free(decoded.ssz_bytes);
+            return error.ErrorResponse;
         }
 
-        // Read the first (and only) response chunk.
-        var buf: [1024 * 1024]u8 = undefined;
-        var buf_len: usize = 0;
-
-        while (true) {
-            const n = stream.read(io, buf[buf_len..]) catch |err| {
-                if (buf_len > 0) break;
-                return err;
-            };
-            if (n == 0) break;
-            buf_len += n;
-
-            const decoded = req_resp_encoding.decodeResponseChunk(
-                self.allocator,
-                buf[0..buf_len],
-                true,
-            ) catch |err| {
-                if (err == error.InsufficientData) continue;
-                return err;
-            };
-
-            if (decoded.result != .success) {
-                self.allocator.free(decoded.ssz_bytes);
-                return error.ErrorResponse;
-            }
-
-            // Return the SSZ bytes; caller owns.
-            return decoded.ssz_bytes;
-        }
-
-        return error.NoBlockReturned;
+        return decoded.ssz_bytes;
     }
 
     /// Fetch raw blocks by range from a peer, returning BatchBlock slices.
@@ -2053,6 +2044,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         const req_resp_encoding = networking.req_resp_encoding;
 
         var stream = try svc.dialProtocol(io, peer_id, protocol_id);
+        defer closeOwnedQuicStream(io, &stream);
 
         // Encode the range request.
         const request = networking.messages.BeaconBlocksByRangeRequest.Type{
@@ -2061,18 +2053,8 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         };
         var req_ssz: [networking.messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
         _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &req_ssz);
-
-        const wire_request = try req_resp_encoding.encodeRequest(self.allocator, &req_ssz);
-        defer self.allocator.free(wire_request);
-
-        // Write request.
-        var written: usize = 0;
-        while (written < wire_request.len) {
-            written += stream.write(io, wire_request[written..]) catch |err| {
-                std.log.warn("fetchRawBlocksByRange write error: {}", .{err});
-                return err;
-            };
-        }
+        try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, &req_ssz);
+        stream.closeWrite(io);
 
         // Read response chunks into BatchBlock array.
         var result: std.ArrayListUnmanaged(BatchBlock) = .empty;
@@ -2081,56 +2063,30 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             result.deinit(self.allocator);
         }
 
-        var buf: [1024 * 1024]u8 = undefined;
-        var buf_len: usize = 0;
+        var reader = req_resp_encoding.ResponseChunkStreamReader{
+            .allocator = self.allocator,
+            .has_context_bytes = true,
+        };
+        defer reader.deinit();
         var blocks_received: u64 = 0;
 
         while (blocks_received < count) {
-            const n = stream.read(io, buf[buf_len..]) catch |err| {
-                std.log.info("fetchRawBlocksByRange: stream ended after {d} blocks ({})", .{ blocks_received, err });
+            const decoded = (try reader.next(io, &stream)) orelse break;
+            if (decoded.result != .success) {
+                self.allocator.free(decoded.ssz_bytes);
                 break;
-            };
-            if (n == 0) break;
-            buf_len += n;
-
-            while (buf_len > 0 and blocks_received < count) {
-                const decoded = req_resp_encoding.decodeResponseChunk(
-                    self.allocator,
-                    buf[0..buf_len],
-                    true,
-                ) catch |err| {
-                    if (err == error.InsufficientData) break;
-                    std.log.warn("fetchRawBlocksByRange: decode error: {}", .{err});
-                    return result.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
-                };
-
-                if (decoded.result != .success) {
-                    self.allocator.free(decoded.ssz_bytes);
-                    break;
-                }
-
-                // Infer slot from the SSZ bytes if possible (first 8 bytes of message = slot).
-                // For BatchBlock we store raw SSZ + slot.
-                // Slot is at offset 8 of the SignedBeaconBlock message (after signature).
-                const slot = if (decoded.ssz_bytes.len >= 108)
-                    std.mem.readInt(u64, decoded.ssz_bytes[100..108], .little)
-                else
-                    start_slot + blocks_received;
-
-                try result.append(self.allocator, .{
-                    .slot = slot,
-                    .block_bytes = decoded.ssz_bytes, // caller owns
-                });
-                blocks_received += 1;
-
-                const consumed = decoded.bytes_consumed;
-                if (consumed < buf_len) {
-                    std.mem.copyForwards(u8, buf[0 .. buf_len - consumed], buf[consumed..buf_len]);
-                    buf_len -= consumed;
-                } else {
-                    buf_len = 0;
-                }
             }
+
+            const slot = if (decoded.ssz_bytes.len >= 108)
+                std.mem.readInt(u64, decoded.ssz_bytes[100..108], .little)
+            else
+                start_slot + blocks_received;
+
+            try result.append(self.allocator, .{
+                .slot = slot,
+                .block_bytes = decoded.ssz_bytes,
+            });
+            blocks_received += 1;
         }
 
         return result.toOwnedSlice(self.allocator);
@@ -2158,6 +2114,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
 
             // Open a negotiated stream for Status.
             var stream = try svc.dialProtocol(io, peer_id, status_protocol_id);
+            defer closeOwnedQuicStream(io, &stream);
 
             // SSZ-encode our Status message.
             var status_ssz: [networking.messages.StatusMessage.fixed_size]u8 = undefined;
@@ -2169,66 +2126,18 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                 our_status.head_slot, our_status.finalized_epoch,
             });
 
-            // Wire-encode: varint length prefix + snappy-compressed SSZ.
-            const wire_request = try req_resp_encoding.encodeRequest(self.allocator, &status_ssz);
-            defer self.allocator.free(wire_request);
+            try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, &status_ssz);
+            stream.closeWrite(io);
 
-            // Write request to stream.
-            var written: usize = 0;
-            while (written < wire_request.len) {
-                written += stream.write(io, wire_request[written..]) catch |err| {
-                    std.log.warn("Status write error: {}", .{err});
-                    return err;
-                };
-            }
+            var reader = req_resp_encoding.ResponseChunkStreamReader{
+                .allocator = self.allocator,
+                .has_context_bytes = false,
+            };
+            defer reader.deinit();
 
-            // Read response from stream.
-            // Status response is small: 1 (result) + varint + snappy(84 SSZ) ≈ ~100 bytes.
-            var resp_buf: [1024]u8 = undefined;
-            var resp_len: usize = 0;
-            while (resp_len < resp_buf.len) {
-                const n = stream.read(io, resp_buf[resp_len..]) catch |err| {
-                    // EOF or stream close — we have what we have.
-                    std.log.info("Status read completed ({d} bytes, end: {})", .{ resp_len, err });
-                    break;
-                };
-                if (n == 0) break;
-                resp_len += n;
-            }
-
-            if (resp_len == 0) {
+            const decoded = (try reader.next(io, &stream)) orelse {
                 std.log.warn("Status: peer sent empty response", .{});
                 return error.EmptyResponse;
-            }
-
-            std.log.debug("Status raw response: {d} bytes", .{resp_len});
-            {
-                var offset: usize = 0;
-                while (offset < resp_len and offset < 112) : (offset += 8) {
-                    const end = @min(offset + 8, resp_len);
-                    switch (end - offset) {
-                        8 => std.log.debug("  [{d:>3}]: {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{
-                            offset,
-                            resp_buf[offset], resp_buf[offset+1], resp_buf[offset+2], resp_buf[offset+3],
-                            resp_buf[offset+4], resp_buf[offset+5], resp_buf[offset+6], resp_buf[offset+7],
-                        }),
-                        4 => std.log.debug("  [{d:>3}]: {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{
-                            offset,
-                            resp_buf[offset], resp_buf[offset+1], resp_buf[offset+2], resp_buf[offset+3],
-                        }),
-                        else => {},
-                    }
-                }
-            }
-
-            // Decode the response chunk (no context bytes for Status).
-            const decoded = req_resp_encoding.decodeResponseChunk(
-                self.allocator,
-                resp_buf[0..resp_len],
-                false, // Status has no context bytes
-            ) catch |err| {
-                std.log.warn("Status response decode error: {} (raw {d} bytes)", .{ err, resp_len });
-                return err;
             };
             defer self.allocator.free(decoded.ssz_bytes);
 
@@ -2486,6 +2395,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             const req_resp_encoding = networking.req_resp_encoding;
 
             var stream = try svc.dialProtocol(io, peer_id, protocol_id);
+            defer closeOwnedQuicStream(io, &stream);
 
             // Encode the range request
             const request = networking.messages.BeaconBlocksByRangeRequest.Type{
@@ -2494,114 +2404,73 @@ fn parseIp4(s: []const u8) ?[4]u8 {
             };
             var req_ssz: [networking.messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
             _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &req_ssz);
-
-            const wire_request = try req_resp_encoding.encodeRequest(self.allocator, &req_ssz);
-            defer self.allocator.free(wire_request);
-
-            // Write request
-            var written: usize = 0;
-            while (written < wire_request.len) {
-                written += stream.write(io, wire_request[written..]) catch |err| {
-                    std.log.warn("BlocksByRange write error: {}", .{err});
-                    return err;
-                };
-            }
+            try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, &req_ssz);
+            stream.closeWrite(io);
 
             std.log.info("BlocksByRange: requested slots {d}..{d}", .{ start_slot, start_slot + count - 1 });
 
-            // Read response chunks from the stream using an accumulation buffer.
-            // Multiple response chunks may arrive in a single read.
             var blocks_received: u64 = 0;
-            var buf: [1024 * 1024]u8 = undefined;
-            var buf_len: usize = 0;
+            var reader = req_resp_encoding.ResponseChunkStreamReader{
+                .allocator = self.allocator,
+                .has_context_bytes = true,
+            };
+            defer reader.deinit();
 
             while (blocks_received < count) {
-                // Read more data from the stream
-                const n = stream.read(io, buf[buf_len..]) catch |err| {
-                    std.log.info("BlocksByRange: stream ended after {d} blocks ({})", .{ blocks_received, err });
-                    break;
-                };
-                if (n == 0) break;
-                buf_len += n;
+                const decoded = (try reader.next(io, &stream)) orelse break;
 
-                // Process as many complete response chunks as possible
-                while (buf_len > 0 and blocks_received < count) {
-                    const decoded = req_resp_encoding.decodeResponseChunk(
-                        self.allocator,
-                        buf[0..buf_len],
-                        true,
-                    ) catch |err| {
-                        if (err == error.InsufficientData) break;
-                        std.log.warn("BlocksByRange: decode error: {}", .{err});
-                        return blocks_received;
-                    };
+                if (decoded.result != .success) {
+                    self.allocator.free(decoded.ssz_bytes);
+                    std.log.warn("BlocksByRange: error response: {}", .{decoded.result});
+                    return blocks_received;
+                }
 
-                    if (decoded.result != .success) {
-                        self.allocator.free(decoded.ssz_bytes);
-                        std.log.warn("BlocksByRange: error response: {}", .{decoded.result});
-                        return blocks_received;
-                    }
-
-                    // Import block
-                    {
-                        defer self.allocator.free(decoded.ssz_bytes);
-                        // Derive fork from context bytes (4-byte fork digest per chunk).
-                        // Fall back to head slot's fork if context bytes are absent.
-                        const fork_seq = blk: {
-                            if (decoded.context_bytes) |ctx| {
-                                std.log.info("BlocksByRange: block {d} ({d} bytes, fork={x:0>2}{x:0>2}{x:0>2}{x:0>2})", .{
-                                    blocks_received + 1, decoded.ssz_bytes.len, ctx[0], ctx[1], ctx[2], ctx[3],
-                                });
-                                // Walk fork list to find which ForkSeq matches this digest.
-                                const gvr = self.genesis_validators_root;
-                                var matched: ?config_mod.ForkSeq = null;
-                                for (self.config.forks_ascending_epoch_order) |fi| {
-                                    const digest = BeaconConfig.computeForkDigest(fi.version, gvr);
-                                    if (std.mem.eql(u8, &digest, &ctx)) {
-                                        matched = fi.fork_seq;
-                                        break;
-                                    }
+                {
+                    defer self.allocator.free(decoded.ssz_bytes);
+                    const fork_seq = blk: {
+                        if (decoded.context_bytes) |ctx| {
+                            std.log.info("BlocksByRange: block {d} ({d} bytes, fork={x:0>2}{x:0>2}{x:0>2}{x:0>2})", .{
+                                blocks_received + 1, decoded.ssz_bytes.len, ctx[0], ctx[1], ctx[2], ctx[3],
+                            });
+                            const gvr = self.genesis_validators_root;
+                            var matched: ?config_mod.ForkSeq = null;
+                            for (self.config.forks_ascending_epoch_order) |fi| {
+                                const digest = BeaconConfig.computeForkDigest(fi.version, gvr);
+                                if (std.mem.eql(u8, &digest, &ctx)) {
+                                    matched = fi.fork_seq;
+                                    break;
                                 }
-                                if (matched) |fs| {
-                                    break :blk fs;
-                                } else {
-                                    std.log.warn("BlocksByRange: unknown fork digest {x:0>2}{x:0>2}{x:0>2}{x:0>2}, falling back to head fork", .{ ctx[0], ctx[1], ctx[2], ctx[3] });
-                                    break :blk self.config.forkSeq(self.head_tracker.head_slot);
-                                }
+                            }
+                            if (matched) |fs| {
+                                break :blk fs;
                             } else {
+                                std.log.warn("BlocksByRange: unknown fork digest {x:0>2}{x:0>2}{x:0>2}{x:0>2}, falling back to head fork", .{ ctx[0], ctx[1], ctx[2], ctx[3] });
                                 break :blk self.config.forkSeq(self.head_tracker.head_slot);
                             }
-                        };
-                        const any_signed = AnySignedBeaconBlock.deserialize(
-                            self.allocator, .full, fork_seq, decoded.ssz_bytes,
-                        ) catch |err| {
-                            std.log.warn("BlocksByRange: deserialize error: {}", .{err});
-                            blocks_received += 1;
-                            continue;
-                        };
-                        defer any_signed.deinit(self.allocator);
-                        const result = self.importBlock(any_signed, .range_sync) catch |err| {
-                            std.log.warn("BlocksByRange: import error at block {d}: {}", .{ blocks_received + 1, err });
-                            blocks_received += 1;
-                            continue;
-                        };
-                        std.log.info("BlocksByRange: imported slot {d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                            result.slot,
-                            result.block_root[0], result.block_root[1],
-                            result.block_root[2], result.block_root[3],
-                        });
-                    }
-                    blocks_received += 1;
-
-                    // Advance buffer past consumed bytes
-                    const consumed = decoded.bytes_consumed;
-                    if (consumed < buf_len) {
-                        std.mem.copyForwards(u8, buf[0 .. buf_len - consumed], buf[consumed..buf_len]);
-                        buf_len -= consumed;
-                    } else {
-                        buf_len = 0;
-                    }
+                        } else {
+                            break :blk self.config.forkSeq(self.head_tracker.head_slot);
+                        }
+                    };
+                    const any_signed = AnySignedBeaconBlock.deserialize(
+                        self.allocator, .full, fork_seq, decoded.ssz_bytes,
+                    ) catch |err| {
+                        std.log.warn("BlocksByRange: deserialize error: {}", .{err});
+                        blocks_received += 1;
+                        continue;
+                    };
+                    defer any_signed.deinit(self.allocator);
+                    const result = self.importBlock(any_signed, .range_sync) catch |err| {
+                        std.log.warn("BlocksByRange: import error at block {d}: {}", .{ blocks_received + 1, err });
+                        blocks_received += 1;
+                        continue;
+                    };
+                    std.log.info("BlocksByRange: imported slot {d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                        result.slot,
+                        result.block_root[0], result.block_root[1],
+                        result.block_root[2], result.block_root[3],
+                    });
                 }
+                blocks_received += 1;
             }
 
             std.log.info("BlocksByRange: received {d} blocks total", .{blocks_received});
@@ -3219,22 +3088,14 @@ fn parseIp4(s: []const u8) ?[4]u8 {
     /// database and state to service the request.
     ///
     /// Uses the EngineApi vtable pattern: a `RequestContext` wrapping `*BeaconNode`
-    /// and a scratch arena is passed as `ptr: *anyopaque` to each callback.
-    /// The scratch arena holds temporary allocations (block bytes from DB) that
-    /// are only needed until `handleRequest` copies them into response chunks.
+    /// is passed as `ptr: *anyopaque` to each callback.
     pub fn onReqResp(
         self: *BeaconNode,
         method: Method,
         request_bytes: []const u8,
     ) ![]const ResponseChunk {
-        // Scratch arena: freed after handleRequest returns.
-        // All DB-fetched byte slices live here; the handler copies them out.
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-
         var req_ctx = reqresp_callbacks_mod.RequestContext{
             .node = @ptrCast(self),
-            .scratch = scratch.allocator(),
         };
         const ctx = reqresp_callbacks_mod.makeReqRespContext(&req_ctx);
         return handleRequest(self.allocator, method, request_bytes, &ctx);
