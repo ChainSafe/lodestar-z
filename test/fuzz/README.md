@@ -193,7 +193,7 @@ rename the output files to replace colons with underscores before committing:
    `zig_fuzz_test` with `callconv(.c)`.
 2. Add the name to the `fuzzers` array in `build.zig`. If the target links
    against blst (i.e. it uses BLS operations), set extra_libs if you're facing similar situation that bls has: e.g., `.extra_libs = &.{dep_blst.artifact("blst")}`.
-3. Create `corpus/<name>-initial/` with hand-crafted seed files.s
+3. Create `corpus/<name>-initial/` with hand-crafted seed files.
 4. Add the target to `replay-crashes.sh` target list.
 
 ## On MacOs
@@ -214,3 +214,4 @@ and calling `__sanitizer_cov_trace_pc_guard_init` crashes at startup.
 
 AFL++ has its own coverage tracking that does not depend on this call, so
 commenting it out is safe.
+
