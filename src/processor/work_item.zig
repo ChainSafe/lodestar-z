@@ -26,8 +26,8 @@ pub const max_aggregate_batch_size: u32 = 64;
 /// Opaque peer identifier. TODO: Replace with real PeerId from networking.
 pub const PeerId = u64;
 
-/// Opaque gossip message identifier. TODO: Replace with real MessageId.
-pub const MessageId = u64;
+/// Ethereum gossipsub message identifier: first 20 bytes of the spec hash.
+pub const MessageId = [20]u8;
 
 /// Phase within a slot, used by the clock fiber.
 pub const SlotPhase = enum(u8) {

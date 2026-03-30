@@ -54,6 +54,9 @@ pub const decodeGossipMessage = gossip_decoding.decodeGossipMessage;
 
 // eth-p2p-z adapter re-exports.
 pub const EthGossipAdapter = eth_gossip.EthGossipAdapter;
+pub const GossipMessageId = eth_gossip.MessageId;
+pub const computeGossipMessageId = eth_gossip.computeMessageId;
+pub const gossipMessageIdFn = eth_gossip.messageIdFn;
 
 // eth-p2p-z integration layer.
 pub const eth2_protocols = @import("eth2_protocols.zig");

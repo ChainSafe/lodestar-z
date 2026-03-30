@@ -33,6 +33,7 @@ const BeaconMetrics = @import("metrics.zig").BeaconMetrics;
 const processor_mod = @import("processor");
 const BeaconProcessor = processor_mod.BeaconProcessor;
 const WorkItem = processor_mod.WorkItem;
+const MessageId = processor_mod.work_item.MessageId;
 const GossipAction = chain_gossip.GossipAction;
 const ChainState = chain_gossip.ChainState;
 
@@ -71,7 +72,7 @@ pub const QueuedAttestation = struct {
 
 pub const GossipIngressMetadata = struct {
     peer_id: u64 = 0,
-    message_id: u64 = 0,
+    message_id: MessageId = std.mem.zeroes(MessageId),
     seen_timestamp_ns: i64 = 0,
 };
 

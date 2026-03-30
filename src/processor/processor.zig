@@ -19,6 +19,7 @@ const testing = std.testing;
 const work_item_mod = @import("work_item.zig");
 const WorkItem = work_item_mod.WorkItem;
 const WorkType = work_item_mod.WorkType;
+const MessageId = work_item_mod.MessageId;
 
 const work_queues_mod = @import("work_queues.zig");
 const WorkQueues = work_queues_mod.WorkQueues;
@@ -366,7 +367,7 @@ test "BeaconProcessor: sync state affects dropping" {
     const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
     proc.ingest(.{ .attestation = .{
         .peer_id = 1,
-        .message_id = 1,
+        .message_id = testMessageId(1),
         .data = dummy_handle,
         .subnet_id = 0,
         .seen_timestamp_ns = 100,
@@ -380,7 +381,7 @@ test "BeaconProcessor: sync state affects dropping" {
     proc.setSyncState(.synced);
     proc.ingest(.{ .attestation = .{
         .peer_id = 2,
-        .message_id = 2,
+        .message_id = testMessageId(2),
         .data = dummy_handle,
         .subnet_id = 1,
         .seen_timestamp_ns = 200,
@@ -499,7 +500,7 @@ test "BeaconProcessor: getQueueDepths" {
     const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
     proc.ingest(.{ .attestation = .{
         .peer_id = 1,
-        .message_id = 1,
+        .message_id = testMessageId(1),
         .data = dummy_handle,
         .subnet_id = 0,
         .seen_timestamp_ns = 100,
@@ -507,7 +508,7 @@ test "BeaconProcessor: getQueueDepths" {
 
     proc.ingest(.{ .gossip_voluntary_exit = .{
         .peer_id = 1,
-        .message_id = 1,
+        .message_id = testMessageId(1),
         .data = dummy_handle,
         .seen_timestamp_ns = 100,
     } });
@@ -541,21 +542,21 @@ test "BeaconProcessor: attestation batching" {
     const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
     proc.ingest(.{ .attestation = .{
         .peer_id = 1,
-        .message_id = 1,
+        .message_id = testMessageId(1),
         .data = dummy_handle,
         .subnet_id = 0,
         .seen_timestamp_ns = 100,
     } });
     proc.ingest(.{ .attestation = .{
         .peer_id = 2,
-        .message_id = 2,
+        .message_id = testMessageId(2),
         .data = dummy_handle,
         .subnet_id = 1,
         .seen_timestamp_ns = 200,
     } });
     proc.ingest(.{ .attestation = .{
         .peer_id = 3,
-        .message_id = 3,
+        .message_id = testMessageId(3),
         .data = dummy_handle,
         .subnet_id = 2,
         .seen_timestamp_ns = 300,
@@ -595,7 +596,7 @@ test "BeaconProcessor: single attestation not batched" {
     const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
     proc.ingest(.{ .attestation = .{
         .peer_id = 1,
-        .message_id = 1,
+        .message_id = testMessageId(1),
         .data = dummy_handle,
         .subnet_id = 0,
         .seen_timestamp_ns = 100,
@@ -633,7 +634,7 @@ test "BeaconProcessor: blocks dispatched before attestations" {
     // Enqueue attestation first, then block.
     proc.ingest(.{ .attestation = .{
         .peer_id = 1,
-        .message_id = 1,
+        .message_id = testMessageId(1),
         .data = dummy_handle,
         .subnet_id = 0,
         .seen_timestamp_ns = 100,
@@ -642,7 +643,7 @@ test "BeaconProcessor: blocks dispatched before attestations" {
     const fork_types = @import("fork_types");
     proc.ingest(.{ .gossip_block = .{
         .peer_id = 2,
-        .message_id = 2,
+        .message_id = testMessageId(2),
         .block = fork_types.AnySignedBeaconBlock{ .phase0 = undefined },
         .seen_timestamp_ns = 200,
     } });
@@ -656,4 +657,10 @@ test "BeaconProcessor: blocks dispatched before attestations" {
     try testing.expectEqual(WorkType.attestation, ctx.processed_types[1]);
 
     try testing.expect(proc.allQueuesEmpty());
+}
+
+fn testMessageId(tag: u8) MessageId {
+    var out = std.mem.zeroes(MessageId);
+    out[0] = tag;
+    return out;
 }

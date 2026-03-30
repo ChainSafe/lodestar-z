@@ -12,6 +12,7 @@ const testing = std.testing;
 const work_item_mod = @import("work_item.zig");
 const WorkItem = work_item_mod.WorkItem;
 const WorkType = work_item_mod.WorkType;
+const MessageId = work_item_mod.MessageId;
 const GossipBlockWork = work_item_mod.GossipBlockWork;
 const GossipBlobWork = work_item_mod.GossipBlobWork;
 const GossipColumnWork = work_item_mod.GossipColumnWork;
@@ -669,7 +670,7 @@ test "WorkQueues: sync-aware dropping" {
     const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
     wq.routeToQueue(.{ .attestation = .{
         .peer_id = 1,
-        .message_id = 1,
+        .message_id = testMessageId(1),
         .data = dummy_handle,
         .subnet_id = 0,
         .seen_timestamp_ns = 100,
@@ -729,4 +730,10 @@ fn testQueueConfig() QueueConfig {
         .lc_optimistic_update = 4,
         .lc_updates_by_range = 4,
     };
+}
+
+fn testMessageId(tag: u8) MessageId {
+    var out = std.mem.zeroes(MessageId);
+    out[0] = tag;
+    return out;
 }

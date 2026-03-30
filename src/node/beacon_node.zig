@@ -1512,6 +1512,9 @@ pub const BeaconNode = struct {
                 .mesh_degree_hi = 12,
                 .mesh_degree_lazy = 6,
                 .heartbeat_interval_ms = 700,
+                .signature_policy = .strict_no_sign,
+                .publish_policy = .anonymous,
+                .msg_id_fn = &networking.gossipMessageIdFn,
             },
         });
         defer self.deinitP2pService(io);
@@ -2226,7 +2229,7 @@ fn parseIp4(s: []const u8) ?[4]u8 {
                     .message => |msg| {
                         const metadata = GossipIngressMetadata{
                             .peer_id = hashOpaqueGossipBytes(0x70656572, msg.from),
-                            .message_id = hashGossipMessageId(msg.topic, msg.seqno, msg.data),
+                            .message_id = networking.computeGossipMessageId(self.allocator, msg.data) catch std.mem.zeroes(networking.GossipMessageId),
                             .seen_timestamp_ns = currentUnixTimeNs(io),
                         };
 
@@ -2381,17 +2384,6 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         fn hashOpaqueGossipBytes(seed: u64, maybe_bytes: ?[]const u8) u64 {
             const bytes = maybe_bytes orelse return 0;
             return std.hash.Wyhash.hash(seed, bytes);
-        }
-
-        fn hashGossipMessageId(topic: []const u8, seqno: ?[]const u8, data: []const u8) u64 {
-            var hasher = std.hash.Wyhash.init(0x6D73674964);
-            hasher.update(topic);
-            if (seqno) |seq| {
-                hasher.update(seq);
-            } else {
-                hasher.update(data);
-            }
-            return hasher.final();
         }
 
         /// Request blocks by range from a connected peer via dialProtocol.

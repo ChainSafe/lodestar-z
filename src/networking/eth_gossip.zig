@@ -29,11 +29,49 @@ const libp2p = @import("zig-libp2p");
 const GossipsubService = libp2p.gossipsub.Service;
 const GossipsubConfig = libp2p.gossipsub.Config;
 const GossipsubEvent = libp2p.gossipsub.config.Event;
+const rpc = libp2p.protobuf.rpc;
 
 const peer_scoring = @import("peer_scoring.zig");
 const PeerScorer = peer_scoring.PeerScorer;
 
 const log = std.log.scoped(.eth_gossip);
+
+pub const MessageId = [20]u8;
+
+pub const MESSAGE_DOMAIN_INVALID_SNAPPY = [_]u8{ 0x00, 0x00, 0x00, 0x00 };
+pub const MESSAGE_DOMAIN_VALID_SNAPPY = [_]u8{ 0x01, 0x00, 0x00, 0x00 };
+const MIN_SNAPPY_FRAME_LEN: usize = 10;
+
+pub fn computeMessageId(allocator: Allocator, compressed_data: []const u8) !MessageId {
+    const maybe_uncompressed = if (compressed_data.len <= MIN_SNAPPY_FRAME_LEN)
+        null
+    else
+        snappy.uncompress(allocator, compressed_data) catch null;
+    defer if (maybe_uncompressed) |uncompressed| allocator.free(uncompressed);
+
+    const domain = if (maybe_uncompressed != null)
+        &MESSAGE_DOMAIN_VALID_SNAPPY
+    else
+        &MESSAGE_DOMAIN_INVALID_SNAPPY;
+    const payload = maybe_uncompressed orelse compressed_data;
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(domain);
+    hasher.update(payload);
+
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+
+    var message_id: MessageId = undefined;
+    @memcpy(message_id[0..], digest[0..message_id.len]);
+    return message_id;
+}
+
+pub fn messageIdFn(allocator: Allocator, msg: *const rpc.Message) ![]const u8 {
+    const data = msg.data orelse return error.MissingData;
+    const message_id = try computeMessageId(allocator, data);
+    return allocator.dupe(u8, &message_id);
+}
 
 /// All global (non-subnet-indexed) topic types that every Ethereum node subscribes to.
 pub const global_topic_types = [_]GossipTopicType{
@@ -639,6 +677,38 @@ test "EthGossipAdapter: duplicate subscriptions are idempotent" {
     try t.adapter.subscribeSubnet(.beacon_attestation, 3);
 
     try testing.expectEqual(global_topic_types.len + 1, t.adapter.subscribed_topics.count());
+}
+
+test "computeMessageId uses valid-snappy domain for decompressible payloads" {
+    const allocator = testing.allocator;
+    const payload = "hello gossip";
+    const compressed = try snappy.compress(allocator, payload);
+    defer allocator.free(compressed);
+
+    const got = try computeMessageId(allocator, compressed);
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(&MESSAGE_DOMAIN_VALID_SNAPPY);
+    hasher.update(payload);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+
+    try testing.expectEqualSlices(u8, digest[0..20], &got);
+}
+
+test "computeMessageId uses invalid-snappy domain for malformed payloads" {
+    const allocator = testing.allocator;
+    const malformed = &[_]u8{ 0x00, 0x01, 0x02, 0x03, 0x04 };
+
+    const got = try computeMessageId(allocator, malformed);
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(&MESSAGE_DOMAIN_INVALID_SNAPPY);
+    hasher.update(malformed);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+
+    try testing.expectEqualSlices(u8, digest[0..20], &got);
 }
 
 test "EthGossipAdapter: publish compresses with snappy" {
