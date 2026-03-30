@@ -86,7 +86,6 @@ pub fn getValidatorStatus(validator: *const Validator.Type, current_epoch: Epoch
 
 const testing = std.testing;
 
-
 fn makeValidator(
     activation_eligibility_epoch: u64,
     activation_epoch: u64,
