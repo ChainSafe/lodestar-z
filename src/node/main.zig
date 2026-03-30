@@ -963,16 +963,17 @@ fn runBeacon(
             .max_size_bytes = 100 * 1024 * 1024, // 100MB default
             .max_files = opts.log_file_daily_rotate,
             .daily = opts.log_file_daily_rotate > 0,
-        }) catch |err| blk: {
-            std.log.err("Failed to open log file '{s}': {}", .{ log_file_path, err });
-            break :blk null;
-        };
+        });
 
         if (file_transport) |*ft| {
-            log_mod.global.setFileTransport(ft);
-            std.log.info("File logging enabled: {s} (level={s})", .{
-                log_file_path, file_level.asText(),
-            });
+            if (log_mod.global.setFileTransport(ft)) |_| {
+                std.log.info("File logging enabled: {s} (level={s})", .{
+                    log_file_path, file_level.asText(),
+                });
+            } else |err| {
+                std.log.err("Failed to start log file transport '{s}': {}", .{ log_file_path, err });
+                file_transport = null;
+            }
         }
     }
     defer if (file_transport) |*ft| ft.close();

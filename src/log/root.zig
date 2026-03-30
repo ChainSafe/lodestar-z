@@ -23,7 +23,11 @@ pub const Logger = logger_mod.Logger;
 pub const GlobalLogger = logger_mod.GlobalLogger;
 pub const FileTransport = logger_mod.FileTransport;
 pub const RotationConfig = logger_mod.RotationConfig;
+pub const Text = logger_mod.Text;
+pub const Hex = logger_mod.Hex;
 pub const stdLogFn = logger_mod.stdLogFn;
+pub const text = logger_mod.text;
+pub const hex = logger_mod.hex;
 
 /// Process-wide logger instance. Initialized by the beacon node at startup.
 pub var global: GlobalLogger = GlobalLogger.init(.info, .human);

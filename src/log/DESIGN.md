@@ -52,8 +52,8 @@ GlobalLogger
 ├── Console transport (stderr, always active)
 │   └── Uses std.debug.lockStderr for thread-safe output
 └── File transport (optional, enabled via --log-file)
-    └── Uses raw Linux syscalls for I/O (no std.Io dependency)
-    └── SpinLock for thread safety
+    └── Producers format into a bounded MPSC queue
+    └── Single background thread owns file I/O + rotation
     └── Size-based and daily rotation
 ```
 
@@ -104,7 +104,9 @@ logger.info("block imported", .{
 
 Context fields are formatted as `key=value` pairs in human mode, and as JSON
 fields in JSON mode. Special formatting:
-- `[N]u8` arrays → hex with `0x` prefix, truncated to 8 hex chars + `..`
+- Text-like byte slices render as text by default
+- Binary byte arrays/slices render as hex with `0x` prefix, truncated to 8 hex chars + `..`
+- `log.text(...)` and `log.hex(...)` provide explicit control when inference is ambiguous
 - Integers → decimal
 - Enums → tag name string
 - Optionals → value or `null`
@@ -140,9 +142,10 @@ Modeled on TS Lodestar's Winston daily-rotate-file transport.
 - File format is always human-readable (timestamps + structured context)
 
 ### Implementation
-- Uses raw Linux syscalls (`write`, `openat`, `close`, `renameat`, `getdents64`) for
-  file I/O, avoiding dependency on `std.Io` instance which requires threading context
-- SpinLock (not `std.Io.Mutex`) for thread safety without Io dependency
+- Uses `std.Io` for file operations and background-thread coordination
+- Producers never touch the file handle directly; they enqueue preformatted lines
+- Queue is bounded, MPSC, and drops newest lines under sustained backpressure
+- A single worker thread performs writes, rotation, and retention cleanup
 - Stack-allocated BufWriter (8KB) for formatting lines without heap allocation
 
 ## Per-Module Level Control
@@ -163,4 +166,4 @@ Runtime: `GlobalLogger` stores a per-module level array indexed by `Module` enum
 3. No heap allocations — `std.fmt.bufPrint` writes to stack buffers
 4. Context struct fields are iterated at comptime via `@typeInfo`
 5. stderr output is buffered via `lockStderr` (8KB buffer)
-6. File output uses raw `write()` syscall (no buffering — each log line is one write)
+6. File output is serialized by a single worker thread draining the queue
