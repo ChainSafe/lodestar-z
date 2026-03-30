@@ -25,6 +25,7 @@ const ProtoArrayError = pa.ProtoArrayError;
 const ProtoBlock = pa.ProtoBlock;
 const ProtoNode = pa.ProtoNode;
 const LVHExecResponse = pa.LVHExecResponse;
+const LVHExecError = pa.LVHExecError;
 const PayloadStatus = pa.PayloadStatus;
 const RootContext = pa.RootContext;
 const ExecutionStatus = pa.ExecutionStatus;
@@ -302,6 +303,8 @@ pub const ForkChoice = struct {
     // idiomatic Zig approach (e.g. returning error unions directly) may be cleaner.
     // ── Error state ──
     irrecoverable_error: ?(Allocator.Error || ProtoArrayError),
+    /// Detailed LVH error context, copied from proto_array when irrecoverable_error is set.
+    lvh_error: ?LVHExecError,
 
     /// Initialize ForkChoice in-place from pre-built components.
     /// The caller is responsible for the memory backing `self`, `pa`, and `fc_store`.
@@ -332,6 +335,7 @@ pub const ForkChoice = struct {
             .queued_attestations_previous_slot = 0,
             .validated_attestation_datas = .empty,
             .irrecoverable_error = null,
+            .lvh_error = null,
         };
 
         // Pre-allocate votes for known validators, initialized to NULL_VOTE_INDEX.
@@ -1554,7 +1558,8 @@ pub const ForkChoice = struct {
     // ── Execution validation ──
 
     /// Propagate execution layer validity response through the DAG.
-    /// Sets irrecoverable_error on failure instead of propagating the error.
+    /// Only sets irrecoverable_error for InvalidLVHExecutionResponse;
+    /// other errors are silently ignored (matching TS behavior).
     pub fn validateLatestHash(
         self: *ForkChoice,
         allocator: Allocator,
@@ -1562,7 +1567,10 @@ pub const ForkChoice = struct {
         current_slot: Slot,
     ) void {
         self.proto_array.validateLatestHash(allocator, response, current_slot) catch |err| {
-            self.irrecoverable_error = err;
+            if (err == error.InvalidLVHExecutionResponse) {
+                self.irrecoverable_error = err;
+                self.lvh_error = self.proto_array.lvh_error;
+            }
         };
     }
 
@@ -1971,6 +1979,7 @@ pub const ForkChoice = struct {
         execution_payload_block_hash: Root,
         execution_payload_number: u64,
         execution_payload_state_root: Root,
+        execution_status: ExecutionStatus,
     ) (Allocator.Error || ForkChoiceError)!void {
         try self.proto_array.onExecutionPayload(
             allocator,
@@ -1980,6 +1989,7 @@ pub const ForkChoice = struct {
             execution_payload_number,
             execution_payload_state_root,
             self.proposer_boost_root,
+            execution_status,
         );
     }
 

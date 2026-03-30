@@ -653,7 +653,7 @@ pub const ProtoArray = struct {
         self.indices.putAssumeCapacity(block.block_root, .{ .pre_gloas = node_index });
 
         if (node.parent) |parent_index| {
-            self.maybeUpdateBestChildAndDescendant(parent_index, node_index, current_slot, proposer_boost_root);
+            try self.maybeUpdateBestChildAndDescendant(parent_index, node_index, current_slot, proposer_boost_root);
 
             if (block.extra_meta.executionStatus() == .valid) {
                 try self.propagateValidExecutionStatusByIndex(parent_index);
@@ -687,7 +687,7 @@ pub const ProtoArray = struct {
                 .gloas => |g| blk: {
                     const parent_status = try self.getParentPayloadStatus(block.parent_root, block.parent_block_hash);
                     break :blk switch (parent_status) {
-                        .full => g.full orelse g.empty,
+                        .full => g.full,
                         .empty => g.empty,
                         .pending => g.pending,
                     };
@@ -726,7 +726,7 @@ pub const ProtoArray = struct {
 
         // Update bestChild pointers
         if (parent_index) |pi| {
-            self.maybeUpdateBestChildAndDescendant(pi, pending_index, current_slot, proposer_boost_root);
+            try self.maybeUpdateBestChildAndDescendant(pi, pending_index, current_slot, proposer_boost_root);
 
             if (block.extra_meta.executionStatus() == .valid) {
                 try self.propagateValidExecutionStatusByIndex(pi);
@@ -734,7 +734,7 @@ pub const ProtoArray = struct {
         }
 
         // Update bestChild for PENDING → EMPTY edge
-        self.maybeUpdateBestChildAndDescendant(pending_index, empty_index, current_slot, proposer_boost_root);
+        try self.maybeUpdateBestChildAndDescendant(pending_index, empty_index, current_slot, proposer_boost_root);
 
         // Initialize PTC votes for this block (all false initially)
         // Spec: gloas/fork-choice.md#modified-on_block
@@ -757,6 +757,7 @@ pub const ProtoArray = struct {
         execution_payload_number: u64,
         execution_payload_state_root: Root,
         proposer_boost_root: ?Root,
+        execution_status: ExecutionStatus,
     ) (Allocator.Error || ProtoArrayError)!void {
         const vi_ptr = self.indices.getPtr(block_root) orelse return error.UnknownBlock;
 
@@ -778,7 +779,8 @@ pub const ProtoArray = struct {
                 // data_availability_status inherited from the PENDING node.
                 full_node.extra_meta.post_merge.execution_payload_block_hash = execution_payload_block_hash;
                 full_node.extra_meta.post_merge.execution_payload_number = execution_payload_number;
-                full_node.extra_meta.post_merge.execution_status = .valid;
+                // TODO GLOAS: handle optimistic sync
+                full_node.extra_meta.post_merge.execution_status = execution_status;
                 full_node.state_root = execution_payload_state_root;
 
                 const full_index: u32 = @intCast(self.nodes.items.len);
@@ -786,7 +788,7 @@ pub const ProtoArray = struct {
                 g.full = full_index;
 
                 // Update best child/descendant: PENDING -> FULL.
-                self.maybeUpdateBestChildAndDescendant(
+                try self.maybeUpdateBestChildAndDescendant(
                     g.pending,
                     full_index,
                     current_slot,
@@ -820,7 +822,6 @@ pub const ProtoArray = struct {
         current_slot: Slot,
     ) ProtoArrayError!void {
         assert(deltas.len == self.nodes.items.len);
-        if (finalized_epoch < self.finalized_epoch) return error.RevertedFinalizedEpoch;
 
         self.maybeUpdateCheckpoints(
             justified_epoch,
@@ -834,7 +835,7 @@ pub const ProtoArray = struct {
             proposer_boost,
         );
 
-        self.updateBestDescendants(
+        try self.updateBestDescendants(
             current_slot,
             if (proposer_boost) |boost|
                 boost.root
@@ -931,13 +932,13 @@ pub const ProtoArray = struct {
         self: *ProtoArray,
         current_slot: Slot,
         proposer_boost_root: ?Root,
-    ) void {
+    ) ProtoArrayError!void {
         var node_index: u32 = @intCast(self.nodes.items.len);
         while (node_index > 0) {
             node_index -= 1;
             if (self.nodes.items[node_index].parent) |parent_index| {
                 assert(parent_index < self.nodes.items.len);
-                self.maybeUpdateBestChildAndDescendant(
+                try self.maybeUpdateBestChildAndDescendant(
                     parent_index,
                     node_index,
                     current_slot,
@@ -1108,14 +1109,14 @@ pub const ProtoArray = struct {
         child_index: u32,
         current_slot: Slot,
         proposer_boost_root: ?Root,
-    ) void {
+    ) ProtoArrayError!void {
         assert(child_index < self.nodes.items.len);
         assert(parent_index < self.nodes.items.len);
 
         const child = &self.nodes.items[child_index];
         const parent = &self.nodes.items[parent_index];
 
-        const result = self.compareCandidateChild(
+        const result = try self.compareCandidateChild(
             parent,
             child,
             child_index,
@@ -1146,7 +1147,7 @@ pub const ProtoArray = struct {
         child_index: u32,
         current_slot: Slot,
         proposer_boost_root: ?Root,
-    ) ChildAndDescendant {
+    ) ProtoArrayError!ChildAndDescendant {
         const child_leads_to_viable =
             self.nodeLeadsToViableHead(child, current_slot);
 
@@ -1185,7 +1186,7 @@ pub const ProtoArray = struct {
         }
 
         // The child is not the best-child but might become it.
-        return self.compareAgainstBestChild(
+        return try self.compareAgainstBestChild(
             best_child_index,
             child,
             child_leads_to_viable,
@@ -1213,7 +1214,7 @@ pub const ProtoArray = struct {
         no_change: ChildAndDescendant,
         current_slot: Slot,
         proposer_boost_root: ?Root,
-    ) ChildAndDescendant {
+    ) ProtoArrayError!ChildAndDescendant {
         assert(best_child_index < self.nodes.items.len);
 
         const best_child =
@@ -1247,8 +1248,8 @@ pub const ProtoArray = struct {
         // tie-breaker by payload status.
         // Note: pre-Gloas, each child node of a block has a unique root,
         // so this point should not be reached.
-        const child_tb = self.getPayloadStatusTiebreaker(child, current_slot, proposer_boost_root);
-        const best_tb = self.getPayloadStatusTiebreaker(best_child, current_slot, proposer_boost_root);
+        const child_tb = try self.getPayloadStatusTiebreaker(child, current_slot, proposer_boost_root);
+        const best_tb = try self.getPayloadStatusTiebreaker(best_child, current_slot, proposer_boost_root);
         return if (child_tb > best_tb) change_to_child else no_change;
     }
 
@@ -1279,13 +1280,13 @@ pub const ProtoArray = struct {
         node: *const ProtoNode,
         current_slot: Slot,
         proposer_boost_root: ?Root,
-    ) u2 {
+    ) ProtoArrayError!u2 {
         // PENDING nodes or nodes not from the previous slot: return raw payload status.
         if (node.payload_status == .pending or node.slot + 1 != current_slot) return @intFromEnum(node.payload_status);
         if (node.payload_status == .empty) return @intFromEnum(PayloadStatus.empty);
 
         // FULL node from previous slot — check shouldExtendPayload.
-        const should_extend = self.shouldExtendPayload(node.block_root, proposer_boost_root) catch false;
+        const should_extend = try self.shouldExtendPayload(node.block_root, proposer_boost_root);
         return if (should_extend) @intFromEnum(PayloadStatus.full) else @intFromEnum(PayloadStatus.pending);
     }
 
@@ -2507,7 +2508,7 @@ test "onExecutionPayload adds FULL variant" {
     try testing.expectEqual(@as(usize, 2), pa.nodes.items.len);
 
     const payload_hash = makeRoot(0xAA);
-    try pa.onExecutionPayload(testing.allocator, root, 0, payload_hash, 42, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 0, payload_hash, 42, ZERO_HASH, null, .valid);
 
     // Now 3 nodes: PENDING, EMPTY, FULL.
     try testing.expectEqual(@as(usize, 3), pa.nodes.items.len);
@@ -2538,8 +2539,8 @@ test "onExecutionPayload duplicate is no-op" {
 
     const root = makeRoot(1);
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(root)), 0, null);
-    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xBB), 1, ZERO_HASH, null);
-    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xCC), 2, ZERO_HASH, null); // Second call is no-op.
+    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xBB), 1, ZERO_HASH, null, .valid);
+    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xCC), 2, ZERO_HASH, null, .valid); // Second call is no-op.
 
     try testing.expectEqual(@as(usize, 3), pa.nodes.items.len);
 }
@@ -2554,7 +2555,7 @@ test "onExecutionPayload for pre-Gloas returns PreGloasBlock error" {
     try pa.onBlock(testing.allocator, TestBlock.withRoot(root), 0, null);
     try testing.expectError(
         error.PreGloasBlock,
-        pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xDD), 1, ZERO_HASH, null),
+        pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xDD), 1, ZERO_HASH, null, .valid),
     );
 
     try testing.expectEqual(@as(usize, 1), pa.nodes.items.len);
@@ -2568,7 +2569,7 @@ test "onExecutionPayload for unknown block returns UnknownBlock error" {
 
     try testing.expectError(
         error.UnknownBlock,
-        pa.onExecutionPayload(testing.allocator, makeRoot(0xFF), 0, makeRoot(0xDD), 1, ZERO_HASH, null),
+        pa.onExecutionPayload(testing.allocator, makeRoot(0xFF), 0, makeRoot(0xDD), 1, ZERO_HASH, null, .valid),
     );
 }
 
@@ -2669,7 +2670,7 @@ test "getParentPayloadStatus matching bid hash returns full" {
     // Add parent with bid block hash, then create FULL with payload_hash = bid_hash.
     // In ePBS, the actual payload hash equals the bid's blockHash.
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(parent_root)), 0, null);
-    try pa.onExecutionPayload(testing.allocator, parent_root, 0, bid_hash, 1, makeRoot(0xDD), null);
+    try pa.onExecutionPayload(testing.allocator, parent_root, 0, bid_hash, 1, makeRoot(0xDD), null, .valid);
 
     // parent_block_hash matches FULL's executionPayloadBlockHash (= bid_hash) → FULL.
     try testing.expectEqual(PayloadStatus.full, try pa.getParentPayloadStatus(parent_root, bid_hash));
@@ -2720,7 +2721,7 @@ test "onBlockGloas links to correct parent variant via parent_block_hash" {
     // Parent: Gloas block with bid hash 0xAA.
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(parent_root)), 0, null);
     // Add FULL variant with execution_payload_block_hash = bid_hash (ePBS invariant).
-    try pa.onExecutionPayload(testing.allocator, parent_root, 0, bid_hash, 42, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, parent_root, 0, bid_hash, 42, ZERO_HASH, null, .valid);
 
     const parent_vi = pa.indices.get(parent_root).?;
     const parent_empty_idx = parent_vi.gloas.empty;
@@ -2817,7 +2818,7 @@ test "child builds on FULL when parent_block_hash matches FULL execHash" {
     try pa.onBlock(testing.allocator, block_a, 1, null);
 
     // Insert payload for A → creates A.FULL with execPayloadBlockHash = bid_hash (ePBS invariant).
-    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null, .valid);
 
     const vi_a = pa.indices.get(root_a).?;
     const full_a_idx = vi_a.gloas.full.?;
@@ -2864,7 +2865,7 @@ test "children of both EMPTY and FULL parent variants" {
     try pa.onBlock(testing.allocator, block_a, 1, null);
 
     // Insert payload for A → creates A.FULL with execHash = bid_hash (ePBS invariant).
-    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null, .valid);
 
     const vi_a = pa.indices.get(root_a).?;
     const empty_a_idx = vi_a.gloas.empty;
@@ -2923,7 +2924,7 @@ test "forked branches with EMPTY and FULL parent linkage and weight propagation"
     try pa.onBlock(testing.allocator, block_a, 1, null);
 
     // Insert payload for A with execHash = bid_hash (ePBS invariant).
-    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null, .valid);
 
     const vi_a = pa.indices.get(root_a).?;
     const empty_a_idx = vi_a.gloas.empty;
@@ -2949,7 +2950,7 @@ test "forked branches with EMPTY and FULL parent linkage and weight propagation"
     try pa.onBlock(testing.allocator, block_c, 2, null);
 
     // Insert payload for C with execHash = C's bid_hash (ZERO_HASH).
-    try pa.onExecutionPayload(testing.allocator, root_c, 2, ZERO_HASH, 2, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root_c, 2, ZERO_HASH, 2, ZERO_HASH, null, .valid);
 
     const pending_c = &pa.nodes.items[pa.indices.get(root_c).?.gloas.pending];
     try testing.expectEqual(full_a_idx, pending_c.parent.?);
@@ -3013,7 +3014,7 @@ test "deep fork weight propagation across EMPTY and FULL variants" {
     try pa.onBlock(testing.allocator, block_a, 1, null);
 
     // Payload for A: execHash = bid_hash_a (ePBS invariant).
-    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null, .valid);
 
     // B at slot 2, builds on A.FULL (parent_block_hash=bid_hash_a matches A.FULL's execHash).
     // B's EMPTY execHash = bid_hash_a (B's parent_block_hash = bid.parentBlockHash).
@@ -3031,7 +3032,7 @@ test "deep fork weight propagation across EMPTY and FULL variants" {
     try testing.expectEqual(full_a_idx, pending_b.parent.?);
 
     // Payload for B: execHash = bid_hash_b (ePBS invariant).
-    try pa.onExecutionPayload(testing.allocator, root_b, 2, bid_hash_b, 2, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root_b, 2, bid_hash_b, 2, ZERO_HASH, null, .valid);
 
     const vi_b = pa.indices.get(root_b).?;
     const empty_b_idx = vi_b.gloas.empty;
@@ -3057,7 +3058,7 @@ test "deep fork weight propagation across EMPTY and FULL variants" {
     try pa.onBlock(testing.allocator, block_d, 3, null);
 
     // Payload for D.
-    try pa.onExecutionPayload(testing.allocator, root_d, 3, ZERO_HASH, 3, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root_d, 3, ZERO_HASH, 3, ZERO_HASH, null, .valid);
 
     const pending_d = &pa.nodes.items[pa.indices.get(root_d).?.gloas.pending];
     try testing.expectEqual(full_b_idx, pending_d.parent.?);
@@ -3174,7 +3175,7 @@ test "isPayloadTimely with FULL and supermajority returns true" {
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(root)), 0, null);
 
     // Add FULL variant.
-    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xAA), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xAA), 1, ZERO_HASH, null, .valid);
 
     // Set more than PAYLOAD_TIMELY_THRESHOLD votes to true.
     pa.ptc_votes.getPtr(root).?.* = ProtoArray.PtcVotes.initFull();
@@ -3193,7 +3194,7 @@ test "shouldExtendPayload timely payload returns true" {
 
     const root = makeRoot(1);
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(root)), 0, null);
-    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xAA), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xAA), 1, ZERO_HASH, null, .valid);
 
     // Make payload timely.
     pa.ptc_votes.getPtr(root).?.* = ProtoArray.PtcVotes.initFull();
@@ -4682,7 +4683,7 @@ test "isPayloadTimely threshold boundary (exactly 50% returns false)" {
 
     const root = makeRoot(1);
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(root)), 0, null);
-    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xBB), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xBB), 1, ZERO_HASH, null, .valid);
 
     // Set exactly PTC_SIZE/2 votes (= PAYLOAD_TIMELY_THRESHOLD). Need > threshold.
     var votes = ProtoArray.PtcVotes.initEmpty();
@@ -4707,7 +4708,7 @@ test "isPayloadTimely counts only true votes with mixed yes/no" {
 
     const root = makeRoot(1);
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(root)), 0, null);
-    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xBB), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xBB), 1, ZERO_HASH, null, .valid);
 
     // Set votes: first half true, second half false (default).
     const half: u32 = preset.PTC_SIZE / 2;
@@ -4747,7 +4748,7 @@ test "Gloas tiebreaker: EMPTY beats FULL for slot n-1 blocks (effectiveWeight ze
     block = TestBlock.withParent(block, ZERO_HASH);
     try pa.onBlock(testing.allocator, block, 6, null);
     // FULL's execution_payload_block_hash = 0xAA
-    try pa.onExecutionPayload(testing.allocator, root, 6, makeRoot(0xAA), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 6, makeRoot(0xAA), 1, ZERO_HASH, null, .valid);
 
     // Add a child block at slot 6 that extends EMPTY (parent_block_hash = ZERO_HASH, which
     // does NOT match FULL's exec hash 0xAA → getParentPayloadStatus returns empty).
@@ -4789,7 +4790,7 @@ test "Gloas tiebreaker: FULL beats EMPTY when payload is timely at slot n-1" {
     var block = TestBlock.asGloas(TestBlock.withSlotAndRoot(5, root));
     block = TestBlock.withParent(block, ZERO_HASH);
     try pa.onBlock(testing.allocator, block, 6, null);
-    try pa.onExecutionPayload(testing.allocator, root, 6, makeRoot(0xAA), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 6, makeRoot(0xAA), 1, ZERO_HASH, null, .valid);
 
     // Set all PTC votes → timely → FULL ordinal stays 2.
     pa.ptc_votes.getPtr(root).?.* = ProtoArray.PtcVotes.initFull();
@@ -4817,7 +4818,7 @@ test "Gloas tiebreaker: older slots (n-2) use weight comparison not tiebreaker" 
     var block = TestBlock.asGloas(TestBlock.withSlotAndRoot(3, root));
     block = TestBlock.withParent(block, ZERO_HASH);
     try pa.onBlock(testing.allocator, block, 6, null);
-    try pa.onExecutionPayload(testing.allocator, root, 6, makeRoot(0xAA), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 6, makeRoot(0xAA), 1, ZERO_HASH, null, .valid);
 
     // Give FULL higher weight than EMPTY.
     const vi = pa.indices.get(root).?;
@@ -4851,7 +4852,7 @@ test "shouldExtendPayload returns false for untimely full" {
 
     const root = makeRoot(1);
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(root)), 0, null);
-    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xAA), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xAA), 1, ZERO_HASH, null, .valid);
 
     // No PTC votes → not timely.
     // Proposer boost root is a child of this block → should NOT extend.
