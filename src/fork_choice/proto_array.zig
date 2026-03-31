@@ -687,7 +687,10 @@ pub const ProtoArray = struct {
                 .gloas => |g| blk: {
                     const parent_status = try self.getParentPayloadStatus(block.parent_root, block.parent_block_hash);
                     break :blk switch (parent_status) {
-                        .full => g.full,
+                        // If getParentPayloadStatus returns .full, the FULL variant
+                        // must exist: getNodeByRootAndBlockHash only matches a FULL
+                        // node when g.full is set (written by onExecutionPayload).
+                        .full => g.full.?,
                         .empty => g.empty,
                         .pending => g.pending,
                     };

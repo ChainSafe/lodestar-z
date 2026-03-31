@@ -90,7 +90,6 @@ pub const ForkChoiceError = ProtoArrayError || error{
     ForkChoiceStoreErr,
     UnableToSetJustifiedCheckpoint,
     AfterBlockFailed,
-    GenesisBlockNotAvailable,
     DependentRootNotFound,
 };
 
@@ -118,6 +117,13 @@ pub const AncestorStatus = enum {
 };
 
 /// Result of `getCommonAncestorDepth`: ancestor status + optional depth.
+/// Result of `getAllAncestorAndNonAncestorBlocks`: owned slices of ancestor
+/// and non-ancestor proto-blocks partitioned by the finalized checkpoint.
+pub const AncestorAndNonAncestorBlocks = struct {
+    ancestors: []ProtoBlock,
+    non_ancestors: []ProtoBlock,
+};
+
 pub const AncestorResult = union(AncestorStatus) {
     common_ancestor: struct { depth: u32 },
     descendant: void,
@@ -1559,7 +1565,7 @@ pub const ForkChoice = struct {
 
     /// Propagate execution layer validity response through the DAG.
     /// Only sets irrecoverable_error for InvalidLVHExecutionResponse;
-    /// other errors are silently ignored (matching TS behavior).
+    /// other errors are silently ignored.
     pub fn validateLatestHash(
         self: *ForkChoice,
         allocator: Allocator,
@@ -1641,8 +1647,8 @@ pub const ForkChoice = struct {
     /// no fork-check is performed inside this function.
     ///
     /// Spec: https://github.com/ethereum/consensus-specs/blob/v1.6.0/fork_choice/safe-block.md#get_safe_execution_block_hash
-    pub fn getSafeExecutionBlockHash(self: *const ForkChoice) Root {
-        const justified_block = self.getJustifiedBlock() catch return ZERO_HASH;
+    pub fn getSafeExecutionBlockHash(self: *const ForkChoice) !Root {
+        const justified_block = try self.getJustifiedBlock();
         return justified_block.extra_meta.executionPayloadBlockHash() orelse ZERO_HASH;
     }
 
@@ -1760,7 +1766,7 @@ pub const ForkChoice = struct {
         allocator: Allocator,
         block_root: Root,
         status: PayloadStatus,
-    ) !struct { ancestors: []ProtoBlock, non_ancestors: []ProtoBlock } {
+    ) !AncestorAndNonAncestorBlocks {
         var pa_result = try self.proto_array.getAllAncestorAndNonAncestorNodes(allocator, block_root, status);
         // The last ancestor block is the previous finalized one, exclude it.
         if (pa_result.ancestors.items.len > 0) _ = pa_result.ancestors.pop();
@@ -1801,9 +1807,11 @@ pub const ForkChoice = struct {
             @as(i64, @intCast(epoch_diff_val * preset.SLOTS_PER_EPOCH));
 
         // Special case close to genesis block, return the genesis block root.
+        // Invariant: when before_slot <= 0, genesis has not been pruned yet
+        // (finalization hasn't advanced enough), so items[0] is always genesis.
         if (before_slot_signed <= 0) {
             const genesis_block = &self.proto_array.nodes.items[0];
-            if (genesis_block.slot != 0) return error.GenesisBlockNotAvailable;
+            assert(genesis_block.slot == 0);
             return genesis_block.block_root;
         }
         const before_slot: Slot = @intCast(before_slot_signed);
@@ -2027,7 +2035,7 @@ fn getCheckpointPayloadStatus(state: *CachedBeaconState, checkpoint_epoch: Epoch
     const fork = state.config.forkSeq(checkpoint_slot);
 
     // Pre-Gloas: always FULL.
-    if (!fork.gte(.gloas)) return .full;
+    if (fork.lt(.gloas)) return .full;
 
     // For Gloas, check state.execution_payload_availability.
     const payload_available = state.state.executionPayloadAvailability(
