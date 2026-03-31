@@ -647,7 +647,7 @@ test "TreeView composite list clone drops uncommitted changes" {
     try std.testing.expectEqual(@as(u64, 1), dropped_e0_value.epoch);
 }
 
-test "TreeView composite list clone(true) does not transfer cache" {
+test "TreeView composite list clone(false) does not transfer cache" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 512);
     defer pool.deinit();
@@ -674,7 +674,7 @@ test "TreeView composite list clone(true) does not transfer cache" {
     try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.chunks.children_data.count());
 }
 
-test "TreeView composite list clone(false) transfers cache and clears source" {
+test "TreeView composite list clone(true) transfers cache and clears source" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 512);
     defer pool.deinit();

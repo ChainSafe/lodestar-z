@@ -147,7 +147,7 @@ test "BitVectorTreeView get/set roundtrip" {
     try std.testing.expectEqualSlices(u8, &expected_root, &view_root);
 }
 
-test "BitVectorTreeView clone(true) does not transfer cache" {
+test "BitVectorTreeView clone(false) does not transfer cache" {
     const allocator = std.testing.allocator;
     const Bits = BitVectorType(44);
 
@@ -173,7 +173,7 @@ test "BitVectorTreeView clone(true) does not transfer cache" {
     try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.data.state.children_nodes.count());
 }
 
-test "BitVectorTreeView clone(false) transfers cache and clears source" {
+test "BitVectorTreeView clone(true) transfers cache and clears source" {
     const allocator = std.testing.allocator;
     const Bits = BitVectorType(44);
 
