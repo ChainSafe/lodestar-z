@@ -26,7 +26,7 @@ const transport_mod = discv5.transport;
 const Address = transport_mod.Address;
 const Transport = transport_mod.Transport;
 
-const ShutdownHandler = @import("shutdown.zig").ShutdownHandler;
+const ShutdownHandler = @import("../../shutdown.zig").ShutdownHandler;
 
 const log = std.log.scoped(.bootnode);
 
