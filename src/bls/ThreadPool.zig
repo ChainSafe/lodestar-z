@@ -397,6 +397,354 @@ pub fn aggregateVerify(
     return mergeAndVerify(&result_bufs, n_results, &gtsig);
 }
 
+// -- Tiled Pippenger multi-scalar multiplication --
+// Matches the Rust blst crate's MultiPoint::mult() strategy:
+//   npoints < 32  → per-point scalar mult + add (on workers)
+//   npoints >= 32 → tiled Pippenger distributed across workers
+
+const Tile = struct {
+    x: usize, // point offset
+    dx: usize, // point count
+    y: usize, // bit offset
+    dy: usize, // bit count (window)
+};
+
+/// Max tiles = MAX_WORKERS * max_ny. Generous upper bound.
+const MAX_TILES = MAX_WORKERS * 16;
+
+fn numBits(l: usize) usize {
+    if (l == 0) return 0;
+    return @bitSizeOf(usize) - @clz(l);
+}
+
+fn pippenger_window_size(npoints: usize) usize {
+    const wbits = numBits(npoints);
+    if (wbits > 13) return wbits - 4;
+    if (wbits > 5) return wbits - 3;
+    return 2;
+}
+
+fn breakdown(nbits: usize, window: usize, ncpus: usize) struct { nx: usize, ny: usize, wnd: usize } {
+    var nx: usize = undefined;
+    var wnd: usize = undefined;
+
+    if (nbits > window * ncpus) {
+        nx = 1;
+        const nb = numBits(ncpus / 4);
+        if ((window + nb) > 18) {
+            wnd = window - nb;
+        } else {
+            wnd = (nbits / window + ncpus - 1) / ncpus;
+            if ((nbits / (window + 1) + ncpus - 1) / ncpus < wnd) {
+                wnd = window + 1;
+            } else {
+                wnd = window;
+            }
+        }
+    } else {
+        nx = 2;
+        wnd = window - 2;
+        while ((nbits / wnd + 1) * nx < ncpus) {
+            nx += 1;
+            wnd = window - numBits(3 * nx / 2);
+        }
+        nx -= 1;
+        wnd = window - numBits(3 * nx / 2);
+    }
+    const ny = nbits / wnd + 1;
+    wnd = nbits / ny + 1;
+
+    return .{ .nx = nx, .ny = ny, .wnd = wnd };
+}
+
+const TileP1Job = struct {
+    /// Contiguous array of affine points
+    points: [*]const c.blst_p1_affine,
+    /// Contiguous array of scalar bytes, nbytes stride
+    scalars: [*]const u8,
+    nbytes: usize,
+    nbits: usize,
+    tiles: []const Tile,
+    results: []c.blst_p1,
+    counter: std.atomic.Value(usize),
+};
+
+const TileP1WorkItem = struct {
+    base: WorkItem,
+    job: *TileP1Job,
+
+    fn exec(base_item: *WorkItem) void {
+        const self: *TileP1WorkItem = @fieldParentPtr("base", base_item);
+        const job = self.job;
+        const total = job.tiles.len;
+
+        // scratch_sizeof(0) gives per-window scratch element count
+        const sz = c.blst_p1s_mult_pippenger_scratch_sizeof(0) / 8;
+        const window = job.tiles[0].dy;
+        const shift: u6 = @intCast(window - 1);
+        const scratch_len = sz << shift;
+        var scratch_buf: [16384]u64 = undefined;
+        const scratch: []u64 = scratch_buf[0..@min(scratch_len, scratch_buf.len)];
+
+        while (true) {
+            const work = job.counter.fetchAdd(1, .monotonic);
+            if (work >= total) break;
+
+            const tile = &job.tiles[work];
+            // Build 2-element pointer arrays: [ptr_to_offset, null_sentinel]
+            const pts: [2]?*const c.blst_p1_affine = .{ &job.points[tile.x], null };
+            const sca: [2]?*const u8 = .{ &job.scalars[tile.x * job.nbytes], null };
+
+            c.blst_p1s_tile_pippenger(
+                &job.results[work],
+                @ptrCast(&pts),
+                tile.dx,
+                @ptrCast(&sca),
+                job.nbits,
+                scratch.ptr,
+                tile.y,
+                tile.dy,
+            );
+        }
+    }
+};
+
+const TileP2Job = struct {
+    points: [*]const c.blst_p2_affine,
+    scalars: [*]const u8,
+    nbytes: usize,
+    nbits: usize,
+    tiles: []const Tile,
+    results: []c.blst_p2,
+    counter: std.atomic.Value(usize),
+};
+
+const TileP2WorkItem = struct {
+    base: WorkItem,
+    job: *TileP2Job,
+
+    fn exec(base_item: *WorkItem) void {
+        const self: *TileP2WorkItem = @fieldParentPtr("base", base_item);
+        const job = self.job;
+        const total = job.tiles.len;
+
+        const sz = c.blst_p2s_mult_pippenger_scratch_sizeof(0) / 8;
+        const window = job.tiles[0].dy;
+        const shift: u6 = @intCast(window - 1);
+        const scratch_len = sz << shift;
+        var scratch_buf: [16384]u64 = undefined;
+        const scratch: []u64 = scratch_buf[0..@min(scratch_len, scratch_buf.len)];
+
+        while (true) {
+            const work = job.counter.fetchAdd(1, .monotonic);
+            if (work >= total) break;
+
+            const tile = &job.tiles[work];
+            const pts: [2]?*const c.blst_p2_affine = .{ &job.points[tile.x], null };
+            const sca: [2]?*const u8 = .{ &job.scalars[tile.x * job.nbytes], null };
+
+            c.blst_p2s_tile_pippenger(
+                &job.results[work],
+                @ptrCast(&pts),
+                tile.dx,
+                @ptrCast(&sca),
+                job.nbits,
+                scratch.ptr,
+                tile.y,
+                tile.dy,
+            );
+        }
+    }
+};
+
+fn buildTileGrid(npoints: usize, nbits: usize, ncpus: usize, tiles: []Tile) usize {
+    const bd = breakdown(nbits, pippenger_window_size(npoints), ncpus);
+    const nx = bd.nx;
+    const ny = bd.ny;
+    const window = bd.wnd;
+
+    const dx = npoints / nx;
+    var total: usize = 0;
+
+    // Top row (highest bits)
+    var y = window * (ny - 1);
+    for (0..nx) |i| {
+        tiles[total] = .{
+            .x = i * dx,
+            .dx = if (i == nx - 1) npoints - i * dx else dx,
+            .y = y,
+            .dy = nbits - y,
+        };
+        total += 1;
+    }
+    // Remaining rows
+    while (y != 0) {
+        y -= window;
+        for (0..nx) |i| {
+            tiles[total] = .{
+                .x = tiles[i].x,
+                .dx = tiles[i].dx,
+                .y = y,
+                .dy = window,
+            };
+            total += 1;
+        }
+    }
+    return total;
+}
+
+/// Reduce tile results: for each row (same y), add across x; then double-and-add across rows.
+fn reduceTilesP1(tiles: []const Tile, results: []c.blst_p1, nx: usize, ny: usize, window: usize) c.blst_p1 {
+    var ret: c.blst_p1 = std.mem.zeroes(c.blst_p1);
+
+    // Process from highest bit row to lowest
+    var row: usize = 0;
+    for (0..ny) |_| {
+        // Sum all tiles in this row (across x)
+        for (0..nx) |_| {
+            c.blst_p1_add_or_double(&ret, &ret, &results[row]);
+            row += 1;
+        }
+        // If not the last row, double `window` times before adding next row
+        if (row < tiles.len) {
+            for (0..window) |_| {
+                c.blst_p1_double(&ret, &ret);
+            }
+        }
+    }
+    return ret;
+}
+
+fn reduceTilesP2(tiles: []const Tile, results: []c.blst_p2, nx: usize, ny: usize, window: usize) c.blst_p2 {
+    var ret: c.blst_p2 = std.mem.zeroes(c.blst_p2);
+
+    var row: usize = 0;
+    for (0..ny) |_| {
+        for (0..nx) |_| {
+            c.blst_p2_add_or_double(&ret, &ret, &results[row]);
+            row += 1;
+        }
+        if (row < tiles.len) {
+            for (0..window) |_| {
+                c.blst_p2_double(&ret, &ret);
+            }
+        }
+    }
+    return ret;
+}
+
+/// Aggregates public keys and signatures with randomness using tiled Pippenger
+/// distributed across the thread pool. Matches the Rust blst crate's strategy.
+///
+/// Takes contiguous arrays of points and 8-byte-stride scalars.
+pub fn aggregateWithRandomness(
+    pool: *ThreadPool,
+    pk_points: []const c.blst_p1_affine,
+    sig_points: []const c.blst_p2_affine,
+    scalars: []const u8,
+    n: usize,
+) BlstError!struct { pk: c.blst_p1, sig: c.blst_p2 } {
+    if (n == 0) return BlstError.AggrTypeMismatch;
+
+    const nbits: usize = 64;
+    const nbytes: usize = 8;
+
+    // For small inputs or single worker, fall back to single-threaded Pippenger
+    if (n < 32 or pool.n_workers <= 1) {
+        const scratch_size = @max(
+            c.blst_p1s_mult_pippenger_scratch_sizeof(n),
+            c.blst_p2s_mult_pippenger_scratch_sizeof(n),
+        );
+        const scratch = pool.allocator.alloc(u64, scratch_size) catch return BlstError.AggrTypeMismatch;
+        defer pool.allocator.free(scratch);
+
+        // Build pointer arrays for the non-tiled API
+        var pk_ptrs: [blst.MAX_AGGREGATE_PER_JOB]*const c.blst_p1_affine = undefined;
+        var sig_ptrs: [blst.MAX_AGGREGATE_PER_JOB]*const c.blst_p2_affine = undefined;
+        var sca_ptrs: [blst.MAX_AGGREGATE_PER_JOB]*const u8 = undefined;
+        for (0..n) |i| {
+            pk_ptrs[i] = &pk_points[i];
+            sig_ptrs[i] = &sig_points[i];
+            sca_ptrs[i] = &scalars[i * nbytes];
+        }
+
+        var p1_ret: c.blst_p1 = std.mem.zeroes(c.blst_p1);
+        c.blst_p1s_mult_pippenger(
+            &p1_ret,
+            @ptrCast(&pk_ptrs),
+            n,
+            @ptrCast(&sca_ptrs),
+            nbits,
+            scratch.ptr,
+        );
+
+        var p2_ret: c.blst_p2 = std.mem.zeroes(c.blst_p2);
+        c.blst_p2s_mult_pippenger(
+            &p2_ret,
+            @ptrCast(&sig_ptrs),
+            n,
+            @ptrCast(&sca_ptrs),
+            nbits,
+            scratch.ptr,
+        );
+
+        return .{ .pk = p1_ret, .sig = p2_ret };
+    }
+
+    // Build tile grid
+    var tiles: [MAX_TILES]Tile = undefined;
+    const total = buildTileGrid(n, nbits, pool.n_workers, &tiles);
+    const bd = breakdown(nbits, pippenger_window_size(n), pool.n_workers);
+
+    // --- P1 (public keys) ---
+    var p1_results: [MAX_TILES]c.blst_p1 = undefined;
+    var p1_job = TileP1Job{
+        .points = pk_points.ptr,
+        .scalars = scalars.ptr,
+        .nbytes = nbytes,
+        .nbits = nbits,
+        .tiles = tiles[0..total],
+        .results = &p1_results,
+        .counter = std.atomic.Value(usize).init(0),
+    };
+
+    const n_active_p1 = @min(pool.n_workers, total);
+    var p1_items: [MAX_WORKERS]TileP1WorkItem = undefined;
+    var p1_ptrs: [MAX_WORKERS]*WorkItem = undefined;
+    for (0..n_active_p1) |i| {
+        p1_items[i] = .{ .base = .{ .exec_fn = TileP1WorkItem.exec }, .job = &p1_job };
+        p1_ptrs[i] = &p1_items[i].base;
+    }
+    pool.submitAndWait(p1_ptrs[0..n_active_p1]);
+
+    const p1_result = reduceTilesP1(tiles[0..total], &p1_results, bd.nx, bd.ny, bd.wnd);
+
+    // --- P2 (signatures) ---
+    var p2_results: [MAX_TILES]c.blst_p2 = undefined;
+    var p2_job = TileP2Job{
+        .points = sig_points.ptr,
+        .scalars = scalars.ptr,
+        .nbytes = nbytes,
+        .nbits = nbits,
+        .tiles = tiles[0..total],
+        .results = &p2_results,
+        .counter = std.atomic.Value(usize).init(0),
+    };
+
+    const n_active_p2 = @min(pool.n_workers, total);
+    var p2_items: [MAX_WORKERS]TileP2WorkItem = undefined;
+    var p2_ptrs: [MAX_WORKERS]*WorkItem = undefined;
+    for (0..n_active_p2) |i| {
+        p2_items[i] = .{ .base = .{ .exec_fn = TileP2WorkItem.exec }, .job = &p2_job };
+        p2_ptrs[i] = &p2_items[i].base;
+    }
+    pool.submitAndWait(p2_ptrs[0..n_active_p2]);
+
+    const p2_result = reduceTilesP2(tiles[0..total], &p2_results, bd.nx, bd.ny, bd.wnd);
+
+    return .{ .pk = p1_result, .sig = p2_result };
+}
+
 /// Merges the first `n_results` pairing buffers and executes `finalVerify`.
 fn mergeAndVerify(
     result_bufs: *[MAX_WORKERS]PairingBuf,
