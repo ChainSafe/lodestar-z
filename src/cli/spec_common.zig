@@ -57,12 +57,22 @@ pub const global_options = .{
         .env = "LODESTAR_Z_PRESET",
     }, null),
 
+    .presetFile = cli.option(?[]const u8, .{
+        .long = "presetFile",
+        .description = "Preset configuration file override",
+    }, null),
+
     .data_dir = cli.option([]const u8, .{
         .long = "data-dir",
         .short = 'd',
         .description = "Root data directory",
         .env = "LODESTAR_Z_DATA_DIR",
     }, ""),
+
+    .dataDir = cli.option(?[]const u8, .{
+        .long = "dataDir",
+        .description = "Lodestar root data directory",
+    }, null),
 
     .db_path = cli.option(?[]const u8, .{
         .long = "db-path",
@@ -76,10 +86,20 @@ pub const global_options = .{
         .env = "LODESTAR_Z_PARAMS_FILE",
     }, null),
 
+    .paramsFile = cli.option(?[]const u8, .{
+        .long = "paramsFile",
+        .description = "Network configuration file",
+    }, null),
+
     .rc_config = cli.option(?[]const u8, .{
         .long = "rc-config",
         .description = "RC config file path (YAML/JSON)",
         .env = "LODESTAR_Z_RC_CONFIG",
+    }, null),
+
+    .rcConfig = cli.option(?[]const u8, .{
+        .long = "rcConfig",
+        .description = "RC file to supplement command line args, accepted formats: .yml, .yaml, .json",
     }, null),
 
     .log_level = cli.option(CliLogLevel, .{
@@ -88,4 +108,27 @@ pub const global_options = .{
         .description = "Logging verbosity level",
         .env = "LODESTAR_Z_LOG_LEVEL",
     }, .info),
+
+    .logLevel = cli.option(?CliLogLevel, .{
+        .long = "logLevel",
+        .description = "Logging verbosity level for emitting logs to terminal",
+    }, null),
+
+    .supernode = cli.flag(.{
+        .long = "supernode",
+        .description = "Subscribe to and custody all data column sidecar subnets",
+        .group = "network",
+    }),
+
+    .semi_supernode = cli.flag(.{
+        .long = "semi-supernode",
+        .description = "Subscribe to and custody half of data column sidecar subnets",
+        .group = "network",
+    }),
+
+    .semiSupernode = cli.flag(.{
+        .long = "semiSupernode",
+        .description = "Subscribe to and custody half of data column sidecar subnets",
+        .group = "network",
+    }),
 };

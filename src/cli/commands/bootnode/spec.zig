@@ -13,6 +13,10 @@ pub const spec = cli.command(.{
             .description = "UDP port for bootnode discv5",
             .env = "LODESTAR_Z_BOOTNODE_PORT",
         }, 9000),
+        .discoveryPort = cli.option(?u16, .{
+            .long = "discoveryPort",
+            .description = "UDP port for bootnode discv5",
+        }, null),
         .listen_address6 = cli.option(?[]const u8, .{
             .long = "listenAddress6",
             .description = "IPv6 address to listen for discv5 connections",
@@ -22,6 +26,10 @@ pub const spec = cli.command(.{
             .long = "port6",
             .description = "IPv6 UDP port for bootnode discv5",
             .env = "LODESTAR_Z_BOOTNODE_PORT6",
+        }, null),
+        .discoveryPort6 = cli.option(?u16, .{
+            .long = "discoveryPort6",
+            .description = "IPv6 UDP port for bootnode discv5",
         }, null),
         .bootnodes = cli.option(?[]const u8, .{
             .long = "bootnodes",
@@ -63,5 +71,40 @@ pub const spec = cli.command(.{
             .description = "Allow ENR configuration of non-local addresses",
             .env = "LODESTAR_Z_BOOTNODE_NAT",
         }, false),
+        .metrics = cli.flag(.{
+            .long = "metrics",
+            .description = "Enable Prometheus metrics HTTP server",
+            .group = "metrics",
+        }),
+        .@"metrics.port" = cli.option(?u16, .{
+            .long = "metrics.port",
+            .description = "Listen TCP port for the Prometheus metrics HTTP server",
+            .group = "metrics",
+        }, null),
+        .@"metrics.address" = cli.option(?[]const u8, .{
+            .long = "metrics.address",
+            .description = "Listen address for the Prometheus metrics HTTP server",
+            .group = "metrics",
+        }, null),
+        .logFile = cli.option(?[]const u8, .{
+            .long = "logFile",
+            .description = "Path to output logs to a persistent log file",
+            .group = "logging",
+        }, null),
+        .logFileLevel = cli.option(?[]const u8, .{
+            .long = "logFileLevel",
+            .description = "Logging verbosity level for file output",
+            .group = "logging",
+        }, null),
+        .logFileDailyRotate = cli.option(?u16, .{
+            .long = "logFileDailyRotate",
+            .description = "Daily rotate log files, set to 0 to disable rotation",
+            .group = "logging",
+        }, null),
+        .logFormat = cli.option(?[]const u8, .{
+            .long = "logFormat",
+            .description = "Log format",
+            .group = "logging",
+        }, null),
     },
 });

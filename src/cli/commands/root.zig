@@ -13,6 +13,11 @@ pub const dev = struct {
     pub const command = @import("dev/command.zig");
 };
 
+pub const lightclient = struct {
+    pub const spec = @import("lightclient/spec.zig");
+    pub const command = @import("lightclient/command.zig");
+};
+
 pub const validator = struct {
     pub const spec = @import("validator/spec.zig");
     pub const command = @import("validator/command.zig");

@@ -21,6 +21,7 @@ const app_spec = cli.app(.{
     .commands = .{
         .beacon = commands.beacon.spec.spec,
         .validator = commands.validator.spec.spec,
+        .lightclient = commands.lightclient.spec.spec,
         .dev = commands.dev.spec.spec,
         .bootnode = commands.bootnode.spec.spec,
     },
@@ -65,7 +66,8 @@ pub fn main(init: std.process.Init) !void {
 
     switch (parsed) {
         .beacon => |opts| try commands.beacon.command.run(io, allocator, opts),
-        .validator => |opts| try commands.validator.command.run(opts),
+        .validator => |opts| try commands.validator.command.run(io, allocator, opts),
+        .lightclient => |opts| try commands.lightclient.command.run(opts),
         .dev => |opts| try commands.dev.command.run(opts),
         .bootnode => |opts| try commands.bootnode.command.run(io, allocator, opts),
     }

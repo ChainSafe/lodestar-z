@@ -8,9 +8,9 @@ const bootnode_runtime = @import("runtime.zig");
 pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     try bootnode_runtime.run(io, allocator, .{
         .listen_address = opts.listen_address,
-        .port = opts.bn_port,
+        .port = opts.discoveryPort orelse opts.bn_port,
         .listen_address6 = opts.listen_address6,
-        .port6 = opts.port6,
+        .port6 = opts.discoveryPort6 orelse opts.port6,
         .bootnodes = opts.bootnodes,
         .bootnodes_file = opts.bootnodes_file,
         .enr_ip = opts.enr_ip,

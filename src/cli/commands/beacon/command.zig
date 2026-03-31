@@ -105,10 +105,36 @@ fn runSlotClock(io: Io, node: *BeaconNode) void {
 
 pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     const network = opts.network.toNetworkName();
+    const data_dir = opts.dataDir orelse opts.data_dir;
+    const params_file = opts.paramsFile orelse opts.params_file;
+    const db_path = opts.dbDir orelse opts.db_path;
+    const execution_urls = opts.@"execution.urls" orelse opts.execution_urls;
+    const jwt_secret = opts.jwtSecret orelse opts.jwt_secret;
+    const api_port = opts.@"rest.port" orelse opts.api_port;
+    const api_address = opts.@"rest.address" orelse opts.api_address;
+    const api_cors = opts.@"rest.cors" orelse opts.api_cors;
+    const p2p_host = opts.listenAddress orelse opts.p2p_host;
+    const p2p_port = opts.port orelse opts.p2p_port;
+    const target_peers = opts.targetPeers orelse opts.target_peers;
+    const direct_peers_raw = opts.directPeers orelse opts.direct_peers;
+    const checkpoint_state = opts.checkpointState orelse opts.checkpoint_state;
+    const checkpoint_sync_url = opts.checkpointSyncUrl orelse opts.checkpoint_sync_url;
+    const weak_subjectivity_checkpoint = opts.wssCheckpoint orelse opts.weak_subjectivity_checkpoint;
+    const force_checkpoint_sync = opts.forceCheckpointSync or opts.force_checkpoint_sync;
+    const metrics_port = opts.@"metrics.port" orelse opts.metrics_port;
+    const metrics_address = opts.@"metrics.address" orelse opts.metrics_address;
+    const suggest_fee_recipient = opts.suggestedFeeRecipient orelse opts.suggest_fee_recipient;
+    const log_level = opts.logLevel orelse opts.log_level;
+    const log_file = opts.logFile orelse opts.log_file;
+    const log_format = opts.logFormat orelse opts.log_format;
+    const log_file_level = opts.logFileLevel orelse opts.log_file_level;
+    const log_file_daily_rotate = opts.logFileDailyRotate orelse opts.log_file_daily_rotate;
+    const subscribe_all_subnets = opts.subscribeAllSubnets or opts.subscribe_all_subnets;
+    const engine_mock = opts.@"execution.engineMock" or opts.engine_mock;
 
     var custom_chain_config: config_mod.ChainConfig = undefined;
     var custom_beacon_config: BeaconConfig = undefined;
-    const beacon_config: *const BeaconConfig = if (opts.params_file) |config_path| blk: {
+    const beacon_config: *const BeaconConfig = if (params_file) |config_path| blk: {
         std.log.info("Loading custom network config from: {s}", .{config_path});
         var arena = std.heap.ArenaAllocator.init(allocator);
         const config_arena = arena.allocator();
@@ -145,29 +171,29 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
 
     std.log.info("lodestar-z v{s} starting", .{common.VERSION});
     std.log.info("  network:    {s}", .{@tagName(network)});
-    std.log.info("  data-dir:   {s}", .{if (opts.data_dir.len > 0) opts.data_dir else "(in-memory)"});
-    std.log.info("  api:        http://{s}:{d}", .{ opts.api_address, opts.api_port });
-    std.log.info("  p2p:        {s}:{d}", .{ opts.p2p_host, opts.p2p_port });
-    if (opts.jwt_secret) |jwt| {
+    std.log.info("  data-dir:   {s}", .{if (data_dir.len > 0) data_dir else "(in-memory)"});
+    std.log.info("  api:        http://{s}:{d}", .{ api_address, api_port });
+    std.log.info("  p2p:        {s}:{d}", .{ p2p_host, p2p_port });
+    if (jwt_secret) |jwt| {
         std.log.info("  jwt-secret: {s}", .{jwt});
     }
-    std.log.info("  execution:  {s}", .{opts.execution_urls});
+    std.log.info("  execution:  {s}", .{execution_urls});
 
-    if (opts.data_dir.len > 0) {
+    if (data_dir.len > 0) {
         var dd = try node_mod.DataDir.resolve(allocator, NodeOptions{
-            .data_dir = opts.data_dir,
+            .data_dir = data_dir,
             .network = network,
-            .db_path = opts.db_path,
+            .db_path = db_path,
         });
         defer dd.deinit();
         try dd.ensureDirs(io);
-        std.log.info("  data directory ready: {s}", .{opts.data_dir});
+        std.log.info("  data directory ready: {s}", .{data_dir});
     }
 
     var pool = try Node.Pool.init(allocator, 200_000);
     defer pool.deinit();
 
-    const direct_peers: []const []const u8 = if (opts.direct_peers) |raw| blk: {
+    const direct_peers: []const []const u8 = if (direct_peers_raw) |raw| blk: {
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
         var it = std.mem.splitScalar(u8, raw, ',');
         while (it.next()) |addr| {
@@ -178,11 +204,13 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     } else &.{};
     defer if (direct_peers.len > 0) allocator.free(direct_peers);
 
-    const discovery_port: ?u16 = if (opts.discovery_port) |port_str| blk: {
+    const discovery_port: ?u16 = if (opts.discoveryPort) |port| blk: {
+        break :blk port;
+    } else if (opts.discovery_port) |port_str| blk: {
         break :blk std.fmt.parseInt(u16, port_str, 10) catch null;
     } else null;
 
-    const fee_recipient: ?[20]u8 = if (opts.suggest_fee_recipient) |hex_str| blk: {
+    const fee_recipient: ?[20]u8 = if (suggest_fee_recipient) |hex_str| blk: {
         const stripped = if (hex_str.len >= 2 and hex_str[0] == '0' and (hex_str[1] == 'x' or hex_str[1] == 'X'))
             hex_str[2..]
         else
@@ -207,46 +235,46 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     } else null;
 
     const node_opts = NodeOptions{
-        .data_dir = opts.data_dir,
-        .db_path = opts.db_path,
+        .data_dir = data_dir,
+        .db_path = db_path,
         .bootnodes = bootnodes,
         .verify_signatures = opts.verify_signatures,
         .rest_enabled = opts.rest,
-        .rest_port = opts.api_port,
-        .rest_address = opts.api_address,
-        .rest_cors_origin = opts.api_cors,
-        .execution_urls = &.{opts.execution_urls},
-        .jwt_secret_path = opts.jwt_secret,
-        .engine_mock = opts.engine_mock,
-        .target_peers = opts.target_peers,
+        .rest_port = api_port,
+        .rest_address = api_address,
+        .rest_cors_origin = api_cors,
+        .execution_urls = &.{execution_urls},
+        .jwt_secret_path = jwt_secret,
+        .engine_mock = engine_mock,
+        .target_peers = target_peers,
         .network = network,
-        .p2p_host = opts.p2p_host,
-        .p2p_port = opts.p2p_port,
+        .p2p_host = p2p_host,
+        .p2p_port = p2p_port,
         .enable_discv5 = opts.discv5,
         .discovery_port = discovery_port,
         .direct_peers = direct_peers,
         .enable_mdns = opts.mdns,
-        .subscribe_all_subnets = opts.subscribe_all_subnets,
+        .subscribe_all_subnets = subscribe_all_subnets,
         .suggested_fee_recipient = fee_recipient,
         .graffiti = graffiti_bytes,
         .metrics_enabled = opts.metrics,
-        .metrics_port = opts.metrics_port,
-        .metrics_address = opts.metrics_address,
-        .checkpoint_sync_url = opts.checkpoint_sync_url,
+        .metrics_port = metrics_port,
+        .metrics_address = metrics_address,
+        .checkpoint_sync_url = checkpoint_sync_url,
     };
 
     {
-        log_mod.global = log_mod.GlobalLogger.init(opts.log_level.toLogLevel(), opts.log_format);
+        log_mod.global = log_mod.GlobalLogger.init(log_level.toLogLevel(), log_format);
     }
 
     var file_transport: ?log_mod.FileTransport = null;
-    if (opts.log_file) |log_file_path| {
-        const file_level = opts.log_file_level.toLogLevel();
+    if (log_file) |log_file_path| {
+        const file_level = log_file_level.toLogLevel();
 
         file_transport = log_mod.FileTransport.init(io, log_file_path, file_level, .{
             .max_size_bytes = 100 * 1024 * 1024,
-            .max_files = opts.log_file_daily_rotate,
-            .daily = opts.log_file_daily_rotate > 0,
+            .max_files = log_file_daily_rotate,
+            .daily = log_file_daily_rotate > 0,
         });
 
         if (file_transport) |*ft| {
@@ -269,9 +297,9 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
 
     node.setIo(io);
 
-    const force_checkpoint = opts.force_checkpoint_sync;
+    const force_checkpoint = force_checkpoint_sync;
 
-    if (opts.checkpoint_sync_url) |sync_url| {
+    if (checkpoint_sync_url) |sync_url| {
         std.log.info("Checkpoint sync from URL: {s}", .{sync_url});
 
         const fetched = checkpoint_sync.fetchFinalizedState(allocator, io, sync_url) catch |err| {
@@ -300,7 +328,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
             std.process.exit(1);
         };
 
-        if (opts.weak_subjectivity_checkpoint) |ws_str| {
+        if (weak_subjectivity_checkpoint) |ws_str| {
             const ws = checkpoint_sync.parseWeakSubjectivityCheckpoint(ws_str) catch |err| {
                 std.log.err("Invalid --weak-subjectivity-checkpoint '{s}': {}", .{ ws_str, err });
                 std.process.exit(1);
@@ -316,11 +344,11 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         }
 
         try node.initFromCheckpoint(cp_state);
-        if (opts.params_file != null) {
+        if (params_file != null) {
             custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
         }
         std.log.info("Initialized from checkpoint sync URL at slot {d}", .{cp_state.state.slot() catch 0});
-    } else if (opts.checkpoint_state) |state_path| {
+    } else if (checkpoint_state) |state_path| {
         std.log.info("Loading checkpoint state from: {s}", .{state_path});
 
         const cp_state = genesis_util.loadGenesisFromFile(allocator, &pool, beacon_config, io, state_path) catch |err| {
@@ -328,7 +356,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
             std.process.exit(1);
         };
 
-        if (opts.weak_subjectivity_checkpoint) |ws_str| {
+        if (weak_subjectivity_checkpoint) |ws_str| {
             const ws = checkpoint_sync.parseWeakSubjectivityCheckpoint(ws_str) catch |err| {
                 std.log.err("Invalid --weak-subjectivity-checkpoint '{s}': {}", .{ ws_str, err });
                 std.process.exit(1);
@@ -347,7 +375,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         } else {
             try node.initFromCheckpoint(cp_state);
         }
-        if (opts.params_file != null) {
+        if (params_file != null) {
             custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
         }
         std.log.info("Initialized from checkpoint file at slot {d}", .{cp_slot});
@@ -375,7 +403,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         };
 
         try node.initFromCheckpoint(db_state);
-        if (opts.params_file != null) {
+        if (params_file != null) {
             custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
         }
         std.log.info("Resumed from DB state at slot {d}", .{db_slot});
@@ -388,7 +416,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         };
 
         try node.initFromGenesis(genesis_state);
-        if (opts.params_file != null) {
+        if (params_file != null) {
             custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
         }
         std.log.info("Initialized from minimal genesis state", .{});
@@ -410,16 +438,16 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
 
     var run_ctx = RunContext{
         .node = node,
-        .api_port = opts.api_port,
-        .api_address = opts.api_address,
-        .api_cors_origin = opts.api_cors,
-        .p2p_port = opts.p2p_port,
-        .p2p_host = opts.p2p_host,
+        .api_port = api_port,
+        .api_address = api_address,
+        .api_cors_origin = api_cors,
+        .p2p_port = p2p_port,
+        .p2p_host = p2p_host,
     };
 
     std.log.info("Starting services concurrently...", .{});
-    std.log.info("  REST API: http://{s}:{d}", .{ opts.api_address, opts.api_port });
-    std.log.info("  P2P:      /ip4/{s}/udp/{d}/quic-v1", .{ opts.p2p_host, opts.p2p_port });
+    std.log.info("  REST API: http://{s}:{d}", .{ api_address, api_port });
+    std.log.info("  P2P:      /ip4/{s}/udp/{d}/quic-v1", .{ p2p_host, p2p_port });
 
     var group: Io.Group = .init;
     group.async(io, runApiServer, .{ io, &run_ctx });
