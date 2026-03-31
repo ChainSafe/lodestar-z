@@ -3,7 +3,7 @@
 //! Implements a minimal discv5 discovery node that:
 //! - Generates or loads a persistent secp256k1 identity
 //! - Builds and signs a local ENR with configured addresses
-//! - Runs a discv5 protocol instance bound to a UDP transport
+//! - Runs a discv5 protocol instance bound to a UDP socket
 //! - Seeds its routing table from CLI bootnodes, file, or network defaults
 //! - Periodically logs peer reachability statistics
 //! - Persists identity (key + ENR) across restarts
@@ -13,7 +13,6 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
-const linux = std.os.linux;
 
 const discv5 = @import("discv5");
 const Protocol = discv5.protocol.Protocol;
@@ -22,9 +21,8 @@ const EnrBuilder = discv5.enr.Builder;
 const NodeId = discv5.enr.NodeId;
 const enr_mod = discv5.enr;
 const secp = discv5.secp256k1;
-const transport_mod = discv5.transport;
-const Address = transport_mod.Address;
-const Transport = transport_mod.Transport;
+const Address = discv5.Address;
+const UdpSocket = discv5.UdpSocket;
 
 const ShutdownHandler = @import("../../shutdown.zig").ShutdownHandler;
 
@@ -65,130 +63,6 @@ pub const BootnodeOpts = struct {
     data_dir: []const u8 = "",
     /// Target Ethereum network
     network: []const u8 = "mainnet",
-};
-
-// ── Raw Linux UDP Transport ─────────────────────────────────────────────────
-// std.posix.socket is removed in newer Zig; use Linux syscalls directly.
-
-const SockaddrIn = extern struct {
-    family: u16 = linux.AF.INET,
-    port: u16 = 0, // big-endian
-    addr: u32 = 0, // big-endian
-    zero: [8]u8 = [_]u8{0} ** 8,
-};
-
-const Timeval = extern struct {
-    sec: i64,
-    usec: i64,
-};
-
-fn htons(x: u16) u16 {
-    return std.mem.nativeToBig(u16, x);
-}
-
-fn htonl(x: u32) u32 {
-    return std.mem.nativeToBig(u32, x);
-}
-
-fn ipToU32(ip: [4]u8) u32 {
-    return htonl((@as(u32, ip[0]) << 24) | (@as(u32, ip[1]) << 16) | (@as(u32, ip[2]) << 8) | @as(u32, ip[3]));
-}
-
-const LinuxUdpTransport = struct {
-    sockfd: i32,
-
-    fn init(bind_ip: [4]u8, bind_port: u16) !LinuxUdpTransport {
-        const r = linux.syscall3(.socket, linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
-        const rc: isize = @bitCast(r);
-        if (rc < 0) return error.SocketFailed;
-        const sockfd: i32 = @intCast(r);
-
-        // Set recv timeout to 100ms for non-blocking-like behavior
-        const tv = Timeval{ .sec = 0, .usec = 100_000 };
-        _ = linux.syscall5(
-            .setsockopt,
-            @intCast(sockfd),
-            linux.SOL.SOCKET,
-            linux.SO.RCVTIMEO,
-            @intFromPtr(&tv),
-            @sizeOf(Timeval),
-        );
-
-        var sa = SockaddrIn{
-            .port = htons(bind_port),
-            .addr = ipToU32(bind_ip),
-        };
-        const bind_rc: isize = @bitCast(linux.syscall3(.bind, @intCast(sockfd), @intFromPtr(&sa), @sizeOf(SockaddrIn)));
-        if (bind_rc != 0) return error.BindFailed;
-
-        return .{ .sockfd = sockfd };
-    }
-
-    fn deinit(self: *LinuxUdpTransport) void {
-        _ = linux.syscall1(.close, @intCast(self.sockfd));
-    }
-
-    fn transport(self: *LinuxUdpTransport) Transport {
-        return .{
-            .ptr = @ptrCast(self),
-            .sendFn = sendImpl,
-            .recvFn = recvImpl,
-            .closeFn = closeImpl,
-        };
-    }
-
-    fn sendImpl(ptr: *anyopaque, dest: Address, data: []const u8) anyerror!void {
-        const self: *LinuxUdpTransport = @ptrCast(@alignCast(ptr));
-        const sa = SockaddrIn{
-            .port = htons(dest.port),
-            .addr = ipToU32(dest.ip),
-        };
-        const r = linux.syscall6(
-            .sendto,
-            @intCast(self.sockfd),
-            @intFromPtr(data.ptr),
-            data.len,
-            0,
-            @intFromPtr(&sa),
-            @sizeOf(SockaddrIn),
-        );
-        const rc: isize = @bitCast(r);
-        if (rc < 0) return error.SendFailed;
-    }
-
-    fn recvImpl(ptr: *anyopaque, buf: []u8) anyerror!transport_mod.RecvResult {
-        const self: *LinuxUdpTransport = @ptrCast(@alignCast(ptr));
-        var src_addr: SockaddrIn = .{};
-        var src_len: u32 = @sizeOf(SockaddrIn);
-        const r = linux.syscall6(
-            .recvfrom,
-            @intCast(self.sockfd),
-            @intFromPtr(buf.ptr),
-            buf.len,
-            0,
-            @intFromPtr(&src_addr),
-            @intFromPtr(&src_len),
-        );
-        const rc: isize = @bitCast(r);
-        if (rc < 0) return error.WouldBlock;
-        const n: usize = @intCast(rc);
-
-        // Extract IP from network-byte-order u32
-        const addr_be = std.mem.toBytes(src_addr.addr);
-
-        return .{
-            .data = buf[0..n],
-            .from = .{
-                .ip = addr_be,
-                .port = std.mem.bigToNative(u16, src_addr.port),
-            },
-        };
-    }
-
-    fn closeImpl(ptr: *anyopaque) void {
-        const self: *LinuxUdpTransport = @ptrCast(@alignCast(ptr));
-        _ = linux.syscall1(.close, @intCast(self.sockfd));
-    }
 };
 
 // ── Key Management ──────────────────────────────────────────────────────────
@@ -328,10 +202,11 @@ fn seedEnrToProtocol(allocator: Allocator, protocol_inst: *Protocol, enr_str: []
     defer enr.deinit();
 
     const node_id = enr.nodeId() orelse return false;
+    const pubkey = enr.pubkey orelse return false;
     const ip = enr.ip orelse return false;
     const port = enr.udp orelse return false;
 
-    protocol_inst.addNode(node_id, null, .{ .ip = ip, .port = port });
+    protocol_inst.addNode(node_id, &pubkey, .{ .bytes = ip, .port = port }, raw);
     return true;
 }
 
@@ -465,6 +340,8 @@ pub fn run(io: Io, allocator: Allocator, opts: BootnodeOpts) !void {
     }
 
     // Encode ENR
+    const local_enr = try enr_builder.encode();
+    defer allocator.free(local_enr);
     const enr_str = try enr_builder.encodeToString();
     defer allocator.free(enr_str);
 
@@ -488,21 +365,19 @@ pub fn run(io: Io, allocator: Allocator, opts: BootnodeOpts) !void {
     log.info("  ENR:        {s}", .{enr_str});
 
     // ── Create discv5 protocol ──────────────────────────────────────
-    var protocol_inst = try Protocol.init(allocator, .{
+    var protocol_inst = try Protocol.init(io, allocator, .{
         .local_secret_key = secret_key,
         .local_node_id = node_id,
-        .listen_addr = .{ .ip = listen_ip4, .port = opts.port },
+        .local_enr = local_enr,
+        .local_enr_seq = enr_seq,
     });
     defer protocol_inst.deinit();
 
-    // ── Bind UDP transport ──────────────────────────────────────────
-    var udp = try LinuxUdpTransport.init(listen_ip4, opts.port);
-    defer udp.deinit();
-    const udp_transport = udp.transport();
+    // ── Bind UDP socket ─────────────────────────────────────────────
+    var udp = try UdpSocket.bind(io, .{ .bytes = listen_ip4, .port = opts.port });
+    defer udp.close();
 
-    log.info("UDP transport bound to {d}.{d}.{d}.{d}:{d}", .{
-        listen_ip4[0], listen_ip4[1], listen_ip4[2], listen_ip4[3], opts.port,
-    });
+    log.info("UDP socket bound to {}", .{udp.address});
 
     // ── Seed routing table ──────────────────────────────────────────
     var total_seeded: usize = 0;
@@ -537,10 +412,14 @@ pub fn run(io: Io, allocator: Allocator, opts: BootnodeOpts) !void {
     const stats_interval: u32 = 100; // ~100 recv timeouts at ~100ms each ≈ 10s
 
     while (!ShutdownHandler.shouldStop()) {
-        // Non-blocking recv with timeout (100ms set via SO_RCVTIMEO)
-        const result = udp_transport.recv(&recv_buf) catch |err| {
+        const result = udp.receiveTimeout(&recv_buf, .{
+            .duration = .{
+                .raw = Io.Duration.fromMilliseconds(100),
+                .clock = .awake,
+            },
+        }) catch |err| {
             switch (err) {
-                error.WouldBlock => {},
+                error.Timeout => {},
                 else => {
                     // On recv errors, sleep briefly and retry
                     io.sleep(.{ .nanoseconds = 100 * std.time.ns_per_ms }, .real) catch break;
@@ -555,11 +434,8 @@ pub fn run(io: Io, allocator: Allocator, opts: BootnodeOpts) !void {
         };
 
         // Process received packet
-        protocol_inst.handlePacket(result.data, result.from, udp_transport) catch |err| {
-            log.debug("Packet handling error from {d}.{d}.{d}.{d}:{d}: {}", .{
-                result.from.ip[0], result.from.ip[1], result.from.ip[2], result.from.ip[3],
-                result.from.port, err,
-            });
+        protocol_inst.handlePacket(result.data, result.from, &udp) catch |err| {
+            log.debug("Packet handling error from {}: {}", .{ result.from, err });
         };
         packets_processed += 1;
 

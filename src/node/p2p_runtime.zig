@@ -484,7 +484,7 @@ fn initDiscoveryService(self: *BeaconNode) !void {
     const disc_port = self.node_options.discovery_port orelse self.node_options.p2p_port;
     const local_ip = parseIp4(self.node_options.p2p_host) orelse [4]u8{ 0, 0, 0, 0 };
 
-    ds.* = try DiscoveryService.init(self.allocator, .{
+    ds.* = try DiscoveryService.init(self.io.?, self.allocator, .{
         .listen_port = disc_port,
         .secret_key = secret_key,
         .local_ip = local_ip,

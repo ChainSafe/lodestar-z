@@ -26,7 +26,7 @@ pub const ReqId = struct {
 
     pub fn fromSlice(s: []const u8) Error!ReqId {
         if (s.len == 0 or s.len > 8) return Error.InvalidMessage;
-        var id = ReqId{ .bytes = undefined, .len = @intCast(s.len) };
+        var id = ReqId{ .bytes = [_]u8{0} ** 8, .len = @intCast(s.len) };
         @memcpy(id.bytes[0..s.len], s);
         return id;
     }
@@ -180,7 +180,7 @@ pub const Nodes = struct {
         try w.writeUint64(self.total);
         const enr_start = try w.beginList();
         for (self.enrs) |enr| {
-            try w.buf.appendSlice(w.alloc, enr);
+            try w.writeBytes(enr);
         }
         try w.finishList(enr_start);
         try w.finishList(list_start);
@@ -190,6 +190,32 @@ pub const Nodes = struct {
         result[0] = MSG_NODES;
         @memcpy(result[1..], rlp_bytes);
         return result;
+    }
+
+    pub fn decode(alloc: Allocator, data: []const u8) Error!struct { msg: Nodes, enrs: [][]u8 } {
+        if (data.len < 1 or data[0] != MSG_NODES) return Error.InvalidMessage;
+        var r = rlp.Reader.init(data[1..]);
+        var list = r.readList() catch return Error.InvalidEncoding;
+        const req_id_bytes = list.readBytes() catch return Error.InvalidEncoding;
+        const req_id = try ReqId.fromSlice(req_id_bytes);
+        const total = list.readUint64() catch return Error.InvalidEncoding;
+
+        var enr_list = list.readList() catch return Error.InvalidEncoding;
+        var enrs: std.ArrayListUnmanaged([]u8) = .empty;
+        errdefer {
+            for (enrs.items) |enr| alloc.free(enr);
+            enrs.deinit(alloc);
+        }
+
+        while (!enr_list.atEnd()) {
+            const enr_bytes = enr_list.readBytes() catch return Error.InvalidEncoding;
+            try enrs.append(alloc, try alloc.dupe(u8, enr_bytes));
+        }
+        const owned = try enrs.toOwnedSlice(alloc);
+        return .{
+            .msg = .{ .req_id = req_id, .total = total, .enrs = owned },
+            .enrs = owned,
+        };
     }
 };
 
@@ -320,4 +346,30 @@ test "discv5 messages: TALKREQ encode/decode" {
     const decoded = try TalkReq.decode(encoded);
     try std.testing.expectEqualSlices(u8, "eth", decoded.protocol);
     try std.testing.expectEqualSlices(u8, "hello", decoded.request);
+}
+
+test "discv5 messages: NODES encode/decode" {
+    const alloc = std.testing.allocator;
+    const req_id = try ReqId.fromSlice("id");
+    const enr_a = "enr-a";
+    const enr_b = "enr-b";
+    const msg = Nodes{
+        .req_id = req_id,
+        .total = 2,
+        .enrs = &.{ enr_a, enr_b },
+    };
+
+    const encoded = try msg.encode(alloc);
+    defer alloc.free(encoded);
+
+    const decoded = try Nodes.decode(alloc, encoded);
+    defer {
+        for (decoded.enrs) |enr| alloc.free(enr);
+        alloc.free(decoded.enrs);
+    }
+
+    try std.testing.expectEqual(@as(u64, 2), decoded.msg.total);
+    try std.testing.expectEqual(@as(usize, 2), decoded.enrs.len);
+    try std.testing.expectEqualSlices(u8, enr_a, decoded.enrs[0]);
+    try std.testing.expectEqualSlices(u8, enr_b, decoded.enrs[1]);
 }

@@ -13,14 +13,16 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 
 const discv5 = @import("discv5");
 const Protocol = discv5.protocol.Protocol;
+const ProtocolEvent = discv5.protocol.Event;
 const Enr = discv5.enr.Enr;
 const EnrBuilder = discv5.enr.Builder;
-const RoutingTable = discv5.kbucket.RoutingTable;
 const NodeId = discv5.enr.NodeId;
 const enr_mod = discv5.enr;
+const UdpSocket = discv5.UdpSocket;
 const bootnodes = @import("bootnodes.zig");
 const BootnodeInfo = bootnodes.BootnodeInfo;
 
@@ -32,6 +34,7 @@ const DEFAULT_LOOKUP_INTERVAL_MS: u64 = 30_000;
 const MAX_DISCOVERED_QUEUE: usize = 256;
 const MAX_ENR_DECODE_BUF: usize = 512;
 const FAR_FUTURE_EPOCH: u64 = 0xffffffffffffffff;
+const LOOKUP_PARALLELISM: usize = 3;
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
@@ -88,8 +91,11 @@ pub const CachedEnr = struct {
 
 pub const DiscoveryService = struct {
     allocator: Allocator,
+    io: Io,
     config: DiscoveryConfig,
+    socket: UdpSocket,
     protocol: Protocol,
+    local_enr: ?[]u8,
     enr_seq: u64,
     current_fork_digest: [4]u8,
     discovered_peers: std.ArrayListUnmanaged(DiscoveredPeer),
@@ -102,7 +108,14 @@ pub const DiscoveryService = struct {
     total_discovered: u64,
     total_filtered_out: u64,
 
-    pub fn init(allocator: Allocator, config: DiscoveryConfig) !DiscoveryService {
+    pub fn init(io: Io, allocator: Allocator, config: DiscoveryConfig) !DiscoveryService {
+        var socket = try UdpSocket.bind(io, .{
+            .bytes = config.local_ip,
+            .port = config.listen_port,
+        });
+        errdefer socket.close();
+
+        const listen_port = socket.address.port;
         const node_id = blk: {
             if (std.mem.eql(u8, &config.secret_key, &([_]u8{0} ** 32))) {
                 break :blk [_]u8{0} ** 32;
@@ -111,15 +124,32 @@ pub const DiscoveryService = struct {
                 break :blk [_]u8{0} ** 32;
             break :blk enr_mod.nodeIdFromCompressedPubkey(&pk);
         };
+        const local_enr = blk: {
+            if (std.mem.eql(u8, &config.secret_key, &([_]u8{0} ** 32))) break :blk null;
+            var builder = EnrBuilder.init(allocator, config.secret_key, 1);
+            builder.ip = config.local_ip;
+            builder.udp = listen_port;
+            builder.tcp = config.p2p_port;
+            builder.quic = config.p2p_port;
+            builder.setEth2(config.fork_digest, config.next_fork_version, config.next_fork_epoch);
+            builder.attnets = [_]u8{0} ** 8;
+            builder.syncnets = [_]u8{0} ** 1;
+            break :blk try builder.encode();
+        };
+        errdefer if (local_enr) |raw| allocator.free(raw);
 
         return .{
             .allocator = allocator,
+            .io = io,
             .config = config,
-            .protocol = try Protocol.init(allocator, .{
+            .socket = socket,
+            .protocol = try Protocol.init(io, allocator, .{
                 .local_node_id = node_id,
                 .local_secret_key = config.secret_key,
-                .listen_addr = .{ .ip = config.local_ip, .port = config.listen_port },
+                .local_enr = local_enr,
+                .local_enr_seq = 1,
             }),
+            .local_enr = local_enr,
             .enr_seq = 1,
             .current_fork_digest = config.fork_digest,
             .discovered_peers = .empty,
@@ -141,7 +171,9 @@ pub const DiscoveryService = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.enr_cache.deinit();
+        if (self.local_enr) |raw| self.allocator.free(raw);
         self.protocol.deinit();
+        self.socket.close();
     }
 
     // ── ENR Management ──────────────────────────────────────────────────
@@ -149,7 +181,7 @@ pub const DiscoveryService = struct {
     pub fn buildLocalEnr(self: *const DiscoveryService) ![]u8 {
         var builder = EnrBuilder.init(self.allocator, self.config.secret_key, self.enr_seq);
         builder.ip = self.config.local_ip;
-        builder.udp = self.config.listen_port;
+        builder.udp = self.socket.address.port;
         builder.tcp = self.config.p2p_port;
         builder.quic = self.config.p2p_port;
         builder.setEth2(self.current_fork_digest, self.config.next_fork_version, self.config.next_fork_epoch);
@@ -161,7 +193,7 @@ pub const DiscoveryService = struct {
     pub fn buildLocalEnrString(self: *const DiscoveryService) ![]u8 {
         var builder = EnrBuilder.init(self.allocator, self.config.secret_key, self.enr_seq);
         builder.ip = self.config.local_ip;
-        builder.udp = self.config.listen_port;
+        builder.udp = self.socket.address.port;
         builder.tcp = self.config.p2p_port;
         builder.quic = self.config.p2p_port;
         builder.setEth2(self.current_fork_digest, self.config.next_fork_version, self.config.next_fork_epoch);
@@ -176,6 +208,22 @@ pub const DiscoveryService = struct {
         self.config.next_fork_version = next_fork_version;
         self.config.next_fork_epoch = next_fork_epoch;
         self.enr_seq += 1;
+        if (!std.mem.eql(u8, &self.config.secret_key, &([_]u8{0} ** 32))) {
+            var builder = EnrBuilder.init(self.allocator, self.config.secret_key, self.enr_seq);
+            builder.ip = self.config.local_ip;
+            builder.udp = self.socket.address.port;
+            builder.tcp = self.config.p2p_port;
+            builder.quic = self.config.p2p_port;
+            builder.setEth2(fork_digest, next_fork_version, next_fork_epoch);
+            builder.attnets = [_]u8{0} ** 8;
+            builder.syncnets = [_]u8{0} ** 1;
+            if (builder.encode()) |updated| {
+                if (self.local_enr) |raw| self.allocator.free(raw);
+                self.local_enr = updated;
+                self.protocol.config.local_enr = updated;
+                self.protocol.config.local_enr_seq = self.enr_seq;
+            } else |_| {}
+        }
         log.info("ENR updated: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} seq={d}", .{
             fork_digest[0], fork_digest[1], fork_digest[2], fork_digest[3], self.enr_seq,
         });
@@ -219,18 +267,20 @@ pub const DiscoveryService = struct {
         const ip = parsed.ip orelse [4]u8{ 0, 0, 0, 0 };
         const port = parsed.udp orelse parsed.tcp orelse 0;
 
-        self.protocol.addNode(node_id, null, .{ .ip = ip, .port = port });
+        self.protocol.addNode(node_id, &pk, .{ .bytes = ip, .port = port }, buf[0..decoded_len]);
         return true;
     }
 
     // ── Peer Discovery ──────────────────────────────────────────────────
 
     pub fn discoverPeers(self: *DiscoveryService) void {
+        self.pollNetwork();
         if (!self.config.enabled) return;
         if (self.connected_peers >= self.config.target_peers) return;
         self.total_lookups += 1;
         self.randomLookup();
         self.processSubnetQueries();
+        self.pollNetwork();
     }
 
     fn randomLookup(self: *DiscoveryService) void {
@@ -238,8 +288,24 @@ pub const DiscoveryService = struct {
         self.protocol.rng.random().bytes(&target);
         var closest: [16]discv5.kbucket.Entry = undefined;
         const found = self.protocol.routing_table.findClosest(&target, 16, &closest);
+        var requests_sent: usize = 0;
         for (closest[0..found]) |entry| {
-            self.evaluateCandidate(entry.node_id, entry.addr, .random_lookup);
+            if (requests_sent >= LOOKUP_PARALLELISM) break;
+            if (self.protocol.hasActiveFindNodeRequest(&entry.node_id)) continue;
+            const peer = self.protocol.getKnownNode(&entry.node_id) orelse continue;
+
+            var distances: [4]u16 = undefined;
+            const distance_count = buildLookupDistances(&target, &peer.node_id, &distances);
+            if (distance_count == 0) continue;
+
+            _ = self.protocol.sendFindNode(
+                &peer.node_id,
+                &peer.pubkey,
+                peer.addr,
+                distances[0..distance_count],
+                &self.socket,
+            ) catch continue;
+            requests_sent += 1;
         }
     }
 
@@ -309,7 +375,8 @@ pub const DiscoveryService = struct {
         const port = enr.quic orelse enr.udp orelse enr.tcp orelse return;
 
         // Generate a string key from node_id (hex).
-        const key = std.fmt.allocPrint(self.allocator, "{}", .{std.fmt.fmtSliceHexLower(&node_id)}) catch return;
+        const key_hex = std.fmt.bytesToHex(node_id, .lower);
+        const key = self.allocator.dupe(u8, &key_hex) catch return;
 
         const gop = self.enr_cache.getOrPut(key) catch {
             self.allocator.free(key);
@@ -325,6 +392,50 @@ pub const DiscoveryService = struct {
             .attnets = attnets,
             .fork_digest = fd,
         };
+    }
+
+    fn pollNetwork(self: *DiscoveryService) void {
+        self.drainIncomingPackets();
+        self.drainProtocolEvents();
+    }
+
+    fn drainIncomingPackets(self: *DiscoveryService) void {
+        var recv_buf: [discv5.protocol.MAX_PACKET_SIZE]u8 = undefined;
+        while (true) {
+            const result = self.socket.receiveTimeout(&recv_buf, .{
+                .duration = .{
+                    .raw = Io.Duration.fromMilliseconds(1),
+                    .clock = .awake,
+                },
+            }) catch |err| switch (err) {
+                error.Timeout => return,
+                else => return,
+            };
+
+            self.protocol.handlePacket(result.data, result.from, &self.socket) catch {};
+        }
+    }
+
+    fn drainProtocolEvents(self: *DiscoveryService) void {
+        while (self.protocol.popEvent()) |event| {
+            var owned_event = event;
+            defer owned_event.deinit(self.allocator);
+
+            switch (owned_event) {
+                .pong => {},
+                .nodes => |nodes| {
+                    for (nodes.enrs) |raw_enr| {
+                        var parsed = enr_mod.decode(self.allocator, raw_enr) catch continue;
+                        defer parsed.deinit();
+
+                        const node_id = parsed.nodeId() orelse continue;
+                        if (!self.filterEnr(&parsed)) continue;
+                        self.recordEnr(node_id, &parsed);
+                        self.evaluateEnrCandidate(node_id, &parsed, .random_lookup);
+                    }
+                },
+            }
+        }
     }
 
     fn evaluateCandidate(self: *DiscoveryService, node_id: NodeId, addr: [6]u8, source: DiscoverySource) void {
@@ -349,6 +460,32 @@ pub const DiscoveryService = struct {
             .has_quic = false,
             .attnets = null,
             .fork_digest = null,
+            .source = source,
+        }) catch return;
+        self.total_discovered += 1;
+    }
+
+    fn evaluateEnrCandidate(self: *DiscoveryService, node_id: NodeId, enr: *const Enr, source: DiscoverySource) void {
+        if (std.mem.eql(u8, &node_id, &self.protocol.config.local_node_id)) return;
+        const ip = enr.ip orelse return;
+        const port = enr.quic orelse enr.udp orelse enr.tcp orelse return;
+
+        for (self.discovered_peers.items) |existing| {
+            if (std.mem.eql(u8, &existing.node_id, &node_id)) return;
+        }
+        if (self.discovered_peers.items.len >= MAX_DISCOVERED_QUEUE) {
+            self.total_filtered_out += 1;
+            return;
+        }
+
+        self.discovered_peers.append(self.allocator, .{
+            .node_id = node_id,
+            .ip = ip,
+            .port = port,
+            .pubkey = enr.pubkey orelse [_]u8{0} ** 33,
+            .has_quic = enr.quic != null,
+            .attnets = enr.attnets,
+            .fork_digest = enr.eth2_fork_digest,
             .source = source,
         }) catch return;
         self.total_discovered += 1;
@@ -412,6 +549,26 @@ pub const DiscoveryService = struct {
     }
 };
 
+fn appendUniqueDistance(out: []u16, len: *usize, distance: u16) void {
+    for (out[0..len.*]) |existing| {
+        if (existing == distance) return;
+    }
+    out[len.*] = distance;
+    len.* += 1;
+}
+
+fn buildLookupDistances(target: *const NodeId, peer_id: *const NodeId, out: []u16) usize {
+    var len: usize = 0;
+    appendUniqueDistance(out, &len, 0);
+
+    const raw_distance = discv5.kbucket.logDistance(target, peer_id) orelse return len;
+    const wire_distance: u16 = @as(u16, raw_distance) + 1;
+    appendUniqueDistance(out, &len, wire_distance);
+    if (wire_distance > 1) appendUniqueDistance(out, &len, wire_distance - 1);
+    if (wire_distance < 256) appendUniqueDistance(out, &len, wire_distance + 1);
+    return len;
+}
+
 pub const DiscoveryStats = struct {
     known_peers: usize,
     connected_peers: u32,
@@ -428,14 +585,14 @@ pub const DiscoveryStats = struct {
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 test "DiscoveryService: init and deinit" {
-    var svc = try DiscoveryService.init(std.testing.allocator, .{});
+    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
     try std.testing.expectEqual(@as(u32, 0), svc.connected_peers);
     try std.testing.expectEqual(@as(u64, 1), svc.enr_seq);
 }
 
 test "DiscoveryService: seedBootnodes runs without crash" {
-    var svc = try DiscoveryService.init(std.testing.allocator, .{});
+    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
     svc.seedBootnodes();
 }
@@ -443,14 +600,14 @@ test "DiscoveryService: seedBootnodes runs without crash" {
 test "DiscoveryService: seedBootnodes with real key inserts peers" {
     const hex_mod = discv5.hex;
     const secret_key = hex_mod.hexToBytesComptime(32, "b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291");
-    var svc = try DiscoveryService.init(std.testing.allocator, .{ .secret_key = secret_key });
+    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0, .secret_key = secret_key });
     defer svc.deinit();
     svc.seedBootnodes();
     try std.testing.expect(svc.knownPeerCount() > 0);
 }
 
 test "DiscoveryService: updateForkDigest bumps seq" {
-    var svc = try DiscoveryService.init(std.testing.allocator, .{});
+    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
     try std.testing.expectEqual(@as(u64, 1), svc.enr_seq);
     svc.updateForkDigest([4]u8{ 0xAB, 0xCD, 0xEF, 0x01 }, [4]u8{ 0, 0, 0, 0 }, FAR_FUTURE_EPOCH);
@@ -459,7 +616,7 @@ test "DiscoveryService: updateForkDigest bumps seq" {
 }
 
 test "DiscoveryService: discoverPeers respects target_peers" {
-    var svc = try DiscoveryService.init(std.testing.allocator, .{ .target_peers = 5 });
+    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0, .target_peers = 5 });
     defer svc.deinit();
     svc.connected_peers = 5;
     svc.discoverPeers();
@@ -470,17 +627,17 @@ test "DiscoveryService: discoverPeers respects target_peers" {
 }
 
 test "DiscoveryService: discoverPeers disabled" {
-    var svc = try DiscoveryService.init(std.testing.allocator, .{ .enabled = false });
+    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0, .enabled = false });
     defer svc.deinit();
     svc.discoverPeers();
     try std.testing.expectEqual(@as(u64, 0), svc.total_lookups);
 }
 
 test "DiscoveryService: drainDiscoveredPeers returns and clears queue" {
-    var svc = try DiscoveryService.init(std.testing.allocator, .{});
+    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
-    svc.protocol.addNode([_]u8{0x11} ** 32, null, .{ .ip = [4]u8{ 1, 2, 3, 4 }, .port = 9000 });
-    svc.protocol.addNode([_]u8{0x22} ** 32, null, .{ .ip = [4]u8{ 5, 6, 7, 8 }, .port = 9001 });
+    svc.protocol.addNode([_]u8{0x11} ** 32, null, .{ .bytes = .{ 1, 2, 3, 4 }, .port = 9000 }, null);
+    svc.protocol.addNode([_]u8{0x22} ** 32, null, .{ .bytes = .{ 5, 6, 7, 8 }, .port = 9001 }, null);
     svc.discoverPeers();
     const peers = svc.drainDiscoveredPeers();
     defer svc.allocator.free(peers);
@@ -488,7 +645,7 @@ test "DiscoveryService: drainDiscoveredPeers returns and clears queue" {
 }
 
 test "DiscoveryService: requestSubnetPeers queues a query" {
-    var svc = try DiscoveryService.init(std.testing.allocator, .{});
+    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
     svc.requestSubnetPeers(5, 2);
     try std.testing.expectEqual(@as(usize, 1), svc.pending_subnet_queries.items.len);
@@ -496,19 +653,29 @@ test "DiscoveryService: requestSubnetPeers queues a query" {
 }
 
 test "DiscoveryService: filterEnr accepts valid ENR" {
-    var svc = try DiscoveryService.init(std.testing.allocator, .{
+    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{
+        .listen_port = 0,
         .fork_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xb0 },
     });
     defer svc.deinit();
 
     var enr_data = [_]u8{0} ** 4;
     var enr = Enr{
-        .seq = 1, .pubkey = [_]u8{0x02} ** 33,
-        .ip = [4]u8{ 1, 2, 3, 4 }, .udp = 9000, .tcp = null,
-        .ip6 = null, .udp6 = null, .quic = 9001, .quic6 = null,
+        .seq = 1,
+        .pubkey = [_]u8{0x02} ** 33,
+        .ip = [4]u8{ 1, 2, 3, 4 },
+        .udp = 9000,
+        .tcp = null,
+        .ip6 = null,
+        .udp6 = null,
+        .quic = 9001,
+        .quic6 = null,
         .eth2_fork_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xb0 },
-        .eth2_raw = null, .attnets = null, .syncnets = null,
-        .raw = &enr_data, .alloc = std.testing.allocator,
+        .eth2_raw = null,
+        .attnets = null,
+        .syncnets = null,
+        .raw = &enr_data,
+        .alloc = std.testing.allocator,
     };
     try std.testing.expect(svc.filterEnr(&enr));
 
@@ -523,9 +690,11 @@ test "DiscoveryService: filterEnr accepts valid ENR" {
 test "DiscoveryService: buildLocalEnr produces valid ENR" {
     const hex_mod = discv5.hex;
     const secret_key = hex_mod.hexToBytesComptime(32, "b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291");
-    var svc = try DiscoveryService.init(std.testing.allocator, .{
-        .secret_key = secret_key, .local_ip = [4]u8{ 127, 0, 0, 1 },
-        .listen_port = 9000, .p2p_port = 9000,
+    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{
+        .secret_key = secret_key,
+        .local_ip = [4]u8{ 127, 0, 0, 1 },
+        .listen_port = 0,
+        .p2p_port = 9000,
         .fork_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xb0 },
     });
     defer svc.deinit();
@@ -537,12 +706,12 @@ test "DiscoveryService: buildLocalEnr produces valid ENR" {
     defer parsed.deinit();
     try std.testing.expect(parsed.pubkey != null);
     try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, parsed.ip.?);
-    try std.testing.expectEqual(@as(?u16, 9000), parsed.udp);
+    try std.testing.expectEqual(@as(?u16, svc.socket.address.port), parsed.udp);
     try std.testing.expect(parsed.eth2_fork_digest != null);
 }
 
 test "DiscoveryService: getStats returns valid state" {
-    var svc = try DiscoveryService.init(std.testing.allocator, .{});
+    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
     const stats = svc.getStats();
     try std.testing.expectEqual(@as(u64, 0), stats.total_lookups);
@@ -552,9 +721,13 @@ test "DiscoveryService: getStats returns valid state" {
 
 test "DiscoveredPeer struct layout" {
     const peer = DiscoveredPeer{
-        .node_id = [_]u8{0xAA} ** 32, .ip = .{ 1, 2, 3, 4 }, .port = 9000,
-        .pubkey = [_]u8{0xBB} ** 33, .has_quic = true,
-        .attnets = [_]u8{0xFF} ** 8, .fork_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xb0 },
+        .node_id = [_]u8{0xAA} ** 32,
+        .ip = .{ 1, 2, 3, 4 },
+        .port = 9000,
+        .pubkey = [_]u8{0xBB} ** 33,
+        .has_quic = true,
+        .attnets = [_]u8{0xFF} ** 8,
+        .fork_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xb0 },
         .source = .random_lookup,
     };
     try std.testing.expectEqual(@as(u16, 9000), peer.port);

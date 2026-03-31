@@ -10,7 +10,7 @@ pub const session = @import("session.zig");
 pub const messages = @import("messages.zig");
 pub const kbucket = @import("kbucket.zig");
 pub const protocol = @import("protocol.zig");
-pub const transport = @import("transport.zig");
+pub const udp_socket = @import("udp_socket.zig");
 pub const hex = @import("hex.zig");
 pub const secp256k1 = @import("secp256k1.zig");
 
@@ -19,8 +19,8 @@ pub const NodeId = enr.NodeId;
 pub const Enr = enr.Enr;
 pub const RoutingTable = kbucket.RoutingTable;
 pub const Protocol = protocol.Protocol;
-pub const Transport = transport.Transport;
-pub const MockTransport = transport.MockTransport;
+pub const Address = udp_socket.Address;
+pub const UdpSocket = udp_socket.Socket;
 
 // Include wire test vectors
 test {
@@ -32,5 +32,5 @@ test {
     _ = @import("messages.zig");
     _ = @import("kbucket.zig");
     _ = @import("protocol.zig");
-    _ = @import("transport.zig");
+    _ = @import("udp_socket.zig");
 }

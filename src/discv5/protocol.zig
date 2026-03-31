@@ -7,9 +7,13 @@ const kbucket = @import("kbucket.zig");
 const packet = @import("packet.zig");
 const session_mod = @import("session.zig");
 const messages = @import("messages.zig");
-const transport_mod = @import("transport.zig");
+const udp_socket = @import("udp_socket.zig");
 const secp = @import("secp256k1.zig");
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
+const Io = std.Io;
+const Address = udp_socket.Address;
+const UdpSocket = udp_socket.Socket;
+const enr_mod = @import("enr.zig");
 
 pub const CHALLENGE_DATA_SIZE = 63;
 
@@ -60,7 +64,6 @@ pub const SeenNonces = struct {
     }
 };
 
-
 pub const SessionState = enum {
     unknown,
     whoareyou_sent,
@@ -86,7 +89,7 @@ pub const PendingRequest = struct {
     nonce: [12]u8,
     dest_node_id: NodeId,
     dest_pubkey: [33]u8,
-    dest_addr: transport_mod.Address,
+    dest_addr: Address,
     message_plaintext: []u8,
     alloc: Allocator,
 
@@ -95,10 +98,91 @@ pub const PendingRequest = struct {
     }
 };
 
+const ReqIdKey = struct {
+    bytes: [8]u8,
+    len: u8,
+
+    fn fromReqId(req_id: messages.ReqId) ReqIdKey {
+        var bytes = [_]u8{0} ** 8;
+        @memcpy(bytes[0..req_id.len], req_id.bytes[0..req_id.len]);
+        return .{
+            .bytes = bytes,
+            .len = req_id.len,
+        };
+    }
+
+    fn toReqId(self: ReqIdKey) messages.ReqId {
+        return .{
+            .bytes = self.bytes,
+            .len = self.len,
+        };
+    }
+};
+
+const RequestKey = struct {
+    peer_id: NodeId,
+    req_id: ReqIdKey,
+};
+
+const ActiveFindNodeRequest = struct {
+    enrs: std.ArrayListUnmanaged([]u8) = .empty,
+    total_responses: ?u64 = null,
+    responses_received: u64 = 0,
+
+    fn deinit(self: *ActiveFindNodeRequest, alloc: Allocator) void {
+        for (self.enrs.items) |enr| alloc.free(enr);
+        self.enrs.deinit(alloc);
+    }
+};
+
+const ActiveRequest = union(enum) {
+    ping: void,
+    findnode: ActiveFindNodeRequest,
+
+    fn deinit(self: *ActiveRequest, alloc: Allocator) void {
+        switch (self.*) {
+            .ping => {},
+            .findnode => |*findnode| findnode.deinit(alloc),
+        }
+    }
+};
+
+pub const PongEvent = struct {
+    peer_id: NodeId,
+    peer_addr: Address,
+    req_id: messages.ReqId,
+    enr_seq: u64,
+    recipient_ip: [4]u8,
+    recipient_port: u16,
+};
+
+pub const NodesEvent = struct {
+    peer_id: NodeId,
+    peer_addr: Address,
+    req_id: messages.ReqId,
+    enrs: [][]u8,
+
+    fn deinit(self: *NodesEvent, alloc: Allocator) void {
+        for (self.enrs) |enr| alloc.free(enr);
+        alloc.free(self.enrs);
+    }
+};
+
+pub const Event = union(enum) {
+    pong: PongEvent,
+    nodes: NodesEvent,
+
+    pub fn deinit(self: *Event, alloc: Allocator) void {
+        switch (self.*) {
+            .pong => {},
+            .nodes => |*nodes| nodes.deinit(alloc),
+        }
+    }
+};
+
 pub const Config = struct {
     local_secret_key: [32]u8,
     local_node_id: NodeId,
-    listen_addr: transport_mod.Address,
     /// Pre-encoded local ENR (RLP bytes). Included in handshake when remote
     /// has a stale enr-seq.
     local_enr: ?[]const u8 = null,
@@ -112,8 +196,19 @@ const WhoareyouRateEntry = struct {
     window_start_ns: i128,
 };
 
+const NodeRecord = struct {
+    pubkey: ?[33]u8,
+    addr: Address,
+    enr: ?[]u8,
+
+    fn deinit(self: *NodeRecord, alloc: Allocator) void {
+        if (self.enr) |enr| alloc.free(enr);
+    }
+};
+
 pub const Protocol = struct {
     alloc: Allocator,
+    io: Io,
     config: Config,
     routing_table: kbucket.RoutingTable,
     sessions: std.AutoHashMap(NodeId, Session),
@@ -123,13 +218,17 @@ pub const Protocol = struct {
     /// Known static public keys for peers, keyed by node-id.
     /// Required to verify id-nonce signatures in incoming handshakes.
     node_pubkeys: std.AutoHashMap(NodeId, [33]u8),
+    node_records: std.AutoHashMap(NodeId, NodeRecord),
+    active_requests: std.AutoHashMap(RequestKey, ActiveRequest),
+    completed_events: std.ArrayListUnmanaged(Event),
 
-    pub fn init(alloc: Allocator, config: Config) !Protocol {
+    pub fn init(io: Io, alloc: Allocator, config: Config) !Protocol {
         var seed_bytes: [8]u8 = undefined;
-        std.Options.debug_io.random(&seed_bytes);
+        io.random(&seed_bytes);
         const seed = std.mem.readInt(u64, &seed_bytes, .little);
         return .{
             .alloc = alloc,
+            .io = io,
             .config = config,
             .routing_table = kbucket.RoutingTable.init(alloc, config.local_node_id),
             .sessions = std.AutoHashMap(NodeId, Session).init(alloc),
@@ -137,6 +236,9 @@ pub const Protocol = struct {
             .whoareyou_rate = std.AutoHashMap([4]u8, WhoareyouRateEntry).init(alloc),
             .rng = std.Random.DefaultPrng.init(seed),
             .node_pubkeys = std.AutoHashMap(NodeId, [33]u8).init(alloc),
+            .node_records = std.AutoHashMap(NodeId, NodeRecord).init(alloc),
+            .active_requests = std.AutoHashMap(RequestKey, ActiveRequest).init(alloc),
+            .completed_events = .empty,
         };
     }
 
@@ -147,6 +249,14 @@ pub const Protocol = struct {
         self.sessions.deinit();
         self.whoareyou_rate.deinit();
         self.node_pubkeys.deinit();
+        var it = self.node_records.iterator();
+        while (it.next()) |entry| entry.value_ptr.deinit(self.alloc);
+        self.node_records.deinit();
+        var active_it = self.active_requests.iterator();
+        while (active_it.next()) |entry| entry.value_ptr.deinit(self.alloc);
+        self.active_requests.deinit();
+        for (self.completed_events.items) |*event| event.deinit(self.alloc);
+        self.completed_events.deinit(self.alloc);
     }
 
     /// Prune stale whoareyou_rate entries.
@@ -157,7 +267,7 @@ pub const Protocol = struct {
     ///
     /// Call periodically (e.g., every minute or at slot boundaries).
     pub fn pruneWhoareyouRate(self: *Protocol) void {
-        const now_ns: i128 = @intCast(std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds());
+        const now_ns: i128 = @intCast(Io.Timestamp.now(self.io, .real).toNanoseconds());
         const max_age_ns: i128 = 60 * std.time.ns_per_s;
 
         // Use a stack-bounded array to avoid heap allocation while iterating.
@@ -182,9 +292,103 @@ pub const Protocol = struct {
     }
 
     pub fn randomReqId(self: *Protocol) messages.ReqId {
-        var id: messages.ReqId = .{ .bytes = undefined, .len = 4 };
+        var id: messages.ReqId = .{ .bytes = [_]u8{0} ** 8, .len = 4 };
         self.rng.random().bytes(id.bytes[0..4]);
         return id;
+    }
+
+    pub fn popEvent(self: *Protocol) ?Event {
+        if (self.completed_events.items.len == 0) return null;
+        return self.completed_events.pop();
+    }
+
+    pub const KnownNode = struct {
+        node_id: NodeId,
+        pubkey: [33]u8,
+        addr: Address,
+    };
+
+    pub fn getKnownNode(self: *const Protocol, node_id: *const NodeId) ?KnownNode {
+        const record = self.node_records.get(node_id.*) orelse return null;
+        const pubkey = record.pubkey orelse return null;
+        return .{
+            .node_id = node_id.*,
+            .pubkey = pubkey,
+            .addr = record.addr,
+        };
+    }
+
+    pub fn hasActiveFindNodeRequest(self: *const Protocol, peer_id: *const NodeId) bool {
+        var it = self.active_requests.iterator();
+        while (it.next()) |entry| {
+            if (!std.mem.eql(u8, &entry.key_ptr.peer_id, peer_id)) continue;
+            if (entry.value_ptr.* == .findnode) return true;
+        }
+        return false;
+    }
+
+    pub fn sendPing(
+        self: *Protocol,
+        dest_node_id: *const NodeId,
+        dest_pubkey: *const [33]u8,
+        dest_addr: Address,
+        enr_seq: u64,
+        socket: *const UdpSocket,
+    ) !messages.ReqId {
+        const req_id = self.randomReqId();
+        const ping = messages.Ping{
+            .req_id = req_id,
+            .enr_seq = enr_seq,
+        };
+        const ping_bytes = try ping.encode(self.alloc);
+        defer self.alloc.free(ping_bytes);
+
+        const key = RequestKey{
+            .peer_id = dest_node_id.*,
+            .req_id = ReqIdKey.fromReqId(req_id),
+        };
+        try self.active_requests.put(key, .{ .ping = {} });
+        errdefer {
+            if (self.active_requests.fetchRemove(key)) |removed| {
+                var value = removed.value;
+                value.deinit(self.alloc);
+            }
+        }
+
+        try self.sendRequest(dest_node_id, dest_pubkey, dest_addr, ping_bytes, socket);
+        return req_id;
+    }
+
+    pub fn sendFindNode(
+        self: *Protocol,
+        dest_node_id: *const NodeId,
+        dest_pubkey: *const [33]u8,
+        dest_addr: Address,
+        distances: []const u16,
+        socket: *const UdpSocket,
+    ) !messages.ReqId {
+        const req_id = self.randomReqId();
+        const find_node = messages.FindNode{
+            .req_id = req_id,
+            .distances = distances,
+        };
+        const find_node_bytes = try find_node.encode(self.alloc);
+        defer self.alloc.free(find_node_bytes);
+
+        const key = RequestKey{
+            .peer_id = dest_node_id.*,
+            .req_id = ReqIdKey.fromReqId(req_id),
+        };
+        try self.active_requests.put(key, .{ .findnode = .{} });
+        errdefer {
+            if (self.active_requests.fetchRemove(key)) |removed| {
+                var value = removed.value;
+                value.deinit(self.alloc);
+            }
+        }
+
+        try self.sendRequest(dest_node_id, dest_pubkey, dest_addr, find_node_bytes, socket);
+        return req_id;
     }
 
     /// Send a request to a remote node. If we have an established session,
@@ -195,13 +399,13 @@ pub const Protocol = struct {
         self: *Protocol,
         dest_node_id: *const NodeId,
         dest_pubkey: *const [33]u8,
-        dest_addr: transport_mod.Address,
+        dest_addr: Address,
         msg_bytes: []const u8,
-        t: transport_mod.Transport,
+        socket: *const UdpSocket,
     ) !void {
         if (self.sessions.get(dest_node_id.*)) |s| {
             if (s.state == .established) {
-                try self.sendOrdinaryMessage(dest_node_id, &s.initiator_key, dest_addr, msg_bytes, t);
+                try self.sendOrdinaryMessage(dest_node_id, &s.initiator_key, dest_addr, msg_bytes, socket);
                 return;
             }
         }
@@ -239,7 +443,7 @@ pub const Protocol = struct {
         );
         defer self.alloc.free(pkt);
 
-        try t.send(dest_addr, pkt);
+        try socket.send(dest_addr, pkt);
 
         // Store the pending request so handleWhoareyou can find it.
         const pt_copy = try self.alloc.dupe(u8, msg_bytes);
@@ -258,8 +462,8 @@ pub const Protocol = struct {
     pub fn handlePacket(
         self: *Protocol,
         raw: []const u8,
-        from: transport_mod.Address,
-        t: transport_mod.Transport,
+        from: Address,
+        socket: *const UdpSocket,
     ) !void {
         // Drop oversized packets before any decoding work (CL-2020-06, spec max = IPv6 min MTU).
         if (raw.len > MAX_PACKET_SIZE) return;
@@ -268,9 +472,9 @@ pub const Protocol = struct {
         defer parsed.deinit();
 
         switch (parsed.static_header.flag) {
-            packet.FLAG_MESSAGE => try self.handleMessage(&parsed, from, t),
-            packet.FLAG_WHOAREYOU => try self.handleWhoareyou(&parsed, from, t),
-            packet.FLAG_HANDSHAKE => try self.handleHandshake(&parsed, from, t),
+            packet.FLAG_MESSAGE => try self.handleMessage(&parsed, from, socket),
+            packet.FLAG_WHOAREYOU => try self.handleWhoareyou(&parsed, from, socket),
+            packet.FLAG_HANDSHAKE => try self.handleHandshake(&parsed, from, socket),
             else => {},
         }
     }
@@ -278,8 +482,8 @@ pub const Protocol = struct {
     fn handleMessage(
         self: *Protocol,
         parsed: *packet.ParsedPacket,
-        from: transport_mod.Address,
-        t: transport_mod.Transport,
+        from: Address,
+        socket: *const UdpSocket,
     ) !void {
         const authdata = parsed.authdata_raw;
         if (authdata.len < 32) return;
@@ -297,18 +501,19 @@ pub const Protocol = struct {
                     &parsed.masking_iv,
                     parsed.header_raw,
                 ) catch {
-                    try self.sendWhoareyou(src_id, &parsed.static_header.nonce, from, t);
+                    try self.sendWhoareyou(src_id, &parsed.static_header.nonce, from, socket);
                     return;
                 };
                 defer self.alloc.free(pt);
                 // Record nonce only after successful decryption.
                 s.seen_nonces.insert(&parsed.static_header.nonce);
-                try self.dispatchMessage(pt, src_id, from, t);
+                self.markNodeSeen(src_id, from, .connected);
+                try self.dispatchMessage(pt, src_id, from, socket);
                 return;
             }
         }
 
-        try self.sendWhoareyou(src_id, &parsed.static_header.nonce, from, t);
+        try self.sendWhoareyou(src_id, &parsed.static_header.nonce, from, socket);
     }
 
     /// Handle a WHOAREYOU challenge from a remote node.
@@ -323,8 +528,8 @@ pub const Protocol = struct {
     fn handleWhoareyou(
         self: *Protocol,
         parsed: *packet.ParsedPacket,
-        from: transport_mod.Address,
-        t: transport_mod.Transport,
+        from: Address,
+        socket: *const UdpSocket,
     ) !void {
         const authdata = parsed.authdata_raw;
         // WHOAREYOU authdata = id_nonce (16) || enr_seq (8) = 24 bytes
@@ -373,7 +578,7 @@ pub const Protocol = struct {
         const eph_pubkey = blk: {
             var attempt: u8 = 0;
             while (attempt < 32) : (attempt += 1) {
-                std.Options.debug_io.random(&eph_seckey);
+                self.io.random(&eph_seckey);
                 if (secp.pubkeyFromSecret(&eph_seckey)) |pk| break :blk pk else |_| {}
             }
             // Unreachable in practice; probability of failure is ~2^{-128} after 32 attempts.
@@ -457,7 +662,7 @@ pub const Protocol = struct {
         defer self.alloc.free(handshake_pkt);
 
         // Send the handshake packet.
-        try t.send(from, handshake_pkt);
+        try socket.send(from, handshake_pkt);
 
         // Store the new session.
         try self.sessions.put(pending.dest_node_id, .{
@@ -474,11 +679,9 @@ pub const Protocol = struct {
     fn handleHandshake(
         self: *Protocol,
         parsed: *packet.ParsedPacket,
-        from: transport_mod.Address,
-        t: transport_mod.Transport,
+        from: Address,
+        socket: *const UdpSocket,
     ) !void {
-        _ = from;
-        _ = t;
         const authdata = parsed.authdata_raw;
         if (authdata.len < 34) return;
 
@@ -506,7 +709,6 @@ pub const Protocol = struct {
             const enr_offset = 34 + @as(usize, sig_size) + @as(usize, eph_key_size);
             if (authdata.len > enr_offset) {
                 const enr_bytes = authdata[enr_offset..];
-                const enr_mod = @import("enr.zig");
                 var parsed_enr = enr_mod.decode(self.alloc, enr_bytes) catch {
                     std.log.warn("discv5: handshake from unknown peer {any} has invalid ENR, rejecting", .{src_id});
                     return;
@@ -549,18 +751,39 @@ pub const Protocol = struct {
         new_session.recipient_key = keys.initiator_key;
         new_session.seen_nonces = SeenNonces.init();
         try self.sessions.put(src_id, new_session);
+
+        const enr_offset = 34 + @as(usize, sig_size) + @as(usize, eph_key_size);
+        const maybe_enr = if (authdata.len > enr_offset) authdata[enr_offset..] else null;
+        self.storeNodeRecord(src_id, &sender_pubkey, from, maybe_enr);
+        self.markNodeSeen(src_id, from, .connected);
+
+        const pt = packet.decryptMessage(
+            self.alloc,
+            &keys.initiator_key,
+            &parsed.static_header.nonce,
+            parsed.message_ciphertext,
+            &parsed.masking_iv,
+            parsed.header_raw,
+        ) catch return;
+        defer self.alloc.free(pt);
+
+        if (!new_session.seen_nonces.contains(&parsed.static_header.nonce)) {
+            new_session.seen_nonces.insert(&parsed.static_header.nonce);
+            try self.sessions.put(src_id, new_session);
+            try self.dispatchMessage(pt, src_id, from, socket);
+        }
     }
 
     fn sendWhoareyou(
         self: *Protocol,
         src_id: NodeId,
         request_nonce: *const [12]u8,
-        dest: transport_mod.Address,
-        t: transport_mod.Transport,
+        dest: Address,
+        socket: *const UdpSocket,
     ) !void {
         // Rate-limit WHOAREYOU responses per source IP to prevent amplification (CL-2020-08).
-        const now_ns: i128 = @intCast(std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds());
-        const gop = try self.whoareyou_rate.getOrPut(dest.ip);
+        const now_ns: i128 = @intCast(Io.Timestamp.now(self.io, .real).toNanoseconds());
+        const gop = try self.whoareyou_rate.getOrPut(dest.bytes);
         if (gop.found_existing) {
             const elapsed_ns = now_ns - gop.value_ptr.window_start_ns;
             if (elapsed_ns < std.time.ns_per_s) {
@@ -635,16 +858,16 @@ pub const Protocol = struct {
         @memcpy(s.challenge_data[16..s.challenge_data_len], header_raw_cd[0 .. s.challenge_data_len - 16]);
         try self.sessions.put(src_id, s);
 
-        try t.send(dest, whoareyou_packet);
+        try socket.send(dest, whoareyou_packet);
     }
 
     fn sendOrdinaryMessage(
         self: *Protocol,
         dest_node_id: *const NodeId,
         write_key: *const [16]u8,
-        dest_addr: transport_mod.Address,
+        dest_addr: Address,
         msg_bytes: []const u8,
-        t: transport_mod.Transport,
+        socket: *const UdpSocket,
     ) !void {
         const nonce = self.randomNonce();
         var masking_iv: [16]u8 = undefined;
@@ -675,20 +898,118 @@ pub const Protocol = struct {
         );
         defer self.alloc.free(pkt);
 
-        try t.send(dest_addr, pkt);
+        try socket.send(dest_addr, pkt);
+    }
+
+    fn storeNodeRecord(self: *Protocol, node_id: NodeId, pubkey: ?*const [33]u8, addr: Address, enr: ?[]const u8) void {
+        const existing = self.node_records.get(node_id);
+        const enr_copy = if (enr) |raw| self.alloc.dupe(u8, raw) catch return else null;
+        errdefer if (enr_copy) |bytes| self.alloc.free(bytes);
+
+        if (pubkey) |pk| {
+            self.node_pubkeys.put(node_id, pk.*) catch {};
+        } else if (existing) |record| {
+            if (record.pubkey) |known| {
+                self.node_pubkeys.put(node_id, known) catch {};
+            }
+        }
+
+        const merged = NodeRecord{
+            .pubkey = if (pubkey) |pk| pk.* else if (existing) |record| record.pubkey else null,
+            .addr = addr,
+            .enr = if (enr_copy != null) enr_copy else if (existing) |record| record.enr else null,
+        };
+
+        if (self.node_records.getPtr(node_id)) |record| {
+            if (enr_copy != null) {
+                if (record.enr) |old| self.alloc.free(old);
+            }
+            record.* = merged;
+        } else {
+            self.node_records.put(node_id, merged) catch {
+                if (enr_copy) |bytes| self.alloc.free(bytes);
+            };
+        }
+    }
+
+    fn appendFindNodeEnr(self: *Protocol, records: *std.ArrayListUnmanaged([]const u8), node_id: NodeId) void {
+        if (self.node_records.get(node_id)) |record| {
+            if (record.enr) |enr| {
+                records.append(self.alloc, enr) catch {};
+            }
+        }
+    }
+
+    fn activeRequestKey(peer_id: NodeId, req_id: messages.ReqId) RequestKey {
+        return .{
+            .peer_id = peer_id,
+            .req_id = ReqIdKey.fromReqId(req_id),
+        };
+    }
+
+    fn currentTimestampNs(self: *const Protocol) i64 {
+        return @intCast(Io.Timestamp.now(self.io, .real).toNanoseconds());
+    }
+
+    fn markNodeSeen(self: *Protocol, node_id: NodeId, addr: Address, status: kbucket.EntryStatus) void {
+        const entry = kbucket.Entry{
+            .node_id = node_id,
+            .addr = .{
+                addr.bytes[0],
+                addr.bytes[1],
+                addr.bytes[2],
+                addr.bytes[3],
+                @intCast(addr.port >> 8),
+                @intCast(addr.port & 0xff),
+            },
+            .last_seen = self.currentTimestampNs(),
+            .status = status,
+        };
+        _ = self.routing_table.insert(entry);
+    }
+
+    fn rememberEnr(self: *Protocol, enr_bytes: []const u8) void {
+        var parsed_enr = enr_mod.decode(self.alloc, enr_bytes) catch return;
+        defer parsed_enr.deinit();
+
+        const node_id = parsed_enr.nodeId() orelse return;
+        if (std.mem.eql(u8, &node_id, &self.config.local_node_id)) return;
+
+        const ip = parsed_enr.ip orelse return;
+        const port = parsed_enr.udp orelse parsed_enr.tcp orelse return;
+        const pubkey = parsed_enr.pubkey;
+
+        self.storeNodeRecord(node_id, if (pubkey) |*pk| pk else null, .{
+            .bytes = ip,
+            .port = port,
+        }, enr_bytes);
+        self.markNodeSeen(node_id, .{ .bytes = ip, .port = port }, .disconnected);
+    }
+
+    fn sendResponseMessage(
+        self: *Protocol,
+        peer_id: NodeId,
+        peer_addr: Address,
+        plaintext: []const u8,
+        socket: *const UdpSocket,
+    ) !void {
+        const s = self.sessions.get(peer_id) orelse return;
+        try self.sendOrdinaryMessage(&peer_id, &s.initiator_key, peer_addr, plaintext, socket);
     }
 
     fn dispatchMessage(
         self: *Protocol,
         pt: []const u8,
         from: NodeId,
-        from_addr: transport_mod.Address,
-        t: transport_mod.Transport,
+        from_addr: Address,
+        socket: *const UdpSocket,
     ) !void {
         if (pt.len == 0) return;
         switch (pt[0]) {
-            messages.MSG_PING => try self.handlePing(pt, from, from_addr, t),
-            messages.MSG_FINDNODE => try self.handleFindNode(pt, from, from_addr, t),
+            messages.MSG_PING => try self.handlePing(pt, from, from_addr, socket),
+            messages.MSG_PONG => self.handlePong(pt, from, from_addr),
+            messages.MSG_FINDNODE => try self.handleFindNode(pt, from, from_addr, socket),
+            messages.MSG_NODES => self.handleNodes(pt, from, from_addr),
             else => {},
         }
     }
@@ -697,149 +1018,150 @@ pub const Protocol = struct {
         self: *Protocol,
         pt: []const u8,
         from: NodeId,
-        from_addr: transport_mod.Address,
-        t: transport_mod.Transport,
+        from_addr: Address,
+        socket: *const UdpSocket,
     ) !void {
         const ping = messages.Ping.decode(pt) catch return;
 
         const pong = messages.Pong{
             .req_id = ping.req_id,
-            .enr_seq = 0,
-            .recipient_ip = from_addr.ip,
+            .enr_seq = self.config.local_enr_seq,
+            .recipient_ip = from_addr.bytes,
             .recipient_port = from_addr.port,
         };
 
-        const s = self.sessions.get(from) orelse return;
-        const nonce = self.randomNonce();
         const pong_bytes = try pong.encode(self.alloc);
         defer self.alloc.free(pong_bytes);
+        try self.sendResponseMessage(from, from_addr, pong_bytes, socket);
+    }
 
-        var masking_iv: [16]u8 = undefined;
-        self.rng.random().bytes(&masking_iv);
-        const authdata: [32]u8 = self.config.local_node_id;
+    fn handlePong(
+        self: *Protocol,
+        pt: []const u8,
+        from: NodeId,
+        from_addr: Address,
+    ) void {
+        const pong = messages.Pong.decode(pt) catch return;
+        const key = activeRequestKey(from, pong.req_id);
+        const removed = self.active_requests.fetchRemove(key) orelse return;
+        var request = removed.value;
+        defer request.deinit(self.alloc);
+        if (request != .ping) return;
 
-        const header_raw = try buildHeaderRaw(self.alloc, packet.FLAG_MESSAGE, &nonce, &authdata);
-        defer self.alloc.free(header_raw);
-
-        const ct = try packet.encryptMessage(
-            self.alloc,
-            &s.initiator_key,
-            &nonce,
-            pong_bytes,
-            &masking_iv,
-            header_raw,
-        );
-        defer self.alloc.free(ct);
-
-        const pkt = try packet.encode(
-            self.alloc,
-            &masking_iv,
-            &from,
-            packet.FLAG_MESSAGE,
-            &nonce,
-            &authdata,
-            ct,
-        );
-        defer self.alloc.free(pkt);
-
-        try t.send(from_addr, pkt);
+        self.markNodeSeen(from, from_addr, .connected);
+        self.completed_events.append(self.alloc, .{
+            .pong = .{
+                .peer_id = from,
+                .peer_addr = from_addr,
+                .req_id = pong.req_id,
+                .enr_seq = pong.enr_seq,
+                .recipient_ip = pong.recipient_ip,
+                .recipient_port = pong.recipient_port,
+            },
+        }) catch {};
     }
 
     fn handleFindNode(
         self: *Protocol,
         pt: []const u8,
         from: NodeId,
-        from_addr: transport_mod.Address,
-        t: transport_mod.Transport,
+        from_addr: Address,
+        socket: *const UdpSocket,
     ) !void {
         const result = messages.FindNode.decode(self.alloc, pt) catch return;
         defer self.alloc.free(result.distances);
 
         const fn_msg = result.msg;
 
-        // Query routing table for nodes at requested distances and build ENR list.
-        // Per discv5 spec, cap at MAX_NODES_RESPONSE (16) total.
-        var enr_list: [MAX_NODES_RESPONSE][]const u8 = undefined;
-        var enr_count: usize = 0;
-        var alloc_count: usize = 0;
-
+        var enr_refs: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer enr_refs.deinit(self.alloc);
         for (fn_msg.distances) |dist| {
-            // Distance 256 is reserved in discv5 (would mean "all nodes"); skip it.
-            if (dist > 255) continue;
-            const entries = self.routing_table.getBucket(@intCast(dist));
-            for (entries) |entry| {
-                if (enr_count >= MAX_NODES_RESPONSE) break;
-                // Encode each node as its raw addr bytes (6 bytes: ip4 + port).
-                // Full RLP-encoded ENR is a follow-up; addr bytes ensure we contribute to the DHT.
-                const encoded = self.alloc.dupe(u8, &entry.addr) catch continue;
-                enr_list[enr_count] = encoded;
-                enr_count += 1;
-                alloc_count += 1;
+            if (dist == 0) {
+                if (self.config.local_enr) |local_enr| {
+                    enr_refs.append(self.alloc, local_enr) catch {};
+                }
+                continue;
             }
-            if (enr_count >= MAX_NODES_RESPONSE) break;
+            if (dist > 256) continue;
+            const entries = self.routing_table.getBucket(@intCast(dist - 1));
+            for (entries) |entry| {
+                self.appendFindNodeEnr(&enr_refs, entry.node_id);
+            }
         }
 
-        const enr_slice = enr_list[0..enr_count];
-        defer {
-            for (enr_list[0..alloc_count]) |e| self.alloc.free(e);
+        const total_chunks: u64 = @max(@as(u64, @intCast(std.math.divCeil(usize, enr_refs.items.len, MAX_NODES_RESPONSE) catch 0)), 1);
+        var chunk_index: usize = 0;
+        while (chunk_index < total_chunks) : (chunk_index += 1) {
+            const start = chunk_index * MAX_NODES_RESPONSE;
+            const end = @min(start + MAX_NODES_RESPONSE, enr_refs.items.len);
+            const nodes_msg = messages.Nodes{
+                .req_id = fn_msg.req_id,
+                .total = total_chunks,
+                .enrs = enr_refs.items[start..end],
+            };
+            const nodes_bytes = try nodes_msg.encode(self.alloc);
+            defer self.alloc.free(nodes_bytes);
+            try self.sendResponseMessage(from, from_addr, nodes_bytes, socket);
         }
-
-        const nodes_msg = messages.Nodes{
-            .req_id = fn_msg.req_id,
-            .total = 1,
-            .enrs = enr_slice,
-        };
-
-        const s = self.sessions.get(from) orelse return;
-        const nonce = self.randomNonce();
-        const nodes_bytes = try nodes_msg.encode(self.alloc);
-        defer self.alloc.free(nodes_bytes);
-
-        var masking_iv: [16]u8 = undefined;
-        self.rng.random().bytes(&masking_iv);
-        const authdata: [32]u8 = self.config.local_node_id;
-
-        const header_raw = try buildHeaderRaw(self.alloc, packet.FLAG_MESSAGE, &nonce, &authdata);
-        defer self.alloc.free(header_raw);
-
-        const ct = try packet.encryptMessage(
-            self.alloc,
-            &s.initiator_key,
-            &nonce,
-            nodes_bytes,
-            &masking_iv,
-            header_raw,
-        );
-        defer self.alloc.free(ct);
-
-        const pkt = try packet.encode(
-            self.alloc,
-            &masking_iv,
-            &from,
-            packet.FLAG_MESSAGE,
-            &nonce,
-            &authdata,
-            ct,
-        );
-        defer self.alloc.free(pkt);
-
-        try t.send(from_addr, pkt);
     }
 
-    pub fn addNode(self: *Protocol, node_id: NodeId, pubkey: ?*const [33]u8, addr: transport_mod.Address) void {
-        const entry = kbucket.Entry{
-            .node_id = node_id,
-            .addr = [6]u8{
-                addr.ip[0], addr.ip[1], addr.ip[2], addr.ip[3],
-                @intCast(addr.port >> 8), @intCast(addr.port & 0xff),
-            },
-            .last_seen = 0,
-            .status = .connected,
-        };
-        _ = self.routing_table.insert(entry);
-        if (pubkey) |pk| {
-            self.node_pubkeys.put(node_id, pk.*) catch {};
+    fn handleNodes(
+        self: *Protocol,
+        pt: []const u8,
+        from: NodeId,
+        from_addr: Address,
+    ) void {
+        const decoded = messages.Nodes.decode(self.alloc, pt) catch return;
+        defer {
+            for (decoded.enrs) |enr| self.alloc.free(enr);
+            self.alloc.free(decoded.enrs);
         }
+
+        if (decoded.msg.total == 0) return;
+
+        const key = activeRequestKey(from, decoded.msg.req_id);
+        const request = self.active_requests.getPtr(key) orelse return;
+        if (request.* != .findnode) return;
+
+        var findnode = &request.findnode;
+        if (findnode.total_responses == null) {
+            findnode.total_responses = decoded.msg.total;
+        } else if (findnode.total_responses.? != decoded.msg.total) {
+            return;
+        }
+
+        for (decoded.enrs) |enr| {
+            self.rememberEnr(enr);
+            findnode.enrs.append(self.alloc, self.alloc.dupe(u8, enr) catch continue) catch {};
+        }
+        findnode.responses_received += 1;
+        self.markNodeSeen(from, from_addr, .connected);
+
+        if (findnode.responses_received < findnode.total_responses.?) return;
+
+        const removed = self.active_requests.fetchRemove(key) orelse return;
+        var completed = removed.value;
+        defer completed.deinit(self.alloc);
+        if (completed != .findnode) return;
+
+        const owned_enrs = completed.findnode.enrs.toOwnedSlice(self.alloc) catch return;
+        completed.findnode.enrs = .empty;
+        self.completed_events.append(self.alloc, .{
+            .nodes = .{
+                .peer_id = from,
+                .peer_addr = from_addr,
+                .req_id = decoded.msg.req_id,
+                .enrs = owned_enrs,
+            },
+        }) catch {
+            for (owned_enrs) |enr| self.alloc.free(enr);
+            self.alloc.free(owned_enrs);
+        };
+    }
+
+    pub fn addNode(self: *Protocol, node_id: NodeId, pubkey: ?*const [33]u8, addr: Address, enr: ?[]const u8) void {
+        self.storeNodeRecord(node_id, pubkey, addr, enr);
+        self.markNodeSeen(node_id, addr, .disconnected);
     }
 };
 
@@ -864,16 +1186,16 @@ fn buildHeaderRaw(
 
 test "discv5 protocol: basic init" {
     const alloc = std.testing.allocator;
+    const io = std.Options.debug_io;
     const hex = @import("hex.zig");
 
     const sk = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
     const pk = try secp.pubkeyFromSecret(&sk);
     const node_id = @import("enr.zig").nodeIdFromCompressedPubkey(&pk);
 
-    var proto = try Protocol.init(alloc, .{
+    var proto = try Protocol.init(io, alloc, .{
         .local_secret_key = sk,
         .local_node_id = node_id,
-        .listen_addr = .{ .ip = [4]u8{ 127, 0, 0, 1 }, .port = 9000 },
     });
     defer proto.deinit();
 
@@ -881,7 +1203,7 @@ test "discv5 protocol: basic init" {
 
     var node_id2: NodeId = [_]u8{0xbb} ** 32;
     node_id2[31] = 0x01;
-    proto.addNode(node_id2, null, .{ .ip = [4]u8{ 192, 168, 1, 1 }, .port = 30303 });
+    proto.addNode(node_id2, null, .{ .bytes = .{ 192, 168, 1, 1 }, .port = 30303 }, null);
     try std.testing.expectEqual(@as(usize, 1), proto.routing_table.nodeCount());
 }
 
@@ -889,8 +1211,8 @@ test "discv5 protocol: WHOAREYOU handshake round-trip" {
     // Simulate: node A sends request -> node B responds WHOAREYOU -> node A
     //           builds handshake -> node B receives and establishes session.
     const alloc = std.testing.allocator;
+    const io = std.Options.debug_io;
     const hex = @import("hex.zig");
-    const enr_mod = @import("enr.zig");
 
     // Node A keys
     const sk_a = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
@@ -902,35 +1224,29 @@ test "discv5 protocol: WHOAREYOU handshake round-trip" {
     const pk_b = try secp.pubkeyFromSecret(&sk_b);
     const node_id_b = enr_mod.nodeIdFromCompressedPubkey(&pk_b);
 
-    const addr_a = transport_mod.Address{ .ip = [4]u8{ 127, 0, 0, 1 }, .port = 9000 };
-    const addr_b = transport_mod.Address{ .ip = [4]u8{ 127, 0, 0, 1 }, .port = 9001 };
+    var socket_a = try UdpSocket.bind(io, .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 });
+    defer socket_a.close();
+    var socket_b = try UdpSocket.bind(io, .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 });
+    defer socket_b.close();
+
+    const addr_a = socket_a.address;
+    const addr_b = socket_b.address;
 
     // Set up node A's protocol
-    var proto_a = try Protocol.init(alloc, .{
+    var proto_a = try Protocol.init(io, alloc, .{
         .local_secret_key = sk_a,
         .local_node_id = node_id_a,
-        .listen_addr = addr_a,
     });
     defer proto_a.deinit();
 
     // Set up node B's protocol
-    var proto_b = try Protocol.init(alloc, .{
+    var proto_b = try Protocol.init(io, alloc, .{
         .local_secret_key = sk_b,
         .local_node_id = node_id_b,
-        .listen_addr = addr_b,
     });
     defer proto_b.deinit();
     // Pre-register node A's static pubkey so B can verify A's id-nonce signature.
-    proto_b.addNode(node_id_a, &pk_a, addr_a);
-
-    // Transport mocks
-    var mock_a = transport_mod.MockTransport.init(alloc, addr_a);
-    defer mock_a.deinit();
-    var mock_b = transport_mod.MockTransport.init(alloc, addr_b);
-    defer mock_b.deinit();
-
-    const t_a = mock_a.transport();
-    const t_b = mock_b.transport();
+    proto_b.addNode(node_id_a, &pk_a, addr_a, null);
 
     // Step 1: Node A sends a PING to node B (no session exists).
     const ping = messages.Ping{
@@ -940,30 +1256,35 @@ test "discv5 protocol: WHOAREYOU handshake round-trip" {
     const ping_bytes = try ping.encode(alloc);
     defer alloc.free(ping_bytes);
 
-    try proto_a.sendRequest(&node_id_b, &pk_b, addr_b, ping_bytes, t_a);
+    try proto_a.sendRequest(&node_id_b, &pk_b, addr_b, ping_bytes, &socket_a);
 
     // Verify node A sent one packet and stored a pending request.
-    try std.testing.expectEqual(@as(usize, 1), mock_a.sent.items.len);
     try std.testing.expectEqual(@as(usize, 1), proto_a.pending_requests.items.len);
 
     // Step 2: Node B receives the packet. Since no session exists, it responds
     // with WHOAREYOU.
-    const pkt1 = mock_a.sent.items[0].data;
-    try proto_b.handlePacket(pkt1, addr_a, t_b);
-
-    // Node B should have sent a WHOAREYOU back.
-    try std.testing.expectEqual(@as(usize, 1), mock_b.sent.items.len);
+    var recv_buf_b: [MAX_PACKET_SIZE]u8 = undefined;
+    const inbound_a = try socket_b.receiveTimeout(&recv_buf_b, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_b.handlePacket(inbound_a.data, inbound_a.from, &socket_b);
 
     // Node B should now have a session in whoareyou_sent state.
     const session_b = proto_b.sessions.get(node_id_a) orelse return error.NoSession;
     try std.testing.expectEqual(SessionState.whoareyou_sent, session_b.state);
 
     // Step 3: Node A receives the WHOAREYOU and responds with a handshake.
-    const whoareyou_pkt = mock_b.sent.items[0].data;
-    try proto_a.handlePacket(whoareyou_pkt, addr_b, t_a);
-
-    // Node A should have sent a handshake packet.
-    try std.testing.expectEqual(@as(usize, 2), mock_a.sent.items.len);
+    var recv_buf_a: [MAX_PACKET_SIZE]u8 = undefined;
+    const inbound_b = try socket_a.receiveTimeout(&recv_buf_a, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_a.handlePacket(inbound_b.data, inbound_b.from, &socket_a);
 
     // Node A should now have an established session.
     const session_a = proto_a.sessions.get(node_id_b) orelse return error.NoSession;
@@ -973,10 +1294,162 @@ test "discv5 protocol: WHOAREYOU handshake round-trip" {
     try std.testing.expectEqual(@as(usize, 0), proto_a.pending_requests.items.len);
 
     // Step 4: Node B receives the handshake.
-    const handshake_pkt = mock_a.sent.items[1].data;
-    try proto_b.handlePacket(handshake_pkt, addr_a, t_b);
+    const handshake = try socket_b.receiveTimeout(&recv_buf_b, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_b.handlePacket(handshake.data, handshake.from, &socket_b);
 
     // Node B should now have an established session.
     const session_b2 = proto_b.sessions.get(node_id_a) orelse return error.NoSession;
     try std.testing.expectEqual(SessionState.established, session_b2.state);
+
+    // Step 5: Node A receives B's post-handshake PONG.
+    const pong_packet = try socket_a.receiveTimeout(&recv_buf_a, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    var parsed_pong = try packet.decode(alloc, pong_packet.data, &node_id_a);
+    defer parsed_pong.deinit();
+    const pong_plaintext = try packet.decryptMessage(
+        alloc,
+        &session_a.recipient_key,
+        &parsed_pong.static_header.nonce,
+        parsed_pong.message_ciphertext,
+        &parsed_pong.masking_iv,
+        parsed_pong.header_raw,
+    );
+    defer alloc.free(pong_plaintext);
+    const pong = try messages.Pong.decode(pong_plaintext);
+    try std.testing.expectEqualSlices(u8, ping.req_id.slice(), pong.req_id.slice());
+    try std.testing.expectEqual(addr_a.bytes, pong.recipient_ip);
+    try std.testing.expectEqual(addr_a.port, pong.recipient_port);
+}
+
+test "discv5 protocol: FINDNODE assembles a completed NODES event" {
+    const alloc = std.testing.allocator;
+    const io = std.Options.debug_io;
+    const hex = @import("hex.zig");
+
+    const sk_a = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
+    const pk_a = try secp.pubkeyFromSecret(&sk_a);
+    const node_id_a = enr_mod.nodeIdFromCompressedPubkey(&pk_a);
+
+    const sk_b = hex.hexToBytesComptime(32, "66fb62bfbd66b9177a138c1e5cddbe4f7c30c343e94e68df8769459cb14571f7");
+    const pk_b = try secp.pubkeyFromSecret(&sk_b);
+    const node_id_b = enr_mod.nodeIdFromCompressedPubkey(&pk_b);
+
+    const sk_c = hex.hexToBytesComptime(32, "7e8107fe766b7f1821c3a7fbc56d18f734f0ebf898f0b85f82412b6d1fa7f4d3");
+    const pk_c = try secp.pubkeyFromSecret(&sk_c);
+    const node_id_c = enr_mod.nodeIdFromCompressedPubkey(&pk_c);
+
+    var socket_a = try UdpSocket.bind(io, .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 });
+    defer socket_a.close();
+    var socket_b = try UdpSocket.bind(io, .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 });
+    defer socket_b.close();
+
+    const addr_a = socket_a.address;
+    const addr_b = socket_b.address;
+    const addr_c = Address{ .bytes = .{ 127, 0, 0, 1 }, .port = 30305 };
+
+    var a_builder = enr_mod.Builder.init(alloc, sk_a, 1);
+    a_builder.ip = addr_a.bytes;
+    a_builder.udp = addr_a.port;
+    const a_enr = try a_builder.encode();
+    defer alloc.free(a_enr);
+
+    var b_builder = enr_mod.Builder.init(alloc, sk_b, 1);
+    b_builder.ip = addr_b.bytes;
+    b_builder.udp = addr_b.port;
+    const b_enr = try b_builder.encode();
+    defer alloc.free(b_enr);
+
+    var c_builder = enr_mod.Builder.init(alloc, sk_c, 1);
+    c_builder.ip = addr_c.bytes;
+    c_builder.udp = addr_c.port;
+    const c_enr = try c_builder.encode();
+    defer alloc.free(c_enr);
+
+    var proto_a = try Protocol.init(io, alloc, .{
+        .local_secret_key = sk_a,
+        .local_node_id = node_id_a,
+        .local_enr = a_enr,
+        .local_enr_seq = 1,
+    });
+    defer proto_a.deinit();
+
+    var proto_b = try Protocol.init(io, alloc, .{
+        .local_secret_key = sk_b,
+        .local_node_id = node_id_b,
+        .local_enr = b_enr,
+        .local_enr_seq = 1,
+    });
+    defer proto_b.deinit();
+
+    proto_a.addNode(node_id_b, &pk_b, addr_b, b_enr);
+    proto_b.addNode(node_id_a, &pk_a, addr_a, a_enr);
+    proto_b.addNode(node_id_c, &pk_c, addr_c, c_enr);
+
+    const c_distance = kbucket.logDistance(&node_id_b, &node_id_c) orelse return error.NoDistance;
+    const distances = [_]u16{ 0, @as(u16, c_distance) + 1 };
+    _ = try proto_a.sendFindNode(&node_id_b, &pk_b, addr_b, &distances, &socket_a);
+
+    var recv_buf_a: [MAX_PACKET_SIZE]u8 = undefined;
+    var recv_buf_b: [MAX_PACKET_SIZE]u8 = undefined;
+
+    const inbound_a = try socket_b.receiveTimeout(&recv_buf_b, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_b.handlePacket(inbound_a.data, inbound_a.from, &socket_b);
+
+    const inbound_b = try socket_a.receiveTimeout(&recv_buf_a, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_a.handlePacket(inbound_b.data, inbound_b.from, &socket_a);
+
+    const handshake = try socket_b.receiveTimeout(&recv_buf_b, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_b.handlePacket(handshake.data, handshake.from, &socket_b);
+
+    const nodes_packet = try socket_a.receiveTimeout(&recv_buf_a, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_a.handlePacket(nodes_packet.data, nodes_packet.from, &socket_a);
+
+    try std.testing.expectEqual(@as(usize, 0), proto_a.active_requests.count());
+
+    var event = proto_a.popEvent() orelse return error.MissingNodesEvent;
+    defer event.deinit(alloc);
+    try std.testing.expect(event == .nodes);
+    try std.testing.expectEqual(node_id_b, event.nodes.peer_id);
+    try std.testing.expectEqual(@as(usize, 2), event.nodes.enrs.len);
+
+    var saw_b = false;
+    var saw_c = false;
+    for (event.nodes.enrs) |raw_enr| {
+        var parsed = try enr_mod.decode(alloc, raw_enr);
+        defer parsed.deinit();
+        const node_id = parsed.nodeId() orelse continue;
+        if (std.mem.eql(u8, &node_id, &node_id_b)) saw_b = true;
+        if (std.mem.eql(u8, &node_id, &node_id_c)) saw_c = true;
+    }
+    try std.testing.expect(saw_b);
+    try std.testing.expect(saw_c);
 }

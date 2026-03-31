@@ -86,8 +86,9 @@ pub fn decode(alloc: Allocator, data: []const u8) Error!Enr {
     var r = rlp.Reader.init(data);
     var list = r.readList() catch return Error.InvalidEnr;
 
-    // signature (skip for now - verify separately)
-    _ = list.readBytes() catch return Error.InvalidEnr;
+    const signature_bytes = list.readBytes() catch return Error.InvalidEnr;
+    if (signature_bytes.len != 64) return Error.InvalidSignature;
+    const content_payload = list.data[list.pos..];
 
     // seq
     const seq = list.readUint64() catch return Error.InvalidEnr;
@@ -110,17 +111,22 @@ pub fn decode(alloc: Allocator, data: []const u8) Error!Enr {
         .alloc = alloc,
     };
     errdefer alloc.free(enr.raw);
+    var saw_id_v4 = false;
 
     // Parse key-value pairs
     while (!list.atEnd()) {
-        const key = list.readBytes() catch break;
-        if (list.atEnd()) break;
+        const key = list.readBytes() catch return Error.InvalidEnr;
+        if (list.atEnd()) return Error.InvalidEnr;
 
         if (std.mem.eql(u8, key, "secp256k1")) {
             const val = list.readBytes() catch return Error.InvalidEnr;
             if (val.len == 33) {
                 enr.pubkey = val[0..33].*;
             }
+        } else if (std.mem.eql(u8, key, "id")) {
+            const val = list.readBytes() catch return Error.InvalidEnr;
+            if (!std.mem.eql(u8, val, "v4")) return Error.UnsupportedScheme;
+            saw_id_v4 = true;
         } else if (std.mem.eql(u8, key, "ip")) {
             const val = list.readBytes() catch return Error.InvalidEnr;
             if (val.len == 4) {
@@ -187,11 +193,43 @@ pub fn decode(alloc: Allocator, data: []const u8) Error!Enr {
             }
         } else {
             // Skip unknown key value
-            list.skipItem() catch break;
+            list.skipItem() catch return Error.InvalidEnr;
         }
     }
 
+    if (!saw_id_v4) return Error.UnsupportedScheme;
+    const pubkey = enr.pubkey orelse return Error.InvalidPublicKey;
+
+    var sig_hash: [32]u8 = undefined;
+    hashSignedPortion(content_payload, &sig_hash);
+    const signature: [64]u8 = signature_bytes[0..64].*;
+    secp.verify(&sig_hash, &signature, &pubkey) catch return Error.InvalidSignature;
+
     return enr;
+}
+
+fn hashSignedPortion(content_payload: []const u8, out: *[32]u8) void {
+    var hasher = Keccak256.init(.{});
+    updateListPrefix(&hasher, content_payload.len);
+    hasher.update(content_payload);
+    hasher.final(out);
+}
+
+fn updateListPrefix(hasher: *Keccak256, payload_len: usize) void {
+    if (payload_len <= 55) {
+        hasher.update(&[_]u8{@as(u8, 0xc0) + @as(u8, @intCast(payload_len))});
+        return;
+    }
+
+    var len_bytes: [8]u8 = undefined;
+    var count: usize = 0;
+    var tmp = payload_len;
+    while (tmp > 0) : (tmp >>= 8) {
+        len_bytes[len_bytes.len - 1 - count] = @intCast(tmp & 0xff);
+        count += 1;
+    }
+    hasher.update(&[_]u8{@as(u8, 0xf7) + @as(u8, @intCast(count))});
+    hasher.update(len_bytes[len_bytes.len - count ..]);
 }
 
 /// Build and sign an ENR
@@ -354,7 +392,6 @@ pub fn countSubnets(attnets: [8]u8) u32 {
     return count;
 }
 
-
 test "ENR nodeIdFromCompressedPubkey" {
     // Test that we correctly compute NodeId from a compressed pubkey
     const hex = @import("hex.zig");
@@ -440,6 +477,25 @@ test "ENR Builder: encodeToString produces valid enr: prefix" {
     defer alloc.free(enr_str);
 
     try std.testing.expect(std.mem.startsWith(u8, enr_str, "enr:"));
+}
+
+test "ENR decode rejects tampered signature" {
+    const hex_mod = @import("hex.zig");
+    const alloc = std.testing.allocator;
+
+    const secret_key = hex_mod.hexToBytesComptime(32, "b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291");
+    var builder = Builder.init(alloc, secret_key, 1);
+    builder.ip = [4]u8{ 127, 0, 0, 1 };
+    builder.udp = 9000;
+
+    const enr_bytes = try builder.encode();
+    defer alloc.free(enr_bytes);
+
+    const tampered = try alloc.dupe(u8, enr_bytes);
+    defer alloc.free(tampered);
+    tampered[tampered.len - 1] ^= 0x01;
+
+    try std.testing.expectError(Error.InvalidSignature, decode(alloc, tampered));
 }
 
 test "isSubnetSet and countSubnets" {

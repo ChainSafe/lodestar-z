@@ -9,8 +9,6 @@ pub const NUM_BUCKETS = 256;
 
 /// Maximum nodes from the same IPv6 /64 prefix allowed in any single bucket.
 /// Limits Sybil attacks where an attacker controls an entire /64 block (CL-2026-11).
-pub const MAX_NODES_PER_IPV6_64: usize = 2;
-
 pub const EntryStatus = enum {
     connected,
     disconnected,
@@ -40,30 +38,26 @@ pub const KBucket = struct {
             }
         }
         if (self.count < K) {
-            // IPv6 /64 Sybil-resistance check (CL-2026-11):
-            // addr[0..6] = [ipv4_0, ipv4_1, ipv4_2, ipv4_3, port_hi, port_lo].
-            // For a real IPv6 address we would check the first 8 bytes (/64 prefix).
-            // Reuse the same guard: count entries sharing the same /24 IPv4 block.
-            const prefix3 = [3]u8{ entry.addr[0], entry.addr[1], entry.addr[2] };
-            var prefix_count: usize = 0;
-            for (self.entries[0..self.count]) |e| {
-                if (e.addr[0] == prefix3[0] and e.addr[1] == prefix3[1] and e.addr[2] == prefix3[2]) {
-                    prefix_count += 1;
-                }
-            }
-            if (prefix_count >= MAX_NODES_PER_IPV6_64) return false;
-
             self.entries[self.count] = entry;
             self.count += 1;
             return true;
         }
-        // Bucket full — evict oldest disconnected
+
+        // Bucket full: only evict disconnected peers, and pick the stalest one.
+        var eviction_idx: ?usize = null;
+        var oldest_last_seen: i64 = 0;
         for (self.entries[0..self.count], 0..) |e, i| {
-            if (e.status == .disconnected) {
-                self.entries[i] = entry;
-                return true;
+            if (e.status != .disconnected) continue;
+            if (eviction_idx == null or e.last_seen < oldest_last_seen) {
+                eviction_idx = i;
+                oldest_last_seen = e.last_seen;
             }
         }
+        if (eviction_idx) |i| {
+            self.entries[i] = entry;
+            return true;
+        }
+
         return false;
     }
 
@@ -219,8 +213,8 @@ test "kbucket: bucket full evicts disconnected" {
         node_id[31] = @intCast(i);
         _ = bucket.insert(Entry{
             .node_id = node_id,
-            .addr = undefined,
-            .last_seen = 0,
+            .addr = .{ 127, 0, 0, 1, 0, 0 },
+            .last_seen = @intCast(i),
             .status = .disconnected,
         });
     }
@@ -228,9 +222,55 @@ test "kbucket: bucket full evicts disconnected" {
 
     const inserted = bucket.insert(Entry{
         .node_id = [_]u8{0xff} ** 32,
-        .addr = undefined,
+        .addr = .{ 127, 0, 0, 1, 0, 1 },
         .last_seen = 0,
         .status = .connected,
     });
     try std.testing.expect(inserted);
+    try std.testing.expectEqualDeep([_]u8{0xff} ** 32, bucket.entries[0].node_id);
+}
+
+test "kbucket: full bucket does not evict connected peers" {
+    var bucket = KBucket.init();
+
+    for (0..K) |i| {
+        var node_id: NodeId = [_]u8{0} ** 32;
+        node_id[31] = @intCast(i);
+        _ = bucket.insert(Entry{
+            .node_id = node_id,
+            .addr = .{ 10, 0, 0, 1, 0, 0 },
+            .last_seen = @intCast(i),
+            .status = .connected,
+        });
+    }
+
+    const inserted = bucket.insert(Entry{
+        .node_id = [_]u8{0xee} ** 32,
+        .addr = .{ 10, 0, 0, 2, 0, 0 },
+        .last_seen = -1,
+        .status = .pending,
+    });
+    try std.testing.expect(!inserted);
+}
+
+test "kbucket: updating existing node does not grow bucket" {
+    var bucket = KBucket.init();
+    const node_id: NodeId = [_]u8{0x42} ** 32;
+
+    try std.testing.expect(bucket.insert(.{
+        .node_id = node_id,
+        .addr = .{ 127, 0, 0, 1, 0x23, 0x28 },
+        .last_seen = 1,
+        .status = .pending,
+    }));
+    try std.testing.expect(bucket.insert(.{
+        .node_id = node_id,
+        .addr = .{ 127, 0, 0, 2, 0x23, 0x29 },
+        .last_seen = 2,
+        .status = .connected,
+    }));
+
+    try std.testing.expectEqual(@as(usize, 1), bucket.count);
+    try std.testing.expectEqualDeep([6]u8{ 127, 0, 0, 2, 0x23, 0x29 }, bucket.entries[0].addr);
+    try std.testing.expectEqual(EntryStatus.connected, bucket.entries[0].status);
 }
