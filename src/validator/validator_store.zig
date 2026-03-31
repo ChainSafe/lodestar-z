@@ -247,7 +247,7 @@ pub const ValidatorStore = struct {
             out.* = .{
                 .pubkey = v.pubkey,
                 .derivation_path = "",
-                .readonly = false,
+                .readonly = v.is_remote,
             };
         }
         return result;
@@ -275,6 +275,28 @@ pub const ValidatorStore = struct {
         const result = try allocator.alloc([48]u8, self.validators.items.len);
         for (self.validators.items, result) |v, *out| {
             out.* = v.pubkey;
+        }
+        return result;
+    }
+
+    /// Return all remote-only validator pubkeys as an owned slice (caller must free).
+    pub fn allRemotePubkeys(self: *const ValidatorStore, allocator: Allocator) ![][48]u8 {
+        const mutex_ptr: *std.Thread.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lock();
+        defer mutex_ptr.unlock();
+
+        var count: usize = 0;
+        for (self.validators.items) |v| {
+            if (v.is_remote) count += 1;
+        }
+
+        const result = try allocator.alloc([48]u8, count);
+        var out_idx: usize = 0;
+        for (self.validators.items) |v| {
+            if (v.is_remote) {
+                result[out_idx] = v.pubkey;
+                out_idx += 1;
+            }
         }
         return result;
     }

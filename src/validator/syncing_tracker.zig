@@ -37,6 +37,15 @@ pub const SYNCING_THRESHOLD: u64 = 5;
 // ---------------------------------------------------------------------------
 
 pub const SyncingTracker = struct {
+    pub const ResyncedCallback = struct {
+        ctx: *anyopaque,
+        fn_ptr: *const fn (ctx: *anyopaque, slot: u64, io: Io) void,
+
+        pub fn call(self: ResyncedCallback, slot: u64, io: Io) void {
+            self.fn_ptr(self.ctx, slot, io);
+        }
+    };
+
     allocator: Allocator,
     api: *BeaconApiClient,
 
@@ -46,6 +55,8 @@ pub const SyncingTracker = struct {
     last_poll_error: std.atomic.Value(bool),
     /// Monotonic timestamp (ns) of last successful poll.
     last_success_ns: std.atomic.Value(u64),
+    resynced_callbacks: [8]ResyncedCallback,
+    resynced_callback_count: usize,
 
     pub fn init(allocator: Allocator, api: *BeaconApiClient) SyncingTracker {
         return .{
@@ -55,7 +66,14 @@ pub const SyncingTracker = struct {
             .synced = std.atomic.Value(bool).init(true),
             .last_poll_error = std.atomic.Value(bool).init(false),
             .last_success_ns = std.atomic.Value(u64).init(0),
+            .resynced_callbacks = undefined,
+            .resynced_callback_count = 0,
         };
+    }
+
+    pub fn onResynced(self: *SyncingTracker, cb: ResyncedCallback) void {
+        self.resynced_callbacks[self.resynced_callback_count] = cb;
+        self.resynced_callback_count += 1;
     }
 
     /// Returns true when the BN is synced enough for validator duties.
@@ -73,8 +91,9 @@ pub const SyncingTracker = struct {
     /// Called from the slot clock callback in validator.zig.
     ///
     /// TS: SyncingStatusTracker.pollSyncingStatus()
-    pub fn poll(self: *SyncingTracker, io: Io) void {
+    pub fn poll(self: *SyncingTracker, io: Io, slot: u64) void {
         const was_synced = self.synced.load(.acquire);
+        const had_poll_error = self.last_poll_error.load(.acquire);
 
         const resp = self.api.getNodeSyncing(io) catch |err| {
             log.warn("failed to poll BN sync status: {s}", .{@errorName(err)});
@@ -97,11 +116,14 @@ pub const SyncingTracker = struct {
                 "beacon node syncing — pausing validator duties (sync_distance={d} head_slot={d})",
                 .{ resp.sync_distance, resp.head_slot },
             );
-        } else if (!was_synced and now_synced) {
+        } else if ((!was_synced or had_poll_error) and now_synced) {
             log.info(
                 "beacon node synced — resuming validator duties (head_slot={d})",
                 .{resp.head_slot},
             );
+            for (self.resynced_callbacks[0..self.resynced_callback_count]) |cb| {
+                cb.call(slot, io);
+            }
         }
     }
 
@@ -109,8 +131,7 @@ pub const SyncingTracker = struct {
     ///
     /// TS: SyncingStatusTracker runs via clockService.runEverySlot
     pub fn onSlot(self: *SyncingTracker, io: Io, slot: u64) void {
-        _ = slot;
-        self.poll(io);
+        self.poll(io, slot);
     }
 };
 

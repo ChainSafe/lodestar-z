@@ -122,6 +122,19 @@ pub const DoppelgangerService = struct {
         log.debug("registered validator for doppelganger detection pubkey=0x{}", .{std.fmt.fmtSliceHexLower(pubkey[0..4])});
     }
 
+    /// Remove a validator from doppelganger monitoring.
+    pub fn unregisterValidator(self: *DoppelgangerService, pubkey: [48]u8) void {
+        for (self.entries.items, 0..) |e, i| {
+            if (std.mem.eql(u8, &e.pubkey, &pubkey)) {
+                _ = self.entries.swapRemove(i);
+                log.debug("unregistered validator from doppelganger detection pubkey=0x{}", .{
+                    std.fmt.fmtSliceHexLower(pubkey[0..4]),
+                });
+                return;
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Status check
     // -----------------------------------------------------------------------

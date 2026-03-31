@@ -81,9 +81,6 @@ const interchange_mod = @import("interchange.zig");
 
 const log = std.log.scoped(.validator_client);
 
-/// Default fee recipient (zero address) — operator should override.
-const ZERO_FEE_RECIPIENT = "0x0000000000000000000000000000000000000000".*;
-
 // ---------------------------------------------------------------------------
 // ValidatorClient
 // ---------------------------------------------------------------------------
@@ -202,7 +199,6 @@ pub const ValidatorClient = struct {
         const header_tracker = ChainHeaderTracker.init(allocator, &api);
 
         // Convert suggested_fee_recipient (20 raw bytes) to hex string [42]u8 ("0x" + 40 hex).
-        // Falls back to ZERO_FEE_RECIPIENT when config has the default zero address.
         const fee_recipient_hex: [42]u8 = blk: {
             var buf: [42]u8 = undefined;
             buf[0] = '0';
@@ -289,7 +285,9 @@ pub const ValidatorClient = struct {
                         if (rec.last_signed_attestation_source_epoch) |src| {
                             if (rec.last_signed_attestation_target_epoch) |tgt| {
                                 _ = try validator_store.slashing_db.checkAndInsertAttestation(
-                                    rec.pubkey, src, tgt,
+                                    rec.pubkey,
+                                    src,
+                                    tgt,
                                 );
                             }
                         }
@@ -324,6 +322,7 @@ pub const ValidatorClient = struct {
             .io = null,
             .index_tracker = idx_tracker,
             .liveness_tracker = live_tracker,
+            .signing_context = signing_ctx,
             .syncing_tracker = SyncingTracker.init(allocator, &api),
             .shutdown_requested = std.atomic.Value(bool).init(false),
             .sse_thread_handle = null,
@@ -392,21 +391,25 @@ pub const ValidatorClient = struct {
             .validator_index = validator_index,
         };
         try signing.voluntaryExitSigningRoot(
-            &self.signing_context,
+            self.signing_context,
             &voluntary_exit,
             epoch,
             &signing_root,
         );
 
         const signature = try self.validator_store.signVoluntaryExit(io, pubkey, signing_root);
-        _ = signature;
+        const sig_bytes = signature.compress();
+        const sig_hex = std.fmt.bytesToHex(&sig_bytes, .lower);
 
-        // TODO: Submit the signed voluntary exit to the BN via:
-        //   POST /eth/v1/beacon/pool/voluntary_exits
-        // BeaconApiClient does not yet have a publishVoluntaryExit method.
-        // When added, serialize SignedVoluntaryExit JSON and call:
-        //   try self.api.publishVoluntaryExit(io, json);
-        log.info("voluntary exit signed for validator {d} at epoch {d} (submission pending API client wiring)", .{
+        const json_body = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"message\":{{\"epoch\":{d},\"validator_index\":{d}}},\"signature\":\"0x{s}\"}}",
+            .{ epoch, validator_index, sig_hex },
+        );
+        defer self.allocator.free(json_body);
+
+        try self.api.publishVoluntaryExit(io, json_body);
+        log.info("voluntary exit submitted for validator {d} at epoch {d}", .{
             validator_index, epoch,
         });
     }
@@ -415,15 +418,108 @@ pub const ValidatorClient = struct {
     ///
     /// Must be called before `start()`.
     pub fn addKey(self: *ValidatorClient, secret_key: bls.SecretKey) !void {
-        try self.validator_store.addKey(secret_key);
         const pk = secret_key.toPublicKey();
         const pk_bytes = pk.compress();
         if (self.doppelganger) |*d| {
             try d.registerValidator(pk_bytes);
         }
+        try self.validator_store.addKey(secret_key);
         // Track in index tracker and liveness tracker.
         self.index_tracker.trackPubkey(pk_bytes);
         self.liveness_tracker.register(pk_bytes);
+    }
+
+    fn applyResolvedIndices(self: *ValidatorClient) void {
+        for (self.index_tracker.entries.items) |e| {
+            if (e.index) |idx| {
+                self.validator_store.updateIndex(e.pubkey, idx, .active_ongoing);
+            }
+        }
+        self.syncDoppelgangerEntryIndices();
+    }
+
+    fn syncDoppelgangerEntryIndices(self: *ValidatorClient) void {
+        if (self.doppelganger) |*d| {
+            for (d.entries.items) |*de| {
+                de.index = self.index_tracker.getIndex(de.pubkey);
+            }
+        }
+    }
+
+    fn registerAllValidatorsWithDoppelganger(self: *ValidatorClient) void {
+        if (self.doppelganger) |*d| {
+            for (self.validator_store.validators.items) |v| {
+                d.registerValidator(v.pubkey) catch |err| {
+                    log.warn("doppelganger registerValidator error: {s}", .{@errorName(err)});
+                };
+            }
+            self.syncDoppelgangerEntryIndices();
+        }
+    }
+
+    fn sliceContainsPubkey(pubkeys: []const [48]u8, pubkey: [48]u8) bool {
+        for (pubkeys) |candidate| {
+            if (std.mem.eql(u8, &candidate, &pubkey)) return true;
+        }
+        return false;
+    }
+
+    fn syncRemoteSignerKeys(self: *ValidatorClient, io: Io) !void {
+        const rs = self.remote_signer orelse return;
+
+        const remote_pubkeys = rs.listKeys(io) catch |err| {
+            log.warn("failed to fetch remote keys: {s}", .{@errorName(err)});
+            return;
+        };
+        defer if (remote_pubkeys.len > 0) self.allocator.free(remote_pubkeys);
+
+        const existing_remote_pubkeys = try self.validator_store.allRemotePubkeys(self.allocator);
+        defer if (existing_remote_pubkeys.len > 0) self.allocator.free(existing_remote_pubkeys);
+
+        var added_count: usize = 0;
+        for (remote_pubkeys) |pk| {
+            if (sliceContainsPubkey(existing_remote_pubkeys, pk)) continue;
+
+            self.validator_store.addRemotePubkey(pk) catch |err| {
+                log.warn("addRemotePubkey failed pubkey=0x{s}: {s}", .{
+                    std.fmt.bytesToHex(pk, .lower), @errorName(err),
+                });
+                continue;
+            };
+            if (self.doppelganger) |*d| {
+                d.registerValidator(pk) catch |err| {
+                    log.warn("doppelganger registerValidator failed pubkey=0x{s}: {s}", .{
+                        std.fmt.bytesToHex(pk, .lower), @errorName(err),
+                    });
+                };
+            }
+            self.index_tracker.trackPubkey(pk);
+            self.liveness_tracker.register(pk);
+            added_count += 1;
+            log.info("registered remote validator pubkey=0x{s}", .{std.fmt.bytesToHex(pk, .lower)});
+        }
+
+        var removed_count: usize = 0;
+        for (existing_remote_pubkeys) |pk| {
+            if (sliceContainsPubkey(remote_pubkeys, pk)) continue;
+
+            if (self.validator_store.removeValidator(pk)) {
+                self.index_tracker.untrackPubkey(pk);
+                if (self.doppelganger) |*d| {
+                    d.unregisterValidator(pk);
+                }
+                self.liveness_tracker.unregister(pk);
+                self.block_service.removeDutiesForKey(pk);
+                self.attestation_service.removeDutiesForKey(pk);
+                self.sync_committee_service.removeDutiesForKey(pk);
+                removed_count += 1;
+                log.info("removed remote validator pubkey=0x{s}", .{std.fmt.bytesToHex(pk, .lower)});
+            }
+        }
+
+        if (added_count > 0 or removed_count > 0) {
+            log.info("remote signer sync complete added={d} removed={d}", .{ added_count, removed_count });
+        }
     }
 
     /// Re-wire all service api/store pointers to stable fields of this ValidatorClient.
@@ -483,8 +579,14 @@ pub const ValidatorClient = struct {
         // Wire liveness tracker into services that record duty outcomes.
         self.attestation_service.setLivenessTracker(&self.liveness_tracker);
         self.sync_committee_service.setLivenessTracker(&self.liveness_tracker);
+        self.syncing_tracker.onResynced(.{ .ctx = self, .fn_ptr = onResyncedDutyRefresh });
 
         // Register clock callbacks.
+        if (self.config.web3signer_url != null) {
+            self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochRemoteSignerSync });
+        }
+        self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochIndexTracker });
+
         self.clock.onSlot(.{ .ctx = self, .fn_ptr = onSlotBlockService });
         self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochBlockService });
 
@@ -520,6 +622,21 @@ pub const ValidatorClient = struct {
         // Store io so clock callbacks can perform HTTP requests.
         self.io = io;
 
+        // Fetch remote signer keys before the initial index resolution so remote
+        // validators participate in the very first duty refresh.
+        if (self.config.web3signer_url) |url| {
+            log.info("fetching remote keys from web3signer url={s}", .{url});
+
+            const rs = try self.allocator.create(RemoteSigner);
+            rs.* = RemoteSigner.init(self.allocator, url);
+            self.remote_signer = rs;
+            self.validator_store.remote_signer = rs;
+            if (self.builder_registration) |*br| {
+                br.remote_signer = rs;
+            }
+            try self.syncRemoteSignerKeys(io);
+        }
+
         // Resolve validator indices at startup.
         // This is required before duties can be fetched (duties use validator index, not pubkey).
         //
@@ -528,82 +645,17 @@ pub const ValidatorClient = struct {
         self.index_tracker.resolveIndices(io) catch |err| {
             log.warn("startup index resolution failed: {s} — will retry on first epoch", .{@errorName(err)});
         };
-
-        // Apply resolved indices to the validator store.
-        for (self.index_tracker.entries.items) |e| {
-            if (e.index) |idx| {
-                self.validator_store.updateIndex(e.pubkey, idx, .active_ongoing);
-            }
-        }
-
-        // Wire index tracker epoch callback.
-        self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochIndexTracker });
+        self.applyResolvedIndices();
 
         // Doppelganger startup: if enabled, validators start as Unverified and cannot sign.
         // The doppelganger service checks liveness each epoch and promotes to VerifiedSafe
         // after DEFAULT_REMAINING_DETECTION_EPOCHS clean epochs.
         //
         // TS: DoppelgangerService.pollLiveness — runs on each epoch, blocks signing until safe.
-        if (self.doppelganger) |*d| {
-            // Register all validators that don't have indices yet.
-            for (self.validator_store.validators.items) |v| {
-                d.registerValidator(v.pubkey) catch |err| {
-                    log.warn("doppelganger registerValidator error: {s}", .{@errorName(err)});
-                };
-                // Apply resolved index if available.
-                if (self.index_tracker.getIndex(v.pubkey)) |idx| {
-                    for (d.entries.items) |*de| {
-                        if (std.mem.eql(u8, &de.pubkey, &v.pubkey)) {
-                            de.index = idx;
-                            break;
-                        }
-                    }
-                }
-            }
+        if (self.doppelganger != null) {
+            self.registerAllValidatorsWithDoppelganger();
             log.info("doppelganger protection enabled — signing blocked until {d} clean epoch(s) observed", .{
                 dopple_mod.DEFAULT_REMAINING_DETECTION_EPOCHS,
-            });
-        }
-
-        // Fetch remote signer keys if web3signer is configured.
-        // Create a heap-allocated RemoteSigner so the pointer remains stable after
-        // ValidatorClient may be moved. Wire it into ValidatorStore for signing delegation.
-        if (self.config.web3signer_url) |url| {
-            log.info("fetching remote keys from web3signer url={s}", .{url});
-
-            // Heap-allocate so the pointer is stable for the lifetime of ValidatorClient.
-            const rs = try self.allocator.create(RemoteSigner);
-            rs.* = RemoteSigner.init(self.allocator, url);
-            self.remote_signer = rs;
-            // Wire into validator_store so signing methods can delegate.
-            self.validator_store.remote_signer = rs;
-
-            const remote_pubkeys = rs.listKeys(io) catch |err| blk: {
-                log.warn("failed to fetch remote keys: {s}", .{@errorName(err)});
-                break :blk &[_][48]u8{};
-            };
-            defer if (remote_pubkeys.len > 0) self.allocator.free(remote_pubkeys);
-            var remote_registered: usize = 0;
-            for (remote_pubkeys) |pk| {
-                // Register the pubkey in the validator store as remote-only.
-                // Duty tracking (indices, attestation duties, etc.) works without
-                // the secret key locally. Signing is delegated via remote_signer.
-                self.validator_store.addRemotePubkey(pk) catch |err| {
-                    log.warn("addRemotePubkey failed pubkey=0x{s}: {s}", .{
-                        std.fmt.bytesToHex(pk, .lower), @errorName(err),
-                    });
-                    continue;
-                };
-                if (self.doppelganger) |*d| {
-                    d.registerValidator(pk) catch {};
-                }
-                self.index_tracker.trackPubkey(pk);
-                self.liveness_tracker.register(pk);
-                remote_registered += 1;
-                log.info("registered remote validator pubkey=0x{s}", .{std.fmt.bytesToHex(pk, .lower)});
-            }
-            log.info("fetched {d} remote validator keys from web3signer ({d} registered)", .{
-                remote_pubkeys.len, remote_registered,
             });
         }
 
@@ -739,13 +791,7 @@ pub const ValidatorClient = struct {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
         const io = self.io orelse return;
         self.index_tracker.onEpoch(io, epoch);
-
-        // Apply any newly resolved indices to the validator store.
-        for (self.index_tracker.entries.items) |e| {
-            if (e.index) |idx| {
-                self.validator_store.updateIndex(e.pubkey, idx, .active_ongoing);
-            }
-        }
+        self.applyResolvedIndices();
 
         // Emit epoch effectiveness summary.
         self.liveness_tracker.logEpochSummary(
@@ -759,6 +805,31 @@ pub const ValidatorClient = struct {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
         const io = self.io orelse return;
         self.syncing_tracker.onSlot(io, slot);
+    }
+
+    fn onEpochRemoteSignerSync(ctx: *anyopaque, epoch: u64) void {
+        _ = epoch;
+        const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
+        const io = self.io orelse return;
+        self.syncRemoteSignerKeys(io) catch |err| {
+            log.warn("remote signer sync failed: {s}", .{@errorName(err)});
+        };
+    }
+
+    fn onResyncedDutyRefresh(ctx: *anyopaque, slot: u64, io: Io) void {
+        const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
+
+        // Epoch-boundary work is already scheduled by the clock.
+        if (slot % self.config.slots_per_epoch == 0) return;
+
+        self.index_tracker.resolveIndices(io) catch |err| {
+            log.warn("resynced index resolution failed: {s}", .{@errorName(err)});
+        };
+        self.applyResolvedIndices();
+
+        const epoch = slot / self.config.slots_per_epoch;
+        self.attestation_service.onEpoch(io, epoch);
+        self.sync_committee_service.onEpoch(io, epoch);
     }
 
     /// Returns true if it is safe to sign for the given pubkey.

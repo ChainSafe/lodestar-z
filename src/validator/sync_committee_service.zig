@@ -67,6 +67,9 @@ pub const SyncCommitteeService = struct {
     duties: std.ArrayList(SyncCommitteeDutyWithProofs),
     /// Sync period for which duties are cached.
     duties_period: ?u64,
+    /// Pre-fetched duties for the next sync committee period.
+    next_duties: std.ArrayList(SyncCommitteeDutyWithProofs),
+    next_duties_period: ?u64,
     /// Doppelganger service reference (optional).
     doppelganger: ?*DoppelgangerService,
     /// Syncing tracker reference (optional).
@@ -100,6 +103,8 @@ pub const SyncCommitteeService = struct {
             .genesis_time_unix_secs = genesis_time_unix_secs,
             .duties = std.ArrayList(SyncCommitteeDutyWithProofs).init(allocator),
             .duties_period = null,
+            .next_duties = std.ArrayList(SyncCommitteeDutyWithProofs).init(allocator),
+            .next_duties_period = null,
             .doppelganger = null,
             .syncing_tracker = null,
             .liveness_tracker = null,
@@ -133,11 +138,10 @@ pub const SyncCommitteeService = struct {
     }
 
     pub fn deinit(self: *SyncCommitteeService) void {
-        for (self.duties.items) |*d| {
-            self.allocator.free(d.duty.validator_sync_committee_indices);
-            self.allocator.free(d.selection_proofs);
-        }
+        self.clearDutyList(&self.duties);
         self.duties.deinit();
+        self.clearDutyList(&self.next_duties);
+        self.next_duties.deinit();
     }
 
     /// Attach a chain header tracker for head root queries.
@@ -157,12 +161,21 @@ pub const SyncCommitteeService = struct {
     pub fn onEpoch(self: *SyncCommitteeService, io: Io, epoch: u64) void {
         const period = epoch / self.epochs_per_sync_committee_period;
 
-        // Refresh if we don't have duties for the current period.
         if (self.duties_period == null or self.duties_period.? != period) {
             log.info("sync committee period transition to period={d} at epoch={d}", .{ period, epoch });
-            self.refreshDuties(io, epoch, period) catch |err| {
-                log.err("refreshDuties period={d} error={s}", .{ period, @errorName(err) });
-            };
+            if (self.next_duties_period != null and self.next_duties_period.? == period) {
+                self.clearDutyList(&self.duties);
+                self.duties.deinit();
+                self.duties = self.next_duties;
+                self.duties_period = period;
+                self.next_duties = std.ArrayList(SyncCommitteeDutyWithProofs).init(self.allocator);
+                self.next_duties_period = null;
+                log.info("activated pre-fetched sync committee duties for period={d}", .{period});
+            } else {
+                self.refreshDuties(io, epoch, period) catch |err| {
+                    log.err("refreshDuties period={d} error={s}", .{ period, @errorName(err) });
+                };
+            }
         }
 
         // Pre-fetch next period's duties 1 epoch before the boundary.
@@ -190,17 +203,39 @@ pub const SyncCommitteeService = struct {
         };
     }
 
+    /// Remove any cached sync committee duties for the given validator pubkey.
+    ///
+    /// This mirrors Lodestar's runtime duty cleanup so validator removals take
+    /// effect immediately instead of waiting for the next period refresh.
+    pub fn removeDutiesForKey(self: *SyncCommitteeService, pubkey: [48]u8) void {
+        var i: usize = 0;
+        while (i < self.duties.items.len) {
+            if (std.mem.eql(u8, &self.duties.items[i].duty.pubkey, &pubkey)) {
+                self.allocator.free(self.duties.items[i].duty.validator_sync_committee_indices);
+                self.allocator.free(self.duties.items[i].selection_proofs);
+                _ = self.duties.swapRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+
+        i = 0;
+        while (i < self.next_duties.items.len) {
+            if (std.mem.eql(u8, &self.next_duties.items[i].duty.pubkey, &pubkey)) {
+                self.allocator.free(self.next_duties.items[i].duty.validator_sync_committee_indices);
+                self.allocator.free(self.next_duties.items[i].selection_proofs);
+                _ = self.next_duties.swapRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Duty management
     // -----------------------------------------------------------------------
 
     /// Pre-fetch duties for an upcoming sync period without overwriting current duties.
-    ///
-    /// The fetched duties are discarded (this warms the BN cache) and will be
-    /// fetched again at the actual period start via refreshDuties().
-    ///
-    /// A more complete implementation would store them in a pending_duties buffer
-    /// and swap atomically at the period boundary.
     ///
     /// TS: SyncCommitteeDutiesService.getDutiesForEpoch(nextPeriodEpoch, true)
     fn refreshDutiesForPeriod(self: *SyncCommitteeService, io: Io, epoch: u64, period: u64) !void {
@@ -219,12 +254,9 @@ pub const SyncCommitteeService = struct {
             self.allocator.free(fetched);
         }
 
-        log.info("pre-fetched {d} sync committee duties for period={d} (will apply at period start)", .{
-            fetched.len,
-            period,
-        });
-        // Note: duties are not stored here; they will be re-fetched and stored
-        // when the period starts (onEpoch detects duties_period != current period).
+        try self.cacheDutyList(&self.next_duties, fetched);
+        self.next_duties_period = period;
+        log.info("pre-fetched {d} sync committee duties for period={d}", .{ fetched.len, period });
     }
 
     fn refreshDuties(
@@ -245,28 +277,37 @@ pub const SyncCommitteeService = struct {
             self.allocator.free(fetched);
         }
 
-        // Free old duties.
-        for (self.duties.items) |*d| {
+        try self.cacheDutyList(&self.duties, fetched);
+        self.duties_period = period;
+        log.debug("cached {d} sync committee duties period={d}", .{ self.duties.items.len, period });
+    }
+
+    fn clearDutyList(self: *SyncCommitteeService, duties: *std.ArrayList(SyncCommitteeDutyWithProofs)) void {
+        for (duties.items) |*d| {
             self.allocator.free(d.duty.validator_sync_committee_indices);
             self.allocator.free(d.selection_proofs);
         }
-        self.duties.clearRetainingCapacity();
-        self.duties_period = period;
+        duties.clearRetainingCapacity();
+    }
+
+    fn cacheDutyList(
+        self: *SyncCommitteeService,
+        duties: *std.ArrayList(SyncCommitteeDutyWithProofs),
+        fetched: []const SyncCommitteeDuty,
+    ) !void {
+        self.clearDutyList(duties);
 
         for (fetched) |duty| {
-            // Copy sync committee indices.
             const sc_indices = try self.allocator.dupe(u64, duty.validator_sync_committee_indices);
             errdefer self.allocator.free(sc_indices);
 
-            // BUG-8 Fix: Selection proofs must be computed per-slot, not per-epoch.
-            // Store null placeholders here; proofs are computed on-demand in
-            // produceAndPublishContributions() using the actual current slot.
+            // Selection proofs are slot-specific. Cache null placeholders now and
+            // compute the actual proofs on demand in produceAndPublishContributions().
             const proofs = try self.allocator.alloc(?[96]u8, sc_indices.len);
             errdefer self.allocator.free(proofs);
-            @memset(proofs, null); // Will be filled on demand at signing time.
-            // BUG-8 fix: epoch not used here — proofs computed per-slot in produceAndPublishContributions.
+            @memset(proofs, null);
 
-            try self.duties.append(.{
+            try duties.append(.{
                 .duty = .{
                     .pubkey = duty.pubkey,
                     .validator_index = duty.validator_index,
@@ -275,8 +316,6 @@ pub const SyncCommitteeService = struct {
                 .selection_proofs = proofs,
             });
         }
-
-        log.debug("cached {d} sync committee duties period={d}", .{ self.duties.items.len, period });
     }
 
     // -----------------------------------------------------------------------
@@ -380,14 +419,15 @@ pub const SyncCommitteeService = struct {
 
         try messages_json.append(']');
 
-        var publish_ok = false;
-        if (count > 0) {
+        const publish_ok = blk: {
+            if (count == 0) break :blk false;
             self.api.publishSyncCommitteeMessages(io, messages_json.items) catch |err| {
                 log.warn("publishSyncCommitteeMessages slot={d} error={s}", .{ slot, @errorName(err) });
+                break :blk false;
             };
-            publish_ok = true;
             log.info("sync committee messages slot={d} count={d}", .{ slot, count });
-        }
+            break :blk true;
+        };
 
         // Record liveness outcomes for all validators with sync committee duties this slot.
         if (self.liveness_tracker) |lt| {

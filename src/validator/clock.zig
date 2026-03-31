@@ -159,7 +159,34 @@ pub const ValidatorSlotTicker = struct {
                 }
                 log.debug("slot {d}", .{slot});
 
-                // Fire per-slot callbacks concurrently.
+                // Fire per-epoch callbacks before per-slot callbacks at startup and
+                // on epoch boundaries. This ensures duties/registrations for the new
+                // epoch are ready before slot work starts, eliminating a race where
+                // the first slot of the epoch could run against stale or empty caches.
+                if (first_iteration or slot % self.slots_per_epoch == 0) {
+                    const epoch = slot / self.slots_per_epoch;
+                    var epoch_threads: [MAX_CALLBACKS]?std.Thread = .{null} ** MAX_CALLBACKS;
+                    for (self.epoch_callbacks[0..self.epoch_callback_count], 0..) |cb, i| {
+                        epoch_threads[i] = std.Thread.spawn(.{}, struct {
+                            fn run(callback: EpochCallback, e: u64) void {
+                                callback.call(e);
+                            }
+                        }.run, .{ cb, epoch }) catch |err| blk: {
+                            log.err("failed to spawn epoch callback thread: {s}", .{@errorName(err)});
+                            cb.call(epoch);
+                            break :blk null;
+                        };
+                    }
+
+                    for (&epoch_threads) |*t| {
+                        if (t.*) |thread| {
+                            thread.join();
+                            t.* = null;
+                        }
+                    }
+                }
+
+                // Fire per-slot callbacks concurrently after the epoch refresh completes.
                 // Each service (block, attestation, sync committee) runs in its own thread
                 // so long-running services (e.g., attestation sleeps ~8s) don't block others.
                 // TS Lodestar runs each as an independent async task; we use threads.
@@ -177,36 +204,9 @@ pub const ValidatorSlotTicker = struct {
                     };
                 }
 
-                // Fire per-epoch callbacks concurrently:
-                //   - At epoch boundary (slot % slots_per_epoch == 0), OR
-                //   - On the very first iteration regardless of slot position.
-                //     Mid-epoch startup must still fire epoch callbacks so duties
-                //     are fetched immediately rather than waiting for the next epoch.
-                var epoch_threads: [MAX_CALLBACKS]?std.Thread = .{null} ** MAX_CALLBACKS;
-                if (first_iteration or slot % self.slots_per_epoch == 0) {
-                    const epoch = slot / self.slots_per_epoch;
-                    for (self.epoch_callbacks[0..self.epoch_callback_count], 0..) |cb, i| {
-                        epoch_threads[i] = std.Thread.spawn(.{}, struct {
-                            fn run(callback: EpochCallback, e: u64) void {
-                                callback.call(e);
-                            }
-                        }.run, .{ cb, epoch }) catch |err| blk: {
-                            log.err("failed to spawn epoch callback thread: {s}", .{@errorName(err)});
-                            cb.call(epoch);
-                            break :blk null;
-                        };
-                    }
-                }
-
-                // Join all spawned threads before sleeping until the next slot.
+                // Join all spawned slot threads before sleeping until the next slot.
                 // This ensures all callbacks complete within the slot window.
                 for (&slot_threads) |*t| {
-                    if (t.*) |thread| {
-                        thread.join();
-                        t.* = null;
-                    }
-                }
-                for (&epoch_threads) |*t| {
                     if (t.*) |thread| {
                         thread.join();
                         t.* = null;

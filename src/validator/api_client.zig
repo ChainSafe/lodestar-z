@@ -208,7 +208,6 @@ pub const BeaconApiClient = struct {
         };
     }
 
-
     /// Perform a GET request with Accept: application/octet-stream.
     /// Returns the raw SSZ bytes and parsed response headers.
     /// Caller must free the returned SszGetResponse.body.
@@ -356,7 +355,6 @@ pub const BeaconApiClient = struct {
         const resp = try self.post(io, path, body);
         self.allocator.free(resp);
     }
-
 
     /// Perform a POST request with SSZ body (Content-Type: application/octet-stream).
     /// The Eth-Consensus-Version header is included for fork context.
@@ -715,7 +713,6 @@ pub const BeaconApiClient = struct {
         try self.postSsz(io, "/eth/v2/beacon/blocks", signed_block_ssz, fork_name);
     }
 
-
     // -----------------------------------------------------------------------
     // Attestation
     // -----------------------------------------------------------------------
@@ -782,6 +779,15 @@ pub const BeaconApiClient = struct {
         attestations_json: []const u8,
     ) !void {
         try self.postNoResponse(io, "/eth/v2/beacon/pool/attestations", attestations_json);
+    }
+
+    /// POST /eth/v1/beacon/pool/voluntary_exits
+    pub fn publishVoluntaryExit(
+        self: *BeaconApiClient,
+        io: Io,
+        signed_exit_json: []const u8,
+    ) !void {
+        try self.postNoResponse(io, "/eth/v1/beacon/pool/voluntary_exits", signed_exit_json);
     }
 
     /// GET /eth/v1/validator/aggregate_attestation?slot=...&attestation_data_root=...
@@ -903,7 +909,6 @@ pub const BeaconApiClient = struct {
     ) !void {
         try self.postNoResponse(io, "/eth/v1/validator/prepare_beacon_proposer", registrations_json);
     }
-
 
     // -----------------------------------------------------------------------
     // Builder API (forwarded through BN)
@@ -1168,7 +1173,6 @@ pub const ProduceBlockSszResponse = struct {
         return self.fork_name[0..self.fork_name_len];
     }
 };
-
 
 pub const AttestationDataResponse = struct {
     slot: u64,

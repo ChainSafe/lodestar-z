@@ -19,10 +19,8 @@ const api_client = @import("api_client.zig");
 const BeaconApiClient = api_client.BeaconApiClient;
 const ValidatorStore = @import("validator_store.zig").ValidatorStore;
 const signing_mod = @import("signing.zig");
-const SigningContext = signing_mod.SigningContext;
 const remote_signer_mod = @import("remote_signer.zig");
 const RemoteSigner = remote_signer_mod.RemoteSigner;
-const SigningType = remote_signer_mod.SigningType;
 
 const log = std.log.scoped(.builder_registration);
 
@@ -92,11 +90,11 @@ pub const BuilderRegistrationService = struct {
         // Snapshot validators under mutex to prevent data races with concurrent
         // Keymanager API add/remove operations (ArrayList reallocation → dangling ptr).
         self.validator_store.mutex.lock();
+        defer self.validator_store.mutex.unlock();
         const validators = try self.allocator.dupe(
             @import("validator_store.zig").ValidatorRecord,
             self.validator_store.validators.items,
         );
-        self.validator_store.mutex.unlock();
         defer {
             // Zero secret keys before freeing — defence in depth against heap scanning.
             for (validators) |*v| {

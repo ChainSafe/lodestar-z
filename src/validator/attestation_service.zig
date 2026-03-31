@@ -219,6 +219,30 @@ pub const AttestationService = struct {
         };
     }
 
+    /// Remove any cached attester duties for the given validator pubkey.
+    ///
+    /// Lodestar drops duties immediately on validator removal; do the same here so
+    /// stale cached duties do not survive until the next epoch refresh.
+    pub fn removeDutiesForKey(self: *AttestationService, pubkey: [48]u8) void {
+        var i: usize = 0;
+        while (i < self.duties.items.len) {
+            if (std.mem.eql(u8, &self.duties.items[i].duty.pubkey, &pubkey)) {
+                _ = self.duties.swapRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+
+        i = 0;
+        while (i < self.next_duties.items.len) {
+            if (std.mem.eql(u8, &self.next_duties.items[i].duty.pubkey, &pubkey)) {
+                _ = self.next_duties.swapRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Duty management
     // -----------------------------------------------------------------------
@@ -349,7 +373,10 @@ pub const AttestationService = struct {
         // Collect duties for this slot.
         var any = false;
         for (duties) |dp| {
-            if (dp.duty.slot == slot) { any = true; break; }
+            if (dp.duty.slot == slot) {
+                any = true;
+                break;
+            }
         }
         if (!any) return std.mem.zeroes([32]u8);
 
@@ -491,8 +518,10 @@ pub const AttestationService = struct {
                         dp.duty.validator_index,
                         slot,
                         bbr_hex,
-                        att_data_resp.source_epoch, src_root_hex,
-                        att_data_resp.target_epoch, tgt_root_hex,
+                        att_data_resp.source_epoch,
+                        src_root_hex,
+                        att_data_resp.target_epoch,
+                        tgt_root_hex,
                         sig_hex,
                     },
                 );
@@ -502,10 +531,13 @@ pub const AttestationService = struct {
                     "{{\"aggregation_bits\":\"0x{s}\",\"data\":{{\"slot\":\"{d}\",\"index\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}},\"signature\":\"0x{s}\"}}",
                     .{
                         agg_bits_hex_slice,
-                        slot, dp.duty.committee_index,
+                        slot,
+                        dp.duty.committee_index,
                         bbr_hex,
-                        att_data_resp.source_epoch, src_root_hex,
-                        att_data_resp.target_epoch, tgt_root_hex,
+                        att_data_resp.source_epoch,
+                        src_root_hex,
+                        att_data_resp.target_epoch,
+                        tgt_root_hex,
                         sig_hex,
                     },
                 );
@@ -516,14 +548,15 @@ pub const AttestationService = struct {
 
         try attestations_json.append(']');
 
-        var publish_ok = false;
-        if (signed_count > 0) {
+        const publish_ok = blk: {
+            if (signed_count == 0) break :blk false;
             self.api.publishAttestations(io, attestations_json.items) catch |err| {
                 log.warn("publishAttestations failed slot={d} error={s}", .{ slot, @errorName(err) });
+                break :blk false;
             };
-            publish_ok = true;
             log.info("attested slot={d} count={d}", .{ slot, signed_count });
-        }
+            break :blk true;
+        };
 
         // Record liveness outcomes for all validators that had duties this slot.
         if (self.liveness_tracker) |lt| {
@@ -589,7 +622,10 @@ pub const AttestationService = struct {
             // 2. Build AggregateAndProof by parsing the aggregate from the BN response.
             // BUG-2 fix: Parse the actual aggregate attestation from the BN JSON response
             // instead of using a zeroed Attestation struct.
-            var aggregate_attestation = try self.parseAggregateAttestation(agg.attestation_json);
+            var aggregate_attestation = self.parseAggregateAttestation(agg.attestation_json) catch |err| {
+                log.warn("parseAggregateAttestation error: {s}", .{@errorName(err)});
+                continue;
+            };
             defer aggregate_attestation.aggregation_bits.data.deinit(self.allocator);
 
             const aggregate_and_proof = consensus_types.phase0.AggregateAndProof.Type{
@@ -661,8 +697,10 @@ pub const AttestationService = struct {
                     agg_data.slot,
                     agg_data.index,
                     agg_bbr_hex,
-                    agg_data.source.epoch, agg_src_root_hex,
-                    agg_data.target.epoch, agg_tgt_root_hex,
+                    agg_data.source.epoch,
+                    agg_src_root_hex,
+                    agg_data.target.epoch,
+                    agg_tgt_root_hex,
                     agg_sig_hex,
                     sel_hex,
                     sig_hex,
@@ -693,104 +731,134 @@ pub const AttestationService = struct {
             .data = std.mem.zeroes(consensus_types.phase0.AttestationData.Type),
             .signature = [_]u8{0} ** 96,
         };
+        var aggregation_bits_initialized = false;
+        errdefer if (aggregation_bits_initialized) result.aggregation_bits.data.deinit(self.allocator);
 
-        const parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), json_bytes, .{}) catch return result;
+        const parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), json_bytes, .{}) catch
+            return error.InvalidAggregateAttestation;
 
         // Response may be {"data": {...}} or the attestation directly.
         const att_obj = blk: {
             const root_obj = switch (parsed.value) {
                 .object => |o| o,
-                else => return result,
+                else => return error.InvalidAggregateAttestation,
             };
             if (root_obj.get("data")) |data_val| {
                 break :blk switch (data_val) {
                     .object => |o| o,
-                    else => return result,
+                    else => return error.InvalidAggregateAttestation,
                 };
             }
             break :blk root_obj;
         };
 
         // Parse aggregation_bits (hex-encoded bitlist).
-        if (att_obj.get("aggregation_bits")) |bits_val| {
-            const bits_str = switch (bits_val) { .string => |s| s, else => "" };
-            const hex = if (std.mem.startsWith(u8, bits_str, "0x")) bits_str[2..] else bits_str;
-            const byte_len = hex.len / 2;
-            if (byte_len > 0) {
-                const bytes = try self.allocator.alloc(u8, byte_len);
-                defer self.allocator.free(bytes);
-                _ = std.fmt.hexToBytes(bytes, hex) catch {};
-                // Last byte has length sentinel: highest set bit marks the end.
-                const last_byte = bytes[byte_len - 1];
-                if (last_byte != 0) {
-                    const sentinel_bit = @as(u3, @intCast(7 - @clz(last_byte)));
-                    const bit_len = (byte_len - 1) * 8 + sentinel_bit;
-                    result.aggregation_bits = try @TypeOf(result.aggregation_bits).fromBitLen(self.allocator, bit_len);
-                    // Copy all data bytes. When byte_len == 1 the single byte holds
-                    // both validator bits and the sentinel; mask out the sentinel bit
-                    // so the bitvector only contains the actual committee bits.
-                    if (byte_len == 1) {
-                        // sentinel_bit tells us which bit is the sentinel; clear it.
-                        const data_byte = last_byte & ~(@as(u8, 1) << sentinel_bit);
-                        if (result.aggregation_bits.data.items.len > 0) {
-                            result.aggregation_bits.data.items[0] = data_byte;
-                        }
-                    } else {
-                        @memcpy(result.aggregation_bits.data.items, bytes[0 .. byte_len - 1]);
-                    }
-                }
+        const bits_val = att_obj.get("aggregation_bits") orelse return error.InvalidAggregateAttestation;
+        const bits_str = switch (bits_val) {
+            .string => |s| s,
+            else => return error.InvalidAggregateAttestation,
+        };
+        const bits_hex = if (std.mem.startsWith(u8, bits_str, "0x")) bits_str[2..] else bits_str;
+        if (bits_hex.len == 0 or bits_hex.len % 2 != 0) return error.InvalidAggregateAttestation;
+        const byte_len = bits_hex.len / 2;
+        const bytes = try self.allocator.alloc(u8, byte_len);
+        defer self.allocator.free(bytes);
+        _ = try std.fmt.hexToBytes(bytes, bits_hex);
+
+        // Last byte has length sentinel: highest set bit marks the end.
+        const last_byte = bytes[byte_len - 1];
+        if (last_byte == 0) return error.InvalidAggregateAttestation;
+        const sentinel_bit = @as(u3, @intCast(7 - @clz(last_byte)));
+        const bit_len = (byte_len - 1) * 8 + sentinel_bit;
+        result.aggregation_bits = try @TypeOf(result.aggregation_bits).fromBitLen(self.allocator, bit_len);
+        aggregation_bits_initialized = true;
+        // Copy all data bytes. When byte_len == 1 the single byte holds
+        // both validator bits and the sentinel; mask out the sentinel bit
+        // so the bitvector only contains the actual committee bits.
+        if (byte_len == 1) {
+            const data_byte = last_byte & ~(@as(u8, 1) << sentinel_bit);
+            if (result.aggregation_bits.data.items.len > 0) {
+                result.aggregation_bits.data.items[0] = data_byte;
             }
+        } else {
+            @memcpy(result.aggregation_bits.data.items, bytes[0 .. byte_len - 1]);
         }
 
         // Parse attestation data fields.
-        if (att_obj.get("data")) |data_val| {
-            const data_map = switch (data_val) { .object => |o| o, else => return result };
+        const data_val = att_obj.get("data") orelse return error.InvalidAggregateAttestation;
+        const data_map = switch (data_val) {
+            .object => |o| o,
+            else => return error.InvalidAggregateAttestation,
+        };
 
-            if (data_map.get("slot")) |v| {
-                const s = switch (v) { .string => |s| s, else => "" };
-                result.data.slot = std.fmt.parseInt(u64, s, 10) catch result.data.slot;
-            }
-            if (data_map.get("index")) |v| {
-                const s = switch (v) { .string => |s| s, else => "" };
-                result.data.index = std.fmt.parseInt(u64, s, 10) catch result.data.index;
-            }
-            if (data_map.get("beacon_block_root")) |v| {
-                const s = switch (v) { .string => |s| s, else => "" };
-                const hex = if (std.mem.startsWith(u8, s, "0x")) s[2..] else s;
-                _ = std.fmt.hexToBytes(&result.data.beacon_block_root, hex) catch {};
-            }
-            if (data_map.get("source")) |src_val| {
-                const src_map = switch (src_val) { .object => |o| o, else => return result };
-                if (src_map.get("epoch")) |v| {
-                    const s = switch (v) { .string => |s| s, else => "" };
-                    result.data.source.epoch = std.fmt.parseInt(u64, s, 10) catch result.data.source.epoch;
-                }
-                if (src_map.get("root")) |v| {
-                    const s = switch (v) { .string => |s| s, else => "" };
-                    const hex = if (std.mem.startsWith(u8, s, "0x")) s[2..] else s;
-                    _ = std.fmt.hexToBytes(&result.data.source.root, hex) catch {};
-                }
-            }
-            if (data_map.get("target")) |tgt_val| {
-                const tgt_map = switch (tgt_val) { .object => |o| o, else => return result };
-                if (tgt_map.get("epoch")) |v| {
-                    const s = switch (v) { .string => |s| s, else => "" };
-                    result.data.target.epoch = std.fmt.parseInt(u64, s, 10) catch result.data.target.epoch;
-                }
-                if (tgt_map.get("root")) |v| {
-                    const s = switch (v) { .string => |s| s, else => "" };
-                    const hex = if (std.mem.startsWith(u8, s, "0x")) s[2..] else s;
-                    _ = std.fmt.hexToBytes(&result.data.target.root, hex) catch {};
-                }
-            }
-        }
+        const slot_val = data_map.get("slot") orelse return error.InvalidAggregateAttestation;
+        const slot_str = switch (slot_val) {
+            .string => |s| s,
+            else => return error.InvalidAggregateAttestation,
+        };
+        result.data.slot = try std.fmt.parseInt(u64, slot_str, 10);
+
+        const index_val = data_map.get("index") orelse return error.InvalidAggregateAttestation;
+        const index_str = switch (index_val) {
+            .string => |s| s,
+            else => return error.InvalidAggregateAttestation,
+        };
+        result.data.index = try std.fmt.parseInt(u64, index_str, 10);
+
+        const bbr_val = data_map.get("beacon_block_root") orelse return error.InvalidAggregateAttestation;
+        const bbr_str = switch (bbr_val) {
+            .string => |s| s,
+            else => return error.InvalidAggregateAttestation,
+        };
+        const bbr_hex = if (std.mem.startsWith(u8, bbr_str, "0x")) bbr_str[2..] else bbr_str;
+        _ = try std.fmt.hexToBytes(&result.data.beacon_block_root, bbr_hex);
+
+        const src_val = data_map.get("source") orelse return error.InvalidAggregateAttestation;
+        const src_map = switch (src_val) {
+            .object => |o| o,
+            else => return error.InvalidAggregateAttestation,
+        };
+        const src_epoch_val = src_map.get("epoch") orelse return error.InvalidAggregateAttestation;
+        const src_epoch_str = switch (src_epoch_val) {
+            .string => |s| s,
+            else => return error.InvalidAggregateAttestation,
+        };
+        result.data.source.epoch = try std.fmt.parseInt(u64, src_epoch_str, 10);
+        const src_root_val = src_map.get("root") orelse return error.InvalidAggregateAttestation;
+        const src_root_str = switch (src_root_val) {
+            .string => |s| s,
+            else => return error.InvalidAggregateAttestation,
+        };
+        const src_root_hex = if (std.mem.startsWith(u8, src_root_str, "0x")) src_root_str[2..] else src_root_str;
+        _ = try std.fmt.hexToBytes(&result.data.source.root, src_root_hex);
+
+        const tgt_val = data_map.get("target") orelse return error.InvalidAggregateAttestation;
+        const tgt_map = switch (tgt_val) {
+            .object => |o| o,
+            else => return error.InvalidAggregateAttestation,
+        };
+        const tgt_epoch_val = tgt_map.get("epoch") orelse return error.InvalidAggregateAttestation;
+        const tgt_epoch_str = switch (tgt_epoch_val) {
+            .string => |s| s,
+            else => return error.InvalidAggregateAttestation,
+        };
+        result.data.target.epoch = try std.fmt.parseInt(u64, tgt_epoch_str, 10);
+        const tgt_root_val = tgt_map.get("root") orelse return error.InvalidAggregateAttestation;
+        const tgt_root_str = switch (tgt_root_val) {
+            .string => |s| s,
+            else => return error.InvalidAggregateAttestation,
+        };
+        const tgt_root_hex = if (std.mem.startsWith(u8, tgt_root_str, "0x")) tgt_root_str[2..] else tgt_root_str;
+        _ = try std.fmt.hexToBytes(&result.data.target.root, tgt_root_hex);
 
         // Parse signature.
-        if (att_obj.get("signature")) |v| {
-            const s = switch (v) { .string => |s| s, else => "" };
-            const hex = if (std.mem.startsWith(u8, s, "0x")) s[2..] else s;
-            _ = std.fmt.hexToBytes(&result.signature, hex) catch {};
-        }
+        const sig_val = att_obj.get("signature") orelse return error.InvalidAggregateAttestation;
+        const sig_str = switch (sig_val) {
+            .string => |s| s,
+            else => return error.InvalidAggregateAttestation,
+        };
+        const sig_hex = if (std.mem.startsWith(u8, sig_str, "0x")) sig_str[2..] else sig_str;
+        _ = try std.fmt.hexToBytes(&result.signature, sig_hex);
 
         return result;
     }

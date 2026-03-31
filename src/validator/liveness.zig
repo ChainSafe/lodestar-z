@@ -141,6 +141,19 @@ pub const LivenessTracker = struct {
         };
     }
 
+    /// Remove a validator from liveness tracking.
+    pub fn unregister(self: *LivenessTracker, pubkey: [48]u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.entries.items, 0..) |e, i| {
+            if (std.mem.eql(u8, &e.pubkey, &pubkey)) {
+                _ = self.entries.swapRemove(i);
+                return;
+            }
+        }
+    }
+
     /// Record that a validator performed (or missed) an attestation duty.
     ///
     /// TS: MetaDataService tracks attestation outcome per epoch.
@@ -300,9 +313,13 @@ pub const LivenessTracker = struct {
             .{
                 epoch,
                 total_validators,
-                hit_att, total_att, att_pct,
+                hit_att,
+                total_att,
+                att_pct,
                 missed_blocks,
-                hit_sync, total_sync, sync_pct,
+                hit_sync,
+                total_sync,
+                sync_pct,
             },
         );
     }
