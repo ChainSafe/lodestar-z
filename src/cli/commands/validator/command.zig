@@ -24,8 +24,15 @@ fn loadBeaconConfig(network: common.Network) *const BeaconConfig {
     };
 }
 
-fn readFile(allocator: Allocator, path: []const u8) ![]u8 {
-    return try std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024 * 1024);
+fn readFile(io: Io, allocator: Allocator, path: []const u8) ![]u8 {
+    const file = try Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
+    const buf = try allocator.alloc(u8, stat.size);
+    errdefer allocator.free(buf);
+    const n = try file.readPositionalAll(io, buf, 0);
+    if (n != stat.size) return error.ShortRead;
+    return buf;
 }
 
 fn firstCsvValue(input: []const u8) []const u8 {
@@ -38,7 +45,7 @@ fn firstCsvValue(input: []const u8) []const u8 {
 }
 
 fn splitCsvOwned(allocator: Allocator, raw: []const u8) ![]const []const u8 {
-    var list = std.ArrayList([]const u8).init(allocator);
+    var list = std.array_list.Managed([]const u8).init(allocator);
     errdefer {
         for (list.items) |item| allocator.free(item);
         list.deinit();
@@ -142,7 +149,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         std.log.info("Loading custom network config from: {s}", .{config_path});
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const config_bytes = readFile(allocator, config_path) catch |err| {
+        const config_bytes = readFile(io, allocator, config_path) catch |err| {
             std.log.err("Failed to read config file '{s}': {}", .{ config_path, err });
             return err;
         };
@@ -170,7 +177,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         data_dir_info.slashing_protection;
     defer if (opts.validatorsDbDir != null) allocator.free(validators_db_dir);
     if (std.fs.path.dirname(validators_db_dir)) |parent| {
-        try std.fs.cwd().makePath(parent);
+        try Io.Dir.cwd().createDirPath(io, parent);
     }
 
     var beacon_api = validator_mod.BeaconApiClient.init(allocator, primary_beacon_url);
@@ -186,7 +193,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
 
     const signing_ctx = buildSigningContext(beacon_config, genesis);
 
-    var fallback_urls: []const []const u8 = &.{};
+    var fallback_urls: [][]const u8 = &.{};
     defer if (fallback_urls.len > 0) freeOwnedStrings(allocator, fallback_urls);
     if (beacon_nodes_raw) |raw| {
         const urls = try splitCsvOwned(allocator, raw);
@@ -250,12 +257,13 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
 
     const client = try allocator.create(validator_mod.ValidatorClient);
     defer allocator.destroy(client);
-    client.* = try validator_mod.ValidatorClient.init(allocator, vc_config, signing_ctx);
+    client.* = try validator_mod.ValidatorClient.init(io, allocator, vc_config, signing_ctx);
     defer client.deinit();
 
     ShutdownHandler.installSignalHandlers();
 
     const WatchCtx = struct {
+        io: Io,
         client: *validator_mod.ValidatorClient,
         done: std.atomic.Value(bool),
     };
@@ -263,6 +271,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     const watch_ctx = try allocator.create(WatchCtx);
     defer allocator.destroy(watch_ctx);
     watch_ctx.* = .{
+        .io = io,
         .client = client,
         .done = std.atomic.Value(bool).init(false),
     };
@@ -274,7 +283,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
                     ctx.client.requestShutdown();
                     return;
                 }
-                std.Thread.sleep(100 * std.time.ns_per_ms);
+                ctx.io.sleep(.{ .nanoseconds = 100 * std.time.ns_per_ms }, .real) catch return;
             }
         }
     }.run, .{watch_ctx});

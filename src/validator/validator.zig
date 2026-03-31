@@ -77,7 +77,9 @@ const IndexTracker = index_tracker_mod.IndexTracker;
 const liveness_mod = @import("liveness.zig");
 const LivenessTracker = liveness_mod.LivenessTracker;
 
+const fs = @import("fs.zig");
 const interchange_mod = @import("interchange.zig");
+const time = @import("time.zig");
 
 const log = std.log.scoped(.validator_client);
 
@@ -143,7 +145,7 @@ pub const ValidatorClient = struct {
     /// or supply from config.
     ///
     /// TS: Validator.init(opts, genesis)
-    pub fn init(allocator: Allocator, config: ValidatorConfig, signing_ctx: SigningContext) !ValidatorClient {
+    pub fn init(io: Io, allocator: Allocator, config: ValidatorConfig, signing_ctx: SigningContext) !ValidatorClient {
         // Initialize API client — use multi-BN if fallback URLs provided.
         var api = if (config.beacon_node_fallback_urls.len > 0) blk: {
             // Build combined URL slice: [primary] ++ fallbacks.
@@ -158,7 +160,7 @@ pub const ValidatorClient = struct {
                 .unreachable_since_ns = 0,
             };
         } else BeaconApiClient.init(allocator, config.beacon_node_url);
-        var validator_store = try ValidatorStore.init(allocator, config.slashing_protection_path);
+        var validator_store = try ValidatorStore.init(io, allocator, config.slashing_protection_path);
         errdefer validator_store.deinit();
 
         const clock = ValidatorSlotTicker.init(
@@ -229,7 +231,7 @@ pub const ValidatorClient = struct {
         else
             null;
 
-        const doppelganger: ?DoppelgangerService = if (config.doppelganger_protection)
+        var doppelganger: ?DoppelgangerService = if (config.doppelganger_protection)
             DoppelgangerService.init(allocator, &api)
         else
             null;
@@ -238,7 +240,7 @@ pub const ValidatorClient = struct {
         var loaded_count: usize = 0;
         if (config.keystores_dir) |ks_dir| {
             if (config.secrets_dir) |sec_dir| {
-                const loaded_keys = try KeyDiscovery.loadAllKeys(allocator, ks_dir, sec_dir);
+                const loaded_keys = try KeyDiscovery.loadAllKeys(io, allocator, ks_dir, sec_dir);
                 defer {
                     for (loaded_keys) |k| k.deinit(allocator);
                     allocator.free(loaded_keys);
@@ -258,7 +260,7 @@ pub const ValidatorClient = struct {
         // This must happen before any signing, so we do it during init().
         // TS: equivalent to --slashingProtection flag feeding importInterchange().
         if (config.interchange_import_path) |ipath| {
-            const interchange_data = std.fs.cwd().readFileAlloc(allocator, ipath, 16 * 1024 * 1024) catch |err| blk: {
+            const interchange_data = fs.readFileAlloc(io, allocator, ipath, 16 * 1024 * 1024) catch |err| blk: {
                 log.err("failed to read interchange file {s}: {s}", .{ ipath, @errorName(err) });
                 break :blk null;
             };
@@ -326,7 +328,7 @@ pub const ValidatorClient = struct {
             .syncing_tracker = SyncingTracker.init(allocator, &api),
             .shutdown_requested = std.atomic.Value(bool).init(false),
             .sse_thread_handle = null,
-            .session_start_ns = @intCast(std.time.nanoTimestamp()),
+            .session_start_ns = time.realtimeNs(),
         };
     }
 
@@ -480,7 +482,7 @@ pub const ValidatorClient = struct {
         for (remote_pubkeys) |pk| {
             if (sliceContainsPubkey(existing_remote_pubkeys, pk)) continue;
 
-            self.validator_store.addRemotePubkey(pk) catch |err| {
+            self.validator_store.addRemotePubkey(io, pk) catch |err| {
                 log.warn("addRemotePubkey failed pubkey=0x{s}: {s}", .{
                     std.fmt.bytesToHex(pk, .lower), @errorName(err),
                 });
@@ -712,7 +714,7 @@ pub const ValidatorClient = struct {
         // Note: slashing_db.close() is called by validator_store.deinit() — do NOT call it here.
 
         // Log session summary.
-        const session_end_ns: u64 = @intCast(std.time.nanoTimestamp());
+        const session_end_ns = time.realtimeNs();
         const session_duration_s = (session_end_ns -| self.session_start_ns) / std.time.ns_per_s;
         log.info(
             "validator client stopped: session_duration={d}s validators={d} missed_blocks={d}",

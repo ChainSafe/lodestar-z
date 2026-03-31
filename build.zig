@@ -159,9 +159,13 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/kzg/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
-    module_kzg.addImport("c_kzg", dep_c_kzg.module("c_kzg"));
+    module_kzg.linkLibrary(dep_c_kzg.artifact("c_kzg"));
+    module_kzg.linkLibrary(dep_blst.artifact("blst"));
+    module_kzg.addIncludePath(dep_c_kzg.artifact("c_kzg").getEmittedIncludeTree());
     b.modules.put(b.dupe("kzg"), module_kzg) catch @panic("OOM");
+    b.getInstallStep().dependOn(&b.addInstallFile(dep_c_kzg.namedLazyPath("trusted_setup"), "trusted_setup.txt").step);
 
     const module_state_transition = b.createModule(.{
         .root_source_file = b.path("src/state_transition/root.zig"),
@@ -169,7 +173,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     b.modules.put(b.dupe("state_transition"), module_state_transition) catch @panic("OOM");
-
 
     const module_networking = b.createModule(.{
         .root_source_file = b.path("src/networking/root.zig"),
@@ -248,7 +251,7 @@ pub fn build(b: *std.Build) void {
     module_validator.addImport("state_transition", module_state_transition);
     module_validator.addImport("log", module_log);
     module_validator.addImport("fork_types", module_fork_types);
-
+    module_validator.addImport("ssz", module_ssz);
 
     const module_processor = b.createModule(.{
         .root_source_file = b.path("src/processor/root.zig"),
@@ -882,7 +885,6 @@ pub fn build(b: *std.Build) void {
     module_api.addImport("state_transition", module_state_transition);
     module_api.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
 
-
     // === discv5 module ===
     const secp256k1_dep = dep_eth_p2p_z.builder.dependency("secp256k1", .{
         .optimize = optimize,
@@ -926,6 +928,8 @@ pub fn build(b: *std.Build) void {
     module_node_main.addImport("preset", module_preset);
     module_node_main.addImport("log", module_log);
     module_node_main.addImport("discv5", module_discv5);
+    module_node_main.addImport("validator", module_validator);
+    module_node_main.addImport("constants", module_constants);
 
     const exe_node = b.addExecutable(.{
         .name = "lodestar-z",
@@ -940,7 +944,7 @@ pub fn build(b: *std.Build) void {
     const tls_run_exe_node = b.step("run", "Run the lodestar-z beacon node");
     tls_run_exe_node.dependOn(&run_exe_node.step);
 
-        // node module imports
+    // node module imports
     module_node.addImport("consensus_types", module_consensus_types);
     module_node.addImport("preset", module_preset);
     module_node.addImport("config", module_config);

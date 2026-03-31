@@ -23,6 +23,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const BeaconApiClient = @import("api_client.zig").BeaconApiClient;
+const time = @import("time.zig");
 
 const log = std.log.scoped(.syncing_tracker);
 
@@ -103,7 +104,7 @@ pub const SyncingTracker = struct {
         };
 
         self.last_poll_error.store(false, .release);
-        self.last_success_ns.store(@intCast(std.time.nanoTimestamp()), .release);
+        self.last_success_ns.store(time.realtimeNs(), .release);
 
         // Determine if we're synced enough to sign.
         const now_synced = !resp.is_syncing or resp.sync_distance <= SYNCING_THRESHOLD;

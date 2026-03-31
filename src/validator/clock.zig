@@ -13,6 +13,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const time = @import("time.zig");
 
 const log = std.log.scoped(.vc_clock);
 
@@ -105,7 +106,7 @@ pub const ValidatorSlotTicker = struct {
     ///
     /// TS: clock.getCurrentSlot()
     pub fn currentSlot(self: *const ValidatorSlotTicker) u64 {
-        const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+        const now_ns = time.realtimeNs();
         if (now_ns < self.genesis_time_ns) return 0;
         const elapsed_ns = now_ns - self.genesis_time_ns;
         const slot_duration_ns = self.seconds_per_slot * std.time.ns_per_s;
@@ -124,7 +125,7 @@ pub const ValidatorSlotTicker = struct {
     /// TS: clock.msToSlot(slot) (we use nanoseconds)
     pub fn nsUntilSlot(self: *const ValidatorSlotTicker, slot: u64) u64 {
         const slot_start_ns = self.genesis_time_ns + slot * self.seconds_per_slot * std.time.ns_per_s;
-        const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+        const now_ns = time.realtimeNs();
         if (now_ns >= slot_start_ns) return 0;
         return slot_start_ns - now_ns;
     }
@@ -134,7 +135,7 @@ pub const ValidatorSlotTicker = struct {
     /// TS: clock.msFromSlot(slot) (we use nanoseconds)
     pub fn nsFromSlot(self: *const ValidatorSlotTicker, slot: u64) u64 {
         const slot_start_ns = self.genesis_time_ns + slot * self.seconds_per_slot * std.time.ns_per_s;
-        const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+        const now_ns = time.realtimeNs();
         if (now_ns <= slot_start_ns) return 0;
         return now_ns - slot_start_ns;
     }

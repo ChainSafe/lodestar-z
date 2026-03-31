@@ -35,6 +35,7 @@ const syncing_tracker_mod = @import("syncing_tracker.zig");
 const SyncingTracker = syncing_tracker_mod.SyncingTracker;
 const liveness_mod = @import("liveness.zig");
 const LivenessTracker = liveness_mod.LivenessTracker;
+const time = @import("time.zig");
 
 const log = std.log.scoped(.attestation_service);
 
@@ -58,11 +59,11 @@ pub const AttestationService = struct {
     electra_fork_epoch: u64,
 
     /// Duties indexed by slot (rolling window across epochs).
-    duties: std.ArrayList(AttesterDutyWithProof),
+    duties: std.array_list.Managed(AttesterDutyWithProof),
     /// Epoch for which duties are currently cached.
     duties_epoch: ?u64,
     /// Pre-fetched duties for next epoch.
-    next_duties: std.ArrayList(AttesterDutyWithProof),
+    next_duties: std.array_list.Managed(AttesterDutyWithProof),
     next_duties_epoch: ?u64,
     /// Optional chain header tracker for reorg detection.
     header_tracker: ?*ChainHeaderTracker,
@@ -97,9 +98,9 @@ pub const AttestationService = struct {
             .seconds_per_slot = seconds_per_slot,
             .genesis_time_unix_secs = genesis_time_unix_secs,
             .electra_fork_epoch = electra_fork_epoch,
-            .duties = std.ArrayList(AttesterDutyWithProof).init(allocator),
+            .duties = std.array_list.Managed(AttesterDutyWithProof).init(allocator),
             .duties_epoch = null,
-            .next_duties = std.ArrayList(AttesterDutyWithProof).init(allocator),
+            .next_duties = std.array_list.Managed(AttesterDutyWithProof).init(allocator),
             .next_duties_epoch = null,
             .header_tracker = null,
             .last_previous_dependent_root = [_]u8{0} ** 32,
@@ -335,10 +336,10 @@ pub const AttestationService = struct {
         const genesis_time_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
         const slot_start_ns = genesis_time_ns + slot * slot_duration_ns;
         {
-            const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+            const now_ns = time.realtimeNs();
             if (now_ns < slot_start_ns + one_third_ns) {
                 const wait_ns = slot_start_ns + one_third_ns - now_ns;
-                std.Thread.sleep(wait_ns);
+                try io.sleep(.{ .nanoseconds = @intCast(wait_ns) }, .real);
             }
         }
 
@@ -347,10 +348,10 @@ pub const AttestationService = struct {
 
         // Sleep until 2/3 slot for aggregation.
         {
-            const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+            const now_ns = time.realtimeNs();
             if (now_ns < slot_start_ns + two_thirds_ns) {
                 const wait_ns = slot_start_ns + two_thirds_ns - now_ns;
-                std.Thread.sleep(wait_ns);
+                try io.sleep(.{ .nanoseconds = @intCast(wait_ns) }, .real);
             }
         }
 
@@ -404,7 +405,7 @@ pub const AttestationService = struct {
         // attestation capability via slashing protection monotonicity.
         // Spec allows at most current_epoch+1 for target (lookahead attestations).
         const current_epoch_for_check = blk: {
-            const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+            const now_ns = time.realtimeNs();
             const genesis_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
             if (now_ns < genesis_ns) break :blk @as(u64, 0);
             const slot_dur_ns = self.seconds_per_slot * std.time.ns_per_s;
@@ -429,14 +430,14 @@ pub const AttestationService = struct {
         }
 
         // Sign for each validator with a duty this slot and collect JSON.
-        var attestations_json = std.ArrayList(u8).init(self.allocator);
+        var attestations_json: std.Io.Writer.Allocating = .init(self.allocator);
         defer attestations_json.deinit();
         var signed_count: u32 = 0;
         // Track signed pubkeys for liveness recording.
-        var signed_pubkeys = std.ArrayList([48]u8).init(self.allocator);
+        var signed_pubkeys = std.array_list.Managed([48]u8).init(self.allocator);
         defer signed_pubkeys.deinit();
 
-        try attestations_json.append('[');
+        try attestations_json.writer.writeByte('[');
 
         for (duties) |dp| {
             if (dp.duty.slot != slot) continue;
@@ -503,7 +504,7 @@ pub const AttestationService = struct {
             }
             const agg_bits_hex_slice = agg_bits_hex_buf[0 .. ssz_byte_count * 2];
 
-            if (signed_count > 0) try attestations_json.append(',');
+            if (signed_count > 0) try attestations_json.writer.writeByte(',');
 
             // Fork-aware JSON format:
             // - Pre-Electra: phase0 Attestation {aggregation_bits, data, signature}
@@ -511,7 +512,7 @@ pub const AttestationService = struct {
             const att_epoch = slot / self.signing_ctx.slots_per_epoch;
             if (att_epoch >= self.electra_fork_epoch) {
                 // Electra: SingleAttestation format for v2 endpoint
-                try attestations_json.writer().print(
+                try attestations_json.writer.print(
                     "{{\"committee_index\":\"{d}\",\"attester_index\":\"{d}\",\"data\":{{\"slot\":\"{d}\",\"index\":\"0\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}},\"signature\":\"0x{s}\"}}",
                     .{
                         dp.duty.committee_index,
@@ -527,7 +528,7 @@ pub const AttestationService = struct {
                 );
             } else {
                 // Pre-Electra: phase0 Attestation format
-                try attestations_json.writer().print(
+                try attestations_json.writer.print(
                     "{{\"aggregation_bits\":\"0x{s}\",\"data\":{{\"slot\":\"{d}\",\"index\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}},\"signature\":\"0x{s}\"}}",
                     .{
                         agg_bits_hex_slice,
@@ -546,11 +547,11 @@ pub const AttestationService = struct {
             signed_count += 1;
         }
 
-        try attestations_json.append(']');
+        try attestations_json.writer.writeByte(']');
 
         const publish_ok = blk: {
             if (signed_count == 0) break :blk false;
-            self.api.publishAttestations(io, attestations_json.items) catch |err| {
+            self.api.publishAttestations(io, attestations_json.written()) catch |err| {
                 log.warn("publishAttestations failed slot={d} error={s}", .{ slot, @errorName(err) });
                 break :blk false;
             };
@@ -660,7 +661,7 @@ pub const AttestationService = struct {
             const agg_src_root_hex = std.fmt.bytesToHex(&agg_data.source.root, .lower);
             const agg_tgt_root_hex = std.fmt.bytesToHex(&agg_data.target.root, .lower);
             const agg_sig_hex = std.fmt.bytesToHex(&aggregate_and_proof.aggregate.signature, .lower);
-            var agg_json = std.ArrayList(u8).init(self.allocator);
+            var agg_json: std.Io.Writer.Allocating = .init(self.allocator);
             defer agg_json.deinit();
             // Serialize actual aggregation_bits from BN aggregate response (SSZ bitlist).
             // data.items contains raw data bytes without sentinel; add sentinel byte.
@@ -689,7 +690,7 @@ pub const AttestationService = struct {
             }
             const agg_agg_bits_hex = agg_agg_bits_hex_buf[0 .. agg_bl_ssz_byte_count * 2];
 
-            try agg_json.writer().print(
+            try agg_json.writer.print(
                 "[{{\"message\":{{\"aggregator_index\":\"{d}\",\"aggregate\":{{\"aggregation_bits\":\"0x{s}\",\"data\":{{\"slot\":\"{d}\",\"index\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}},\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}]",
                 .{
                     dp.duty.validator_index,
@@ -707,7 +708,7 @@ pub const AttestationService = struct {
                 },
             );
 
-            self.api.publishAggregateAndProofs(io, agg_json.items) catch |err| {
+            self.api.publishAggregateAndProofs(io, agg_json.written()) catch |err| {
                 log.warn("publishAggregateAndProofs error: {s}", .{@errorName(err)});
             };
         }

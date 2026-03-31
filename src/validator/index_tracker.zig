@@ -19,6 +19,7 @@ const Io = std.Io;
 
 const api_client = @import("api_client.zig");
 const BeaconApiClient = api_client.BeaconApiClient;
+const mutex_mod = @import("mutex.zig");
 
 const log = std.log.scoped(.index_tracker);
 
@@ -40,9 +41,9 @@ pub const IndexTracker = struct {
     allocator: Allocator,
     api: *BeaconApiClient,
     /// All tracked entries.
-    entries: std.ArrayList(IndexEntry),
+    entries: std.array_list.Managed(IndexEntry),
     /// Mutex for thread-safe access from multiple services.
-    mutex: std.Thread.Mutex,
+    mutex: mutex_mod.Mutex,
 
     // -----------------------------------------------------------------------
     // Init / deinit
@@ -52,7 +53,7 @@ pub const IndexTracker = struct {
         return .{
             .allocator = allocator,
             .api = api,
-            .entries = std.ArrayList(IndexEntry).init(allocator),
+            .entries = std.array_list.Managed(IndexEntry).init(allocator),
             .mutex = .{},
         };
     }
@@ -83,7 +84,7 @@ pub const IndexTracker = struct {
         }) catch |err| {
             log.err("trackPubkey: OOM {s}", .{@errorName(err)});
         };
-        log.debug("tracking pubkey 0x{}", .{std.fmt.fmtSliceHexLower(pubkey[0..4])});
+        log.debug("tracking pubkey 0x{x}", .{pubkey[0..4]});
     }
 
     /// Remove a pubkey from tracking (e.g. key deleted via keymanager API).
@@ -94,7 +95,7 @@ pub const IndexTracker = struct {
         for (self.entries.items, 0..) |e, i| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) {
                 _ = self.entries.swapRemove(i);
-                log.debug("untracked pubkey 0x{}", .{std.fmt.fmtSliceHexLower(pubkey[0..4])});
+                log.debug("untracked pubkey 0x{x}", .{pubkey[0..4]});
                 return;
             }
         }
@@ -127,7 +128,7 @@ pub const IndexTracker = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        var result = std.ArrayList(u64).init(allocator);
+        var result = std.array_list.Managed(u64).init(allocator);
         errdefer result.deinit();
 
         for (self.entries.items) |e| {
@@ -153,7 +154,7 @@ pub const IndexTracker = struct {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            var list = std.ArrayList([48]u8).init(self.allocator);
+            var list = std.array_list.Managed([48]u8).init(self.allocator);
             errdefer list.deinit();
 
             for (self.entries.items) |e| {
@@ -185,8 +186,8 @@ pub const IndexTracker = struct {
                     if (e.index == null) {
                         e.index = r.index;
                         resolved_count += 1;
-                        log.info("validator index resolved pubkey=0x{} index={d}", .{
-                            std.fmt.fmtSliceHexLower(e.pubkey[0..4]),
+                        log.info("validator index resolved pubkey=0x{s} index={d}", .{
+                            std.fmt.bytesToHex(e.pubkey[0..4], .lower),
                             r.index,
                         });
                     }

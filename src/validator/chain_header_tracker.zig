@@ -21,6 +21,7 @@ const api_client = @import("api_client.zig");
 const BeaconApiClient = api_client.BeaconApiClient;
 const SseEvent = api_client.SseEvent;
 const SseCallback = api_client.SseCallback;
+const mutex_mod = @import("mutex.zig");
 
 const log = std.log.scoped(.chain_header_tracker);
 
@@ -69,7 +70,7 @@ pub const ChainHeaderTracker = struct {
     api: *BeaconApiClient,
 
     /// Current head info (protected by mutex for concurrent access).
-    mu: std.Thread.Mutex,
+    mu: mutex_mod.Mutex,
     head: HeadInfo,
 
     /// Registered head callbacks.
@@ -199,7 +200,7 @@ pub const ChainHeaderTracker = struct {
         self.head = info;
         self.mu.unlock();
 
-        log.debug("new head slot={d} root={}", .{ slot, std.fmt.fmtSliceHexLower(&block_root) });
+        log.debug("new head slot={d} root={x}", .{ slot, block_root });
 
         // Fire callbacks (without holding lock).
         for (self.head_callbacks[0..self.head_callback_count]) |cb| {

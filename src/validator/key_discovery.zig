@@ -19,10 +19,12 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 
 const bls = @import("bls");
 const SecretKey = bls.SecretKey;
 
+const fs = @import("fs.zig");
 const keystore_mod = @import("keystore.zig");
 
 const log = std.log.scoped(.key_discovery);
@@ -58,34 +60,28 @@ pub const LoadedKey = struct {
 
 /// Key discovery and loading utilities.
 pub const KeyDiscovery = struct {
-    /// Scan `keystores_dir` for EIP-2335 keystore files.
-    ///
-    /// Expected layout: keystores/<0xPUBKEY>/voting-keystore.json
-    ///
-    /// Returns a caller-owned slice of DiscoveredKey. Caller must free each
-    /// entry via `entry.deinit(allocator)` and then free the slice itself.
-    pub fn scanKeystores(allocator: Allocator, keystores_dir: []const u8) ![]DiscoveredKey {
-        var results = std.ArrayList(DiscoveredKey).init(allocator);
+    pub fn scanKeystores(io: Io, allocator: Allocator, keystores_dir: []const u8) ![]DiscoveredKey {
+        var results = std.array_list.Managed(DiscoveredKey).init(allocator);
         errdefer {
             for (results.items) |k| k.deinit(allocator);
             results.deinit();
         }
 
-        var dir = std.fs.openDirAbsolute(keystores_dir, .{ .iterate = true }) catch |err| switch (err) {
+        const keystores_abs = try fs.resolvePath(allocator, keystores_dir);
+        defer allocator.free(keystores_abs);
+        var dir = Io.Dir.openDirAbsolute(io, keystores_abs, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => return results.toOwnedSlice(),
             else => return err,
         };
-        defer dir.close();
+        defer dir.close(io);
 
         var iter = dir.iterate();
-        while (try iter.next()) |entry| {
+        while (try iter.next(io)) |entry| {
             if (entry.kind != .directory) continue;
 
-            // Directory name should be the pubkey hex (e.g. "0xaabb...").
             const dir_name = entry.name;
             if (dir_name.len < 3 or !std.mem.startsWith(u8, dir_name, "0x")) continue;
 
-            // Decode the pubkey from the directory name.
             const hex_without_prefix = dir_name[2..];
             if (hex_without_prefix.len != 96) {
                 log.debug("skipping keystore dir with unexpected length: {s}", .{dir_name});
@@ -93,17 +89,17 @@ pub const KeyDiscovery = struct {
             }
 
             var pubkey_bytes: [48]u8 = undefined;
-            std.fmt.hexToBytes(&pubkey_bytes, hex_without_prefix) catch {
+            _ = std.fmt.hexToBytes(&pubkey_bytes, hex_without_prefix) catch {
                 log.debug("skipping keystore dir with non-hex name: {s}", .{dir_name});
                 continue;
             };
 
-            // Construct path to voting-keystore.json.
             const keystore_path = try std.fs.path.join(allocator, &.{ keystores_dir, dir_name, "voting-keystore.json" });
             errdefer allocator.free(keystore_path);
 
-            // Check the file exists.
-            std.fs.accessAbsolute(keystore_path, .{}) catch {
+            const keystore_abs = try fs.resolvePath(allocator, keystore_path);
+            defer allocator.free(keystore_abs);
+            Io.Dir.accessAbsolute(io, keystore_abs, .{}) catch {
                 allocator.free(keystore_path);
                 log.debug("skipping {s}: no voting-keystore.json", .{dir_name});
                 continue;
@@ -131,18 +127,15 @@ pub const KeyDiscovery = struct {
     /// The `pubkey_hex` should be the "0x..."-prefixed hex string (directory name).
     ///
     /// Returns an owned slice. Caller must free.
-    pub fn loadPassword(allocator: Allocator, secrets_dir: []const u8, pubkey_hex: []const u8) ![]const u8 {
+    pub fn loadPassword(io: Io, allocator: Allocator, secrets_dir: []const u8, pubkey_hex: []const u8) ![]const u8 {
         const secret_path = try std.fs.path.join(allocator, &.{ secrets_dir, pubkey_hex });
         defer allocator.free(secret_path);
 
-        const file = try std.fs.openFileAbsolute(secret_path, .{});
-        defer file.close();
-
-        const password_raw = try file.readToEndAlloc(allocator, 4096);
+        const password_raw = try fs.readFileAlloc(io, allocator, secret_path, 4096);
         errdefer allocator.free(password_raw);
 
         // Trim trailing newline/whitespace.
-        const password = std.mem.trimRight(u8, password_raw, &[_]u8{ '\n', '\r', ' ', '\t' });
+        const password = std.mem.trimEnd(u8, password_raw, &[_]u8{ '\n', '\r', ' ', '\t' });
 
         // Return a clean copy if we trimmed.
         if (password.len < password_raw.len) {
@@ -160,14 +153,14 @@ pub const KeyDiscovery = struct {
     ///
     /// Keys that fail to load (missing password, wrong password, corrupt keystore)
     /// are logged as warnings and skipped rather than causing a hard error.
-    pub fn loadAllKeys(allocator: Allocator, keystores_dir: []const u8, secrets_dir: []const u8) ![]LoadedKey {
-        const discovered = try scanKeystores(allocator, keystores_dir);
+    pub fn loadAllKeys(io: Io, allocator: Allocator, keystores_dir: []const u8, secrets_dir: []const u8) ![]LoadedKey {
+        const discovered = try scanKeystores(io, allocator, keystores_dir);
         defer {
             for (discovered) |k| k.deinit(allocator);
             allocator.free(discovered);
         }
 
-        var loaded = std.ArrayList(LoadedKey).init(allocator);
+        var loaded = std.array_list.Managed(LoadedKey).init(allocator);
         errdefer {
             for (loaded.items) |k| k.deinit(allocator);
             loaded.deinit();
@@ -175,14 +168,14 @@ pub const KeyDiscovery = struct {
 
         for (discovered) |key| {
             // Load password.
-            const password = loadPassword(allocator, secrets_dir, key.pubkey_hex) catch |err| {
+            const password = loadPassword(io, allocator, secrets_dir, key.pubkey_hex) catch |err| {
                 log.warn("failed to load password for {s}: {s}", .{ key.pubkey_hex, @errorName(err) });
                 continue;
             };
             defer allocator.free(password);
 
             // Read keystore JSON.
-            const json_bytes = std.fs.cwd().readFileAlloc(allocator, key.keystore_path, 1024 * 1024) catch |err| {
+            const json_bytes = fs.readFileAlloc(io, allocator, key.keystore_path, 1024 * 1024) catch |err| {
                 log.warn("failed to read keystore {s}: {s}", .{ key.keystore_path, @errorName(err) });
                 continue;
             };
@@ -218,7 +211,7 @@ pub const KeyDiscovery = struct {
 const testing = std.testing;
 
 test "KeyDiscovery.scanKeystores: nonexistent dir returns empty slice" {
-    const keys = try KeyDiscovery.scanKeystores(testing.allocator, "/nonexistent/path/to/keystores");
+    const keys = try KeyDiscovery.scanKeystores(testing.io, testing.allocator, "/nonexistent/path/to/keystores");
     defer testing.allocator.free(keys);
     try testing.expectEqual(@as(usize, 0), keys.len);
 }
@@ -244,7 +237,7 @@ test "KeyDiscovery.scanKeystores: scans directory layout" {
     // Also create a non-directory entry (should be skipped).
     try tmp.dir.writeFile(.{ .sub_path = "somefile.txt", .data = "ignored" });
 
-    const keys = try KeyDiscovery.scanKeystores(testing.allocator, tmp_path);
+    const keys = try KeyDiscovery.scanKeystores(testing.io, testing.allocator, tmp_path);
     defer {
         for (keys) |k| k.deinit(testing.allocator);
         testing.allocator.free(keys);
@@ -265,7 +258,7 @@ test "KeyDiscovery.loadPassword: reads and trims password" {
     const pubkey_hex = "0xaabbcc";
     try tmp.dir.writeFile(.{ .sub_path = pubkey_hex, .data = "mysecretpassword\n" });
 
-    const password = try KeyDiscovery.loadPassword(testing.allocator, tmp_path, pubkey_hex);
+    const password = try KeyDiscovery.loadPassword(testing.io, testing.allocator, tmp_path, pubkey_hex);
     defer testing.allocator.free(password);
 
     try testing.expectEqualStrings("mysecretpassword", password);
@@ -278,6 +271,6 @@ test "KeyDiscovery.loadPassword: missing file returns error" {
     const tmp_path = try tmp.dir.realpathAlloc(testing.allocator, ".");
     defer testing.allocator.free(tmp_path);
 
-    const result = KeyDiscovery.loadPassword(testing.allocator, tmp_path, "0xmissing");
+    const result = KeyDiscovery.loadPassword(testing.io, testing.allocator, tmp_path, "0xmissing");
     try testing.expectError(error.FileNotFound, result);
 }

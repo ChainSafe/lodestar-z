@@ -288,10 +288,10 @@ pub fn exportInterchange(
     records: []const SlashingProtectionRecord,
     genesis_validators_root: [32]u8,
 ) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
+    var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
 
-    const writer = out.writer();
+    const writer = &out.writer;
 
     const gvr_hex = std.fmt.bytesToHex(&genesis_validators_root, .lower);
 

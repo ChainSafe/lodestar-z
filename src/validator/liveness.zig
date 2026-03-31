@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const mutex_mod = @import("mutex.zig");
 
 const log = std.log.scoped(.validator_liveness);
 
@@ -111,13 +112,13 @@ fn hitRate(history: *const [HISTORY_WINDOW]?EpochDutyResult) f64 {
 
 pub const LivenessTracker = struct {
     allocator: Allocator,
-    entries: std.ArrayList(ValidatorLivenessEntry),
-    mutex: std.Thread.Mutex,
+    entries: std.array_list.Managed(ValidatorLivenessEntry),
+    mutex: mutex_mod.Mutex,
 
     pub fn init(allocator: Allocator) LivenessTracker {
         return .{
             .allocator = allocator,
-            .entries = std.ArrayList(ValidatorLivenessEntry).init(allocator),
+            .entries = std.array_list.Managed(ValidatorLivenessEntry).init(allocator),
             .mutex = .{},
         };
     }
@@ -168,26 +169,26 @@ pub const LivenessTracker = struct {
                 if (!performed) {
                     if (e.consecutive_missed_attestations >= CONSECUTIVE_MISS_WARN_THRESHOLD) {
                         log.warn(
-                            "validator 0x{} missed attestation for {d} consecutive epoch(s) (epoch={d})",
-                            .{ std.fmt.fmtSliceHexLower(pubkey[0..4]), e.consecutive_missed_attestations, epoch },
+                            "validator 0x{s} missed attestation for {d} consecutive epoch(s) (epoch={d})",
+                            .{ std.fmt.bytesToHex(pubkey[0..4], .lower), e.consecutive_missed_attestations, epoch },
                         );
                     }
                 } else {
-                    log.debug("validator 0x{} attested epoch={d}", .{
-                        std.fmt.fmtSliceHexLower(pubkey[0..4]),
+                    log.debug("validator 0x{s} attested epoch={d}", .{
+                        std.fmt.bytesToHex(pubkey[0..4], .lower),
                         epoch,
                     });
                 }
 
                 // Log metrics.
                 log.debug(
-                    "attestation_hit_rate validator=0x{} rate={d:.3}",
-                    .{ std.fmt.fmtSliceHexLower(pubkey[0..4]), e.attestationHitRate() },
+                    "attestation_hit_rate validator=0x{s} rate={d:.3}",
+                    .{ std.fmt.bytesToHex(pubkey[0..4], .lower), e.attestationHitRate() },
                 );
                 return;
             }
         }
-        log.warn("recordAttestationDuty: unknown validator 0x{}", .{std.fmt.fmtSliceHexLower(pubkey[0..4])});
+        log.warn("recordAttestationDuty: unknown validator 0x{x}", .{pubkey[0..4]});
     }
 
     /// Record that a validator performed (or missed) a sync committee duty.
@@ -204,20 +205,20 @@ pub const LivenessTracker = struct {
                 if (!performed) {
                     if (e.consecutive_missed_sync >= CONSECUTIVE_MISS_WARN_THRESHOLD) {
                         log.warn(
-                            "validator 0x{} missed sync committee duty for {d} consecutive epoch(s) (epoch={d})",
-                            .{ std.fmt.fmtSliceHexLower(pubkey[0..4]), e.consecutive_missed_sync, epoch },
+                            "validator 0x{s} missed sync committee duty for {d} consecutive epoch(s) (epoch={d})",
+                            .{ std.fmt.bytesToHex(pubkey[0..4], .lower), e.consecutive_missed_sync, epoch },
                         );
                     }
                 }
 
                 log.debug(
-                    "sync_participation_rate validator=0x{} rate={d:.3}",
-                    .{ std.fmt.fmtSliceHexLower(pubkey[0..4]), e.syncParticipationRate() },
+                    "sync_participation_rate validator=0x{s} rate={d:.3}",
+                    .{ std.fmt.bytesToHex(pubkey[0..4], .lower), e.syncParticipationRate() },
                 );
                 return;
             }
         }
-        log.warn("recordSyncDuty: unknown validator 0x{}", .{std.fmt.fmtSliceHexLower(pubkey[0..4])});
+        log.warn("recordSyncDuty: unknown validator 0x{x}", .{pubkey[0..4]});
     }
 
     /// Log a summary of all tracked validator liveness.
@@ -229,9 +230,9 @@ pub const LivenessTracker = struct {
 
         for (self.entries.items) |e| {
             log.info(
-                "liveness summary validator=0x{} att_rate={d:.3} sync_rate={d:.3} missed_att_streak={d} missed_sync_streak={d}",
+                "liveness summary validator=0x{s} att_rate={d:.3} sync_rate={d:.3} missed_att_streak={d} missed_sync_streak={d}",
                 .{
-                    std.fmt.fmtSliceHexLower(e.pubkey[0..4]),
+                    std.fmt.bytesToHex(e.pubkey[0..4], .lower),
                     e.attestationHitRate(),
                     e.syncParticipationRate(),
                     e.consecutive_missed_attestations,

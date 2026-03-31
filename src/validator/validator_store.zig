@@ -31,6 +31,7 @@ const RemoteSigner = remote_signer_mod.RemoteSigner;
 const SigningType = remote_signer_mod.SigningType;
 
 const Io = std.Io;
+const mutex_mod = @import("mutex.zig");
 
 const log = std.log.scoped(.validator_store);
 
@@ -63,13 +64,13 @@ pub const ValidatorRecord = struct {
 
 pub const ValidatorStore = struct {
     allocator: Allocator,
-    validators: std.ArrayList(ValidatorRecord),
+    validators: std.array_list.Managed(ValidatorRecord),
     /// Cached pubkey slice kept in sync with validators for non-allocating pubkeys() access.
-    pubkeys_cache: std.ArrayList([48]u8),
+    pubkeys_cache: std.array_list.Managed([48]u8),
     /// Persistent slashing protection database.
     slashing_db: SlashingProtectionDb,
     /// Mutex protecting validators list for concurrent add/remove.
-    mutex: std.Thread.Mutex,
+    mutex: mutex_mod.Mutex,
     /// Remote signer client (Web3Signer). Non-null when web3signer_url is configured.
     /// Used by signing methods when `validator.is_remote == true`.
     remote_signer: ?*RemoteSigner = null,
@@ -77,12 +78,12 @@ pub const ValidatorStore = struct {
     /// Initialize the ValidatorStore with an optional persistent slashing protection DB.
     ///
     /// Pass db_path = null for in-memory-only mode (tests, no persistence).
-    pub fn init(allocator: Allocator, db_path: ?[]const u8) !ValidatorStore {
-        const slashing_db = try SlashingProtectionDb.init(allocator, db_path);
+    pub fn init(io: Io, allocator: Allocator, db_path: ?[]const u8) !ValidatorStore {
+        const slashing_db = try SlashingProtectionDb.init(io, allocator, db_path);
         return .{
             .allocator = allocator,
-            .validators = std.ArrayList(ValidatorRecord).init(allocator),
-            .pubkeys_cache = std.ArrayList([48]u8).init(allocator),
+            .validators = std.array_list.Managed(ValidatorRecord).init(allocator),
+            .pubkeys_cache = std.array_list.Managed([48]u8).init(allocator),
             .slashing_db = slashing_db,
             .mutex = .{},
         };
@@ -91,7 +92,7 @@ pub const ValidatorStore = struct {
     pub fn deinit(self: *ValidatorStore) void {
         // Zero all BLS secret keys before freeing the list.
         for (self.validators.items) |*v| {
-            std.crypto.utils.secureZero(u8, &v.secret_key.value.b);
+            std.crypto.secureZero(u8, &v.secret_key.value.b);
         }
         self.validators.deinit();
         self.pubkeys_cache.deinit();
@@ -136,7 +137,7 @@ pub const ValidatorStore = struct {
         });
         // Keep pubkeys_cache in sync for non-allocating pubkeys() access.
         try self.pubkeys_cache.append(pubkey_bytes);
-        log.debug("added validator pubkey={}", .{std.fmt.fmtSliceHexLower(&pubkey_bytes)});
+        log.debug("added validator pubkey={x}", .{pubkey_bytes});
     }
 
     /// Add a validator at runtime (alias for addKey; thread-safe).
@@ -153,7 +154,7 @@ pub const ValidatorStore = struct {
     ///
     /// TS: ValidatorStore init with `ExternalSignerSigner` entries — pubkey tracked but
     ///     signing goes through the external signer HTTP client.
-    pub fn addRemotePubkey(self: *ValidatorStore, pubkey: [48]u8) !void {
+    pub fn addRemotePubkey(self: *ValidatorStore, io: Io, pubkey: [48]u8) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -166,7 +167,7 @@ pub const ValidatorStore = struct {
         // a valid non-zero BLS scalar. Using random bytes avoids the scalar=1 pitfall
         // where all remote validators would share the same (trivially recoverable) key.
         var random_sk_bytes: [32]u8 = undefined;
-        std.Options.debug_io.random(&random_sk_bytes);
+        io.random(&random_sk_bytes);
         // Ensure non-zero (astronomically unlikely, but be safe).
         random_sk_bytes[31] |= 1;
         const placeholder_sk = SecretKey.deserialize(&random_sk_bytes) catch return error.InvalidPubkey;
@@ -185,7 +186,7 @@ pub const ValidatorStore = struct {
             },
         });
         try self.pubkeys_cache.append(pubkey);
-        log.info("registered remote validator pubkey={}", .{std.fmt.fmtSliceHexLower(&pubkey)});
+        log.info("registered remote validator pubkey={x}", .{pubkey});
     }
 
     /// Return true if the given pubkey belongs to a remote signer.
@@ -211,11 +212,11 @@ pub const ValidatorStore = struct {
         for (self.validators.items, 0..) |v, i| {
             if (std.mem.eql(u8, &v.pubkey, &pubkey)) {
                 // Zero secret key memory before removing the entry.
-                std.crypto.utils.secureZero(u8, &self.validators.items[i].secret_key.value.b);
+                std.crypto.secureZero(u8, &self.validators.items[i].secret_key.value.b);
                 _ = self.validators.swapRemove(i);
                 // Keep pubkeys_cache in sync.
                 _ = self.pubkeys_cache.swapRemove(i);
-                log.info("removed validator pubkey={}", .{std.fmt.fmtSliceHexLower(&pubkey)});
+                log.info("removed validator pubkey={x}", .{pubkey});
                 return true;
             }
         }
@@ -268,7 +269,7 @@ pub const ValidatorStore = struct {
 
     /// Return all known public keys as an owned slice (caller must free).
     pub fn allPubkeys(self: *const ValidatorStore, allocator: Allocator) ![][48]u8 {
-        const mutex_ptr: *std.Thread.Mutex = @constCast(&self.mutex);
+        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
         mutex_ptr.lock();
         defer mutex_ptr.unlock();
 
@@ -281,7 +282,7 @@ pub const ValidatorStore = struct {
 
     /// Return all remote-only validator pubkeys as an owned slice (caller must free).
     pub fn allRemotePubkeys(self: *const ValidatorStore, allocator: Allocator) ![][48]u8 {
-        const mutex_ptr: *std.Thread.Mutex = @constCast(&self.mutex);
+        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
         mutex_ptr.lock();
         defer mutex_ptr.unlock();
 
@@ -320,7 +321,7 @@ pub const ValidatorStore = struct {
     pub fn allIndices(self: *const ValidatorStore, allocator: Allocator) ![]u64 {
         // Lock mutex for thread-safe access. Cast away const — mutex is logically
         // interior-mutable and doesn't change observable ValidatorStore state.
-        const mutex_ptr: *std.Thread.Mutex = @constCast(&self.mutex);
+        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
         mutex_ptr.lock();
         defer mutex_ptr.unlock();
 
@@ -607,7 +608,7 @@ fn makeDummyKey() SecretKey {
 }
 
 test "ValidatorStore: addKey and allIndices" {
-    var store = try ValidatorStore.init(testing.allocator, null);
+    var store = try ValidatorStore.init(testing.io, testing.allocator, null);
     defer store.deinit();
 
     const sk = makeDummyKey();
@@ -630,7 +631,7 @@ test "ValidatorStore: addKey and allIndices" {
 }
 
 test "ValidatorStore: slashing protection — block double proposal" {
-    var store = try ValidatorStore.init(testing.allocator, null);
+    var store = try ValidatorStore.init(testing.io, testing.allocator, null);
     defer store.deinit();
 
     const sk = makeDummyKey();
@@ -653,7 +654,7 @@ test "ValidatorStore: slashing protection — block double proposal" {
 }
 
 test "ValidatorStore: slashing protection — attestation double vote" {
-    var store = try ValidatorStore.init(testing.allocator, null);
+    var store = try ValidatorStore.init(testing.io, testing.allocator, null);
     defer store.deinit();
 
     const sk = makeDummyKey();
@@ -679,7 +680,7 @@ test "ValidatorStore: slashing protection — attestation double vote" {
 }
 
 test "ValidatorStore: allPubkeys" {
-    var store = try ValidatorStore.init(testing.allocator, null);
+    var store = try ValidatorStore.init(testing.io, testing.allocator, null);
     defer store.deinit();
 
     const sk = makeDummyKey();
@@ -692,7 +693,7 @@ test "ValidatorStore: allPubkeys" {
 }
 
 test "ValidatorStore: addValidator, listValidators, removeValidator" {
-    var store = try ValidatorStore.init(testing.allocator, null);
+    var store = try ValidatorStore.init(testing.io, testing.allocator, null);
     defer store.deinit();
 
     const sk = makeDummyKey();

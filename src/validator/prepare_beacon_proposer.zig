@@ -98,7 +98,7 @@ pub const PrepareBeaconProposerService = struct {
         }
 
         // Build entries list.
-        var entries = try std.ArrayList(FeeRecipientEntry).initCapacity(self.allocator, indices.len);
+        var entries = try std.array_list.Managed(FeeRecipientEntry).initCapacity(self.allocator, indices.len);
         defer entries.deinit();
 
         for (indices) |idx| {
@@ -124,10 +124,10 @@ pub const PrepareBeaconProposerService = struct {
     }
 
     fn serializeEntries(self: *PrepareBeaconProposerService, entries: []const FeeRecipientEntry) ![]const u8 {
-        var buf = std.ArrayList(u8).init(self.allocator);
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
         errdefer buf.deinit();
 
-        var writer = buf.writer();
+        const writer = &buf.writer;
         try writer.writeByte('[');
         for (entries, 0..) |entry, i| {
             if (i > 0) try writer.writeByte(',');

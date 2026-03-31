@@ -18,6 +18,14 @@ const SecretKey = bls.SecretKey;
 
 const log = std.log.scoped(.keystore);
 
+fn optionalStringField(obj: std.json.ObjectMap, key: []const u8) []const u8 {
+    const value = obj.get(key) orelse return "";
+    return switch (value) {
+        .string => |s| s,
+        else => "",
+    };
+}
+
 // ---------------------------------------------------------------------------
 // EIP-2335 JSON schema types
 // ---------------------------------------------------------------------------
@@ -172,7 +180,7 @@ pub const KeystoreDecryptor = struct {
     pub fn decrypt(self: *KeystoreDecryptor, keystore: *const Keystore, password: []const u8) !SecretKey {
         // Step 1: KDF — derive 32-byte decryption key.
         var decryption_key: [32]u8 = undefined;
-        defer std.crypto.utils.secureZero(u8, &decryption_key);
+        defer std.crypto.secureZero(u8, &decryption_key);
         switch (keystore.crypto.kdf.function) {
             .scrypt => {
                 const params_obj = switch (keystore.crypto.kdf.params_json) {
@@ -269,7 +277,7 @@ pub const KeystoreDecryptor = struct {
 
         var checksum_input = try self.allocator.alloc(u8, 16 + cipher_bytes.len);
         defer {
-            std.crypto.utils.secureZero(u8, checksum_input);
+            std.crypto.secureZero(u8, checksum_input);
             self.allocator.free(checksum_input);
         }
         @memcpy(checksum_input[0..16], decryption_key[16..32]);
@@ -293,12 +301,12 @@ pub const KeystoreDecryptor = struct {
         _ = try std.fmt.hexToBytes(&iv_bytes, iv_hex);
 
         var key_bytes: [16]u8 = undefined;
-        defer std.crypto.utils.secureZero(u8, &key_bytes);
+        defer std.crypto.secureZero(u8, &key_bytes);
         @memcpy(&key_bytes, decryption_key[0..16]);
 
         const plaintext = try self.allocator.alloc(u8, cipher_bytes.len);
         defer {
-            std.crypto.utils.secureZero(u8, plaintext);
+            std.crypto.secureZero(u8, plaintext);
             self.allocator.free(plaintext);
         }
         aesCtr128Xor(plaintext, cipher_bytes, key_bytes, iv_bytes);
@@ -306,7 +314,7 @@ pub const KeystoreDecryptor = struct {
         // Step 4: interpret 32-byte plaintext as BLS secret key.
         if (plaintext.len < 32) return error.InvalidKeystoreSize;
         var sk_bytes: [32]u8 = undefined;
-        defer std.crypto.utils.secureZero(u8, &sk_bytes);
+        defer std.crypto.secureZero(u8, &sk_bytes);
         @memcpy(&sk_bytes, plaintext[0..32]);
 
         log.debug("keystore decryption successful", .{});
@@ -373,11 +381,7 @@ pub fn loadKeystore(allocator: Allocator, json_bytes: []const u8, password: []co
         return error.UnsupportedKdfFunction;
 
     const kdf_params_val = kdf_obj.get("params") orelse return error.MissingKeystoreField;
-    const kdf_msg_val = kdf_obj.get("message") orelse .{ .string = "" };
-    const kdf_msg = switch (kdf_msg_val) {
-        .string => |s| s,
-        else => "",
-    };
+    const kdf_msg = optionalStringField(kdf_obj, "message");
 
     // Parse cipher.
     const cipher_val = crypto_obj.get("cipher") orelse return error.MissingKeystoreField;
@@ -424,26 +428,10 @@ pub fn loadKeystore(allocator: Allocator, json_bytes: []const u8, password: []co
     };
 
     // Build Keystore struct.
-    const uuid_val = root_obj.get("uuid") orelse .{ .string = "" };
-    const uuid_str = switch (uuid_val) {
-        .string => |s| s,
-        else => "",
-    };
-    const desc_val = root_obj.get("description") orelse .{ .string = "" };
-    const desc_str = switch (desc_val) {
-        .string => |s| s,
-        else => "",
-    };
-    const pk_val = root_obj.get("pubkey") orelse .{ .string = "" };
-    const pk_str = switch (pk_val) {
-        .string => |s| s,
-        else => "",
-    };
-    const path_val = root_obj.get("path") orelse .{ .string = "" };
-    const path_str = switch (path_val) {
-        .string => |s| s,
-        else => "",
-    };
+    const uuid_str = optionalStringField(root_obj, "uuid");
+    const desc_str = optionalStringField(root_obj, "description");
+    const pk_str = optionalStringField(root_obj, "pubkey");
+    const path_str = optionalStringField(root_obj, "path");
 
     const keystore = Keystore{
         .version = version,

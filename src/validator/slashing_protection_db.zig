@@ -19,6 +19,8 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const fs = @import("fs.zig");
 
 const log = std.log.scoped(.slashing_db);
 
@@ -47,7 +49,7 @@ pub const AttestRecord = struct {
 
 /// All attestation records for a single validator, kept sorted by target_epoch ascending.
 /// Sorted order enables efficient surround vote detection.
-const AttestHistory = std.ArrayList(AttestRecord);
+const AttestHistory = std.array_list.Managed(AttestRecord);
 
 /// Map from pubkey → list of all attestation records (sorted by target_epoch asc).
 const AttestHistoryMap = std.HashMap([48]u8, AttestHistory, PubkeyContext, std.hash_map.default_max_load_percentage);
@@ -117,8 +119,9 @@ pub fn checkSurroundVote(history: []const AttestRecord, new_source: u64, new_tar
 // ---------------------------------------------------------------------------
 
 pub const SlashingProtectionDb = struct {
+    io: Io,
     allocator: Allocator,
-    file: ?std.fs.File,
+    file: ?Io.File,
     block_map: BlockMap,
     /// Full attestation history per validator (sorted by target_epoch asc).
     attest_history: AttestHistoryMap,
@@ -127,8 +130,9 @@ pub const SlashingProtectionDb = struct {
     ///
     /// Opens or creates the file at db_path, reads all existing records into memory.
     /// Pass db_path = null to create an in-memory-only instance (for tests).
-    pub fn init(allocator: Allocator, db_path: ?[]const u8) !SlashingProtectionDb {
+    pub fn init(io: Io, allocator: Allocator, db_path: ?[]const u8) !SlashingProtectionDb {
         var self = SlashingProtectionDb{
+            .io = io,
             .allocator = allocator,
             .file = null,
             .block_map = BlockMap.init(allocator),
@@ -136,7 +140,9 @@ pub const SlashingProtectionDb = struct {
         };
 
         if (db_path) |path| {
-            const file = try std.fs.cwd().createFile(path, .{
+            const abs_path = try fs.resolvePath(allocator, path);
+            defer allocator.free(abs_path);
+            const file = try Io.Dir.createFileAbsolute(io, abs_path, .{
                 .read = true,
                 .truncate = false,
             });
@@ -151,7 +157,7 @@ pub const SlashingProtectionDb = struct {
 
     pub fn close(self: *SlashingProtectionDb) void {
         if (self.file) |f| {
-            f.close();
+            f.close(self.io);
             self.file = null;
         }
         self.block_map.deinit();
@@ -292,27 +298,32 @@ pub const SlashingProtectionDb = struct {
     fn loadRecords(self: *SlashingProtectionDb) !void {
         const file = self.file orelse return;
 
-        // Seek to start.
-        try file.seekTo(0);
-
         var buf: [ATTESTATION_RECORD_SIZE]u8 = undefined; // largest record
         var count_blocks: u32 = 0;
         var count_attests: u32 = 0;
+        const stat = try file.stat(self.io);
+        var offset: u64 = 0;
 
-        while (true) {
+        while (offset < stat.size) {
             // Read type byte.
-            const n = file.read(buf[0..1]) catch break;
-            if (n == 0) break; // EOF
+            const n = try file.readPositionalAll(self.io, buf[0..1], offset);
+            if (n != 1) break;
+            offset += 1;
 
             const record_type = buf[0];
             switch (record_type) {
                 RECORD_TYPE_BLOCK => {
                     const rest_size = BLOCK_RECORD_SIZE - 1; // already read type byte
-                    const m = try file.readAll(buf[0..rest_size]);
+                    if (stat.size - offset < rest_size) {
+                        log.warn("slashing_db: truncated block record at EOF (expected {d} bytes, got {d})", .{ rest_size, stat.size - offset });
+                        break;
+                    }
+                    const m = try file.readPositionalAll(self.io, buf[0..rest_size], offset);
                     if (m != rest_size) {
                         log.warn("slashing_db: truncated block record at EOF (expected {d} bytes, got {d})", .{ rest_size, m });
                         break;
                     }
+                    offset += rest_size;
 
                     const slot = std.mem.readInt(u64, buf[0..8], .little);
                     var pubkey: [48]u8 = undefined;
@@ -327,11 +338,16 @@ pub const SlashingProtectionDb = struct {
                 },
                 RECORD_TYPE_ATTESTATION => {
                     const rest_size = ATTESTATION_RECORD_SIZE - 1;
-                    const m = try file.readAll(buf[0..rest_size]);
+                    if (stat.size - offset < rest_size) {
+                        log.warn("slashing_db: truncated attestation record at EOF (expected {d} bytes, got {d})", .{ rest_size, stat.size - offset });
+                        break;
+                    }
+                    const m = try file.readPositionalAll(self.io, buf[0..rest_size], offset);
                     if (m != rest_size) {
                         log.warn("slashing_db: truncated attestation record at EOF (expected {d} bytes, got {d})", .{ rest_size, m });
                         break;
                     }
+                    offset += rest_size;
 
                     const source_epoch = std.mem.readInt(u64, buf[0..8], .little);
                     const target_epoch = std.mem.readInt(u64, buf[8..16], .little);
@@ -376,10 +392,9 @@ pub const SlashingProtectionDb = struct {
         std.mem.writeInt(u64, record[1..9], slot, .little);
         @memcpy(record[9..57], &pubkey);
 
-        // Seek to end and append.
-        try file.seekFromEnd(0);
-        try file.writeAll(&record);
-        try file.sync();
+        const end = (try file.stat(self.io)).size;
+        try file.writePositionalAll(self.io, &record, end);
+        try file.sync(self.io);
     }
 
     fn appendAttestationRecord(self: *SlashingProtectionDb, pubkey: [48]u8, source_epoch: u64, target_epoch: u64) !void {
@@ -391,9 +406,9 @@ pub const SlashingProtectionDb = struct {
         std.mem.writeInt(u64, record[9..17], target_epoch, .little);
         @memcpy(record[17..65], &pubkey);
 
-        try file.seekFromEnd(0);
-        try file.writeAll(&record);
-        try file.sync();
+        const end = (try file.stat(self.io)).size;
+        try file.writePositionalAll(self.io, &record, end);
+        try file.sync(self.io);
     }
 };
 
@@ -404,7 +419,7 @@ pub const SlashingProtectionDb = struct {
 const testing = std.testing;
 
 test "SlashingProtectionDb: in-memory block protection" {
-    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    var db = try SlashingProtectionDb.init(testing.io, testing.allocator, null);
     defer db.close();
 
     const pubkey: [48]u8 = [_]u8{0xAB} ** 48;
@@ -423,7 +438,7 @@ test "SlashingProtectionDb: in-memory block protection" {
 }
 
 test "SlashingProtectionDb: in-memory attestation double vote protection" {
-    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    var db = try SlashingProtectionDb.init(testing.io, testing.allocator, null);
     defer db.close();
 
     const pubkey: [48]u8 = [_]u8{0xCD} ** 48;
@@ -444,7 +459,7 @@ test "SlashingProtectionDb: in-memory attestation double vote protection" {
 test "SlashingProtectionDb: surround vote — new surrounds existing" {
     // Existing (2, 5), new (1, 6): new_source < existing_source AND new_target > existing_target
     // → SURROUNDING — refuse.
-    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    var db = try SlashingProtectionDb.init(testing.io, testing.allocator, null);
     defer db.close();
 
     const pubkey: [48]u8 = [_]u8{0x01} ** 48;
@@ -456,7 +471,7 @@ test "SlashingProtectionDb: surround vote — new surrounds existing" {
 test "SlashingProtectionDb: surround vote — new surrounded by existing" {
     // Existing (1, 6), new (2, 5): new_source > existing_source AND new_target < existing_target
     // → SURROUNDED — refuse.
-    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    var db = try SlashingProtectionDb.init(testing.io, testing.allocator, null);
     defer db.close();
 
     const pubkey: [48]u8 = [_]u8{0x02} ** 48;
@@ -467,7 +482,7 @@ test "SlashingProtectionDb: surround vote — new surrounded by existing" {
 
 test "SlashingProtectionDb: non-overlapping attestations — accept" {
     // Existing (2, 5), new (6, 8): completely non-overlapping — accept.
-    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    var db = try SlashingProtectionDb.init(testing.io, testing.allocator, null);
     defer db.close();
 
     const pubkey: [48]u8 = [_]u8{0x03} ** 48;
@@ -478,7 +493,7 @@ test "SlashingProtectionDb: non-overlapping attestations — accept" {
 
 test "SlashingProtectionDb: adjacent attestations — accept" {
     // Existing (2, 5), new (5, 7): source of new == target of existing — not surrounding.
-    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    var db = try SlashingProtectionDb.init(testing.io, testing.allocator, null);
     defer db.close();
 
     const pubkey: [48]u8 = [_]u8{0x04} ** 48;
@@ -490,7 +505,7 @@ test "SlashingProtectionDb: adjacent attestations — accept" {
 test "SlashingProtectionDb: multiple existing records — surround detected" {
     // Build history: (1,3), (4,6), (7,9)
     // New (5, 10): source=5 < 7 AND target=10 > 9 → surrounds (7,9)
-    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    var db = try SlashingProtectionDb.init(testing.io, testing.allocator, null);
     defer db.close();
 
     const pubkey: [48]u8 = [_]u8{0x05} ** 48;
@@ -506,7 +521,7 @@ test "SlashingProtectionDb: multiple existing records — surround detected" {
 test "SlashingProtectionDb: multiple existing records — surrounded detected" {
     // Build history: (1,3), (2,8)
     // New (3, 7): source=3 > 2 AND target=7 < 8 → surrounded by (2,8)
-    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    var db = try SlashingProtectionDb.init(testing.io, testing.allocator, null);
     defer db.close();
 
     const pubkey: [48]u8 = [_]u8{0x06} ** 48;
@@ -520,7 +535,7 @@ test "SlashingProtectionDb: multiple existing records — surrounded detected" {
 
 test "SlashingProtectionDb: double vote still detected (same target, different source)" {
     // Existing (2, 5), new (3, 5): same target epoch — double vote — refuse.
-    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    var db = try SlashingProtectionDb.init(testing.io, testing.allocator, null);
     defer db.close();
 
     const pubkey: [48]u8 = [_]u8{0x07} ** 48;
@@ -530,7 +545,7 @@ test "SlashingProtectionDb: double vote still detected (same target, different s
 }
 
 test "SlashingProtectionDb: different validators are independent" {
-    var db = try SlashingProtectionDb.init(testing.allocator, null);
+    var db = try SlashingProtectionDb.init(testing.io, testing.allocator, null);
     defer db.close();
 
     const pubkey1: [48]u8 = [_]u8{0xAA} ** 48;
@@ -555,7 +570,7 @@ test "SlashingProtectionDb: persistent storage round-trip with surround check" {
 
     // Write records: (2, 5) and (6, 8).
     {
-        var db = try SlashingProtectionDb.init(testing.allocator, db_path);
+        var db = try SlashingProtectionDb.init(testing.io, testing.allocator, db_path);
         defer db.close();
 
         try testing.expect(try db.checkAndInsertBlock(pubkey, 100));
@@ -565,7 +580,7 @@ test "SlashingProtectionDb: persistent storage round-trip with surround check" {
 
     // Reload and verify surround check works on replayed history.
     {
-        var db = try SlashingProtectionDb.init(testing.allocator, db_path);
+        var db = try SlashingProtectionDb.init(testing.io, testing.allocator, db_path);
         defer db.close();
 
         // Block at slot 100 was already signed — refused.

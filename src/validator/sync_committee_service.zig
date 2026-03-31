@@ -33,6 +33,7 @@ const syncing_tracker_mod = @import("syncing_tracker.zig");
 const SyncingTracker = syncing_tracker_mod.SyncingTracker;
 const liveness_mod = @import("liveness.zig");
 const LivenessTracker = liveness_mod.LivenessTracker;
+const time = @import("time.zig");
 
 const log = std.log.scoped(.sync_committee_service);
 
@@ -64,11 +65,11 @@ pub const SyncCommitteeService = struct {
     genesis_time_unix_secs: u64,
 
     /// Duties keyed by validator index (valid for the current sync period).
-    duties: std.ArrayList(SyncCommitteeDutyWithProofs),
+    duties: std.array_list.Managed(SyncCommitteeDutyWithProofs),
     /// Sync period for which duties are cached.
     duties_period: ?u64,
     /// Pre-fetched duties for the next sync committee period.
-    next_duties: std.ArrayList(SyncCommitteeDutyWithProofs),
+    next_duties: std.array_list.Managed(SyncCommitteeDutyWithProofs),
     next_duties_period: ?u64,
     /// Doppelganger service reference (optional).
     doppelganger: ?*DoppelgangerService,
@@ -101,9 +102,9 @@ pub const SyncCommitteeService = struct {
             .sync_committee_subnet_count = sync_committee_subnet_count,
             .seconds_per_slot = seconds_per_slot,
             .genesis_time_unix_secs = genesis_time_unix_secs,
-            .duties = std.ArrayList(SyncCommitteeDutyWithProofs).init(allocator),
+            .duties = std.array_list.Managed(SyncCommitteeDutyWithProofs).init(allocator),
             .duties_period = null,
-            .next_duties = std.ArrayList(SyncCommitteeDutyWithProofs).init(allocator),
+            .next_duties = std.array_list.Managed(SyncCommitteeDutyWithProofs).init(allocator),
             .next_duties_period = null,
             .doppelganger = null,
             .syncing_tracker = null,
@@ -168,7 +169,7 @@ pub const SyncCommitteeService = struct {
                 self.duties.deinit();
                 self.duties = self.next_duties;
                 self.duties_period = period;
-                self.next_duties = std.ArrayList(SyncCommitteeDutyWithProofs).init(self.allocator);
+                self.next_duties = std.array_list.Managed(SyncCommitteeDutyWithProofs).init(self.allocator);
                 self.next_duties_period = null;
                 log.info("activated pre-fetched sync committee duties for period={d}", .{period});
             } else {
@@ -282,7 +283,7 @@ pub const SyncCommitteeService = struct {
         log.debug("cached {d} sync committee duties period={d}", .{ self.duties.items.len, period });
     }
 
-    fn clearDutyList(self: *SyncCommitteeService, duties: *std.ArrayList(SyncCommitteeDutyWithProofs)) void {
+    fn clearDutyList(self: *SyncCommitteeService, duties: *std.array_list.Managed(SyncCommitteeDutyWithProofs)) void {
         for (duties.items) |*d| {
             self.allocator.free(d.duty.validator_sync_committee_indices);
             self.allocator.free(d.selection_proofs);
@@ -292,7 +293,7 @@ pub const SyncCommitteeService = struct {
 
     fn cacheDutyList(
         self: *SyncCommitteeService,
-        duties: *std.ArrayList(SyncCommitteeDutyWithProofs),
+        duties: *std.array_list.Managed(SyncCommitteeDutyWithProofs),
         fetched: []const SyncCommitteeDuty,
     ) !void {
         self.clearDutyList(duties);
@@ -354,18 +355,18 @@ pub const SyncCommitteeService = struct {
 
         // Step 1: sign and submit sync committee messages (~1/3 slot).
         {
-            const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+            const now_ns = time.realtimeNs();
             if (now_ns < slot_start_ns + one_third_ns) {
-                std.Thread.sleep(slot_start_ns + one_third_ns - now_ns);
+                try io.sleep(.{ .nanoseconds = @intCast(slot_start_ns + one_third_ns - now_ns) }, .real);
             }
         }
         try self.produceAndPublishMessages(io, slot, &beacon_block_root);
 
         // Step 2: produce contributions for subcommittees we aggregate (~2/3 slot).
         {
-            const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+            const now_ns = time.realtimeNs();
             if (now_ns < slot_start_ns + two_thirds_ns) {
-                std.Thread.sleep(slot_start_ns + two_thirds_ns - now_ns);
+                try io.sleep(.{ .nanoseconds = @intCast(slot_start_ns + two_thirds_ns - now_ns) }, .real);
             }
         }
         try self.produceAndPublishContributions(io, slot, &beacon_block_root);
@@ -378,12 +379,12 @@ pub const SyncCommitteeService = struct {
         beacon_block_root: *const [32]u8,
     ) !void {
         var count: u32 = 0;
-        var signed_pubkeys = std.ArrayList([48]u8).init(self.allocator);
+        var signed_pubkeys = std.array_list.Managed([48]u8).init(self.allocator);
         defer signed_pubkeys.deinit();
 
-        var messages_json = std.ArrayList(u8).init(self.allocator);
+        var messages_json: std.Io.Writer.Allocating = .init(self.allocator);
         defer messages_json.deinit();
-        try messages_json.append('[');
+        try messages_json.writer.writeByte('[');
 
         for (self.duties.items) |*d| {
             // Compute signing root: sign(beacon_block_root) with DOMAIN_SYNC_COMMITTEE.
@@ -408,8 +409,8 @@ pub const SyncCommitteeService = struct {
             const sig_hex = std.fmt.bytesToHex(&sig_bytes, .lower);
             const bbr_hex = std.fmt.bytesToHex(beacon_block_root, .lower);
 
-            if (count > 0) try messages_json.append(',');
-            try messages_json.writer().print(
+            if (count > 0) try messages_json.writer.writeByte(',');
+            try messages_json.writer.print(
                 "{{\"slot\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"validator_index\":\"{d}\",\"signature\":\"0x{s}\"}}",
                 .{ slot, bbr_hex, d.duty.validator_index, sig_hex },
             );
@@ -417,11 +418,11 @@ pub const SyncCommitteeService = struct {
             count += 1;
         }
 
-        try messages_json.append(']');
+        try messages_json.writer.writeByte(']');
 
         const publish_ok = blk: {
             if (count == 0) break :blk false;
-            self.api.publishSyncCommitteeMessages(io, messages_json.items) catch |err| {
+            self.api.publishSyncCommitteeMessages(io, messages_json.written()) catch |err| {
                 log.warn("publishSyncCommitteeMessages slot={d} error={s}", .{ slot, @errorName(err) });
                 break :blk false;
             };
@@ -510,13 +511,17 @@ pub const SyncCommitteeService = struct {
                 // The bit position within the subcommittee is sc_idx % subcommittee_size.
                 // (subcommittee_size already computed above for the aggregator check.)
                 const bit_index = sc_idx % subcommittee_size; // position within subcommittee
-                var agg_bits_buf = [_]u8{0} ** MAX_SUBCOMMITTEE_BYTES;
+                const AggregationBitsData = @FieldType(
+                    @FieldType(consensus_types.altair.SyncCommitteeContribution.Type, "aggregation_bits"),
+                    "data",
+                );
+                var agg_bits: AggregationBitsData = [_]u8{0} ** @typeInfo(AggregationBitsData).array.len;
                 const subcommittee_bytes = (subcommittee_size + 7) / 8;
-                var agg_bits = agg_bits_buf[0..subcommittee_bytes];
+                const agg_bits_slice = agg_bits[0..subcommittee_bytes];
                 // Copy BN's aggregated bits (all validators' bits), then set ours.
-                const copy_len = @min(contrib.aggregation_bits.len, agg_bits.len);
-                @memcpy(agg_bits[0..copy_len], contrib.aggregation_bits[0..copy_len]);
-                agg_bits[bit_index / 8] |= @as(u8, 1) << @intCast(bit_index % 8);
+                const copy_len = @min(contrib.aggregation_bits.len, agg_bits_slice.len);
+                @memcpy(agg_bits_slice[0..copy_len], contrib.aggregation_bits[0..copy_len]);
+                agg_bits_slice[bit_index / 8] |= @as(u8, 1) << @intCast(bit_index % 8);
 
                 const contribution_and_proof = consensus_types.altair.ContributionAndProof.Type{
                     .aggregator_index = dp.duty.validator_index,
@@ -553,14 +558,14 @@ pub const SyncCommitteeService = struct {
                 // 3. Build SignedContributionAndProof JSON and publish.
                 // Fix 4: Hex-encode the actual agg_bits instead of hardcoded "0x00".
                 // agg_bits is a BitVector(128) — 16 bytes, no sentinel needed (fixed-size).
-                var contrib_json = std.ArrayList(u8).init(self.allocator);
+                var contrib_json: std.Io.Writer.Allocating = .init(self.allocator);
                 defer contrib_json.deinit();
-                try contrib_json.writer().print(
-                    "[{{\"message\":{{\"aggregator_index\":\"{d}\",\"contribution\":{{\"slot\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"subcommittee_index\":\"{d}\",\"aggregation_bits\":\"0x{}\",\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}]",
-                    .{ dp.duty.validator_index, slot, bbr_hex2, subcommittee_index, std.fmt.fmtSliceHexLower(agg_bits), contrib_sig_hex, sel_hex, sig_hex },
+                try contrib_json.writer.print(
+                    "[{{\"message\":{{\"aggregator_index\":\"{d}\",\"contribution\":{{\"slot\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"subcommittee_index\":\"{d}\",\"aggregation_bits\":\"0x{x}\",\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}]",
+                    .{ dp.duty.validator_index, slot, bbr_hex2, subcommittee_index, agg_bits_slice, contrib_sig_hex, sel_hex, sig_hex },
                 );
 
-                self.api.publishContributionAndProofs(io, contrib_json.items) catch |err| {
+                self.api.publishContributionAndProofs(io, contrib_json.written()) catch |err| {
                     log.warn("publishContributionAndProofs error: {s}", .{@errorName(err)});
                 };
             }

@@ -19,6 +19,7 @@ const types = @import("types.zig");
 const ProposerDuty = types.ProposerDuty;
 const AttesterDuty = types.AttesterDuty;
 const SyncCommitteeDuty = types.SyncCommitteeDuty;
+const time = @import("time.zig");
 
 const log = std.log.scoped(.vc_api);
 
@@ -124,12 +125,12 @@ pub const BeaconApiClient = struct {
         if (self.consecutive_failures >= BN_UNREACHABLE_THRESHOLD) {
             if (!self.was_unreachable) {
                 self.was_unreachable = true;
-                self.unreachable_since_ns = @intCast(std.time.nanoTimestamp());
+                self.unreachable_since_ns = time.realtimeNs();
                 log.warn("beacon node unreachable url={s} (consecutive_failures={d})", .{
                     self.activeUrl(), self.consecutive_failures,
                 });
             } else {
-                const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+                const now_ns = time.realtimeNs();
                 const secs = (now_ns -| self.unreachable_since_ns) / std.time.ns_per_s;
                 log.warn("beacon node unreachable for {d}s url={s}", .{ secs, self.activeUrl() });
             }
@@ -488,16 +489,16 @@ pub const BeaconApiClient = struct {
         defer self.allocator.free(path);
 
         // Serialize indices as JSON array of strings: ["0","1",...]
-        var body_buf = std.ArrayList(u8).init(self.allocator);
+        var body_buf: std.Io.Writer.Allocating = .init(self.allocator);
         defer body_buf.deinit();
-        try body_buf.append('[');
+        try body_buf.writer.writeByte('[');
         for (indices, 0..) |idx, i| {
-            if (i > 0) try body_buf.append(',');
-            try body_buf.writer().print("\"{d}\"", .{idx});
+            if (i > 0) try body_buf.writer.writeByte(',');
+            try body_buf.writer.print("\"{d}\"", .{idx});
         }
-        try body_buf.append(']');
+        try body_buf.writer.writeByte(']');
 
-        const resp = try self.post(io, path, body_buf.items);
+        const resp = try self.post(io, path, body_buf.written());
         defer self.allocator.free(resp);
 
         const AttesterDutyJson = struct {
@@ -540,16 +541,16 @@ pub const BeaconApiClient = struct {
         const path = try std.fmt.allocPrint(self.allocator, "/eth/v1/validator/duties/sync/{d}", .{epoch});
         defer self.allocator.free(path);
 
-        var body_buf = std.ArrayList(u8).init(self.allocator);
+        var body_buf: std.Io.Writer.Allocating = .init(self.allocator);
         defer body_buf.deinit();
-        try body_buf.append('[');
+        try body_buf.writer.writeByte('[');
         for (indices, 0..) |idx, i| {
-            if (i > 0) try body_buf.append(',');
-            try body_buf.writer().print("\"{d}\"", .{idx});
+            if (i > 0) try body_buf.writer.writeByte(',');
+            try body_buf.writer.print("\"{d}\"", .{idx});
         }
-        try body_buf.append(']');
+        try body_buf.writer.writeByte(']');
 
-        const resp = try self.post(io, path, body_buf.items);
+        const resp = try self.post(io, path, body_buf.written());
         defer self.allocator.free(resp);
 
         const SyncDutyJson = struct {
@@ -592,16 +593,16 @@ pub const BeaconApiClient = struct {
         pubkeys: []const [48]u8,
     ) ![]ValidatorIndexAndStatus {
         // Build JSON array of hex pubkeys.
-        var body_buf = std.ArrayList(u8).init(self.allocator);
+        var body_buf: std.Io.Writer.Allocating = .init(self.allocator);
         defer body_buf.deinit();
-        try body_buf.append('[');
+        try body_buf.writer.writeByte('[');
         for (pubkeys, 0..) |pk, i| {
-            if (i > 0) try body_buf.append(',');
-            try body_buf.writer().print("\"0x{}\"", .{std.fmt.fmtSliceHexLower(&pk)});
+            if (i > 0) try body_buf.writer.writeByte(',');
+            try body_buf.writer.print("\"0x{x}\"", .{pk});
         }
-        try body_buf.append(']');
+        try body_buf.writer.writeByte(']');
 
-        const resp = try self.post(io, "/eth/v1/beacon/states/head/validators", body_buf.items);
+        const resp = try self.post(io, "/eth/v1/beacon/states/head/validators", body_buf.written());
         defer self.allocator.free(resp);
 
         const ValidatorJson = struct {
@@ -959,7 +960,7 @@ pub const BeaconApiClient = struct {
         callback: SseCallback,
     ) !void {
         // Build topics query string.
-        var topics_buf = std.ArrayList(u8).init(self.allocator);
+        var topics_buf = std.array_list.Managed(u8).init(self.allocator);
         defer topics_buf.deinit();
         for (topics, 0..) |topic, i| {
             if (i > 0) try topics_buf.append(',');
@@ -1002,7 +1003,6 @@ pub const BeaconApiClient = struct {
         }
 
         // Parse SSE stream line by line.
-        var line_buf: [SSE_LINE_BUF]u8 = undefined;
         var event_type_buf: [128]u8 = undefined;
         var event_type: []const u8 = "";
         var data_buf: [SSE_LINE_BUF]u8 = undefined;
@@ -1013,7 +1013,7 @@ pub const BeaconApiClient = struct {
 
         while (true) {
             // Read one line at a time.
-            const line = reader.readUntilDelimiter(&line_buf, '\n') catch |err| switch (err) {
+            const line = reader.*.takeDelimiterExclusive('\n') catch |err| switch (err) {
                 error.EndOfStream => break,
                 else => return err,
             };
@@ -1036,12 +1036,12 @@ pub const BeaconApiClient = struct {
             }
 
             if (std.mem.startsWith(u8, trimmed, "event:")) {
-                const ev = std.mem.trimLeft(u8, trimmed[6..], " ");
+                const ev = std.mem.trimStart(u8, trimmed[6..], " ");
                 const copy_len = @min(ev.len, event_type_buf.len);
                 @memcpy(event_type_buf[0..copy_len], ev[0..copy_len]);
                 event_type = event_type_buf[0..copy_len];
             } else if (std.mem.startsWith(u8, trimmed, "data:")) {
-                const d = std.mem.trimLeft(u8, trimmed[5..], " ");
+                const d = std.mem.trimStart(u8, trimmed[5..], " ");
                 const copy_len = @min(d.len, data_buf.len - data_len);
                 @memcpy(data_buf[data_len .. data_len + copy_len], d[0..copy_len]);
                 data_len += copy_len;
@@ -1095,16 +1095,16 @@ pub const BeaconApiClient = struct {
         const path = try std.fmt.allocPrint(self.allocator, "/eth/v1/validator/liveness/{d}", .{epoch});
         defer self.allocator.free(path);
 
-        var body_buf = std.ArrayList(u8).init(self.allocator);
+        var body_buf: std.Io.Writer.Allocating = .init(self.allocator);
         defer body_buf.deinit();
-        try body_buf.append('[');
+        try body_buf.writer.writeByte('[');
         for (indices, 0..) |idx, i| {
-            if (i > 0) try body_buf.append(',');
-            try body_buf.writer().print("\"{d}\"", .{idx});
+            if (i > 0) try body_buf.writer.writeByte(',');
+            try body_buf.writer.print("\"{d}\"", .{idx});
         }
-        try body_buf.append(']');
+        try body_buf.writer.writeByte(']');
 
-        const resp = try self.post(io, path, body_buf.items);
+        const resp = try self.post(io, path, body_buf.written());
         defer self.allocator.free(resp);
 
         const LivenessJson = struct {

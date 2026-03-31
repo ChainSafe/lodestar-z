@@ -98,7 +98,7 @@ pub const BuilderRegistrationService = struct {
         defer {
             // Zero secret keys before freeing — defence in depth against heap scanning.
             for (validators) |*v| {
-                std.crypto.utils.secureZero(u8, std.mem.asBytes(&v.secret_key));
+                std.crypto.secureZero(u8, std.mem.asBytes(&v.secret_key));
             }
             self.allocator.free(validators);
         }
@@ -112,7 +112,7 @@ pub const BuilderRegistrationService = struct {
         const timestamp = unixTimestampSeconds();
 
         // Build signed registrations.
-        var registrations = try std.ArrayList(RegistrationEntry).initCapacity(
+        var registrations = try std.array_list.Managed(RegistrationEntry).initCapacity(
             self.allocator,
             validators.len,
         );
@@ -128,8 +128,8 @@ pub const BuilderRegistrationService = struct {
                 v.pubkey,
                 &signing_root,
             ) catch |err| {
-                log.warn("failed to compute builder registration signing root for {}: {s}", .{
-                    std.fmt.fmtSliceHexLower(&v.pubkey),
+                log.warn("failed to compute builder registration signing root for {x}: {s}", .{
+                    v.pubkey,
                     @errorName(err),
                 });
                 continue;
@@ -139,14 +139,14 @@ pub const BuilderRegistrationService = struct {
             const sig_bytes = blk: {
                 if (v.is_remote) {
                     const rs = self.remote_signer orelse {
-                        log.warn("skipping builder registration for remote key {} — no remote signer configured", .{
-                            std.fmt.fmtSliceHexLower(&v.pubkey),
+                        log.warn("skipping builder registration for remote key {x} — no remote signer configured", .{
+                            v.pubkey,
                         });
                         continue;
                     };
                     const sig = rs.sign(io, v.pubkey, signing_root, .VALIDATOR_REGISTRATION) catch |err| {
-                        log.warn("remote signer failed builder registration for {}: {s}", .{
-                            std.fmt.fmtSliceHexLower(&v.pubkey),
+                        log.warn("remote signer failed builder registration for {x}: {s}", .{
+                            v.pubkey,
                             @errorName(err),
                         });
                         continue;
@@ -183,9 +183,9 @@ pub const BuilderRegistrationService = struct {
     // -----------------------------------------------------------------------
 
     fn serializeRegistrations(allocator: Allocator, entries: []const RegistrationEntry) ![]const u8 {
-        var buf = std.ArrayList(u8).init(allocator);
+        var buf: std.Io.Writer.Allocating = .init(allocator);
         errdefer buf.deinit();
-        var writer = buf.writer();
+        const writer = &buf.writer;
 
         try writer.writeByte('[');
         for (entries, 0..) |e, i| {

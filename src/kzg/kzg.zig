@@ -1,28 +1,14 @@
-//! Idiomatic Zig KZG interface wrapping c-kzg-4844 bindings.
+//! Idiomatic Zig KZG interface wrapping the raw c-kzg-4844 C API.
 //!
-//! Provides higher-level types and methods on top of the raw C bindings in
-//! the `c_kzg` dependency.  The KZG settings (trusted setup) are loaded once
-//! at node startup and then shared across the lifetime of the process.
-//!
-//! ## EIP-4844 (Deneb)
-//! - `blobToCommitment`   — compute KZG commitment from blob
-//! - `computeBlobProof`   — compute blob-level KZG proof
-//! - `verifyBlobProof`    — verify a single blob proof
-//! - `verifyBlobProofBatch` — batch-verify multiple blob proofs (cheaper per blob)
-//!
-//! ## EIP-7594 (PeerDAS / Fulu)
-//! - `computeCellsAndProofs`    — split a blob into cells with per-cell proofs
-//! - `recoverCellsAndProofs`    — recover from a subset of cells (erasure recovery)
-//! - `verifyCellProofBatch`     — batch-verify cell KZG proofs
+//! Provides higher-level types and methods on top of the installed `ckzg.h`
+//! headers from the `c_kzg` dependency. The KZG settings (trusted setup) are
+//! loaded once at node startup and then shared across the lifetime of the
+//! process.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const c_kzg = @import("c_kzg");
-
-// ---------------------------------------------------------------------------
-// Re-export constants
-// ---------------------------------------------------------------------------
+const c_kzg = @import("c.zig").c;
 
 pub const BYTES_PER_BLOB: usize = c_kzg.BYTES_PER_BLOB;
 pub const FIELD_ELEMENTS_PER_BLOB: usize = c_kzg.FIELD_ELEMENTS_PER_BLOB;
@@ -31,33 +17,17 @@ pub const BYTES_PER_PROOF: usize = c_kzg.BYTES_PER_PROOF;
 pub const BYTES_PER_CELL: usize = c_kzg.BYTES_PER_CELL;
 pub const CELLS_PER_EXT_BLOB: usize = c_kzg.CELLS_PER_EXT_BLOB;
 pub const CELLS_PER_BLOB: usize = c_kzg.CELLS_PER_BLOB;
-pub const COLUMNS_PER_BLOB: usize = c_kzg.CELLS_PER_EXT_BLOB; // alias: NUMBER_OF_COLUMNS
+pub const COLUMNS_PER_BLOB: usize = c_kzg.CELLS_PER_EXT_BLOB;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/// Raw blob bytes — 131072 bytes (4096 field elements × 32 bytes).
 pub const Blob = [BYTES_PER_BLOB]u8;
-
-/// A 48-byte G1 point representing a KZG commitment.
-pub const KzgCommitment = [48]u8;
-
-/// A 48-byte G1 point representing a KZG proof.
-pub const KzgProof = [48]u8;
-
-/// A single data availability cell — 2048 bytes (64 field elements × 32 bytes).
+pub const KzgCommitment = [BYTES_PER_COMMITMENT]u8;
+pub const KzgProof = [BYTES_PER_PROOF]u8;
 pub const Cell = [BYTES_PER_CELL]u8;
 
-/// All cells and their proofs for an extended blob (EIP-7594).
 pub const CellsAndProofs = struct {
     cells: [CELLS_PER_EXT_BLOB]Cell,
     proofs: [CELLS_PER_EXT_BLOB]KzgProof,
 };
-
-// ---------------------------------------------------------------------------
-// Error set
-// ---------------------------------------------------------------------------
 
 pub const KzgError = error{
     InvalidArgument,
@@ -66,173 +36,148 @@ pub const KzgError = error{
     FileOpenFailed,
 };
 
-// ---------------------------------------------------------------------------
-// Kzg — main interface struct
-// ---------------------------------------------------------------------------
-
-/// Top-level KZG interface.  One instance per process; load once and share.
-///
-/// ```zig
-/// var kzg = try Kzg.initFromFile(allocator, "trusted_setup.txt");
-/// defer kzg.deinit(allocator);
-///
-/// const commitment = try kzg.blobToCommitment(&blob);
-/// const proof      = try kzg.computeBlobProof(&blob, commitment);
-/// const valid      = try kzg.verifyBlobProof(&blob, commitment, proof);
-/// ```
 pub const Kzg = struct {
-    settings: *c_kzg.KzgSettings,
+    settings: *c_kzg.KZGSettings,
 
-    // -----------------------------------------------------------------------
-    // Initialization
-    // -----------------------------------------------------------------------
-
-    /// Load trusted setup from a file path (e.g. `trusted_setup.txt`).
-    ///
-    /// The allocator is used to heap-allocate the KzgSettings struct; the same
-    /// allocator must be passed to `deinit`.
     pub fn initFromFile(allocator: Allocator, trusted_setup_path: []const u8) KzgError!Kzg {
-        const settings = c_kzg.loadTrustedSetupFile(allocator, trusted_setup_path) catch |err| switch (err) {
-            error.FileOpenFailed => return KzgError.FileOpenFailed,
-            error.InvalidArgument => return KzgError.InvalidArgument,
-            error.KzgInternalError => return KzgError.KzgInternalError,
-            error.OutOfMemory => return KzgError.OutOfMemory,
-        };
-        return Kzg{ .settings = settings };
+        const path_z = try allocator.dupeZ(u8, trusted_setup_path);
+        defer allocator.free(path_z);
+
+        const file = c_kzg.fopen(path_z.ptr, "r") orelse return KzgError.FileOpenFailed;
+        defer _ = c_kzg.fclose(file);
+
+        const settings = try allocator.create(c_kzg.KZGSettings);
+        errdefer allocator.destroy(settings);
+
+        try check(c_kzg.load_trusted_setup_file(settings, file, 0));
+        return .{ .settings = settings };
     }
 
-    /// Load trusted setup from raw bytes (for embedding the setup at compile time).
-    ///
-    /// - `g1_monomial_bytes`: G1 monomial-form points (n_g1 × 48 bytes)
-    /// - `g1_lagrange_bytes`: G1 Lagrange-form points (n_g1 × 48 bytes)
-    /// - `g2_monomial_bytes`: G2 monomial-form points (n_g2 × 96 bytes)
     pub fn initFromBytes(
         allocator: Allocator,
         g1_monomial_bytes: []const u8,
         g1_lagrange_bytes: []const u8,
         g2_monomial_bytes: []const u8,
     ) KzgError!Kzg {
-        const settings = c_kzg.loadTrustedSetup(
-            allocator,
-            g1_monomial_bytes,
-            g1_lagrange_bytes,
-            g2_monomial_bytes,
-        ) catch |err| switch (err) {
-            error.InvalidArgument => return KzgError.InvalidArgument,
-            error.KzgInternalError => return KzgError.KzgInternalError,
-            error.OutOfMemory => return KzgError.OutOfMemory,
-        };
-        return Kzg{ .settings = settings };
+        const settings = try allocator.create(c_kzg.KZGSettings);
+        errdefer allocator.destroy(settings);
+
+        try check(c_kzg.load_trusted_setup(
+            settings,
+            ptrOrNull(g1_monomial_bytes),
+            g1_monomial_bytes.len,
+            ptrOrNull(g1_lagrange_bytes),
+            g1_lagrange_bytes.len,
+            ptrOrNull(g2_monomial_bytes),
+            g2_monomial_bytes.len,
+            0,
+        ));
+        return .{ .settings = settings };
     }
 
-    /// Free trusted setup memory.  Must use the same allocator as init*.
     pub fn deinit(self: *Kzg, allocator: Allocator) void {
-        c_kzg.freeTrustedSetup(allocator, self.settings);
+        c_kzg.free_trusted_setup(self.settings);
+        allocator.destroy(self.settings);
     }
 
-    // -----------------------------------------------------------------------
-    // EIP-4844 API
-    // -----------------------------------------------------------------------
-
-    /// Compute the KZG commitment for a blob.
     pub fn blobToCommitment(self: Kzg, blob: *const Blob) KzgError!KzgCommitment {
-        return c_kzg.blobToKzgCommitment(blob, self.settings) catch |err| switch (err) {
-            error.InvalidArgument => return KzgError.InvalidArgument,
-            error.KzgInternalError => return KzgError.KzgInternalError,
-            error.OutOfMemory => return KzgError.OutOfMemory,
-        };
+        var out: c_kzg.KZGCommitment = undefined;
+        try check(c_kzg.blob_to_kzg_commitment(&out, @ptrCast(blob), self.settings));
+        return out.bytes;
     }
 
-    /// Compute a blob KZG proof (Fiat-Shamir challenge over the entire blob).
     pub fn computeBlobProof(self: Kzg, blob: *const Blob, commitment: KzgCommitment) KzgError!KzgProof {
-        return c_kzg.computeBlobKzgProof(blob, &commitment, self.settings) catch |err| switch (err) {
-            error.InvalidArgument => return KzgError.InvalidArgument,
-            error.KzgInternalError => return KzgError.KzgInternalError,
-            error.OutOfMemory => return KzgError.OutOfMemory,
-        };
+        var out: c_kzg.KZGProof = undefined;
+        try check(c_kzg.compute_blob_kzg_proof(
+            &out,
+            @ptrCast(blob),
+            @ptrCast(&commitment),
+            self.settings,
+        ));
+        return out.bytes;
     }
 
-    /// Verify a single blob KZG proof.
     pub fn verifyBlobProof(
         self: Kzg,
         blob: *const Blob,
         commitment: KzgCommitment,
         proof: KzgProof,
     ) KzgError!bool {
-        return c_kzg.verifyBlobKzgProof(blob, &commitment, &proof, self.settings) catch |err| switch (err) {
-            error.InvalidArgument => return KzgError.InvalidArgument,
-            error.KzgInternalError => return KzgError.KzgInternalError,
-            error.OutOfMemory => return KzgError.OutOfMemory,
-        };
+        var ok = false;
+        try check(c_kzg.verify_blob_kzg_proof(
+            &ok,
+            @ptrCast(blob),
+            @ptrCast(&commitment),
+            @ptrCast(&proof),
+            self.settings,
+        ));
+        return ok;
     }
 
-    /// Batch-verify multiple blob KZG proofs.
-    ///
-    /// All slices must have equal length.  More efficient than calling
-    /// `verifyBlobProof` in a loop due to random-linear-combination tricks.
     pub fn verifyBlobProofBatch(
         self: Kzg,
         blobs: []const Blob,
         commitments: []const KzgCommitment,
         proofs: []const KzgProof,
     ) KzgError!bool {
-        return c_kzg.verifyBlobKzgProofBatch(blobs, commitments, proofs, self.settings) catch |err| switch (err) {
-            error.InvalidArgument => return KzgError.InvalidArgument,
-            error.KzgInternalError => return KzgError.KzgInternalError,
-            error.OutOfMemory => return KzgError.OutOfMemory,
-        };
+        if (blobs.len != commitments.len or blobs.len != proofs.len) return KzgError.InvalidArgument;
+
+        var ok = false;
+        try check(c_kzg.verify_blob_kzg_proof_batch(
+            &ok,
+            @ptrCast(blobs.ptr),
+            @ptrCast(commitments.ptr),
+            @ptrCast(proofs.ptr),
+            blobs.len,
+            self.settings,
+        ));
+        return ok;
     }
 
-    // -----------------------------------------------------------------------
-    // EIP-7594 / PeerDAS API
-    // -----------------------------------------------------------------------
-
-    /// Compute all 128 cells and their per-cell KZG proofs for a blob.
-    ///
-    /// Used when producing a block to construct data columns for gossip.
     pub fn computeCellsAndProofs(self: Kzg, blob: *const Blob) KzgError!CellsAndProofs {
-        const raw = c_kzg.computeCellsAndKzgProofs(blob, self.settings) catch |err| switch (err) {
-            error.InvalidArgument => return KzgError.InvalidArgument,
-            error.KzgInternalError => return KzgError.KzgInternalError,
-            error.OutOfMemory => return KzgError.OutOfMemory,
-        };
-        return CellsAndProofs{
-            .cells = raw.cells,
-            .proofs = raw.proofs,
-        };
+        var c_cells: [CELLS_PER_EXT_BLOB]c_kzg.Cell = undefined;
+        var c_proofs: [CELLS_PER_EXT_BLOB]c_kzg.KZGProof = undefined;
+        try check(c_kzg.compute_cells_and_kzg_proofs(
+            &c_cells,
+            &c_proofs,
+            @ptrCast(blob),
+            self.settings,
+        ));
+
+        var out: CellsAndProofs = undefined;
+        for (0..CELLS_PER_EXT_BLOB) |i| {
+            out.cells[i] = c_cells[i].bytes;
+            out.proofs[i] = c_proofs[i].bytes;
+        }
+        return out;
     }
 
-    /// Recover all 128 cells and their proofs from a subset (erasure recovery).
-    ///
-    /// - `cell_indices`: indices (0..CELLS_PER_EXT_BLOB) of the provided cells
-    /// - `cells`: the corresponding cell data (same length as `cell_indices`)
-    ///
-    /// Requires at least CELLS_PER_EXT_BLOB/2 = 64 cells to recover.
     pub fn recoverCellsAndProofs(
         self: Kzg,
         cell_indices: []const u64,
         cells: []const Cell,
     ) KzgError!CellsAndProofs {
-        const raw = c_kzg.recoverCellsAndKzgProofs(cell_indices, cells, self.settings) catch |err| switch (err) {
-            error.InvalidArgument => return KzgError.InvalidArgument,
-            error.KzgInternalError => return KzgError.KzgInternalError,
-            error.OutOfMemory => return KzgError.OutOfMemory,
-        };
-        return CellsAndProofs{
-            .cells = raw.cells,
-            .proofs = raw.proofs,
-        };
+        if (cell_indices.len != cells.len) return KzgError.InvalidArgument;
+
+        var recovered_cells: [CELLS_PER_EXT_BLOB]c_kzg.Cell = undefined;
+        var recovered_proofs: [CELLS_PER_EXT_BLOB]c_kzg.KZGProof = undefined;
+        try check(c_kzg.recover_cells_and_kzg_proofs(
+            &recovered_cells,
+            &recovered_proofs,
+            ptrOrNull(cell_indices),
+            @ptrCast(ptrOrNull(cells)),
+            cells.len,
+            self.settings,
+        ));
+
+        var out: CellsAndProofs = undefined;
+        for (0..CELLS_PER_EXT_BLOB) |i| {
+            out.cells[i] = recovered_cells[i].bytes;
+            out.proofs[i] = recovered_proofs[i].bytes;
+        }
+        return out;
     }
 
-    /// Batch-verify cell KZG proofs (PeerDAS gossip validation).
-    ///
-    /// - `allocator`: used for a temporary C-compatible buffer (freed before return)
-    /// - `commitments`: one KzgCommitment per cell (caller maps blob commitment to each cell)
-    /// - `cell_indices`: which cell index within the extended blob (0..CELLS_PER_EXT_BLOB)
-    /// - `cells`: the cell data
-    /// - `proofs`: KZG proof per cell
-    ///
-    /// All slices must have equal length.
     pub fn verifyCellProofBatch(
         self: Kzg,
         allocator: Allocator,
@@ -241,24 +186,39 @@ pub const Kzg = struct {
         cells: []const Cell,
         proofs: []const KzgProof,
     ) KzgError!bool {
-        return c_kzg.verifyCellKzgProofBatch(
-            allocator,
-            commitments,
-            cell_indices,
-            cells,
-            proofs,
+        _ = allocator;
+        if (commitments.len != cell_indices.len or commitments.len != cells.len or commitments.len != proofs.len) {
+            return KzgError.InvalidArgument;
+        }
+
+        var ok = false;
+        try check(c_kzg.verify_cell_kzg_proof_batch(
+            &ok,
+            @ptrCast(ptrOrNull(commitments)),
+            ptrOrNull(cell_indices),
+            @ptrCast(ptrOrNull(cells)),
+            @ptrCast(ptrOrNull(proofs)),
+            commitments.len,
             self.settings,
-        ) catch |err| switch (err) {
-            error.InvalidArgument => return KzgError.InvalidArgument,
-            error.KzgInternalError => return KzgError.KzgInternalError,
-            error.OutOfMemory => return KzgError.OutOfMemory,
-        };
+        ));
+        return ok;
     }
 };
 
-// ---------------------------------------------------------------------------
-// Tests (unit — no trusted setup required)
-// ---------------------------------------------------------------------------
+fn check(ret: c_kzg.C_KZG_RET) KzgError!void {
+    switch (ret) {
+        c_kzg.C_KZG_OK => {},
+        c_kzg.C_KZG_BADARGS => return KzgError.InvalidArgument,
+        c_kzg.C_KZG_ERROR => return KzgError.KzgInternalError,
+        c_kzg.C_KZG_MALLOC => return KzgError.OutOfMemory,
+        else => return KzgError.KzgInternalError,
+    }
+}
+
+fn ptrOrNull(slice: anytype) ?[*]const std.meta.Elem(@TypeOf(slice)) {
+    if (slice.len == 0) return null;
+    return slice.ptr;
+}
 
 test "constants match spec" {
     const testing = std.testing;
@@ -277,7 +237,6 @@ test "Kzg type sizes" {
     try testing.expectEqual(@as(usize, 48), @sizeOf(KzgCommitment));
     try testing.expectEqual(@as(usize, 48), @sizeOf(KzgProof));
     try testing.expectEqual(@as(usize, 2048), @sizeOf(Cell));
-    // CellsAndProofs: 128 cells × 2048 + 128 proofs × 48
     const expected_cap = 128 * 2048 + 128 * 48;
     try testing.expectEqual(@as(usize, expected_cap), @sizeOf(CellsAndProofs));
 }

@@ -51,10 +51,10 @@ pub const BlockService = struct {
     /// Signing context (fork_version + genesis_validators_root) for domain computation.
     signing_ctx: SigningContext,
     /// Duties for the current epoch.
-    duties: std.ArrayList(CachedProposerDuty),
+    duties: std.array_list.Managed(CachedProposerDuty),
     duties_epoch: ?u64,
     /// Pre-fetched duties for the next epoch (swap at epoch boundary).
-    next_duties: std.ArrayList(CachedProposerDuty),
+    next_duties: std.array_list.Managed(CachedProposerDuty),
     next_duties_epoch: ?u64,
     /// Count of missed block proposals this session.
     missed_block_count: u64,
@@ -84,9 +84,9 @@ pub const BlockService = struct {
             .api = api,
             .validator_store = validator_store,
             .signing_ctx = signing_ctx,
-            .duties = std.ArrayList(CachedProposerDuty).init(allocator),
+            .duties = std.array_list.Managed(CachedProposerDuty).init(allocator),
             .duties_epoch = null,
-            .next_duties = std.ArrayList(CachedProposerDuty).init(allocator),
+            .next_duties = std.array_list.Managed(CachedProposerDuty).init(allocator),
             .next_duties_epoch = null,
             .missed_block_count = 0,
             .doppelganger = null,
@@ -143,7 +143,7 @@ pub const BlockService = struct {
                 self.duties.deinit();
                 self.duties = self.next_duties;
                 self.duties_epoch = ne;
-                self.next_duties = std.ArrayList(CachedProposerDuty).init(self.allocator);
+                self.next_duties = std.array_list.Managed(CachedProposerDuty).init(self.allocator);
                 self.next_duties_epoch = null;
                 log.debug("swapped pre-fetched proposer duties into epoch={d}", .{epoch});
                 return;
@@ -197,7 +197,7 @@ pub const BlockService = struct {
         const fetched = try self.api.getProposerDuties(io, epoch);
         defer self.allocator.free(fetched);
 
-        var refreshed = std.ArrayList(CachedProposerDuty).init(self.allocator);
+        var refreshed = std.array_list.Managed(CachedProposerDuty).init(self.allocator);
         errdefer refreshed.deinit();
 
         if (self.duties_epoch) |prev_epoch| {
@@ -233,7 +233,7 @@ pub const BlockService = struct {
         };
         defer self.allocator.free(fetched);
 
-        var prefetched = std.ArrayList(CachedProposerDuty).init(self.allocator);
+        var prefetched = std.array_list.Managed(CachedProposerDuty).init(self.allocator);
         errdefer prefetched.deinit();
 
         for (fetched) |duty| {

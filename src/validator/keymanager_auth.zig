@@ -14,6 +14,8 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const fs = @import("fs.zig");
 
 const log = std.log.scoped(.keymanager_auth);
 
@@ -39,11 +41,11 @@ pub const KeymanagerAuth = struct {
     /// Load token from file, or generate and persist it if absent.
     ///
     /// TS: getApiToken(tokenFilepath)
-    pub fn loadOrGenerate(allocator: Allocator, path: []const u8) !KeymanagerAuth {
-        const token = loadToken(allocator, path) catch |err| switch (err) {
+    pub fn loadOrGenerate(io: Io, allocator: Allocator, path: []const u8) !KeymanagerAuth {
+        const token = loadToken(io, allocator, path) catch |err| switch (err) {
             error.FileNotFound => {
                 log.info("Keymanager API token not found, generating new token at {s}", .{path});
-                const new_token = try generateToken(allocator, path);
+                const new_token = try generateToken(io, allocator, path);
                 return .{ .allocator = allocator, .token = new_token };
             },
             else => return err,
@@ -78,26 +80,25 @@ pub const KeymanagerAuth = struct {
     ///
     /// The token is 32 random bytes encoded as a 64-char hex string.
     /// Creates parent directories if needed.
-    pub fn generateToken(allocator: Allocator, path: []const u8) ![]const u8 {
+    pub fn generateToken(io: Io, allocator: Allocator, path: []const u8) ![]const u8 {
         var random_bytes: [TOKEN_BYTES]u8 = undefined;
-        std.Options.debug_io.random(&random_bytes);
+        io.random(&random_bytes);
 
-        const token = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&random_bytes)});
+        const token = try std.fmt.allocPrint(allocator, "{x}", .{random_bytes});
         errdefer allocator.free(token);
 
         // Create parent directory if needed.
         if (std.fs.path.dirname(path)) |dir_path| {
-            std.fs.makeDirAbsolute(dir_path) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => return err,
-            };
+            try Io.Dir.cwd().createDirPath(io, dir_path);
         }
 
         // Write token to file.
-        const file = try std.fs.createFileAbsolute(path, .{ .exclusive = false });
-        defer file.close();
-        try file.writeAll(token);
-        try file.writeAll("\n");
+        const abs_path = try fs.resolvePath(allocator, path);
+        defer allocator.free(abs_path);
+        const file = try Io.Dir.createFileAbsolute(io, abs_path, .{ .exclusive = false });
+        defer file.close(io);
+        try file.writePositionalAll(io, token, 0);
+        try file.writePositionalAll(io, "\n", token.len);
 
         log.debug("generated Keymanager API token (length={d})", .{token.len});
         return token;
@@ -106,14 +107,11 @@ pub const KeymanagerAuth = struct {
     /// Load token from file.
     ///
     /// Trims trailing whitespace/newlines.
-    pub fn loadToken(allocator: Allocator, path: []const u8) ![]const u8 {
-        const file = try std.fs.openFileAbsolute(path, .{});
-        defer file.close();
-
-        const raw = try file.readToEndAlloc(allocator, 4096);
+    pub fn loadToken(io: Io, allocator: Allocator, path: []const u8) ![]const u8 {
+        const raw = try fs.readFileAlloc(io, allocator, path, 4096);
         errdefer allocator.free(raw);
 
-        const trimmed = std.mem.trimRight(u8, raw, &[_]u8{ '\n', '\r', ' ', '\t' });
+        const trimmed = std.mem.trimEnd(u8, raw, &[_]u8{ '\n', '\r', ' ', '\t' });
         if (trimmed.len == 0) return error.EmptyToken;
 
         if (trimmed.len < raw.len) {
@@ -168,12 +166,12 @@ test "KeymanagerAuth: generateToken and loadToken roundtrip" {
     const token_path = try std.fs.path.join(testing.allocator, &.{ tmp_path, "api-token.txt" });
     defer testing.allocator.free(token_path);
 
-    const generated = try KeymanagerAuth.generateToken(testing.allocator, token_path);
+    const generated = try KeymanagerAuth.generateToken(testing.io, testing.allocator, token_path);
     defer testing.allocator.free(generated);
 
     try testing.expectEqual(@as(usize, TOKEN_BYTES * 2), generated.len);
 
-    const loaded = try KeymanagerAuth.loadToken(testing.allocator, token_path);
+    const loaded = try KeymanagerAuth.loadToken(testing.io, testing.allocator, token_path);
     defer testing.allocator.free(loaded);
 
     try testing.expectEqualStrings(generated, loaded);

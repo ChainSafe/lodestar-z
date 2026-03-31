@@ -74,7 +74,7 @@ pub const DoppelgangerService = struct {
     allocator: Allocator,
     api: *BeaconApiClient,
     /// Per-validator entries.
-    entries: std.ArrayList(DoppelgangerEntry),
+    entries: std.array_list.Managed(DoppelgangerEntry),
     /// Optional shutdown callback — called on doppelganger detection.
     shutdown_callback: ?ShutdownCallback,
 
@@ -82,7 +82,7 @@ pub const DoppelgangerService = struct {
         return .{
             .allocator = allocator,
             .api = api,
-            .entries = std.ArrayList(DoppelgangerEntry).init(allocator),
+            .entries = std.array_list.Managed(DoppelgangerEntry).init(allocator),
             .shutdown_callback = null,
         };
     }
@@ -119,7 +119,7 @@ pub const DoppelgangerService = struct {
                 .status = .unverified,
             },
         });
-        log.debug("registered validator for doppelganger detection pubkey=0x{}", .{std.fmt.fmtSliceHexLower(pubkey[0..4])});
+        log.debug("registered validator for doppelganger detection pubkey=0x{x}", .{pubkey[0..4]});
     }
 
     /// Remove a validator from doppelganger monitoring.
@@ -127,8 +127,8 @@ pub const DoppelgangerService = struct {
         for (self.entries.items, 0..) |e, i| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) {
                 _ = self.entries.swapRemove(i);
-                log.debug("unregistered validator from doppelganger detection pubkey=0x{}", .{
-                    std.fmt.fmtSliceHexLower(pubkey[0..4]),
+                log.debug("unregistered validator from doppelganger detection pubkey=0x{s}", .{
+                    std.fmt.bytesToHex(pubkey[0..4], .lower),
                 });
                 return;
             }
@@ -187,7 +187,7 @@ pub const DoppelgangerService = struct {
         }
 
         // Step 2: collect indices of validators still being monitored.
-        var indices = std.ArrayList(u64).init(self.allocator);
+        var indices = std.array_list.Managed(u64).init(self.allocator);
         defer indices.deinit();
 
         for (self.entries.items) |e| {
@@ -234,7 +234,7 @@ pub const DoppelgangerService = struct {
                 }
                 if (e.state.remaining_epochs == 0) {
                     e.state.status = .verified_safe;
-                    log.info("doppelganger check passed for pubkey=0x{} — validator now allowed to sign", .{std.fmt.fmtSliceHexLower(e.pubkey[0..4])});
+                    log.info("doppelganger check passed for pubkey=0x{x} — validator now allowed to sign", .{e.pubkey[0..4]});
                 }
             }
         }
@@ -244,7 +244,7 @@ pub const DoppelgangerService = struct {
     ///
     /// Calls api.getValidatorIndices() with all unresolved pubkeys.
     fn resolveIndices(self: *DoppelgangerService, io: Io) !void {
-        var unresolved = std.ArrayList([48]u8).init(self.allocator);
+        var unresolved = std.array_list.Managed([48]u8).init(self.allocator);
         defer unresolved.deinit();
 
         for (self.entries.items) |e| {

@@ -132,7 +132,7 @@ pub const RemoteSigner = struct {
             else => return error.InvalidResponse,
         };
 
-        var keys = std.ArrayList([48]u8).init(self.allocator);
+        var keys = std.array_list.Managed([48]u8).init(self.allocator);
         errdefer keys.deinit();
 
         for (arr.items) |item| {

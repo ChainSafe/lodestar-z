@@ -15,10 +15,12 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 
 const bls = @import("bls");
 const SecretKey = bls.SecretKey;
 
+const fs = @import("fs.zig");
 const keystore_mod = @import("keystore.zig");
 
 const log = std.log.scoped(.keystore_create);
@@ -51,10 +53,10 @@ pub const CreatedKeystore = struct {
 /// Generate a new random BLS secret key and encrypt as EIP-2335 keystore.
 ///
 /// Returns an owned CreatedKeystore. Caller must call .deinit(allocator).
-pub fn createKeystore(allocator: Allocator, password: []const u8, params: ScryptParams) !CreatedKeystore {
+pub fn createKeystore(io: Io, allocator: Allocator, password: []const u8, params: ScryptParams) !CreatedKeystore {
     // Generate random 32-byte scalar.
     var sk_bytes: [32]u8 = undefined;
-    std.Options.debug_io.random(&sk_bytes);
+    io.random(&sk_bytes);
 
     // Create BLS secret key. Retry if we happen to generate zero (astronomically rare).
     const secret_key: SecretKey = sk: {
@@ -66,10 +68,10 @@ pub fn createKeystore(allocator: Allocator, password: []const u8, params: Scrypt
     };
 
     const pubkey = secret_key.toPublicKey().compress();
-    const pubkey_hex = try std.fmt.allocPrint(allocator, "0x{}", .{std.fmt.fmtSliceHexLower(&pubkey)});
+    const pubkey_hex = try std.fmt.allocPrint(allocator, "0x{x}", .{pubkey});
     errdefer allocator.free(pubkey_hex);
 
-    const keystore_json = try encryptKeystore(allocator, secret_key, password, params);
+    const keystore_json = try encryptKeystore(io, allocator, secret_key, password, params);
     errdefer allocator.free(keystore_json);
 
     return .{
@@ -84,18 +86,18 @@ pub fn createKeystore(allocator: Allocator, password: []const u8, params: Scrypt
 ///
 /// Uses scrypt KDF with the given parameters.
 /// Returns an owned JSON string. Caller must free.
-pub fn encryptKeystore(allocator: Allocator, secret_key: SecretKey, password: []const u8, params: ScryptParams) ![]const u8 {
+pub fn encryptKeystore(io: Io, allocator: Allocator, secret_key: SecretKey, password: []const u8, params: ScryptParams) ![]const u8 {
     const sk_bytes = secret_key.serialize();
 
     // Generate random 32-byte salt and 16-byte IV.
     var salt: [32]u8 = undefined;
     var iv: [16]u8 = undefined;
-    std.Options.debug_io.random(&salt);
-    std.Options.debug_io.random(&iv);
+    io.random(&salt);
+    io.random(&iv);
 
     // Generate UUID (v4).
     var uuid_bytes: [16]u8 = undefined;
-    std.Options.debug_io.random(&uuid_bytes);
+    io.random(&uuid_bytes);
     // Set version (4) and variant bits per RFC 4122.
     uuid_bytes[6] = (uuid_bytes[6] & 0x0f) | 0x40;
     uuid_bytes[8] = (uuid_bytes[8] & 0x3f) | 0x80;
@@ -164,11 +166,11 @@ pub fn encryptKeystore(allocator: Allocator, secret_key: SecretKey, password: []
         params.n,
         params.p,
         params.r,
-        std.fmt.fmtSliceHexLower(&salt),
-        std.fmt.fmtSliceHexLower(&checksum),
-        std.fmt.fmtSliceHexLower(&iv),
-        std.fmt.fmtSliceHexLower(&ciphertext),
-        std.fmt.fmtSliceHexLower(&pubkey),
+        salt,
+        checksum,
+        iv,
+        ciphertext,
+        pubkey,
         formatUuid(uuid_bytes),
     });
 
@@ -181,6 +183,7 @@ pub fn encryptKeystore(allocator: Allocator, secret_key: SecretKey, password: []
 ///   <keystores_dir>/<pubkey_hex>/voting-keystore.json
 ///   <secrets_dir>/<pubkey_hex>  (password file)
 pub fn writeKeystoreToDir(
+    io: Io,
     keystores_dir: []const u8,
     secrets_dir: []const u8,
     pubkey_hex: []const u8,
@@ -188,22 +191,22 @@ pub fn writeKeystoreToDir(
     password: []const u8,
 ) !void {
     // Create <keystores_dir>/<pubkey_hex>/ directory.
-    var ks_base = try std.fs.openDirAbsolute(keystores_dir, .{});
-    defer ks_base.close();
-    ks_base.makeDir(pubkey_hex) catch |err| switch (err) {
+    var ks_base = try Io.Dir.openDirAbsolute(io, keystores_dir, .{});
+    defer ks_base.close(io);
+    ks_base.createDir(io, pubkey_hex, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
     // Write voting-keystore.json.
-    var ks_subdir = try ks_base.openDir(pubkey_hex, .{});
-    defer ks_subdir.close();
-    try ks_subdir.writeFile(.{ .sub_path = "voting-keystore.json", .data = keystore_json });
+    var ks_subdir = try ks_base.openDir(io, pubkey_hex, .{});
+    defer ks_subdir.close(io);
+    try ks_subdir.writeFile(io, .{ .sub_path = "voting-keystore.json", .data = keystore_json });
 
     // Write password file.
-    var secrets_base = try std.fs.openDirAbsolute(secrets_dir, .{});
-    defer secrets_base.close();
-    try secrets_base.writeFile(.{ .sub_path = pubkey_hex, .data = password });
+    var secrets_base = try Io.Dir.openDirAbsolute(io, secrets_dir, .{});
+    defer secrets_base.close(io);
+    try secrets_base.writeFile(io, .{ .sub_path = pubkey_hex, .data = password });
 
     log.info("wrote keystore for {s}", .{pubkey_hex});
 }
@@ -264,7 +267,7 @@ test "createKeystore: roundtrip encrypt/decrypt" {
     const params = ScryptParams{ .n = 2, .r = 1, .p = 1 };
     const password = "testpass";
 
-    const created = try createKeystore(testing.allocator, password, params);
+    const created = try createKeystore(testing.io, testing.allocator, password, params);
     defer created.deinit(testing.allocator);
 
     // The pubkey_hex should start with "0x" and have 98 chars (0x + 96 hex chars).
@@ -281,7 +284,7 @@ test "createKeystore: roundtrip encrypt/decrypt" {
 test "createKeystore: wrong password fails" {
     const params = ScryptParams{ .n = 2, .r = 1, .p = 1 };
 
-    const created = try createKeystore(testing.allocator, "correct", params);
+    const created = try createKeystore(testing.io, testing.allocator, "correct", params);
     defer created.deinit(testing.allocator);
 
     try testing.expectError(
@@ -296,7 +299,7 @@ test "encryptKeystore: known key roundtrip" {
     sk_bytes[31] = 1;
     const sk = try SecretKey.deserialize(&sk_bytes);
 
-    const json = try encryptKeystore(testing.allocator, sk, "mypassword", params);
+    const json = try encryptKeystore(testing.io, testing.allocator, sk, "mypassword", params);
     defer testing.allocator.free(json);
 
     const recovered = try keystore_mod.loadKeystore(testing.allocator, json, "mypassword");
@@ -318,19 +321,19 @@ test "writeKeystoreToDir: writes files correctly" {
     const keystore_json = "{\"version\":4}";
     const password = "hunter2";
 
-    try writeKeystoreToDir(ks_path, sec_path, pubkey_hex, keystore_json, password);
+    try writeKeystoreToDir(testing.io, ks_path, sec_path, pubkey_hex, keystore_json, password);
 
     // Verify voting-keystore.json exists.
     const ks_file_path = try std.fs.path.join(testing.allocator, &.{ ks_path, pubkey_hex, "voting-keystore.json" });
     defer testing.allocator.free(ks_file_path);
-    const ks_content = try std.fs.cwd().readFileAlloc(testing.allocator, ks_file_path, 4096);
+    const ks_content = try fs.readFileAlloc(testing.allocator, ks_file_path, 4096);
     defer testing.allocator.free(ks_content);
     try testing.expectEqualStrings(keystore_json, ks_content);
 
     // Verify password file exists.
     const sec_file_path = try std.fs.path.join(testing.allocator, &.{ sec_path, pubkey_hex });
     defer testing.allocator.free(sec_file_path);
-    const sec_content = try std.fs.cwd().readFileAlloc(testing.allocator, sec_file_path, 4096);
+    const sec_content = try fs.readFileAlloc(testing.allocator, sec_file_path, 4096);
     defer testing.allocator.free(sec_content);
     try testing.expectEqualStrings(password, sec_content);
 }
