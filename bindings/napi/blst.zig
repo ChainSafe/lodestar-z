@@ -835,23 +835,38 @@ const AsyncAggregateData = struct {
 
 fn asyncAggregateExecute(_: napi.Env, data: *AsyncAggregateData) void {
     const n = data.n;
+    const nbits: usize = 64;
+    const nbytes: usize = 8;
 
-    // Generate 32 bytes of randomness per element, 64 meaningful bits (nbits=64)
-    var rands: [32 * MAX_AGGREGATE_PER_JOB]u8 = undefined;
-    std.crypto.random.bytes(rands[0 .. n * 32]);
-
-    // Build pointer arrays (stack-allocated, MAX_AGGREGATE_PER_JOB is 128)
-    var pk_refs: [MAX_AGGREGATE_PER_JOB]*const PublicKey = undefined;
-    var sig_refs: [MAX_AGGREGATE_PER_JOB]*const Signature = undefined;
+    // Generate 8-byte scalars (64 bits each), contiguous, matching Rust blst crate layout
+    var scalars: [8 * MAX_AGGREGATE_PER_JOB]u8 = undefined;
+    std.crypto.random.bytes(scalars[0 .. n * nbytes]);
+    // Ensure no zero scalars
     for (0..n) |i| {
-        pk_refs[i] = &data.pks[i];
-        sig_refs[i] = &data.sigs[i];
+        while (std.mem.allEqual(u8, scalars[i * nbytes ..][0..nbytes], 0)) {
+            std.crypto.random.bytes(scalars[i * nbytes ..][0..nbytes]);
+        }
     }
 
-    // Per-call scratch allocation (safe for worker threads)
-    const p1_scratch_size = bls.c.blst_p1s_mult_pippenger_scratch_sizeof(n);
-    const p2_scratch_size = bls.c.blst_p2s_mult_pippenger_scratch_sizeof(n);
-    const scratch_size = @max(p1_scratch_size, p2_scratch_size);
+    // Cast contiguous pk/sig arrays to affine point arrays
+    const pk_points: [*]const bls.c.blst_p1_affine = @ptrCast(data.pks.ptr);
+    const sig_points: [*]const bls.c.blst_p2_affine = @ptrCast(data.sigs.ptr);
+
+    // Build pointer arrays for Pippenger API
+    var pk_ptrs: [MAX_AGGREGATE_PER_JOB]*const bls.c.blst_p1_affine = undefined;
+    var sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const bls.c.blst_p2_affine = undefined;
+    var sca_ptrs: [MAX_AGGREGATE_PER_JOB]*const u8 = undefined;
+    for (0..n) |i| {
+        pk_ptrs[i] = &pk_points[i];
+        sig_ptrs[i] = &sig_points[i];
+        sca_ptrs[i] = &scalars[i * nbytes];
+    }
+
+    // Per-call scratch allocation
+    const scratch_size = @max(
+        bls.c.blst_p1s_mult_pippenger_scratch_sizeof(n),
+        bls.c.blst_p2s_mult_pippenger_scratch_sizeof(n),
+    );
     const scratch = allocator.alloc(u64, scratch_size) catch {
         data.err = true;
         return;
@@ -859,29 +874,28 @@ fn asyncAggregateExecute(_: napi.Env, data: *AsyncAggregateData) void {
     defer allocator.free(scratch);
 
     // Pippenger multi-scalar multiplication on G1 (pubkeys)
-    const agg_pk = AggregatePublicKey.aggregateWithRandomness(
-        pk_refs[0..n],
-        rands[0 .. n * 32],
-        false, // already validated
-        scratch,
-    ) catch {
-        data.err = true;
-        return;
-    };
+    var p1_ret: bls.c.blst_p1 = std.mem.zeroes(bls.c.blst_p1);
+    bls.c.blst_p1s_mult_pippenger(
+        &p1_ret,
+        @ptrCast(&pk_ptrs),
+        n,
+        @ptrCast(&sca_ptrs),
+        nbits,
+        scratch.ptr,
+    );
+    bls.c.blst_p1_to_affine(&data.result_pk.point, &p1_ret);
 
     // Pippenger multi-scalar multiplication on G2 (signatures)
-    const agg_sig = AggregateSignature.aggregateWithRandomness(
-        sig_refs[0..n],
-        rands[0 .. n * 32],
-        false, // already validated during deserialization
-        scratch,
-    ) catch {
-        data.err = true;
-        return;
-    };
-
-    data.result_pk = agg_pk.toPublicKey();
-    data.result_sig = agg_sig.toSignature();
+    var p2_ret: bls.c.blst_p2 = std.mem.zeroes(bls.c.blst_p2);
+    bls.c.blst_p2s_mult_pippenger(
+        &p2_ret,
+        @ptrCast(&sig_ptrs),
+        n,
+        @ptrCast(&sca_ptrs),
+        nbits,
+        scratch.ptr,
+    );
+    bls.c.blst_p2_to_affine(&data.result_sig.point, &p2_ret);
 }
 
 fn asyncAggregateComplete(env: napi.Env, _: napi.status.Status, data: *AsyncAggregateData) void {
@@ -914,6 +928,7 @@ fn asyncAggregateComplete(env: napi.Env, _: napi.status.Status, data: *AsyncAggr
 
     data.deferred.resolve(result) catch return;
 }
+
 
 /// Asynchronously aggregates public keys and signatures with randomness using
 /// Pippenger multi-scalar multiplication. Heavy math runs on the libuv thread pool.
