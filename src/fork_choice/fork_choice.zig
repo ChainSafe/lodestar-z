@@ -992,29 +992,6 @@ pub const ForkChoice = struct {
         return self.head;
     }
 
-    // ── Proposer boost ──
-
-    /// Apply proposer boost for a block.
-    /// Caller computes score = committee_weight * PROPOSER_SCORE_BOOST / 100
-    /// (PROPOSER_SCORE_BOOST is in ChainConfig, not a comptime preset).
-    pub fn setProposerBoost(
-        self: *ForkChoice,
-        root: Root,
-        score: u64,
-    ) void {
-        self.proto_array.previous_proposer_boost = .{
-            .root = root,
-            .score = score,
-        };
-        self.proposer_boost_root = root;
-    }
-
-    /// Clear proposer boost (typically at start of new slot).
-    pub fn clearProposerBoost(self: *ForkChoice) void {
-        self.proto_array.previous_proposer_boost = null;
-        self.proposer_boost_root = null;
-    }
-
     // ── Proposer boost reorg ──
 
     /// Called by `predictProposerHead` and `onBlock`. If the result is not same as
