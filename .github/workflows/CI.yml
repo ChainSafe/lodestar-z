@@ -118,10 +118,10 @@ jobs:
 
       - name: Build benchmarks
         run: |
-          zig build build-exe:bench_hashing build-exe:bench_merkle_gindex build-exe:bench_merkle_node build-exe:bench_ssz_attestation build-exe:bench_ssz_block build-exe:bench_ssz_state build-exe:bench_process_block build-exe:bench_process_epoch
+          zig build build-exe:bench_hashing build-exe:bench_merkle_gindex build-exe:bench_merkle_node build-exe:bench_ssz_attestation build-exe:bench_ssz_block build-exe:bench_ssz_state build-exe:bench_process_block build-exe:bench_process_epoch build-exe:bench_fork_choice_update_head build-exe:bench_fork_choice_compute_deltas build-exe:bench_fork_choice_on_attestation
 
   build-test-slow:
-    name: slow tests 
+    name: slow tests
     # It takes time to download and run these tests, so we only run them on ubuntu-latest
     runs-on: ubuntu-latest
     needs: build-test
