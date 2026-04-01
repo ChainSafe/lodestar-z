@@ -373,6 +373,10 @@ pub const PeerInfo = struct {
     connected_at_ms: u64 = 0,
     /// Timestamp (ms) of last message received from this peer.
     last_seen_ms: u64 = 0,
+    /// Timestamp (ms) of the last successful outbound ping response.
+    last_ping_response_ms: u64 = 0,
+    /// Timestamp (ms) of the last successful Status exchange.
+    last_status_exchange_ms: u64 = 0,
     /// Ban expiry timestamp (ms). Only meaningful when connection_state == .banned.
     ban_expiry_ms: u64 = 0,
     /// Whether this is a trusted/direct peer that should always be reconnected.

@@ -18,6 +18,7 @@ const chain_mod = @import("chain");
 const ChainQuery = chain_mod.Query;
 const networking = @import("networking");
 const StatusMessage = networking.messages.StatusMessage;
+const SubnetService = networking.SubnetService;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 const api_mod = @import("api");
 const ApiContext = api_mod.context.ApiContext;
@@ -35,6 +36,7 @@ pub const ApiBindings = struct {
     produce_block_ctx: *ProduceBlockCallbackCtx,
     attestation_data_ctx: *AttestationDataCallbackCtx,
     pool_submit_ctx: *PoolSubmitCallbackCtx,
+    subnet_subscription_cb_ctx: *SubnetSubscriptionCallbackCtx,
     validator_monitor_cb_ctx: ?*ValidatorMonitorCallbackCtx = null,
     builder_cb_ctx: ?*BuilderCallbackCtx = null,
 
@@ -51,6 +53,7 @@ pub const ApiBindings = struct {
             .produce_block_ctx = undefined,
             .attestation_data_ctx = undefined,
             .pool_submit_ctx = undefined,
+            .subnet_subscription_cb_ctx = undefined,
             .validator_monitor_cb_ctx = null,
             .builder_cb_ctx = null,
         };
@@ -94,6 +97,10 @@ pub const ApiBindings = struct {
         errdefer allocator.destroy(bindings.pool_submit_ctx);
         bindings.pool_submit_ctx.* = .{ .node = node };
 
+        bindings.subnet_subscription_cb_ctx = try allocator.create(SubnetSubscriptionCallbackCtx);
+        errdefer allocator.destroy(bindings.subnet_subscription_cb_ctx);
+        bindings.subnet_subscription_cb_ctx.* = .{ .node = node };
+
         if (node.validator_monitor) |vm| {
             bindings.validator_monitor_cb_ctx = try allocator.create(ValidatorMonitorCallbackCtx);
             bindings.validator_monitor_cb_ctx.?.* = .{ .monitor = vm };
@@ -115,6 +122,7 @@ pub const ApiBindings = struct {
     pub fn deinit(self: *ApiBindings, allocator: std.mem.Allocator) void {
         if (self.builder_cb_ctx) |ctx| allocator.destroy(ctx);
         if (self.validator_monitor_cb_ctx) |ctx| allocator.destroy(ctx);
+        allocator.destroy(self.subnet_subscription_cb_ctx);
         allocator.destroy(self.pool_submit_ctx);
         allocator.destroy(self.attestation_data_ctx);
         allocator.destroy(self.produce_block_ctx);
@@ -178,6 +186,11 @@ pub const ApiBindings = struct {
             .submitVoluntaryExitFn = &submitVoluntaryExitCallback,
             .submitContributionAndProofFn = &submitContributionAndProofCallback,
         };
+        api_ctx.subnet_subscriptions = .{
+            .ptr = @ptrCast(self.subnet_subscription_cb_ctx),
+            .prepareBeaconCommitteeSubnetsFn = &prepareBeaconCommitteeSubnetsCallback,
+            .prepareSyncCommitteeSubnetsFn = &prepareSyncCommitteeSubnetsCallback,
+        };
         if (self.validator_monitor_cb_ctx) |ctx| {
             api_ctx.validator_monitor = .{
                 .ptr = @ptrCast(ctx),
@@ -230,6 +243,10 @@ pub const PoolSubmitCallbackCtx = struct {
     node: *BeaconNode,
 };
 
+pub const SubnetSubscriptionCallbackCtx = struct {
+    node: *BeaconNode,
+};
+
 pub const BuilderCallbackCtx = struct {
     node: *BeaconNode,
 };
@@ -237,6 +254,44 @@ pub const BuilderCallbackCtx = struct {
 pub const OpPoolCallbackCtx = struct {
     query: ChainQuery,
 };
+
+fn computeAttestationSubnet(slot: u64, committees_at_slot: u64, committee_index: u64) u8 {
+    const committees_since_epoch_start = committees_at_slot * (slot % preset.SLOTS_PER_EPOCH);
+    return @intCast((committees_since_epoch_start + committee_index) % networking.peer_info.ATTESTATION_SUBNET_COUNT);
+}
+
+fn prepareBeaconCommitteeSubnetsCallback(ptr: *anyopaque, subscriptions: []const api_mod.types.BeaconCommitteeSubscription) anyerror!void {
+    const ctx: *SubnetSubscriptionCallbackCtx = @ptrCast(@alignCast(ptr));
+    const subnet_service = ctx.node.subnet_service orelse return error.NotImplemented;
+
+    for (subscriptions) |subscription| {
+        try subnet_service.subscribeToAttestationSubnet(
+            computeAttestationSubnet(subscription.slot, subscription.committees_at_slot, subscription.committee_index),
+            subscription.slot,
+            subscription.is_aggregator,
+        );
+    }
+}
+
+fn prepareSyncCommitteeSubnetsCallback(ptr: *anyopaque, subscriptions: []const api_mod.types.SyncCommitteeSubscription) anyerror!void {
+    const ctx: *SubnetSubscriptionCallbackCtx = @ptrCast(@alignCast(ptr));
+    const subnet_service = ctx.node.subnet_service orelse return error.NotImplemented;
+    const sync_subcommittee_size = @divFloor(preset.SYNC_COMMITTEE_SIZE, networking.peer_info.SYNC_COMMITTEE_SUBNET_COUNT);
+
+    for (subscriptions) |subscription| {
+        var seen = std.StaticBitSet(networking.peer_info.SYNC_COMMITTEE_SUBNET_COUNT).initEmpty();
+        for (subscription.sync_committee_indices) |committee_index| {
+            const subnet: u8 = @intCast(@divFloor(committee_index, sync_subcommittee_size));
+            if (seen.isSet(subnet)) continue;
+            seen.set(subnet);
+            try subnet_service.subscribeToSyncSubnet(
+                subnet,
+                (subscription.until_epoch + 1) * preset.SLOTS_PER_EPOCH,
+                true,
+            );
+        }
+    }
+}
 
 fn getChainHeadTrackerCallback(ptr: *anyopaque) ApiHeadTracker {
     const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));

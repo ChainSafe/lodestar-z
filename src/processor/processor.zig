@@ -20,6 +20,7 @@ const work_item_mod = @import("work_item.zig");
 const WorkItem = work_item_mod.WorkItem;
 const WorkType = work_item_mod.WorkType;
 const MessageId = work_item_mod.MessageId;
+const GossipDataHandle = work_item_mod.GossipDataHandle;
 
 const work_queues_mod = @import("work_queues.zig");
 const WorkQueues = work_queues_mod.WorkQueues;
@@ -112,6 +113,10 @@ pub const BeaconProcessor = struct {
             .handler_context = handler_context,
             .metrics = ProcessorMetrics.init(),
         };
+    }
+
+    pub fn deinit(self: *BeaconProcessor) void {
+        self.queues.deinit();
     }
 
     /// Ingest a single work item into the appropriate queue.
@@ -245,6 +250,10 @@ const TestContext = struct {
     }
 };
 
+fn dummyHandle() GossipDataHandle {
+    return GossipDataHandle.initBorrowed(@ptrFromInt(0xDEAD));
+}
+
 test "BeaconProcessor: ingest and dispatch priority order" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -364,7 +373,7 @@ test "BeaconProcessor: sync state affects dropping" {
     proc.setSyncState(.syncing);
 
     // Attestation should be dropped during sync.
-    const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+    const dummy_handle = dummyHandle();
     proc.ingest(.{ .attestation = .{
         .peer_id = 1,
         .message_id = testMessageId(1),
@@ -497,7 +506,7 @@ test "BeaconProcessor: getQueueDepths" {
         .seen_timestamp_ns = 100,
     } });
 
-    const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+    const dummy_handle = dummyHandle();
     proc.ingest(.{ .attestation = .{
         .peer_id = 1,
         .message_id = testMessageId(1),
@@ -539,7 +548,7 @@ test "BeaconProcessor: attestation batching" {
     );
 
     // Ingest 3 attestations. The LIFO queue should batch them when popped.
-    const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+    const dummy_handle = dummyHandle();
     proc.ingest(.{ .attestation = .{
         .peer_id = 1,
         .message_id = testMessageId(1),
@@ -593,7 +602,7 @@ test "BeaconProcessor: single attestation not batched" {
         @ptrCast(&ctx),
     );
 
-    const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+    const dummy_handle = dummyHandle();
     proc.ingest(.{ .attestation = .{
         .peer_id = 1,
         .message_id = testMessageId(1),
@@ -629,7 +638,7 @@ test "BeaconProcessor: blocks dispatched before attestations" {
         @ptrCast(&ctx),
     );
 
-    const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+    const dummy_handle = dummyHandle();
 
     // Enqueue attestation first, then block.
     proc.ingest(.{ .attestation = .{

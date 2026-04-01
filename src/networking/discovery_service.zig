@@ -24,6 +24,8 @@ const EnrBuilder = discv5.enr.Builder;
 const NodeId = discv5.enr.NodeId;
 const enr_mod = discv5.enr;
 const bootnodes = @import("bootnodes.zig");
+const subnet_service = @import("subnet_service.zig");
+const SubnetKind = subnet_service.SubnetKind;
 
 const log = std.log.scoped(.discovery);
 
@@ -79,6 +81,7 @@ pub const DiscoverySource = enum {
 };
 
 pub const SubnetQuery = struct {
+    kind: SubnetKind = .attestation,
     subnet_id: u6,
     min_peers: u32 = 1,
 };
@@ -90,7 +93,9 @@ pub const CachedEnr = struct {
     node_id: [32]u8,
     addr_ip4: ?Address,
     addr_ip6: ?Address,
+    has_quic: bool,
     attnets: [8]u8,
+    syncnets: [1]u8,
     fork_digest: [4]u8,
 };
 
@@ -276,7 +281,7 @@ pub const DiscoveryService = struct {
         const queries = self.pending_subnet_queries.items;
         if (queries.len == 0) return;
         for (queries) |query| {
-            self.findSubnetPeers(query.subnet_id, query.min_peers);
+            self.findSubnetPeers(query.kind, query.subnet_id, query.min_peers);
         }
         self.pending_subnet_queries.clearRetainingCapacity();
     }
@@ -289,32 +294,34 @@ pub const DiscoveryService = struct {
     ///
     /// If fewer than `min_peers` are found in cache, falls back to a random lookup
     /// to populate the cache with fresh candidates.
-    fn findSubnetPeers(self: *DiscoveryService, subnet_id: u6, min_peers: u32) void {
+    fn findSubnetPeers(self: *DiscoveryService, kind: SubnetKind, subnet_id: u6, min_peers: u32) void {
         var found: u32 = 0;
 
         // Scan ENR cache for nodes with this subnet bit set.
-        // attnets is an 8-byte bitvector; use the helper from enr_mod.
         var iter = self.enr_cache.iterator();
         while (iter.next()) |entry| {
             const cached = entry.value_ptr.*;
             // Only consider peers on our fork.
             if (!std.mem.eql(u8, &cached.fork_digest, &self.current_fork_digest)) continue;
-            if (!enr_mod.isSubnetSet(cached.attnets, subnet_id)) continue;
+            switch (kind) {
+                .attestation => if (!enr_mod.isSubnetSet(cached.attnets, subnet_id)) continue,
+                .sync_committee => if (!syncSubnetSet(cached.syncnets, subnet_id)) continue,
+            }
 
             // This peer advertises our subnet — queue for dialing.
-            self.evaluateCandidate(cached.node_id, cached.addr_ip4, cached.addr_ip6, null, false, cached.attnets, cached.fork_digest, .subnet_query);
+            self.evaluateCandidate(cached.node_id, cached.addr_ip4, cached.addr_ip6, null, cached.has_quic, cached.attnets, cached.fork_digest, .subnet_query);
             found += 1;
             if (found >= min_peers) break;
         }
 
         if (found < min_peers) {
-            log.debug("Subnet {d}: found {d}/{d} peers in cache, falling back to random lookup", .{
-                subnet_id, found, min_peers,
+            log.debug("{s} subnet {d}: found {d}/{d} peers in cache, falling back to random lookup", .{
+                @tagName(kind), subnet_id, found, min_peers,
             });
             // Do a random lookup to populate the cache with fresh candidates.
             self.startRandomLookup(.subnet_query);
         } else {
-            log.debug("Subnet {d}: found {d} candidate peer(s) in ENR cache", .{ subnet_id, found });
+            log.debug("{s} subnet {d}: found {d} candidate peer(s) in ENR cache", .{ @tagName(kind), subnet_id, found });
         }
     }
 
@@ -328,6 +335,7 @@ pub const DiscoveryService = struct {
         if (!std.mem.eql(u8, &fd, &self.current_fork_digest)) return;
 
         const attnets = enr.attnets orelse [_]u8{0} ** 8;
+        const syncnets = enr.syncnets orelse [_]u8{0} ** 1;
         const addr_ip4 = addressFromEnr(enr, .ip4);
         const addr_ip6 = addressFromEnr(enr, .ip6);
         if (addr_ip4 == null and addr_ip6 == null) return;
@@ -347,9 +355,15 @@ pub const DiscoveryService = struct {
             .node_id = node_id,
             .addr_ip4 = addr_ip4,
             .addr_ip6 = addr_ip6,
+            .has_quic = enr.quic != null or enr.quic6 != null,
             .attnets = attnets,
+            .syncnets = syncnets,
             .fork_digest = fd,
         };
+    }
+
+    pub fn poll(self: *DiscoveryService) void {
+        self.pollNetwork();
     }
 
     fn pollNetwork(self: *DiscoveryService) void {
@@ -453,12 +467,13 @@ pub const DiscoveryService = struct {
 
     // ── Subnet Queries ──────────────────────────────────────────────────
 
-    pub fn requestSubnetPeers(self: *DiscoveryService, subnet_id: u6, min_peers: u32) void {
+    pub fn requestSubnetPeers(self: *DiscoveryService, kind: SubnetKind, subnet_id: u6, min_peers: u32) void {
         self.pending_subnet_queries.append(self.allocator, .{
+            .kind = kind,
             .subnet_id = subnet_id,
             .min_peers = min_peers,
         }) catch {
-            log.warn("Failed to queue subnet query for subnet {d}", .{subnet_id});
+            log.warn("Failed to queue {s} subnet query for subnet {d}", .{ @tagName(kind), subnet_id });
         };
     }
 
@@ -525,6 +540,8 @@ pub const DiscoveryService = struct {
             builder.udp6 = parsed.udp6;
             builder.tcp6 = parsed.tcp6;
             builder.quic6 = parsed.quic6;
+            builder.attnets = parsed.attnets orelse builder.attnets.?;
+            builder.syncnets = parsed.syncnets orelse builder.syncnets.?;
         } else {
             if (advertisedIp4(&self.config, &self.service)) |ip4| {
                 builder.ip = ip4;
@@ -542,6 +559,37 @@ pub const DiscoveryService = struct {
         errdefer self.allocator.free(updated);
         try self.service.setLocalEnr(updated);
         self.allocator.free(updated);
+    }
+
+    pub fn updateSubnets(self: *DiscoveryService, attnets: [8]u8, syncnets: [1]u8) !void {
+        const local_enr = self.service.localEnr() orelse return error.NoLocalEnr;
+
+        var parsed = try enr_mod.decode(self.allocator, local_enr);
+        defer parsed.deinit();
+
+        if (std.mem.eql(u8, &(parsed.attnets orelse [_]u8{0} ** 8), &attnets) and
+            std.mem.eql(u8, &(parsed.syncnets orelse [_]u8{0} ** 1), &syncnets))
+        {
+            return;
+        }
+
+        const next_seq = self.service.localEnrSeq() + 1;
+        var builder = EnrBuilder.init(self.allocator, self.config.secret_key, next_seq);
+        builder.ip = parsed.ip;
+        builder.udp = parsed.udp;
+        builder.tcp = parsed.tcp orelse self.config.p2p_port;
+        builder.quic = parsed.quic orelse self.config.p2p_port;
+        builder.ip6 = parsed.ip6;
+        builder.udp6 = parsed.udp6;
+        builder.tcp6 = parsed.tcp6;
+        builder.quic6 = parsed.quic6;
+        builder.attnets = attnets;
+        builder.syncnets = syncnets;
+        builder.setEth2(self.current_fork_digest, self.config.next_fork_version, self.config.next_fork_epoch);
+
+        const updated = try builder.encode();
+        defer self.allocator.free(updated);
+        try self.service.setLocalEnr(updated);
     }
 
     fn sourceForLookup(self: *const DiscoveryService, lookup_id: ?u32) DiscoverySource {
@@ -609,6 +657,10 @@ fn addressFromEnr(enr: *const Enr, family: Address.Family) ?Address {
         else
             null,
     };
+}
+
+fn syncSubnetSet(syncnets: [1]u8, subnet_id: u6) bool {
+    return (syncnets[0] & (@as(u8, 1) << @intCast(subnet_id))) != 0;
 }
 
 pub const DiscoveryStats = struct {
@@ -693,8 +745,9 @@ test "DiscoveryService: drainDiscoveredPeers returns and clears queue" {
 test "DiscoveryService: requestSubnetPeers queues a query" {
     var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
-    svc.requestSubnetPeers(5, 2);
+    svc.requestSubnetPeers(.attestation, 5, 2);
     try std.testing.expectEqual(@as(usize, 1), svc.pending_subnet_queries.items.len);
+    try std.testing.expectEqual(.attestation, svc.pending_subnet_queries.items[0].kind);
     try std.testing.expectEqual(@as(u6, 5), svc.pending_subnet_queries.items[0].subnet_id);
 }
 

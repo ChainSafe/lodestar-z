@@ -237,6 +237,15 @@ pub const EthGossipAdapter = struct {
         try self.subscribeTopicType(topic_type, subnet_id);
     }
 
+    /// Unsubscribe from a specific subnet-indexed topic.
+    pub fn unsubscribeSubnet(
+        self: *Self,
+        topic_type: GossipTopicType,
+        subnet_id: u8,
+    ) !void {
+        try self.unsubscribeTopicType(topic_type, subnet_id);
+    }
+
     fn subscribeTopicType(self: *Self, topic_type: GossipTopicType, subnet_id: ?u8) !void {
         var buf: [gossip_topics.MAX_TOPIC_LENGTH]u8 = undefined;
         const topic_slice = gossip_topics.formatTopic(&buf, self.fork_digest, topic_type, subnet_id);
@@ -253,6 +262,16 @@ pub const EthGossipAdapter = struct {
         errdefer _ = self.subscribed_topics.remove(topic_str);
 
         try self.gossipsub.subscribe(topic_str);
+    }
+
+    fn unsubscribeTopicType(self: *Self, topic_type: GossipTopicType, subnet_id: ?u8) !void {
+        var buf: [gossip_topics.MAX_TOPIC_LENGTH]u8 = undefined;
+        const topic_slice = gossip_topics.formatTopic(&buf, self.fork_digest, topic_type, subnet_id);
+
+        const owned_topic = self.subscribed_topics.getKey(topic_slice) orelse return;
+        try self.gossipsub.unsubscribe(owned_topic);
+        _ = self.subscribed_topics.remove(owned_topic);
+        self.allocator.free(owned_topic);
     }
 
     fn clearSubscribedTopics(self: *Self) void {
@@ -640,7 +659,7 @@ test "EthGossipAdapter: handleMessage rejects invalid snappy data" {
 
     const result = t.adapter.handleMessage(
         "/eth2/abcdef01/beacon_block/ssz_snappy",
-        &([_]u8{ 0x00 } ** 16),
+        &([_]u8{0x00} ** 16),
         null,
     );
     try testing.expectEqual(ValidationResult.reject, result.validation);

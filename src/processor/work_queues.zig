@@ -8,11 +8,13 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
+const Allocator = std.mem.Allocator;
 
 const work_item_mod = @import("work_item.zig");
 const WorkItem = work_item_mod.WorkItem;
 const WorkType = work_item_mod.WorkType;
 const MessageId = work_item_mod.MessageId;
+const GossipDataHandle = work_item_mod.GossipDataHandle;
 const GossipBlockWork = work_item_mod.GossipBlockWork;
 const GossipBlobWork = work_item_mod.GossipBlobWork;
 const GossipColumnWork = work_item_mod.GossipColumnWork;
@@ -178,6 +180,8 @@ pub const SyncState = enum(u8) {
 /// Backed by a single contiguous allocation sliced into per-queue regions.
 /// The manager fiber is the sole accessor — no locking required.
 pub const WorkQueues = struct {
+    allocator: Allocator,
+
     // ── FIFO queues ──
     chain_segment: FifoQueue(ChainSegmentWork),
     rpc_block: FifoQueue(RpcBlockWork),
@@ -238,6 +242,7 @@ pub const WorkQueues = struct {
         config: QueueConfig,
     ) !WorkQueues {
         return .{
+            .allocator = allocator,
             .chain_segment = FifoQueue(ChainSegmentWork).init(
                 try allocator.alloc(ChainSegmentWork, config.chain_segment),
             ),
@@ -369,6 +374,103 @@ pub const WorkQueues = struct {
         };
     }
 
+    pub fn deinit(self: *WorkQueues) void {
+        self.cleanupQueuedItems();
+        self.freeQueueBuffers();
+        self.allocator.free(self.attestation_batch_buf);
+        self.allocator.free(self.aggregate_batch_buf);
+    }
+
+    fn cleanupItem(self: *WorkQueues, item: WorkItem) void {
+        item.deinit(self.allocator);
+    }
+
+    fn cleanupQueue(self: *WorkQueues, comptime tag: WorkType, queue: anytype) void {
+        while (queue.pop()) |item| {
+            self.cleanupItem(@unionInit(WorkItem, @tagName(tag), item));
+        }
+    }
+
+    fn cleanupQueuedItems(self: *WorkQueues) void {
+        self.cleanupQueue(.chain_segment, &self.chain_segment);
+        self.cleanupQueue(.rpc_block, &self.rpc_block);
+        self.cleanupQueue(.rpc_blob, &self.rpc_blob);
+        self.cleanupQueue(.rpc_custody_column, &self.rpc_custody_column);
+        self.cleanupQueue(.delayed_block, &self.delayed_block);
+        self.cleanupQueue(.gossip_block, &self.gossip_block);
+        self.cleanupQueue(.gossip_execution_payload, &self.gossip_execution_payload);
+        self.cleanupQueue(.gossip_blob, &self.gossip_blob);
+        self.cleanupQueue(.gossip_data_column, &self.gossip_data_column);
+        self.cleanupQueue(.column_reconstruction, &self.column_reconstruction);
+        self.cleanupQueue(.api_request_p0, &self.api_request_p0);
+        self.cleanupQueue(.aggregate, &self.aggregate);
+        self.cleanupQueue(.attestation, &self.attestation);
+        self.cleanupQueue(.gossip_payload_attestation, &self.gossip_payload_attestation);
+        self.cleanupQueue(.sync_contribution, &self.sync_contribution);
+        self.cleanupQueue(.sync_message, &self.sync_message);
+        self.cleanupQueue(.unknown_block_aggregate, &self.unknown_block_aggregate);
+        self.cleanupQueue(.unknown_block_attestation, &self.unknown_block_attestation);
+        self.cleanupQueue(.gossip_execution_payload_bid, &self.gossip_execution_payload_bid);
+        self.cleanupQueue(.gossip_proposer_preferences, &self.gossip_proposer_preferences);
+        self.cleanupQueue(.status, &self.status);
+        self.cleanupQueue(.blocks_by_range, &self.blocks_by_range);
+        self.cleanupQueue(.blocks_by_root, &self.blocks_by_root);
+        self.cleanupQueue(.blobs_by_range, &self.blobs_by_range);
+        self.cleanupQueue(.blobs_by_root, &self.blobs_by_root);
+        self.cleanupQueue(.columns_by_range, &self.columns_by_range);
+        self.cleanupQueue(.columns_by_root, &self.columns_by_root);
+        self.cleanupQueue(.gossip_attester_slashing, &self.gossip_attester_slashing);
+        self.cleanupQueue(.gossip_proposer_slashing, &self.gossip_proposer_slashing);
+        self.cleanupQueue(.gossip_voluntary_exit, &self.gossip_voluntary_exit);
+        self.cleanupQueue(.gossip_bls_to_exec, &self.gossip_bls_to_exec);
+        self.cleanupQueue(.api_request_p1, &self.api_request_p1);
+        self.cleanupQueue(.backfill_segment, &self.backfill_segment);
+        self.cleanupQueue(.lc_bootstrap, &self.lc_bootstrap);
+        self.cleanupQueue(.lc_finality_update, &self.lc_finality_update);
+        self.cleanupQueue(.lc_optimistic_update, &self.lc_optimistic_update);
+        self.cleanupQueue(.lc_updates_by_range, &self.lc_updates_by_range);
+    }
+
+    fn freeQueueBuffers(self: *WorkQueues) void {
+        self.allocator.free(self.chain_segment.buffer);
+        self.allocator.free(self.rpc_block.buffer);
+        self.allocator.free(self.rpc_blob.buffer);
+        self.allocator.free(self.rpc_custody_column.buffer);
+        self.allocator.free(self.delayed_block.buffer);
+        self.allocator.free(self.gossip_block.buffer);
+        self.allocator.free(self.gossip_execution_payload.buffer);
+        self.allocator.free(self.gossip_blob.buffer);
+        self.allocator.free(self.gossip_data_column.buffer);
+        self.allocator.free(self.api_request_p0.buffer);
+        self.allocator.free(self.gossip_payload_attestation.buffer);
+        self.allocator.free(self.gossip_execution_payload_bid.buffer);
+        self.allocator.free(self.gossip_proposer_preferences.buffer);
+        self.allocator.free(self.status.buffer);
+        self.allocator.free(self.blocks_by_range.buffer);
+        self.allocator.free(self.blocks_by_root.buffer);
+        self.allocator.free(self.blobs_by_range.buffer);
+        self.allocator.free(self.blobs_by_root.buffer);
+        self.allocator.free(self.columns_by_range.buffer);
+        self.allocator.free(self.columns_by_root.buffer);
+        self.allocator.free(self.gossip_attester_slashing.buffer);
+        self.allocator.free(self.gossip_proposer_slashing.buffer);
+        self.allocator.free(self.gossip_voluntary_exit.buffer);
+        self.allocator.free(self.gossip_bls_to_exec.buffer);
+        self.allocator.free(self.api_request_p1.buffer);
+        self.allocator.free(self.backfill_segment.buffer);
+        self.allocator.free(self.lc_bootstrap.buffer);
+        self.allocator.free(self.lc_finality_update.buffer);
+        self.allocator.free(self.lc_optimistic_update.buffer);
+        self.allocator.free(self.lc_updates_by_range.buffer);
+        self.allocator.free(self.aggregate.buffer);
+        self.allocator.free(self.attestation.buffer);
+        self.allocator.free(self.unknown_block_aggregate.buffer);
+        self.allocator.free(self.unknown_block_attestation.buffer);
+        self.allocator.free(self.sync_contribution.buffer);
+        self.allocator.free(self.sync_message.buffer);
+        self.allocator.free(self.column_reconstruction.buffer);
+    }
+
     /// Route a work item to the appropriate typed queue.
     /// Handles sync-aware dropping and queue-full metrics.
     ///
@@ -380,6 +482,7 @@ pub const WorkQueues = struct {
         // Drop during initial sync if applicable.
         if (self.sync_state == .syncing and wtype.dropDuringSync()) {
             self.items_dropped_sync += 1;
+            self.cleanupItem(item);
             return;
         }
 
@@ -387,30 +490,26 @@ pub const WorkQueues = struct {
 
         // Helper: push to a FIFO queue, count drops on overflow.
         const pushFifo = struct {
-            fn call(dropped: *u64, queue: anytype, w: anytype) void {
-                if (!queue.push(w)) dropped.* += 1;
+            fn call(queues: *WorkQueues, queue: anytype, w: anytype, wrapped: WorkItem) void {
+                if (!queue.push(w)) {
+                    queues.items_dropped_full += 1;
+                    queues.cleanupItem(wrapped);
+                }
             }
         }.call;
 
         switch (item) {
             // ── FIFO queues ──
-            inline .chain_segment, .rpc_block, .rpc_blob, .rpc_custody_column,
-            .delayed_block, .gossip_block, .gossip_execution_payload, .gossip_blob,
-            .gossip_data_column, .api_request_p0, .gossip_payload_attestation,
-            .gossip_execution_payload_bid, .gossip_proposer_preferences,
-            .status, .blocks_by_range, .blocks_by_root, .blobs_by_range, .blobs_by_root,
-            .columns_by_range, .columns_by_root, .gossip_attester_slashing,
-            .gossip_proposer_slashing, .gossip_voluntary_exit, .gossip_bls_to_exec,
-            .api_request_p1, .backfill_segment, .lc_bootstrap, .lc_finality_update,
-            .lc_optimistic_update, .lc_updates_by_range => |w, tag| {
-                pushFifo(&self.items_dropped_full, &@field(self, @tagName(tag)), w);
+            inline .chain_segment, .rpc_block, .rpc_blob, .rpc_custody_column, .delayed_block, .gossip_block, .gossip_execution_payload, .gossip_blob, .gossip_data_column, .api_request_p0, .gossip_payload_attestation, .gossip_execution_payload_bid, .gossip_proposer_preferences, .status, .blocks_by_range, .blocks_by_root, .blobs_by_range, .blobs_by_root, .columns_by_range, .columns_by_root, .gossip_attester_slashing, .gossip_proposer_slashing, .gossip_voluntary_exit, .gossip_bls_to_exec, .api_request_p1, .backfill_segment, .lc_bootstrap, .lc_finality_update, .lc_optimistic_update, .lc_updates_by_range => |w, tag| {
+                pushFifo(self, &@field(self, @tagName(tag)), w, @unionInit(WorkItem, @tagName(tag), w));
             },
 
             // ── LIFO queues: always accept, drop oldest on overflow ──
-            inline .aggregate, .attestation, .unknown_block_aggregate,
-            .unknown_block_attestation, .sync_contribution, .sync_message,
-            .column_reconstruction => |w, tag| {
-                @field(self, @tagName(tag)).push(w);
+            inline .aggregate, .attestation, .unknown_block_aggregate, .unknown_block_attestation, .sync_contribution, .sync_message, .column_reconstruction => |w, tag| {
+                if (@field(self, @tagName(tag)).push(w)) |dropped| {
+                    self.items_dropped_full += 1;
+                    self.cleanupItem(@unionInit(WorkItem, @tagName(tag), dropped));
+                }
             },
 
             // ── Batch items are produced internally, not routed from inbound ──
@@ -667,7 +766,7 @@ test "WorkQueues: sync-aware dropping" {
     wq.sync_state = .syncing;
 
     // Attestation should be dropped during sync.
-    const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+    const dummy_handle = GossipDataHandle.initBorrowed(@ptrFromInt(0xDEAD));
     wq.routeToQueue(.{ .attestation = .{
         .peer_id = 1,
         .message_id = testMessageId(1),
@@ -687,6 +786,111 @@ test "WorkQueues: sync-aware dropping" {
     } });
 
     try testing.expectEqual(@as(u32, 1), wq.status.len);
+}
+
+const DropCounterHandle = struct {
+    allocator: Allocator,
+    counter: *u32,
+
+    pub fn deinit(self: *DropCounterHandle) void {
+        self.counter.* += 1;
+        self.allocator.destroy(self);
+    }
+};
+
+fn makeOwnedHandle(allocator: Allocator, counter: *u32) !GossipDataHandle {
+    const handle = try allocator.create(DropCounterHandle);
+    handle.* = .{
+        .allocator = allocator,
+        .counter = counter,
+    };
+    return GossipDataHandle.initOwned(DropCounterHandle, handle);
+}
+
+test "WorkQueues: sync drop deinitializes owned gossip data" {
+    const allocator = testing.allocator;
+    var config = testQueueConfig();
+    config.attestation = 1;
+
+    var wq = try WorkQueues.init(allocator, config);
+    defer wq.deinit();
+    wq.sync_state = .syncing;
+
+    var dropped: u32 = 0;
+    wq.routeToQueue(.{ .attestation = .{
+        .peer_id = 1,
+        .message_id = testMessageId(1),
+        .data = try makeOwnedHandle(allocator, &dropped),
+        .subnet_id = 0,
+        .seen_timestamp_ns = 100,
+    } });
+
+    try testing.expectEqual(@as(u32, 1), dropped);
+    try testing.expect(wq.attestation.isEmpty());
+}
+
+test "WorkQueues: LIFO overflow deinitializes dropped owned gossip data" {
+    const allocator = testing.allocator;
+    var config = testQueueConfig();
+    config.attestation = 1;
+
+    var wq = try WorkQueues.init(allocator, config);
+    defer wq.deinit();
+
+    var dropped_oldest: u32 = 0;
+    var dropped_newest: u32 = 0;
+    wq.routeToQueue(.{ .attestation = .{
+        .peer_id = 1,
+        .message_id = testMessageId(1),
+        .data = try makeOwnedHandle(allocator, &dropped_oldest),
+        .subnet_id = 0,
+        .seen_timestamp_ns = 100,
+    } });
+    wq.routeToQueue(.{ .attestation = .{
+        .peer_id = 2,
+        .message_id = testMessageId(2),
+        .data = try makeOwnedHandle(allocator, &dropped_newest),
+        .subnet_id = 1,
+        .seen_timestamp_ns = 200,
+    } });
+
+    try testing.expectEqual(@as(u32, 1), dropped_oldest);
+    try testing.expectEqual(@as(u32, 0), dropped_newest);
+
+    const queued = wq.popHighestPriority().?;
+    defer queued.deinit(allocator);
+    try testing.expectEqual(WorkType.attestation, queued.workType());
+}
+
+test "WorkQueues: FIFO overflow deinitializes rejected owned gossip data" {
+    const allocator = testing.allocator;
+    var config = testQueueConfig();
+    config.gossip_voluntary_exit = 1;
+
+    var wq = try WorkQueues.init(allocator, config);
+    defer wq.deinit();
+
+    var dropped_existing: u32 = 0;
+    var dropped_rejected: u32 = 0;
+    wq.routeToQueue(.{ .gossip_voluntary_exit = .{
+        .peer_id = 1,
+        .message_id = testMessageId(1),
+        .data = try makeOwnedHandle(allocator, &dropped_existing),
+        .seen_timestamp_ns = 100,
+    } });
+    wq.routeToQueue(.{ .gossip_voluntary_exit = .{
+        .peer_id = 2,
+        .message_id = testMessageId(2),
+        .data = try makeOwnedHandle(allocator, &dropped_rejected),
+        .seen_timestamp_ns = 200,
+    } });
+
+    try testing.expectEqual(@as(u32, 0), dropped_existing);
+    try testing.expectEqual(@as(u32, 1), dropped_rejected);
+
+    const queued = wq.popHighestPriority().?;
+    defer queued.deinit(allocator);
+    try testing.expectEqual(WorkType.gossip_voluntary_exit, queued.workType());
 }
 
 /// Test helper: tiny queue config with capacity 4 for all queues.

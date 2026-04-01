@@ -186,6 +186,12 @@ pub const BeaconNode = struct {
     // Peer manager — tracks peer connections, scoring, and lifecycle (v2).
     peer_manager: ?*PeerManager = null,
 
+    // Validator-driven subnet state for gossip subscriptions, metadata, and
+    // peer prioritization.
+    subnet_service: ?*networking.SubnetService = null,
+    gossip_attestation_subscriptions: networking.peer_info.AttnetsBitfield = networking.peer_info.AttnetsBitfield.initEmpty(),
+    gossip_sync_subscriptions: networking.peer_info.SyncnetsBitfield = networking.peer_info.SyncnetsBitfield.initEmpty(),
+
     // P2P service (lazy-initialized via startP2p).
     // Owns the libp2p Switch, gossipsub service, and gossip adapter.
     p2p_service: ?P2pService = null,
@@ -833,7 +839,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                     var j: u32 = 0;
                     while (j < batch.count) : (j += 1) {
                         const att_work = batch.items[j];
-                        const queued: *QueuedAttestation = @ptrCast(@alignCast(att_work.data));
+                        const queued = att_work.data.cast(QueuedAttestation);
                         if (!verifyFn(gh.node, queued.ssz_bytes)) {
                             batch_valid = false;
                             break;
@@ -851,8 +857,8 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             var i: u32 = 0;
             while (i < batch.count) : (i += 1) {
                 const att_work = batch.items[i];
-                const queued: *QueuedAttestation = @ptrCast(@alignCast(att_work.data));
-                defer queued.deinit();
+                const queued = att_work.data.cast(QueuedAttestation);
+                defer att_work.data.deinit();
 
                 if (!batch_valid) {
                     // Batch failed — verify individually to find the bad one(s).
@@ -889,15 +895,18 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             var i: u32 = 0;
             while (i < batch.count) : (i += 1) {
                 const agg_work = batch.items[i];
-                _ = agg_work; // TODO: import individual aggregate
+                handleQueuedAggregate(node, agg_work);
             }
+        },
+        .aggregate => |work| {
+            handleQueuedAggregate(node, work);
         },
         .attestation => |att_work| {
             // Single attestation (not batched).
             // BLS verify and import to fork choice.
             const QueuedAttestation = gossip_handler_mod.QueuedAttestation;
-            const queued: *QueuedAttestation = @ptrCast(@alignCast(att_work.data));
-            defer queued.deinit();
+            const queued = att_work.data.cast(QueuedAttestation);
+            defer att_work.data.deinit();
 
             // BLS signature verification.
             if (node.gossip_handler) |gh| {
@@ -919,12 +928,168 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                 std.log.warn("FC onSingleVote failed validator={d}: {}", .{ queued.att.attester_index, err });
             };
         },
+        .gossip_voluntary_exit => |work| {
+            handleQueuedVoluntaryExit(node, work);
+        },
+        .gossip_proposer_slashing => |work| {
+            handleQueuedPoolObject(node, work, .proposer_slashing);
+        },
+        .gossip_attester_slashing => |work| {
+            handleQueuedPoolObject(node, work, .attester_slashing);
+        },
+        .gossip_bls_to_exec => |work| {
+            handleQueuedPoolObject(node, work, .bls_to_execution_change);
+        },
+        .sync_contribution => |work| {
+            handleQueuedSyncContribution(node, work);
+        },
+        .sync_message => |work| {
+            handleQueuedSyncMessage(node, work);
+        },
         else => {
             // For all other work types, log at debug level.
             // Full handler wiring per work type is progressive — add as needed.
             std.log.debug("Processor: dispatched {s}", .{@tagName(wtype)});
         },
     }
+}
+
+const PoolObjectKind = enum {
+    proposer_slashing,
+    attester_slashing,
+    bls_to_execution_change,
+};
+
+fn handleQueuedAggregate(
+    node: *BeaconNode,
+    work: processor_mod.work_item.AggregateWork,
+) void {
+    const QueuedSszBytes = gossip_handler_mod.QueuedSszBytes;
+    const queued = work.data.cast(QueuedSszBytes);
+    defer work.data.deinit();
+
+    const decoded = networking.gossip_decoding.decodeFromSszBytes(
+        node.allocator,
+        .beacon_aggregate_and_proof,
+        queued.ssz_bytes,
+        queued.fork_seq,
+    ) catch |err| {
+        std.log.warn("Processor: aggregate decode failed: {}", .{err});
+        return;
+    };
+    const agg = decoded.beacon_aggregate_and_proof;
+
+    std.log.info("Accepted aggregate: aggregator={d} slot={d} target_epoch={d}", .{
+        agg.aggregator_index,
+        agg.attestation_slot,
+        agg.attestation_target_epoch,
+    });
+}
+
+fn handleQueuedVoluntaryExit(
+    node: *BeaconNode,
+    work: processor_mod.work_item.PoolObjectWork,
+) void {
+    const gh = node.gossip_handler orelse {
+        work.data.deinit();
+        return;
+    };
+    const importFn = gh.importVoluntaryExitFn orelse {
+        work.data.deinit();
+        return;
+    };
+
+    const QueuedSszBytes = gossip_handler_mod.QueuedSszBytes;
+    const queued = work.data.cast(QueuedSszBytes);
+    defer work.data.deinit();
+
+    var exit: types.phase0.SignedVoluntaryExit.Type = undefined;
+    types.phase0.SignedVoluntaryExit.deserializeFromBytes(queued.ssz_bytes, &exit) catch |err| {
+        std.log.warn("Processor: voluntary exit decode failed: {}", .{err});
+        return;
+    };
+
+    importFn(gh.node, exit.message.validator_index, exit.message.epoch) catch |err| {
+        std.log.warn("Processor: voluntary exit import failed for validator {d}: {}", .{
+            exit.message.validator_index, err,
+        });
+    };
+}
+
+fn handleQueuedPoolObject(
+    node: *BeaconNode,
+    work: processor_mod.work_item.PoolObjectWork,
+    kind: PoolObjectKind,
+) void {
+    const gh = node.gossip_handler orelse {
+        work.data.deinit();
+        return;
+    };
+
+    const importFn = switch (kind) {
+        .proposer_slashing => gh.importProposerSlashingFn,
+        .attester_slashing => gh.importAttesterSlashingFn,
+        .bls_to_execution_change => gh.importBlsChangeFn,
+    } orelse {
+        work.data.deinit();
+        return;
+    };
+
+    const QueuedSszBytes = gossip_handler_mod.QueuedSszBytes;
+    const queued = work.data.cast(QueuedSszBytes);
+    defer work.data.deinit();
+
+    importFn(gh.node, queued.ssz_bytes) catch |err| {
+        switch (kind) {
+            .proposer_slashing => std.log.warn("Processor: proposer slashing import failed: {}", .{err}),
+            .attester_slashing => std.log.warn("Processor: attester slashing import failed: {}", .{err}),
+            .bls_to_execution_change => std.log.warn("Processor: BLS change import failed: {}", .{err}),
+        }
+    };
+}
+
+fn handleQueuedSyncContribution(
+    node: *BeaconNode,
+    work: processor_mod.work_item.SyncContributionWork,
+) void {
+    const gh = node.gossip_handler orelse {
+        work.data.deinit();
+        return;
+    };
+    const importFn = gh.importSyncContributionFn orelse {
+        work.data.deinit();
+        return;
+    };
+
+    const QueuedSszBytes = gossip_handler_mod.QueuedSszBytes;
+    const queued = work.data.cast(QueuedSszBytes);
+    defer work.data.deinit();
+
+    importFn(gh.node, queued.ssz_bytes) catch |err| {
+        std.log.warn("Processor: sync contribution import failed: {}", .{err});
+    };
+}
+
+fn handleQueuedSyncMessage(
+    node: *BeaconNode,
+    work: processor_mod.work_item.SyncMessageWork,
+) void {
+    const gh = node.gossip_handler orelse {
+        work.data.deinit();
+        return;
+    };
+    const importFn = gh.importSyncCommitteeMessageFn orelse {
+        work.data.deinit();
+        return;
+    };
+
+    const QueuedSszBytes = gossip_handler_mod.QueuedSszBytes;
+    const queued = work.data.cast(QueuedSszBytes);
+    defer work.data.deinit();
+
+    importFn(gh.node, queued.ssz_bytes, work.subnet_id) catch |err| {
+        std.log.warn("Processor: sync committee message import failed: {}", .{err});
+    };
 }
 
 // Gossip callbacks are defined in gossip_node_callbacks.zig.
@@ -935,3 +1100,111 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+const ProcessorImportTestContext = struct {
+    validator_index: ?u64 = null,
+    exit_epoch: ?u64 = null,
+    sync_subnet: ?u64 = null,
+    sync_bytes_len: usize = 0,
+
+    fn importVoluntaryExit(ptr: *anyopaque, validator_index: u64, epoch: u64) anyerror!void {
+        const ctx: *ProcessorImportTestContext = @ptrCast(@alignCast(ptr));
+        ctx.validator_index = validator_index;
+        ctx.exit_epoch = epoch;
+    }
+
+    fn importSyncCommitteeMessage(ptr: *anyopaque, ssz_bytes: []const u8, subnet: u64) anyerror!void {
+        const ctx: *ProcessorImportTestContext = @ptrCast(@alignCast(ptr));
+        ctx.sync_subnet = subnet;
+        ctx.sync_bytes_len = ssz_bytes.len;
+    }
+};
+
+fn makeQueuedSszHandle(
+    allocator: Allocator,
+    fork_seq: config_mod.ForkSeq,
+    ssz_bytes: []const u8,
+) !processor_mod.work_item.GossipDataHandle {
+    const QueuedSszBytes = gossip_handler_mod.QueuedSszBytes;
+    const queued = try allocator.create(QueuedSszBytes);
+    errdefer allocator.destroy(queued);
+
+    const ssz_copy = try allocator.dupe(u8, ssz_bytes);
+    queued.* = .{
+        .ssz_bytes = ssz_copy,
+        .allocator = allocator,
+        .fork_seq = fork_seq,
+    };
+    return processor_mod.work_item.GossipDataHandle.initOwned(QueuedSszBytes, queued);
+}
+
+test "processorHandlerCallback imports queued voluntary exits" {
+    const allocator = std.testing.allocator;
+
+    var ctx = ProcessorImportTestContext{};
+    var node: BeaconNode = undefined;
+    node.allocator = allocator;
+
+    var gh: GossipHandler = undefined;
+    gh.node = @ptrCast(&ctx);
+    gh.importVoluntaryExitFn = &ProcessorImportTestContext.importVoluntaryExit;
+    node.gossip_handler = &gh;
+
+    var exit = types.phase0.SignedVoluntaryExit.Type{
+        .message = .{
+            .epoch = 12,
+            .validator_index = 34,
+        },
+        .signature = [_]u8{0} ** 96,
+    };
+    const ssz_size = types.phase0.SignedVoluntaryExit.fixed_size;
+    const ssz_bytes = try allocator.alloc(u8, ssz_size);
+    defer allocator.free(ssz_bytes);
+    _ = types.phase0.SignedVoluntaryExit.serializeIntoBytes(&exit, ssz_bytes);
+
+    processorHandlerCallback(.{ .gossip_voluntary_exit = .{
+        .peer_id = 1,
+        .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
+        .data = try makeQueuedSszHandle(allocator, .phase0, ssz_bytes),
+        .seen_timestamp_ns = 0,
+    } }, @ptrCast(&node));
+
+    try std.testing.expectEqual(@as(?u64, 34), ctx.validator_index);
+    try std.testing.expectEqual(@as(?u64, 12), ctx.exit_epoch);
+}
+
+test "processorHandlerCallback imports queued sync committee messages" {
+    const allocator = std.testing.allocator;
+
+    var ctx = ProcessorImportTestContext{};
+    var node: BeaconNode = undefined;
+    node.allocator = allocator;
+
+    var gh: GossipHandler = undefined;
+    gh.node = @ptrCast(&ctx);
+    gh.importSyncCommitteeMessageFn = &ProcessorImportTestContext.importSyncCommitteeMessage;
+    node.gossip_handler = &gh;
+
+    var msg = types.altair.SyncCommitteeMessage.Type{
+        .slot = 99,
+        .beacon_block_root = [_]u8{0xAB} ** 32,
+        .validator_index = 7,
+        .signature = [_]u8{0xCD} ** 96,
+    };
+    const ssz_size = types.altair.SyncCommitteeMessage.fixed_size;
+    const ssz_bytes = try allocator.alloc(u8, ssz_size);
+    defer allocator.free(ssz_bytes);
+    _ = types.altair.SyncCommitteeMessage.serializeIntoBytes(&msg, ssz_bytes);
+
+    processorHandlerCallback(.{ .sync_message = .{
+        .peer_id = 1,
+        .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
+        .data = try makeQueuedSszHandle(allocator, .altair, ssz_bytes),
+        .slot = msg.slot,
+        .subnet_id = 3,
+        .seen_timestamp_ns = 0,
+    } }, @ptrCast(&node));
+
+    try std.testing.expectEqual(@as(?u64, 3), ctx.sync_subnet);
+    try std.testing.expectEqual(ssz_bytes.len, ctx.sync_bytes_len);
+}

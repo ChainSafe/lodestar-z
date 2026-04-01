@@ -8,6 +8,7 @@ const std = @import("std");
 const preset_root = @import("preset");
 const networking = @import("networking");
 const StatusMessage = networking.messages.StatusMessage;
+const MetadataV2 = networking.messages.MetadataV2;
 const ReqRespContext = networking.ReqRespContext;
 const PayloadSink = networking.req_resp_handler.PayloadSink;
 const SlotPayload = networking.req_resp_handler.SlotPayload;
@@ -48,18 +49,18 @@ fn reqRespGetStatus(ptr: *anyopaque) StatusMessage.Type {
     return node.getStatus();
 }
 
-fn reqRespGetMetadata(ptr: *anyopaque) networking.messages.MetadataV2.Type {
-    _ = ptr;
+fn reqRespGetMetadata(ptr: *anyopaque) MetadataV2.Type {
+    const node = requestNode(ptr);
     return .{
-        .seq_number = 0,
-        .attnets = .{ .data = std.mem.zeroes([8]u8) },
-        .syncnets = .{ .data = std.mem.zeroes([1]u8) },
+        .seq_number = node.api_node_identity.metadata.seq_number,
+        .attnets = .{ .data = node.api_node_identity.metadata.attnets },
+        .syncnets = .{ .data = node.api_node_identity.metadata.syncnets },
     };
 }
 
 fn reqRespGetPingSequence(ptr: *anyopaque) u64 {
-    _ = ptr;
-    return 0;
+    const node = requestNode(ptr);
+    return node.api_node_identity.metadata.seq_number;
 }
 
 fn reqRespFindBlockByRoot(ptr: *anyopaque, root: [32]u8, sink: *const PayloadSink) anyerror!void {
@@ -179,21 +180,92 @@ fn reqRespGetForkDigest(ptr: *anyopaque, slot: u64) [4]u8 {
 }
 
 fn reqRespOnGoodbye(ptr: *anyopaque, peer_id: ?[]const u8, reason: u64) void {
-    _ = ptr;
-    _ = peer_id;
-    _ = reason;
+    const node = requestNode(ptr);
+    const effective_peer_id = peer_id orelse return;
+    handlePeerGoodbye(node, effective_peer_id, reason);
 }
 
 fn reqRespOnPeerStatus(ptr: *anyopaque, peer_id: ?[]const u8, status: StatusMessage.Type) void {
     const node = requestNode(ptr);
-    const effective_peer_id = peer_id orelse "unknown";
+    const effective_peer_id = peer_id orelse return;
+    const irrelevance = handlePeerStatus(node, effective_peer_id, status);
+    if (irrelevance) |code| {
+        std.log.info("Peer {s} failed relevance check during inbound status handling: {s}", .{
+            effective_peer_id,
+            @tagName(code),
+        });
+    }
+}
+
+pub fn handlePeerStatus(node: *BeaconNode, peer_id: []const u8, status: StatusMessage.Type) ?networking.IrrelevantPeerCode {
+    var irrelevance: ?networking.IrrelevantPeerCode = null;
+    var registered_new_peer = false;
+
+    if (node.peer_manager) |pm| {
+        const now_ms = wallTimeMs();
+        const existing = pm.getPeer(peer_id);
+        if (existing == null or !existing.?.isConnected()) {
+            const direction = if (existing) |info| info.direction orelse .inbound else .inbound;
+            if ((pm.onPeerConnected(peer_id, direction, now_ms) catch null) != null) {
+                registered_new_peer = true;
+            }
+        }
+
+        irrelevance = pm.onPeerStatus(
+            peer_id,
+            status.fork_digest,
+            status.finalized_root,
+            status.finalized_epoch,
+            status.head_root,
+            status.head_slot,
+            localCachedStatus(node),
+            node.currentHeadSlot(),
+        );
+        pm.markStatusExchange(peer_id, now_ms);
+    }
+
+    if (registered_new_peer) {
+        if (node.metrics) |metrics| metrics.peer_connected_total.incr();
+    }
 
     if (node.sync_service_inst) |sync_svc| {
-        sync_svc.onPeerStatus(effective_peer_id, status) catch |err| {
+        sync_svc.onPeerStatus(peer_id, status) catch |err| {
             std.log.warn("SyncService.onPeerStatus failed: {}", .{err});
         };
     }
-    node.unknown_chain_sync.onPeerConnected(effective_peer_id, status.head_root) catch {};
+    node.unknown_chain_sync.onPeerConnected(peer_id, status.head_root) catch {};
+
+    return irrelevance;
+}
+
+pub fn handlePeerGoodbye(node: *BeaconNode, peer_id: []const u8, reason: u64) void {
+    if (node.peer_manager) |pm| {
+        pm.onPeerDisconnecting(peer_id);
+    }
+    std.log.info("Peer sent Goodbye {s} reason={d}", .{ peer_id, reason });
+}
+
+fn localCachedStatus(node: *const BeaconNode) networking.CachedStatus {
+    const status = node.getStatus();
+    return .{
+        .fork_digest = status.fork_digest,
+        .finalized_root = status.finalized_root,
+        .finalized_epoch = status.finalized_epoch,
+        .head_root = status.head_root,
+        .head_slot = status.head_slot,
+    };
+}
+
+fn wallTimeMs() u64 {
+    var ts: std.posix.timespec = undefined;
+    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
+        .SUCCESS => {
+            const sec: u64 = if (ts.sec < 0) 0 else @intCast(ts.sec);
+            const nsec: u64 = if (ts.nsec < 0) 0 else @intCast(ts.nsec);
+            return sec * std.time.ms_per_s + (nsec / std.time.ns_per_ms);
+        },
+        else => return 0,
+    }
 }
 
 fn readSignedBeaconBlockSlot(bytes: []const u8) ?u64 {

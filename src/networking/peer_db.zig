@@ -153,6 +153,8 @@ pub const PeerDB = struct {
         info.direction = direction;
         info.connected_at_ms = now_ms;
         info.last_seen_ms = now_ms;
+        info.last_ping_response_ms = 0;
+        info.last_status_exchange_ms = 0;
         info.peer_score.last_updated_ms = now_ms;
 
         self.connected_count += 1;
@@ -272,6 +274,40 @@ pub const PeerDB = struct {
         const info = self.peers.getPtr(peer_id) orelse return;
         info.attnets = attnets;
         info.syncnets = syncnets;
+    }
+
+    /// Update metadata sequence number and subnet subscriptions.
+    pub fn updatePeerMetadata(
+        self: *PeerDB,
+        peer_id: []const u8,
+        metadata_seq: u64,
+        attnets: AttnetsBitfield,
+        syncnets: SyncnetsBitfield,
+    ) void {
+        const info = self.peers.getPtr(peer_id) orelse return;
+        info.metadata_seq = metadata_seq;
+        info.attnets = attnets;
+        info.syncnets = syncnets;
+    }
+
+    /// Record that the peer was observed responding successfully.
+    pub fn notePeerSeen(self: *PeerDB, peer_id: []const u8, now_ms: u64) void {
+        const info = self.peers.getPtr(peer_id) orelse return;
+        info.last_seen_ms = now_ms;
+    }
+
+    /// Record a successful outbound ping response.
+    pub fn markPingResponse(self: *PeerDB, peer_id: []const u8, now_ms: u64) void {
+        const info = self.peers.getPtr(peer_id) orelse return;
+        info.last_ping_response_ms = now_ms;
+        info.last_seen_ms = now_ms;
+    }
+
+    /// Record a successful Status exchange.
+    pub fn markStatusExchange(self: *PeerDB, peer_id: []const u8, now_ms: u64) void {
+        const info = self.peers.getPtr(peer_id) orelse return;
+        info.last_status_exchange_ms = now_ms;
+        info.last_seen_ms = now_ms;
     }
 
     /// Update a peer's last received Status message fields.

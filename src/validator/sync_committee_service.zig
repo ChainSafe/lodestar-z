@@ -20,7 +20,9 @@ const consensus_types = @import("consensus_types");
 const types = @import("types.zig");
 const SyncCommitteeDuty = types.SyncCommitteeDuty;
 const SyncCommitteeDutyWithProofs = types.SyncCommitteeDutyWithProofs;
-const BeaconApiClient = @import("api_client.zig").BeaconApiClient;
+const api_client = @import("api_client.zig");
+const BeaconApiClient = api_client.BeaconApiClient;
+const SyncCommitteeSubscription = api_client.SyncCommitteeSubscription;
 const ValidatorStore = @import("validator_store.zig").ValidatorStore;
 const chain_header_tracker = @import("chain_header_tracker.zig");
 const ChainHeaderTracker = chain_header_tracker.ChainHeaderTracker;
@@ -172,6 +174,7 @@ pub const SyncCommitteeService = struct {
                 self.next_duties = std.array_list.Managed(SyncCommitteeDutyWithProofs).init(self.allocator);
                 self.next_duties_period = null;
                 log.info("activated pre-fetched sync committee duties for period={d}", .{period});
+                self.publishSyncCommitteeSubscriptions(io, self.duties.items, period);
             } else {
                 self.refreshDuties(io, epoch, period) catch |err| {
                     log.err("refreshDuties period={d} error={s}", .{ period, @errorName(err) });
@@ -257,6 +260,7 @@ pub const SyncCommitteeService = struct {
 
         try self.cacheDutyList(&self.next_duties, fetched);
         self.next_duties_period = period;
+        self.publishSyncCommitteeSubscriptions(io, self.next_duties.items, period);
         log.info("pre-fetched {d} sync committee duties for period={d}", .{ fetched.len, period });
     }
 
@@ -280,6 +284,7 @@ pub const SyncCommitteeService = struct {
 
         try self.cacheDutyList(&self.duties, fetched);
         self.duties_period = period;
+        self.publishSyncCommitteeSubscriptions(io, self.duties.items, period);
         log.debug("cached {d} sync committee duties period={d}", .{ self.duties.items.len, period });
     }
 
@@ -317,6 +322,34 @@ pub const SyncCommitteeService = struct {
                 .selection_proofs = proofs,
             });
         }
+    }
+
+    fn publishSyncCommitteeSubscriptions(
+        self: *SyncCommitteeService,
+        io: Io,
+        duties: []const SyncCommitteeDutyWithProofs,
+        period: u64,
+    ) void {
+        if (duties.len == 0) return;
+
+        const subscriptions = self.allocator.alloc(SyncCommitteeSubscription, duties.len) catch |err| {
+            log.warn("alloc sync committee subscriptions failed: {s}", .{@errorName(err)});
+            return;
+        };
+        defer self.allocator.free(subscriptions);
+
+        const until_epoch = (period + 1) * self.epochs_per_sync_committee_period;
+        for (duties, subscriptions) |duty, *subscription| {
+            subscription.* = .{
+                .validator_index = duty.duty.validator_index,
+                .sync_committee_indices = duty.duty.validator_sync_committee_indices,
+                .until_epoch = until_epoch,
+            };
+        }
+
+        self.api.prepareSyncCommitteeSubnets(io, subscriptions) catch |err| {
+            log.warn("prepareSyncCommitteeSubnets failed: {s}", .{@errorName(err)});
+        };
     }
 
     // -----------------------------------------------------------------------

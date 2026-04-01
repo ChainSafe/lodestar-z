@@ -260,6 +260,13 @@ pub const SyncCommitteeContributionCallback = struct {
     /// Returns raw JSON bytes of the contribution. Caller owns.
     getSyncCommitteeContributionFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, slot: u64, subcommittee_index: u64, beacon_block_root: [32]u8) anyerror![]const u8,
 };
+
+/// Callback for validator-driven subnet subscription updates.
+pub const SubnetSubscriptionCallback = struct {
+    ptr: *anyopaque,
+    prepareBeaconCommitteeSubnetsFn: *const fn (ptr: *anyopaque, subscriptions: []const types.BeaconCommitteeSubscription) anyerror!void,
+    prepareSyncCommitteeSubnetsFn: *const fn (ptr: *anyopaque, subscriptions: []const types.SyncCommitteeSubscription) anyerror!void,
+};
 /// Validator key info for listing.
 pub const ValidatorKeyInfo = struct {
     pubkey: [48]u8,
@@ -370,6 +377,8 @@ pub const ApiContext = struct {
 
     /// Optional sync committee contribution callback. Nil until wired by BeaconNode.init.
     sync_committee_contribution: ?SyncCommitteeContributionCallback = null,
+    /// Optional validator subnet subscription callback. Nil until wired by BeaconNode.init.
+    subnet_subscriptions: ?SubnetSubscriptionCallback = null,
     /// Optional keymanager callback.
     keymanager: ?KeymanagerCallback = null,
     /// Optional validator monitor callback. Nil until wired by BeaconNode.init.

@@ -231,6 +231,20 @@ pub const NodeMetadata = struct {
     syncnets: [1]u8,
 };
 
+pub const BeaconCommitteeSubscription = struct {
+    validator_index: u64,
+    committee_index: u64,
+    committees_at_slot: u64,
+    slot: u64,
+    is_aggregator: bool,
+};
+
+pub const SyncCommitteeSubscription = struct {
+    validator_index: u64,
+    sync_committee_indices: []const u64,
+    until_epoch: u64,
+};
+
 pub const NodeVersion = struct {
     version: []const u8,
 };

@@ -23,6 +23,8 @@ pub const ATTESTATION_SUBNET_COUNT: u64 = 64;
 /// Maximum sync committee subnet index (4 on mainnet).
 pub const SYNC_COMMITTEE_SUBNET_COUNT: u64 = 4;
 
+const AttestationSubnetSet = std.StaticBitSet(@as(usize, ATTESTATION_SUBNET_COUNT));
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 pub const SubnetId = u8;
@@ -54,6 +56,10 @@ pub const SubnetService = struct {
     attnets: std.AutoHashMap(SubnetId, SubnetSubscription),
     /// Sync committee subnet subscriptions: subnet_id → SubnetSubscription
     syncnets: std.AutoHashMap(SubnetId, SubnetSubscription),
+    /// Aggregator duties keyed by target slot. Used to activate gossip
+    /// subscriptions only near the attestation duty rather than for the full
+    /// prefetch horizon.
+    aggregator_slots: std.AutoHashMap(u64, AttestationSubnetSet),
     /// Current slot, updated via onSlot.
     current_slot: u64,
     /// Extra slots to keep a subscription alive after target slot.
@@ -64,6 +70,7 @@ pub const SubnetService = struct {
             .allocator = allocator,
             .attnets = std.AutoHashMap(SubnetId, SubnetSubscription).init(allocator),
             .syncnets = std.AutoHashMap(SubnetId, SubnetSubscription).init(allocator),
+            .aggregator_slots = std.AutoHashMap(u64, AttestationSubnetSet).init(allocator),
             .current_slot = 0,
             .lookahead_slots = DEFAULT_SUBSCRIPTION_LOOKAHEAD_SLOTS,
         };
@@ -72,6 +79,7 @@ pub const SubnetService = struct {
     pub fn deinit(self: *SubnetService) void {
         self.attnets.deinit();
         self.syncnets.deinit();
+        self.aggregator_slots.deinit();
     }
 
     /// Subscribe to an attestation subnet for the given slot.
@@ -96,6 +104,14 @@ pub const SubnetService = struct {
         if (!entry.found_existing or entry.value_ptr.expiry_slot < expiry_slot) {
             entry.value_ptr.* = sub;
             log.debug("subscribed to attestation subnet {} until slot {}", .{ subnet_id, expiry_slot });
+        }
+
+        if (is_aggregator) {
+            const slot_entry = try self.aggregator_slots.getOrPut(slot);
+            if (!slot_entry.found_existing) {
+                slot_entry.value_ptr.* = AttestationSubnetSet.initEmpty();
+            }
+            slot_entry.value_ptr.set(subnet_id);
         }
     }
 
@@ -125,6 +141,11 @@ pub const SubnetService = struct {
     pub fn unsubscribeFromAttestationSubnet(self: *SubnetService, subnet_id: SubnetId) void {
         if (self.attnets.remove(subnet_id)) {
             log.debug("unsubscribed from attestation subnet {}", .{subnet_id});
+        }
+
+        var slots_iter = self.aggregator_slots.iterator();
+        while (slots_iter.next()) |entry| {
+            entry.value_ptr.unset(subnet_id);
         }
     }
 
@@ -168,6 +189,7 @@ pub const SubnetService = struct {
         self.current_slot = slot;
         self.pruneExpired(&self.attnets, "attestation");
         self.pruneExpired(&self.syncnets, "sync_committee");
+        self.pruneExpiredAggregators();
     }
 
     /// Remove expired subscriptions from a map.
@@ -207,8 +229,37 @@ pub const SubnetService = struct {
 
     /// Returns whether this node is acting as aggregator on the given attestation subnet.
     pub fn isAggregatorOnAttestationSubnet(self: *SubnetService, subnet_id: SubnetId) bool {
-        const sub = self.attnets.get(subnet_id) orelse return false;
-        return sub.expiry_slot >= self.current_slot and sub.is_aggregator;
+        var slots_iter = self.aggregator_slots.iterator();
+        while (slots_iter.next()) |entry| {
+            const target_slot = entry.key_ptr.*;
+            if (target_slot < self.current_slot) continue;
+            if (target_slot > self.current_slot + self.lookahead_slots) continue;
+            if (entry.value_ptr.isSet(subnet_id)) return true;
+        }
+        return false;
+    }
+
+    /// Returns attestation subnets whose aggregator duties are close enough that
+    /// the node should maintain a local gossip subscription now.
+    pub fn getGossipAttestationSubnets(self: *SubnetService) ![]SubnetId {
+        var active = AttestationSubnetSet.initEmpty();
+        var slots_iter = self.aggregator_slots.iterator();
+        while (slots_iter.next()) |entry| {
+            const target_slot = entry.key_ptr.*;
+            if (target_slot < self.current_slot) continue;
+            if (target_slot > self.current_slot + self.lookahead_slots) continue;
+            active.setUnion(entry.value_ptr.*);
+        }
+
+        var result = std.ArrayListUnmanaged(SubnetId).empty;
+        errdefer result.deinit(self.allocator);
+
+        var subnet: usize = 0;
+        while (subnet < ATTESTATION_SUBNET_COUNT) : (subnet += 1) {
+            if (!active.isSet(subnet)) continue;
+            try result.append(self.allocator, @intCast(subnet));
+        }
+        return result.toOwnedSlice(self.allocator);
     }
 
     /// Total number of active subscriptions (attestation + sync).
@@ -227,6 +278,23 @@ pub const SubnetService = struct {
             }
         }
         return count;
+    }
+
+    fn pruneExpiredAggregators(self: *SubnetService) void {
+        var to_remove: [64]u64 = undefined;
+        var count: usize = 0;
+
+        var iter = self.aggregator_slots.iterator();
+        while (iter.next()) |entry| {
+            if (entry.key_ptr.* < self.current_slot or entry.value_ptr.count() == 0) {
+                to_remove[count] = entry.key_ptr.*;
+                count += 1;
+            }
+        }
+
+        for (to_remove[0..count]) |slot| {
+            _ = self.aggregator_slots.remove(slot);
+        }
     }
 };
 
@@ -252,6 +320,34 @@ test "SubnetService: aggregator flag" {
     try svc.subscribeToAttestationSubnet(3, 102, true);
 
     try testing.expect(svc.isAggregatorOnAttestationSubnet(3));
+}
+
+test "SubnetService: aggregator gossip subscription activates near duty slot" {
+    var svc = SubnetService.init(testing.allocator);
+    defer svc.deinit();
+
+    svc.onSlot(10);
+    try svc.subscribeToAttestationSubnet(3, 20, true);
+    try testing.expect(!svc.isAggregatorOnAttestationSubnet(3));
+
+    svc.onSlot(18);
+    try testing.expect(svc.isAggregatorOnAttestationSubnet(3));
+
+    const gossip_subnets = try svc.getGossipAttestationSubnets();
+    defer testing.allocator.free(gossip_subnets);
+    try testing.expectEqual(@as(usize, 1), gossip_subnets.len);
+    try testing.expectEqual(@as(SubnetId, 3), gossip_subnets[0]);
+}
+
+test "SubnetService: later non-aggregator duty does not clear pending aggregator duty" {
+    var svc = SubnetService.init(testing.allocator);
+    defer svc.deinit();
+
+    svc.onSlot(30);
+    try svc.subscribeToAttestationSubnet(5, 32, true);
+    try svc.subscribeToAttestationSubnet(5, 40, false);
+
+    try testing.expect(svc.isAggregatorOnAttestationSubnet(5));
 }
 
 test "SubnetService: subscription expiry via onSlot" {

@@ -34,6 +34,7 @@ const processor_mod = @import("processor");
 const BeaconProcessor = processor_mod.BeaconProcessor;
 const WorkItem = processor_mod.WorkItem;
 const MessageId = processor_mod.work_item.MessageId;
+const GossipDataHandle = processor_mod.work_item.GossipDataHandle;
 const GossipAction = chain_gossip.GossipAction;
 const ChainState = chain_gossip.ChainState;
 
@@ -65,6 +66,19 @@ pub const QueuedAttestation = struct {
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *QueuedAttestation) void {
+        self.allocator.free(self.ssz_bytes);
+        self.allocator.destroy(self);
+    }
+};
+
+/// Heap-allocated copy of a decoded gossip payload's SSZ bytes.
+/// Used when the processor needs to import an object from raw SSZ later.
+pub const QueuedSszBytes = struct {
+    ssz_bytes: []u8,
+    allocator: std.mem.Allocator,
+    fork_seq: ForkSeq,
+
+    pub fn deinit(self: *QueuedSszBytes) void {
         self.allocator.free(self.ssz_bytes);
         self.allocator.destroy(self);
     }
@@ -260,6 +274,20 @@ pub const GossipHandler = struct {
         }
     }
 
+    fn dupeQueuedSszBytes(self: *GossipHandler, ssz_bytes: []const u8) ?GossipDataHandle {
+        const queued = self.allocator.create(QueuedSszBytes) catch return null;
+        const ssz_copy = self.allocator.dupe(u8, ssz_bytes) catch {
+            self.allocator.destroy(queued);
+            return null;
+        };
+        queued.* = .{
+            .ssz_bytes = ssz_copy,
+            .allocator = self.allocator,
+            .fork_seq = self.current_fork_seq,
+        };
+        return GossipDataHandle.initOwned(QueuedSszBytes, queued);
+    }
+
     /// Called when a gossip message arrives on the beacon_block topic.
     ///
     /// Pipeline:
@@ -376,7 +404,7 @@ pub const GossipHandler = struct {
             bp.ingest(.{ .attestation = .{
                 .peer_id = metadata.peer_id,
                 .message_id = metadata.message_id,
-                .data = @ptrCast(queued),
+                .data = GossipDataHandle.initOwned(QueuedAttestation, queued),
                 .subnet_id = @intCast(subnet_id),
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
@@ -458,11 +486,11 @@ pub const GossipHandler = struct {
         // Phase 2: Import aggregate to fork choice + attestation pool.
         // When processor is available, enqueue for priority-ordered batch processing.
         if (self.beacon_processor) |bp| {
-            const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .aggregate = .{
                 .peer_id = metadata.peer_id,
                 .message_id = metadata.message_id,
-                .data = dummy_handle,
+                .data = queued,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
@@ -521,11 +549,11 @@ pub const GossipHandler = struct {
 
         // Phase 2: import to op pool.
         if (self.beacon_processor) |bp| {
-            const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .gossip_voluntary_exit = .{
                 .peer_id = metadata.peer_id,
                 .message_id = metadata.message_id,
-                .data = dummy_handle,
+                .data = queued,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
@@ -591,11 +619,11 @@ pub const GossipHandler = struct {
 
         // Phase 2: import raw SSZ bytes to op pool.
         if (self.beacon_processor) |bp| {
-            const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .gossip_proposer_slashing = .{
                 .peer_id = metadata.peer_id,
                 .message_id = metadata.message_id,
-                .data = dummy_handle,
+                .data = queued,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
@@ -662,11 +690,11 @@ pub const GossipHandler = struct {
 
         // Phase 2: import raw SSZ bytes.
         if (self.beacon_processor) |bp| {
-            const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .gossip_attester_slashing = .{
                 .peer_id = metadata.peer_id,
                 .message_id = metadata.message_id,
-                .data = dummy_handle,
+                .data = queued,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
@@ -726,11 +754,11 @@ pub const GossipHandler = struct {
 
         // Phase 2: import raw SSZ bytes to op pool.
         if (self.beacon_processor) |bp| {
-            const dummy_handle: *anyopaque = @ptrFromInt(0xDEAD);
+            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .gossip_bls_to_exec = .{
                 .peer_id = metadata.peer_id,
                 .message_id = metadata.message_id,
-                .data = dummy_handle,
+                .data = queued,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
@@ -784,9 +812,11 @@ pub const GossipHandler = struct {
 
         // Phase 2: import to sync contribution pool.
         if (self.beacon_processor) |bp| {
+            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .sync_contribution = .{
                 .peer_id = metadata.peer_id,
                 .message_id = metadata.message_id,
+                .data = queued,
                 .slot = contrib.contribution_slot,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
@@ -853,9 +883,11 @@ pub const GossipHandler = struct {
 
         // Phase 2: import to sync committee message pool.
         if (self.beacon_processor) |bp| {
+            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .sync_message = .{
                 .peer_id = metadata.peer_id,
                 .message_id = metadata.message_id,
+                .data = queued,
                 .slot = msg.slot,
                 .subnet_id = @intCast(subnet_id),
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,

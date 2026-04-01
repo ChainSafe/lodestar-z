@@ -110,15 +110,18 @@ pub fn LifoQueue(comptime T: type) type {
             };
         }
 
-        /// Push an item. If the queue is full, the oldest item is silently
-        /// dropped to make room (the caller should bump a metric).
-        pub fn push(self: *Self, item: T) void {
+        /// Push an item. If the queue is full, the oldest item is returned so
+        /// the caller can account for and clean it up.
+        pub fn push(self: *Self, item: T) ?T {
+            var dropped: ?T = null;
             if (self.len == self.capacity) {
                 // Overwrite the oldest item (at the tail end).
                 // Head will advance backwards to the new slot.
                 // The oldest item is at position (head + len - 1) % cap
                 // but since len == cap, the slot we're about to write into
                 // is the oldest.  We decrement len first, then push normally.
+                const tail_index = (self.head + self.len - 1) % self.capacity;
+                dropped = self.buffer[tail_index];
                 self.len -= 1;
             }
             // Advance head backwards (wrapping) and write the new item there.
@@ -129,6 +132,7 @@ pub fn LifoQueue(comptime T: type) type {
             }
             self.buffer[self.head] = item;
             self.len += 1;
+            return dropped;
         }
 
         /// Pop the most recently pushed item (LIFO order).
@@ -259,9 +263,9 @@ test "LifoQueue: basic push/pop ordering" {
 
     try testing.expect(q.isEmpty());
 
-    q.push(10);
-    q.push(20);
-    q.push(30);
+    _ = q.push(10);
+    _ = q.push(20);
+    _ = q.push(30);
     try testing.expectEqual(@as(u32, 3), q.len);
 
     // LIFO: newest comes out first.
@@ -275,13 +279,13 @@ test "LifoQueue: drops oldest when full" {
     var buf: [3]u32 = undefined;
     var q = LifoQueue(u32).init(&buf);
 
-    q.push(1);
-    q.push(2);
-    q.push(3);
+    _ = q.push(1);
+    _ = q.push(2);
+    _ = q.push(3);
     try testing.expect(q.isFull());
 
     // Push 4 — should drop 1 (oldest).
-    q.push(4);
+    _ = q.push(4);
     try testing.expectEqual(@as(u32, 3), q.len);
 
     // Pop all: 4 (newest), 3, 2 — item 1 was dropped.
@@ -295,13 +299,13 @@ test "LifoQueue: drops oldest repeatedly when full" {
     var buf: [2]u32 = undefined;
     var q = LifoQueue(u32).init(&buf);
 
-    q.push(1);
-    q.push(2);
+    _ = q.push(1);
+    _ = q.push(2);
 
     // Push 3, 4, 5 — each should drop the oldest.
-    q.push(3);
-    q.push(4);
-    q.push(5);
+    _ = q.push(3);
+    _ = q.push(4);
+    _ = q.push(5);
     try testing.expectEqual(@as(u32, 2), q.len);
 
     // Only the two newest should remain: 5, 4.
@@ -317,7 +321,7 @@ test "LifoQueue: popBatch" {
     // Push 1..6.
     var i: u32 = 1;
     while (i <= 6) : (i += 1) {
-        q.push(i);
+        _ = q.push(i);
     }
     try testing.expectEqual(@as(u32, 6), q.len);
 
@@ -340,8 +344,8 @@ test "LifoQueue: popBatch when fewer items than requested" {
     var buf: [4]u32 = undefined;
     var q = LifoQueue(u32).init(&buf);
 
-    q.push(10);
-    q.push(20);
+    _ = q.push(10);
+    _ = q.push(20);
 
     var batch: [8]u32 = undefined;
     const count = q.popBatch(&batch);
@@ -355,13 +359,13 @@ test "LifoQueue: wrap-around with push and pop interleaved" {
     var buf: [3]u32 = undefined;
     var q = LifoQueue(u32).init(&buf);
 
-    q.push(1);
-    q.push(2);
+    _ = q.push(1);
+    _ = q.push(2);
     // Pop one (newest = 2).
     try testing.expectEqual(@as(u32, 2), q.pop().?);
 
-    q.push(3);
-    q.push(4);
+    _ = q.push(3);
+    _ = q.push(4);
     // Queue has: 4 (newest), 3, 1 (oldest). len=3.
     try testing.expectEqual(@as(u32, 3), q.len);
 
@@ -375,14 +379,14 @@ test "LifoQueue: clear" {
     var buf: [4]u32 = undefined;
     var q = LifoQueue(u32).init(&buf);
 
-    q.push(1);
-    q.push(2);
+    _ = q.push(1);
+    _ = q.push(2);
     q.clear();
     try testing.expect(q.isEmpty());
     try testing.expectEqual(@as(?u32, null), q.pop());
 
     // Can reuse after clear.
-    q.push(99);
+    _ = q.push(99);
     try testing.expectEqual(@as(u32, 99), q.pop().?);
 }
 
@@ -401,9 +405,9 @@ test "LifoQueue: capacity of 1" {
     var buf: [1]u32 = undefined;
     var q = LifoQueue(u32).init(&buf);
 
-    q.push(42);
+    _ = q.push(42);
     try testing.expect(q.isFull());
-    q.push(99); // Should drop 42.
+    _ = q.push(99); // Should drop 42.
     try testing.expectEqual(@as(u32, 1), q.len);
     try testing.expectEqual(@as(u32, 99), q.pop().?);
     try testing.expect(q.isEmpty());

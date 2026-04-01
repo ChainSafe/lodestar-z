@@ -233,6 +233,26 @@ pub fn getSyncDuties(
     };
 }
 
+/// POST /eth/v1/validator/beacon_committee_subscriptions
+pub fn prepareBeaconCommitteeSubnet(
+    ctx: *ApiContext,
+    subscriptions: []const types.BeaconCommitteeSubscription,
+) !HandlerResult(void) {
+    const cb = ctx.subnet_subscriptions orelse return error.NotImplemented;
+    try cb.prepareBeaconCommitteeSubnetsFn(cb.ptr, subscriptions);
+    return .{ .data = {} };
+}
+
+/// POST /eth/v1/validator/sync_committee_subscriptions
+pub fn prepareSyncCommitteeSubnets(
+    ctx: *ApiContext,
+    subscriptions: []const types.SyncCommitteeSubscription,
+) !HandlerResult(void) {
+    const cb = ctx.subnet_subscriptions orelse return error.NotImplemented;
+    try cb.prepareSyncCommitteeSubnetsFn(cb.ptr, subscriptions);
+    return .{ .data = {} };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -286,6 +306,78 @@ test "getSyncDuties returns NotImplemented without head state" {
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const result = getSyncDuties(&tc.ctx, 0, &[_]u64{});
     try std.testing.expectError(error.NotImplemented, result);
+}
+
+test "prepareBeaconCommitteeSubnet forwards subscriptions to callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const Mock = struct {
+        var called = false;
+        fn prepareBeacon(ptr: *anyopaque, subscriptions: []const types.BeaconCommitteeSubscription) anyerror!void {
+            _ = ptr;
+            called = true;
+            try std.testing.expectEqual(@as(usize, 1), subscriptions.len);
+            try std.testing.expectEqual(@as(u64, 7), subscriptions[0].slot);
+        }
+
+        fn prepareSync(_: *anyopaque, _: []const types.SyncCommitteeSubscription) anyerror!void {}
+    };
+
+    var dummy: u8 = 0;
+    tc.ctx.subnet_subscriptions = .{
+        .ptr = &dummy,
+        .prepareBeaconCommitteeSubnetsFn = &Mock.prepareBeacon,
+        .prepareSyncCommitteeSubnetsFn = &Mock.prepareSync,
+    };
+
+    const result = try prepareBeaconCommitteeSubnet(&tc.ctx, &.{
+        .{
+            .validator_index = 1,
+            .committee_index = 2,
+            .committees_at_slot = 3,
+            .slot = 7,
+            .is_aggregator = true,
+        },
+    });
+    _ = result;
+    try std.testing.expect(Mock.called);
+}
+
+test "prepareSyncCommitteeSubnets forwards subscriptions to callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const Mock = struct {
+        var called = false;
+        fn prepareBeacon(_: *anyopaque, _: []const types.BeaconCommitteeSubscription) anyerror!void {}
+
+        fn prepareSync(ptr: *anyopaque, subscriptions: []const types.SyncCommitteeSubscription) anyerror!void {
+            _ = ptr;
+            called = true;
+            try std.testing.expectEqual(@as(usize, 1), subscriptions.len);
+            try std.testing.expectEqual(@as(usize, 2), subscriptions[0].sync_committee_indices.len);
+            try std.testing.expectEqual(@as(u64, 512), subscriptions[0].until_epoch);
+        }
+    };
+
+    var dummy: u8 = 0;
+    const indices = [_]u64{ 0, 128 };
+    tc.ctx.subnet_subscriptions = .{
+        .ptr = &dummy,
+        .prepareBeaconCommitteeSubnetsFn = &Mock.prepareBeacon,
+        .prepareSyncCommitteeSubnetsFn = &Mock.prepareSync,
+    };
+
+    const result = try prepareSyncCommitteeSubnets(&tc.ctx, &.{
+        .{
+            .validator_index = 1,
+            .sync_committee_indices = &indices,
+            .until_epoch = 512,
+        },
+    });
+    _ = result;
+    try std.testing.expect(Mock.called);
 }
 
 // ---------------------------------------------------------------------------

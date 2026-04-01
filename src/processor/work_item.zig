@@ -48,9 +48,44 @@ pub const DataColumnHandle = *anyopaque;
 /// Opaque handle for execution payload envelope. TODO: Replace with real type.
 pub const ExecutionPayloadHandle = *anyopaque;
 
-/// Opaque handle for serialised gossip message bytes.
-/// Points to a buffer managed by the gossip layer.
-pub const GossipDataHandle = *anyopaque;
+/// Type-erased handle for queued gossip payload data.
+///
+/// The gossip layer can attach an owned payload wrapper with a concrete
+/// `deinit()` method, and the processor can later destroy it without knowing
+/// the concrete type.
+pub const GossipDataHandle = struct {
+    ptr: *anyopaque,
+    deinitFn: *const fn (ptr: *anyopaque) void,
+
+    pub fn initOwned(comptime T: type, ptr: *T) GossipDataHandle {
+        return .{
+            .ptr = @ptrCast(ptr),
+            .deinitFn = struct {
+                fn call(raw: *anyopaque) void {
+                    const typed: *T = @ptrCast(@alignCast(raw));
+                    typed.deinit();
+                }
+            }.call,
+        };
+    }
+
+    pub fn initBorrowed(ptr: *anyopaque) GossipDataHandle {
+        return .{
+            .ptr = ptr,
+            .deinitFn = struct {
+                fn call(_: *anyopaque) void {}
+            }.call,
+        };
+    }
+
+    pub fn cast(self: GossipDataHandle, comptime T: type) *T {
+        return @ptrCast(@alignCast(self.ptr));
+    }
+
+    pub fn deinit(self: GossipDataHandle) void {
+        self.deinitFn(self.ptr);
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Work payload structs — one per logical work type.
@@ -140,6 +175,7 @@ pub const ReprocessWork = struct {
 pub const SyncMessageWork = struct {
     peer_id: PeerId,
     message_id: MessageId,
+    data: GossipDataHandle,
     slot: u64,
     subnet_id: u8,
     seen_timestamp_ns: i64,
@@ -149,6 +185,7 @@ pub const SyncMessageWork = struct {
 pub const SyncContributionWork = struct {
     peer_id: PeerId,
     message_id: MessageId,
+    data: GossipDataHandle,
     slot: u64,
     seen_timestamp_ns: i64,
 };
@@ -421,6 +458,25 @@ pub const WorkItem = union(WorkType) {
     /// Returns true if this item should be dropped during initial sync.
     pub fn dropDuringSync(self: WorkItem) bool {
         return self.workType().dropDuringSync();
+    }
+
+    pub fn deinit(self: WorkItem, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .delayed_block => |work| work.block.deinit(allocator),
+            .gossip_block => |work| work.block.deinit(allocator),
+            .rpc_block => |work| work.block.deinit(allocator),
+            .attestation => |work| work.data.deinit(),
+            .aggregate => |work| work.data.deinit(),
+            .unknown_block_aggregate => |work| work.data.deinit(),
+            .unknown_block_attestation => |work| work.data.deinit(),
+            .sync_contribution => |work| work.data.deinit(),
+            .sync_message => |work| work.data.deinit(),
+            .gossip_attester_slashing => |work| work.data.deinit(),
+            .gossip_proposer_slashing => |work| work.data.deinit(),
+            .gossip_voluntary_exit => |work| work.data.deinit(),
+            .gossip_bls_to_exec => |work| work.data.deinit(),
+            else => {},
+        }
     }
 };
 

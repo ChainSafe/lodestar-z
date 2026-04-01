@@ -5,7 +5,6 @@ const Io = std.Io;
 
 const api_mod = @import("api");
 const config_mod = @import("config");
-const db_mod = @import("db");
 const validator_mod = @import("validator");
 
 pub const Config = struct {
@@ -25,10 +24,7 @@ pub const Runtime = struct {
     keymanager_runtime: validator_mod.KeymanagerRuntime,
     api_context: api_mod.ApiContext,
     server: api_mod.HttpServer,
-    head_tracker: api_mod.context.HeadTracker,
-    sync_status: api_mod.context.SyncStatus,
     node_identity: api_mod.types.NodeIdentity,
-    dummy_db: db_mod.BeaconDB = undefined,
     thread_handle: ?std.Thread = null,
 
     pub fn init(
@@ -51,22 +47,6 @@ pub const Runtime = struct {
             .client = client,
             .config = config,
             .keymanager_runtime = keymanager_runtime,
-            .head_tracker = .{
-                .head_slot = 0,
-                .head_root = [_]u8{0} ** 32,
-                .head_state_root = [_]u8{0} ** 32,
-                .finalized_slot = 0,
-                .finalized_root = [_]u8{0} ** 32,
-                .justified_slot = 0,
-                .justified_root = [_]u8{0} ** 32,
-            },
-            .sync_status = .{
-                .head_slot = 0,
-                .sync_distance = 0,
-                .is_syncing = false,
-                .is_optimistic = false,
-                .el_offline = false,
-            },
             .node_identity = .{
                 .peer_id = "",
                 .enr = "",
@@ -83,10 +63,7 @@ pub const Runtime = struct {
         };
 
         runtime.api_context = .{
-            .head_tracker = &runtime.head_tracker,
-            .db = &runtime.dummy_db,
             .node_identity = &runtime.node_identity,
-            .sync_status = &runtime.sync_status,
             .beacon_config = beacon_config,
             .allocator = allocator,
             .keymanager = runtime.keymanager_runtime.callback(),

@@ -197,6 +197,16 @@ pub const routes = [_]Route{
         .path = "/eth/v1/validator/duties/sync/{epoch}",
         .operation_id = "getSyncDuties",
     },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/beacon_committee_subscriptions",
+        .operation_id = "prepareBeaconCommitteeSubnet",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/sync_committee_subscriptions",
+        .operation_id = "prepareSyncCommitteeSubnets",
+    },
 
     .{
         .method = .GET,
@@ -654,5 +664,5 @@ test "findRoute wrong method" {
 
 test "route count" {
     // Verify we defined all expected routes.
-    try std.testing.expectEqual(@as(usize, 64), routes.len);
+    try std.testing.expectEqual(@as(usize, 66), routes.len);
 }

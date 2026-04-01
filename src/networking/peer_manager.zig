@@ -63,6 +63,12 @@ const RelevanceStatus = peer_info_mod.RelevanceStatus;
 
 /// Heartbeat interval in milliseconds (30 seconds).
 pub const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
+/// Periodic ping interval for inbound peers.
+pub const INBOUND_PING_INTERVAL_MS: u64 = 15_000;
+/// Periodic ping interval for outbound peers.
+pub const OUTBOUND_PING_INTERVAL_MS: u64 = 20_000;
+/// Periodic Status refresh interval for connected peers.
+pub const STATUS_REFRESH_INTERVAL_MS: u64 = 5 * 60_000;
 
 /// Target number of peers desired per attestation subnet.
 const TARGET_SUBNET_PEERS: u32 = 6;
@@ -116,6 +122,38 @@ pub const HeartbeatActions = struct {
         if (self.peers_to_disconnect.len > 0) allocator.free(self.peers_to_disconnect);
         if (self.peers_to_ban.len > 0) allocator.free(self.peers_to_ban);
         if (self.subnets_needing_peers.len > 0) allocator.free(self.subnets_needing_peers);
+    }
+};
+
+/// Configuration for bounded peer-maintenance selection.
+pub const MaintenanceConfig = struct {
+    max_ping_requests: u32 = 4,
+    max_status_requests: u32 = 2,
+    ping_interval_inbound_ms: u64 = INBOUND_PING_INTERVAL_MS,
+    ping_interval_outbound_ms: u64 = OUTBOUND_PING_INTERVAL_MS,
+    status_refresh_interval_ms: u64 = STATUS_REFRESH_INTERVAL_MS,
+};
+
+/// Due maintenance work for the runtime to execute.
+pub const MaintenanceActions = struct {
+    peers_to_ping: [][]const u8 = &.{},
+    peers_to_restatus: [][]const u8 = &.{},
+
+    pub fn deinit(self: *MaintenanceActions, allocator: Allocator) void {
+        for (self.peers_to_ping) |peer_id| allocator.free(peer_id);
+        if (self.peers_to_ping.len > 0) allocator.free(self.peers_to_ping);
+        for (self.peers_to_restatus) |peer_id| allocator.free(peer_id);
+        if (self.peers_to_restatus.len > 0) allocator.free(self.peers_to_restatus);
+    }
+};
+
+/// Generic housekeeping work that should run regardless of subnet demand.
+pub const HousekeepingActions = struct {
+    peers_to_disconnect: [][]const u8 = &.{},
+
+    pub fn deinit(self: *HousekeepingActions, allocator: Allocator) void {
+        for (self.peers_to_disconnect) |peer_id| allocator.free(peer_id);
+        if (self.peers_to_disconnect.len > 0) allocator.free(self.peers_to_disconnect);
     }
 };
 
@@ -182,6 +220,12 @@ pub const PeerManager = struct {
         });
     }
 
+    /// Called when we begin a graceful disconnect but the transport has not
+    /// fully torn down yet.
+    pub fn onPeerDisconnecting(self: *PeerManager, peer_id: []const u8) void {
+        self.db.peerDisconnecting(peer_id);
+    }
+
     /// Called when we initiate a dial to a peer.
     pub fn onDialing(self: *PeerManager, peer_id: []const u8, now_ms: u64) !void {
         try self.db.dialingPeer(peer_id, now_ms);
@@ -223,6 +267,32 @@ pub const PeerManager = struct {
         syncnets: SyncnetsBitfield,
     ) void {
         self.db.updateSubnets(peer_id, attnets, syncnets);
+    }
+
+    /// Update peer metadata sequence and subnet subscriptions from Metadata.
+    pub fn updatePeerMetadata(
+        self: *PeerManager,
+        peer_id: []const u8,
+        metadata_seq: u64,
+        attnets: AttnetsBitfield,
+        syncnets: SyncnetsBitfield,
+    ) void {
+        self.db.updatePeerMetadata(peer_id, metadata_seq, attnets, syncnets);
+    }
+
+    /// Update a peer's last-seen timestamp after any successful req/resp exchange.
+    pub fn notePeerSeen(self: *PeerManager, peer_id: []const u8, now_ms: u64) void {
+        self.db.notePeerSeen(peer_id, now_ms);
+    }
+
+    /// Record a successful outbound ping response.
+    pub fn markPingResponse(self: *PeerManager, peer_id: []const u8, now_ms: u64) void {
+        self.db.markPingResponse(peer_id, now_ms);
+    }
+
+    /// Record a successful Status exchange.
+    pub fn markStatusExchange(self: *PeerManager, peer_id: []const u8, now_ms: u64) void {
+        self.db.markStatusExchange(peer_id, now_ms);
     }
 
     // ── Peer actions ────────────────────────────────────────────────
@@ -269,7 +339,6 @@ pub const PeerManager = struct {
             duration.seconds(),
         });
     }
-
 
     // ── Relevance check ─────────────────────────────────────────────
 
@@ -398,6 +467,68 @@ pub const PeerManager = struct {
         return self.db.getPeer(peer_id);
     }
 
+    /// Get transport-live peer IDs (connected or disconnecting). Caller owns the returned slice and entries.
+    pub fn getConnectedPeerIds(self: *PeerManager) ![][]const u8 {
+        var live_count: usize = 0;
+        var count_iter = self.db.peers.valueIterator();
+        while (count_iter.next()) |peer| {
+            if (peer.connection_state == .connected or peer.connection_state == .disconnecting) {
+                live_count += 1;
+            }
+        }
+
+        var copied: usize = 0;
+        var peer_ids = try self.allocator.alloc([]const u8, live_count);
+        errdefer {
+            for (peer_ids[0..copied]) |peer_id| self.allocator.free(peer_id);
+            self.allocator.free(peer_ids);
+        }
+
+        var iter = self.db.peers.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.connection_state != .connected and entry.value_ptr.connection_state != .disconnecting) continue;
+            peer_ids[copied] = try self.allocator.dupe(u8, entry.key_ptr.*);
+            copied += 1;
+        }
+
+        return peer_ids;
+    }
+
+    /// Select a bounded set of connected peers that are due for maintenance.
+    ///
+    /// Status refreshes take precedence over pings since they also re-run the
+    /// relevance check. Selected peer IDs are duplicated for the caller.
+    pub fn maintenance(self: *PeerManager, now_ms: u64, config: MaintenanceConfig) !MaintenanceActions {
+        var actions = MaintenanceActions{};
+        errdefer actions.deinit(self.allocator);
+
+        const connected = try self.db.getConnectedPeers();
+        defer self.allocator.free(connected);
+
+        var status_peers = std.ArrayListUnmanaged([]const u8).empty;
+        defer status_peers.deinit(self.allocator);
+
+        var ping_peers = std.ArrayListUnmanaged([]const u8).empty;
+        defer ping_peers.deinit(self.allocator);
+
+        for (connected) |peer| {
+            if (status_peers.items.len >= @as(usize, @intCast(config.max_status_requests))) break;
+            if (!peerNeedsStatusRefresh(peer.info, now_ms, config.status_refresh_interval_ms)) continue;
+            try status_peers.append(self.allocator, try self.allocator.dupe(u8, peer.peer_id));
+        }
+
+        for (connected) |peer| {
+            if (ping_peers.items.len >= @as(usize, @intCast(config.max_ping_requests))) break;
+            if (containsPeerId(status_peers.items, peer.peer_id)) continue;
+            if (!peerNeedsPing(peer.info, now_ms, config)) continue;
+            try ping_peers.append(self.allocator, try self.allocator.dupe(u8, peer.peer_id));
+        }
+
+        actions.peers_to_restatus = try status_peers.toOwnedSlice(self.allocator);
+        actions.peers_to_ping = try ping_peers.toOwnedSlice(self.allocator);
+        return actions;
+    }
+
     /// Highest head slot among connected peers.
     pub fn getHighestPeerSlot(self: *PeerManager) u64 {
         return self.db.getHighestPeerSlot();
@@ -440,27 +571,16 @@ pub const PeerManager = struct {
         var actions = HeartbeatActions{};
         errdefer actions.deinit(self.allocator);
 
-        // 1. Decay all scores.
-        self.db.decayAllScores(now_ms);
-
-        // 2. Unban expired bans.
-        const expired = try self.db.getExpiredBans(now_ms);
-        defer self.allocator.free(expired);
-        for (expired) |pid| {
-            _ = self.db.unbanIfExpired(pid, now_ms);
-            log.debug("Unbanned expired peer {s}", .{pid});
+        const housekeeping_actions = try self.housekeeping(now_ms);
+        defer {
+            if (housekeeping_actions.peers_to_disconnect.len > 0) self.allocator.free(housekeeping_actions.peers_to_disconnect);
         }
-
-        // 3. Collect peers to disconnect (score below threshold).
-        const score_disconnects = try self.db.getScoreDisconnectPeers();
-        // Will be freed by caller via HeartbeatActions.deinit().
 
         // 4. Prune excess peers if above target.
         const prune_disconnects = try self.pruneExcessPeers();
 
         // Merge disconnect lists.
-        actions.peers_to_disconnect = try self.mergeSlices(score_disconnects, prune_disconnects);
-        if (score_disconnects.len > 0) self.allocator.free(score_disconnects);
+        actions.peers_to_disconnect = try self.mergeSlices(housekeeping_actions.peers_to_disconnect, prune_disconnects);
         if (prune_disconnects.len > 0) self.allocator.free(prune_disconnects);
 
         // 5. Determine discovery needs.
@@ -490,6 +610,26 @@ pub const PeerManager = struct {
             actions.subnets_needing_peers.len,
         });
 
+        return actions;
+    }
+
+    /// Run score decay, expired-ban cleanup, and low-score disconnection
+    /// selection without the legacy subnet-agnostic pruning path.
+    pub fn housekeeping(self: *PeerManager, now_ms: u64) !HousekeepingActions {
+        var actions = HousekeepingActions{};
+        errdefer actions.deinit(self.allocator);
+
+        self.db.decayAllScores(now_ms);
+
+        const expired = try self.db.getExpiredBans(now_ms);
+        defer self.allocator.free(expired);
+        for (expired) |pid| {
+            _ = self.db.unbanIfExpired(pid, now_ms);
+            log.debug("Unbanned expired peer {s}", .{pid});
+        }
+
+        actions.peers_to_disconnect = try self.db.getScoreDisconnectPeers();
+        _ = self.db.pruneStale(STALE_PEER_MS, now_ms);
         return actions;
     }
 
@@ -607,6 +747,34 @@ pub const PeerManager = struct {
         @memcpy(result[0..a.len], a);
         @memcpy(result[a.len..], b);
         return result;
+    }
+
+    fn peerNeedsStatusRefresh(peer: *const PeerInfo, now_ms: u64, interval_ms: u64) bool {
+        if (peer.last_status_fork_digest == null or peer.relevance == .unknown) return true;
+        const last_exchange_ms = if (peer.last_status_exchange_ms != 0)
+            peer.last_status_exchange_ms
+        else
+            peer.connected_at_ms;
+        return now_ms >= last_exchange_ms + interval_ms;
+    }
+
+    fn peerNeedsPing(peer: *const PeerInfo, now_ms: u64, config: MaintenanceConfig) bool {
+        const interval_ms = switch (peer.direction orelse .inbound) {
+            .inbound => config.ping_interval_inbound_ms,
+            .outbound => config.ping_interval_outbound_ms,
+        };
+        const last_ping_ms = if (peer.last_ping_response_ms != 0)
+            peer.last_ping_response_ms
+        else
+            peer.connected_at_ms;
+        return now_ms >= last_ping_ms + interval_ms;
+    }
+
+    fn containsPeerId(peer_ids: []const []const u8, needle: []const u8) bool {
+        for (peer_ids) |peer_id| {
+            if (std.mem.eql(u8, peer_id, needle)) return true;
+        }
+        return false;
     }
 };
 
@@ -774,4 +942,66 @@ test "PeerManager: unique subnet coverage protects peer from pruning" {
     // Should disconnect 1 peer. peer_a should be protected (unique subnet).
     try std.testing.expectEqual(@as(usize, 1), actions.peers_to_disconnect.len);
     try std.testing.expectEqualStrings("peer_b", actions.peers_to_disconnect[0]);
+}
+
+test "PeerManager: maintenance schedules pings by connection direction" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator, .{});
+    defer pm.deinit();
+
+    _ = try pm.onPeerConnected("inbound_peer", .inbound, 1_000);
+    _ = try pm.onPeerConnected("outbound_peer", .outbound, 1_000);
+    pm.db.updatePeerStatus("inbound_peer", [_]u8{0x11} ** 4, [_]u8{0x22} ** 32, 1, 2, [_]u8{0x33} ** 32);
+    pm.db.updatePeerStatus("outbound_peer", [_]u8{0x44} ** 4, [_]u8{0x55} ** 32, 1, 2, [_]u8{0x66} ** 32);
+    pm.db.setRelevanceStatus("inbound_peer", .relevant);
+    pm.db.setRelevanceStatus("outbound_peer", .relevant);
+    pm.markStatusExchange("inbound_peer", 1_000);
+    pm.markStatusExchange("outbound_peer", 1_000);
+
+    var actions = try pm.maintenance(16_000, .{ .max_ping_requests = 4, .max_status_requests = 2 });
+    defer actions.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), actions.peers_to_ping.len);
+    try std.testing.expectEqualStrings("inbound_peer", actions.peers_to_ping[0]);
+
+    pm.markPingResponse("inbound_peer", 16_000);
+
+    var later_actions = try pm.maintenance(21_000, .{ .max_ping_requests = 4, .max_status_requests = 2 });
+    defer later_actions.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), later_actions.peers_to_ping.len);
+    try std.testing.expectEqualStrings("outbound_peer", later_actions.peers_to_ping[0]);
+}
+
+test "PeerManager: maintenance prioritizes status refresh over ping" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator, .{});
+    defer pm.deinit();
+
+    _ = try pm.onPeerConnected("peer_a", .outbound, 1_000);
+    pm.db.updatePeerStatus("peer_a", [_]u8{0x77} ** 4, [_]u8{0x88} ** 32, 1, 2, [_]u8{0x99} ** 32);
+    pm.db.setRelevanceStatus("peer_a", .relevant);
+    pm.markStatusExchange("peer_a", 1_000);
+    pm.markPingResponse("peer_a", 1_000);
+
+    var actions = try pm.maintenance(301_000, .{ .max_ping_requests = 1, .max_status_requests = 1 });
+    defer actions.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), actions.peers_to_restatus.len);
+    try std.testing.expectEqualStrings("peer_a", actions.peers_to_restatus[0]);
+    try std.testing.expectEqual(@as(usize, 0), actions.peers_to_ping.len);
+}
+
+test "PeerManager: maintenance restatuses peers without prior status" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator, .{});
+    defer pm.deinit();
+
+    _ = try pm.onPeerConnected("peer_a", .inbound, 1_000);
+
+    var actions = try pm.maintenance(2_000, .{ .max_ping_requests = 1, .max_status_requests = 1 });
+    defer actions.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), actions.peers_to_restatus.len);
+    try std.testing.expectEqualStrings("peer_a", actions.peers_to_restatus[0]);
 }

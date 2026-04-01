@@ -18,7 +18,9 @@ const consensus_types = @import("consensus_types");
 const types = @import("types.zig");
 const AttesterDuty = types.AttesterDuty;
 const AttesterDutyWithProof = types.AttesterDutyWithProof;
-const BeaconApiClient = @import("api_client.zig").BeaconApiClient;
+const api_client = @import("api_client.zig");
+const BeaconApiClient = api_client.BeaconApiClient;
+const BeaconCommitteeSubscription = api_client.BeaconCommitteeSubscription;
 const ValidatorStore = @import("validator_store.zig").ValidatorStore;
 const signing_mod = @import("signing.zig");
 const SigningContext = signing_mod.SigningContext;
@@ -201,6 +203,7 @@ pub const AttestationService = struct {
                 self.next_duties.clearRetainingCapacity();
                 self.next_duties_epoch = null;
                 log.debug("swapped pre-fetched attester duties into epoch={d}", .{epoch});
+                self.publishBeaconCommitteeSubscriptions(io, self.duties.items);
                 // Pre-fetch for epoch+1 now.
                 self.prefetchNextEpochDuties(io, epoch + 1);
                 return;
@@ -278,6 +281,7 @@ pub const AttestationService = struct {
             });
         }
 
+        self.publishBeaconCommitteeSubscriptions(io, self.duties.items);
         log.debug("cached {d} attester duties epoch={d}", .{ fetched.len, epoch });
     }
 
@@ -308,7 +312,32 @@ pub const AttestationService = struct {
             } else |_| {}
             self.next_duties.append(.{ .duty = duty, .selection_proof = sel_proof }) catch {};
         }
+        self.publishBeaconCommitteeSubscriptions(io, self.next_duties.items);
         log.debug("pre-fetched {d} attester duties epoch={d}", .{ fetched.len, next_epoch });
+    }
+
+    fn publishBeaconCommitteeSubscriptions(self: *AttestationService, io: Io, duties: []const AttesterDutyWithProof) void {
+        if (duties.len == 0) return;
+
+        const subscriptions = self.allocator.alloc(BeaconCommitteeSubscription, duties.len) catch |err| {
+            log.warn("alloc beacon committee subscriptions failed: {s}", .{@errorName(err)});
+            return;
+        };
+        defer self.allocator.free(subscriptions);
+
+        for (duties, subscriptions) |duty, *subscription| {
+            subscription.* = .{
+                .validator_index = duty.duty.validator_index,
+                .committee_index = duty.duty.committee_index,
+                .committees_at_slot = duty.duty.committees_at_slot,
+                .slot = duty.duty.slot,
+                .is_aggregator = duty.selection_proof != null,
+            };
+        }
+
+        self.api.prepareBeaconCommitteeSubnets(io, subscriptions) catch |err| {
+            log.warn("prepareBeaconCommitteeSubnets failed: {s}", .{@errorName(err)});
+        };
     }
 
     // -----------------------------------------------------------------------

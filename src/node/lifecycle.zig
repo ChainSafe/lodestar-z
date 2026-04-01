@@ -226,6 +226,7 @@ pub fn deinit(self: *BeaconNode) void {
     allocator.destroy(self.event_bus);
 
     if (self.beacon_processor) |bp| {
+        bp.deinit();
         allocator.destroy(bp);
     }
 

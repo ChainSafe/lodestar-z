@@ -55,6 +55,20 @@ pub const SseCallback = struct {
     }
 };
 
+pub const BeaconCommitteeSubscription = struct {
+    validator_index: u64,
+    committee_index: u64,
+    committees_at_slot: u64,
+    slot: u64,
+    is_aggregator: bool,
+};
+
+pub const SyncCommitteeSubscription = struct {
+    validator_index: u64,
+    sync_committee_indices: []const u64,
+    until_epoch: u64,
+};
+
 // ---------------------------------------------------------------------------
 // BeaconApiClient
 // ---------------------------------------------------------------------------
@@ -1019,6 +1033,60 @@ pub const BeaconApiClient = struct {
     // -----------------------------------------------------------------------
     // Proposer preparation
     // -----------------------------------------------------------------------
+
+    /// POST /eth/v1/validator/beacon_committee_subscriptions
+    pub fn prepareBeaconCommitteeSubnets(
+        self: *BeaconApiClient,
+        io: Io,
+        subscriptions: []const BeaconCommitteeSubscription,
+    ) !void {
+        if (subscriptions.len == 0) return;
+
+        var body: std.Io.Writer.Allocating = .init(self.allocator);
+        defer body.deinit();
+        try body.writer.writeByte('[');
+        for (subscriptions, 0..) |subscription, i| {
+            if (i > 0) try body.writer.writeByte(',');
+            try body.writer.print(
+                "{{\"validator_index\":\"{d}\",\"committee_index\":\"{d}\",\"committees_at_slot\":\"{d}\",\"slot\":\"{d}\",\"is_aggregator\":{s}}}",
+                .{
+                    subscription.validator_index,
+                    subscription.committee_index,
+                    subscription.committees_at_slot,
+                    subscription.slot,
+                    if (subscription.is_aggregator) "true" else "false",
+                },
+            );
+        }
+        try body.writer.writeByte(']');
+
+        try self.postNoResponse(io, "/eth/v1/validator/beacon_committee_subscriptions", body.written());
+    }
+
+    /// POST /eth/v1/validator/sync_committee_subscriptions
+    pub fn prepareSyncCommitteeSubnets(
+        self: *BeaconApiClient,
+        io: Io,
+        subscriptions: []const SyncCommitteeSubscription,
+    ) !void {
+        if (subscriptions.len == 0) return;
+
+        var body: std.Io.Writer.Allocating = .init(self.allocator);
+        defer body.deinit();
+        try body.writer.writeByte('[');
+        for (subscriptions, 0..) |subscription, i| {
+            if (i > 0) try body.writer.writeByte(',');
+            try body.writer.print("{{\"validator_index\":\"{d}\",\"sync_committee_indices\":[", .{subscription.validator_index});
+            for (subscription.sync_committee_indices, 0..) |committee_index, committee_i| {
+                if (committee_i > 0) try body.writer.writeByte(',');
+                try body.writer.print("\"{d}\"", .{committee_index});
+            }
+            try body.writer.print("],\"until_epoch\":\"{d}\"}}", .{subscription.until_epoch});
+        }
+        try body.writer.writeByte(']');
+
+        try self.postNoResponse(io, "/eth/v1/validator/sync_committee_subscriptions", body.written());
+    }
 
     /// POST /eth/v1/validator/prepare_beacon_proposer
     pub fn prepareBeaconProposer(

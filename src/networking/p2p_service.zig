@@ -307,6 +307,28 @@ pub const P2pService = struct {
         return self.network.dial(io, peer_addr);
     }
 
+    /// Return whether the peer currently has an active transport connection.
+    pub fn isPeerConnected(self: *Self, peer_id: []const u8) bool {
+        return self.network.connections.contains(peer_id);
+    }
+
+    /// Snapshot the currently connected peer IDs. Caller owns the returned slice and entries.
+    pub fn snapshotConnectedPeerIds(self: *Self, allocator: Allocator) ![][]const u8 {
+        var peer_ids = try allocator.alloc([]const u8, self.network.connections.count());
+        var copied: usize = 0;
+        errdefer {
+            for (peer_ids[0..copied]) |peer_id| allocator.free(peer_id);
+            allocator.free(peer_ids);
+        }
+
+        var iter = self.network.connections.iterator();
+        while (iter.next()) |entry| : (copied += 1) {
+            peer_ids[copied] = try allocator.dupe(u8, entry.key_ptr.*);
+        }
+
+        return peer_ids;
+    }
+
     /// Open a new outbound stream for a protocol to a connected peer.
     /// `ssz_payload` is passed as context to `handleOutbound`; use `null` for
     /// zero-body requests (Metadata) and provide the serialized SSZ bytes for
@@ -330,6 +352,24 @@ pub const P2pService = struct {
         return self.network.dialProtocol(io, peer_id, protocol_id);
     }
 
+    /// Ask libp2p to open an outbound gossipsub stream to a connected peer.
+    pub fn openGossipsubStream(self: *Self, io: Io, peer_id: []const u8) !void {
+        try self.newStream(io, peer_id, GossipsubHandler, null);
+    }
+
+    /// Gracefully close a connected peer transport. The switch will clean up
+    /// handler state when its connection task observes the closure.
+    pub fn disconnectPeer(self: *Self, io: Io, peer_id: []const u8) bool {
+        const conn = self.network.connections.get(peer_id) orelse return false;
+        conn.close(io);
+        return true;
+    }
+
+    /// Return the latest identify result for a peer, if available.
+    pub fn identifyResult(self: *Self, peer_id: []const u8) ?*const identify_mod.IdentifyResult {
+        return self.network.getHandler(IdentifyHandler).getPeerResult(peer_id);
+    }
+
     /// Publish an SSZ message to a gossip topic.
     ///
     /// The message is Snappy-compressed internally by `EthGossipAdapter.publish`.
@@ -345,6 +385,11 @@ pub const P2pService = struct {
     /// Subscribe to a gossip subnet topic (e.g., attestation subnets).
     pub fn subscribeSubnet(self: *Self, topic_type: GossipTopicType, subnet_id: u8) !void {
         try self.gossip_adapter.subscribeSubnet(topic_type, subnet_id);
+    }
+
+    /// Unsubscribe from a gossip subnet topic.
+    pub fn unsubscribeSubnet(self: *Self, topic_type: GossipTopicType, subnet_id: u8) !void {
+        try self.gossip_adapter.unsubscribeSubnet(topic_type, subnet_id);
     }
 
     /// Handle a fork transition: migrate all gossip topic subscriptions to the new fork.

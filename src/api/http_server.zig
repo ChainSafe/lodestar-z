@@ -655,6 +655,8 @@ pub const HttpServer = struct {
         .{ "getProposerDuties", &hGetProposerDuties },
         .{ "getAttesterDuties", &hGetAttesterDuties },
         .{ "getSyncDuties", &hGetSyncDuties },
+        .{ "prepareBeaconCommitteeSubnet", &hPrepareBeaconCommitteeSubnet },
+        .{ "prepareSyncCommitteeSubnets", &hPrepareSyncCommitteeSubnets },
         .{ "getSpec", &hGetSpec },
         .{ "getForkSchedule", &hGetForkSchedule },
         .{ "getValidatorMonitor", &hGetValidatorMonitor },
@@ -709,6 +711,30 @@ pub const HttpServer = struct {
         const op = dc.match.route.operation_id;
         const handler_fn = handler_table.get(op) orelse return error.NotImplemented;
         return handler_fn(self, dc);
+    }
+
+    fn jsonValueU64(value: std.json.Value) !u64 {
+        return switch (value) {
+            .integer => |i| blk: {
+                if (i < 0) return error.InvalidRequest;
+                break :blk @intCast(i);
+            },
+            .string => |s| try std.fmt.parseInt(u64, s, 10),
+            else => error.InvalidRequest,
+        };
+    }
+
+    fn jsonValueBool(value: std.json.Value) !bool {
+        return switch (value) {
+            .bool => |b| b,
+            .string => |s| if (std.mem.eql(u8, s, "true"))
+                true
+            else if (std.mem.eql(u8, s, "false"))
+                false
+            else
+                error.InvalidRequest,
+            else => error.InvalidRequest,
+        };
     }
 
     // ── Individual handler functions ─────────────────────────────────────────
@@ -1203,6 +1229,86 @@ pub const HttpServer = struct {
         }
         const body = try json_response.writeApiArrayEnvelope(alloc, handlers.validator.SyncDuty, handler_res.data, handler_res.meta);
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
+    }
+
+    fn hPrepareBeaconCommitteeSubnet(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const alloc = self.allocator;
+        var subscriptions = std.ArrayListUnmanaged(types.BeaconCommitteeSubscription).empty;
+        defer subscriptions.deinit(alloc);
+
+        if (dc.body.len > 2) {
+            const parsed = std.json.parseFromSlice(std.json.Value, alloc, dc.body, .{}) catch return error.InvalidRequest;
+            defer parsed.deinit();
+
+            const items = switch (parsed.value) {
+                .array => |array| array.items,
+                else => return error.InvalidRequest,
+            };
+
+            for (items) |item| {
+                const object = switch (item) {
+                    .object => |obj| obj,
+                    else => return error.InvalidRequest,
+                };
+
+                try subscriptions.append(alloc, .{
+                    .validator_index = try jsonValueU64(object.get("validator_index") orelse return error.InvalidRequest),
+                    .committee_index = try jsonValueU64(object.get("committee_index") orelse return error.InvalidRequest),
+                    .committees_at_slot = try jsonValueU64(object.get("committees_at_slot") orelse return error.InvalidRequest),
+                    .slot = try jsonValueU64(object.get("slot") orelse return error.InvalidRequest),
+                    .is_aggregator = try jsonValueBool(object.get("is_aggregator") orelse return error.InvalidRequest),
+                });
+            }
+        }
+
+        const handler_res = try handlers.validator.prepareBeaconCommitteeSubnet(self.api_context, subscriptions.items);
+        return self.makeVoidResult(handler_res);
+    }
+
+    fn hPrepareSyncCommitteeSubnets(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const alloc = self.allocator;
+        var subscriptions = std.ArrayListUnmanaged(types.SyncCommitteeSubscription).empty;
+        defer {
+            for (subscriptions.items) |subscription| alloc.free(subscription.sync_committee_indices);
+            subscriptions.deinit(alloc);
+        }
+
+        if (dc.body.len > 2) {
+            const parsed = std.json.parseFromSlice(std.json.Value, alloc, dc.body, .{}) catch return error.InvalidRequest;
+            defer parsed.deinit();
+
+            const items = switch (parsed.value) {
+                .array => |array| array.items,
+                else => return error.InvalidRequest,
+            };
+
+            for (items) |item| {
+                const object = switch (item) {
+                    .object => |obj| obj,
+                    else => return error.InvalidRequest,
+                };
+                const sync_indices_value = object.get("sync_committee_indices") orelse return error.InvalidRequest;
+                const sync_indices_items = switch (sync_indices_value) {
+                    .array => |array| array.items,
+                    else => return error.InvalidRequest,
+                };
+
+                var sync_indices = std.ArrayListUnmanaged(u64).empty;
+                errdefer sync_indices.deinit(alloc);
+                for (sync_indices_items) |idx_value| {
+                    try sync_indices.append(alloc, try jsonValueU64(idx_value));
+                }
+
+                try subscriptions.append(alloc, .{
+                    .validator_index = try jsonValueU64(object.get("validator_index") orelse return error.InvalidRequest),
+                    .sync_committee_indices = try sync_indices.toOwnedSlice(alloc),
+                    .until_epoch = try jsonValueU64(object.get("until_epoch") orelse return error.InvalidRequest),
+                });
+            }
+        }
+
+        const handler_res = try handlers.validator.prepareSyncCommitteeSubnets(self.api_context, subscriptions.items);
+        return self.makeVoidResult(handler_res);
     }
 
     fn hGetSpec(self: *HttpServer, _: DispatchContext) !HandlerResult {
