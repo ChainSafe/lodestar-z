@@ -86,6 +86,7 @@ pub const Session = struct {
 /// responds with WHOAREYOU. We store the original message here so we can
 /// re-send it inside the handshake response.
 pub const PendingRequest = struct {
+    sent_at_ns: i64,
     nonce: [12]u8,
     dest_node_id: NodeId,
     dest_pubkey: [33]u8,
@@ -135,15 +136,56 @@ const ActiveFindNodeRequest = struct {
     }
 };
 
-const ActiveRequest = union(enum) {
+const ActiveRequestKind = union(enum) {
     ping: void,
     findnode: ActiveFindNodeRequest,
+    talkreq: void,
 
-    fn deinit(self: *ActiveRequest, alloc: Allocator) void {
+    fn deinit(self: *ActiveRequestKind, alloc: Allocator) void {
         switch (self.*) {
             .ping => {},
             .findnode => |*findnode| findnode.deinit(alloc),
+            .talkreq => {},
         }
+    }
+};
+
+pub const RequestKind = enum {
+    ping,
+    findnode,
+    talkreq,
+};
+
+const ActiveRequest = struct {
+    started_at_ns: i64,
+    kind: ActiveRequestKind,
+
+    fn deinit(self: *ActiveRequest, alloc: Allocator) void {
+        self.kind.deinit(alloc);
+    }
+
+    fn requestKind(self: *const ActiveRequest) RequestKind {
+        return switch (self.kind) {
+            .ping => .ping,
+            .findnode => .findnode,
+            .talkreq => .talkreq,
+        };
+    }
+};
+
+const AddressKey = struct {
+    family: Address.Family,
+    bytes: [16]u8,
+
+    fn fromAddress(addr: Address) AddressKey {
+        return switch (addr) {
+            .ip4 => |ip4| blk: {
+                var bytes = [_]u8{0} ** 16;
+                @memcpy(bytes[0..4], &ip4.bytes);
+                break :blk .{ .family = .ip4, .bytes = bytes };
+            },
+            .ip6 => |ip6| .{ .family = .ip6, .bytes = ip6.bytes },
+        };
     }
 };
 
@@ -152,7 +194,7 @@ pub const PongEvent = struct {
     peer_addr: Address,
     req_id: messages.ReqId,
     enr_seq: u64,
-    recipient_ip: [4]u8,
+    recipient_ip: messages.Pong.RecipientIp,
     recipient_port: u16,
 };
 
@@ -168,14 +210,50 @@ pub const NodesEvent = struct {
     }
 };
 
+pub const TalkReqEvent = struct {
+    peer_id: NodeId,
+    peer_addr: Address,
+    req_id: messages.ReqId,
+    protocol: []u8,
+    request: []u8,
+
+    fn deinit(self: *TalkReqEvent, alloc: Allocator) void {
+        alloc.free(self.protocol);
+        alloc.free(self.request);
+    }
+};
+
+pub const TalkRespEvent = struct {
+    peer_id: NodeId,
+    peer_addr: Address,
+    req_id: messages.ReqId,
+    response: []u8,
+
+    fn deinit(self: *TalkRespEvent, alloc: Allocator) void {
+        alloc.free(self.response);
+    }
+};
+
+pub const RequestTimeoutEvent = struct {
+    peer_id: NodeId,
+    req_id: messages.ReqId,
+    kind: RequestKind,
+};
+
 pub const Event = union(enum) {
     pong: PongEvent,
     nodes: NodesEvent,
+    talkreq: TalkReqEvent,
+    talkresp: TalkRespEvent,
+    request_timeout: RequestTimeoutEvent,
 
     pub fn deinit(self: *Event, alloc: Allocator) void {
         switch (self.*) {
             .pong => {},
             .nodes => |*nodes| nodes.deinit(alloc),
+            .talkreq => |*talkreq| talkreq.deinit(alloc),
+            .talkresp => |*talkresp| talkresp.deinit(alloc),
+            .request_timeout => {},
         }
     }
 };
@@ -188,6 +266,10 @@ pub const Config = struct {
     local_enr: ?[]const u8 = null,
     /// Sequence number of our local ENR.
     local_enr_seq: u64 = 0,
+    /// Time after which outbound requests are considered failed and removed.
+    request_timeout_ms: u64 = 1_000,
+    /// Time a replacement node waits before evicting the stalest disconnected bucket entry.
+    bucket_pending_timeout_ms: u64 = kbucket.BUCKET_PENDING_TIMEOUT_MS,
 };
 
 /// Per-IP rate-limit state for outgoing WHOAREYOU packets.
@@ -213,7 +295,7 @@ pub const Protocol = struct {
     routing_table: kbucket.RoutingTable,
     sessions: std.AutoHashMap(NodeId, Session),
     pending_requests: std.ArrayListUnmanaged(PendingRequest),
-    whoareyou_rate: std.AutoHashMap([4]u8, WhoareyouRateEntry),
+    whoareyou_rate: std.AutoHashMap(AddressKey, WhoareyouRateEntry),
     rng: std.Random.DefaultPrng,
     /// Known static public keys for peers, keyed by node-id.
     /// Required to verify id-nonce signatures in incoming handshakes.
@@ -233,7 +315,7 @@ pub const Protocol = struct {
             .routing_table = kbucket.RoutingTable.init(alloc, config.local_node_id),
             .sessions = std.AutoHashMap(NodeId, Session).init(alloc),
             .pending_requests = .empty,
-            .whoareyou_rate = std.AutoHashMap([4]u8, WhoareyouRateEntry).init(alloc),
+            .whoareyou_rate = std.AutoHashMap(AddressKey, WhoareyouRateEntry).init(alloc),
             .rng = std.Random.DefaultPrng.init(seed),
             .node_pubkeys = std.AutoHashMap(NodeId, [33]u8).init(alloc),
             .node_records = std.AutoHashMap(NodeId, NodeRecord).init(alloc),
@@ -270,14 +352,13 @@ pub const Protocol = struct {
         const now_ns: i128 = @intCast(Io.Timestamp.now(self.io, .real).toNanoseconds());
         const max_age_ns: i128 = 60 * std.time.ns_per_s;
 
-        // Use a stack-bounded array to avoid heap allocation while iterating.
-        // 256 entries is well above any realistic prune batch size.
-        var to_remove = std.BoundedArray([4]u8, 256){};
+        var to_remove: std.ArrayListUnmanaged(AddressKey) = .empty;
+        defer to_remove.deinit(self.alloc);
 
         var it = self.whoareyou_rate.iterator();
         while (it.next()) |entry| {
             if (now_ns - entry.value_ptr.window_start_ns > max_age_ns) {
-                to_remove.append(entry.key_ptr.*) catch continue;
+                to_remove.append(self.alloc, entry.key_ptr.*) catch continue;
             }
         }
         for (to_remove.items) |key| {
@@ -322,9 +403,17 @@ pub const Protocol = struct {
         var it = self.active_requests.iterator();
         while (it.next()) |entry| {
             if (!std.mem.eql(u8, &entry.key_ptr.peer_id, peer_id)) continue;
-            if (entry.value_ptr.* == .findnode) return true;
+            if (entry.value_ptr.kind == .findnode) return true;
         }
         return false;
+    }
+
+    pub fn pruneExpiredState(self: *Protocol) void {
+        const now_ns = self.currentTimestampNs();
+        self.pruneExpiredActiveRequests(now_ns);
+        self.pruneExpiredPendingRequests(now_ns);
+        self.routing_table.prunePending(now_ns, self.config.bucket_pending_timeout_ms);
+        self.pruneWhoareyouRate();
     }
 
     pub fn sendPing(
@@ -335,6 +424,7 @@ pub const Protocol = struct {
         enr_seq: u64,
         socket: *const UdpSocket,
     ) !messages.ReqId {
+        self.pruneExpiredState();
         const req_id = self.randomReqId();
         const ping = messages.Ping{
             .req_id = req_id,
@@ -347,7 +437,10 @@ pub const Protocol = struct {
             .peer_id = dest_node_id.*,
             .req_id = ReqIdKey.fromReqId(req_id),
         };
-        try self.active_requests.put(key, .{ .ping = {} });
+        try self.active_requests.put(key, .{
+            .started_at_ns = self.currentTimestampNs(),
+            .kind = .{ .ping = {} },
+        });
         errdefer {
             if (self.active_requests.fetchRemove(key)) |removed| {
                 var value = removed.value;
@@ -367,6 +460,7 @@ pub const Protocol = struct {
         distances: []const u16,
         socket: *const UdpSocket,
     ) !messages.ReqId {
+        self.pruneExpiredState();
         const req_id = self.randomReqId();
         const find_node = messages.FindNode{
             .req_id = req_id,
@@ -379,7 +473,10 @@ pub const Protocol = struct {
             .peer_id = dest_node_id.*,
             .req_id = ReqIdKey.fromReqId(req_id),
         };
-        try self.active_requests.put(key, .{ .findnode = .{} });
+        try self.active_requests.put(key, .{
+            .started_at_ns = self.currentTimestampNs(),
+            .kind = .{ .findnode = .{} },
+        });
         errdefer {
             if (self.active_requests.fetchRemove(key)) |removed| {
                 var value = removed.value;
@@ -389,6 +486,61 @@ pub const Protocol = struct {
 
         try self.sendRequest(dest_node_id, dest_pubkey, dest_addr, find_node_bytes, socket);
         return req_id;
+    }
+
+    pub fn sendTalkRequest(
+        self: *Protocol,
+        dest_node_id: *const NodeId,
+        dest_pubkey: *const [33]u8,
+        dest_addr: Address,
+        protocol_name: []const u8,
+        request: []const u8,
+        socket: *const UdpSocket,
+    ) !messages.ReqId {
+        self.pruneExpiredState();
+        const req_id = self.randomReqId();
+        const talk_req = messages.TalkReq{
+            .req_id = req_id,
+            .protocol = protocol_name,
+            .request = request,
+        };
+        const talk_req_bytes = try talk_req.encode(self.alloc);
+        defer self.alloc.free(talk_req_bytes);
+
+        const key = RequestKey{
+            .peer_id = dest_node_id.*,
+            .req_id = ReqIdKey.fromReqId(req_id),
+        };
+        try self.active_requests.put(key, .{
+            .started_at_ns = self.currentTimestampNs(),
+            .kind = .{ .talkreq = {} },
+        });
+        errdefer {
+            if (self.active_requests.fetchRemove(key)) |removed| {
+                var value = removed.value;
+                value.deinit(self.alloc);
+            }
+        }
+
+        try self.sendRequest(dest_node_id, dest_pubkey, dest_addr, talk_req_bytes, socket);
+        return req_id;
+    }
+
+    pub fn sendTalkResponse(
+        self: *Protocol,
+        peer_id: NodeId,
+        peer_addr: Address,
+        req_id: messages.ReqId,
+        response: []const u8,
+        socket: *const UdpSocket,
+    ) !void {
+        const talk_resp = messages.TalkResp{
+            .req_id = req_id,
+            .response = response,
+        };
+        const talk_resp_bytes = try talk_resp.encode(self.alloc);
+        defer self.alloc.free(talk_resp_bytes);
+        try self.sendResponseMessage(peer_id, peer_addr, talk_resp_bytes, socket);
     }
 
     /// Send a request to a remote node. If we have an established session,
@@ -449,6 +601,7 @@ pub const Protocol = struct {
         const pt_copy = try self.alloc.dupe(u8, msg_bytes);
         errdefer self.alloc.free(pt_copy);
         try self.pending_requests.append(self.alloc, .{
+            .sent_at_ns = self.currentTimestampNs(),
             .nonce = nonce,
             .dest_node_id = dest_node_id.*,
             .dest_pubkey = dest_pubkey.*,
@@ -465,6 +618,7 @@ pub const Protocol = struct {
         from: Address,
         socket: *const UdpSocket,
     ) !void {
+        self.pruneExpiredState();
         // Drop oversized packets before any decoding work (CL-2020-06, spec max = IPv6 min MTU).
         if (raw.len > MAX_PACKET_SIZE) return;
 
@@ -783,7 +937,7 @@ pub const Protocol = struct {
     ) !void {
         // Rate-limit WHOAREYOU responses per source IP to prevent amplification (CL-2020-08).
         const now_ns: i128 = @intCast(Io.Timestamp.now(self.io, .real).toNanoseconds());
-        const gop = try self.whoareyou_rate.getOrPut(dest.bytes);
+        const gop = try self.whoareyou_rate.getOrPut(AddressKey.fromAddress(dest));
         if (gop.found_existing) {
             const elapsed_ns = now_ns - gop.value_ptr.window_start_ns;
             if (elapsed_ns < std.time.ns_per_s) {
@@ -903,8 +1057,28 @@ pub const Protocol = struct {
 
     fn storeNodeRecord(self: *Protocol, node_id: NodeId, pubkey: ?*const [33]u8, addr: Address, enr: ?[]const u8) void {
         const existing = self.node_records.get(node_id);
-        const enr_copy = if (enr) |raw| self.alloc.dupe(u8, raw) catch return else null;
+        var enr_copy = if (enr) |raw| self.alloc.dupe(u8, raw) catch return else null;
         errdefer if (enr_copy) |bytes| self.alloc.free(bytes);
+
+        var effective_addr = addr;
+        var keep_existing_enr = false;
+        if (enr_copy) |incoming_enr| {
+            if (existing) |record| {
+                if (record.enr) |current_enr| {
+                    var incoming = enr_mod.decode(self.alloc, incoming_enr) catch null;
+                    defer if (incoming) |*parsed| parsed.deinit();
+                    var current = enr_mod.decode(self.alloc, current_enr) catch null;
+                    defer if (current) |*parsed| parsed.deinit();
+
+                    if (incoming != null and current != null and incoming.?.seq <= current.?.seq) {
+                        self.alloc.free(incoming_enr);
+                        enr_copy = null;
+                        keep_existing_enr = true;
+                        effective_addr = record.addr;
+                    }
+                }
+            }
+        }
 
         if (pubkey) |pk| {
             self.node_pubkeys.put(node_id, pk.*) catch {};
@@ -916,8 +1090,15 @@ pub const Protocol = struct {
 
         const merged = NodeRecord{
             .pubkey = if (pubkey) |pk| pk.* else if (existing) |record| record.pubkey else null,
-            .addr = addr,
-            .enr = if (enr_copy != null) enr_copy else if (existing) |record| record.enr else null,
+            .addr = effective_addr,
+            .enr = if (enr_copy != null)
+                enr_copy
+            else if (keep_existing_enr)
+                if (existing) |record| record.enr else null
+            else if (existing) |record|
+                record.enr
+            else
+                null,
         };
 
         if (self.node_records.getPtr(node_id)) |record| {
@@ -947,6 +1128,49 @@ pub const Protocol = struct {
         };
     }
 
+    fn requestTimedOut(self: *const Protocol, started_at_ns: i64, now_ns: i64) bool {
+        const elapsed_ns: i128 = @as(i128, now_ns) - @as(i128, started_at_ns);
+        const timeout_ns: i128 = @as(i128, self.config.request_timeout_ms) * std.time.ns_per_ms;
+        return elapsed_ns >= timeout_ns;
+    }
+
+    fn pruneExpiredActiveRequests(self: *Protocol, now_ns: i64) void {
+        var expired: std.ArrayListUnmanaged(RequestKey) = .empty;
+        defer expired.deinit(self.alloc);
+
+        var it = self.active_requests.iterator();
+        while (it.next()) |entry| {
+            if (!self.requestTimedOut(entry.value_ptr.started_at_ns, now_ns)) continue;
+            expired.append(self.alloc, entry.key_ptr.*) catch return;
+        }
+
+        for (expired.items) |key| {
+            const removed = self.active_requests.fetchRemove(key) orelse continue;
+            var request = removed.value;
+            self.completed_events.append(self.alloc, .{
+                .request_timeout = .{
+                    .peer_id = key.peer_id,
+                    .req_id = key.req_id.toReqId(),
+                    .kind = request.requestKind(),
+                },
+            }) catch {};
+            request.deinit(self.alloc);
+        }
+    }
+
+    fn pruneExpiredPendingRequests(self: *Protocol, now_ns: i64) void {
+        var i: usize = 0;
+        while (i < self.pending_requests.items.len) {
+            if (!self.requestTimedOut(self.pending_requests.items[i].sent_at_ns, now_ns)) {
+                i += 1;
+                continue;
+            }
+
+            var pending = self.pending_requests.orderedRemove(i);
+            pending.deinit();
+        }
+    }
+
     fn currentTimestampNs(self: *const Protocol) i64 {
         return @intCast(Io.Timestamp.now(self.io, .real).toNanoseconds());
     }
@@ -954,14 +1178,7 @@ pub const Protocol = struct {
     fn markNodeSeen(self: *Protocol, node_id: NodeId, addr: Address, status: kbucket.EntryStatus) void {
         const entry = kbucket.Entry{
             .node_id = node_id,
-            .addr = .{
-                addr.bytes[0],
-                addr.bytes[1],
-                addr.bytes[2],
-                addr.bytes[3],
-                @intCast(addr.port >> 8),
-                @intCast(addr.port & 0xff),
-            },
+            .addr = addr,
             .last_seen = self.currentTimestampNs(),
             .status = status,
         };
@@ -975,15 +1192,27 @@ pub const Protocol = struct {
         const node_id = parsed_enr.nodeId() orelse return;
         if (std.mem.eql(u8, &node_id, &self.config.local_node_id)) return;
 
-        const ip = parsed_enr.ip orelse return;
-        const port = parsed_enr.udp orelse parsed_enr.tcp orelse return;
         const pubkey = parsed_enr.pubkey;
+        const addr = if (parsed_enr.ip) |ip|
+            if (parsed_enr.udp orelse parsed_enr.tcp) |port|
+                Address{ .ip4 = .{ .bytes = ip, .port = port } }
+            else if (parsed_enr.ip6) |ip6|
+                if (parsed_enr.udp6) |port6|
+                    Address{ .ip6 = .{ .bytes = ip6, .port = port6 } }
+                else
+                    return
+            else
+                return
+        else if (parsed_enr.ip6) |ip6|
+            if (parsed_enr.udp6) |port6|
+                Address{ .ip6 = .{ .bytes = ip6, .port = port6 } }
+            else
+                return
+        else
+            return;
 
-        self.storeNodeRecord(node_id, if (pubkey) |*pk| pk else null, .{
-            .bytes = ip,
-            .port = port,
-        }, enr_bytes);
-        self.markNodeSeen(node_id, .{ .bytes = ip, .port = port }, .disconnected);
+        self.storeNodeRecord(node_id, if (pubkey) |*pk| pk else null, addr, enr_bytes);
+        self.markNodeSeen(node_id, addr, .disconnected);
     }
 
     fn sendResponseMessage(
@@ -1010,6 +1239,8 @@ pub const Protocol = struct {
             messages.MSG_PONG => self.handlePong(pt, from, from_addr),
             messages.MSG_FINDNODE => try self.handleFindNode(pt, from, from_addr, socket),
             messages.MSG_NODES => self.handleNodes(pt, from, from_addr),
+            messages.MSG_TALKREQ => self.handleTalkReq(pt, from, from_addr),
+            messages.MSG_TALKRESP => self.handleTalkResp(pt, from, from_addr),
             else => {},
         }
     }
@@ -1026,8 +1257,11 @@ pub const Protocol = struct {
         const pong = messages.Pong{
             .req_id = ping.req_id,
             .enr_seq = self.config.local_enr_seq,
-            .recipient_ip = from_addr.bytes,
-            .recipient_port = from_addr.port,
+            .recipient_ip = switch (from_addr) {
+                .ip4 => |ip4| .{ .ip4 = ip4.bytes },
+                .ip6 => |ip6| .{ .ip6 = ip6.bytes },
+            },
+            .recipient_port = from_addr.getPort(),
         };
 
         const pong_bytes = try pong.encode(self.alloc);
@@ -1046,7 +1280,7 @@ pub const Protocol = struct {
         const removed = self.active_requests.fetchRemove(key) orelse return;
         var request = removed.value;
         defer request.deinit(self.alloc);
-        if (request != .ping) return;
+        if (request.kind != .ping) return;
 
         self.markNodeSeen(from, from_addr, .connected);
         self.completed_events.append(self.alloc, .{
@@ -1121,9 +1355,9 @@ pub const Protocol = struct {
 
         const key = activeRequestKey(from, decoded.msg.req_id);
         const request = self.active_requests.getPtr(key) orelse return;
-        if (request.* != .findnode) return;
+        if (request.kind != .findnode) return;
 
-        var findnode = &request.findnode;
+        var findnode = &request.kind.findnode;
         if (findnode.total_responses == null) {
             findnode.total_responses = decoded.msg.total;
         } else if (findnode.total_responses.? != decoded.msg.total) {
@@ -1142,10 +1376,10 @@ pub const Protocol = struct {
         const removed = self.active_requests.fetchRemove(key) orelse return;
         var completed = removed.value;
         defer completed.deinit(self.alloc);
-        if (completed != .findnode) return;
+        if (completed.kind != .findnode) return;
 
-        const owned_enrs = completed.findnode.enrs.toOwnedSlice(self.alloc) catch return;
-        completed.findnode.enrs = .empty;
+        const owned_enrs = completed.kind.findnode.enrs.toOwnedSlice(self.alloc) catch return;
+        completed.kind.findnode.enrs = .empty;
         self.completed_events.append(self.alloc, .{
             .nodes = .{
                 .peer_id = from,
@@ -1157,6 +1391,60 @@ pub const Protocol = struct {
             for (owned_enrs) |enr| self.alloc.free(enr);
             self.alloc.free(owned_enrs);
         };
+    }
+
+    fn handleTalkReq(
+        self: *Protocol,
+        pt: []const u8,
+        from: NodeId,
+        from_addr: Address,
+    ) void {
+        const talk_req = messages.TalkReq.decode(pt) catch return;
+        const protocol_name = self.alloc.dupe(u8, talk_req.protocol) catch return;
+        const request = self.alloc.dupe(u8, talk_req.request) catch {
+            self.alloc.free(protocol_name);
+            return;
+        };
+
+        self.markNodeSeen(from, from_addr, .connected);
+        self.completed_events.append(self.alloc, .{
+            .talkreq = .{
+                .peer_id = from,
+                .peer_addr = from_addr,
+                .req_id = talk_req.req_id,
+                .protocol = protocol_name,
+                .request = request,
+            },
+        }) catch {
+            self.alloc.free(protocol_name);
+            self.alloc.free(request);
+        };
+    }
+
+    fn handleTalkResp(
+        self: *Protocol,
+        pt: []const u8,
+        from: NodeId,
+        from_addr: Address,
+    ) void {
+        const talk_resp = messages.TalkResp.decode(pt) catch return;
+        const key = activeRequestKey(from, talk_resp.req_id);
+        const removed = self.active_requests.fetchRemove(key) orelse return;
+        var request = removed.value;
+        defer request.deinit(self.alloc);
+        if (request.kind != .talkreq) return;
+
+        const response = self.alloc.dupe(u8, talk_resp.response) catch return;
+
+        self.markNodeSeen(from, from_addr, .connected);
+        self.completed_events.append(self.alloc, .{
+            .talkresp = .{
+                .peer_id = from,
+                .peer_addr = from_addr,
+                .req_id = talk_resp.req_id,
+                .response = response,
+            },
+        }) catch self.alloc.free(response);
     }
 
     pub fn addNode(self: *Protocol, node_id: NodeId, pubkey: ?*const [33]u8, addr: Address, enr: ?[]const u8) void {
@@ -1203,7 +1491,7 @@ test "discv5 protocol: basic init" {
 
     var node_id2: NodeId = [_]u8{0xbb} ** 32;
     node_id2[31] = 0x01;
-    proto.addNode(node_id2, null, .{ .bytes = .{ 192, 168, 1, 1 }, .port = 30303 }, null);
+    proto.addNode(node_id2, null, .{ .ip4 = .{ .bytes = .{ 192, 168, 1, 1 }, .port = 30303 } }, null);
     try std.testing.expectEqual(@as(usize, 1), proto.routing_table.nodeCount());
 }
 
@@ -1224,9 +1512,9 @@ test "discv5 protocol: WHOAREYOU handshake round-trip" {
     const pk_b = try secp.pubkeyFromSecret(&sk_b);
     const node_id_b = enr_mod.nodeIdFromCompressedPubkey(&pk_b);
 
-    var socket_a = try UdpSocket.bind(io, .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 });
+    var socket_a = try UdpSocket.bind(io, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } });
     defer socket_a.close();
-    var socket_b = try UdpSocket.bind(io, .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 });
+    var socket_b = try UdpSocket.bind(io, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } });
     defer socket_b.close();
 
     const addr_a = socket_a.address;
@@ -1326,8 +1614,11 @@ test "discv5 protocol: WHOAREYOU handshake round-trip" {
     defer alloc.free(pong_plaintext);
     const pong = try messages.Pong.decode(pong_plaintext);
     try std.testing.expectEqualSlices(u8, ping.req_id.slice(), pong.req_id.slice());
-    try std.testing.expectEqual(addr_a.bytes, pong.recipient_ip);
-    try std.testing.expectEqual(addr_a.port, pong.recipient_port);
+    try std.testing.expectEqual(addr_a.getPort(), pong.recipient_port);
+    switch (addr_a) {
+        .ip4 => |ip4| try std.testing.expectEqualDeep(messages.Pong.RecipientIp{ .ip4 = ip4.bytes }, pong.recipient_ip),
+        .ip6 => |ip6| try std.testing.expectEqualDeep(messages.Pong.RecipientIp{ .ip6 = ip6.bytes }, pong.recipient_ip),
+    }
 }
 
 test "discv5 protocol: FINDNODE assembles a completed NODES event" {
@@ -1347,30 +1638,39 @@ test "discv5 protocol: FINDNODE assembles a completed NODES event" {
     const pk_c = try secp.pubkeyFromSecret(&sk_c);
     const node_id_c = enr_mod.nodeIdFromCompressedPubkey(&pk_c);
 
-    var socket_a = try UdpSocket.bind(io, .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 });
+    var socket_a = try UdpSocket.bind(io, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } });
     defer socket_a.close();
-    var socket_b = try UdpSocket.bind(io, .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 });
+    var socket_b = try UdpSocket.bind(io, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } });
     defer socket_b.close();
 
     const addr_a = socket_a.address;
     const addr_b = socket_b.address;
-    const addr_c = Address{ .bytes = .{ 127, 0, 0, 1 }, .port = 30305 };
+    const addr_c = Address{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 30305 } };
 
     var a_builder = enr_mod.Builder.init(alloc, sk_a, 1);
-    a_builder.ip = addr_a.bytes;
-    a_builder.udp = addr_a.port;
+    a_builder.ip = switch (addr_a) {
+        .ip4 => |ip4| ip4.bytes,
+        .ip6 => unreachable,
+    };
+    a_builder.udp = addr_a.getPort();
     const a_enr = try a_builder.encode();
     defer alloc.free(a_enr);
 
     var b_builder = enr_mod.Builder.init(alloc, sk_b, 1);
-    b_builder.ip = addr_b.bytes;
-    b_builder.udp = addr_b.port;
+    b_builder.ip = switch (addr_b) {
+        .ip4 => |ip4| ip4.bytes,
+        .ip6 => unreachable,
+    };
+    b_builder.udp = addr_b.getPort();
     const b_enr = try b_builder.encode();
     defer alloc.free(b_enr);
 
     var c_builder = enr_mod.Builder.init(alloc, sk_c, 1);
-    c_builder.ip = addr_c.bytes;
-    c_builder.udp = addr_c.port;
+    c_builder.ip = switch (addr_c) {
+        .ip4 => |ip4| ip4.bytes,
+        .ip6 => unreachable,
+    };
+    c_builder.udp = addr_c.getPort();
     const c_enr = try c_builder.encode();
     defer alloc.free(c_enr);
 
@@ -1452,4 +1752,159 @@ test "discv5 protocol: FINDNODE assembles a completed NODES event" {
     }
     try std.testing.expect(saw_b);
     try std.testing.expect(saw_c);
+}
+
+test "discv5 protocol: TALKREQ/TALKRESP round-trip produces events" {
+    const alloc = std.testing.allocator;
+    const io = std.Options.debug_io;
+    const hex = @import("hex.zig");
+
+    const sk_a = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
+    const pk_a = try secp.pubkeyFromSecret(&sk_a);
+    const node_id_a = enr_mod.nodeIdFromCompressedPubkey(&pk_a);
+
+    const sk_b = hex.hexToBytesComptime(32, "66fb62bfbd66b9177a138c1e5cddbe4f7c30c343e94e68df8769459cb14571f7");
+    const pk_b = try secp.pubkeyFromSecret(&sk_b);
+    const node_id_b = enr_mod.nodeIdFromCompressedPubkey(&pk_b);
+
+    var socket_a = try UdpSocket.bind(io, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer socket_a.close();
+    var socket_b = try UdpSocket.bind(io, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer socket_b.close();
+
+    const addr_a = socket_a.address;
+    const addr_b = socket_b.address;
+
+    var proto_a = try Protocol.init(io, alloc, .{
+        .local_secret_key = sk_a,
+        .local_node_id = node_id_a,
+    });
+    defer proto_a.deinit();
+
+    var proto_b = try Protocol.init(io, alloc, .{
+        .local_secret_key = sk_b,
+        .local_node_id = node_id_b,
+    });
+    defer proto_b.deinit();
+
+    proto_a.addNode(node_id_b, &pk_b, addr_b, null);
+    proto_b.addNode(node_id_a, &pk_a, addr_a, null);
+
+    const req_id = try proto_a.sendTalkRequest(
+        &node_id_b,
+        &pk_b,
+        addr_b,
+        "/eth2/test",
+        "ping",
+        &socket_a,
+    );
+
+    var recv_buf_a: [MAX_PACKET_SIZE]u8 = undefined;
+    var recv_buf_b: [MAX_PACKET_SIZE]u8 = undefined;
+
+    const inbound_a = try socket_b.receiveTimeout(&recv_buf_b, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_b.handlePacket(inbound_a.data, inbound_a.from, &socket_b);
+
+    const inbound_b = try socket_a.receiveTimeout(&recv_buf_a, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_a.handlePacket(inbound_b.data, inbound_b.from, &socket_a);
+
+    const handshake = try socket_b.receiveTimeout(&recv_buf_b, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_b.handlePacket(handshake.data, handshake.from, &socket_b);
+
+    var request_event = proto_b.popEvent() orelse return error.MissingTalkReqEvent;
+    defer request_event.deinit(alloc);
+    try std.testing.expect(request_event == .talkreq);
+    try std.testing.expectEqual(node_id_a, request_event.talkreq.peer_id);
+    try std.testing.expectEqualSlices(u8, req_id.slice(), request_event.talkreq.req_id.slice());
+    try std.testing.expectEqualStrings("/eth2/test", request_event.talkreq.protocol);
+    try std.testing.expectEqualStrings("ping", request_event.talkreq.request);
+
+    try proto_b.sendTalkResponse(
+        request_event.talkreq.peer_id,
+        request_event.talkreq.peer_addr,
+        request_event.talkreq.req_id,
+        "pong",
+        &socket_b,
+    );
+
+    const response_packet = try socket_a.receiveTimeout(&recv_buf_a, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_a.handlePacket(response_packet.data, response_packet.from, &socket_a);
+
+    var response_event = proto_a.popEvent() orelse return error.MissingTalkRespEvent;
+    defer response_event.deinit(alloc);
+    try std.testing.expect(response_event == .talkresp);
+    try std.testing.expectEqual(node_id_b, response_event.talkresp.peer_id);
+    try std.testing.expectEqualSlices(u8, req_id.slice(), response_event.talkresp.req_id.slice());
+    try std.testing.expectEqualStrings("pong", response_event.talkresp.response);
+}
+
+test "discv5 protocol: request timeout prunes active and pending state" {
+    const alloc = std.testing.allocator;
+    const io = std.Options.debug_io;
+    const hex = @import("hex.zig");
+
+    const sk_a = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
+    const pk_a = try secp.pubkeyFromSecret(&sk_a);
+    const node_id_a = enr_mod.nodeIdFromCompressedPubkey(&pk_a);
+
+    const sk_b = hex.hexToBytesComptime(32, "66fb62bfbd66b9177a138c1e5cddbe4f7c30c343e94e68df8769459cb14571f7");
+    const pk_b = try secp.pubkeyFromSecret(&sk_b);
+    const node_id_b = enr_mod.nodeIdFromCompressedPubkey(&pk_b);
+
+    var socket_a = try UdpSocket.bind(io, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer socket_a.close();
+
+    var proto_a = try Protocol.init(io, alloc, .{
+        .local_secret_key = sk_a,
+        .local_node_id = node_id_a,
+        .request_timeout_ms = 1,
+    });
+    defer proto_a.deinit();
+
+    const addr_b = Address{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 30303 } };
+    proto_a.addNode(node_id_b, &pk_b, addr_b, null);
+
+    const req_id = try proto_a.sendPing(&node_id_b, &pk_b, addr_b, 1, &socket_a);
+    try std.testing.expectEqual(@as(usize, 1), proto_a.active_requests.count());
+    try std.testing.expectEqual(@as(usize, 1), proto_a.pending_requests.items.len);
+
+    var active_it = proto_a.active_requests.iterator();
+    while (active_it.next()) |entry| {
+        entry.value_ptr.started_at_ns = 0;
+    }
+    for (proto_a.pending_requests.items) |*pending| {
+        pending.sent_at_ns = 0;
+    }
+
+    proto_a.pruneExpiredState();
+
+    try std.testing.expectEqual(@as(usize, 0), proto_a.active_requests.count());
+    try std.testing.expectEqual(@as(usize, 0), proto_a.pending_requests.items.len);
+
+    var event = proto_a.popEvent() orelse return error.MissingTimeoutEvent;
+    defer event.deinit(alloc);
+    try std.testing.expect(event == .request_timeout);
+    try std.testing.expectEqual(node_id_b, event.request_timeout.peer_id);
+    try std.testing.expectEqualSlices(u8, req_id.slice(), event.request_timeout.req_id.slice());
+    try std.testing.expectEqual(RequestKind.ping, event.request_timeout.kind);
 }

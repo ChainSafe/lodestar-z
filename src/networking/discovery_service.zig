@@ -110,12 +110,14 @@ pub const DiscoveryService = struct {
 
     pub fn init(io: Io, allocator: Allocator, config: DiscoveryConfig) !DiscoveryService {
         var socket = try UdpSocket.bind(io, .{
-            .bytes = config.local_ip,
-            .port = config.listen_port,
+            .ip4 = .{
+                .bytes = config.local_ip,
+                .port = config.listen_port,
+            },
         });
         errdefer socket.close();
 
-        const listen_port = socket.address.port;
+        const listen_port = socket.address.getPort();
         const node_id = blk: {
             if (std.mem.eql(u8, &config.secret_key, &([_]u8{0} ** 32))) {
                 break :blk [_]u8{0} ** 32;
@@ -181,7 +183,7 @@ pub const DiscoveryService = struct {
     pub fn buildLocalEnr(self: *const DiscoveryService) ![]u8 {
         var builder = EnrBuilder.init(self.allocator, self.config.secret_key, self.enr_seq);
         builder.ip = self.config.local_ip;
-        builder.udp = self.socket.address.port;
+        builder.udp = self.socket.address.getPort();
         builder.tcp = self.config.p2p_port;
         builder.quic = self.config.p2p_port;
         builder.setEth2(self.current_fork_digest, self.config.next_fork_version, self.config.next_fork_epoch);
@@ -193,7 +195,7 @@ pub const DiscoveryService = struct {
     pub fn buildLocalEnrString(self: *const DiscoveryService) ![]u8 {
         var builder = EnrBuilder.init(self.allocator, self.config.secret_key, self.enr_seq);
         builder.ip = self.config.local_ip;
-        builder.udp = self.socket.address.port;
+        builder.udp = self.socket.address.getPort();
         builder.tcp = self.config.p2p_port;
         builder.quic = self.config.p2p_port;
         builder.setEth2(self.current_fork_digest, self.config.next_fork_version, self.config.next_fork_epoch);
@@ -211,7 +213,7 @@ pub const DiscoveryService = struct {
         if (!std.mem.eql(u8, &self.config.secret_key, &([_]u8{0} ** 32))) {
             var builder = EnrBuilder.init(self.allocator, self.config.secret_key, self.enr_seq);
             builder.ip = self.config.local_ip;
-            builder.udp = self.socket.address.port;
+            builder.udp = self.socket.address.getPort();
             builder.tcp = self.config.p2p_port;
             builder.quic = self.config.p2p_port;
             builder.setEth2(fork_digest, next_fork_version, next_fork_epoch);
@@ -264,10 +266,14 @@ pub const DiscoveryService = struct {
 
         if (std.mem.eql(u8, &node_id, &self.protocol.config.local_node_id)) return false;
 
-        const ip = parsed.ip orelse [4]u8{ 0, 0, 0, 0 };
-        const port = parsed.udp orelse parsed.tcp orelse 0;
+        const addr = if (parsed.ip) |ip|
+            discv5.Address{ .ip4 = .{ .bytes = ip, .port = parsed.udp orelse parsed.tcp orelse return false } }
+        else if (parsed.ip6) |ip6|
+            discv5.Address{ .ip6 = .{ .bytes = ip6, .port = parsed.udp6 orelse return false } }
+        else
+            return false;
 
-        self.protocol.addNode(node_id, &pk, .{ .bytes = ip, .port = port }, buf[0..decoded_len]);
+        self.protocol.addNode(node_id, &pk, addr, buf[0..decoded_len]);
         return true;
     }
 
@@ -434,6 +440,9 @@ pub const DiscoveryService = struct {
                         self.evaluateEnrCandidate(node_id, &parsed, .random_lookup);
                     }
                 },
+                .talkreq => {},
+                .talkresp => {},
+                .request_timeout => {},
             }
         }
     }
@@ -636,8 +645,8 @@ test "DiscoveryService: discoverPeers disabled" {
 test "DiscoveryService: drainDiscoveredPeers returns and clears queue" {
     var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
-    svc.protocol.addNode([_]u8{0x11} ** 32, null, .{ .bytes = .{ 1, 2, 3, 4 }, .port = 9000 }, null);
-    svc.protocol.addNode([_]u8{0x22} ** 32, null, .{ .bytes = .{ 5, 6, 7, 8 }, .port = 9001 }, null);
+    svc.protocol.addNode([_]u8{0x11} ** 32, null, .{ .ip4 = .{ .bytes = .{ 1, 2, 3, 4 }, .port = 9000 } }, null);
+    svc.protocol.addNode([_]u8{0x22} ** 32, null, .{ .ip4 = .{ .bytes = .{ 5, 6, 7, 8 }, .port = 9001 } }, null);
     svc.discoverPeers();
     const peers = svc.drainDiscoveredPeers();
     defer svc.allocator.free(peers);
@@ -706,7 +715,7 @@ test "DiscoveryService: buildLocalEnr produces valid ENR" {
     defer parsed.deinit();
     try std.testing.expect(parsed.pubkey != null);
     try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, parsed.ip.?);
-    try std.testing.expectEqual(@as(?u16, svc.socket.address.port), parsed.udp);
+    try std.testing.expectEqual(@as(?u16, svc.socket.address.getPort()), parsed.udp);
     try std.testing.expect(parsed.eth2_fork_digest != null);
 }
 

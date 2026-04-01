@@ -68,9 +68,14 @@ pub const Ping = struct {
 };
 
 pub const Pong = struct {
+    pub const RecipientIp = union(enum) {
+        ip4: [4]u8,
+        ip6: [16]u8,
+    };
+
     req_id: ReqId,
     enr_seq: u64,
-    recipient_ip: [4]u8,
+    recipient_ip: RecipientIp,
     recipient_port: u16,
 
     pub fn encode(self: *const Pong, alloc: Allocator) ![]u8 {
@@ -80,7 +85,10 @@ pub const Pong = struct {
         const list_start = try w.beginList();
         try w.writeBytes(self.req_id.slice());
         try w.writeUint64(self.enr_seq);
-        try w.writeBytes(&self.recipient_ip);
+        switch (self.recipient_ip) {
+            .ip4 => |ip| try w.writeBytes(&ip),
+            .ip6 => |ip| try w.writeBytes(&ip),
+        }
         const port = self.recipient_port;
         if (port == 0) {
             try w.writeUint64(0);
@@ -106,14 +114,17 @@ pub const Pong = struct {
         const req_id = try ReqId.fromSlice(req_id_bytes);
         const enr_seq = list.readUint64() catch return Error.InvalidEncoding;
         const ip_bytes = list.readBytes() catch return Error.InvalidEncoding;
-        if (ip_bytes.len != 4) return Error.InvalidMessage;
         const port_bytes = list.readBytes() catch return Error.InvalidEncoding;
         var port: u16 = 0;
         for (port_bytes) |b| port = (port << 8) | b;
         return Pong{
             .req_id = req_id,
             .enr_seq = enr_seq,
-            .recipient_ip = ip_bytes[0..4].*,
+            .recipient_ip = switch (ip_bytes.len) {
+                4 => .{ .ip4 = ip_bytes[0..4].* },
+                16 => .{ .ip6 = ip_bytes[0..16].* },
+                else => return Error.InvalidMessage,
+            },
             .recipient_port = port,
         };
     }
@@ -305,7 +316,7 @@ test "discv5 messages: PONG encode/decode" {
     const pong = Pong{
         .req_id = try ReqId.fromSlice(&[_]u8{ 0x00, 0x00, 0x00, 0x01 }),
         .enr_seq = 1,
-        .recipient_ip = [4]u8{ 127, 0, 0, 1 },
+        .recipient_ip = .{ .ip4 = [4]u8{ 127, 0, 0, 1 } },
         .recipient_port = 9000,
     };
     const encoded = try pong.encode(alloc);
@@ -314,7 +325,24 @@ test "discv5 messages: PONG encode/decode" {
     const decoded = try Pong.decode(encoded);
     try std.testing.expectEqual(@as(u64, 1), decoded.enr_seq);
     try std.testing.expectEqual(@as(u16, 9000), decoded.recipient_port);
-    try std.testing.expectEqualSlices(u8, &[4]u8{ 127, 0, 0, 1 }, &decoded.recipient_ip);
+    try std.testing.expectEqualDeep(pong.recipient_ip, decoded.recipient_ip);
+}
+
+test "discv5 messages: PONG encode/decode IPv6" {
+    const alloc = std.testing.allocator;
+    const pong = Pong{
+        .req_id = try ReqId.fromSlice(&[_]u8{ 0x00, 0x00, 0x00, 0x02 }),
+        .enr_seq = 2,
+        .recipient_ip = .{ .ip6 = [16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } },
+        .recipient_port = 9001,
+    };
+    const encoded = try pong.encode(alloc);
+    defer alloc.free(encoded);
+
+    const decoded = try Pong.decode(encoded);
+    try std.testing.expectEqual(@as(u64, 2), decoded.enr_seq);
+    try std.testing.expectEqual(@as(u16, 9001), decoded.recipient_port);
+    try std.testing.expectEqualDeep(pong.recipient_ip, decoded.recipient_ip);
 }
 
 test "discv5 messages: FINDNODE encode/decode" {

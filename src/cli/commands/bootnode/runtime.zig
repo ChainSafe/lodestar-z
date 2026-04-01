@@ -203,10 +203,14 @@ fn seedEnrToProtocol(allocator: Allocator, protocol_inst: *Protocol, enr_str: []
 
     const node_id = enr.nodeId() orelse return false;
     const pubkey = enr.pubkey orelse return false;
-    const ip = enr.ip orelse return false;
-    const port = enr.udp orelse return false;
+    const addr = if (enr.ip) |ip|
+        Address{ .ip4 = .{ .bytes = ip, .port = enr.udp orelse return false } }
+    else if (enr.ip6) |ip6|
+        Address{ .ip6 = .{ .bytes = ip6, .port = enr.udp6 orelse return false } }
+    else
+        return false;
 
-    protocol_inst.addNode(node_id, &pubkey, .{ .bytes = ip, .port = port }, raw);
+    protocol_inst.addNode(node_id, &pubkey, addr, raw);
     return true;
 }
 
@@ -272,14 +276,21 @@ fn countPeerStats(protocol_inst: *const Protocol) PeerStats {
         for (bucket) |entry| {
             if (entry.status != .connected) continue;
             stats.total += 1;
-            // Entries in kbucket store [6]u8 addr: 4 bytes IP + 2 bytes port
-            const ip = entry.addr[0..4];
-            const is_zero_ip = std.mem.eql(u8, ip, &[_]u8{ 0, 0, 0, 0 });
-            if (is_zero_ip) {
-                stats.@"unreachable" += 1;
-            } else {
-                // In our current implementation, kbucket only stores IPv4
-                stats.ip4_only += 1;
+            switch (entry.addr) {
+                .ip4 => |ip4| {
+                    if (std.mem.eql(u8, &ip4.bytes, &[_]u8{ 0, 0, 0, 0 })) {
+                        stats.@"unreachable" += 1;
+                    } else {
+                        stats.ip4_only += 1;
+                    }
+                },
+                .ip6 => |ip6| {
+                    if (std.mem.eql(u8, &ip6.bytes, &([_]u8{0} ** 16))) {
+                        stats.@"unreachable" += 1;
+                    } else {
+                        stats.ip6_only += 1;
+                    }
+                },
             }
         }
     }
@@ -374,7 +385,7 @@ pub fn run(io: Io, allocator: Allocator, opts: BootnodeOpts) !void {
     defer protocol_inst.deinit();
 
     // ── Bind UDP socket ─────────────────────────────────────────────
-    var udp = try UdpSocket.bind(io, .{ .bytes = listen_ip4, .port = opts.port });
+    var udp = try UdpSocket.bind(io, .{ .ip4 = .{ .bytes = listen_ip4, .port = opts.port } });
     defer udp.close();
 
     log.info("UDP socket bound to {}", .{udp.address});

@@ -39,6 +39,8 @@ pub const Enr = struct {
     ip6: ?[16]u8,
     /// UDP6 port
     udp6: ?u16,
+    /// TCP6 port
+    tcp6: ?u16,
     quic: ?u16,
     quic6: ?u16,
     /// Fork digest from eth2 ENR field (first 4 bytes of ENRForkID SSZ)
@@ -101,6 +103,7 @@ pub fn decode(alloc: Allocator, data: []const u8) Error!Enr {
         .tcp = null,
         .ip6 = null,
         .udp6 = null,
+        .tcp6 = null,
         .quic = null,
         .quic6 = null,
         .eth2_fork_digest = null,
@@ -157,6 +160,13 @@ pub fn decode(alloc: Allocator, data: []const u8) Error!Enr {
                 var port: u16 = 0;
                 for (val) |b| port = (port << 8) | b;
                 enr.udp6 = port;
+            }
+        } else if (std.mem.eql(u8, key, "tcp6")) {
+            const val = list.readBytes() catch return Error.InvalidEnr;
+            if (val.len > 0 and val.len <= 2) {
+                var port: u16 = 0;
+                for (val) |b| port = (port << 8) | b;
+                enr.tcp6 = port;
             }
         } else if (std.mem.eql(u8, key, "quic")) {
             const val = list.readBytes() catch return Error.InvalidEnr;

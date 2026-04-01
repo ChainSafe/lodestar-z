@@ -3,12 +3,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const NodeId = @import("enr.zig").NodeId;
+const Address = @import("udp_socket.zig").Address;
 
 pub const K = 16;
 pub const NUM_BUCKETS = 256;
+pub const BUCKET_PENDING_TIMEOUT_MS: u64 = 60_000;
 
-/// Maximum nodes from the same IPv6 /64 prefix allowed in any single bucket.
-/// Limits Sybil attacks where an attacker controls an entire /64 block (CL-2026-11).
+/// Connectivity state used for bucket ordering and eviction.
 pub const EntryStatus = enum {
     connected,
     disconnected,
@@ -17,7 +18,7 @@ pub const EntryStatus = enum {
 
 pub const Entry = struct {
     node_id: NodeId,
-    addr: [6]u8,
+    addr: Address,
     last_seen: i64,
     status: EntryStatus,
 };
@@ -25,51 +26,151 @@ pub const Entry = struct {
 pub const KBucket = struct {
     entries: [K]Entry,
     count: usize,
+    first_connected_index: ?usize,
+    pending: ?Entry,
+    pending_inserted_at_ns: i64,
 
     pub fn init() KBucket {
-        return .{ .entries = undefined, .count = 0 };
+        return .{
+            .entries = undefined,
+            .count = 0,
+            .first_connected_index = null,
+            .pending = null,
+            .pending_inserted_at_ns = 0,
+        };
     }
 
     pub fn insert(self: *KBucket, entry: Entry) bool {
-        for (self.entries[0..self.count]) |*e| {
-            if (std.mem.eql(u8, &e.node_id, &entry.node_id)) {
-                e.* = entry;
+        if (self.pending) |pending| {
+            if (std.mem.eql(u8, &pending.node_id, &entry.node_id)) {
+                self.pending = entry;
+                self.pending_inserted_at_ns = entry.last_seen;
                 return true;
             }
         }
-        if (self.count < K) {
-            self.entries[self.count] = entry;
-            self.count += 1;
+
+        for (self.entries[0..self.count], 0..) |existing, i| {
+            if (!std.mem.eql(u8, &existing.node_id, &entry.node_id)) continue;
+            if (i == 0 and entry.status == .connected) {
+                self.clearPending();
+            }
+            _ = self.removeAt(i);
+            self.insertOrdered(entry);
             return true;
         }
 
-        // Bucket full: only evict disconnected peers, and pick the stalest one.
-        var eviction_idx: ?usize = null;
-        var oldest_last_seen: i64 = 0;
-        for (self.entries[0..self.count], 0..) |e, i| {
-            if (e.status != .disconnected) continue;
-            if (eviction_idx == null or e.last_seen < oldest_last_seen) {
-                eviction_idx = i;
-                oldest_last_seen = e.last_seen;
-            }
-        }
-        if (eviction_idx) |i| {
-            self.entries[i] = entry;
+        if (self.count < K) {
+            self.insertOrdered(entry);
             return true;
+        }
+
+        if (entry.status == .connected or entry.status == .pending) {
+            if (self.first_connected_index != 0) {
+                self.pending = entry;
+                self.pending_inserted_at_ns = entry.last_seen;
+                return false;
+            }
         }
 
         return false;
     }
 
     pub fn remove(self: *KBucket, node_id: *const NodeId) bool {
-        for (self.entries[0..self.count], 0..) |e, i| {
-            if (std.mem.eql(u8, &e.node_id, node_id)) {
-                std.mem.copyForwards(Entry, self.entries[i .. self.count - 1], self.entries[i + 1 .. self.count]);
-                self.count -= 1;
+        if (self.pending) |pending| {
+            if (std.mem.eql(u8, &pending.node_id, node_id)) {
+                self.clearPending();
                 return true;
             }
         }
+
+        for (self.entries[0..self.count], 0..) |e, i| {
+            if (!std.mem.eql(u8, &e.node_id, node_id)) continue;
+            _ = self.removeAt(i);
+            self.maybeInsertPending();
+            return true;
+        }
         return false;
+    }
+
+    pub fn applyPendingIfExpired(self: *KBucket, now_ns: i64, timeout_ms: u64) bool {
+        const pending = self.pending orelse return false;
+        const elapsed_ns: i128 = @as(i128, now_ns) - @as(i128, self.pending_inserted_at_ns);
+        const timeout_ns: i128 = @as(i128, timeout_ms) * std.time.ns_per_ms;
+        if (elapsed_ns < timeout_ns) return false;
+
+        self.clearPending();
+
+        if (self.count < K) {
+            self.insertOrdered(pending);
+            return true;
+        }
+
+        if (self.first_connected_index == 0) {
+            return false;
+        }
+
+        _ = self.removeAt(0);
+        self.insertOrdered(pending);
+        return true;
+    }
+
+    fn clearPending(self: *KBucket) void {
+        self.pending = null;
+        self.pending_inserted_at_ns = 0;
+    }
+
+    fn maybeInsertPending(self: *KBucket) void {
+        if (self.count >= K) return;
+        const pending = self.pending orelse return;
+        self.clearPending();
+        self.insertOrdered(pending);
+    }
+
+    fn removeAt(self: *KBucket, index: usize) Entry {
+        const removed = self.entries[index];
+        if (index + 1 < self.count) {
+            std.mem.copyForwards(Entry, self.entries[index .. self.count - 1], self.entries[index + 1 .. self.count]);
+        }
+        self.count -= 1;
+
+        switch (removed.status) {
+            .connected => {
+                if (self.first_connected_index) |first| {
+                    if (first >= self.count) self.first_connected_index = null;
+                }
+            },
+            .disconnected, .pending => {
+                if (self.first_connected_index) |*first| {
+                    first.* -= 1;
+                }
+            },
+        }
+
+        return removed;
+    }
+
+    fn insertOrdered(self: *KBucket, entry: Entry) void {
+        switch (entry.status) {
+            .connected => {
+                self.entries[self.count] = entry;
+                if (self.first_connected_index == null) {
+                    self.first_connected_index = self.count;
+                }
+            },
+            .disconnected, .pending => {
+                const insert_at = self.first_connected_index orelse self.count;
+                if (insert_at < self.count) {
+                    std.mem.copyBackwards(Entry, self.entries[insert_at + 1 .. self.count + 1], self.entries[insert_at..self.count]);
+                }
+                self.entries[insert_at] = entry;
+                if (self.first_connected_index) |*first| {
+                    first.* += 1;
+                }
+                self.count += 1;
+                return;
+            },
+        }
+        self.count += 1;
     }
 };
 
@@ -121,6 +222,12 @@ pub const RoutingTable = struct {
     pub fn remove(self: *RoutingTable, node_id: *const NodeId) bool {
         const dist = logDistance(&self.local_id, node_id) orelse return false;
         return self.buckets[dist].remove(node_id);
+    }
+
+    pub fn prunePending(self: *RoutingTable, now_ns: i64, timeout_ms: u64) void {
+        for (&self.buckets) |*bucket| {
+            _ = bucket.applyPendingIfExpired(now_ns, timeout_ms);
+        }
     }
 
     pub fn findClosest(self: *const RoutingTable, target: *const NodeId, n: usize, out: []Entry) usize {
@@ -190,7 +297,7 @@ test "kbucket: routing table insert/find" {
         node_id[31] = @intCast(i);
         const entry = Entry{
             .node_id = node_id,
-            .addr = [6]u8{ 127, 0, 0, 1, 0x23, 0x28 },
+            .addr = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0x2328 } },
             .last_seen = 0,
             .status = .connected,
         };
@@ -205,7 +312,7 @@ test "kbucket: routing table insert/find" {
     try std.testing.expect(found <= 5);
 }
 
-test "kbucket: bucket full evicts disconnected" {
+test "kbucket: full bucket stores pending connected entry until timeout" {
     var bucket = KBucket.init();
 
     for (0..K) |i| {
@@ -213,7 +320,7 @@ test "kbucket: bucket full evicts disconnected" {
         node_id[31] = @intCast(i);
         _ = bucket.insert(Entry{
             .node_id = node_id,
-            .addr = .{ 127, 0, 0, 1, 0, 0 },
+            .addr = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } },
             .last_seen = @intCast(i),
             .status = .disconnected,
         });
@@ -222,12 +329,18 @@ test "kbucket: bucket full evicts disconnected" {
 
     const inserted = bucket.insert(Entry{
         .node_id = [_]u8{0xff} ** 32,
-        .addr = .{ 127, 0, 0, 1, 0, 1 },
-        .last_seen = 0,
+        .addr = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 1 } },
+        .last_seen = std.time.ns_per_ms,
         .status = .connected,
     });
-    try std.testing.expect(inserted);
-    try std.testing.expectEqualDeep([_]u8{0xff} ** 32, bucket.entries[0].node_id);
+    try std.testing.expect(!inserted);
+    try std.testing.expect(bucket.pending != null);
+    try std.testing.expectEqualDeep([_]u8{0xff} ** 32, bucket.pending.?.node_id);
+
+    try std.testing.expect(bucket.applyPendingIfExpired(std.time.ns_per_ms * 2, 1));
+    try std.testing.expect(bucket.pending == null);
+    try std.testing.expectEqualDeep([_]u8{0xff} ** 32, bucket.entries[K - 1].node_id);
+    try std.testing.expectEqual(@as(usize, K), bucket.count);
 }
 
 test "kbucket: full bucket does not evict connected peers" {
@@ -238,7 +351,7 @@ test "kbucket: full bucket does not evict connected peers" {
         node_id[31] = @intCast(i);
         _ = bucket.insert(Entry{
             .node_id = node_id,
-            .addr = .{ 10, 0, 0, 1, 0, 0 },
+            .addr = .{ .ip4 = .{ .bytes = .{ 10, 0, 0, 1 }, .port = 0 } },
             .last_seen = @intCast(i),
             .status = .connected,
         });
@@ -246,11 +359,12 @@ test "kbucket: full bucket does not evict connected peers" {
 
     const inserted = bucket.insert(Entry{
         .node_id = [_]u8{0xee} ** 32,
-        .addr = .{ 10, 0, 0, 2, 0, 0 },
+        .addr = .{ .ip4 = .{ .bytes = .{ 10, 0, 0, 2 }, .port = 0 } },
         .last_seen = -1,
         .status = .pending,
     });
     try std.testing.expect(!inserted);
+    try std.testing.expect(bucket.pending == null);
 }
 
 test "kbucket: updating existing node does not grow bucket" {
@@ -259,18 +373,53 @@ test "kbucket: updating existing node does not grow bucket" {
 
     try std.testing.expect(bucket.insert(.{
         .node_id = node_id,
-        .addr = .{ 127, 0, 0, 1, 0x23, 0x28 },
+        .addr = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0x2328 } },
         .last_seen = 1,
         .status = .pending,
     }));
     try std.testing.expect(bucket.insert(.{
         .node_id = node_id,
-        .addr = .{ 127, 0, 0, 2, 0x23, 0x29 },
+        .addr = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = 0x2329 } },
         .last_seen = 2,
         .status = .connected,
     }));
 
     try std.testing.expectEqual(@as(usize, 1), bucket.count);
-    try std.testing.expectEqualDeep([6]u8{ 127, 0, 0, 2, 0x23, 0x29 }, bucket.entries[0].addr);
+    try std.testing.expectEqualDeep(@as(Address, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = 0x2329 } }), bucket.entries[0].addr);
     try std.testing.expectEqual(EntryStatus.connected, bucket.entries[0].status);
+}
+
+test "kbucket: reconnecting oldest entry clears pending replacement" {
+    var bucket = KBucket.init();
+
+    for (0..K) |i| {
+        var node_id: NodeId = [_]u8{0} ** 32;
+        node_id[31] = @intCast(i);
+        _ = bucket.insert(Entry{
+            .node_id = node_id,
+            .addr = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } },
+            .last_seen = @intCast(i),
+            .status = .disconnected,
+        });
+    }
+
+    const pending_id: NodeId = [_]u8{0xaa} ** 32;
+    try std.testing.expect(!bucket.insert(.{
+        .node_id = pending_id,
+        .addr = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = 1 } },
+        .last_seen = 100,
+        .status = .connected,
+    }));
+    try std.testing.expect(bucket.pending != null);
+
+    const oldest_id = bucket.entries[0].node_id;
+    try std.testing.expect(bucket.insert(.{
+        .node_id = oldest_id,
+        .addr = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 3 }, .port = 2 } },
+        .last_seen = 101,
+        .status = .connected,
+    }));
+
+    try std.testing.expect(bucket.pending == null);
+    try std.testing.expectEqual(EntryStatus.connected, bucket.entries[K - 1].status);
 }

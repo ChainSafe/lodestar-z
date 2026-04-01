@@ -554,11 +554,22 @@ pub fn main() !void {
                     std.debug.print("  Failed to decode PONG: {s}\n", .{@errorName(err)});
                     continue;
                 };
-                std.debug.print("  ✓ PONG! External IP: {d}.{d}.{d}.{d}:{d}  (bootnode enr-seq={d})\n", .{
-                    pong.recipient_ip[0], pong.recipient_ip[1],
-                    pong.recipient_ip[2], pong.recipient_ip[3],
-                    pong.recipient_port,  pong.enr_seq,
-                });
+                switch (pong.recipient_ip) {
+                    .ip4 => |ip4| std.debug.print(
+                        "  ✓ PONG! External IP: {d}.{d}.{d}.{d}:{d}  (bootnode enr-seq={d})\n",
+                        .{ ip4[0], ip4[1], ip4[2], ip4[3], pong.recipient_port, pong.enr_seq },
+                    ),
+                    .ip6 => |ip6| std.debug.print(
+                        "  ✓ PONG! External IP: [{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}]:{d}  (bootnode enr-seq={d})\n",
+                        .{
+                            ip6[0],              ip6[1],       ip6[2],  ip6[3],
+                            ip6[4],              ip6[5],       ip6[6],  ip6[7],
+                            ip6[8],              ip6[9],       ip6[10], ip6[11],
+                            ip6[12],             ip6[13],      ip6[14], ip6[15],
+                            pong.recipient_port, pong.enr_seq,
+                        },
+                    ),
+                }
                 total_pongs += 1;
 
                 // Step 5: Send FINDNODE
