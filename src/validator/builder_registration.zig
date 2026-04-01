@@ -39,24 +39,15 @@ pub const BuilderRegistrationService = struct {
     api: *BeaconApiClient,
     validator_store: *ValidatorStore,
 
-    /// Suggested fee recipient (20 bytes). Set from ValidatorConfig.
-    fee_recipient: [20]u8,
-    /// Default gas limit for all validators.
-    gas_limit: u64,
-
     pub fn init(
         allocator: Allocator,
         api: *BeaconApiClient,
         validator_store: *ValidatorStore,
-        fee_recipient: [20]u8,
-        gas_limit: u64,
     ) BuilderRegistrationService {
         return .{
             .allocator = allocator,
             .api = api,
             .validator_store = validator_store,
-            .fee_recipient = fee_recipient,
-            .gas_limit = gas_limit,
         };
     }
 
@@ -102,11 +93,14 @@ pub const BuilderRegistrationService = struct {
         defer registrations.deinit();
 
         for (pubkeys) |pubkey| {
+            const fee_recipient = self.validator_store.getFeeRecipient(pubkey);
+            const gas_limit = self.validator_store.getGasLimit(pubkey);
+
             // Compute signing root (same path for local and remote).
             var signing_root: [32]u8 = undefined;
             signing_mod.builderRegistrationSigningRoot(
-                self.fee_recipient,
-                self.gas_limit,
+                fee_recipient,
+                gas_limit,
                 timestamp,
                 pubkey,
                 &signing_root,
@@ -129,8 +123,8 @@ pub const BuilderRegistrationService = struct {
 
             try registrations.append(.{
                 .pubkey = pubkey,
-                .fee_recipient = self.fee_recipient,
-                .gas_limit = self.gas_limit,
+                .fee_recipient = fee_recipient,
+                .gas_limit = gas_limit,
                 .timestamp = timestamp,
                 .signature = sig_bytes,
             });

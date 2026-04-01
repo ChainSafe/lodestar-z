@@ -40,6 +40,11 @@ pub const SseEvent = struct {
     data: []const u8,
 };
 
+pub const HeadHeaderSummary = struct {
+    slot: u64,
+    block_root: [32]u8,
+};
+
 /// Callback type for SSE events.
 pub const SseCallback = struct {
     ctx: *anyopaque,
@@ -480,6 +485,63 @@ pub const BeaconApiClient = struct {
         };
     }
 
+    /// GET /eth/v1/beacon/headers/head
+    ///
+    /// Returns the current canonical head slot and block root.
+    pub fn getHeadHeaderSummary(self: *BeaconApiClient, io: Io) !HeadHeaderSummary {
+        const body = try self.get(io, "/eth/v1/beacon/headers/head");
+        defer self.allocator.free(body);
+
+        const Parsed = struct {
+            data: struct {
+                root: []const u8,
+                header: struct {
+                    message: struct {
+                        slot: []const u8,
+                    },
+                },
+            },
+        };
+
+        var parsed = try std.json.parseFromSlice(Parsed, self.allocator, body, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+
+        const d = parsed.value.data;
+        var block_root: [32]u8 = [_]u8{0} ** 32;
+        const root_hex = if (std.mem.startsWith(u8, d.root, "0x")) d.root[2..] else d.root;
+        _ = std.fmt.hexToBytes(&block_root, root_hex) catch {};
+
+        return .{
+            .slot = try std.fmt.parseInt(u64, d.header.message.slot, 10),
+            .block_root = block_root,
+        };
+    }
+
+    /// GET /eth/v1/beacon/states/head/finality_checkpoints
+    ///
+    /// Returns the current finalized checkpoint epoch.
+    pub fn getFinalizedCheckpointEpoch(self: *BeaconApiClient, io: Io) !u64 {
+        const body = try self.get(io, "/eth/v1/beacon/states/head/finality_checkpoints");
+        defer self.allocator.free(body);
+
+        const Parsed = struct {
+            data: struct {
+                finalized: struct {
+                    epoch: []const u8,
+                },
+            },
+        };
+
+        var parsed = try std.json.parseFromSlice(Parsed, self.allocator, body, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+
+        return try std.fmt.parseInt(u64, parsed.value.data.finalized.epoch, 10);
+    }
+
     // -----------------------------------------------------------------------
     // Duties
     // -----------------------------------------------------------------------
@@ -687,14 +749,22 @@ pub const BeaconApiClient = struct {
         slot: u64,
         randao_reveal: [96]u8,
         graffiti: [32]u8,
+        builder_boost_factor: ?u64,
     ) !ProduceBlockResponse {
         const randao_hex = std.fmt.bytesToHex(&randao_reveal, .lower);
         const graffiti_hex = std.fmt.bytesToHex(&graffiti, .lower);
-        const path = try std.fmt.allocPrint(
-            self.allocator,
-            "/eth/v3/validator/blocks/{d}?randao_reveal=0x{s}&graffiti=0x{s}",
-            .{ slot, randao_hex, graffiti_hex },
-        );
+        const path = if (builder_boost_factor) |boost_factor|
+            try std.fmt.allocPrint(
+                self.allocator,
+                "/eth/v3/validator/blocks/{d}?randao_reveal=0x{s}&graffiti=0x{s}&builder_boost_factor={d}",
+                .{ slot, randao_hex, graffiti_hex, boost_factor },
+            )
+        else
+            try std.fmt.allocPrint(
+                self.allocator,
+                "/eth/v3/validator/blocks/{d}?randao_reveal=0x{s}&graffiti=0x{s}",
+                .{ slot, randao_hex, graffiti_hex },
+            );
         defer self.allocator.free(path);
 
         const body = try self.get(io, path);
@@ -722,14 +792,22 @@ pub const BeaconApiClient = struct {
         slot: u64,
         randao_reveal: [96]u8,
         graffiti: [32]u8,
+        builder_boost_factor: ?u64,
     ) !ProduceBlockSszResponse {
         const randao_hex = std.fmt.bytesToHex(&randao_reveal, .lower);
         const graffiti_hex = std.fmt.bytesToHex(&graffiti, .lower);
-        const path = try std.fmt.allocPrint(
-            self.allocator,
-            "/eth/v3/validator/blocks/{d}?randao_reveal=0x{s}&graffiti=0x{s}",
-            .{ slot, randao_hex, graffiti_hex },
-        );
+        const path = if (builder_boost_factor) |boost_factor|
+            try std.fmt.allocPrint(
+                self.allocator,
+                "/eth/v3/validator/blocks/{d}?randao_reveal=0x{s}&graffiti=0x{s}&builder_boost_factor={d}",
+                .{ slot, randao_hex, graffiti_hex, boost_factor },
+            )
+        else
+            try std.fmt.allocPrint(
+                self.allocator,
+                "/eth/v3/validator/blocks/{d}?randao_reveal=0x{s}&graffiti=0x{s}",
+                .{ slot, randao_hex, graffiti_hex },
+            );
         defer self.allocator.free(path);
 
         const resp = try self.getSsz(io, path);
@@ -1014,7 +1092,7 @@ pub const BeaconApiClient = struct {
         );
         defer self.allocator.free(path);
 
-        const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.base_url, path });
+        const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.activeUrl(), path });
         defer self.allocator.free(url);
 
         log.info("subscribing to SSE events: {s}", .{topics_buf.items});
@@ -1023,24 +1101,36 @@ pub const BeaconApiClient = struct {
         defer client.deinit();
 
         const uri = try std.Uri.parse(url);
-        var req = try client.request(.GET, uri, .{
+        var req = client.request(.GET, uri, .{
             .keep_alive = true,
             .extra_headers = &.{
                 .{ .name = "Accept", .value = "text/event-stream" },
                 .{ .name = "Cache-Control", .value = "no-cache" },
             },
-        });
+        }) catch |err| {
+            self.recordFailure();
+            return err;
+        };
         defer req.deinit();
 
-        try req.sendBodiless();
+        req.sendBodiless() catch |err| {
+            self.recordFailure();
+            return err;
+        };
 
         var redirect_buf: [1024]u8 = undefined;
-        var response = try req.receiveHead(&redirect_buf);
+        var response = req.receiveHead(&redirect_buf) catch |err| {
+            self.recordFailure();
+            return err;
+        };
 
         if (response.head.status != .ok) {
             log.err("SSE subscription failed: HTTP {d}", .{@intFromEnum(response.head.status)});
+            self.recordFailure();
             return error.HttpError;
         }
+
+        self.recordSuccess();
 
         // Parse SSE stream line by line.
         var event_type_buf: [128]u8 = undefined;

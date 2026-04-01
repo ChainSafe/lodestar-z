@@ -391,6 +391,76 @@ pub const routes = [_]Route{
         .path = "/eth/v1/remotekeys",
         .operation_id = "deleteRemoteKeys",
     },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/validator/{pubkey}/feerecipient",
+        .operation_id = "listFeeRecipient",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/{pubkey}/feerecipient",
+        .operation_id = "setFeeRecipient",
+    },
+    .{
+        .method = .DELETE,
+        .path = "/eth/v1/validator/{pubkey}/feerecipient",
+        .operation_id = "deleteFeeRecipient",
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/validator/{pubkey}/graffiti",
+        .operation_id = "getGraffiti",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/{pubkey}/graffiti",
+        .operation_id = "setGraffiti",
+    },
+    .{
+        .method = .DELETE,
+        .path = "/eth/v1/validator/{pubkey}/graffiti",
+        .operation_id = "deleteGraffiti",
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/validator/{pubkey}/gas_limit",
+        .operation_id = "getGasLimit",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/{pubkey}/gas_limit",
+        .operation_id = "setGasLimit",
+    },
+    .{
+        .method = .DELETE,
+        .path = "/eth/v1/validator/{pubkey}/gas_limit",
+        .operation_id = "deleteGasLimit",
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v1/validator/{pubkey}/builder_boost_factor",
+        .operation_id = "getBuilderBoostFactor",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/{pubkey}/builder_boost_factor",
+        .operation_id = "setBuilderBoostFactor",
+    },
+    .{
+        .method = .DELETE,
+        .path = "/eth/v1/validator/{pubkey}/builder_boost_factor",
+        .operation_id = "deleteBuilderBoostFactor",
+    },
+    .{
+        .method = .GET,
+        .path = "/eth/v0/validator/{pubkey}/proposer_config",
+        .operation_id = "getProposerConfig",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v1/validator/{pubkey}/voluntary_exit",
+        .operation_id = "signVoluntaryExit",
+    },
 };
 
 /// Path segment — either a literal string or a named parameter.

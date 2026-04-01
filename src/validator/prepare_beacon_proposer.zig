@@ -41,33 +41,16 @@ pub const PrepareBeaconProposerService = struct {
     api: *BeaconApiClient,
     validator_store: *ValidatorStore,
 
-    /// Default fee recipient address used when no per-validator override exists.
-    default_fee_recipient: [42]u8,
-
-    /// Per-validator override map: validator_index → fee_recipient.
-    /// Managed externally; pointer is borrowed (not owned).
-    overrides: ?*const std.AutoHashMap(u64, [42]u8),
-
     pub fn init(
         allocator: Allocator,
         api: *BeaconApiClient,
         validator_store: *ValidatorStore,
-        default_fee_recipient: [42]u8,
     ) PrepareBeaconProposerService {
         return .{
             .allocator = allocator,
             .api = api,
             .validator_store = validator_store,
-            .default_fee_recipient = default_fee_recipient,
-            .overrides = null,
         };
-    }
-
-    /// Set per-validator fee recipient overrides.
-    ///
-    /// The map lifetime must exceed the service lifetime.
-    pub fn setOverrides(self: *PrepareBeaconProposerService, overrides: *const std.AutoHashMap(u64, [42]u8)) void {
-        self.overrides = overrides;
     }
 
     // -----------------------------------------------------------------------
@@ -88,30 +71,34 @@ pub const PrepareBeaconProposerService = struct {
     // -----------------------------------------------------------------------
 
     fn registerFeeRecipients(self: *PrepareBeaconProposerService, io: Io, epoch: u64) !void {
-        // Collect validator indices.
-        const indices = try self.validator_store.allIndices(self.allocator);
-        defer self.allocator.free(indices);
+        const pubkeys = try self.validator_store.allPubkeys(self.allocator);
+        defer self.allocator.free(pubkeys);
 
-        if (indices.len == 0) {
+        if (pubkeys.len == 0) {
             log.debug("no validators registered — skipping prepare_beacon_proposer epoch={d}", .{epoch});
             return;
         }
 
         // Build entries list.
-        var entries = try std.array_list.Managed(FeeRecipientEntry).initCapacity(self.allocator, indices.len);
+        var entries = std.array_list.Managed(FeeRecipientEntry).init(self.allocator);
         defer entries.deinit();
 
-        for (indices) |idx| {
-            const fee_recipient = if (self.overrides) |ov|
-                ov.get(idx) orelse self.default_fee_recipient
-            else
-                self.default_fee_recipient;
+        for (pubkeys) |pubkey| {
+            const validator_index = self.validator_store.getValidatorIndex(pubkey) orelse continue;
+            const fee_recipient = self.validator_store.getFeeRecipient(pubkey);
 
-            entries.appendAssumeCapacity(.{
-                .validator_index = idx,
-                .fee_recipient = fee_recipient,
+            var fee_recipient_hex: [42]u8 = undefined;
+            fee_recipient_hex[0] = '0';
+            fee_recipient_hex[1] = 'x';
+            _ = std.fmt.bufPrint(fee_recipient_hex[2..], "{x}", .{fee_recipient}) catch unreachable;
+
+            try entries.append(.{
+                .validator_index = validator_index,
+                .fee_recipient = fee_recipient_hex,
             });
         }
+
+        if (entries.items.len == 0) return;
 
         // Serialize to JSON: [{"validator_index":"N","fee_recipient":"0x..."},...]
         const json_body = try self.serializeEntries(entries.items);

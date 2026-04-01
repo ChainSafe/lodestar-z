@@ -13,11 +13,30 @@ const log = std.log.scoped(.validator_startup);
 
 pub const LoadedKey = key_discovery_mod.LoadedKey;
 
+pub const RemoteSignerKeys = struct {
+    url: []const u8,
+    pubkeys: [][48]u8 = &.{},
+
+    pub fn deinit(self: *RemoteSignerKeys, allocator: Allocator) void {
+        allocator.free(self.url);
+        if (self.pubkeys.len > 0) allocator.free(self.pubkeys);
+        self.* = .{
+            .url = "",
+            .pubkeys = &.{},
+        };
+    }
+};
+
+pub const RemoteSignerDefinition = struct {
+    pubkey: [48]u8,
+    url: []const u8,
+};
+
 pub const StartupSigners = struct {
     allocator: Allocator,
     local_keys: []LoadedKey = &.{},
     local_keystore_locks: []KeystoreLock = &.{},
-    remote_pubkeys: [][48]u8 = &.{},
+    remote_signers: []RemoteSignerKeys = &.{},
 
     pub const Counts = struct {
         total: usize,
@@ -32,7 +51,8 @@ pub const StartupSigners = struct {
         for (self.local_keystore_locks) |*lock| lock.deinit(io);
         if (self.local_keystore_locks.len > 0) self.allocator.free(self.local_keystore_locks);
 
-        if (self.remote_pubkeys.len > 0) self.allocator.free(self.remote_pubkeys);
+        for (self.remote_signers) |*remote_signer| remote_signer.deinit(self.allocator);
+        if (self.remote_signers.len > 0) self.allocator.free(self.remote_signers);
 
         self.* = .{
             .allocator = self.allocator,
@@ -40,10 +60,13 @@ pub const StartupSigners = struct {
     }
 
     pub fn counts(self: *const StartupSigners) Counts {
+        var remote: usize = 0;
+        for (self.remote_signers) |remote_signer| remote += remote_signer.pubkeys.len;
+
         return .{
-            .total = self.local_keys.len + self.remote_pubkeys.len,
+            .total = self.local_keys.len + remote,
             .local = self.local_keys.len,
-            .remote = self.remote_pubkeys.len,
+            .remote = remote,
         };
     }
 };
@@ -79,7 +102,7 @@ pub fn loadLocalSigners(
 
     for (discovered) |key| {
         if (!options.force) {
-            const lock = KeystoreLock.acquire(io, allocator, key.keystore_path) catch |err| {
+            const lock = KeystoreLock.acquireWithPubkey(io, allocator, key.keystore_path, key.pubkey) catch |err| {
                 log.err("failed to lock keystore {s}: {s}", .{ key.keystore_path, @errorName(err) });
                 return err;
             };
@@ -121,11 +144,187 @@ pub fn loadLocalSigners(
     };
 }
 
-pub fn fetchRemoteSignerPubkeys(io: Io, allocator: Allocator, url: []const u8) ![][48]u8 {
-    var signer = RemoteSigner.init(allocator, url);
-    const pubkeys = try signer.listKeys(io);
-    log.info("fetched {d} remote validator key(s) from {s}", .{ pubkeys.len, url });
-    return pubkeys;
+pub fn fetchRemoteSignerKeys(
+    io: Io,
+    allocator: Allocator,
+    urls: []const []const u8,
+) ![]RemoteSignerKeys {
+    var by_url = std.ArrayListUnmanaged(RemoteSignerKeys).empty;
+    errdefer {
+        for (by_url.items) |*item| item.deinit(allocator);
+        by_url.deinit(allocator);
+    }
+
+    var seen_pubkeys = std.AutoHashMap([48]u8, []const u8).init(allocator);
+    defer seen_pubkeys.deinit();
+
+    for (urls) |url| {
+        var signer = RemoteSigner.init(allocator, url);
+        const fetched_pubkeys = try signer.listKeys(io);
+        defer if (fetched_pubkeys.len > 0) allocator.free(fetched_pubkeys);
+
+        var unique_pubkeys = std.ArrayListUnmanaged([48]u8).empty;
+        errdefer unique_pubkeys.deinit(allocator);
+
+        for (fetched_pubkeys) |pubkey| {
+            const existing = try seen_pubkeys.getOrPut(pubkey);
+            if (existing.found_existing) {
+                log.warn(
+                    "duplicate remote validator pubkey=0x{s} first_url={s} duplicate_url={s} - keeping first occurrence",
+                    .{
+                        std.fmt.bytesToHex(pubkey, .lower),
+                        existing.value_ptr.*,
+                        url,
+                    },
+                );
+                continue;
+            }
+
+            existing.value_ptr.* = url;
+            try unique_pubkeys.append(allocator, pubkey);
+        }
+
+        log.info("fetched {d} remote validator key(s) from {s}", .{ unique_pubkeys.items.len, url });
+        try by_url.append(allocator, .{
+            .url = try allocator.dupe(u8, url),
+            .pubkeys = try unique_pubkeys.toOwnedSlice(allocator),
+        });
+    }
+
+    return try by_url.toOwnedSlice(allocator);
+}
+
+pub fn loadPersistedRemoteSignerKeys(
+    io: Io,
+    allocator: Allocator,
+    remote_keys_dir: []const u8,
+) ![]RemoteSignerKeys {
+    var dir = std.Io.Dir.cwd().openDir(io, remote_keys_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return &.{},
+        else => return err,
+    };
+    defer dir.close(io);
+
+    var definitions = std.ArrayListUnmanaged(RemoteSignerDefinition).empty;
+    defer {
+        for (definitions.items) |definition| allocator.free(definition.url);
+        definitions.deinit(allocator);
+    }
+
+    var iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+
+        const definition_path = try std.fs.path.join(allocator, &.{ remote_keys_dir, entry.name });
+        defer allocator.free(definition_path);
+
+        const bytes = try fs.readFileAlloc(io, allocator, definition_path, 16 * 1024);
+        defer allocator.free(bytes);
+
+        const definition = try parseRemoteSignerDefinition(allocator, bytes);
+        errdefer allocator.free(definition.url);
+        try definitions.append(allocator, definition);
+    }
+
+    return groupRemoteSignerDefinitions(allocator, definitions.items);
+}
+
+fn parseRemoteSignerDefinition(allocator: Allocator, bytes: []const u8) !RemoteSignerDefinition {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), bytes, .{});
+    const object = switch (parsed.value) {
+        .object => |value| value,
+        else => return error.InvalidRemoteSignerDefinition,
+    };
+
+    const pubkey_string = switch (object.get("pubkey") orelse return error.InvalidRemoteSignerDefinition) {
+        .string => |value| value,
+        else => return error.InvalidRemoteSignerDefinition,
+    };
+    const url = switch (object.get("url") orelse return error.InvalidRemoteSignerDefinition) {
+        .string => |value| value,
+        else => return error.InvalidRemoteSignerDefinition,
+    };
+
+    try validateRemoteSignerUrl(url);
+
+    return .{
+        .pubkey = try parseRemoteSignerPubkey(pubkey_string),
+        .url = try allocator.dupe(u8, url),
+    };
+}
+
+fn groupRemoteSignerDefinitions(
+    allocator: Allocator,
+    definitions: []const RemoteSignerDefinition,
+) ![]RemoteSignerKeys {
+    var grouped = std.ArrayListUnmanaged(RemoteSignerKeys).empty;
+    errdefer {
+        for (grouped.items) |*item| item.deinit(allocator);
+        grouped.deinit(allocator);
+    }
+
+    var seen_pubkeys = std.AutoHashMap([48]u8, []const u8).init(allocator);
+    defer seen_pubkeys.deinit();
+
+    for (definitions) |definition| {
+        const existing_pubkey = try seen_pubkeys.getOrPut(definition.pubkey);
+        if (existing_pubkey.found_existing) {
+            log.warn(
+                "duplicate persisted remote validator pubkey=0x{s} first_url={s} duplicate_url={s} - keeping first occurrence",
+                .{
+                    std.fmt.bytesToHex(definition.pubkey, .lower),
+                    existing_pubkey.value_ptr.*,
+                    definition.url,
+                },
+            );
+            continue;
+        }
+        existing_pubkey.value_ptr.* = definition.url;
+
+        const signer_idx = findRemoteSignerGroup(grouped.items, definition.url) orelse blk: {
+            try grouped.append(allocator, .{
+                .url = try allocator.dupe(u8, definition.url),
+                .pubkeys = &.{},
+            });
+            break :blk grouped.items.len - 1;
+        };
+
+        var pubkeys = std.ArrayListUnmanaged([48]u8).fromOwnedSlice(grouped.items[signer_idx].pubkeys);
+        defer grouped.items[signer_idx].pubkeys = pubkeys.items;
+        try pubkeys.append(allocator, definition.pubkey);
+    }
+
+    return try grouped.toOwnedSlice(allocator);
+}
+
+fn findRemoteSignerGroup(items: []const RemoteSignerKeys, url: []const u8) ?usize {
+    for (items, 0..) |item, idx| {
+        if (std.mem.eql(u8, item.url, url)) return idx;
+    }
+    return null;
+}
+
+pub fn parseRemoteSignerPubkey(raw: []const u8) ![48]u8 {
+    const hex = if (std.mem.startsWith(u8, raw, "0x") or std.mem.startsWith(u8, raw, "0X"))
+        raw[2..]
+    else
+        raw;
+    if (hex.len != 96) return error.InvalidRemoteSignerPubkey;
+
+    var pubkey: [48]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&pubkey, hex);
+    return pubkey;
+}
+
+pub fn validateRemoteSignerUrl(url: []const u8) !void {
+    const uri = try std.Uri.parse(url);
+    if (uri.scheme.len == 0) return error.InvalidRemoteSignerUrl;
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "http") and !std.ascii.eqlIgnoreCase(uri.scheme, "https")) {
+        return error.InvalidRemoteSignerUrl;
+    }
 }
 
 const testing = std.testing;
@@ -208,4 +407,44 @@ test "loadLocalSigners fails fast when a password file is missing" {
     defer testing.allocator.free(secrets_dir);
 
     try testing.expectError(error.FileNotFound, loadLocalSigners(testing.io, testing.allocator, keystores_dir, secrets_dir, .{}));
+}
+
+test "loadPersistedRemoteSignerKeys groups definitions by URL" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("remoteKeys");
+    try tmp.dir.writeFile(.{
+        .sub_path = "remoteKeys/0x111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+        .data = "{\"pubkey\":\"0x111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\",\"url\":\"http://signer-a:9000\",\"readonly\":false}",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "remoteKeys/0x222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
+        .data = "{\"pubkey\":\"0x222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222\",\"url\":\"http://signer-a:9000\",\"readonly\":false}",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "remoteKeys/0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
+        .data = "{\"pubkey\":\"0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\",\"url\":\"https://signer-b:9000\",\"readonly\":false}",
+    });
+
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+    const remote_keys_dir = try std.fs.path.join(testing.allocator, &.{ root, "remoteKeys" });
+    defer testing.allocator.free(remote_keys_dir);
+
+    const groups = try loadPersistedRemoteSignerKeys(testing.io, testing.allocator, remote_keys_dir);
+    defer {
+        for (groups) |*group| group.deinit(testing.allocator);
+        if (groups.len > 0) testing.allocator.free(groups);
+    }
+
+    try testing.expectEqual(@as(usize, 2), groups.len);
+    try testing.expectEqualStrings("http://signer-a:9000", groups[0].url);
+    try testing.expectEqual(@as(usize, 2), groups[0].pubkeys.len);
+    try testing.expectEqualStrings("https://signer-b:9000", groups[1].url);
+    try testing.expectEqual(@as(usize, 1), groups[1].pubkeys.len);
+}
+
+test "validateRemoteSignerUrl rejects unsupported schemes" {
+    try testing.expectError(error.InvalidRemoteSignerUrl, validateRemoteSignerUrl("ftp://signer.example"));
 }

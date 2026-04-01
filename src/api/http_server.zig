@@ -46,7 +46,7 @@ comptime {
     }
 }
 
-/// Keymanager path prefixes that must never receive wildcard CORS.
+/// Static keymanager path prefixes that must never receive wildcard CORS.
 const keymanager_paths: []const []const u8 = &.{
     "/eth/v1/keystores",
     "/eth/v1/remotekeys",
@@ -57,10 +57,63 @@ fn isKeymanagerPath(path: []const u8) bool {
     for (keymanager_paths) |prefix| {
         if (std.mem.startsWith(u8, path, prefix)) return true;
     }
+    return isKeymanagerValidatorPath(path);
+}
+
+fn isKeymanagerValidatorPath(path: []const u8) bool {
+    var iter = std.mem.splitScalar(u8, path, '/');
+    const first = iter.next() orelse return false;
+    const second = iter.next() orelse return false;
+    const third = iter.next() orelse return false;
+    const fourth = iter.next() orelse return false;
+    const fifth = iter.next() orelse return false;
+    const sixth = iter.next() orelse return false;
+    if (iter.next() != null) return false;
+
+    if (first.len != 0) return false;
+    if (!std.mem.eql(u8, second, "eth")) return false;
+    if (!(std.mem.eql(u8, third, "v1") or std.mem.eql(u8, third, "v0"))) return false;
+    if (!std.mem.eql(u8, fourth, "validator")) return false;
+    if (fifth.len == 0) return false;
+
+    return std.mem.eql(u8, sixth, "feerecipient") or
+        std.mem.eql(u8, sixth, "graffiti") or
+        std.mem.eql(u8, sixth, "gas_limit") or
+        std.mem.eql(u8, sixth, "builder_boost_factor") or
+        std.mem.eql(u8, sixth, "proposer_config") or
+        std.mem.eql(u8, sixth, "voluntary_exit");
+}
+
+fn sliceContains(items: []const []const u8, value: []const u8) bool {
+    for (items) |item| {
+        if (std.mem.eql(u8, item, value)) return true;
+    }
+    return false;
+}
+
+fn pathMatchesPrefixes(path: []const u8, prefixes: []const []const u8) bool {
+    for (prefixes) |prefix| {
+        if (std.mem.startsWith(u8, path, prefix)) return true;
+    }
     return false;
 }
 
 pub const HttpServer = struct {
+    pub const StartupStatus = enum(u8) {
+        idle,
+        started,
+        failed,
+    };
+
+    pub const Options = struct {
+        cors_origin: ?[]const u8 = null,
+        allow_keymanager_cors: bool = false,
+        allowed_path_prefixes: ?[]const []const u8 = null,
+        allowed_operation_ids: ?[]const []const u8 = null,
+        max_body_bytes: usize = default_max_body_bytes,
+        max_block_body_bytes: usize = default_max_block_body_bytes,
+    };
+
     allocator: Allocator,
     api_context: *ApiContext,
     address: []const u8,
@@ -68,19 +121,27 @@ pub const HttpServer = struct {
     /// CORS origin to allow. Null = no CORS headers (same-origin only).
     /// Never applied to keymanager endpoints regardless of this setting.
     cors_origin: ?[]const u8 = null,
+    allow_keymanager_cors: bool = false,
+    allowed_path_prefixes: ?[]const []const u8 = null,
+    allowed_operation_ids: ?[]const []const u8 = null,
+    max_body_bytes: usize = default_max_body_bytes,
+    max_block_body_bytes: usize = default_max_block_body_bytes,
     /// Set to true to request a clean shutdown of the serve loop.
     shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// Number of currently active connections.
     active_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    startup_status: std.atomic.Value(u8) = std.atomic.Value(u8).init(@intFromEnum(StartupStatus.idle)),
+    listener: ?net.Server = null,
+    listener_mutex: std.Io.Mutex = .init,
 
     // ── DoS protection limits ─────────────────────────────────────────────────
 
     /// Read timeout per connection in seconds (Slowloris defence).
     pub const recv_timeout_sec: c_long = 30;
     /// Maximum request body size for general POST endpoints (1 MiB).
-    pub const max_body_bytes: usize = 1 * 1024 * 1024;
+    pub const default_max_body_bytes: usize = 1 * 1024 * 1024;
     /// Maximum request body size for block-submission endpoints (10 MiB).
-    pub const max_block_body_bytes: usize = 10 * 1024 * 1024;
+    pub const default_max_block_body_bytes: usize = 10 * 1024 * 1024;
     /// Maximum keep-alive requests per connection.
     pub const max_keepalive_requests: u32 = 100;
     /// Maximum concurrent TCP connections.
@@ -96,12 +157,7 @@ pub const HttpServer = struct {
         address: []const u8,
         port: u16,
     ) HttpServer {
-        return .{
-            .allocator = allocator,
-            .api_context = api_context,
-            .address = address,
-            .port = port,
-        };
+        return initWithOptions(allocator, api_context, address, port, .{});
     }
 
     /// Create an HttpServer with CORS configured.
@@ -112,18 +168,65 @@ pub const HttpServer = struct {
         port: u16,
         cors_origin: ?[]const u8,
     ) HttpServer {
+        return initWithOptions(allocator, api_context, address, port, .{
+            .cors_origin = cors_origin,
+        });
+    }
+
+    pub fn initWithOptions(
+        allocator: Allocator,
+        api_context: *ApiContext,
+        address: []const u8,
+        port: u16,
+        options: Options,
+    ) HttpServer {
         return .{
             .allocator = allocator,
             .api_context = api_context,
             .address = address,
             .port = port,
-            .cors_origin = cors_origin,
+            .cors_origin = options.cors_origin,
+            .allow_keymanager_cors = options.allow_keymanager_cors,
+            .allowed_path_prefixes = options.allowed_path_prefixes,
+            .allowed_operation_ids = options.allowed_operation_ids,
+            .max_body_bytes = options.max_body_bytes,
+            .max_block_body_bytes = options.max_block_body_bytes,
         };
     }
 
+    pub fn startupStatus(self: *const HttpServer) StartupStatus {
+        return @enumFromInt(self.startup_status.load(.acquire));
+    }
+
+    fn pathAllowed(self: *const HttpServer, path: []const u8) bool {
+        if (self.allowed_path_prefixes) |prefixes| {
+            return pathMatchesPrefixes(path, prefixes);
+        }
+        return true;
+    }
+
+    fn operationAllowed(self: *const HttpServer, operation_id: []const u8) bool {
+        if (self.allowed_operation_ids) |allowed_operation_ids| {
+            return sliceContains(allowed_operation_ids, operation_id);
+        }
+        return true;
+    }
+
+    fn shouldApplyCors(self: *const HttpServer, path: []const u8) bool {
+        if (self.cors_origin == null) return false;
+        if (isKeymanagerPath(path) and !self.allow_keymanager_cors) return false;
+        return true;
+    }
+
     /// Signal the serve loop to exit after the current connection completes.
-    pub fn shutdown(self: *HttpServer) void {
+    pub fn shutdown(self: *HttpServer, io: Io) void {
         self.shutdown_requested.store(true, .release);
+        self.listener_mutex.lock(io) catch return;
+        defer self.listener_mutex.unlock(io);
+        if (self.listener) |*listener| {
+            listener.deinit(io);
+            self.listener = null;
+        }
     }
 
     /// Start serving HTTP requests (blocking).
@@ -132,14 +235,43 @@ pub const HttpServer = struct {
     /// HTTP requests via `std.http.Server`, and dispatches to Beacon API
     /// handlers.
     pub fn serve(self: *HttpServer, io: Io) !void {
-        const ip = try parseIpAddress(self.address, self.port);
-        var tcp_server = try ip.listen(io, .{ .reuse_address = true });
-        defer tcp_server.deinit(io);
+        const ip = parseIpAddress(self.address, self.port) catch |err| {
+            self.startup_status.store(@intFromEnum(StartupStatus.failed), .release);
+            return err;
+        };
+        var tcp_server = ip.listen(io, .{ .reuse_address = true }) catch |err| {
+            self.startup_status.store(@intFromEnum(StartupStatus.failed), .release);
+            return err;
+        };
+        try self.listener_mutex.lock(io);
+        self.listener = tcp_server;
+        self.listener_mutex.unlock(io);
+        defer {
+            var locked = false;
+            if (self.listener_mutex.lock(io)) |_| {
+                locked = true;
+            } else |_| {}
+            if (locked) {
+                defer self.listener_mutex.unlock(io);
+                if (self.listener) |*listener| {
+                    listener.deinit(io);
+                    self.listener = null;
+                }
+            }
+        }
+        self.startup_status.store(@intFromEnum(StartupStatus.started), .release);
 
         log.info("Beacon API listening on {s}:{d}", .{ self.address, self.port });
 
         while (!self.shutdown_requested.load(.acquire)) {
             const stream = tcp_server.accept(io) catch |err| {
+                if (self.shutdown_requested.load(.acquire)) break;
+                switch (err) {
+                    error.SocketNotListening,
+                    error.ConnectionAborted,
+                    => break,
+                    else => {},
+                }
                 log.err("accept failed: {s}", .{@errorName(err)});
                 continue;
             };
@@ -222,26 +354,30 @@ pub const HttpServer = struct {
 
         // Split target into path and query.
         const path, _ = splitTarget(target);
+        if (!self.pathAllowed(path)) {
+            try respondApiError(request, .{
+                .code = .not_found,
+                .message = "Route not found",
+            });
+            return;
+        }
 
         // CORS preflight.
         if (request.head.method == .OPTIONS) {
             // Only send CORS headers for non-keymanager paths; keymanager
             // paths require authentication and must not expose CORS headers.
-            if (self.cors_origin) |origin| {
-                if (!isKeymanagerPath(path)) {
-                    const preflight_headers: []const http.Header = &.{
-                        .{ .name = "Access-Control-Allow-Origin", .value = origin },
-                        .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, DELETE, OPTIONS" },
-                        .{ .name = "Access-Control-Allow-Headers", .value = "Content-Type, Authorization" },
-                        .{ .name = "Access-Control-Max-Age", .value = "3600" },
-                    };
-                    try request.respond("", .{
-                        .status = .no_content,
-                        .extra_headers = preflight_headers,
-                    });
-                } else {
-                    try request.respond("", .{ .status = .no_content });
-                }
+            if (self.shouldApplyCors(path)) {
+                const origin = self.cors_origin.?;
+                const preflight_headers: []const http.Header = &.{
+                    .{ .name = "Access-Control-Allow-Origin", .value = origin },
+                    .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, DELETE, OPTIONS" },
+                    .{ .name = "Access-Control-Allow-Headers", .value = "Content-Type, Authorization" },
+                    .{ .name = "Access-Control-Max-Age", .value = "3600" },
+                };
+                try request.respond("", .{
+                    .status = .no_content,
+                    .extra_headers = preflight_headers,
+                });
             } else {
                 try request.respond("", .{ .status = .no_content });
             }
@@ -270,6 +406,13 @@ pub const HttpServer = struct {
             });
             return;
         };
+        if (!self.operationAllowed(match.route.operation_id)) {
+            try respondApiError(request, .{
+                .code = .not_found,
+                .message = "Route not found",
+            });
+            return;
+        }
 
         // SSE streaming: intercept the events endpoint before normal dispatch.
         // SSE needs streaming response, which bypasses the HandlerResult path.
@@ -313,7 +456,7 @@ pub const HttpServer = struct {
             // Block-submission endpoints allow up to max_block_body_bytes; all
             // other POST endpoints are capped at max_body_bytes (1 MiB).
             const is_block_endpoint = std.mem.eql(u8, match.route.operation_id, "publishBlockV2");
-            const body_limit: usize = if (is_block_endpoint) max_block_body_bytes else max_body_bytes;
+            const body_limit: usize = if (is_block_endpoint) self.max_block_body_bytes else self.max_body_bytes;
             request_body = body_reader.readAlloc(self.allocator, body_limit) catch &[_]u8{};
             request_body_owned = true;
         }
@@ -339,15 +482,14 @@ pub const HttpServer = struct {
         extra_hdrs_buf[extra_count] = .{ .name = "Content-Type", .value = result.content_type };
         extra_count += 1;
         // Apply CORS headers only when configured AND not a keymanager endpoint.
-        if (self.cors_origin) |origin| {
-            if (!isKeymanagerPath(path)) {
-                extra_hdrs_buf[extra_count] = .{ .name = "Access-Control-Allow-Origin", .value = origin };
-                extra_count += 1;
-                extra_hdrs_buf[extra_count] = .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, DELETE, OPTIONS" };
-                extra_count += 1;
-                extra_hdrs_buf[extra_count] = .{ .name = "Access-Control-Allow-Headers", .value = "Content-Type, Authorization" };
-                extra_count += 1;
-            }
+        if (self.shouldApplyCors(path)) {
+            const origin = self.cors_origin.?;
+            extra_hdrs_buf[extra_count] = .{ .name = "Access-Control-Allow-Origin", .value = origin };
+            extra_count += 1;
+            extra_hdrs_buf[extra_count] = .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, DELETE, OPTIONS" };
+            extra_count += 1;
+            extra_hdrs_buf[extra_count] = .{ .name = "Access-Control-Allow-Headers", .value = "Content-Type, Authorization" };
+            extra_count += 1;
         }
 
         // Emit metadata headers from the handler result.
@@ -541,6 +683,20 @@ pub const HttpServer = struct {
         .{ "listRemoteKeys", &hListRemoteKeys },
         .{ "importRemoteKeys", &hImportRemoteKeys },
         .{ "deleteRemoteKeys", &hDeleteRemoteKeys },
+        .{ "listFeeRecipient", &hListFeeRecipient },
+        .{ "setFeeRecipient", &hSetFeeRecipient },
+        .{ "deleteFeeRecipient", &hDeleteFeeRecipient },
+        .{ "getGraffiti", &hGetGraffiti },
+        .{ "setGraffiti", &hSetGraffiti },
+        .{ "deleteGraffiti", &hDeleteGraffiti },
+        .{ "getGasLimit", &hGetGasLimit },
+        .{ "setGasLimit", &hSetGasLimit },
+        .{ "deleteGasLimit", &hDeleteGasLimit },
+        .{ "getBuilderBoostFactor", &hGetBuilderBoostFactor },
+        .{ "setBuilderBoostFactor", &hSetBuilderBoostFactor },
+        .{ "deleteBuilderBoostFactor", &hDeleteBuilderBoostFactor },
+        .{ "getProposerConfig", &hGetProposerConfig },
+        .{ "signVoluntaryExit", &hSignVoluntaryExit },
         .{ "getForkChoice", &hGetForkChoice },
     });
 
@@ -1404,6 +1560,91 @@ pub const HttpServer = struct {
         return .{ .status = 200, .content_type = "application/json", .body = body };
     }
 
+    fn hListFeeRecipient(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const pubkey = try parsePubkeyParam(dc.match.getParam("pubkey") orelse return error.InvalidRequest);
+        const body = try handlers.keymanager.listFeeRecipient(self.api_context, dc.auth_header, pubkey);
+        return .{ .status = 200, .content_type = "application/json", .body = body };
+    }
+
+    fn hSetFeeRecipient(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const pubkey = try parsePubkeyParam(dc.match.getParam("pubkey") orelse return error.InvalidRequest);
+        try handlers.keymanager.setFeeRecipient(self.api_context, dc.auth_header, pubkey, dc.body);
+        return .{ .status = 202, .content_type = "application/json", .body = &.{} };
+    }
+
+    fn hDeleteFeeRecipient(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const pubkey = try parsePubkeyParam(dc.match.getParam("pubkey") orelse return error.InvalidRequest);
+        try handlers.keymanager.deleteFeeRecipient(self.api_context, dc.auth_header, pubkey);
+        return .{ .status = 204, .content_type = "application/json", .body = &.{} };
+    }
+
+    fn hGetGraffiti(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const pubkey = try parsePubkeyParam(dc.match.getParam("pubkey") orelse return error.InvalidRequest);
+        const body = try handlers.keymanager.getGraffiti(self.api_context, dc.auth_header, pubkey);
+        return .{ .status = 200, .content_type = "application/json", .body = body };
+    }
+
+    fn hSetGraffiti(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const pubkey = try parsePubkeyParam(dc.match.getParam("pubkey") orelse return error.InvalidRequest);
+        try handlers.keymanager.setGraffiti(self.api_context, dc.auth_header, pubkey, dc.body);
+        return .{ .status = 202, .content_type = "application/json", .body = &.{} };
+    }
+
+    fn hDeleteGraffiti(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const pubkey = try parsePubkeyParam(dc.match.getParam("pubkey") orelse return error.InvalidRequest);
+        try handlers.keymanager.deleteGraffiti(self.api_context, dc.auth_header, pubkey);
+        return .{ .status = 204, .content_type = "application/json", .body = &.{} };
+    }
+
+    fn hGetGasLimit(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const pubkey = try parsePubkeyParam(dc.match.getParam("pubkey") orelse return error.InvalidRequest);
+        const body = try handlers.keymanager.getGasLimit(self.api_context, dc.auth_header, pubkey);
+        return .{ .status = 200, .content_type = "application/json", .body = body };
+    }
+
+    fn hSetGasLimit(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const pubkey = try parsePubkeyParam(dc.match.getParam("pubkey") orelse return error.InvalidRequest);
+        try handlers.keymanager.setGasLimit(self.api_context, dc.auth_header, pubkey, dc.body);
+        return .{ .status = 202, .content_type = "application/json", .body = &.{} };
+    }
+
+    fn hDeleteGasLimit(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const pubkey = try parsePubkeyParam(dc.match.getParam("pubkey") orelse return error.InvalidRequest);
+        try handlers.keymanager.deleteGasLimit(self.api_context, dc.auth_header, pubkey);
+        return .{ .status = 204, .content_type = "application/json", .body = &.{} };
+    }
+
+    fn hGetBuilderBoostFactor(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const pubkey = try parsePubkeyParam(dc.match.getParam("pubkey") orelse return error.InvalidRequest);
+        const body = try handlers.keymanager.getBuilderBoostFactor(self.api_context, dc.auth_header, pubkey);
+        return .{ .status = 200, .content_type = "application/json", .body = body };
+    }
+
+    fn hSetBuilderBoostFactor(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const pubkey = try parsePubkeyParam(dc.match.getParam("pubkey") orelse return error.InvalidRequest);
+        try handlers.keymanager.setBuilderBoostFactor(self.api_context, dc.auth_header, pubkey, dc.body);
+        return .{ .status = 202, .content_type = "application/json", .body = &.{} };
+    }
+
+    fn hDeleteBuilderBoostFactor(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const pubkey = try parsePubkeyParam(dc.match.getParam("pubkey") orelse return error.InvalidRequest);
+        try handlers.keymanager.deleteBuilderBoostFactor(self.api_context, dc.auth_header, pubkey);
+        return .{ .status = 204, .content_type = "application/json", .body = &.{} };
+    }
+
+    fn hGetProposerConfig(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const pubkey = try parsePubkeyParam(dc.match.getParam("pubkey") orelse return error.InvalidRequest);
+        const body = try handlers.keymanager.getProposerConfig(self.api_context, dc.auth_header, pubkey);
+        return .{ .status = 200, .content_type = "application/json", .body = body };
+    }
+
+    fn hSignVoluntaryExit(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const pubkey = try parsePubkeyParam(dc.match.getParam("pubkey") orelse return error.InvalidRequest);
+        const epoch = if (dc.getQuery("epoch")) |value| try std.fmt.parseInt(u64, value, 10) else null;
+        const body = try handlers.keymanager.signVoluntaryExit(self.api_context, dc.auth_header, pubkey, epoch);
+        return .{ .status = 200, .content_type = "application/json", .body = body };
+    }
+
     fn hGetForkChoice(self: *HttpServer, _: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
         const handler_res = try handlers.debug.getForkChoice(self.api_context);
@@ -1686,6 +1927,15 @@ fn splitTarget(target: []const u8) struct { []const u8, ?[]const u8 } {
         return .{ target[0..idx], target[idx + 1 ..] };
     }
     return .{ target, null };
+}
+
+fn parsePubkeyParam(input: []const u8) ![48]u8 {
+    const hex = if (std.mem.startsWith(u8, input, "0x")) input[2..] else input;
+    if (hex.len != 96) return error.InvalidRequest;
+
+    var pubkey: [48]u8 = undefined;
+    _ = std.fmt.hexToBytes(&pubkey, hex) catch return error.InvalidRequest;
+    return pubkey;
 }
 
 /// Parse an IP address string (IPv4 only for now).

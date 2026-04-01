@@ -252,6 +252,7 @@ pub fn build(b: *std.Build) void {
     module_validator.addImport("log", module_log);
     module_validator.addImport("fork_types", module_fork_types);
     module_validator.addImport("ssz", module_ssz);
+    module_validator.addImport("api", module_api);
 
     const module_processor = b.createModule(.{
         .root_source_file = b.path("src/processor/root.zig"),
@@ -931,6 +932,8 @@ pub fn build(b: *std.Build) void {
     module_node_main.addImport("networking", module_networking);
     module_node_main.addImport("validator", module_validator);
     module_node_main.addImport("constants", module_constants);
+    module_node_main.addImport("api", module_api);
+    module_node_main.addImport("db", module_db);
 
     const exe_node = b.addExecutable(.{
         .name = "lodestar-z",

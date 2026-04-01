@@ -66,8 +66,12 @@ const MAX_HEAD_CALLBACKS: usize = 8;
 // ---------------------------------------------------------------------------
 
 pub const ChainHeaderTracker = struct {
+    const reconnect_backoff_initial_ns = std.time.ns_per_s;
+    const reconnect_backoff_max_ns = 30 * std.time.ns_per_s;
+
     allocator: Allocator,
     api: *BeaconApiClient,
+    shutdown_requested: std.atomic.Value(bool),
 
     /// Current head info (protected by mutex for concurrent access).
     mu: mutex_mod.Mutex,
@@ -81,6 +85,7 @@ pub const ChainHeaderTracker = struct {
         return .{
             .allocator = allocator,
             .api = api,
+            .shutdown_requested = std.atomic.Value(bool).init(false),
             .mu = .{},
             .head = .{
                 .slot = 0,
@@ -108,9 +113,13 @@ pub const ChainHeaderTracker = struct {
         return self.head;
     }
 
+    pub fn requestShutdown(self: *ChainHeaderTracker) void {
+        self.shutdown_requested.store(true, .release);
+    }
+
     /// Start subscribing to BN SSE events.
     ///
-    /// Blocks until the SSE stream ends or an error occurs.
+    /// Blocks until shutdown is requested.
     /// Designed to be run on a background fiber.
     ///
     /// TS: ChainHeaderTracker.start(signal)
@@ -123,7 +132,30 @@ pub const ChainHeaderTracker = struct {
             .fn_ptr = sseEventHandler,
         };
 
-        try self.api.subscribeToEvents(io, topics, cb);
+        self.refreshSnapshot(io) catch |err| {
+            log.warn("failed to seed chain head snapshot before SSE subscribe: {s}", .{@errorName(err)});
+        };
+
+        var reconnect_backoff_ns: u64 = reconnect_backoff_initial_ns;
+        while (!self.shutdown_requested.load(.acquire)) {
+            const subscribe_result = self.api.subscribeToEvents(io, topics, cb);
+            if (self.shutdown_requested.load(.acquire)) break;
+
+            if (subscribe_result) |_| {
+                log.warn("chain head SSE stream ended; refreshing snapshot and reconnecting", .{});
+            } else |err| {
+                log.warn("chain head SSE stream failed: {s}", .{@errorName(err)});
+            }
+
+            self.refreshSnapshot(io) catch |err| {
+                log.warn("failed to refresh chain head snapshot after SSE interruption: {s}", .{@errorName(err)});
+            };
+
+            const sleep_ns = reconnect_backoff_ns;
+            log.info("reconnecting chain head SSE stream in {d}s", .{sleep_ns / std.time.ns_per_s});
+            io.sleep(.{ .nanoseconds = sleep_ns }, .real) catch return;
+            reconnect_backoff_ns = @min(reconnect_backoff_ns * 2, reconnect_backoff_max_ns);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -175,8 +207,9 @@ pub const ChainHeaderTracker = struct {
         }
 
         // Parse dependent roots for reorg detection.
-        var previous_duty_dependent_root: [32]u8 = self.head.previous_duty_dependent_root;
-        var current_duty_dependent_root: [32]u8 = self.head.current_duty_dependent_root;
+        const current_head = self.getHeadInfo();
+        var previous_duty_dependent_root: [32]u8 = current_head.previous_duty_dependent_root;
+        var current_duty_dependent_root: [32]u8 = current_head.current_duty_dependent_root;
 
         if (ev.previous_duty_dependent_root) |pdr| {
             const pdr_hex = if (std.mem.startsWith(u8, pdr, "0x")) pdr[2..] else pdr;
@@ -190,22 +223,13 @@ pub const ChainHeaderTracker = struct {
         const info = HeadInfo{
             .slot = slot,
             .block_root = block_root,
-            .finalized_epoch = self.head.finalized_epoch, // preserve existing
+            .finalized_epoch = current_head.finalized_epoch,
             .previous_duty_dependent_root = previous_duty_dependent_root,
             .current_duty_dependent_root = current_duty_dependent_root,
         };
 
-        // Update under lock.
-        self.mu.lock();
-        self.head = info;
-        self.mu.unlock();
-
+        self.applyHeadInfo(info);
         log.debug("new head slot={d} root={x}", .{ slot, block_root });
-
-        // Fire callbacks (without holding lock).
-        for (self.head_callbacks[0..self.head_callback_count]) |cb| {
-            cb.call(info);
-        }
     }
 
     /// Parse and apply a "finalized_checkpoint" SSE event.
@@ -228,9 +252,40 @@ pub const ChainHeaderTracker = struct {
 
         self.mu.lock();
         self.head.finalized_epoch = epoch;
+        const snapshot = self.head;
         self.mu.unlock();
 
+        self.notifyHeadCallbacks(snapshot);
+
         log.debug("finalized checkpoint epoch={d}", .{epoch});
+    }
+
+    fn refreshSnapshot(self: *ChainHeaderTracker, io: Io) !void {
+        const head = try self.api.getHeadHeaderSummary(io);
+        const current = self.getHeadInfo();
+        const finalized_epoch = self.api.getFinalizedCheckpointEpoch(io) catch current.finalized_epoch;
+
+        self.applyHeadInfo(.{
+            .slot = head.slot,
+            .block_root = head.block_root,
+            .finalized_epoch = finalized_epoch,
+            .previous_duty_dependent_root = current.previous_duty_dependent_root,
+            .current_duty_dependent_root = current.current_duty_dependent_root,
+        });
+    }
+
+    fn applyHeadInfo(self: *ChainHeaderTracker, info: HeadInfo) void {
+        self.mu.lock();
+        self.head = info;
+        self.mu.unlock();
+
+        self.notifyHeadCallbacks(info);
+    }
+
+    fn notifyHeadCallbacks(self: *ChainHeaderTracker, info: HeadInfo) void {
+        for (self.head_callbacks[0..self.head_callback_count]) |cb| {
+            cb.call(info);
+        }
     }
 };
 

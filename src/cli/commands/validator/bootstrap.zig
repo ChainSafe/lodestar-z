@@ -12,18 +12,43 @@ const constants = @import("constants");
 const preset = @import("preset").preset;
 const paths_mod = @import("paths.zig");
 
+const RemoteSignerSource = enum {
+    none,
+    persisted,
+    pinned,
+    fetch,
+};
+
+pub const KeymanagerConfig = struct {
+    address: []const u8,
+    port: u16,
+    cors_origin: ?[]const u8,
+    auth_enabled: bool,
+    token_file: []const u8,
+    body_limit: usize,
+};
+
 pub const PreparedRuntime = struct {
     network: common.Network,
     paths: paths_mod.Paths,
+    beacon_config: BeaconConfig,
     primary_beacon_url: []const u8,
     fallback_urls: []const []const u8 = &.{},
+    external_signer_urls: []const []const u8 = &.{},
+    remote_signer_source: RemoteSignerSource = .none,
+    external_signer_fetch_enabled: bool = false,
+    keymanager: ?KeymanagerConfig = null,
     startup_signers: validator_mod.StartupSigners,
     validator_config: validator_mod.ValidatorConfig,
     signing_context: validator_mod.SigningContext,
 
     pub fn deinit(self: *PreparedRuntime, io: Io) void {
         self.startup_signers.deinit(io);
+        if (self.validator_config.proposer_configs.len > 0) {
+            self.paths.allocator.free(self.validator_config.proposer_configs);
+        }
         freeOwnedStrings(self.paths.allocator, self.fallback_urls);
+        freeOwnedStrings(self.paths.allocator, self.external_signer_urls);
         self.paths.deinit();
     }
 
@@ -31,10 +56,23 @@ pub const PreparedRuntime = struct {
         const counts = self.startup_signers.counts();
         if (counts.total > 0) return;
 
-        if (self.validator_config.web3signer_url) |url| {
+        if (self.keymanager != null and self.remote_signer_source == .fetch and self.external_signer_urls.len > 0) {
             std.log.warn(
-                "No validator keys loaded at startup; waiting for keys from external signer {s}",
-                .{url},
+                "No validator keys loaded at startup; waiting for keys from the keymanager API or {d} configured external signer(s)",
+                .{self.external_signer_urls.len},
+            );
+            return;
+        }
+
+        if (self.keymanager != null) {
+            std.log.warn("No validator keys loaded at startup; waiting for keys to be imported through the keymanager API", .{});
+            return;
+        }
+
+        if (self.remote_signer_source == .fetch and self.external_signer_urls.len > 0) {
+            std.log.warn(
+                "No validator keys loaded at startup; waiting for keys from {d} configured external signer(s)",
+                .{self.external_signer_urls.len},
             );
             return;
         }
@@ -60,8 +98,22 @@ pub const PreparedRuntime = struct {
             counts.local,
             counts.remote,
         });
-        if (self.validator_config.web3signer_url) |url| {
-            std.log.info("  web3signer:   {s}", .{url});
+        if (self.external_signer_urls.len > 0) {
+            std.log.info("  web3signers:  {d} endpoint(s)", .{self.external_signer_urls.len});
+            std.log.info("  remote-mode:  {s}", .{
+                switch (self.remote_signer_source) {
+                    .fetch => "fetch",
+                    .pinned => "pinned",
+                    .persisted => "persisted remoteKeys",
+                    .none => "none",
+                },
+            });
+            for (self.external_signer_urls) |url| {
+                std.log.info("    external-signer: {s}", .{url});
+            }
+        }
+        if (self.keymanager) |keymanager| {
+            std.log.info("  keymanager:   http://{s}:{d}", .{ keymanager.address, keymanager.port });
         }
     }
 };
@@ -72,7 +124,7 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
     const params_file = opts.paramsFile orelse opts.params_file;
     const beacon_nodes_raw = opts.beaconNodes orelse opts.server;
     const primary_beacon_url = if (beacon_nodes_raw) |raw| firstCsvValue(raw) else opts.beacon_url;
-    const external_signer_urls = opts.@"externalSigner.urls" orelse opts.@"externalSigner.url";
+    const external_signer_urls_raw = opts.@"externalSigner.urls" orelse opts.@"externalSigner.url";
 
     var custom_chain_config: config_mod.ChainConfig = undefined;
     var custom_beacon_config: BeaconConfig = undefined;
@@ -106,15 +158,49 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
     errdefer paths.deinit();
     try paths.ensureDirs(io);
 
+    const proposer_configs = try validator_mod.readPersistedProposerConfigs(io, allocator, paths.proposer_dir);
+    errdefer if (proposer_configs.len > 0) allocator.free(proposer_configs);
+
+    var external_signer_urls: []const []const u8 = if (external_signer_urls_raw) |raw|
+        try splitCsvOwnedUnique(allocator, raw)
+    else
+        &.{};
+    errdefer freeOwnedStrings(allocator, external_signer_urls);
+    for (external_signer_urls) |url| {
+        validator_mod.validateRemoteSignerUrl(url) catch |err| {
+            std.log.err("Invalid external signer URL '{s}': {}", .{ url, err });
+            return err;
+        };
+    }
+
     var startup_signers = validator_mod.StartupSigners{ .allocator = allocator };
     errdefer startup_signers.deinit(io);
 
     startup_signers = try validator_mod.loadLocalSigners(io, allocator, paths.keystores_dir, paths.secrets_dir, .{
         .force = opts.force,
     });
-    if (external_signer_urls) |raw| {
-        const url = firstCsvValue(raw);
-        startup_signers.remote_pubkeys = try validator_mod.fetchRemoteSignerPubkeys(io, allocator, url);
+    const external_signer_fetch_enabled = opts.@"externalSigner.fetch";
+    var remote_signer_source: RemoteSignerSource = .none;
+    if ((external_signer_fetch_enabled or opts.@"externalSigner.pubkeys" != null) and
+        try directoryHasEntries(io, paths.remote_keys_dir))
+    {
+        std.log.info(
+            "Ignoring persisted remote signer definitions under {s} because explicit external signer options were provided",
+            .{paths.remote_keys_dir},
+        );
+    }
+    if (external_signer_fetch_enabled) {
+        startup_signers.remote_signers = try validator_mod.fetchRemoteSignerKeys(io, allocator, external_signer_urls);
+        remote_signer_source = .fetch;
+    } else if (opts.@"externalSigner.pubkeys") |raw_pubkeys| {
+        startup_signers.remote_signers = try loadPinnedRemoteSignerKeys(allocator, external_signer_urls, raw_pubkeys);
+        remote_signer_source = .pinned;
+    } else {
+        startup_signers.remote_signers = try validator_mod.loadPersistedRemoteSignerKeys(io, allocator, paths.remote_keys_dir);
+        if (startup_signers.remote_signers.len > 0) {
+            external_signer_urls = try duplicateRemoteSignerUrls(allocator, startup_signers.remote_signers);
+            remote_signer_source = .persisted;
+        }
     }
 
     var fallback_urls: []const []const u8 = &.{};
@@ -165,10 +251,6 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
     try ensureConfigSpecMatches(beacon_config, remote_spec);
     try validator_mod.ensureGenesisMetadata(io, allocator, paths.metadata_file, genesis);
 
-    const web3signer_url = if (external_signer_urls) |raw| blk: {
-        break :blk firstCsvValue(raw);
-    } else null;
-
     const fee_recipient = parseFeeRecipient(opts.suggestedFeeRecipient) catch |err| {
         std.log.err("Invalid --suggestedFeeRecipient: {}", .{err});
         return err;
@@ -177,15 +259,43 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
         std.log.err("Invalid --builder.boostFactor: {}", .{err});
         return err;
     };
+    const external_signer_fetch_interval_ms = parseExternalSignerFetchInterval(opts.@"externalSigner.fetchInterval") catch |err| {
+        std.log.err("Invalid --externalSigner.fetchInterval: {}", .{err});
+        return err;
+    };
+    const keymanager_body_limit = parseKeymanagerBodyLimit(opts.@"keymanager.bodyLimit") catch |err| {
+        std.log.err("Invalid --keymanager.bodyLimit: {}", .{err});
+        return err;
+    };
+
+    const keymanager: ?KeymanagerConfig = if (opts.keymanager) .{
+        .address = opts.@"keymanager.address" orelse "127.0.0.1",
+        .port = opts.@"keymanager.port" orelse 5062,
+        .cors_origin = opts.@"keymanager.cors" orelse "*",
+        .auth_enabled = opts.@"keymanager.auth",
+        .token_file = opts.@"keymanager.tokenFile" orelse paths.keymanager_token_file,
+        .body_limit = keymanager_body_limit,
+    } else null;
 
     return .{
         .network = network,
         .paths = paths,
+        .beacon_config = beacon_config.*,
         .primary_beacon_url = primary_beacon_url,
         .fallback_urls = fallback_urls,
+        .external_signer_urls = external_signer_urls,
+        .remote_signer_source = remote_signer_source,
+        .external_signer_fetch_enabled = external_signer_fetch_enabled,
+        .keymanager = keymanager,
         .startup_signers = startup_signers,
         .signing_context = buildSigningContext(beacon_config, genesis),
         .validator_config = .{
+            .persistence = .{
+                .keystores_dir = paths.keystores_dir,
+                .secrets_dir = paths.secrets_dir,
+                .remote_keys_dir = paths.remote_keys_dir,
+                .proposer_dir = paths.proposer_dir,
+            },
             .beacon_node_url = primary_beacon_url,
             .genesis_time = genesis.genesis_time,
             .genesis_validators_root = genesis.genesis_validators_root,
@@ -197,12 +307,16 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
             .electra_fork_epoch = beacon_config.chain.ELECTRA_FORK_EPOCH,
             .doppelganger_protection = opts.doppelgangerProtection,
             .slashing_protection_path = paths.slashing_protection_db,
-            .web3signer_url = web3signer_url,
+            .external_signer_urls = external_signer_urls,
+            .external_signer_fetch_enabled = external_signer_fetch_enabled,
+            .external_signer_fetch_interval_ms = external_signer_fetch_interval_ms,
             .beacon_node_fallback_urls = fallback_urls,
+            .proposer_configs = proposer_configs,
             .suggested_fee_recipient = fee_recipient,
-            .gas_limit = opts.defaultGasLimit orelse 30_000_000,
+            .gas_limit = opts.defaultGasLimit orelse 60_000_000,
             .graffiti = parseGraffiti(opts.graffiti),
-            .builder_boost_factor = builder_boost_factor,
+            .builder_boost_factor = builder_boost_factor orelse 100,
+            .strict_fee_recipient_check = opts.strictFeeRecipientCheck,
         },
     };
 }
@@ -258,6 +372,35 @@ fn splitCsvOwned(allocator: Allocator, raw: []const u8) ![]const []const u8 {
     return try list.toOwnedSlice(allocator);
 }
 
+fn splitCsvOwnedUnique(allocator: Allocator, raw: []const u8) ![]const []const u8 {
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (list.items) |item| allocator.free(item);
+        list.deinit(allocator);
+    }
+
+    var it = std.mem.splitScalar(u8, raw, ',');
+    while (it.next()) |part| {
+        const trimmed = std.mem.trim(u8, part, " \t\r\n");
+        if (trimmed.len == 0) continue;
+        if (sliceContainsString(list.items, trimmed)) continue;
+        try list.append(allocator, try allocator.dupe(u8, trimmed));
+    }
+
+    if (list.items.len == 0) {
+        list.deinit(allocator);
+        return &.{};
+    }
+    return try list.toOwnedSlice(allocator);
+}
+
+fn sliceContainsString(items: []const []const u8, needle: []const u8) bool {
+    for (items) |item| {
+        if (std.mem.eql(u8, item, needle)) return true;
+    }
+    return false;
+}
+
 fn freeOwnedStrings(allocator: Allocator, items: []const []const u8) void {
     if (items.len == 0) return;
     for (items) |item| allocator.free(item);
@@ -285,6 +428,88 @@ fn parseGraffiti(input: ?[]const u8) [32]u8 {
 fn parseBuilderBoostFactor(input: ?[]const u8) !?u64 {
     const raw = input orelse return null;
     return try std.fmt.parseInt(u64, raw, 10);
+}
+
+fn parseExternalSignerFetchInterval(input: ?u64) !?u64 {
+    const interval_ms = input orelse return null;
+    if (interval_ms == 0) return error.InvalidExternalSignerFetchInterval;
+    return interval_ms;
+}
+
+fn parseKeymanagerBodyLimit(input: ?u64) !usize {
+    const bytes = input orelse return 20 * 1024 * 1024;
+    if (bytes == 0) return error.InvalidKeymanagerBodyLimit;
+    return std.math.cast(usize, bytes) orelse return error.InvalidKeymanagerBodyLimit;
+}
+
+fn loadPinnedRemoteSignerKeys(
+    allocator: Allocator,
+    urls: []const []const u8,
+    raw_pubkeys: []const u8,
+) ![]validator_mod.RemoteSignerKeys {
+    if (urls.len != 1) return error.InvalidExternalSignerConfiguration;
+
+    try validator_mod.validateRemoteSignerUrl(urls[0]);
+
+    var pubkeys = std.ArrayListUnmanaged([48]u8).empty;
+    errdefer pubkeys.deinit(allocator);
+
+    var seen = std.AutoHashMap([48]u8, void).init(allocator);
+    defer seen.deinit();
+
+    var it = std.mem.splitScalar(u8, raw_pubkeys, ',');
+    while (it.next()) |part| {
+        const trimmed = std.mem.trim(u8, part, " \t\r\n");
+        if (trimmed.len == 0) continue;
+
+        const pubkey = try validator_mod.parseRemoteSignerPubkey(trimmed);
+        const entry = try seen.getOrPut(pubkey);
+        if (entry.found_existing) continue;
+        try pubkeys.append(allocator, pubkey);
+    }
+
+    if (pubkeys.items.len == 0) return error.InvalidExternalSignerConfiguration;
+
+    const grouped = try allocator.alloc(validator_mod.RemoteSignerKeys, 1);
+    errdefer allocator.free(grouped);
+    grouped[0] = .{
+        .url = try allocator.dupe(u8, urls[0]),
+        .pubkeys = try pubkeys.toOwnedSlice(allocator),
+    };
+    return grouped;
+}
+
+fn duplicateRemoteSignerUrls(
+    allocator: Allocator,
+    groups: []const validator_mod.RemoteSignerKeys,
+) ![]const []const u8 {
+    if (groups.len == 0) return &.{};
+
+    const urls = try allocator.alloc([]const u8, groups.len);
+    var populated: usize = 0;
+    errdefer {
+        for (urls[0..populated]) |url| allocator.free(url);
+        allocator.free(urls);
+    }
+
+    for (groups, 0..) |group, idx| {
+        urls[idx] = try allocator.dupe(u8, group.url);
+        populated += 1;
+    }
+
+    return urls;
+}
+
+fn directoryHasEntries(io: Io, path: []const u8) !bool {
+    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer dir.close(io);
+
+    var iter = dir.iterate();
+    while (try iter.next(io)) |_| return true;
+    return false;
 }
 
 fn waitForGenesis(
@@ -393,4 +618,32 @@ fn buildSigningContext(
     }
 
     return ctx;
+}
+
+const testing = std.testing;
+
+test "splitCsvOwnedUnique trims and deduplicates values" {
+    const items = try splitCsvOwnedUnique(testing.allocator, " http://a ,http://b,http://a ,, http://b ");
+    defer freeOwnedStrings(testing.allocator, items);
+
+    try testing.expectEqual(@as(usize, 2), items.len);
+    try testing.expectEqualStrings("http://a", items[0]);
+    try testing.expectEqualStrings("http://b", items[1]);
+}
+
+test "loadPinnedRemoteSignerKeys parses and deduplicates pubkeys" {
+    const urls: []const []const u8 = &.{"http://signer.example:9000"};
+    const grouped = try loadPinnedRemoteSignerKeys(
+        testing.allocator,
+        urls,
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+    defer {
+        for (grouped) |*item| item.deinit(testing.allocator);
+        testing.allocator.free(grouped);
+    }
+
+    try testing.expectEqual(@as(usize, 1), grouped.len);
+    try testing.expectEqualStrings("http://signer.example:9000", grouped[0].url);
+    try testing.expectEqual(@as(usize, 2), grouped[0].pubkeys.len);
 }

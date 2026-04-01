@@ -96,57 +96,72 @@ pub const spec = cli.command(.{
         }),
         .keymanager = cli.flag(.{
             .long = "keymanager",
-            .description = "Compatibility flag only. Validator keymanager API server is not implemented yet",
+            .description = "Enable the validator keymanager API server",
             .group = "keymanager",
         }),
-        .@"keymanager.auth" = cli.flag(.{
+        .@"keymanager.auth" = cli.option(bool, .{
             .long = "keymanager.auth",
-            .description = "Compatibility flag only. Validator keymanager API server is not implemented yet",
+            .description = "Enable bearer-token authentication for the validator keymanager API",
             .group = "keymanager",
-        }),
+        }, true),
         .@"keymanager.tokenFile" = cli.option(?[]const u8, .{
             .long = "keymanager.tokenFile",
-            .description = "Compatibility flag only. Validator keymanager API server is not implemented yet",
+            .description = "Path to the validator keymanager bearer token file",
             .group = "keymanager",
         }, null),
         .@"keymanager.port" = cli.option(?u16, .{
             .long = "keymanager.port",
-            .description = "Compatibility flag only. Validator keymanager API server is not implemented yet",
+            .description = "Port for the validator keymanager API server",
             .group = "keymanager",
         }, null),
         .@"keymanager.address" = cli.option(?[]const u8, .{
             .long = "keymanager.address",
-            .description = "Compatibility flag only. Validator keymanager API server is not implemented yet",
+            .description = "Bind address for the validator keymanager API server",
             .group = "keymanager",
         }, null),
         .@"keymanager.cors" = cli.option(?[]const u8, .{
             .long = "keymanager.cors",
-            .description = "Compatibility flag only. Validator keymanager API server is not implemented yet",
+            .description = "CORS Access-Control-Allow-Origin value for the validator keymanager API server",
             .group = "keymanager",
         }, null),
+        .@"keymanager.bodyLimit" = cli.option(?u64, .{
+            .long = "keymanager.bodyLimit",
+            .description = "Maximum request body size in bytes for the validator keymanager API server",
+            .group = "keymanager",
+        }, null),
+        .@"keymanager.headerLimit" = cli.option(?u64, .{
+            .long = "keymanager.headerLimit",
+            .description = "Compatibility flag only. Keymanager header limits are not implemented yet",
+            .group = "keymanager",
+        }, null),
+        .@"keymanager.stacktraces" = cli.flag(.{
+            .long = "keymanager.stacktraces",
+            .description = "Compatibility flag only. Keymanager stacktrace responses are not implemented yet",
+            .group = "keymanager",
+        }),
         .@"externalSigner.urls" = cli.option(?[]const u8, .{
             .long = "externalSigner.urls",
-            .description = "External signer URL. Current implementation supports exactly one URL when used with --externalSigner.fetch",
+            .description = "Comma-separated external signer URLs used for remote validator signing",
             .group = "externalSigner",
         }, null),
         .@"externalSigner.url" = cli.option(?[]const u8, .{
             .long = "externalSigner.url",
-            .description = "External signer URL. Current implementation supports exactly one URL when used with --externalSigner.fetch",
+            .description = "Backward-compatible alias for externalSigner.urls",
             .group = "externalSigner",
         }, null),
         .@"externalSigner.pubkeys" = cli.option(?[]const u8, .{
             .long = "externalSigner.pubkeys",
-            .description = "Compatibility flag only. Explicit remote-signer pubkey lists are not implemented yet",
+            .description = "Comma-separated validator pubkeys pinned to the configured external signer URL (supports exactly one URL)",
             .group = "externalSigner",
         }, null),
         .@"externalSigner.fetch" = cli.flag(.{
             .long = "externalSigner.fetch",
-            .description = "Fetch validator pubkeys from the external signer. This is the only currently supported remote-signer mode",
+            .description = "Fetch validator pubkeys from the configured external signer URL(s) and refresh them periodically",
             .group = "externalSigner",
         }),
         .@"externalSigner.fetchInterval" = cli.option(?u64, .{
             .long = "externalSigner.fetchInterval",
-            .description = "Compatibility flag only. Custom external signer fetch intervals are not implemented yet",
+            .description = "Refresh interval in milliseconds for fetching validator pubkeys from external signers (defaults to once per epoch)",
             .group = "externalSigner",
         }, null),
         .importKeystores = cli.option(?[]const u8, .{

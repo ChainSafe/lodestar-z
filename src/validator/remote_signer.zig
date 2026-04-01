@@ -106,6 +106,18 @@ pub const RemoteSigner = struct {
         };
     }
 
+    pub fn initOwned(allocator: Allocator, base_url: []const u8) !RemoteSigner {
+        return .{
+            .allocator = allocator,
+            .base_url = try allocator.dupe(u8, base_url),
+        };
+    }
+
+    pub fn deinit(self: *RemoteSigner) void {
+        self.allocator.free(self.base_url);
+        self.* = undefined;
+    }
+
     // -----------------------------------------------------------------------
     // Public API
     // -----------------------------------------------------------------------

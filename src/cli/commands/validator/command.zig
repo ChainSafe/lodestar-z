@@ -7,6 +7,7 @@ const validator_mod = @import("validator");
 const log_mod = @import("log");
 const ShutdownHandler = @import("../../shutdown.zig").ShutdownHandler;
 const bootstrap = @import("bootstrap.zig");
+const keymanager_server = @import("keymanager_server.zig");
 
 fn unsupportedOption(message: []const u8) error{UnsupportedValidatorOption}!void {
     std.log.err("{s}", .{message});
@@ -30,14 +31,18 @@ fn rejectUnsupportedOptions(opts: anytype) !void {
     if (opts.@"monitoring.endpoint" != null or opts.@"monitoring.interval" != null) {
         return unsupportedOption("Validator monitoring flags are not implemented yet. Remove --monitoring.endpoint and --monitoring.interval.");
     }
-    if (opts.keymanager or
-        opts.@"keymanager.auth" or
-        opts.@"keymanager.tokenFile" != null or
-        opts.@"keymanager.port" != null or
-        opts.@"keymanager.address" != null or
-        opts.@"keymanager.cors" != null)
+    if (opts.@"keymanager.headerLimit" != null or opts.@"keymanager.stacktraces") {
+        return unsupportedOption("Validator keymanager header-limit and stacktrace options are not implemented yet. Remove --keymanager.headerLimit and --keymanager.stacktraces.");
+    }
+    if (!opts.keymanager and
+        (opts.@"keymanager.tokenFile" != null or
+            opts.@"keymanager.port" != null or
+            opts.@"keymanager.address" != null or
+            opts.@"keymanager.cors" != null or
+            opts.@"keymanager.bodyLimit" != null or
+            opts.@"keymanager.auth" != true))
     {
-        return unsupportedOption("Validator keymanager API server flags are not implemented yet. Remove the --keymanager* options.");
+        return unsupportedOption("Validator keymanager options require --keymanager. Add --keymanager or remove the --keymanager.* overrides.");
     }
     if (opts.importKeystores != null or opts.importKeystoresPassword != null) {
         return unsupportedOption("Validator keystore import at startup is not implemented yet. Populate the keystores and secrets directories directly instead.");
@@ -57,23 +62,33 @@ fn rejectUnsupportedOptions(opts: anytype) !void {
     if (opts.distributed) {
         return unsupportedOption("Distributed validator mode is not implemented yet. Remove --distributed.");
     }
-    if (opts.@"externalSigner.pubkeys" != null) {
-        return unsupportedOption("Validator external signer pubkey pinning is not implemented yet. The current implementation only supports fetching all keys from one signer.");
-    }
-    if (opts.@"externalSigner.fetchInterval" != null) {
-        return unsupportedOption("Validator external signer fetchInterval is not implemented yet. Remote signer keys are refreshed on the validator epoch loop.");
-    }
-
     const external_signer_urls = opts.@"externalSigner.urls" orelse opts.@"externalSigner.url";
     if (external_signer_urls) |raw| {
-        if (!opts.@"externalSigner.fetch") {
-            return unsupportedOption("Validator external signer support currently requires --externalSigner.fetch. Only fetch-all mode from one signer is implemented.");
+        const url_count = countCsvValues(raw);
+        if (url_count == 0) {
+            return unsupportedOption("--externalSigner.url or --externalSigner.urls requires at least one non-empty signer URL.");
         }
-        if (countCsvValues(raw) > 1) {
-            return unsupportedOption("Multiple external signer URLs are not implemented yet. Only one Web3Signer endpoint can be used.");
+        if (!opts.@"externalSigner.fetch" and opts.@"externalSigner.pubkeys" == null) {
+            return unsupportedOption("--externalSigner.url(s) requires either --externalSigner.fetch or --externalSigner.pubkeys.");
         }
-    } else if (opts.@"externalSigner.fetch") {
-        return unsupportedOption("--externalSigner.fetch requires --externalSigner.url or --externalSigner.urls.");
+        if (opts.@"externalSigner.fetch" and opts.@"externalSigner.pubkeys" != null) {
+            return unsupportedOption("--externalSigner.fetch conflicts with --externalSigner.pubkeys.");
+        }
+        if (opts.@"externalSigner.pubkeys" != null and url_count > 1) {
+            return unsupportedOption("--externalSigner.pubkeys currently supports exactly one external signer URL.");
+        }
+        if (opts.@"externalSigner.pubkeys") |pubkeys| {
+            if (countCsvValues(pubkeys) == 0) {
+                return unsupportedOption("--externalSigner.pubkeys requires at least one non-empty validator pubkey.");
+            }
+        }
+    } else {
+        if (opts.@"externalSigner.fetch") {
+            return unsupportedOption("--externalSigner.fetch requires --externalSigner.url or --externalSigner.urls.");
+        }
+        if (opts.@"externalSigner.pubkeys" != null) {
+            return unsupportedOption("--externalSigner.pubkeys requires --externalSigner.url or --externalSigner.urls.");
+        }
     }
 }
 
@@ -149,5 +164,30 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     }
 
     prepared.logStartup();
+
+    var keymanager: ?keymanager_server.Runtime = null;
+    if (prepared.keymanager) |keymanager_config| {
+        keymanager = try keymanager_server.Runtime.init(
+            io,
+            allocator,
+            client,
+            &prepared.beacon_config,
+            .{
+                .address = keymanager_config.address,
+                .port = keymanager_config.port,
+                .cors_origin = keymanager_config.cors_origin,
+                .auth_enabled = keymanager_config.auth_enabled,
+                .token_file = keymanager_config.token_file,
+                .body_limit = keymanager_config.body_limit,
+            },
+        );
+        errdefer if (keymanager) |*km| km.deinit();
+        try keymanager.?.start();
+    }
+    defer if (keymanager) |*km| {
+        km.stop();
+        km.deinit();
+    };
+
     try client.start();
 }

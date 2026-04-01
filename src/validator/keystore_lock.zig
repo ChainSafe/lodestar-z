@@ -8,9 +8,19 @@ const fs = @import("fs.zig");
 pub const KeystoreLock = struct {
     allocator: Allocator,
     path: []const u8,
+    pubkey: ?[48]u8 = null,
     file: Io.File,
 
     pub fn acquire(io: Io, allocator: Allocator, keystore_path: []const u8) !KeystoreLock {
+        return acquireWithPubkey(io, allocator, keystore_path, null);
+    }
+
+    pub fn acquireWithPubkey(
+        io: Io,
+        allocator: Allocator,
+        keystore_path: []const u8,
+        pubkey: ?[48]u8,
+    ) !KeystoreLock {
         const abs_path = try fs.resolvePath(allocator, keystore_path);
         defer allocator.free(abs_path);
 
@@ -28,6 +38,21 @@ pub const KeystoreLock = struct {
         return .{
             .allocator = allocator,
             .path = try allocator.dupe(u8, keystore_path),
+            .pubkey = pubkey,
+            .file = file,
+        };
+    }
+
+    pub fn fromLockedFile(
+        allocator: Allocator,
+        keystore_path: []const u8,
+        pubkey: [48]u8,
+        file: Io.File,
+    ) !KeystoreLock {
+        return .{
+            .allocator = allocator,
+            .path = try allocator.dupe(u8, keystore_path),
+            .pubkey = pubkey,
             .file = file,
         };
     }

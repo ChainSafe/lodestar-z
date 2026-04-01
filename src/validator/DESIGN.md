@@ -17,29 +17,46 @@ Current gaps:
    `--importKeystores*` is rejected. Operators must populate the keystore and
    secret directories directly.
 
-3. External signer support is narrower than Lodestar TS.
-   The current implementation only supports a single Web3Signer endpoint in
-   fetch-all mode (`--externalSigner.fetch` with one URL). Explicit pubkey
-   pinning, multiple signer URLs, and custom fetch intervals are not supported.
+3. External signer support is still narrower than Lodestar TS, but no longer
+   in the basic startup path.
+   The validator now supports Lodestar's three startup sources for remote
+   signers: persisted `remoteKeys/` definitions, explicit
+   `--externalSigner.pubkeys`, and dynamic `--externalSigner.fetch`.
+   The runtime keymanager server can now also add and remove remote keys while
+   the client is running. The remaining external-signer gap is broader
+   keymanager/key-discovery polish, not the core signer path.
 
-4. Keymanager API, proposer settings files, strict fee-recipient checks,
-   distributed-validator flags, broadcast validation controls, blinded-local
-   controls, and mnemonic / interop signer sources are not implemented yet.
+4. The validator keymanager server now covers keystores, remote keys,
+   fee-recipient updates, graffiti updates, gas-limit updates, builder-boost
+   updates, proposer-config reads, and voluntary-exit signing. The remaining
+   keymanager gaps are:
+   `--keymanager.headerLimit`, `--keymanager.stacktraces`, and dedicated
+   keymanager metrics/monitoring integration.
+
+5. Proposer settings files, strict fee-recipient checks, builder selection
+   policy flags, distributed-validator flags, broadcast validation controls,
+   blinded-local controls, and mnemonic / interop signer sources are still not
+   implemented.
    The validator launcher now resolves Lodestar-style `cache/`, `remoteKeys/`,
-   and `proposerConfigs/` paths, but those directories are still reserved for
-   the missing keymanager and proposer-settings flows. The CLI exposes the
-   major Lodestar-compatible flags for these features and rejects them at
-   startup instead of silently ignoring them.
+   and `proposerConfigs/` paths, and `proposerConfigs/` is now loaded and
+   persisted by the keymanager/runtime path instead of being ignored.
 
-5. Beacon-node config verification is implemented only against the subset of
+6. Beacon-node config verification is implemented only against the subset of
    `/eth/v1/config/spec` that lodestar-z currently exposes and consumes.
    That is enough to catch the major fork/timing mismatches we depend on, but it
    is not yet a full Lodestar-TS-style critical-params check.
 
-6. Validator persistence is intentionally simpler than Lodestar TS.
+7. Validator persistence is intentionally simpler than Lodestar TS.
    Slashing protection uses an append-only file, and validator metadata
    (`genesis_time`, `genesis_validators_root`) is stored in a small sidecar file
    under `validator-db/`.
+
+8. Chain-head tracking still uses a dedicated SSE thread.
+   The tracker now seeds itself from normal REST calls and reconnects when the
+   SSE stream drops, but the current HTTP event stream client still does not
+   expose a true cancellation primitive. Shutdown therefore still depends on
+   the beacon node unblocking or closing the SSE stream. That remaining
+   cancellation limitation is a real runtime gap, not hidden behavior.
 
 Non-gap note:
 

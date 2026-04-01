@@ -23,6 +23,7 @@ const Io = std.Io;
 const fs = @import("fs.zig");
 
 const log = std.log.scoped(.slashing_db);
+const SlashingProtectionRecord = @import("types.zig").SlashingProtectionRecord;
 
 // ---------------------------------------------------------------------------
 // Record types
@@ -258,6 +259,33 @@ pub const SlashingProtectionDb = struct {
         try self.appendAttestationRecord(pubkey, source_epoch, target_epoch);
         try self.insertAttestRecord(pubkey, source_epoch, target_epoch);
         return true;
+    }
+
+    /// Return the current persisted slashing protection summary for one validator.
+    ///
+    /// The returned record is a snapshot derived from the durable maps, suitable
+    /// for EIP-3076 export on key deletion.
+    pub fn exportRecord(self: *const SlashingProtectionDb, pubkey: [48]u8) ?SlashingProtectionRecord {
+        const last_block_slot = self.block_map.get(pubkey);
+
+        var source_epoch: ?u64 = null;
+        var target_epoch: ?u64 = null;
+        if (self.attest_history.get(pubkey)) |history| {
+            if (history.items.len > 0) {
+                const latest = history.items[history.items.len - 1];
+                source_epoch = latest.source_epoch;
+                target_epoch = latest.target_epoch;
+            }
+        }
+
+        if (last_block_slot == null and target_epoch == null) return null;
+
+        return .{
+            .pubkey = pubkey,
+            .last_signed_block_slot = last_block_slot,
+            .last_signed_attestation_source_epoch = source_epoch,
+            .last_signed_attestation_target_epoch = target_epoch,
+        };
     }
 
     // -----------------------------------------------------------------------

@@ -24,6 +24,7 @@ pub const Paths = struct {
     validators_db_dir: []const u8,
     slashing_protection_db: []const u8,
     metadata_file: []const u8,
+    keymanager_token_file: []const u8,
     cache_dir: []const u8,
     keystores_dir: []const u8,
     secrets_dir: []const u8,
@@ -44,6 +45,7 @@ pub const Paths = struct {
 
         const slashing_protection_db = try std.fs.path.join(allocator, &.{ validators_db_dir, "slashing-protection.db" });
         const metadata_file = try std.fs.path.join(allocator, &.{ validators_db_dir, "metadata.json" });
+        const keymanager_token_file = try std.fs.path.join(allocator, &.{ validators_db_dir, "api-token.txt" });
 
         const cache_dir = if (opts.cache_dir) |path|
             try allocator.dupe(u8, path)
@@ -78,6 +80,7 @@ pub const Paths = struct {
             .validators_db_dir = validators_db_dir,
             .slashing_protection_db = slashing_protection_db,
             .metadata_file = metadata_file,
+            .keymanager_token_file = keymanager_token_file,
             .cache_dir = cache_dir,
             .keystores_dir = keystores_dir,
             .secrets_dir = secrets_dir,
@@ -105,6 +108,7 @@ pub const Paths = struct {
         allocator.free(self.validators_db_dir);
         allocator.free(self.slashing_protection_db);
         allocator.free(self.metadata_file);
+        allocator.free(self.keymanager_token_file);
         allocator.free(self.cache_dir);
         allocator.free(self.keystores_dir);
         allocator.free(self.secrets_dir);
@@ -127,6 +131,7 @@ test "Paths.resolve uses Lodestar-style validator layout" {
     try testing.expectEqualStrings("/tmp/validator-data/validator-db", paths.validators_db_dir);
     try testing.expectEqualStrings("/tmp/validator-data/validator-db/slashing-protection.db", paths.slashing_protection_db);
     try testing.expectEqualStrings("/tmp/validator-data/validator-db/metadata.json", paths.metadata_file);
+    try testing.expectEqualStrings("/tmp/validator-data/validator-db/api-token.txt", paths.keymanager_token_file);
     try testing.expectEqualStrings("/tmp/validator-data/cache", paths.cache_dir);
     try testing.expectEqualStrings("/tmp/validator-data/keystores", paths.keystores_dir);
     try testing.expectEqualStrings("/tmp/validator-data/secrets", paths.secrets_dir);
@@ -151,6 +156,7 @@ test "Paths.resolve honors path overrides" {
     try testing.expectEqualStrings("/data/validator-db", paths.validators_db_dir);
     try testing.expectEqualStrings("/data/validator-db/slashing-protection.db", paths.slashing_protection_db);
     try testing.expectEqualStrings("/data/validator-db/metadata.json", paths.metadata_file);
+    try testing.expectEqualStrings("/data/validator-db/api-token.txt", paths.keymanager_token_file);
     try testing.expectEqualStrings("/data/cache", paths.cache_dir);
     try testing.expectEqualStrings("/data/keystores", paths.keystores_dir);
     try testing.expectEqualStrings("/data/secrets", paths.secrets_dir);

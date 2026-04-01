@@ -303,6 +303,27 @@ pub const KeymanagerCallback = struct {
     importRemoteKeyFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, pubkey: [48]u8, url: []const u8) anyerror![]const u8,
     /// Delete a remote key. Returns status string ("deleted"/"not_found"/"error").
     deleteRemoteKeyFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, pubkey: [48]u8) anyerror![]const u8,
+    /// Get the effective fee recipient for a validator.
+    getFeeRecipientFn: *const fn (ptr: *anyopaque, pubkey: [48]u8) anyerror![20]u8,
+    /// Set/delete per-validator fee recipient overrides.
+    setFeeRecipientFn: *const fn (ptr: *anyopaque, pubkey: [48]u8, fee_recipient: [20]u8) anyerror!void,
+    deleteFeeRecipientFn: *const fn (ptr: *anyopaque, pubkey: [48]u8) anyerror!void,
+    /// Get/set/delete per-validator graffiti overrides.
+    getGraffitiFn: *const fn (ptr: *anyopaque, pubkey: [48]u8) anyerror![32]u8,
+    setGraffitiFn: *const fn (ptr: *anyopaque, pubkey: [48]u8, graffiti: [32]u8) anyerror!void,
+    deleteGraffitiFn: *const fn (ptr: *anyopaque, pubkey: [48]u8) anyerror!void,
+    /// Get/set/delete per-validator gas-limit overrides.
+    getGasLimitFn: *const fn (ptr: *anyopaque, pubkey: [48]u8) anyerror!u64,
+    setGasLimitFn: *const fn (ptr: *anyopaque, pubkey: [48]u8, gas_limit: u64) anyerror!void,
+    deleteGasLimitFn: *const fn (ptr: *anyopaque, pubkey: [48]u8) anyerror!void,
+    /// Get/set/delete per-validator builder boost overrides.
+    getBuilderBoostFactorFn: *const fn (ptr: *anyopaque, pubkey: [48]u8) anyerror!u64,
+    setBuilderBoostFactorFn: *const fn (ptr: *anyopaque, pubkey: [48]u8, builder_boost_factor: u64) anyerror!void,
+    deleteBuilderBoostFactorFn: *const fn (ptr: *anyopaque, pubkey: [48]u8) anyerror!void,
+    /// Serialize the raw override config for a validator. Caller owns the bytes.
+    getProposerConfigFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, pubkey: [48]u8) anyerror![]const u8,
+    /// Sign and return a voluntary exit for the validator. Caller owns the bytes.
+    signVoluntaryExitFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, pubkey: [48]u8, epoch: ?u64) anyerror![]const u8,
 };
 
 /// Result of a key delete operation.

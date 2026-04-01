@@ -333,7 +333,7 @@ pub const BeaconNode = struct {
     /// Signal all loops to stop.
     pub fn requestShutdown(self: *BeaconNode) void {
         self.shutdown_requested.store(true, .release);
-        if (self.http_server) |*srv| srv.shutdown();
+        if (self.http_server) |*srv| srv.shutdown(self.io);
     }
 
     /// Create a new BeaconNode with all components wired together.

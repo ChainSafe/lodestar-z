@@ -10,6 +10,20 @@
 //!   GET    /eth/v1/remotekeys       — list remote signer keys
 //!   POST   /eth/v1/remotekeys       — import remote signer keys
 //!   DELETE /eth/v1/remotekeys       — delete remote signer keys
+//!   GET    /eth/v1/validator/{pubkey}/feerecipient
+//!   POST   /eth/v1/validator/{pubkey}/feerecipient
+//!   DELETE /eth/v1/validator/{pubkey}/feerecipient
+//!   GET    /eth/v1/validator/{pubkey}/graffiti
+//!   POST   /eth/v1/validator/{pubkey}/graffiti
+//!   DELETE /eth/v1/validator/{pubkey}/graffiti
+//!   GET    /eth/v1/validator/{pubkey}/gas_limit
+//!   POST   /eth/v1/validator/{pubkey}/gas_limit
+//!   DELETE /eth/v1/validator/{pubkey}/gas_limit
+//!   GET    /eth/v1/validator/{pubkey}/builder_boost_factor
+//!   POST   /eth/v1/validator/{pubkey}/builder_boost_factor
+//!   DELETE /eth/v1/validator/{pubkey}/builder_boost_factor
+//!   GET    /eth/v0/validator/{pubkey}/proposer_config
+//!   POST   /eth/v1/validator/{pubkey}/voluntary_exit
 //!
 //! References:
 //!   https://ethereum.github.io/keymanager-APIs/
@@ -464,8 +478,247 @@ pub fn deleteRemoteKeys(ctx: *ApiContext, auth_header: ?[]const u8, body: []cons
 }
 
 // ---------------------------------------------------------------------------
+// GET/POST/DELETE /eth/v1/validator/{pubkey}/feerecipient
+// ---------------------------------------------------------------------------
+
+pub fn listFeeRecipient(ctx: *ApiContext, auth_header: ?[]const u8, pubkey: [48]u8) ![]u8 {
+    try validateAuth(ctx, auth_header);
+    const km = ctx.keymanager.?;
+    const fee_recipient = try km.getFeeRecipientFn(km.ptr, pubkey);
+
+    return std.fmt.allocPrint(
+        ctx.allocator,
+        "{{\"data\":{{\"pubkey\":\"0x{s}\",\"ethaddress\":\"0x{s}\"}}}}",
+        .{
+            std.fmt.bytesToHex(pubkey, .lower),
+            std.fmt.bytesToHex(fee_recipient, .lower),
+        },
+    );
+}
+
+pub fn setFeeRecipient(ctx: *ApiContext, auth_header: ?[]const u8, pubkey: [48]u8, body: []const u8) !void {
+    try validateAuth(ctx, auth_header);
+    const km = ctx.keymanager.?;
+
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{});
+    const root_obj = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return error.InvalidRequestBody,
+    };
+    const fee_value = root_obj.get("ethaddress") orelse return error.MissingField;
+    const fee_text = switch (fee_value) {
+        .string => |value| value,
+        else => return error.InvalidRequestBody,
+    };
+
+    try km.setFeeRecipientFn(km.ptr, pubkey, try parseFeeRecipientHex(fee_text));
+}
+
+pub fn deleteFeeRecipient(ctx: *ApiContext, auth_header: ?[]const u8, pubkey: [48]u8) !void {
+    try validateAuth(ctx, auth_header);
+    const km = ctx.keymanager.?;
+    try km.deleteFeeRecipientFn(km.ptr, pubkey);
+}
+
+// ---------------------------------------------------------------------------
+// GET/POST/DELETE /eth/v1/validator/{pubkey}/graffiti
+// ---------------------------------------------------------------------------
+
+pub fn getGraffiti(ctx: *ApiContext, auth_header: ?[]const u8, pubkey: [48]u8) ![]u8 {
+    try validateAuth(ctx, auth_header);
+    const km = ctx.keymanager.?;
+    const graffiti = try km.getGraffitiFn(km.ptr, pubkey);
+    const graffiti_hex = try formatGraffitiHex(ctx.allocator, graffiti);
+    defer ctx.allocator.free(graffiti_hex);
+
+    return std.fmt.allocPrint(
+        ctx.allocator,
+        "{{\"data\":{{\"pubkey\":\"0x{s}\",\"graffiti\":\"{s}\"}}}}",
+        .{
+            std.fmt.bytesToHex(pubkey, .lower),
+            graffiti_hex,
+        },
+    );
+}
+
+pub fn setGraffiti(ctx: *ApiContext, auth_header: ?[]const u8, pubkey: [48]u8, body: []const u8) !void {
+    try validateAuth(ctx, auth_header);
+    const km = ctx.keymanager.?;
+
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{});
+    const root_obj = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return error.InvalidRequestBody,
+    };
+    const graffiti_value = root_obj.get("graffiti") orelse return error.MissingField;
+    const graffiti_text = switch (graffiti_value) {
+        .string => |value| value,
+        else => return error.InvalidRequestBody,
+    };
+
+    try km.setGraffitiFn(km.ptr, pubkey, try parseGraffitiHex(graffiti_text));
+}
+
+pub fn deleteGraffiti(ctx: *ApiContext, auth_header: ?[]const u8, pubkey: [48]u8) !void {
+    try validateAuth(ctx, auth_header);
+    const km = ctx.keymanager.?;
+    try km.deleteGraffitiFn(km.ptr, pubkey);
+}
+
+// ---------------------------------------------------------------------------
+// GET/POST/DELETE /eth/v1/validator/{pubkey}/gas_limit
+// ---------------------------------------------------------------------------
+
+pub fn getGasLimit(ctx: *ApiContext, auth_header: ?[]const u8, pubkey: [48]u8) ![]u8 {
+    try validateAuth(ctx, auth_header);
+    const km = ctx.keymanager.?;
+    const gas_limit = try km.getGasLimitFn(km.ptr, pubkey);
+
+    return std.fmt.allocPrint(
+        ctx.allocator,
+        "{{\"data\":{{\"pubkey\":\"0x{s}\",\"gas_limit\":{d}}}}}",
+        .{ std.fmt.bytesToHex(pubkey, .lower), gas_limit },
+    );
+}
+
+pub fn setGasLimit(ctx: *ApiContext, auth_header: ?[]const u8, pubkey: [48]u8, body: []const u8) !void {
+    try validateAuth(ctx, auth_header);
+    const km = ctx.keymanager.?;
+
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{});
+    const root_obj = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return error.InvalidRequestBody,
+    };
+    const gas_limit_value = root_obj.get("gas_limit") orelse return error.MissingField;
+    try km.setGasLimitFn(km.ptr, pubkey, try parseU64Json(gas_limit_value));
+}
+
+pub fn deleteGasLimit(ctx: *ApiContext, auth_header: ?[]const u8, pubkey: [48]u8) !void {
+    try validateAuth(ctx, auth_header);
+    const km = ctx.keymanager.?;
+    try km.deleteGasLimitFn(km.ptr, pubkey);
+}
+
+// ---------------------------------------------------------------------------
+// GET/POST/DELETE /eth/v1/validator/{pubkey}/builder_boost_factor
+// ---------------------------------------------------------------------------
+
+pub fn getBuilderBoostFactor(ctx: *ApiContext, auth_header: ?[]const u8, pubkey: [48]u8) ![]u8 {
+    try validateAuth(ctx, auth_header);
+    const km = ctx.keymanager.?;
+    const builder_boost_factor = try km.getBuilderBoostFactorFn(km.ptr, pubkey);
+
+    return std.fmt.allocPrint(
+        ctx.allocator,
+        "{{\"data\":{{\"pubkey\":\"0x{s}\",\"builder_boost_factor\":\"{d}\"}}}}",
+        .{ std.fmt.bytesToHex(pubkey, .lower), builder_boost_factor },
+    );
+}
+
+pub fn setBuilderBoostFactor(ctx: *ApiContext, auth_header: ?[]const u8, pubkey: [48]u8, body: []const u8) !void {
+    try validateAuth(ctx, auth_header);
+    const km = ctx.keymanager.?;
+
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{});
+    const root_obj = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return error.InvalidRequestBody,
+    };
+    const boost_value = root_obj.get("builder_boost_factor") orelse return error.MissingField;
+    try km.setBuilderBoostFactorFn(km.ptr, pubkey, try parseU64Json(boost_value));
+}
+
+pub fn deleteBuilderBoostFactor(ctx: *ApiContext, auth_header: ?[]const u8, pubkey: [48]u8) !void {
+    try validateAuth(ctx, auth_header);
+    const km = ctx.keymanager.?;
+    try km.deleteBuilderBoostFactorFn(km.ptr, pubkey);
+}
+
+// ---------------------------------------------------------------------------
+// GET /eth/v0/validator/{pubkey}/proposer_config
+// ---------------------------------------------------------------------------
+
+pub fn getProposerConfig(ctx: *ApiContext, auth_header: ?[]const u8, pubkey: [48]u8) ![]u8 {
+    try validateAuth(ctx, auth_header);
+    const km = ctx.keymanager.?;
+    const config_json = try km.getProposerConfigFn(km.ptr, ctx.allocator, pubkey);
+    defer ctx.allocator.free(config_json);
+    return std.fmt.allocPrint(ctx.allocator, "{{\"data\":{s}}}", .{config_json});
+}
+
+// ---------------------------------------------------------------------------
+// POST /eth/v1/validator/{pubkey}/voluntary_exit
+// ---------------------------------------------------------------------------
+
+pub fn signVoluntaryExit(
+    ctx: *ApiContext,
+    auth_header: ?[]const u8,
+    pubkey: [48]u8,
+    epoch: ?u64,
+) ![]u8 {
+    try validateAuth(ctx, auth_header);
+    const km = ctx.keymanager.?;
+    const signed_exit_json = try km.signVoluntaryExitFn(km.ptr, ctx.allocator, pubkey, epoch);
+    defer ctx.allocator.free(signed_exit_json);
+    return std.fmt.allocPrint(ctx.allocator, "{{\"data\":{s}}}", .{signed_exit_json});
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+fn parseFeeRecipientHex(input: []const u8) ![20]u8 {
+    const hex = if (std.mem.startsWith(u8, input, "0x")) input[2..] else input;
+    if (hex.len != 40) return error.InvalidRequestBody;
+
+    var fee_recipient: [20]u8 = undefined;
+    _ = std.fmt.hexToBytes(&fee_recipient, hex) catch return error.InvalidRequestBody;
+    return fee_recipient;
+}
+
+fn parseGraffitiHex(input: []const u8) ![32]u8 {
+    const hex = if (std.mem.startsWith(u8, input, "0x")) input[2..] else input;
+    if (hex.len > 64 or hex.len % 2 != 0) return error.InvalidRequestBody;
+
+    var graffiti: [32]u8 = [_]u8{0} ** 32;
+    const decoded_len = hex.len / 2;
+    _ = std.fmt.hexToBytes(graffiti[0..decoded_len], hex) catch return error.InvalidRequestBody;
+    if (!std.unicode.utf8ValidateSlice(graffiti[0..decoded_len])) return error.InvalidRequestBody;
+    return graffiti;
+}
+
+fn formatGraffitiHex(allocator: std.mem.Allocator, graffiti: [32]u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{x}", .{graffiti});
+}
+
+fn textToGraffiti(text: []const u8) [32]u8 {
+    var graffiti: [32]u8 = [_]u8{0} ** 32;
+    const copy_len = @min(text.len, graffiti.len);
+    @memcpy(graffiti[0..copy_len], text[0..copy_len]);
+    return graffiti;
+}
+
+fn parseU64Json(value: std.json.Value) !u64 {
+    return switch (value) {
+        .integer => |n| std.math.cast(u64, n) orelse error.InvalidRequestBody,
+        .number_string => |s| std.fmt.parseInt(u64, s, 10) catch error.InvalidRequestBody,
+        .string => |s| std.fmt.parseInt(u64, s, 10) catch error.InvalidRequestBody,
+        else => error.InvalidRequestBody,
+    };
+}
 
 fn buildCombinedSlashingProtection(allocator: std.mem.Allocator, sp_jsons: []const []const u8) ![]const u8 {
     // For now, return the first non-empty one. A full implementation would
@@ -508,6 +761,10 @@ const TestKeyState = struct {
     token: []const u8,
     local_keys: std.ArrayListUnmanaged([48]u8),
     remote_keys: std.ArrayListUnmanaged(RemoteEntry),
+    fee_recipients: std.AutoHashMapUnmanaged([48]u8, [20]u8),
+    graffitis: std.AutoHashMapUnmanaged([48]u8, [32]u8),
+    gas_limits: std.AutoHashMapUnmanaged([48]u8, u64),
+    builder_boost_factors: std.AutoHashMapUnmanaged([48]u8, u64),
 
     fn init(allocator: std.mem.Allocator, token: []const u8) !*TestKeyState {
         const self = try allocator.create(TestKeyState);
@@ -515,6 +772,10 @@ const TestKeyState = struct {
         self.token = token;
         self.local_keys = .empty;
         self.remote_keys = .empty;
+        self.fee_recipients = .empty;
+        self.graffitis = .empty;
+        self.gas_limits = .empty;
+        self.builder_boost_factors = .empty;
         return self;
     }
 
@@ -522,19 +783,37 @@ const TestKeyState = struct {
         self.local_keys.deinit(self.allocator);
         for (self.remote_keys.items) |rk| self.allocator.free(rk.url);
         self.remote_keys.deinit(self.allocator);
+        self.fee_recipients.deinit(self.allocator);
+        self.graffitis.deinit(self.allocator);
+        self.gas_limits.deinit(self.allocator);
+        self.builder_boost_factors.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 
     fn callback(self: *TestKeyState) context.KeymanagerCallback {
         return .{
             .ptr = @ptrCast(self),
-            .validateTokenFn = validateToken,
-            .listKeysFn = listKeys,
-            .importKeyFn = importKey,
-            .deleteKeyFn = deleteKey,
-            .listRemoteKeysFn = listRemoteKeys2,
-            .importRemoteKeyFn = importRemoteKey,
-            .deleteRemoteKeyFn = deleteRemoteKey,
+            .validateTokenFn = TestKeyState.validateToken,
+            .listKeysFn = TestKeyState.listKeys,
+            .importKeyFn = TestKeyState.importKey,
+            .deleteKeyFn = TestKeyState.deleteKey,
+            .listRemoteKeysFn = TestKeyState.listRemoteKeys2,
+            .importRemoteKeyFn = TestKeyState.importRemoteKey,
+            .deleteRemoteKeyFn = TestKeyState.deleteRemoteKey,
+            .getFeeRecipientFn = TestKeyState.getFeeRecipient,
+            .setFeeRecipientFn = TestKeyState.setFeeRecipient,
+            .deleteFeeRecipientFn = TestKeyState.deleteFeeRecipient,
+            .getGraffitiFn = TestKeyState.getGraffiti,
+            .setGraffitiFn = TestKeyState.setGraffiti,
+            .deleteGraffitiFn = TestKeyState.deleteGraffiti,
+            .getGasLimitFn = TestKeyState.getGasLimit,
+            .setGasLimitFn = TestKeyState.setGasLimit,
+            .deleteGasLimitFn = TestKeyState.deleteGasLimit,
+            .getBuilderBoostFactorFn = TestKeyState.getBuilderBoostFactor,
+            .setBuilderBoostFactorFn = TestKeyState.setBuilderBoostFactor,
+            .deleteBuilderBoostFactorFn = TestKeyState.deleteBuilderBoostFactor,
+            .getProposerConfigFn = TestKeyState.getProposerConfig,
+            .signVoluntaryExitFn = TestKeyState.signVoluntaryExit,
         };
     }
 
@@ -616,6 +895,118 @@ const TestKeyState = struct {
             }
         }
         return allocator.dupe(u8, "not_found");
+    }
+
+    fn getFeeRecipient(ptr: *anyopaque, pubkey: [48]u8) anyerror![20]u8 {
+        const self: *TestKeyState = @ptrCast(@alignCast(ptr));
+        try self.ensureKnownPubkey(pubkey);
+        return self.fee_recipients.get(pubkey) orelse [_]u8{0x11} ** 20;
+    }
+
+    fn setFeeRecipient(ptr: *anyopaque, pubkey: [48]u8, fee_recipient: [20]u8) anyerror!void {
+        const self: *TestKeyState = @ptrCast(@alignCast(ptr));
+        try self.ensureKnownPubkey(pubkey);
+        try self.fee_recipients.put(self.allocator, pubkey, fee_recipient);
+    }
+
+    fn deleteFeeRecipient(ptr: *anyopaque, pubkey: [48]u8) anyerror!void {
+        const self: *TestKeyState = @ptrCast(@alignCast(ptr));
+        try self.ensureKnownPubkey(pubkey);
+        _ = self.fee_recipients.remove(pubkey);
+    }
+
+    fn getGraffiti(ptr: *anyopaque, pubkey: [48]u8) anyerror![32]u8 {
+        const self: *TestKeyState = @ptrCast(@alignCast(ptr));
+        try self.ensureKnownPubkey(pubkey);
+        return self.graffitis.get(pubkey) orelse textToGraffiti("test-graffiti");
+    }
+
+    fn setGraffiti(ptr: *anyopaque, pubkey: [48]u8, graffiti: [32]u8) anyerror!void {
+        const self: *TestKeyState = @ptrCast(@alignCast(ptr));
+        try self.ensureKnownPubkey(pubkey);
+        try self.graffitis.put(self.allocator, pubkey, graffiti);
+    }
+
+    fn deleteGraffiti(ptr: *anyopaque, pubkey: [48]u8) anyerror!void {
+        const self: *TestKeyState = @ptrCast(@alignCast(ptr));
+        try self.ensureKnownPubkey(pubkey);
+        _ = self.graffitis.remove(pubkey);
+    }
+
+    fn getGasLimit(ptr: *anyopaque, pubkey: [48]u8) anyerror!u64 {
+        const self: *TestKeyState = @ptrCast(@alignCast(ptr));
+        try self.ensureKnownPubkey(pubkey);
+        return self.gas_limits.get(pubkey) orelse 60_000_000;
+    }
+
+    fn setGasLimit(ptr: *anyopaque, pubkey: [48]u8, gas_limit: u64) anyerror!void {
+        const self: *TestKeyState = @ptrCast(@alignCast(ptr));
+        try self.ensureKnownPubkey(pubkey);
+        try self.gas_limits.put(self.allocator, pubkey, gas_limit);
+    }
+
+    fn deleteGasLimit(ptr: *anyopaque, pubkey: [48]u8) anyerror!void {
+        const self: *TestKeyState = @ptrCast(@alignCast(ptr));
+        try self.ensureKnownPubkey(pubkey);
+        _ = self.gas_limits.remove(pubkey);
+    }
+
+    fn getBuilderBoostFactor(ptr: *anyopaque, pubkey: [48]u8) anyerror!u64 {
+        const self: *TestKeyState = @ptrCast(@alignCast(ptr));
+        try self.ensureKnownPubkey(pubkey);
+        return self.builder_boost_factors.get(pubkey) orelse 100;
+    }
+
+    fn setBuilderBoostFactor(ptr: *anyopaque, pubkey: [48]u8, builder_boost_factor: u64) anyerror!void {
+        const self: *TestKeyState = @ptrCast(@alignCast(ptr));
+        try self.ensureKnownPubkey(pubkey);
+        try self.builder_boost_factors.put(self.allocator, pubkey, builder_boost_factor);
+    }
+
+    fn deleteBuilderBoostFactor(ptr: *anyopaque, pubkey: [48]u8) anyerror!void {
+        const self: *TestKeyState = @ptrCast(@alignCast(ptr));
+        try self.ensureKnownPubkey(pubkey);
+        _ = self.builder_boost_factors.remove(pubkey);
+    }
+
+    fn getProposerConfig(ptr: *anyopaque, allocator: std.mem.Allocator, pubkey: [48]u8) anyerror![]const u8 {
+        const self: *TestKeyState = @ptrCast(@alignCast(ptr));
+        try self.ensureKnownPubkey(pubkey);
+
+        if (self.fee_recipients.get(pubkey)) |fee_recipient| {
+            return std.fmt.allocPrint(
+                allocator,
+                "{{\"feeRecipient\":\"0x{s}\"}}",
+                .{std.fmt.bytesToHex(fee_recipient, .lower)},
+            );
+        }
+
+        return allocator.dupe(u8, "null");
+    }
+
+    fn signVoluntaryExit(
+        ptr: *anyopaque,
+        allocator: std.mem.Allocator,
+        pubkey: [48]u8,
+        epoch: ?u64,
+    ) anyerror![]const u8 {
+        const self: *TestKeyState = @ptrCast(@alignCast(ptr));
+        try self.ensureKnownPubkey(pubkey);
+        return std.fmt.allocPrint(
+            allocator,
+            "{{\"message\":{{\"epoch\":\"{d}\",\"validator_index\":\"1\"}},\"signature\":\"0x{s}\"}}",
+            .{ epoch orelse 0, "aa" ** 96 },
+        );
+    }
+
+    fn ensureKnownPubkey(self: *const TestKeyState, pubkey: [48]u8) !void {
+        for (self.local_keys.items) |key| {
+            if (std.mem.eql(u8, &key, &pubkey)) return;
+        }
+        for (self.remote_keys.items) |remote_key| {
+            if (std.mem.eql(u8, &remote_key.pubkey, &pubkey)) return;
+        }
+        return error.ValidatorNotFound;
     }
 };
 

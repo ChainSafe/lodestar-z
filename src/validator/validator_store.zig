@@ -21,6 +21,9 @@ const PublicKey = bls.PublicKey;
 const Signature = bls.Signature;
 
 const types = @import("types.zig");
+const EffectiveProposerConfig = types.EffectiveProposerConfig;
+const ProposerConfig = types.ProposerConfig;
+const ProposerConfigEntry = types.ProposerConfigEntry;
 const SlashingProtectionRecord = types.SlashingProtectionRecord;
 const ValidatorStatus = types.ValidatorStatus;
 
@@ -41,7 +44,12 @@ const log = std.log.scoped(.validator_store);
 
 pub const ValidatorSigner = union(enum) {
     local: SecretKey,
-    remote: void,
+    remote: *RemoteSigner,
+};
+
+pub const SignerKind = enum {
+    local,
+    remote,
 };
 
 /// Per-validator in-memory state.
@@ -82,24 +90,39 @@ pub const ValidatorStore = struct {
     pubkeys_cache: std.array_list.Managed([48]u8),
     /// Persistent slashing protection database.
     slashing_db: SlashingProtectionDb,
+    /// Default proposer settings applied to every validator unless overridden.
+    default_proposer_config: EffectiveProposerConfig,
+    /// Per-validator proposer config overrides keyed by pubkey.
+    proposer_overrides: std.AutoHashMapUnmanaged([48]u8, ProposerConfig),
     /// Mutex protecting validators list for concurrent add/remove.
     mutex: mutex_mod.Mutex,
-    /// Remote signer client (Web3Signer). Non-null when web3signer_url is configured.
-    /// Used by signing methods when `validator.is_remote == true`.
-    remote_signer: ?*RemoteSigner = null,
-
     /// Initialize the ValidatorStore with an optional persistent slashing protection DB.
     ///
     /// Pass db_path = null for in-memory-only mode (tests, no persistence).
-    pub fn init(io: Io, allocator: Allocator, db_path: ?[]const u8) !ValidatorStore {
+    pub fn init(
+        io: Io,
+        allocator: Allocator,
+        db_path: ?[]const u8,
+        default_proposer_config: EffectiveProposerConfig,
+        proposer_configs: []const ProposerConfigEntry,
+    ) !ValidatorStore {
         const slashing_db = try SlashingProtectionDb.init(io, allocator, db_path);
-        return .{
+        var store = ValidatorStore{
             .allocator = allocator,
             .validators = std.array_list.Managed(ValidatorRecord).init(allocator),
             .pubkeys_cache = std.array_list.Managed([48]u8).init(allocator),
             .slashing_db = slashing_db,
+            .default_proposer_config = default_proposer_config,
+            .proposer_overrides = .empty,
             .mutex = .{},
         };
+        errdefer store.proposer_overrides.deinit(allocator);
+
+        for (proposer_configs) |entry| {
+            try store.proposer_overrides.put(allocator, entry.pubkey, entry.config);
+        }
+
+        return store;
     }
 
     pub fn deinit(self: *ValidatorStore) void {
@@ -109,6 +132,7 @@ pub const ValidatorStore = struct {
         }
         self.validators.deinit();
         self.pubkeys_cache.deinit();
+        self.proposer_overrides.deinit(self.allocator);
         self.slashing_db.close();
     }
 
@@ -126,6 +150,126 @@ pub const ValidatorStore = struct {
             .local = self.validators.items.len - remote,
             .remote = remote,
         };
+    }
+
+    pub fn getFeeRecipient(self: *ValidatorStore, pubkey: [48]u8) [20]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.effectiveProposerConfigLocked(pubkey).fee_recipient;
+    }
+
+    pub fn getFeeRecipientByIndex(self: *ValidatorStore, index: u64) [20]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.validators.items) |validator| {
+            if (validator.index != index) continue;
+            return self.effectiveProposerConfigLocked(validator.pubkey).fee_recipient;
+        }
+        return self.default_proposer_config.fee_recipient;
+    }
+
+    pub fn getGraffiti(self: *ValidatorStore, pubkey: [48]u8) [32]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.effectiveProposerConfigLocked(pubkey).graffiti;
+    }
+
+    pub fn getGasLimit(self: *ValidatorStore, pubkey: [48]u8) u64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.effectiveProposerConfigLocked(pubkey).gas_limit;
+    }
+
+    pub fn getBuilderBoostFactor(self: *ValidatorStore, pubkey: [48]u8) ?u64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.effectiveProposerConfigLocked(pubkey).builder_boost_factor;
+    }
+
+    pub fn strictFeeRecipientCheck(self: *ValidatorStore, pubkey: [48]u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.effectiveProposerConfigLocked(pubkey).strict_fee_recipient_check;
+    }
+
+    pub fn getProposerConfig(self: *ValidatorStore, pubkey: [48]u8) ?ProposerConfig {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.proposer_overrides.get(pubkey);
+    }
+
+    pub fn setProposerConfigOverride(
+        self: *ValidatorStore,
+        pubkey: [48]u8,
+        config: ?ProposerConfig,
+    ) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        try self.putProposerConfigLocked(pubkey, config orelse ProposerConfig{});
+    }
+
+    pub fn setFeeRecipient(self: *ValidatorStore, pubkey: [48]u8, fee_recipient: [20]u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var config = self.proposer_overrides.get(pubkey) orelse ProposerConfig{};
+        config.fee_recipient = fee_recipient;
+        try self.putProposerConfigLocked(pubkey, config);
+    }
+
+    pub fn deleteFeeRecipient(self: *ValidatorStore, pubkey: [48]u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var config = self.proposer_overrides.get(pubkey) orelse return;
+        config.fee_recipient = null;
+        try self.putProposerConfigLocked(pubkey, config);
+    }
+
+    pub fn setGraffiti(self: *ValidatorStore, pubkey: [48]u8, graffiti: [32]u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var config = self.proposer_overrides.get(pubkey) orelse ProposerConfig{};
+        config.graffiti = graffiti;
+        try self.putProposerConfigLocked(pubkey, config);
+    }
+
+    pub fn deleteGraffiti(self: *ValidatorStore, pubkey: [48]u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var config = self.proposer_overrides.get(pubkey) orelse return;
+        config.graffiti = null;
+        try self.putProposerConfigLocked(pubkey, config);
+    }
+
+    pub fn setGasLimit(self: *ValidatorStore, pubkey: [48]u8, gas_limit: u64) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var config = self.proposer_overrides.get(pubkey) orelse ProposerConfig{};
+        config.gas_limit = gas_limit;
+        try self.putProposerConfigLocked(pubkey, config);
+    }
+
+    pub fn deleteGasLimit(self: *ValidatorStore, pubkey: [48]u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var config = self.proposer_overrides.get(pubkey) orelse return;
+        config.gas_limit = null;
+        try self.putProposerConfigLocked(pubkey, config);
+    }
+
+    pub fn setBuilderBoostFactor(self: *ValidatorStore, pubkey: [48]u8, builder_boost_factor: u64) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var config = self.proposer_overrides.get(pubkey) orelse ProposerConfig{};
+        config.builder_boost_factor = builder_boost_factor;
+        try self.putProposerConfigLocked(pubkey, config);
+    }
+
+    pub fn deleteBuilderBoostFactor(self: *ValidatorStore, pubkey: [48]u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var config = self.proposer_overrides.get(pubkey) orelse return;
+        config.builder_boost_factor = null;
+        try self.putProposerConfigLocked(pubkey, config);
     }
 
     // -----------------------------------------------------------------------
@@ -183,7 +327,7 @@ pub const ValidatorStore = struct {
     ///
     /// TS: ValidatorStore init with `ExternalSignerSigner` entries — pubkey tracked but
     ///     signing goes through the external signer HTTP client.
-    pub fn addRemotePubkey(self: *ValidatorStore, pubkey: [48]u8) !void {
+    pub fn addRemotePubkey(self: *ValidatorStore, pubkey: [48]u8, signer: *RemoteSigner) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -194,7 +338,7 @@ pub const ValidatorStore = struct {
 
         try self.validators.append(.{
             .pubkey = pubkey,
-            .signer = .remote,
+            .signer = .{ .remote = signer },
             .index = null,
             .status = .unknown,
             .slashing = .{
@@ -216,6 +360,19 @@ pub const ValidatorStore = struct {
             if (std.mem.eql(u8, &v.pubkey, &pubkey)) return v.isRemote();
         }
         return false;
+    }
+
+    pub fn signerKind(self: *ValidatorStore, pubkey: [48]u8) ?SignerKind {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.validators.items) |v| {
+            if (!std.mem.eql(u8, &v.pubkey, &pubkey)) continue;
+            return switch (v.signer) {
+                .local => .local,
+                .remote => .remote,
+            };
+        }
+        return null;
     }
 
     /// Remove a validator key at runtime (thread-safe).
@@ -252,23 +409,99 @@ pub const ValidatorStore = struct {
         readonly: bool,
     };
 
-    /// List all validators with metadata (thread-safe).
+    /// List local validators with metadata (thread-safe).
     ///
     /// Returns a caller-owned slice. Caller must free.
     /// Used by the Keymanager API GET /eth/v1/keystores.
     ///
     /// TS: ValidatorStore.getLocalKeystoreInfo()
-    pub fn listValidators(self: *ValidatorStore, allocator: Allocator) ![]ValidatorInfo {
+    pub fn listLocalValidators(self: *ValidatorStore, allocator: Allocator) ![]ValidatorInfo {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const result = try allocator.alloc(ValidatorInfo, self.validators.items.len);
-        for (self.validators.items, result) |v, *out| {
+        var count: usize = 0;
+        for (self.validators.items) |v| {
+            if (!v.isRemote()) count += 1;
+        }
+
+        const result = try allocator.alloc(ValidatorInfo, count);
+        var out_idx: usize = 0;
+        for (self.validators.items) |v| {
+            if (v.isRemote()) continue;
+            const out = &result[out_idx];
             out.* = .{
                 .pubkey = v.pubkey,
                 .derivation_path = "",
-                .readonly = v.isRemote(),
+                .readonly = false,
             };
+            out_idx += 1;
+        }
+        return result;
+    }
+
+    pub const RemoteValidatorInfo = struct {
+        pubkey: [48]u8,
+        url: []const u8,
+        readonly: bool,
+    };
+
+    pub fn listRemoteValidators(self: *ValidatorStore, allocator: Allocator) ![]RemoteValidatorInfo {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var count: usize = 0;
+        for (self.validators.items) |v| {
+            if (v.isRemote()) count += 1;
+        }
+
+        const result = try allocator.alloc(RemoteValidatorInfo, count);
+        var out_idx: usize = 0;
+        for (self.validators.items) |v| {
+            const remote_signer = switch (v.signer) {
+                .remote => |signer| signer,
+                .local => continue,
+            };
+            result[out_idx] = .{
+                .pubkey = v.pubkey,
+                .url = remote_signer.base_url,
+                .readonly = false,
+            };
+            out_idx += 1;
+        }
+        return result;
+    }
+
+    /// Return all remote validator pubkeys for one signer as an owned slice.
+    pub fn allRemotePubkeysForSigner(
+        self: *const ValidatorStore,
+        allocator: Allocator,
+        signer: *const RemoteSigner,
+    ) ![][48]u8 {
+        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lock();
+        defer mutex_ptr.unlock();
+
+        var count: usize = 0;
+        for (self.validators.items) |v| {
+            switch (v.signer) {
+                .remote => |candidate| {
+                    if (candidate == signer) count += 1;
+                },
+                .local => {},
+            }
+        }
+
+        const result = try allocator.alloc([48]u8, count);
+        var out_idx: usize = 0;
+        for (self.validators.items) |v| {
+            switch (v.signer) {
+                .remote => |candidate| {
+                    if (candidate != signer) continue;
+                    result[out_idx] = v.pubkey;
+                    out_idx += 1;
+                },
+                .local => {},
+            }
         }
         return result;
     }
@@ -558,6 +791,55 @@ pub const ValidatorStore = struct {
     // Internal helpers
     // -----------------------------------------------------------------------
 
+    fn effectiveProposerConfigLocked(
+        self: *const ValidatorStore,
+        pubkey: [48]u8,
+    ) EffectiveProposerConfig {
+        const override = self.proposer_overrides.get(pubkey);
+        return .{
+            .fee_recipient = if (override) |config|
+                config.fee_recipient orelse self.default_proposer_config.fee_recipient
+            else
+                self.default_proposer_config.fee_recipient,
+            .graffiti = if (override) |config|
+                config.graffiti orelse self.default_proposer_config.graffiti
+            else
+                self.default_proposer_config.graffiti,
+            .gas_limit = if (override) |config|
+                config.gas_limit orelse self.default_proposer_config.gas_limit
+            else
+                self.default_proposer_config.gas_limit,
+            .builder_boost_factor = if (override) |config|
+                config.builder_boost_factor orelse self.default_proposer_config.builder_boost_factor
+            else
+                self.default_proposer_config.builder_boost_factor,
+            .strict_fee_recipient_check = if (override) |config|
+                config.strict_fee_recipient_check orelse self.default_proposer_config.strict_fee_recipient_check
+            else
+                self.default_proposer_config.strict_fee_recipient_check,
+        };
+    }
+
+    fn putProposerConfigLocked(
+        self: *ValidatorStore,
+        pubkey: [48]u8,
+        config: ProposerConfig,
+    ) !void {
+        if (configIsEmpty(config)) {
+            _ = self.proposer_overrides.remove(pubkey);
+            return;
+        }
+        try self.proposer_overrides.put(self.allocator, pubkey, config);
+    }
+
+    fn configIsEmpty(config: ProposerConfig) bool {
+        return config.fee_recipient == null and
+            config.graffiti == null and
+            config.gas_limit == null and
+            config.builder_boost_factor == null and
+            config.strict_fee_recipient_check == null;
+    }
+
     fn findValidator(self: *ValidatorStore, pubkey: [48]u8) ?*ValidatorRecord {
         for (self.validators.items) |*v| {
             if (std.mem.eql(u8, &v.pubkey, &pubkey)) return v;
@@ -581,12 +863,15 @@ pub const ValidatorStore = struct {
         signing_root: [32]u8,
         signing_type: SigningType,
     ) !Signature {
+        _ = self;
         return switch (validator.signer) {
             .local => |secret_key| secret_key.sign(&signing_root, bls.DST, null),
-            .remote => blk: {
-                const rs = self.remote_signer orelse return error.RemoteSignerRequired;
-                break :blk rs.sign(io, pubkey, signing_root, signing_type) catch |err| {
-                    log.warn("remote signer {s} error={s}", .{ signing_type.asStr(), @errorName(err) });
+            .remote => |remote_signer| blk: {
+                break :blk remote_signer.sign(io, pubkey, signing_root, signing_type) catch |err| {
+                    log.warn(
+                        "remote signer url={s} type={s} error={s}",
+                        .{ remote_signer.base_url, signing_type.asStr(), @errorName(err) },
+                    );
                     return err;
                 };
             },
@@ -607,8 +892,18 @@ fn makeDummyKey() SecretKey {
     return SecretKey.deserialize(&scalar) catch unreachable;
 }
 
+fn initTestStore() !ValidatorStore {
+    return ValidatorStore.init(testing.io, testing.allocator, null, .{
+        .fee_recipient = [_]u8{0} ** 20,
+        .graffiti = [_]u8{0} ** 32,
+        .gas_limit = 60_000_000,
+        .builder_boost_factor = 100,
+        .strict_fee_recipient_check = false,
+    }, &.{});
+}
+
 test "ValidatorStore: addKey and allIndices" {
-    var store = try ValidatorStore.init(testing.io, testing.allocator, null);
+    var store = try initTestStore();
     defer store.deinit();
 
     const sk = makeDummyKey();
@@ -631,7 +926,7 @@ test "ValidatorStore: addKey and allIndices" {
 }
 
 test "ValidatorStore: slashing protection — block double proposal" {
-    var store = try ValidatorStore.init(testing.io, testing.allocator, null);
+    var store = try initTestStore();
     defer store.deinit();
 
     const sk = makeDummyKey();
@@ -654,7 +949,7 @@ test "ValidatorStore: slashing protection — block double proposal" {
 }
 
 test "ValidatorStore: slashing protection — attestation double vote" {
-    var store = try ValidatorStore.init(testing.io, testing.allocator, null);
+    var store = try initTestStore();
     defer store.deinit();
 
     const sk = makeDummyKey();
@@ -680,7 +975,7 @@ test "ValidatorStore: slashing protection — attestation double vote" {
 }
 
 test "ValidatorStore: allPubkeys" {
-    var store = try ValidatorStore.init(testing.io, testing.allocator, null);
+    var store = try initTestStore();
     defer store.deinit();
 
     const sk = makeDummyKey();
@@ -692,14 +987,14 @@ test "ValidatorStore: allPubkeys" {
     try testing.expectEqualSlices(u8, &sk.toPublicKey().compress(), &pks[0]);
 }
 
-test "ValidatorStore: addValidator, listValidators, removeValidator" {
-    var store = try ValidatorStore.init(testing.io, testing.allocator, null);
+test "ValidatorStore: addValidator, listLocalValidators, removeValidator" {
+    var store = try initTestStore();
     defer store.deinit();
 
     const sk = makeDummyKey();
     try store.addValidator(sk);
 
-    const infos = try store.listValidators(testing.allocator);
+    const infos = try store.listLocalValidators(testing.allocator);
     defer testing.allocator.free(infos);
 
     try testing.expectEqual(@as(usize, 1), infos.len);
@@ -710,10 +1005,93 @@ test "ValidatorStore: addValidator, listValidators, removeValidator" {
     const removed = store.removeValidator(sk.toPublicKey().compress());
     try testing.expect(removed);
 
-    const infos2 = try store.listValidators(testing.allocator);
+    const infos2 = try store.listLocalValidators(testing.allocator);
     defer testing.allocator.free(infos2);
     try testing.expectEqual(@as(usize, 0), infos2.len);
 
     // Remove again — not found.
     try testing.expect(!store.removeValidator(sk.toPublicKey().compress()));
+}
+
+test "ValidatorStore: allRemotePubkeysForSigner groups remote validators by signer pointer" {
+    var store = try initTestStore();
+    defer store.deinit();
+
+    var signer0 = RemoteSigner.init(testing.allocator, "http://127.0.0.1:9000");
+    var signer1 = RemoteSigner.init(testing.allocator, "http://127.0.0.1:9001");
+
+    var pk0: [48]u8 = [_]u8{0} ** 48;
+    var pk1: [48]u8 = [_]u8{1} ** 48;
+    var pk2: [48]u8 = [_]u8{2} ** 48;
+
+    try store.addRemotePubkey(pk0, &signer0);
+    try store.addRemotePubkey(pk1, &signer1);
+    try store.addRemotePubkey(pk2, &signer0);
+
+    const signer0_pubkeys = try store.allRemotePubkeysForSigner(testing.allocator, &signer0);
+    defer testing.allocator.free(signer0_pubkeys);
+    try testing.expectEqual(@as(usize, 2), signer0_pubkeys.len);
+    try testing.expectEqualSlices(u8, &pk0, &signer0_pubkeys[0]);
+    try testing.expectEqualSlices(u8, &pk2, &signer0_pubkeys[1]);
+
+    const signer1_pubkeys = try store.allRemotePubkeysForSigner(testing.allocator, &signer1);
+    defer testing.allocator.free(signer1_pubkeys);
+    try testing.expectEqual(@as(usize, 1), signer1_pubkeys.len);
+    try testing.expectEqualSlices(u8, &pk1, &signer1_pubkeys[0]);
+}
+
+test "ValidatorStore: proposer config overrides apply after validator is added" {
+    const sk = makeDummyKey();
+    const pubkey = sk.toPublicKey().compress();
+
+    var default_graffiti: [32]u8 = [_]u8{0} ** 32;
+    @memcpy(default_graffiti[0..7], "default");
+
+    const override_fee_recipient: [20]u8 = [_]u8{0x22} ** 20;
+    const override_graffiti = textToGraffiti("override");
+    const default_fee_recipient: [20]u8 = [_]u8{0x11} ** 20;
+
+    var store = try ValidatorStore.init(testing.io, testing.allocator, null, .{
+        .fee_recipient = default_fee_recipient,
+        .graffiti = default_graffiti,
+        .gas_limit = 60_000_000,
+        .builder_boost_factor = 100,
+        .strict_fee_recipient_check = false,
+    }, &.{
+        .{
+            .pubkey = pubkey,
+            .config = .{
+                .fee_recipient = override_fee_recipient,
+                .graffiti = override_graffiti,
+                .gas_limit = 70_000_000,
+                .builder_boost_factor = 200,
+            },
+        },
+    });
+    defer store.deinit();
+
+    try store.addKey(sk);
+
+    try testing.expectEqualSlices(u8, &override_fee_recipient, &store.getFeeRecipient(pubkey));
+    try testing.expectEqualSlices(u8, &override_graffiti, &store.getGraffiti(pubkey));
+    try testing.expectEqual(@as(u64, 70_000_000), store.getGasLimit(pubkey));
+    try testing.expectEqual(@as(?u64, 200), store.getBuilderBoostFactor(pubkey));
+
+    try store.deleteFeeRecipient(pubkey);
+    try store.deleteGraffiti(pubkey);
+    try store.deleteGasLimit(pubkey);
+    try store.deleteBuilderBoostFactor(pubkey);
+
+    try testing.expectEqualSlices(u8, &default_fee_recipient, &store.getFeeRecipient(pubkey));
+    try testing.expectEqualSlices(u8, &default_graffiti, &store.getGraffiti(pubkey));
+    try testing.expectEqual(@as(u64, 60_000_000), store.getGasLimit(pubkey));
+    try testing.expectEqual(@as(?u64, 100), store.getBuilderBoostFactor(pubkey));
+    try testing.expect(store.getProposerConfig(pubkey) == null);
+}
+
+fn textToGraffiti(text: []const u8) [32]u8 {
+    var graffiti: [32]u8 = [_]u8{0} ** 32;
+    const copy_len = @min(text.len, graffiti.len);
+    @memcpy(graffiti[0..copy_len], text[0..copy_len]);
+    return graffiti;
 }

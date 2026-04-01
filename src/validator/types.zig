@@ -109,12 +109,38 @@ pub const SlashingProtectionRecord = struct {
     last_signed_attestation_target_epoch: ?u64,
 };
 
+pub const ProposerConfig = struct {
+    fee_recipient: ?[20]u8 = null,
+    graffiti: ?[32]u8 = null,
+    gas_limit: ?u64 = null,
+    builder_boost_factor: ?u64 = null,
+    strict_fee_recipient_check: ?bool = null,
+};
+
+pub const ProposerConfigEntry = struct {
+    pubkey: [48]u8,
+    config: ProposerConfig,
+};
+
+pub const EffectiveProposerConfig = struct {
+    fee_recipient: [20]u8,
+    graffiti: [32]u8,
+    gas_limit: u64,
+    builder_boost_factor: ?u64,
+    strict_fee_recipient_check: bool,
+};
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
 /// Configuration for the validator client.
 pub const ValidatorConfig = struct {
+    /// Concrete validator persistence directories prepared by the launcher.
+    ///
+    /// The validator runtime uses these resolved paths for runtime keymanager
+    /// mutations. Path policy and defaults stay in the CLI/bootstrap layer.
+    persistence: ?PersistencePaths = null,
     /// HTTP URL of the beacon node REST API (e.g. "http://localhost:5052").
     beacon_node_url: []const u8,
     /// Genesis time (Unix seconds) — needed to compute current slot.
@@ -138,9 +164,23 @@ pub const ValidatorConfig = struct {
     doppelganger_protection: bool = true,
     /// Path to slashing protection DB file (null = in-memory only).
     slashing_protection_path: ?[]const u8 = null,
-    /// URL of Web3Signer remote signing service (null = disabled).
-    /// When set, public keys are fetched from the signer at startup.
-    web3signer_url: ?[]const u8 = null,
+    /// URLs of configured Web3Signer remote signing services.
+    ///
+    /// These are the static endpoints the validator can sign against, regardless
+    /// of whether the remote validator set was loaded from disk, pinned by CLI,
+    /// or fetched dynamically.
+    external_signer_urls: []const []const u8 = &.{},
+    /// Whether the remote signer set should be refreshed dynamically.
+    ///
+    /// This is enabled only for `--externalSigner.fetch`. Persisted `remoteKeys/`
+    /// definitions and explicit `--externalSigner.pubkeys` are static startup
+    /// configuration and do not enable background refresh.
+    external_signer_fetch_enabled: bool = false,
+    /// Refresh interval for dynamic external signer key discovery in milliseconds.
+    ///
+    /// Null uses the Lodestar default: once per epoch. Ignored unless
+    /// `external_signer_fetch_enabled` is true.
+    external_signer_fetch_interval_ms: ?u64 = null,
     /// Additional beacon node URLs for fallback (beyond beacon_node_url).
     ///
     /// When set, api_client will try these URLs if the primary fails.
@@ -159,12 +199,15 @@ pub const ValidatorConfig = struct {
     /// When set, the VC will register validators and use blinded blocks.
     /// Example: "http://localhost:18550"
     builder_url: ?[]const u8 = null,
+    /// Per-validator proposer config overrides loaded from persisted
+    /// keymanager state at startup.
+    proposer_configs: []const ProposerConfigEntry = &.{},
     /// Suggested fee recipient address (20 bytes, hex).
     /// Used when building SignedValidatorRegistration messages.
     /// Defaults to zero address — operator must override.
     suggested_fee_recipient: [20]u8 = [_]u8{0} ** 20,
-    /// Default gas limit for builder registrations (default: 30_000_000).
-    gas_limit: u64 = 30_000_000,
+    /// Default gas limit for builder registrations (default: 60_000_000).
+    gas_limit: u64 = 60_000_000,
     /// Graffiti bytes (32 bytes) included in proposed blocks.
     /// Defaults to all-zeros. Operators can set a custom string (UTF-8, right-padded).
     graffiti: [32]u8 = std.mem.zeroes([32]u8),
@@ -172,4 +215,14 @@ pub const ValidatorConfig = struct {
     /// 100 = neutral (builder wins if bid >= local). 200 = builder needs 2x.
     /// Per-spec default is 100. Set null to disable builder path.
     builder_boost_factor: ?u64 = 100,
+    /// Whether the validator must enforce that the block returned by the beacon
+    /// node uses the configured fee recipient.
+    strict_fee_recipient_check: bool = false,
+};
+
+pub const PersistencePaths = struct {
+    keystores_dir: []const u8,
+    secrets_dir: []const u8,
+    remote_keys_dir: []const u8,
+    proposer_dir: []const u8,
 };
