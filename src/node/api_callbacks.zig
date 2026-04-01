@@ -26,6 +26,7 @@ const ApiHeadTracker = api_mod.context.HeadTracker;
 const ApiSyncStatus = api_mod.context.SyncStatus;
 const ValidatorMonitor = chain_mod.ValidatorMonitor;
 const block_production_mod = @import("block_production.zig");
+const execution_mod = @import("execution");
 
 pub const ApiBindings = struct {
     block_import_ctx: *BlockImportCallbackCtx,
@@ -708,7 +709,8 @@ fn produceBlockCallback(
     var prod_config = chain_mod.BlockProductionConfig{};
     if (params.graffiti) |graffiti| prod_config.graffiti = graffiti;
     if (params.fee_recipient) |fee_recipient| prod_config.fee_recipient = fee_recipient;
-    prod_config.builder_boost_factor = switch (params.builder_selection orelse .executiononly) {
+    const selection = params.builder_selection orelse .executiononly;
+    prod_config.builder_boost_factor = switch (selection) {
         .executionalways, .executiononly => 0,
         .@"default" => 90,
         .maxprofit => params.builder_boost_factor,
@@ -716,35 +718,123 @@ fn produceBlockCallback(
     };
     prod_config.randao_reveal = params.randao_reveal;
 
-    if (node.builder_api != null) {
-        const selection = params.builder_selection orelse .executiononly;
-        if (selection.usesBuilder()) return error.UnsupportedBuilderSelection;
+    switch (selection) {
+        .executiononly, .executionalways => {
+            var produced = try node.produceFullBlock(params.slot, prod_config);
+            defer produced.deinit(allocator);
+
+            if (params.strict_fee_recipient_check) {
+                const expected_fee_recipient = params.fee_recipient orelse node.chainQuery().proposerFeeRecipientForSlot(
+                    params.slot,
+                    node.node_options.suggested_fee_recipient,
+                ) orelse return error.MissingProposerFeeRecipient;
+                try block_production_mod.ensureProducedFeeRecipient(&produced, expected_fee_recipient, true);
+            }
+
+            const serialized = try block_production_mod.serializeUnsignedBlock(
+                node,
+                allocator,
+                params.slot,
+                &produced,
+                if (params.blinded_local) .blinded else .full,
+            );
+            return .{
+                .ssz_bytes = serialized.ssz_bytes,
+                .fork = serialized.fork_name,
+                .blinded = serialized.block_type == .blinded,
+                .execution_payload_source = .engine,
+            };
+        },
+        .@"default", .maxprofit => {
+            if (try block_production_mod.produceBuilderBlindedBlock(
+                node,
+                params.slot,
+                prod_config,
+                block_production_mod.builderBidThresholdForConfig(node, prod_config),
+                false,
+            )) |produced_blinded_value| {
+                var produced_blinded = produced_blinded_value;
+                defer produced_blinded.deinit(allocator);
+
+                if (params.strict_fee_recipient_check) {
+                    const expected_fee_recipient = params.fee_recipient orelse node.chainQuery().proposerFeeRecipientForSlot(
+                        params.slot,
+                        node.node_options.suggested_fee_recipient,
+                    ) orelse return error.MissingProposerFeeRecipient;
+                    try block_production_mod.ensureProducedBlindedFeeRecipient(&produced_blinded, expected_fee_recipient, true);
+                }
+
+                const serialized = try block_production_mod.serializeUnsignedProducedBlindedBlock(
+                    node,
+                    allocator,
+                    params.slot,
+                    &produced_blinded,
+                );
+                return .{
+                    .ssz_bytes = serialized.ssz_bytes,
+                    .fork = serialized.fork_name,
+                    .blinded = true,
+                    .execution_payload_source = .builder,
+                };
+            }
+
+            var produced = try node.produceFullBlock(params.slot, prod_config);
+            defer produced.deinit(allocator);
+
+            if (params.strict_fee_recipient_check) {
+                const expected_fee_recipient = params.fee_recipient orelse node.chainQuery().proposerFeeRecipientForSlot(
+                    params.slot,
+                    node.node_options.suggested_fee_recipient,
+                ) orelse return error.MissingProposerFeeRecipient;
+                try block_production_mod.ensureProducedFeeRecipient(&produced, expected_fee_recipient, true);
+            }
+
+            const serialized = try block_production_mod.serializeUnsignedBlock(
+                node,
+                allocator,
+                params.slot,
+                &produced,
+                if (params.blinded_local) .blinded else .full,
+            );
+            return .{
+                .ssz_bytes = serialized.ssz_bytes,
+                .fork = serialized.fork_name,
+                .blinded = serialized.block_type == .blinded,
+                .execution_payload_source = .engine,
+            };
+        },
+        .builderalways, .builderonly => {
+            var produced = (try block_production_mod.produceBuilderBlindedBlock(
+                node,
+                params.slot,
+                prod_config,
+                null,
+                true,
+            )) orelse return error.BuilderBidUnavailable;
+            defer produced.deinit(allocator);
+
+            if (params.strict_fee_recipient_check) {
+                const expected_fee_recipient = params.fee_recipient orelse node.chainQuery().proposerFeeRecipientForSlot(
+                    params.slot,
+                    node.node_options.suggested_fee_recipient,
+                ) orelse return error.MissingProposerFeeRecipient;
+                try block_production_mod.ensureProducedBlindedFeeRecipient(&produced, expected_fee_recipient, true);
+            }
+
+            const serialized = try block_production_mod.serializeUnsignedProducedBlindedBlock(
+                node,
+                allocator,
+                params.slot,
+                &produced,
+            );
+            return .{
+                .ssz_bytes = serialized.ssz_bytes,
+                .fork = serialized.fork_name,
+                .blinded = true,
+                .execution_payload_source = .builder,
+            };
+        },
     }
-
-    var produced = try node.produceFullBlock(params.slot, prod_config);
-    defer produced.deinit(allocator);
-
-    if (params.strict_fee_recipient_check) {
-        const expected_fee_recipient = params.fee_recipient orelse node.chainQuery().proposerFeeRecipientForSlot(
-            params.slot,
-            node.node_options.suggested_fee_recipient,
-        ) orelse return error.MissingProposerFeeRecipient;
-        try block_production_mod.ensureProducedFeeRecipient(&produced, expected_fee_recipient, true);
-    }
-
-    const serialized = try block_production_mod.serializeUnsignedBlock(
-        node,
-        allocator,
-        params.slot,
-        &produced,
-        if (params.blinded_local) .blinded else .full,
-    );
-    return .{
-        .ssz_bytes = serialized.ssz_bytes,
-        .fork = serialized.fork_name,
-        .blinded = serialized.block_type == .blinded,
-        .execution_payload_source = .engine,
-    };
 }
 
 fn getAttestationDataCallback(
@@ -844,13 +934,33 @@ fn submitContributionAndProofCallback(ptr: *anyopaque, json_bytes: []const u8) a
     } });
 }
 
-fn builderRegisterValidatorsCallback(ptr: *anyopaque, registrations_json: []const u8) anyerror!void {
+fn builderRegisterValidatorsCallback(
+    ptr: *anyopaque,
+    registrations: []const api_mod.types.SignedValidatorRegistrationV1,
+) anyerror!void {
     const ctx: *BuilderCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
-    const builder = node.builder_api orelse return;
-    _ = builder;
-    _ = registrations_json;
-    std.log.info("builder: received validator registration request (forwarding not yet implemented, VC uses direct relay path)", .{});
+    _ = node.builder_api orelse return;
+
+    const relay_registrations = try node.allocator.alloc(
+        execution_mod.builder.SignedValidatorRegistration,
+        registrations.len,
+    );
+    defer node.allocator.free(relay_registrations);
+
+    for (registrations, 0..) |registration, i| {
+        relay_registrations[i] = .{
+            .message = .{
+                .fee_recipient = registration.message.fee_recipient,
+                .gas_limit = registration.message.gas_limit,
+                .timestamp = registration.message.timestamp,
+                .pubkey = registration.message.pubkey,
+            },
+            .signature = registration.signature,
+        };
+    }
+
+    node.registerValidatorsWithBuilder(relay_registrations);
 }
 
 fn opPoolGetCountsCallback(ptr: *anyopaque) [5]usize {

@@ -152,7 +152,10 @@ pub const MockEngine = struct {
         .getPayloadV2 = &getPayloadV2Impl,
         .getPayloadV3 = &getPayloadV3Impl,
         .getPayloadV4 = &getPayloadV4Impl,
+        .freeGetPayloadResponse = &freeGetPayloadResponseImpl,
     };
+
+    fn freeGetPayloadResponseImpl(_: *anyopaque, _: GetPayloadResponse) void {}
 
     // ── newPayload implementations ────────────────────────────────────────────
 

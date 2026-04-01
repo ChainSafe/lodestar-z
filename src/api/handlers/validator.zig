@@ -740,51 +740,50 @@ pub fn registerValidator(
     registrations: []const types.SignedValidatorRegistrationV1,
 ) !HandlerResult(void) {
     if (ctx.builder) |*builder_cb| {
-        // Serialize registrations to JSON and forward to the relay.
-        const json = serializeRegistrationsToJson(ctx.allocator, registrations) catch |err| {
-            std.log.warn("registerValidator: failed to serialize registrations: {s}", .{@errorName(err)});
-            return .{ .data = {} };
-        };
-        defer ctx.allocator.free(json);
-        builder_cb.registerValidators(json) catch |err| {
+        builder_cb.registerValidators(registrations) catch |err| {
             std.log.warn("registerValidator: builder relay error: {s}", .{@errorName(err)});
         };
     }
     return .{ .data = {} };
 }
 
-fn serializeRegistrationsToJson(
-    allocator: std.mem.Allocator,
-    registrations: []const types.SignedValidatorRegistrationV1,
-) ![]const u8 {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    errdefer buf.deinit(allocator);
-    try buf.append(allocator, '[');
-    for (registrations, 0..) |r, i| {
-        if (i > 0) try buf.append(allocator, ',');
-        const fee_hex = std.fmt.bytesToHex(&r.message.fee_recipient, .lower);
-        const pk_hex = std.fmt.bytesToHex(&r.message.pubkey, .lower);
-        const sig_hex = std.fmt.bytesToHex(&r.signature, .lower);
-        const entry = try std.fmt.allocPrint(
-            allocator,
-            "{{\"{s}\":{{\"{s}\":\"0x{s}\",\"{s}\":\"{d}\",\"{s}\":\"{d}\",\"{s}\":\"0x{s}\"}},\"{s}\":\"0x{s}\"}}",
-            .{
-                "message",
-                "fee_recipient",
-                fee_hex,
-                "gas_limit",
-                r.message.gas_limit,
-                "timestamp",
-                r.message.timestamp,
-                "pubkey",
-                pk_hex,
-                "signature",
-                sig_hex,
+test "registerValidator forwards typed registrations to builder callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const Mock = struct {
+        var called = false;
+
+        fn register(
+            _: *anyopaque,
+            registrations: []const types.SignedValidatorRegistrationV1,
+        ) anyerror!void {
+            called = true;
+            try std.testing.expectEqual(@as(usize, 1), registrations.len);
+            try std.testing.expectEqual([_]u8{0x11} ** 20, registrations[0].message.fee_recipient);
+            try std.testing.expectEqual(@as(u64, 30_000_000), registrations[0].message.gas_limit);
+            try std.testing.expectEqual([_]u8{0x22} ** 48, registrations[0].message.pubkey);
+            try std.testing.expectEqual([_]u8{0x33} ** 96, registrations[0].signature);
+        }
+    };
+
+    var dummy: u8 = 0;
+    tc.ctx.builder = .{
+        .ptr = &dummy,
+        .registerValidatorsFn = &Mock.register,
+    };
+
+    _ = try registerValidator(&tc.ctx, &.{
+        .{
+            .message = .{
+                .fee_recipient = [_]u8{0x11} ** 20,
+                .gas_limit = 30_000_000,
+                .timestamp = 1234,
+                .pubkey = [_]u8{0x22} ** 48,
             },
-        );
-        defer allocator.free(entry);
-        try buf.appendSlice(allocator, entry);
-    }
-    try buf.append(allocator, ']');
-    return buf.toOwnedSlice(allocator);
+            .signature = [_]u8{0x33} ** 96,
+        },
+    });
+
+    try std.testing.expect(Mock.called);
 }

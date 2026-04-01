@@ -48,10 +48,16 @@ Current gaps:
    request overrides, request-level `builder_boost_factor`,
    `builder.selection`, validator-provided `randao_reveal`, `blindedLocal`,
    and `broadcastValidation` for local block production/publish.
-   The remaining builder gap is explicit: when the local beacon node has a
-   builder relay configured, it still cannot produce builder-sourced blinded
-   proposals yet, so builder-aware selections fail fast instead of silently
-   degrading to an engine block. Engine-only selections work today.
+   The local beacon node can now also produce builder-sourced blinded
+   proposals for builder-aware selections instead of silently degrading them
+   to an engine block. The remaining production gap in that area is narrower:
+   the local BN still evaluates the engine payload and builder bid
+   sequentially, not with Lodestar TS's parallel race/cutoff policy, so the
+   builder-vs-engine choice is correct but not yet as latency-hardened.
+   On the beacon CLI side, `--builder`, `--builder.url`, and the default
+   builder boost now wire through to a real local builder client, but the
+   builder timeout and circuit-breaker tuning flags still fail fast because
+   that builder-health control path is not implemented yet.
    `broadcastValidation=consensus_and_equivocation` currently aliases
    `consensus` with a warning because explicit equivocation checks are still
    missing on the local beacon-node path.

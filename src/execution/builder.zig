@@ -75,6 +75,10 @@ pub const BuilderBid = struct {
     header: ExecutionPayloadHeader,
     /// Blob KZG commitments (Deneb+).
     blob_kzg_commitments: []const [48]u8,
+    /// Electra execution requests returned with the bid, when present.
+    deposit_requests: []const types.DepositRequest = &.{},
+    withdrawal_requests: []const types.WithdrawalRequest = &.{},
+    consolidation_requests: []const types.ConsolidationRequest = &.{},
     /// MEV reward value in wei.
     value: u256,
     /// Builder BLS public key.
@@ -604,15 +608,144 @@ fn parseSignedBuilderBid(allocator: Allocator, json_bytes: []const u8) !SignedBu
     // If commitments was heap-allocated (len > 0), free it on any subsequent error.
     errdefer if (blob_kzg_commitments.len > 0) allocator.free(blob_kzg_commitments);
 
+    const parsed_requests = try parseExecutionRequests(allocator, message_obj);
+    errdefer parsed_requests.deinit(allocator);
+
     return SignedBuilderBid{
         .message = BuilderBid{
             .header = header,
             .blob_kzg_commitments = blob_kzg_commitments,
+            .deposit_requests = parsed_requests.deposit_requests,
+            .withdrawal_requests = parsed_requests.withdrawal_requests,
+            .consolidation_requests = parsed_requests.consolidation_requests,
             .value = value,
             .pubkey = pubkey,
         },
         .signature = signature,
     };
+}
+
+const ParsedExecutionRequests = struct {
+    deposit_requests: []const types.DepositRequest = &.{},
+    withdrawal_requests: []const types.WithdrawalRequest = &.{},
+    consolidation_requests: []const types.ConsolidationRequest = &.{},
+
+    fn deinit(self: ParsedExecutionRequests, allocator: Allocator) void {
+        if (self.deposit_requests.len > 0) allocator.free(self.deposit_requests);
+        if (self.withdrawal_requests.len > 0) allocator.free(self.withdrawal_requests);
+        if (self.consolidation_requests.len > 0) allocator.free(self.consolidation_requests);
+    }
+};
+
+fn getObjectField(object: std.json.ObjectMap, comptime names: []const []const u8) ?std.json.Value {
+    inline for (names) |name| {
+        if (object.get(name)) |value| return value;
+    }
+    return null;
+}
+
+fn parseExecutionRequests(
+    allocator: Allocator,
+    message_obj: std.json.ObjectMap,
+) !ParsedExecutionRequests {
+    const requests_val = getObjectField(message_obj, &.{ "execution_requests", "executionRequests" }) orelse return .{};
+    if (requests_val != .object) return error.InvalidExecutionRequestsType;
+
+    const requests = requests_val.object;
+    return .{
+        .deposit_requests = try parseDepositRequests(
+            allocator,
+            getObjectField(requests, &.{ "deposits", "deposit_requests", "depositRequests" }),
+        ),
+        .withdrawal_requests = try parseWithdrawalRequests(
+            allocator,
+            getObjectField(requests, &.{ "withdrawals", "withdrawal_requests", "withdrawalRequests" }),
+        ),
+        .consolidation_requests = try parseConsolidationRequests(
+            allocator,
+            getObjectField(requests, &.{ "consolidations", "consolidation_requests", "consolidationRequests" }),
+        ),
+    };
+}
+
+fn parseDepositRequests(
+    allocator: Allocator,
+    maybe_value: ?std.json.Value,
+) ![]const types.DepositRequest {
+    const value = maybe_value orelse return &.{};
+    if (value != .array) return error.InvalidExecutionRequestsType;
+
+    const items = value.array.items;
+    if (items.len == 0) return &.{};
+
+    const out = try allocator.alloc(types.DepositRequest, items.len);
+    errdefer allocator.free(out);
+
+    for (items, 0..) |item, i| {
+        if (item != .object) return error.InvalidExecutionRequestsType;
+        const obj = item.object;
+        out[i] = .{
+            .pubkey = try parseHex48((getObjectField(obj, &.{ "pubkey" }) orelse return error.MissingField).string),
+            .withdrawal_credentials = try parseHex32((getObjectField(obj, &.{ "withdrawal_credentials", "withdrawalCredentials" }) orelse return error.MissingField).string),
+            .amount = try parseQuantityU64((getObjectField(obj, &.{ "amount" }) orelse return error.MissingField).string),
+            .signature = try parseHex96((getObjectField(obj, &.{ "signature" }) orelse return error.MissingField).string),
+            .index = try parseQuantityU64((getObjectField(obj, &.{ "index" }) orelse return error.MissingField).string),
+        };
+    }
+
+    return out;
+}
+
+fn parseWithdrawalRequests(
+    allocator: Allocator,
+    maybe_value: ?std.json.Value,
+) ![]const types.WithdrawalRequest {
+    const value = maybe_value orelse return &.{};
+    if (value != .array) return error.InvalidExecutionRequestsType;
+
+    const items = value.array.items;
+    if (items.len == 0) return &.{};
+
+    const out = try allocator.alloc(types.WithdrawalRequest, items.len);
+    errdefer allocator.free(out);
+
+    for (items, 0..) |item, i| {
+        if (item != .object) return error.InvalidExecutionRequestsType;
+        const obj = item.object;
+        out[i] = .{
+            .source_address = try parseHex20((getObjectField(obj, &.{ "source_address", "sourceAddress" }) orelse return error.MissingField).string),
+            .validator_pubkey = try parseHex48((getObjectField(obj, &.{ "validator_pubkey", "validatorPubkey" }) orelse return error.MissingField).string),
+            .amount = try parseQuantityU64((getObjectField(obj, &.{ "amount" }) orelse return error.MissingField).string),
+        };
+    }
+
+    return out;
+}
+
+fn parseConsolidationRequests(
+    allocator: Allocator,
+    maybe_value: ?std.json.Value,
+) ![]const types.ConsolidationRequest {
+    const value = maybe_value orelse return &.{};
+    if (value != .array) return error.InvalidExecutionRequestsType;
+
+    const items = value.array.items;
+    if (items.len == 0) return &.{};
+
+    const out = try allocator.alloc(types.ConsolidationRequest, items.len);
+    errdefer allocator.free(out);
+
+    for (items, 0..) |item, i| {
+        if (item != .object) return error.InvalidExecutionRequestsType;
+        const obj = item.object;
+        out[i] = .{
+            .source_address = try parseHex20((getObjectField(obj, &.{ "source_address", "sourceAddress" }) orelse return error.MissingField).string),
+            .source_pubkey = try parseHex48((getObjectField(obj, &.{ "source_pubkey", "sourcePubkey" }) orelse return error.MissingField).string),
+            .target_pubkey = try parseHex48((getObjectField(obj, &.{ "target_pubkey", "targetPubkey" }) orelse return error.MissingField).string),
+        };
+    }
+
+    return out;
 }
 
 /// Parse an ExecutionPayload from submitBlindedBlock response.
@@ -690,6 +823,9 @@ fn parseExecutionPayload(allocator: Allocator, json_bytes: []const u8) !types.Ex
 pub fn freeBid(allocator: Allocator, bid: SignedBuilderBid) void {
     if (bid.message.header.extra_data.len > 0) allocator.free(bid.message.header.extra_data);
     if (bid.message.blob_kzg_commitments.len > 0) allocator.free(bid.message.blob_kzg_commitments);
+    if (bid.message.deposit_requests.len > 0) allocator.free(bid.message.deposit_requests);
+    if (bid.message.withdrawal_requests.len > 0) allocator.free(bid.message.withdrawal_requests);
+    if (bid.message.consolidation_requests.len > 0) allocator.free(bid.message.consolidation_requests);
 }
 
 /// Free the heap-allocated fields of an ExecutionPayloadV3 produced by parseExecutionPayload.

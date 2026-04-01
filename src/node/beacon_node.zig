@@ -82,7 +82,7 @@ const IoHttpTransport = execution_mod.IoHttpTransport;
 const PayloadAttributesV3 = execution_mod.engine_api_types.PayloadAttributesV3;
 const GetPayloadResponse = execution_mod.GetPayloadResponse;
 const BuilderApi = execution_mod.BuilderApi;
-const BuilderStatus = execution_mod.BuilderStatus;
+const HttpBuilder = execution_mod.HttpBuilder;
 const constants = @import("constants");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const metrics_mod = @import("metrics.zig");
@@ -244,6 +244,8 @@ pub const BeaconNode = struct {
     http_engine: ?*HttpEngine = null,
     io_transport: ?*IoHttpTransport = null,
     engine_api: ?EngineApi = null,
+    http_builder: ?*HttpBuilder = null,
+    builder_transport: ?*IoHttpTransport = null,
 
     /// Cached payload ID from the last forkchoiceUpdated call with payload attributes.
     /// Used by produceBlockWithPayload to retrieve the built execution payload via getPayload.
@@ -254,11 +256,6 @@ pub const BeaconNode = struct {
     /// When configured, block production attempts to use the builder for higher rewards.
     /// Falls back to local execution engine if builder is unavailable or bid too low.
     builder_api: ?BuilderApi = null,
-
-    /// Minimum builder bid value threshold relative to local payload value (0.0 to 1.0).
-    /// Builder bid must exceed local_value * threshold to use the blinded path.
-    /// Default: 0.0 (any positive bid is acceptable).
-    builder_bid_threshold: f64 = 0.0,
 
     /// Track whether the EL is offline (unreachable). Reset on successful Engine API call.
     el_offline: bool = false,

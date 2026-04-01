@@ -135,6 +135,7 @@ pub fn fromZigError(err: anyerror) ApiError {
         error.ServiceUnavailable,
         error.NodeNotReady,
         error.BuilderNotConfigured,
+        error.BuilderBidUnavailable,
         => .{ .code = .service_unavailable, .message = "Service unavailable" },
 
         // 500 Internal Server Error (default)

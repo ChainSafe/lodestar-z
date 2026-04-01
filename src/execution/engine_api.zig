@@ -114,6 +114,12 @@ pub const EngineApi = struct {
             ptr: *anyopaque,
             payload_id: [8]u8,
         ) anyerror!GetPayloadResponseV4,
+
+        /// Free allocator-owned fields of a getPayload response.
+        freeGetPayloadResponse: *const fn (
+            ptr: *anyopaque,
+            resp: GetPayloadResponse,
+        ) void,
     };
 
     // ── newPayload wrappers ───────────────────────────────────────────────────
@@ -216,6 +222,13 @@ pub const EngineApi = struct {
     ) !GetPayloadResponseV4 {
         return self.vtable.getPayloadV4(self.ptr, payload_id);
     }
+
+    pub fn freeGetPayloadResponse(
+        self: EngineApi,
+        resp: GetPayloadResponse,
+    ) void {
+        self.vtable.freeGetPayloadResponse(self.ptr, resp);
+    }
 };
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -223,7 +236,7 @@ pub const EngineApi = struct {
 test "EngineApi vtable struct layout" {
     // Verify vtable has all required function pointers.
     const info = @typeInfo(EngineApi.VTable);
-    try testing.expectEqual(@as(usize, 11), info.@"struct".fields.len);
+    try testing.expectEqual(@as(usize, 12), info.@"struct".fields.len);
 }
 
 test "EngineApi methods exist" {
@@ -239,4 +252,5 @@ test "EngineApi methods exist" {
     try testing.expect(@hasDecl(EngineApi, "getPayloadV1"));
     try testing.expect(@hasDecl(EngineApi, "getPayloadV2"));
     try testing.expect(@hasDecl(EngineApi, "getPayloadV4"));
+    try testing.expect(@hasDecl(EngineApi, "freeGetPayloadResponse"));
 }

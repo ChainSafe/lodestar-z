@@ -12,6 +12,7 @@ const state_transition = @import("state_transition");
 const chain_mod = @import("chain");
 const ProducedBlockBody = chain_mod.ProducedBlockBody;
 const ProducedBlock = chain_mod.ProducedBlock;
+const ProducedBlindedBlock = chain_mod.ProducedBlindedBlock;
 const BlockProductionConfig = chain_mod.BlockProductionConfig;
 const ImportResult = chain_mod.ImportResult;
 const execution_mod = @import("execution");
@@ -28,11 +29,26 @@ pub const SerializedUnsignedBlock = struct {
     block_type: BlockType,
 };
 
-fn builderBidThresholdForConfig(self: *BeaconNode, prod_config: BlockProductionConfig) f64 {
+pub fn builderBidThresholdForConfig(self: *BeaconNode, prod_config: BlockProductionConfig) f64 {
     if (prod_config.builder_boost_factor) |boost_factor| {
         return @as(f64, @floatFromInt(boost_factor)) / 100.0;
     }
-    return self.builder_bid_threshold;
+    return @as(f64, @floatFromInt(self.node_options.builder_boost_factor)) / 100.0;
+}
+
+fn normalizeBlockProductionConfig(
+    self: *BeaconNode,
+    slot: u64,
+    prod_config: BlockProductionConfig,
+) !BlockProductionConfig {
+    var effective = prod_config;
+    if (effective.graffiti == null) {
+        effective.graffiti = self.node_options.graffiti;
+    }
+    if (std.mem.eql(u8, &effective.fee_recipient, &std.mem.zeroes([20]u8))) {
+        effective.fee_recipient = payloadFeeRecipientForSlot(self, slot) orelse return error.MissingProposerFeeRecipient;
+    }
+    return effective;
 }
 
 pub fn notifyForkchoiceUpdate(self: *BeaconNode, new_head_root: [32]u8) !void {
@@ -119,7 +135,7 @@ pub fn preparePayload(
     }
 }
 
-fn getExecutionPayloadWithThreshold(self: *BeaconNode, builder_bid_threshold: f64) !GetPayloadResponse {
+fn getEnginePayload(self: *BeaconNode) !GetPayloadResponse {
     const engine = self.engine_api orelse return error.NoEngineApi;
     const payload_id = self.cached_payload_id orelse return error.NoPayloadId;
 
@@ -140,45 +156,11 @@ fn getExecutionPayloadWithThreshold(self: *BeaconNode, builder_bid_threshold: f6
         result.blobs_bundle.blobs.len,
     });
 
-    if (self.builder_api) |builder| {
-        const head = self.getHead();
-        const proposer_pubkey = std.mem.zeroes([48]u8);
-        const parent_hash = result.execution_payload.parent_hash;
-
-        const maybe_bid = builder.getHeader(head.slot, parent_hash, proposer_pubkey) catch |err| {
-            std.log.warn("Builder: getHeader error: {} — using local payload", .{err});
-            return result;
-        };
-
-        if (maybe_bid) |bid| {
-            const bid_value = bid.message.value;
-            const local_value = result.block_value;
-            const threshold_scaled = @as(u256, @intFromFloat(@as(f64, @floatFromInt(local_value)) * builder_bid_threshold));
-
-            if (bid_value >= threshold_scaled and bid_value > 0) {
-                std.log.info(
-                    "Builder: bid {d} > local {d} — using blinded block path",
-                    .{ @as(u64, @truncate(bid_value)), @as(u64, @truncate(local_value)) },
-                );
-                std.log.info("Builder: bid accepted (value={d}), blinded signing integration pending", .{
-                    @as(u64, @truncate(bid.message.value)),
-                });
-            } else {
-                std.log.info(
-                    "Builder: bid {d} <= local {d} * {d:.2} — using local payload",
-                    .{ @as(u64, @truncate(bid_value)), @as(u64, @truncate(local_value)), builder_bid_threshold },
-                );
-            }
-        } else {
-            std.log.debug("Builder: no bid available — using local payload", .{});
-        }
-    }
-
     return result;
 }
 
 pub fn getExecutionPayload(self: *BeaconNode) !GetPayloadResponse {
-    return getExecutionPayloadWithThreshold(self, self.builder_bid_threshold);
+    return getEnginePayload(self);
 }
 
 pub fn registerValidatorsWithBuilder(
@@ -213,6 +195,145 @@ fn prevRandaoForSlot(self: *BeaconNode, slot: u64) ![32]u8 {
     return mix_ptr.*;
 }
 
+fn proposerPubkeyForSlot(self: *BeaconNode, slot: u64) ![48]u8 {
+    const head_state = self.headState() orelse return error.NoHeadState;
+    const proposer_index = try head_state.getBeaconProposer(slot);
+    var validators = try head_state.state.validators();
+    var validator: types.phase0.Validator.Type = undefined;
+    try validators.getValue(self.allocator, proposer_index, &validator);
+    return validator.pubkey;
+}
+
+fn currentExecutionHeadHash(self: *BeaconNode) ![32]u8 {
+    const state = self.chainQuery().executionForkchoiceState(self.currentHeadRoot()) orelse return error.NoExecutionHeadHash;
+    return state.head_block_hash;
+}
+
+fn copyBlobCommitments(
+    allocator: std.mem.Allocator,
+    commitments: []const [48]u8,
+) !std.ArrayListUnmanaged(types.primitive.KZGCommitment.Type) {
+    if (commitments.len == 0) return .empty;
+
+    var out = try std.ArrayListUnmanaged(types.primitive.KZGCommitment.Type).initCapacity(
+        allocator,
+        commitments.len,
+    );
+    for (commitments) |commitment| {
+        out.appendAssumeCapacity(commitment);
+    }
+    return out;
+}
+
+fn copyBlobsBundle(
+    allocator: std.mem.Allocator,
+    bundle: execution_mod.engine_api_types.BlobsBundle,
+) !?chain_mod.produce_block.BlobsBundle {
+    if (bundle.commitments.len == 0 and bundle.proofs.len == 0 and bundle.blobs.len == 0) {
+        return null;
+    }
+
+    const commitments = try allocator.dupe([48]u8, bundle.commitments);
+    errdefer if (commitments.len > 0) allocator.free(commitments);
+
+    const proofs = try allocator.dupe([48]u8, bundle.proofs);
+    errdefer if (proofs.len > 0) allocator.free(proofs);
+
+    const blobs = try allocator.dupe([131072]u8, bundle.blobs);
+    errdefer if (blobs.len > 0) allocator.free(blobs);
+
+    return .{
+        .commitments = commitments,
+        .proofs = proofs,
+        .blobs = blobs,
+    };
+}
+
+fn convertExecutionRequests(
+    allocator: std.mem.Allocator,
+    deposit_requests: []const execution_mod.engine_api_types.DepositRequest,
+    withdrawal_requests: []const execution_mod.engine_api_types.WithdrawalRequest,
+    consolidation_requests: []const execution_mod.engine_api_types.ConsolidationRequest,
+) !types.electra.ExecutionRequests.Type {
+    var deposits = try std.ArrayListUnmanaged(types.electra.DepositRequest.Type).initCapacity(
+        allocator,
+        deposit_requests.len,
+    );
+    errdefer deposits.deinit(allocator);
+    for (deposit_requests) |request| {
+        deposits.appendAssumeCapacity(.{
+            .pubkey = request.pubkey,
+            .withdrawal_credentials = request.withdrawal_credentials,
+            .amount = request.amount,
+            .signature = request.signature,
+            .index = request.index,
+        });
+    }
+
+    var withdrawals = try std.ArrayListUnmanaged(types.electra.WithdrawalRequest.Type).initCapacity(
+        allocator,
+        withdrawal_requests.len,
+    );
+    errdefer withdrawals.deinit(allocator);
+    for (withdrawal_requests) |request| {
+        withdrawals.appendAssumeCapacity(.{
+            .source_address = request.source_address,
+            .validator_pubkey = request.validator_pubkey,
+            .amount = request.amount,
+        });
+    }
+
+    var consolidations = try std.ArrayListUnmanaged(types.electra.ConsolidationRequest.Type).initCapacity(
+        allocator,
+        consolidation_requests.len,
+    );
+    errdefer consolidations.deinit(allocator);
+    for (consolidation_requests) |request| {
+        consolidations.appendAssumeCapacity(.{
+            .source_address = request.source_address,
+            .source_pubkey = request.source_pubkey,
+            .target_pubkey = request.target_pubkey,
+        });
+    }
+
+    return .{
+        .deposits = deposits,
+        .withdrawals = withdrawals,
+        .consolidations = consolidations,
+    };
+}
+
+fn convertBuilderPayloadHeader(
+    allocator: std.mem.Allocator,
+    header: execution_mod.builder.ExecutionPayloadHeader,
+) !types.deneb.ExecutionPayloadHeader.Type {
+    var extra_data: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer extra_data.deinit(allocator);
+    if (header.extra_data.len > 0) {
+        try extra_data.appendSlice(allocator, header.extra_data);
+    }
+
+    return .{
+        .parent_hash = header.parent_hash,
+        .fee_recipient = header.fee_recipient,
+        .state_root = header.state_root,
+        .receipts_root = header.receipts_root,
+        .logs_bloom = header.logs_bloom,
+        .prev_randao = header.prev_randao,
+        .block_number = header.block_number,
+        .gas_limit = header.gas_limit,
+        .gas_used = header.gas_used,
+        .timestamp = header.timestamp,
+        .extra_data = extra_data,
+        .base_fee_per_gas = header.base_fee_per_gas,
+        .block_hash = header.block_hash,
+        .transactions_root = header.transactions_root,
+        .withdrawals_root = header.withdrawals_root orelse std.mem.zeroes([32]u8),
+        .blob_gas_used = header.blob_gas_used orelse 0,
+        .excess_blob_gas = header.excess_blob_gas orelse 0,
+    };
+}
+
 fn ensureExecutionPayloadForSlot(self: *BeaconNode, slot: u64) !void {
     _ = self.engine_api orelse return error.NoEngineApi;
 
@@ -238,33 +359,34 @@ fn ensureExecutionPayloadForSlot(self: *BeaconNode, slot: u64) !void {
 }
 
 pub fn produceFullBlock(self: *BeaconNode, slot: u64, prod_config: BlockProductionConfig) !ProducedBlock {
-    var effective_config = prod_config;
-    if (effective_config.graffiti == null) {
-        effective_config.graffiti = self.node_options.graffiti;
-    }
-    if (std.mem.eql(u8, &effective_config.fee_recipient, &std.mem.zeroes([20]u8))) {
-        effective_config.fee_recipient = payloadFeeRecipientForSlot(self, slot) orelse return error.MissingProposerFeeRecipient;
-    }
+    const effective_config = try normalizeBlockProductionConfig(self, slot, prod_config);
 
     try ensureExecutionPayloadForSlot(self, slot);
-    const resp = try getExecutionPayloadWithThreshold(self, builderBidThresholdForConfig(self, effective_config));
+    const engine = self.engine_api orelse return error.NoEngineApi;
+    const resp = try getEnginePayload(self);
+    defer engine.freeGetPayloadResponse(resp);
 
-    const exec_payload = try convertEnginePayload(self.allocator, resp.execution_payload);
-    const blobs_bundle: ?chain_mod.produce_block.BlobsBundle = .{
-        .commitments = resp.blobs_bundle.commitments,
-        .proofs = resp.blobs_bundle.proofs,
-        .blobs = resp.blobs_bundle.blobs,
+    var exec_payload = try convertEnginePayload(self.allocator, resp.execution_payload);
+    errdefer types.electra.ExecutionPayload.deinit(self.allocator, &exec_payload);
+    const blobs_bundle = try copyBlobsBundle(self.allocator, resp.blobs_bundle);
+    errdefer if (blobs_bundle) |bundle| {
+        if (bundle.commitments.len > 0) self.allocator.free(bundle.commitments);
+        if (bundle.proofs.len > 0) self.allocator.free(bundle.proofs);
+        if (bundle.blobs.len > 0) self.allocator.free(bundle.blobs);
     };
     const block_value: u256 = resp.block_value;
-    var blob_commitments = std.ArrayListUnmanaged(types.primitive.KZGCommitment.Type).empty;
-
-    if (resp.blobs_bundle.commitments.len > 0) {
-        blob_commitments = try std.ArrayListUnmanaged(
-            types.primitive.KZGCommitment.Type,
-        ).initCapacity(self.allocator, resp.blobs_bundle.commitments.len);
-        for (resp.blobs_bundle.commitments) |commitment| {
-            blob_commitments.appendAssumeCapacity(commitment);
-        }
+    var blob_commitments = try copyBlobCommitments(self.allocator, resp.blobs_bundle.commitments);
+    errdefer blob_commitments.deinit(self.allocator);
+    var execution_requests = try convertExecutionRequests(
+        self.allocator,
+        resp.deposit_requests,
+        resp.withdrawal_requests,
+        resp.consolidation_requests,
+    );
+    errdefer {
+        execution_requests.deposits.deinit(self.allocator);
+        execution_requests.withdrawals.deinit(self.allocator);
+        execution_requests.consolidations.deinit(self.allocator);
     }
 
     const block = try self.chainService().produceFullBlockWithPayload(
@@ -273,6 +395,7 @@ pub fn produceFullBlock(self: *BeaconNode, slot: u64, prod_config: BlockProducti
         blobs_bundle,
         block_value,
         blob_commitments,
+        execution_requests,
         effective_config,
     );
 
@@ -283,6 +406,147 @@ pub fn produceFullBlock(self: *BeaconNode, slot: u64, prod_config: BlockProducti
         @as(u64, @truncate(block.block_value)),
     });
 
+    return block;
+}
+
+pub fn produceBuilderBlindedBlock(
+    self: *BeaconNode,
+    slot: u64,
+    prod_config: BlockProductionConfig,
+    builder_bid_threshold: ?f64,
+    require_builder: bool,
+) !?ProducedBlindedBlock {
+    const effective_config = try normalizeBlockProductionConfig(self, slot, prod_config);
+    const builder = self.builder_api orelse {
+        if (require_builder) return error.BuilderNotConfigured;
+        return null;
+    };
+
+    const proposer_pubkey = try proposerPubkeyForSlot(self, slot);
+    const parent_hash = try currentExecutionHeadHash(self);
+
+    if (builder_bid_threshold) |threshold| {
+        try ensureExecutionPayloadForSlot(self, slot);
+        const engine = self.engine_api orelse return error.NoEngineApi;
+        const local_payload = try getEnginePayload(self);
+        defer engine.freeGetPayloadResponse(local_payload);
+
+        if (local_payload.should_override_builder) {
+            std.log.info("Builder: local execution payload overrides builder for slot={d}", .{slot});
+            if (require_builder) return error.BuilderBidUnavailable;
+            return null;
+        }
+
+        const maybe_bid = builder.getHeader(slot, parent_hash, proposer_pubkey) catch |err| {
+            std.log.warn("Builder: getHeader error for slot={d}: {} — using local payload", .{ slot, err });
+            if (require_builder) return error.BuilderBidUnavailable;
+            return null;
+        };
+
+        const bid = maybe_bid orelse {
+            std.log.info("Builder: no bid available for slot={d}", .{slot});
+            if (require_builder) return error.BuilderBidUnavailable;
+            return null;
+        };
+        errdefer execution_mod.builder.freeBid(self.allocator, bid);
+
+        const threshold_scaled = @as(
+            u256,
+            @intFromFloat(@as(f64, @floatFromInt(local_payload.block_value)) * threshold),
+        );
+        if (bid.message.value == 0 or bid.message.value < threshold_scaled) {
+            std.log.info(
+                "Builder: bid {d} <= local {d} * {d:.2} for slot={d}",
+                .{
+                    @as(u64, @truncate(bid.message.value)),
+                    @as(u64, @truncate(local_payload.block_value)),
+                    threshold,
+                    slot,
+                },
+            );
+            if (require_builder) return error.BuilderBidUnavailable;
+            return null;
+        }
+
+        var header = try convertBuilderPayloadHeader(self.allocator, bid.message.header);
+        errdefer types.deneb.ExecutionPayloadHeader.deinit(self.allocator, &header);
+        var blob_commitments = try copyBlobCommitments(self.allocator, bid.message.blob_kzg_commitments);
+        errdefer blob_commitments.deinit(self.allocator);
+        var execution_requests = try convertExecutionRequests(
+            self.allocator,
+            bid.message.deposit_requests,
+            bid.message.withdrawal_requests,
+            bid.message.consolidation_requests,
+        );
+        errdefer {
+            execution_requests.deposits.deinit(self.allocator);
+            execution_requests.withdrawals.deinit(self.allocator);
+            execution_requests.consolidations.deinit(self.allocator);
+        }
+
+        const block = try self.chainService().produceBlindedBlockWithHeader(
+            slot,
+            header,
+            bid.message.value,
+            blob_commitments,
+            execution_requests,
+            effective_config,
+        );
+        execution_mod.builder.freeBid(self.allocator, bid);
+
+        std.log.info("Produced builder blinded block: slot={d} proposer={d} parent={s}... value={d}", .{
+            slot,
+            block.proposer_index,
+            &std.fmt.bytesToHex(block.parent_root[0..4], .lower),
+            @as(u64, @truncate(block.block_value)),
+        });
+        return block;
+    }
+
+    const maybe_bid = builder.getHeader(slot, parent_hash, proposer_pubkey) catch |err| {
+        std.log.warn("Builder: getHeader error for slot={d}: {}", .{ slot, err });
+        if (require_builder) return error.BuilderBidUnavailable;
+        return null;
+    };
+    const bid = maybe_bid orelse {
+        std.log.info("Builder: no bid available for slot={d}", .{slot});
+        if (require_builder) return error.BuilderBidUnavailable;
+        return null;
+    };
+    errdefer execution_mod.builder.freeBid(self.allocator, bid);
+
+    var header = try convertBuilderPayloadHeader(self.allocator, bid.message.header);
+    errdefer types.deneb.ExecutionPayloadHeader.deinit(self.allocator, &header);
+    var blob_commitments = try copyBlobCommitments(self.allocator, bid.message.blob_kzg_commitments);
+    errdefer blob_commitments.deinit(self.allocator);
+    var execution_requests = try convertExecutionRequests(
+        self.allocator,
+        bid.message.deposit_requests,
+        bid.message.withdrawal_requests,
+        bid.message.consolidation_requests,
+    );
+    errdefer {
+        execution_requests.deposits.deinit(self.allocator);
+        execution_requests.withdrawals.deinit(self.allocator);
+        execution_requests.consolidations.deinit(self.allocator);
+    }
+
+    const block = try self.chainService().produceBlindedBlockWithHeader(
+        slot,
+        header,
+        bid.message.value,
+        blob_commitments,
+        execution_requests,
+        effective_config,
+    );
+    execution_mod.builder.freeBid(self.allocator, bid);
+
+    std.log.info("Produced builder blinded block: slot={d} proposer={d} parent={s}... value={d}", .{
+        slot,
+        block.proposer_index,
+        &std.fmt.bytesToHex(block.parent_root[0..4], .lower),
+        @as(u64, @truncate(block.block_value)),
+    });
     return block;
 }
 
@@ -301,28 +565,26 @@ pub fn ensureProducedFeeRecipient(
     return error.FeeRecipientMismatch;
 }
 
-fn computeProducedStateRoot(
+pub fn ensureProducedBlindedFeeRecipient(
+    produced: *const ProducedBlindedBlock,
+    expected_fee_recipient: [20]u8,
+    strict_fee_recipient_check: bool,
+) !void {
+    if (!strict_fee_recipient_check) return;
+    if (std.mem.eql(u8, &produced.block_body.execution_payload_header.fee_recipient, &expected_fee_recipient)) return;
+
+    std.log.err("Produced blinded block fee recipient mismatch expected=0x{s} actual=0x{s}", .{
+        std.fmt.bytesToHex(&expected_fee_recipient, .lower),
+        std.fmt.bytesToHex(&produced.block_body.execution_payload_header.fee_recipient, .lower),
+    });
+    return error.FeeRecipientMismatch;
+}
+
+fn computeStateRootForAnyBlock(
     self: *BeaconNode,
-    slot: u64,
-    produced: *const ProducedBlock,
+    any_block: fork_types.AnySignedBeaconBlock,
 ) ![32]u8 {
     const head_state = self.headState() orelse return error.NoHeadState;
-
-    var signed_block = types.electra.SignedBeaconBlock.Type{
-        .message = .{
-            .slot = slot,
-            .proposer_index = produced.proposer_index,
-            .parent_root = produced.parent_root,
-            .state_root = [_]u8{0} ** 32,
-            .body = produced.block_body,
-        },
-        .signature = [_]u8{0} ** 96,
-    };
-
-    const any_block: fork_types.AnySignedBeaconBlock = switch (self.config.forkSeq(slot)) {
-        .fulu => .{ .full_fulu = @ptrCast(&signed_block) },
-        else => .{ .full_electra = &signed_block },
-    };
 
     const post_state = state_transition.stateTransition(
         self.allocator,
@@ -346,6 +608,54 @@ fn computeProducedStateRoot(
     return (try post_state.state.hashTreeRoot()).*;
 }
 
+fn computeProducedStateRoot(
+    self: *BeaconNode,
+    slot: u64,
+    produced: *const ProducedBlock,
+) ![32]u8 {
+    var signed_block = types.electra.SignedBeaconBlock.Type{
+        .message = .{
+            .slot = slot,
+            .proposer_index = produced.proposer_index,
+            .parent_root = produced.parent_root,
+            .state_root = [_]u8{0} ** 32,
+            .body = produced.block_body,
+        },
+        .signature = [_]u8{0} ** 96,
+    };
+
+    const any_block: fork_types.AnySignedBeaconBlock = switch (self.config.forkSeq(slot)) {
+        .fulu => .{ .full_fulu = @ptrCast(&signed_block) },
+        else => .{ .full_electra = &signed_block },
+    };
+
+    return computeStateRootForAnyBlock(self, any_block);
+}
+
+fn computeProducedBlindedStateRoot(
+    self: *BeaconNode,
+    slot: u64,
+    produced: *const ProducedBlindedBlock,
+) ![32]u8 {
+    var signed_block = types.electra.SignedBlindedBeaconBlock.Type{
+        .message = .{
+            .slot = slot,
+            .proposer_index = produced.proposer_index,
+            .parent_root = produced.parent_root,
+            .state_root = [_]u8{0} ** 32,
+            .body = produced.block_body,
+        },
+        .signature = [_]u8{0} ** 96,
+    };
+
+    const any_block: fork_types.AnySignedBeaconBlock = switch (self.config.forkSeq(slot)) {
+        .fulu => .{ .blinded_fulu = @ptrCast(&signed_block) },
+        else => .{ .blinded_electra = &signed_block },
+    };
+
+    return computeStateRootForAnyBlock(self, any_block);
+}
+
 pub fn serializeUnsignedBlock(
     self: *BeaconNode,
     allocator: std.mem.Allocator,
@@ -356,6 +666,53 @@ pub fn serializeUnsignedBlock(
     return switch (block_type) {
         .full => serializeUnsignedFullBlock(self, allocator, slot, produced),
         .blinded => serializeUnsignedBlindedBlock(self, allocator, slot, produced),
+    };
+}
+
+pub fn serializeUnsignedProducedBlindedBlock(
+    self: *BeaconNode,
+    allocator: std.mem.Allocator,
+    slot: u64,
+    produced: *const ProducedBlindedBlock,
+) !SerializedUnsignedBlock {
+    const state_root = try computeProducedBlindedStateRoot(self, slot, produced);
+    const fork_seq = self.config.forkSeq(slot);
+    if (fork_seq.lt(.bellatrix)) return error.InvalidFork;
+
+    const ssz_bytes = switch (fork_seq) {
+        .electra => blk: {
+            const block = types.electra.BlindedBeaconBlock.Type{
+                .slot = slot,
+                .proposer_index = produced.proposer_index,
+                .parent_root = produced.parent_root,
+                .state_root = state_root,
+                .body = produced.block_body,
+            };
+            const out = try allocator.alloc(u8, types.electra.BlindedBeaconBlock.serializedSize(&block));
+            errdefer allocator.free(out);
+            _ = types.electra.BlindedBeaconBlock.serializeIntoBytes(&block, out);
+            break :blk out;
+        },
+        .fulu => blk: {
+            const block = types.fulu.BlindedBeaconBlock.Type{
+                .slot = slot,
+                .proposer_index = produced.proposer_index,
+                .parent_root = produced.parent_root,
+                .state_root = state_root,
+                .body = produced.block_body,
+            };
+            const out = try allocator.alloc(u8, types.fulu.BlindedBeaconBlock.serializedSize(&block));
+            errdefer allocator.free(out);
+            _ = types.fulu.BlindedBeaconBlock.serializeIntoBytes(&block, out);
+            break :blk out;
+        },
+        else => return error.UnsupportedFork,
+    };
+
+    return .{
+        .ssz_bytes = ssz_bytes,
+        .fork_name = @tagName(fork_seq),
+        .block_type = .blinded,
     };
 }
 

@@ -1018,7 +1018,13 @@ pub const HttpEngine = struct {
         .getPayloadV2 = &getPayloadV2,
         .getPayloadV3 = &getPayloadV3,
         .getPayloadV4 = &getPayloadV4,
+        .freeGetPayloadResponse = &freeGetPayloadResponseImpl,
     };
+
+    fn freeGetPayloadResponseImpl(ptr: *anyopaque, resp: GetPayloadResponse) void {
+        const self: *HttpEngine = @ptrCast(@alignCast(ptr));
+        self.freeGetPayloadResponse(resp);
+    }
 
     fn newPayloadV3(
         ptr: *anyopaque,

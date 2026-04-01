@@ -16,6 +16,7 @@ const Query = @import("query.zig").Query;
 const produce_block = @import("produce_block.zig");
 const ProducedBlockBody = produce_block.ProducedBlockBody;
 const ProducedBlock = produce_block.ProducedBlock;
+const ProducedBlindedBlock = produce_block.ProducedBlindedBlock;
 const BlockProductionConfig = produce_block.BlockProductionConfig;
 const BlobsBundle = produce_block.BlobsBundle;
 const proposer_cache_mod = @import("beacon_proposer_cache.zig");
@@ -33,6 +34,8 @@ const SyncCommitteeContribution = consensus_types.altair.SyncCommitteeContributi
 const Eth1Data = consensus_types.phase0.Eth1Data;
 const Eth1DataType = Eth1Data.Type;
 const ExecutionPayload = consensus_types.electra.ExecutionPayload.Type;
+const ExecutionPayloadHeader = consensus_types.deneb.ExecutionPayloadHeader.Type;
+const ExecutionRequests = consensus_types.electra.ExecutionRequests.Type;
 const BLSSignature = consensus_types.primitive.BLSSignature.Type;
 
 pub const ReadyBlockInput = chain_types.ReadyBlockInput;
@@ -499,6 +502,7 @@ pub const Service = struct {
         blobs_bundle: ?BlobsBundle,
         block_value: u256,
         blob_commitments: std.ArrayListUnmanaged(KZGCommitment),
+        execution_requests: ExecutionRequests,
         eth1_data: Eth1DataType,
         config: BlockProductionConfig,
     ) !ProducedBlock {
@@ -512,6 +516,35 @@ pub const Service = struct {
             blobs_bundle,
             block_value,
             blob_commitments,
+            execution_requests,
+            eth1_data,
+            config,
+            self.chain.sync_contribution_pool,
+        );
+    }
+
+    pub fn assembleBlindedBlock(
+        self: Service,
+        slot: Slot,
+        proposer_index: ValidatorIndex,
+        parent_root: Root,
+        exec_payload_header: ExecutionPayloadHeader,
+        block_value: u256,
+        blob_commitments: std.ArrayListUnmanaged(KZGCommitment),
+        execution_requests: ExecutionRequests,
+        eth1_data: Eth1DataType,
+        config: BlockProductionConfig,
+    ) !ProducedBlindedBlock {
+        return produce_block.assembleBlindedBlock(
+            self.chain.allocator,
+            slot,
+            proposer_index,
+            parent_root,
+            self.chain.op_pool,
+            exec_payload_header,
+            block_value,
+            blob_commitments,
+            execution_requests,
             eth1_data,
             config,
             self.chain.sync_contribution_pool,
@@ -525,6 +558,7 @@ pub const Service = struct {
         blobs_bundle: ?BlobsBundle,
         block_value: u256,
         blob_commitments: std.ArrayListUnmanaged(KZGCommitment),
+        execution_requests: ExecutionRequests,
         config: BlockProductionConfig,
     ) !ProducedBlock {
         const chain_query = self.query();
@@ -554,6 +588,48 @@ pub const Service = struct {
             blobs_bundle,
             block_value,
             blob_commitments,
+            execution_requests,
+            eth1_data,
+            config,
+        );
+    }
+
+    pub fn produceBlindedBlockWithHeader(
+        self: Service,
+        slot: Slot,
+        exec_payload_header: ExecutionPayloadHeader,
+        block_value: u256,
+        blob_commitments: std.ArrayListUnmanaged(KZGCommitment),
+        execution_requests: ExecutionRequests,
+        config: BlockProductionConfig,
+    ) !ProducedBlindedBlock {
+        const chain_query = self.query();
+        const head = chain_query.head();
+        const head_state = chain_query.headState();
+
+        var eth1_data = Eth1Data.default_value;
+        if (head_state) |cached| {
+            const state_eth1 = cached.state.eth1Data() catch null;
+            if (state_eth1) |eth1_view| {
+                eth1_data.deposit_root = (eth1_view.getFieldRoot("deposit_root") catch &std.mem.zeroes([32]u8)).*;
+                eth1_data.deposit_count = eth1_view.get("deposit_count") catch 0;
+                eth1_data.block_hash = (eth1_view.getFieldRoot("block_hash") catch &std.mem.zeroes([32]u8)).*;
+            }
+        }
+
+        var proposer_index: ValidatorIndex = 0;
+        if (head_state) |cached| {
+            proposer_index = cached.getBeaconProposer(slot) catch 0;
+        }
+
+        return self.assembleBlindedBlock(
+            slot,
+            proposer_index,
+            head.root,
+            exec_payload_header,
+            block_value,
+            blob_commitments,
+            execution_requests,
             eth1_data,
             config,
         );

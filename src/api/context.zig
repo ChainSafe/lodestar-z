@@ -534,11 +534,11 @@ pub const ApiContext = struct {
 /// Type-erased callback for forwarding validator registrations to the builder relay.
 pub const BuilderCallback = struct {
     ptr: *anyopaque,
-    /// Forward signed validator registrations to the relay. Raw JSON bytes.
-    registerValidatorsFn: *const fn (ptr: *anyopaque, registrations_json: []const u8) anyerror!void,
+    /// Forward signed validator registrations to the relay.
+    registerValidatorsFn: *const fn (ptr: *anyopaque, registrations: []const types.SignedValidatorRegistrationV1) anyerror!void,
 
-    pub fn registerValidators(self: *const BuilderCallback, registrations_json: []const u8) !void {
-        return self.registerValidatorsFn(self.ptr, registrations_json);
+    pub fn registerValidators(self: *const BuilderCallback, registrations: []const types.SignedValidatorRegistrationV1) !void {
+        return self.registerValidatorsFn(self.ptr, registrations);
     }
 };
 

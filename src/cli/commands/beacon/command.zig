@@ -20,6 +20,8 @@ const sync_mod = @import("sync");
 const checkpoint_sync = sync_mod.checkpoint_sync;
 const common = @import("../../spec_common.zig");
 
+const default_builder_url = "http://localhost:8661";
+
 const RunContext = struct {
     node: *BeaconNode,
     api_port: u16,
@@ -71,6 +73,15 @@ fn rejectUnsupportedOptions(opts: anytype) void {
     if (opts.disableLightClientServer) {
         unsupportedOption("--disableLightClientServer", "light client server toggling is not wired yet");
     }
+    if (opts.builder_timeout != null or opts.@"builder.timeout" != null) {
+        unsupportedOption("--builder-timeout", "builder HTTP timeout overrides are not wired yet");
+    }
+    if (opts.builder_fault_window != null or opts.@"builder.faultInspectionWindow" != null) {
+        unsupportedOption("--builder-fault-inspection-window", "builder circuit-breaker inspection is not wired yet");
+    }
+    if (opts.builder_allowed_faults != null or opts.@"builder.allowedFaults" != null) {
+        unsupportedOption("--builder-allowed-faults", "builder circuit-breaker thresholds are not wired yet");
+    }
 }
 
 fn loadBeaconConfig(network: common.Network) *const BeaconConfig {
@@ -97,6 +108,40 @@ fn readFile(io: Io, allocator: Allocator, path: []const u8) ![]u8 {
 fn parseOptionalPort(raw: ?[]const u8) ?u16 {
     const value = raw orelse return null;
     return std.fmt.parseInt(u16, value, 10) catch null;
+}
+
+fn parseU64OrExit(flag_name: []const u8, raw: []const u8) u64 {
+    return std.fmt.parseInt(u64, raw, 10) catch {
+        std.log.err("Invalid {s}: expected unsigned integer, got '{s}'", .{ flag_name, raw });
+        std.process.exit(1);
+    };
+}
+
+fn resolveBuilderUrl(opts: anytype) ?[]const u8 {
+    const dashed = opts.builder_url;
+    const dotted = opts.@"builder.url";
+    const plural = opts.@"builder.urls";
+
+    if (plural) |value| {
+        if (std.mem.indexOfScalar(u8, value, ',') != null) {
+            unsupportedOption(
+                "--builder.urls",
+                "multiple builder URLs are not supported; use an external relay multiplexer like mev-boost",
+            );
+        }
+    }
+
+    if (dashed != null and dotted != null and !std.mem.eql(u8, dashed.?, dotted.?)) {
+        unsupportedOption("--builder-url/--builder.url", "conflicting builder URL values were provided");
+    }
+    if (dashed != null and plural != null and !std.mem.eql(u8, dashed.?, plural.?)) {
+        unsupportedOption("--builder-url/--builder.urls", "conflicting builder URL values were provided");
+    }
+    if (dotted != null and plural != null and !std.mem.eql(u8, dotted.?, plural.?)) {
+        unsupportedOption("--builder.url/--builder.urls", "conflicting builder URL values were provided");
+    }
+
+    return dotted orelse dashed orelse plural;
 }
 
 fn formatP2pListenMultiaddr(buf: []u8, host: []const u8, port: u16) ![]const u8 {
@@ -193,6 +238,9 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     const metrics_port = opts.@"metrics.port" orelse opts.metrics_port;
     const metrics_address = opts.@"metrics.address" orelse opts.metrics_address;
     const suggest_fee_recipient = opts.suggestedFeeRecipient orelse opts.suggest_fee_recipient;
+    const builder_enabled = opts.builder;
+    const builder_url = resolveBuilderUrl(opts);
+    const builder_boost_factor_raw = opts.builder_boost_factor;
     const log_level = opts.logLevel orelse opts.log_level;
     const log_file = opts.logFile orelse opts.log_file;
     const log_format = opts.logFormat orelse opts.log_format;
@@ -202,6 +250,17 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     const engine_mock = opts.@"execution.engineMock" or opts.engine_mock;
     const persist_network_identity = opts.persistNetworkIdentity orelse true;
     const private_identify = opts.private;
+
+    if (!builder_enabled and builder_url != null) {
+        unsupportedOption("--builder.url", "add --builder to enable the external builder relay");
+    }
+    if (!builder_enabled and builder_boost_factor_raw != null) {
+        unsupportedOption("--builder-boost-factor", "add --builder to enable builder bid selection");
+    }
+    const builder_boost_factor = if (builder_boost_factor_raw) |raw|
+        parseU64OrExit("--builder-boost-factor", raw)
+    else
+        @as(u64, 100);
 
     var custom_chain_config: config_mod.ChainConfig = undefined;
     var custom_beacon_config: BeaconConfig = undefined;
@@ -241,6 +300,9 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         std.log.info("  jwt-secret: {s}", .{jwt});
     }
     std.log.info("  execution:  {s}", .{execution_urls});
+    if (builder_enabled) {
+        std.log.info("  builder:    {s} (boost={d})", .{ builder_url orelse default_builder_url, builder_boost_factor });
+    }
 
     var pool = try Node.Pool.init(allocator, 200_000);
     defer pool.deinit();
@@ -300,6 +362,9 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         .rest_cors_origin = api_cors,
         .execution_urls = &.{execution_urls},
         .engine_mock = engine_mock,
+        .builder_enabled = builder_enabled,
+        .builder_url = builder_url orelse default_builder_url,
+        .builder_boost_factor = builder_boost_factor,
         .target_peers = target_peers,
         .network = network,
         .p2p_host = p2p_host4,

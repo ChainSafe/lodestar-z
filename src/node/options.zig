@@ -72,6 +72,12 @@ pub const NodeOptions = struct {
     execution_urls: []const []const u8 = &.{"http://localhost:8551"},
     /// Use mock execution engine instead of real EL (--engine-mock).
     engine_mock: bool = false,
+    /// Enable an external builder relay for proposer block production.
+    builder_enabled: bool = false,
+    /// Builder relay URL used when builder support is enabled.
+    builder_url: []const u8 = "http://localhost:8661",
+    /// Default builder boost factor percentage for local BN produceBlockV3.
+    builder_boost_factor: u64 = 100,
 
     // ── API ──────────────────────────────────────────────────────
     /// Enable the REST HTTP API (--rest flag).

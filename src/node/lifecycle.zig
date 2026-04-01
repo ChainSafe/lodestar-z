@@ -24,6 +24,7 @@ const execution_mod = @import("execution");
 const EngineApi = execution_mod.EngineApi;
 const MockEngine = execution_mod.MockEngine;
 const HttpEngine = execution_mod.HttpEngine;
+const HttpBuilder = execution_mod.HttpBuilder;
 const IoHttpTransport = execution_mod.IoHttpTransport;
 const processor_mod = @import("processor");
 const BeaconProcessor = processor_mod.BeaconProcessor;
@@ -113,6 +114,9 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
     var http_engine_ptr: ?*HttpEngine = null;
     var io_transport_ptr: ?*IoHttpTransport = null;
     var engine: ?EngineApi = null;
+    var http_builder_ptr: ?*HttpBuilder = null;
+    var builder_transport_ptr: ?*IoHttpTransport = null;
+    var builder_api: ?execution_mod.BuilderApi = null;
 
     if (opts.engine_mock) {
         const mock = try allocator.create(MockEngine);
@@ -155,6 +159,28 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         log.logger(.node).info("Execution engine: MockEngine (no --execution-url)", .{});
     }
 
+    if (opts.builder_enabled) {
+        const transport = try allocator.create(IoHttpTransport);
+        errdefer allocator.destroy(transport);
+        transport.* = IoHttpTransport.init(allocator);
+        transport.setIo(io);
+        errdefer transport.deinit();
+        builder_transport_ptr = transport;
+
+        const http_builder = try allocator.create(HttpBuilder);
+        errdefer allocator.destroy(http_builder);
+        http_builder.* = HttpBuilder.init(
+            allocator,
+            opts.builder_url,
+            transport.transport(),
+        );
+        errdefer http_builder.deinit();
+        http_builder_ptr = http_builder;
+        builder_api = http_builder.builder();
+
+        log.logger(.node).info("Execution builder: HttpBuilder -> {s}", .{opts.builder_url});
+    }
+
     const node = try allocator.create(BeaconNode);
     node.* = .{
         .allocator = allocator,
@@ -173,6 +199,9 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         .http_engine = http_engine_ptr,
         .io_transport = io_transport_ptr,
         .engine_api = engine,
+        .http_builder = http_builder_ptr,
+        .builder_transport = builder_transport_ptr,
+        .builder_api = builder_api,
         .api_context = api_ctx,
         .api_node_identity = api_node_identity,
         .event_bus = event_bus_ptr,
@@ -218,7 +247,17 @@ pub fn deinit(self: *BeaconNode) void {
         allocator.destroy(he);
     }
 
+    if (self.http_builder) |hb| {
+        hb.deinit();
+        allocator.destroy(hb);
+    }
+
     if (self.io_transport) |pt| {
+        pt.deinit();
+        allocator.destroy(pt);
+    }
+
+    if (self.builder_transport) |pt| {
         pt.deinit();
         allocator.destroy(pt);
     }
