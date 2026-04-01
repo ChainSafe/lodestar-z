@@ -37,7 +37,6 @@ const Multiaddr = @import("multiaddr").Multiaddr;
 const sync_mod = @import("sync");
 const SyncService = sync_mod.SyncService;
 const BatchBlock = sync_mod.BatchBlock;
-const BlobVerifyInput = chain_mod.BlobVerifyInput;
 
 const GossipHandler = @import("gossip_handler.zig").GossipHandler;
 const gossip_ingress_mod = @import("gossip_ingress.zig");
@@ -50,7 +49,6 @@ const BlobIdentifier = types.deneb.BlobIdentifier;
 const DataColumnSidecar = types.fulu.DataColumnSidecar;
 
 const BYTES_PER_BLOB = kzg_mod.BYTES_PER_BLOB;
-const BYTES_PER_CELL = kzg_mod.BYTES_PER_CELL;
 const MAX_COLUMNS = preset_root.NUMBER_OF_COLUMNS;
 
 const SyncBlockMeta = struct {
@@ -1420,8 +1418,6 @@ fn fetchBlobSidecarsByRangeForMetas(
     peer_id: []const u8,
     metas: []const SyncBlockMeta,
 ) !void {
-    const kzg = self.chain.kzg orelse return error.MissingKzgContext;
-
     var start_slot: u64 = std.math.maxInt(u64);
     var end_slot: u64 = 0;
     var have_pending = false;
@@ -1502,7 +1498,7 @@ fn fetchBlobSidecarsByRangeForMetas(
         }
 
         const blob_ptr: *const [BYTES_PER_BLOB]u8 = @ptrCast(&sidecar.blob);
-        try chain_mod.verifyBlobSidecar(kzg.*, BlobVerifyInput{
+        try self.chainService().verifyBlobSidecar(.{
             .blob = blob_ptr,
             .commitment = sidecar.kzg_commitment,
             .proof = sidecar.kzg_proof,
@@ -1543,7 +1539,6 @@ fn fetchBlobSidecarsByRootForMeta(
     peer_id: []const u8,
     meta: SyncBlockMeta,
 ) !void {
-    const kzg = self.chain.kzg orelse return error.MissingKzgContext;
     const missing = try self.chainService().missingBlobSidecars(self.allocator, meta.block_root);
     defer self.allocator.free(missing);
     if (missing.len == 0) return;
@@ -1604,7 +1599,7 @@ fn fetchBlobSidecarsByRootForMeta(
         }
 
         const blob_ptr: *const [BYTES_PER_BLOB]u8 = @ptrCast(&sidecar.blob);
-        try chain_mod.verifyBlobSidecar(kzg.*, BlobVerifyInput{
+        try self.chainService().verifyBlobSidecar(.{
             .blob = blob_ptr,
             .commitment = sidecar.kzg_commitment,
             .proof = sidecar.kzg_proof,
@@ -1640,8 +1635,6 @@ fn fetchDataColumnsByRangeForMetas(
     peer_id: []const u8,
     metas: []const SyncBlockMeta,
 ) !void {
-    const kzg = self.chain.kzg orelse return error.MissingKzgContext;
-
     var requested_columns = std.StaticBitSet(MAX_COLUMNS).initEmpty();
     var start_slot: u64 = std.math.maxInt(u64);
     var end_slot: u64 = 0;
@@ -1736,9 +1729,8 @@ fn fetchDataColumnsByRangeForMetas(
             }
         }
 
-        try chain_mod.verifyDataColumnSidecar(
+        try self.chainService().verifyDataColumnSidecar(
             self.allocator,
-            kzg.*,
             sidecar.index,
             sidecar.kzg_commitments.items,
             sidecar.column.items,
@@ -1765,8 +1757,6 @@ fn fetchDataColumnsByRootForMeta(
     peer_id: []const u8,
     meta: SyncBlockMeta,
 ) !void {
-    const kzg = self.chain.kzg orelse return error.MissingKzgContext;
-
     const missing = try self.chainService().missingDataColumns(self.allocator, meta.block_root);
     defer self.allocator.free(missing);
     if (missing.len == 0) return;
@@ -1835,9 +1825,8 @@ fn fetchDataColumnsByRootForMeta(
             }
         }
 
-        try chain_mod.verifyDataColumnSidecar(
+        try self.chainService().verifyDataColumnSidecar(
             self.allocator,
-            kzg.*,
             sidecar.index,
             sidecar.kzg_commitments.items,
             sidecar.column.items,
@@ -2191,6 +2180,7 @@ fn initGossipHandler(self: *BeaconNode) void {
         self.allocator,
         @ptrCast(self),
         &callbacks.importBlockFromGossip,
+        &callbacks.getForkSeqForSlot,
         &callbacks.getProposerIndex,
         &callbacks.isKnownBlockRoot,
         &callbacks.getValidatorCount,

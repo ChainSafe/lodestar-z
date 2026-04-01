@@ -194,6 +194,7 @@ pub const GossipHandler = struct {
     current_fork_seq: ForkSeq,
 
     /// Vtable for state queries (proposer schedule, known roots, etc.).
+    getForkSeqForSlot: *const fn (ptr: *anyopaque, slot: u64) ForkSeq,
     getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
     isKnownBlockRoot: *const fn (ptr: *anyopaque, root: [32]u8) bool,
     getValidatorCount: *const fn (ptr: *anyopaque) u32,
@@ -212,6 +213,7 @@ pub const GossipHandler = struct {
         allocator: Allocator,
         node: *anyopaque,
         importBlockFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
+        getForkSeqForSlot: *const fn (ptr: *anyopaque, slot: u64) ForkSeq,
         getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
         isKnownBlockRoot: *const fn (ptr: *anyopaque, root: [32]u8) bool,
         getValidatorCount: *const fn (ptr: *anyopaque) u32,
@@ -248,6 +250,7 @@ pub const GossipHandler = struct {
             .current_epoch = 0,
             .finalized_slot = 0,
             .current_fork_seq = .phase0,
+            .getForkSeqForSlot = getForkSeqForSlot,
             .getProposerIndex = getProposerIndex,
             .isKnownBlockRoot = isKnownBlockRoot,
             .getValidatorCount = getValidatorCount,
@@ -414,7 +417,7 @@ pub const GossipHandler = struct {
             const any_signed = AnySignedBeaconBlock.deserialize(
                 self.allocator,
                 .full,
-                self.current_fork_seq,
+                self.getForkSeqForSlot(self.node, blk.slot),
                 ssz_bytes,
             ) catch return GossipHandlerError.DecodeFailed;
             bp.ingest(.{ .gossip_block = .{
@@ -1210,6 +1213,10 @@ fn stubGetProposerIndex(_: *anyopaque, slot: u64) ?u32 {
     return @intCast(slot % 100);
 }
 
+fn stubGetForkSeqForSlot(_: *anyopaque, _: u64) ForkSeq {
+    return .phase0;
+}
+
 fn stubIsKnownBlockRoot(_: *anyopaque, _: [32]u8) bool {
     return true; // all parents known
 }
@@ -1234,6 +1241,7 @@ fn makeTestHandler(allocator: Allocator) !*GossipHandler {
         allocator,
         @ptrCast(&dummy_node),
         &stubImportBlock,
+        &stubGetForkSeqForSlot,
         &stubGetProposerIndex,
         &stubIsKnownBlockRoot,
         &stubGetValidatorCount,

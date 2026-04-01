@@ -572,10 +572,10 @@ fn getAggregateAttestationCallback(
 }
 
 fn readSignedBlockSlot(block_bytes: []const u8) ?u64 {
-    return if (block_bytes.len >= 108)
-        std.mem.readInt(u64, block_bytes[100..108], .little)
-    else
-        null;
+    if (block_bytes.len < 4) return null;
+    const msg_offset = std.mem.readInt(u32, block_bytes[0..4], .little);
+    if (block_bytes.len < @as(usize, msg_offset) + 8) return null;
+    return std.mem.readInt(u64, block_bytes[msg_offset..][0..8], .little);
 }
 
 fn applyPublishValidation(

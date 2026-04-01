@@ -363,6 +363,43 @@ pub const BeaconNode = struct {
         return self.finishImportOutcome(t0, outcome);
     }
 
+    pub fn completeReadyIngress(
+        self: *BeaconNode,
+        ready: chain_mod.ReadyBlockInput,
+        raw_block_bytes: ?[]const u8,
+    ) !?ImportResult {
+        const result = self.importReadyBlock(ready) catch |err| {
+            switch (err) {
+                error.UnknownParentBlock => {
+                    if (raw_block_bytes) |bytes| {
+                        self.queueOrphanBlock(ready.block, bytes);
+                    } else {
+                        const serialized = ready.block.serialize(self.allocator) catch |serialize_err| {
+                            ready.block.deinit(self.allocator);
+                            return serialize_err;
+                        };
+                        defer self.allocator.free(serialized);
+                        self.queueOrphanBlock(ready.block, serialized);
+                    }
+                    ready.block.deinit(self.allocator);
+                    return null;
+                },
+                error.BlockAlreadyKnown, error.BlockAlreadyFinalized => {
+                    ready.block.deinit(self.allocator);
+                    return null;
+                },
+                else => {
+                    ready.block.deinit(self.allocator);
+                    return err;
+                },
+            }
+        };
+
+        ready.block.deinit(self.allocator);
+        self.processPendingChildren(result.block_root);
+        return result;
+    }
+
     pub fn processRangeSyncSegment(
         self: *BeaconNode,
         raw_blocks: []const chain_mod.RawBlockBytes,
@@ -912,29 +949,19 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                 .ready => |ready| ready,
             };
 
-            const result = node.importReadyBlock(ready) catch |err| {
-                if (err == error.UnknownParentBlock) {
-                    const ssz_bytes = ready.block.serialize(node.allocator) catch {
-                        ready.block.deinit(node.allocator);
-                        return;
-                    };
-                    defer node.allocator.free(ssz_bytes);
-                    node.queueOrphanBlock(ready.block, ssz_bytes);
-                } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
-                    std.log.warn("Processor: gossip block import failed: {}", .{err});
-                }
-                ready.block.deinit(node.allocator);
+            const maybe_result = node.completeReadyIngress(ready, null) catch |err| {
+                std.log.warn("Processor: gossip block import failed: {}", .{err});
                 return;
             };
-            ready.block.deinit(node.allocator);
-            node.processPendingChildren(result.block_root);
-            std.log.info("PROCESSOR: block imported slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                result.slot,
-                result.block_root[0],
-                result.block_root[1],
-                result.block_root[2],
-                result.block_root[3],
-            });
+            if (maybe_result) |result| {
+                std.log.info("PROCESSOR: block imported slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                    result.slot,
+                    result.block_root[0],
+                    result.block_root[1],
+                    result.block_root[2],
+                    result.block_root[3],
+                });
+            }
         },
         .attestation_batch => |batch| {
             // Batch BLS verification: the key performance optimization.

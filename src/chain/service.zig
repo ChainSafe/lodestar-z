@@ -14,6 +14,7 @@ const chain_types = @import("types.zig");
 const chain_effects = @import("effects.zig");
 const Query = @import("query.zig").Query;
 const produce_block = @import("produce_block.zig");
+const blob_kzg_verification = @import("blob_kzg_verification.zig");
 const ProducedBlockBody = produce_block.ProducedBlockBody;
 const ProducedBlock = produce_block.ProducedBlock;
 const ProducedBlindedBlock = produce_block.ProducedBlindedBlock;
@@ -37,6 +38,8 @@ const ExecutionPayload = consensus_types.electra.ExecutionPayload.Type;
 const ExecutionPayloadHeader = consensus_types.deneb.ExecutionPayloadHeader.Type;
 const ExecutionRequests = consensus_types.electra.ExecutionRequests.Type;
 const BLSSignature = consensus_types.primitive.BLSSignature.Type;
+const BlobVerifyInput = blob_kzg_verification.BlobVerifyInput;
+const BYTES_PER_CELL = blob_kzg_verification.BYTES_PER_CELL;
 
 pub const ReadyBlockInput = chain_types.ReadyBlockInput;
 pub const RawBlockBytes = chain_types.RawBlockBytes;
@@ -460,6 +463,30 @@ pub const Service = struct {
     ) ![]u64 {
         const dam = self.chain.da_manager orelse return error.MissingDaManager;
         return dam.getMissingColumns(allocator, block_root);
+    }
+
+    pub fn verifyBlobSidecar(self: Service, input: BlobVerifyInput) !void {
+        const kzg = self.chain.kzg orelse return error.MissingKzgContext;
+        try blob_kzg_verification.verifyBlobSidecar(kzg.*, input);
+    }
+
+    pub fn verifyDataColumnSidecar(
+        self: Service,
+        allocator: std.mem.Allocator,
+        column_index: u64,
+        commitments: []const [48]u8,
+        cells: []const [BYTES_PER_CELL]u8,
+        proofs: []const [48]u8,
+    ) !void {
+        const kzg = self.chain.kzg orelse return error.MissingKzgContext;
+        try blob_kzg_verification.verifyDataColumnSidecar(
+            allocator,
+            kzg.*,
+            column_index,
+            commitments,
+            cells,
+            proofs,
+        );
     }
 
     pub fn archiveState(self: Service, slot: Slot, state_root: Root) !void {

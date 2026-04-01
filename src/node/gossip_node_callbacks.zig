@@ -9,6 +9,7 @@
 //! instead of a module-level global — eliminating the gossip_node hack.
 
 const std = @import("std");
+const config_mod = @import("config");
 const types = @import("consensus_types");
 const state_transition = @import("state_transition");
 const fork_types = @import("fork_types");
@@ -25,16 +26,20 @@ const ssz = @import("ssz");
 const beacon_node_mod = @import("beacon_node.zig");
 const BeaconNode = beacon_node_mod.BeaconNode;
 
+fn readSignedBeaconBlockSlot(bytes: []const u8) ?u64 {
+    if (bytes.len < 4) return null;
+    const msg_offset = std.mem.readInt(u32, bytes[0..4], .little);
+    if (bytes.len < @as(usize, msg_offset) + 8) return null;
+    return std.mem.readInt(u64, bytes[msg_offset..][0..8], .little);
+}
+
 // ---------------------------------------------------------------------------
 // Block import callback
 // ---------------------------------------------------------------------------
 
 pub fn importBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const block_slot: u64 = if (block_bytes.len >= 108)
-        std.mem.readInt(u64, block_bytes[100..108], .little)
-    else
-        node.currentHeadSlot();
+    const block_slot = readSignedBeaconBlockSlot(block_bytes) orelse node.currentHeadSlot();
     const fork_seq = node.config.forkSeq(block_slot);
     const any_signed = AnySignedBeaconBlock.deserialize(
         node.allocator,
@@ -54,24 +59,26 @@ pub fn importBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!
         .pending_data => return,
         .ready => |ready| ready,
     };
-    defer ready.block.deinit(node.allocator);
 
-    const result = node.importReadyBlock(ready) catch |err| {
-        if (err == error.UnknownParentBlock) {
-            node.queueOrphanBlock(ready.block, block_bytes);
-        } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
-            std.log.warn("Gossip block import: {}", .{err});
-        }
+    const maybe_result = node.completeReadyIngress(ready, block_bytes) catch |err| {
+        std.log.warn("Gossip block import: {}", .{err});
         return err;
     };
-    node.processPendingChildren(result.block_root);
-    std.log.info("GOSSIP BLOCK IMPORTED (via handler) slot={d}", .{result.slot});
+    if (maybe_result) |result| {
+        std.log.info("GOSSIP BLOCK IMPORTED (via handler) slot={d}", .{result.slot});
+    }
 }
 
 // ---------------------------------------------------------------------------
 // "Ptr-free" vtable callbacks — use the node pointer from GossipHandler.node.
 // These are now regular ptr-bearing callbacks matching GossipHandler's node field.
 // ---------------------------------------------------------------------------
+
+/// Returns the expected block proposer for `slot` from the head state's epoch cache.
+pub fn getForkSeqForSlot(ptr: *anyopaque, slot: u64) config_mod.ForkSeq {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    return node.config.forkSeq(slot);
+}
 
 /// Returns the expected block proposer for `slot` from the head state's epoch cache.
 pub fn getProposerIndex(ptr: *anyopaque, slot: u64) ?u32 {
@@ -275,18 +282,7 @@ pub fn importBlobSidecar(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
     };
 
     if (try node.ingestBlobSidecar(block_root, sidecar.index, sidecar.signed_block_header.message.slot, ssz_bytes)) |ready| {
-        defer ready.block.deinit(node.allocator);
-
-        const result = node.importReadyBlock(ready) catch |err| {
-            if (err == error.UnknownParentBlock) {
-                const block_bytes = ready.block.serialize(node.allocator) catch return err;
-                defer node.allocator.free(block_bytes);
-                node.queueOrphanBlock(ready.block, block_bytes);
-                return err;
-            }
-            return err;
-        };
-        node.processPendingChildren(result.block_root);
+        _ = try node.completeReadyIngress(ready, null);
     }
 }
 
@@ -307,18 +303,7 @@ pub fn importDataColumnSidecar(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!
     };
 
     if (try node.ingestDataColumnSidecar(block_root, sidecar.index, sidecar.signed_block_header.message.slot, ssz_bytes)) |ready| {
-        defer ready.block.deinit(node.allocator);
-
-        const result = node.importReadyBlock(ready) catch |err| {
-            if (err == error.UnknownParentBlock) {
-                const block_bytes = ready.block.serialize(node.allocator) catch return err;
-                defer node.allocator.free(block_bytes);
-                node.queueOrphanBlock(ready.block, block_bytes);
-                return err;
-            }
-            return err;
-        };
-        node.processPendingChildren(result.block_root);
+        _ = try node.completeReadyIngress(ready, null);
     }
 }
 
@@ -330,7 +315,8 @@ pub fn verifyBlockSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
     const cached = node.headState() orelse return true;
 
-    const fork_seq = node.config.forkSeq(node.currentHeadSlot());
+    const block_slot = readSignedBeaconBlockSlot(ssz_bytes) orelse node.currentHeadSlot();
+    const fork_seq = node.config.forkSeq(block_slot);
     const any_signed = fork_types.AnySignedBeaconBlock.deserialize(
         node.allocator,
         .full,
