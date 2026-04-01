@@ -380,7 +380,7 @@ pub const Protocol = struct {
 
     pub fn popEvent(self: *Protocol) ?Event {
         if (self.completed_events.items.len == 0) return null;
-        return self.completed_events.pop();
+        return self.completed_events.orderedRemove(0);
     }
 
     pub const KnownNode = struct {

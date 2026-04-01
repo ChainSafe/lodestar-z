@@ -19,6 +19,10 @@ pub const Socket = struct {
     pub fn bind(io: Io, address: Address) !Socket {
         const bound = try net.IpAddress.bind(&address, io, .{
             .mode = .dgram,
+            .ip6_only = switch (address) {
+                .ip4 => false,
+                .ip6 => true,
+            },
         });
         errdefer bound.close(io);
 
@@ -81,5 +85,29 @@ test "udp socket loopback send and receive" {
     });
 
     try std.testing.expectEqualSlices(u8, "ping", result.data);
+    try std.testing.expect(result.from.eql(&socket_a.address));
+}
+
+test "udp socket ipv6 loopback send and receive" {
+    const io = std.Options.debug_io;
+    const loopback6 = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+
+    var socket_a = try Socket.bind(io, .{ .ip6 = .{ .bytes = loopback6, .port = 0 } });
+    defer socket_a.close();
+
+    var socket_b = try Socket.bind(io, .{ .ip6 = .{ .bytes = loopback6, .port = 0 } });
+    defer socket_b.close();
+
+    try socket_a.send(socket_b.address, "ping6");
+
+    var recv_buf: [64]u8 = undefined;
+    const result = try socket_b.receiveTimeout(&recv_buf, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+
+    try std.testing.expectEqualSlices(u8, "ping6", result.data);
     try std.testing.expect(result.from.eql(&socket_a.address));
 }

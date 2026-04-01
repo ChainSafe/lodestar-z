@@ -21,6 +21,7 @@ pub const Enr = enr.Enr;
 pub const RoutingTable = kbucket.RoutingTable;
 pub const Protocol = protocol.Protocol;
 pub const Service = service.Service;
+pub const BindAddresses = service.BindAddresses;
 pub const Address = udp_socket.Address;
 pub const UdpSocket = udp_socket.Socket;
 

@@ -14,14 +14,27 @@ pub const Address = udp_socket.Address;
 pub const NodeId = enr_mod.NodeId;
 pub const Protocol = protocol_mod.Protocol;
 
+pub const BindAddresses = struct {
+    ip4: ?Address = null,
+    ip6: ?Address = null,
+
+    fn count(self: *const BindAddresses) usize {
+        var total: usize = 0;
+        if (self.ip4 != null) total += 1;
+        if (self.ip6 != null) total += 1;
+        return total;
+    }
+};
+
 pub const Config = struct {
-    bind_address: Address,
+    bind_addresses: BindAddresses,
     protocol_config: protocol_mod.Config,
     lookup_num_results: usize = 16,
     lookup_parallelism: usize = 3,
     lookup_request_limit: usize = 3,
     lookup_timeout_ms: u64 = 60_000,
     receive_timeout_ms: u64 = 1,
+    ping_interval_ms: u64 = 30_000,
     enr_update: bool = true,
     addr_votes_to_update_enr: usize = 10,
 };
@@ -319,6 +332,12 @@ const LookupRequestKey = struct {
     }
 };
 
+const ConnectedPeer = struct {
+    addr: Address,
+    next_ping_at_ns: i64,
+    awaiting_ping_response: bool = false,
+};
+
 pub const LookupFinishedEvent = struct {
     lookup_id: u32,
     target: NodeId,
@@ -352,6 +371,16 @@ pub const LocalEnrUpdatedEvent = struct {
     }
 };
 
+pub const PeerConnectedEvent = struct {
+    peer_id: NodeId,
+    peer_addr: Address,
+};
+
+pub const PeerDisconnectedEvent = struct {
+    peer_id: NodeId,
+    peer_addr: Address,
+};
+
 pub const Event = union(enum) {
     pong: protocol_mod.PongEvent,
     nodes: protocol_mod.NodesEvent,
@@ -361,6 +390,8 @@ pub const Event = union(enum) {
     discovered_enr: DiscoveredEnrEvent,
     lookup_finished: LookupFinishedEvent,
     local_enr_updated: LocalEnrUpdatedEvent,
+    peer_connected: PeerConnectedEvent,
+    peer_disconnected: PeerDisconnectedEvent,
 
     pub fn deinit(self: *Event, alloc: Allocator) void {
         switch (self.*) {
@@ -381,6 +412,8 @@ pub const Event = union(enum) {
             .discovered_enr => |*discovered_enr| discovered_enr.deinit(alloc),
             .lookup_finished => |*lookup_finished| lookup_finished.deinit(alloc),
             .local_enr_updated => |*local_enr_updated| local_enr_updated.deinit(alloc),
+            .peer_connected => {},
+            .peer_disconnected => {},
         }
     }
 };
@@ -394,11 +427,13 @@ pub const Service = struct {
     allocator: Allocator,
     io: Io,
     config: Config,
-    socket: udp_socket.Socket,
+    socket_ip4: ?udp_socket.Socket = null,
+    socket_ip6: ?udp_socket.Socket = null,
     protocol: Protocol,
     next_lookup_id: u32 = 1,
     active_lookups: std.AutoHashMap(u32, Lookup),
     request_lookup_ids: std.AutoHashMap(LookupRequestKey, u32),
+    connected_peers: std.AutoHashMap(NodeId, ConnectedPeer),
     owned_local_enr: ?[]u8 = null,
     addr_votes_ip4: AddrVotes,
     addr_votes_ip6: AddrVotes,
@@ -412,17 +447,38 @@ pub const Service = struct {
             service_config.protocol_config.local_enr = owned_local_enr.?;
         }
 
-        var socket = try udp_socket.Socket.bind(io, config.bind_address);
-        errdefer socket.close();
+        if (config.bind_addresses.count() == 0) return error.NoBindAddresses;
+        if (config.bind_addresses.ip4) |addr| switch (addr) {
+            .ip4 => {},
+            .ip6 => return error.InvalidBindAddressFamily,
+        };
+        if (config.bind_addresses.ip6) |addr| switch (addr) {
+            .ip4 => return error.InvalidBindAddressFamily,
+            .ip6 => {},
+        };
+
+        var socket_ip4: ?udp_socket.Socket = null;
+        errdefer if (socket_ip4) |*socket| socket.close();
+        if (config.bind_addresses.ip4) |addr| {
+            socket_ip4 = try udp_socket.Socket.bind(io, addr);
+        }
+
+        var socket_ip6: ?udp_socket.Socket = null;
+        errdefer if (socket_ip6) |*socket| socket.close();
+        if (config.bind_addresses.ip6) |addr| {
+            socket_ip6 = try udp_socket.Socket.bind(io, addr);
+        }
 
         return .{
             .allocator = allocator,
             .io = io,
             .config = service_config,
-            .socket = socket,
+            .socket_ip4 = socket_ip4,
+            .socket_ip6 = socket_ip6,
             .protocol = try Protocol.init(io, allocator, service_config.protocol_config),
             .active_lookups = std.AutoHashMap(u32, Lookup).init(allocator),
             .request_lookup_ids = std.AutoHashMap(LookupRequestKey, u32).init(allocator),
+            .connected_peers = std.AutoHashMap(NodeId, ConnectedPeer).init(allocator),
             .owned_local_enr = owned_local_enr,
             .addr_votes_ip4 = AddrVotes.init(allocator, service_config.addr_votes_to_update_enr),
             .addr_votes_ip6 = AddrVotes.init(allocator, service_config.addr_votes_to_update_enr),
@@ -434,13 +490,15 @@ pub const Service = struct {
         while (lookups.next()) |entry| entry.value_ptr.deinit(self.allocator);
         self.active_lookups.deinit();
         self.request_lookup_ids.deinit();
+        self.connected_peers.deinit();
         self.addr_votes_ip4.deinit();
         self.addr_votes_ip6.deinit();
         for (self.completed_events.items) |*event| event.deinit(self.allocator);
         self.completed_events.deinit(self.allocator);
         if (self.owned_local_enr) |local_enr| self.allocator.free(local_enr);
         self.protocol.deinit();
-        self.socket.close();
+        if (self.socket_ip4) |*socket| socket.close();
+        if (self.socket_ip6) |*socket| socket.close();
     }
 
     pub fn addNode(self: *Service, node_id: NodeId, pubkey: ?*const [33]u8, addr: Address, enr: ?[]const u8) void {
@@ -505,13 +563,29 @@ pub const Service = struct {
         return try alloc.dupe(u8, enr_bytes);
     }
 
+    pub fn boundAddress(self: *const Service, family: Address.Family) ?Address {
+        return switch (family) {
+            .ip4 => if (self.socket_ip4) |socket| socket.address else null,
+            .ip6 => if (self.socket_ip6) |socket| socket.address else null,
+        };
+    }
+
+    pub fn boundPort(self: *const Service, family: Address.Family) ?u16 {
+        const addr = self.boundAddress(family) orelse return null;
+        return addr.getPort();
+    }
+
     pub fn popEvent(self: *Service) ?Event {
         if (self.completed_events.items.len == 0) return null;
-        return self.completed_events.pop();
+        return self.completed_events.orderedRemove(0);
     }
 
     pub fn knownPeerCount(self: *const Service) usize {
         return self.protocol.routing_table.nodeCount();
+    }
+
+    pub fn connectedPeerCount(self: *const Service) usize {
+        return self.connected_peers.count();
     }
 
     pub fn poll(self: *Service) void {
@@ -519,22 +593,28 @@ pub const Service = struct {
         self.protocol.pruneExpiredState();
         self.drainProtocolEvents();
         self.pruneTimedOutLookups();
+        self.syncConnectedPeers();
+        self.pingDueConnectedPeers();
     }
 
     pub fn sendPing(self: *Service, node_id: *const NodeId, pubkey: *const [33]u8, addr: Address, enr_seq: u64) !messages.ReqId {
-        return self.protocol.sendPing(node_id, pubkey, addr, enr_seq, &self.socket);
+        const socket = self.socketForAddress(addr) orelse return error.NoSocketForAddressFamily;
+        return self.protocol.sendPing(node_id, pubkey, addr, enr_seq, socket);
     }
 
     pub fn sendFindNode(self: *Service, node_id: *const NodeId, pubkey: *const [33]u8, addr: Address, distances: []const u16) !messages.ReqId {
-        return self.protocol.sendFindNode(node_id, pubkey, addr, distances, &self.socket);
+        const socket = self.socketForAddress(addr) orelse return error.NoSocketForAddressFamily;
+        return self.protocol.sendFindNode(node_id, pubkey, addr, distances, socket);
     }
 
     pub fn sendTalkRequest(self: *Service, node_id: *const NodeId, pubkey: *const [33]u8, addr: Address, protocol_name: []const u8, request: []const u8) !messages.ReqId {
-        return self.protocol.sendTalkRequest(node_id, pubkey, addr, protocol_name, request, &self.socket);
+        const socket = self.socketForAddress(addr) orelse return error.NoSocketForAddressFamily;
+        return self.protocol.sendTalkRequest(node_id, pubkey, addr, protocol_name, request, socket);
     }
 
     pub fn sendTalkResponse(self: *Service, node_id: NodeId, addr: Address, req_id: messages.ReqId, response: []const u8) !void {
-        try self.protocol.sendTalkResponse(node_id, addr, req_id, response, &self.socket);
+        const socket = self.socketForAddress(addr) orelse return error.NoSocketForAddressFamily;
+        try self.protocol.sendTalkResponse(node_id, addr, req_id, response, socket);
     }
 
     fn maybeUpdateLocalEnrFromVote(self: *Service, voter: NodeId, observed_addr: Address) void {
@@ -620,19 +700,13 @@ pub const Service = struct {
     }
 
     fn pingConnectedPeers(self: *Service) void {
-        for (&self.protocol.routing_table.buckets) |*bucket| {
-            for (bucket.entries[0..bucket.count]) |entry| {
-                if (entry.status != .connected) continue;
-                const peer = self.protocol.getKnownNode(&entry.node_id) orelse continue;
-                _ = self.protocol.sendPing(
-                    &peer.node_id,
-                    &peer.pubkey,
-                    peer.addr,
-                    self.protocol.config.local_enr_seq,
-                    &self.socket,
-                ) catch continue;
-            }
+        self.syncConnectedPeers();
+        const now_ns = currentTimestampNs(self.io);
+        var it = self.connected_peers.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.next_ping_at_ns = now_ns;
         }
+        self.pingDueConnectedPeers();
     }
 
     pub fn startLookup(self: *Service, target: *const NodeId) !u32 {
@@ -668,19 +742,8 @@ pub const Service = struct {
 
     fn drainIncomingPackets(self: *Service) void {
         var recv_buf: [protocol_mod.MAX_PACKET_SIZE]u8 = undefined;
-        while (true) {
-            const result = self.socket.receiveTimeout(&recv_buf, .{
-                .duration = .{
-                    .raw = Io.Duration.fromMilliseconds(@intCast(self.config.receive_timeout_ms)),
-                    .clock = .awake,
-                },
-            }) catch |err| switch (err) {
-                error.Timeout => return,
-                else => return,
-            };
-
-            self.protocol.handlePacket(result.data, result.from, &self.socket) catch {};
-        }
+        if (self.socket_ip4) |*socket| self.drainIncomingPacketsFrom(socket, &recv_buf);
+        if (self.socket_ip6) |*socket| self.drainIncomingPacketsFrom(socket, &recv_buf);
     }
 
     fn drainProtocolEvents(self: *Service) void {
@@ -688,9 +751,11 @@ pub const Service = struct {
             switch (protocol_event) {
                 .pong => |pong| {
                     self.maybeUpdateLocalEnrFromVote(pong.peer_id, recipientAddress(pong.recipient_ip, pong.recipient_port));
+                    self.notePeerResponsive(pong.peer_id, pong.peer_addr);
                     self.completed_events.append(self.allocator, .{ .pong = pong }) catch {};
                 },
                 .nodes => |nodes| {
+                    self.notePeerResponsive(nodes.peer_id, nodes.peer_addr);
                     const lookup_id = self.lookupIdForNodes(&nodes);
                     self.emitDiscoveredEnrs(&nodes, lookup_id);
                     self.handleLookupNodes(&nodes, lookup_id);
@@ -700,12 +765,14 @@ pub const Service = struct {
                     };
                 },
                 .talkreq => |talkreq| {
+                    self.notePeerResponsive(talkreq.peer_id, talkreq.peer_addr);
                     self.completed_events.append(self.allocator, .{ .talkreq = talkreq }) catch {
                         var owned = Event{ .talkreq = talkreq };
                         owned.deinit(self.allocator);
                     };
                 },
                 .talkresp => |talkresp| {
+                    self.notePeerResponsive(talkresp.peer_id, talkresp.peer_addr);
                     self.completed_events.append(self.allocator, .{ .talkresp = talkresp }) catch {
                         var owned = Event{ .talkresp = talkresp };
                         owned.deinit(self.allocator);
@@ -713,6 +780,7 @@ pub const Service = struct {
                 },
                 .request_timeout => |timeout| {
                     self.handleLookupTimeout(&timeout);
+                    self.handlePeerTimeout(&timeout);
                     self.completed_events.append(self.allocator, .{ .request_timeout = timeout }) catch {};
                 },
             }
@@ -783,6 +851,10 @@ pub const Service = struct {
         }
     }
 
+    fn handlePeerTimeout(self: *Service, timeout: *const protocol_mod.RequestTimeoutEvent) void {
+        self.disconnectPeer(timeout.peer_id);
+    }
+
     fn pruneTimedOutLookups(self: *Service) void {
         const now_ns = currentTimestampNs(self.io);
 
@@ -821,7 +893,10 @@ pub const Service = struct {
                 &known.pubkey,
                 known.addr,
                 distances[0..count],
-                &self.socket,
+                self.socketForAddress(known.addr) orelse {
+                    lookup.onFailure(&peer_id, &self.config);
+                    continue;
+                },
             ) catch {
                 lookup.onFailure(&peer_id, &self.config);
                 continue;
@@ -876,6 +951,131 @@ pub const Service = struct {
         });
     }
 
+    fn syncConnectedPeers(self: *Service) void {
+        const now_ns = currentTimestampNs(self.io);
+
+        var stale_peers: std.ArrayListUnmanaged(NodeId) = .empty;
+        defer stale_peers.deinit(self.allocator);
+
+        var tracked_it = self.connected_peers.iterator();
+        while (tracked_it.next()) |entry| {
+            const routing_entry = self.routingEntry(&entry.key_ptr.*) orelse {
+                stale_peers.append(self.allocator, entry.key_ptr.*) catch continue;
+                continue;
+            };
+            if (routing_entry.status != .connected) {
+                stale_peers.append(self.allocator, entry.key_ptr.*) catch continue;
+                continue;
+            }
+            entry.value_ptr.addr = routing_entry.addr;
+        }
+
+        for (stale_peers.items) |peer_id| {
+            const removed = self.connected_peers.fetchRemove(peer_id) orelse continue;
+            self.completed_events.append(self.allocator, .{
+                .peer_disconnected = .{
+                    .peer_id = removed.key,
+                    .peer_addr = removed.value.addr,
+                },
+            }) catch {};
+        }
+
+        for (&self.protocol.routing_table.buckets) |*bucket| {
+            for (bucket.entries[0..bucket.count]) |entry| {
+                if (entry.status != .connected) continue;
+                if (self.connected_peers.getPtr(entry.node_id)) |tracked| {
+                    tracked.addr = entry.addr;
+                    continue;
+                }
+                self.connected_peers.put(entry.node_id, .{
+                    .addr = entry.addr,
+                    .next_ping_at_ns = now_ns,
+                }) catch continue;
+                self.completed_events.append(self.allocator, .{
+                    .peer_connected = .{
+                        .peer_id = entry.node_id,
+                        .peer_addr = entry.addr,
+                    },
+                }) catch {};
+            }
+        }
+    }
+
+    fn pingDueConnectedPeers(self: *Service) void {
+        if (self.config.ping_interval_ms == 0) return;
+        const now_ns = currentTimestampNs(self.io);
+        const interval_ns: i64 = @intCast(@as(i128, self.config.ping_interval_ms) * std.time.ns_per_ms);
+
+        var it = self.connected_peers.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.awaiting_ping_response) continue;
+            if (entry.value_ptr.next_ping_at_ns > now_ns) continue;
+
+            const peer = self.protocol.getKnownNode(&entry.key_ptr.*) orelse {
+                entry.value_ptr.next_ping_at_ns = now_ns + interval_ns;
+                continue;
+            };
+
+            _ = self.protocol.sendPing(
+                &peer.node_id,
+                &peer.pubkey,
+                peer.addr,
+                self.protocol.config.local_enr_seq,
+                self.socketForAddress(peer.addr) orelse {
+                    entry.value_ptr.next_ping_at_ns = now_ns + interval_ns;
+                    continue;
+                },
+            ) catch {
+                entry.value_ptr.next_ping_at_ns = now_ns + interval_ns;
+                continue;
+            };
+            entry.value_ptr.addr = peer.addr;
+            entry.value_ptr.awaiting_ping_response = true;
+            entry.value_ptr.next_ping_at_ns = now_ns + interval_ns;
+        }
+    }
+
+    fn notePeerResponsive(self: *Service, peer_id: NodeId, peer_addr: Address) void {
+        if (self.connected_peers.getPtr(peer_id)) |tracked| {
+            tracked.addr = peer_addr;
+            tracked.awaiting_ping_response = false;
+            tracked.next_ping_at_ns = currentTimestampNs(self.io) +
+                @as(i64, @intCast(@as(i128, self.config.ping_interval_ms) * std.time.ns_per_ms));
+        }
+    }
+
+    fn routingEntry(self: *const Service, node_id: *const NodeId) ?kbucket.Entry {
+        const distance = kbucket.logDistance(&self.protocol.config.local_node_id, node_id) orelse return null;
+        for (self.protocol.routing_table.getBucket(distance)) |entry| {
+            if (std.mem.eql(u8, &entry.node_id, node_id)) return entry;
+        }
+        return null;
+    }
+
+    fn disconnectPeer(self: *Service, peer_id: NodeId) void {
+        const addr = if (self.connected_peers.get(peer_id)) |tracked|
+            tracked.addr
+        else if (self.protocol.node_records.get(peer_id)) |record|
+            record.addr
+        else
+            return;
+
+        _ = self.protocol.routing_table.insert(.{
+            .node_id = peer_id,
+            .addr = addr,
+            .last_seen = currentTimestampNs(self.io),
+            .status = .disconnected,
+        });
+
+        const removed = self.connected_peers.fetchRemove(peer_id) orelse return;
+        self.completed_events.append(self.allocator, .{
+            .peer_disconnected = .{
+                .peer_id = removed.key,
+                .peer_addr = removed.value.addr,
+            },
+        }) catch {};
+    }
+
     fn commitLocalEnrBytes(self: *Service, updated_enr: []u8, next_seq: u64, clear_votes: bool) !void {
         errdefer self.allocator.free(updated_enr);
 
@@ -899,6 +1099,43 @@ pub const Service = struct {
         });
 
         self.pingConnectedPeers();
+    }
+
+    fn socketForAddress(self: *Service, addr: Address) ?*udp_socket.Socket {
+        return switch (addr) {
+            .ip4 => if (self.socket_ip4) |*socket| socket else null,
+            .ip6 => if (self.socket_ip6) |*socket| socket else null,
+        };
+    }
+
+    fn socketCount(self: *const Service) usize {
+        var total: usize = 0;
+        if (self.socket_ip4 != null) total += 1;
+        if (self.socket_ip6 != null) total += 1;
+        return total;
+    }
+
+    fn receiveTimeoutPerSocketMs(self: *const Service) u64 {
+        if (self.config.receive_timeout_ms == 0) return 0;
+        const count = self.socketCount();
+        if (count <= 1) return self.config.receive_timeout_ms;
+        return @max(self.config.receive_timeout_ms / count, 1);
+    }
+
+    fn drainIncomingPacketsFrom(self: *Service, socket: *udp_socket.Socket, recv_buf: []u8) void {
+        while (true) {
+            const result = socket.receiveTimeout(recv_buf, .{
+                .duration = .{
+                    .raw = Io.Duration.fromMilliseconds(@intCast(self.receiveTimeoutPerSocketMs())),
+                    .clock = .awake,
+                },
+            }) catch |err| switch (err) {
+                error.Timeout => return,
+                else => return,
+            };
+
+            self.protocol.handlePacket(result.data, result.from, socket) catch {};
+        }
     }
 };
 
@@ -967,7 +1204,7 @@ test "discv5 service: lookup emits lookup_finished" {
     const node_id_c = enr_mod.nodeIdFromCompressedPubkey(&pk_c);
 
     var service_a = try Service.init(io, alloc, .{
-        .bind_address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } },
+        .bind_addresses = .{ .ip4 = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } } },
         .protocol_config = .{
             .local_secret_key = sk_a,
             .local_node_id = node_id_a,
@@ -984,7 +1221,8 @@ test "discv5 service: lookup emits lookup_finished" {
 
     var a_builder = enr_mod.Builder.init(alloc, sk_a, 1);
     a_builder.ip = .{ 127, 0, 0, 1 };
-    a_builder.udp = service_a.socket.address.getPort();
+    const addr_a = service_a.boundAddress(.ip4) orelse return error.MissingBindAddress;
+    a_builder.udp = addr_a.getPort();
     const a_enr = try a_builder.encode();
     defer alloc.free(a_enr);
     service_a.protocol.config.local_enr = a_enr;
@@ -1011,7 +1249,7 @@ test "discv5 service: lookup emits lookup_finished" {
     defer proto_b.deinit();
 
     service_a.addNode(node_id_b, &pk_b, addr_b, b_enr);
-    proto_b.addNode(node_id_a, &pk_a, service_a.socket.address, a_enr);
+    proto_b.addNode(node_id_a, &pk_a, addr_a, a_enr);
     proto_b.addNode(node_id_c, &pk_c, addr_c, c_enr);
 
     const lookup_id = try service_a.startLookup(&node_id_c);
@@ -1037,13 +1275,14 @@ test "discv5 service: lookup emits lookup_finished" {
     });
     try proto_b.handlePacket(handshake.data, handshake.from, &socket_b);
 
-    const nodes_packet = try service_a.socket.receiveTimeout(&recv_buf_a, .{
+    const socket_a = service_a.socketForAddress(addr_a) orelse return error.MissingBindAddress;
+    const nodes_packet = try socket_a.receiveTimeout(&recv_buf_a, .{
         .duration = .{
             .raw = Io.Duration.fromMilliseconds(250),
             .clock = .awake,
         },
     });
-    try service_a.protocol.handlePacket(nodes_packet.data, nodes_packet.from, &service_a.socket);
+    try service_a.protocol.handlePacket(nodes_packet.data, nodes_packet.from, socket_a);
     service_a.poll();
 
     var saw_lookup_finished = false;
@@ -1118,6 +1357,147 @@ test "discv5 service: lookup emits lookup_finished" {
     try std.testing.expect(saw_lookup_finished);
 }
 
+test "discv5 service: connected peers are pinged and disconnected on timeout" {
+    const alloc = std.testing.allocator;
+    const io = std.Options.debug_io;
+    const hex = @import("hex.zig");
+    const secp = @import("secp256k1.zig");
+
+    const sk_a = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
+    const pk_a = try secp.pubkeyFromSecret(&sk_a);
+    const node_id_a = enr_mod.nodeIdFromCompressedPubkey(&pk_a);
+
+    const sk_b = hex.hexToBytesComptime(32, "66fb62bfbd66b9177a138c1e5cddbe4f7c30c343e94e68df8769459cb14571f7");
+    const pk_b = try secp.pubkeyFromSecret(&sk_b);
+    const node_id_b = enr_mod.nodeIdFromCompressedPubkey(&pk_b);
+
+    var service_a = try Service.init(io, alloc, .{
+        .bind_addresses = .{ .ip4 = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } } },
+        .protocol_config = .{
+            .local_secret_key = sk_a,
+            .local_node_id = node_id_a,
+            .request_timeout_ms = 1_000,
+        },
+        .ping_interval_ms = 30_000,
+    });
+    defer service_a.deinit();
+
+    var socket_b = try udp_socket.Socket.bind(io, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer socket_b.close();
+
+    const addr_b = socket_b.address;
+
+    var a_builder = enr_mod.Builder.init(alloc, sk_a, 1);
+    a_builder.ip = .{ 127, 0, 0, 1 };
+    const addr_a = service_a.boundAddress(.ip4) orelse return error.MissingBindAddress;
+    a_builder.udp = addr_a.getPort();
+    const a_enr = try a_builder.encode();
+    defer alloc.free(a_enr);
+    try service_a.setLocalEnr(a_enr);
+
+    var b_builder = enr_mod.Builder.init(alloc, sk_b, 1);
+    b_builder.ip = .{ 127, 0, 0, 1 };
+    b_builder.udp = addr_b.getPort();
+    const b_enr = try b_builder.encode();
+    defer alloc.free(b_enr);
+
+    var proto_b = try Protocol.init(io, alloc, .{
+        .local_secret_key = sk_b,
+        .local_node_id = node_id_b,
+        .local_enr = b_enr,
+        .local_enr_seq = 1,
+    });
+    defer proto_b.deinit();
+
+    service_a.addNode(node_id_b, &pk_b, addr_b, b_enr);
+    proto_b.addNode(node_id_a, &pk_a, addr_a, a_enr);
+
+    _ = try service_a.sendPing(&node_id_b, &pk_b, addr_b, service_a.localEnrSeq());
+
+    var recv_buf_a: [protocol_mod.MAX_PACKET_SIZE]u8 = undefined;
+    var recv_buf_b: [protocol_mod.MAX_PACKET_SIZE]u8 = undefined;
+
+    const inbound_a = try socket_b.receiveTimeout(&recv_buf_b, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_b.handlePacket(inbound_a.data, inbound_a.from, &socket_b);
+    service_a.poll();
+
+    const handshake = try socket_b.receiveTimeout(&recv_buf_b, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_b.handlePacket(handshake.data, handshake.from, &socket_b);
+
+    const socket_a = service_a.socketForAddress(addr_a) orelse return error.MissingBindAddress;
+    const pong_packet = try socket_a.receiveTimeout(&recv_buf_a, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try service_a.protocol.handlePacket(pong_packet.data, pong_packet.from, socket_a);
+    service_a.poll();
+
+    try std.testing.expectEqual(@as(usize, 1), service_a.connectedPeerCount());
+
+    var saw_connected = false;
+    while (service_a.popEvent()) |event| {
+        var owned = event;
+        defer owned.deinit(alloc);
+
+        switch (owned) {
+            .peer_connected => |connected| {
+                saw_connected = true;
+                try std.testing.expectEqual(node_id_b, connected.peer_id);
+                try std.testing.expectEqual(addr_b, connected.peer_addr);
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_connected);
+
+    try std.testing.expect(service_a.protocol.active_requests.count() > 0);
+    var active_request_it = service_a.protocol.active_requests.iterator();
+    while (active_request_it.next()) |entry| {
+        entry.value_ptr.started_at_ns = 0;
+    }
+
+    service_a.poll();
+
+    try std.testing.expectEqual(@as(usize, 0), service_a.connectedPeerCount());
+
+    var saw_timeout = false;
+    var saw_disconnected = false;
+    while (service_a.popEvent()) |event| {
+        var owned = event;
+        defer owned.deinit(alloc);
+
+        switch (owned) {
+            .request_timeout => |timeout| {
+                if (std.mem.eql(u8, &timeout.peer_id, &node_id_b)) {
+                    saw_timeout = true;
+                    try std.testing.expectEqual(protocol_mod.RequestKind.ping, timeout.kind);
+                }
+            },
+            .peer_disconnected => |disconnected| {
+                saw_disconnected = true;
+                try std.testing.expectEqual(node_id_b, disconnected.peer_id);
+                try std.testing.expectEqual(addr_b, disconnected.peer_addr);
+            },
+            else => {},
+        }
+    }
+
+    try std.testing.expect(saw_timeout);
+    try std.testing.expect(saw_disconnected);
+}
+
 test "discv5 service: setLocalEnr exposes current local ENR" {
     const alloc = std.testing.allocator;
     const io = std.Options.debug_io;
@@ -1136,7 +1516,7 @@ test "discv5 service: setLocalEnr exposes current local ENR" {
     defer alloc.free(local_enr);
 
     var service = try Service.init(io, alloc, .{
-        .bind_address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } },
+        .bind_addresses = .{ .ip4 = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } } },
         .protocol_config = .{
             .local_secret_key = sk,
             .local_node_id = node_id,
@@ -1193,6 +1573,34 @@ test "discv5 service: setLocalEnr exposes current local ENR" {
     try std.testing.expect(saw_update_event);
 }
 
+test "discv5 service: dual bind exposes both listener families" {
+    const alloc = std.testing.allocator;
+    const io = std.Options.debug_io;
+    const hex = @import("hex.zig");
+    const secp = @import("secp256k1.zig");
+
+    const sk = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
+    const pk = try secp.pubkeyFromSecret(&sk);
+    const node_id = enr_mod.nodeIdFromCompressedPubkey(&pk);
+
+    var service = try Service.init(io, alloc, .{
+        .bind_addresses = .{
+            .ip4 = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } },
+            .ip6 = .{ .ip6 = .{ .bytes = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, .port = 0 } },
+        },
+        .protocol_config = .{
+            .local_secret_key = sk,
+            .local_node_id = node_id,
+        },
+    });
+    defer service.deinit();
+
+    try std.testing.expect(service.boundPort(.ip4) != null);
+    try std.testing.expect(service.boundPort(.ip6) != null);
+    try std.testing.expect(service.boundAddress(.ip4) != null);
+    try std.testing.expect(service.boundAddress(.ip6) != null);
+}
+
 test "discv5 service: addr votes update local ENR" {
     const alloc = std.testing.allocator;
     const io = std.Options.debug_io;
@@ -1212,7 +1620,7 @@ test "discv5 service: addr votes update local ENR" {
     defer alloc.free(local_enr);
 
     var service = try Service.init(io, alloc, .{
-        .bind_address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } },
+        .bind_addresses = .{ .ip4 = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } } },
         .protocol_config = .{
             .local_secret_key = sk,
             .local_node_id = node_id,
@@ -1264,7 +1672,7 @@ test "discv5 service: ipv4-mapped ipv6 vote normalizes to ipv4" {
     defer alloc.free(local_enr);
 
     var service = try Service.init(io, alloc, .{
-        .bind_address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } },
+        .bind_addresses = .{ .ip4 = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } } },
         .protocol_config = .{
             .local_secret_key = sk,
             .local_node_id = node_id,

@@ -3,11 +3,11 @@ const cli = @import("zig_cli");
 pub const spec = cli.command(.{
     .description = "Run a standalone discv5 bootnode",
     .options = .{
-        .listen_address = cli.option([]const u8, .{
+        .listen_address = cli.option(?[]const u8, .{
             .long = "listenAddress",
-            .description = "IPv4 address to listen for discv5 connections",
+            .description = "IPv4 address to listen for discv5 connections; omit to disable IPv4 if IPv6 is configured",
             .env = "LODESTAR_Z_BOOTNODE_LISTEN_ADDRESS",
-        }, "0.0.0.0"),
+        }, null),
         .bn_port = cli.option(u16, .{
             .long = "port",
             .description = "UDP port for bootnode discv5",
@@ -19,7 +19,7 @@ pub const spec = cli.command(.{
         }, null),
         .listen_address6 = cli.option(?[]const u8, .{
             .long = "listenAddress6",
-            .description = "IPv6 address to listen for discv5 connections",
+            .description = "IPv6 address to listen for discv5 connections; omit to disable IPv6 unless IPv6-specific options are set",
             .env = "LODESTAR_Z_BOOTNODE_LISTEN_ADDRESS6",
         }, null),
         .port6 = cli.option(?u16, .{
