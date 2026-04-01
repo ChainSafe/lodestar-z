@@ -9,11 +9,9 @@ const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
 const state_transition = @import("state_transition");
 const chain_mod = @import("chain");
-const produceBlockBody = chain_mod.produceBlockBody;
 const ProducedBlockBody = chain_mod.ProducedBlockBody;
 const ProducedBlock = chain_mod.ProducedBlock;
 const BlockProductionConfig = chain_mod.BlockProductionConfig;
-const assembleBlock = chain_mod.assembleBlock;
 const ImportResult = chain_mod.ImportResult;
 const execution_mod = @import("execution");
 const ForkchoiceStateV1 = execution_mod.ForkchoiceStateV1;
@@ -32,42 +30,22 @@ pub fn notifyForkchoiceUpdateWithAttrs(
     payload_attrs: ?PayloadAttributesV3,
 ) !void {
     const engine = self.engine_api orelse return;
-    const fc = self.fork_choice orelse return;
-
-    const head_node = fc.getBlockDefaultStatus(new_head_root);
-    const head_block_hash = if (head_node) |node|
-        node.extra_meta.executionPayloadBlockHash() orelse return
-    else
-        return;
-
-    const justified_cp = fc.getJustifiedCheckpoint();
-    const safe_block_hash = if (fc.getBlockDefaultStatus(justified_cp.root)) |node|
-        node.extra_meta.executionPayloadBlockHash() orelse std.mem.zeroes([32]u8)
-    else
-        std.mem.zeroes([32]u8);
-
-    const finalized_cp = fc.getFinalizedCheckpoint();
-    const finalized_block_hash = if (fc.getBlockDefaultStatus(finalized_cp.root)) |node|
-        node.extra_meta.executionPayloadBlockHash() orelse std.mem.zeroes([32]u8)
-    else
-        std.mem.zeroes([32]u8);
+    const fc_state = self.chainQuery().executionForkchoiceState(new_head_root) orelse return;
 
     const fcu_state = ForkchoiceStateV1{
-        .head_block_hash = head_block_hash,
-        .safe_block_hash = safe_block_hash,
-        .finalized_block_hash = finalized_block_hash,
+        .head_block_hash = fc_state.head_block_hash,
+        .safe_block_hash = fc_state.safe_block_hash,
+        .finalized_block_hash = fc_state.finalized_block_hash,
     };
 
     const result = engine.forkchoiceUpdated(fcu_state, payload_attrs) catch |err| {
         std.log.warn("engine_forkchoiceUpdatedV3 failed: {}", .{err});
         self.el_offline = true;
-        self.api_sync_status.el_offline = true;
         if (self.metrics) |m| m.execution_errors_total.incr();
         return err;
     };
 
     self.el_offline = false;
-    self.api_sync_status.el_offline = false;
 
     if (result.payload_id) |payload_id| {
         self.cached_payload_id = payload_id;
@@ -78,18 +56,18 @@ pub fn notifyForkchoiceUpdateWithAttrs(
 
     std.log.info("forkchoiceUpdated: status={s} head={s}... safe={s}... finalized={s}...", .{
         @tagName(result.payload_status.status),
-        &std.fmt.bytesToHex(head_block_hash[0..4], .lower),
-        &std.fmt.bytesToHex(safe_block_hash[0..4], .lower),
-        &std.fmt.bytesToHex(finalized_block_hash[0..4], .lower),
+        &std.fmt.bytesToHex(fc_state.head_block_hash[0..4], .lower),
+        &std.fmt.bytesToHex(fc_state.safe_block_hash[0..4], .lower),
+        &std.fmt.bytesToHex(fc_state.finalized_block_hash[0..4], .lower),
     });
 
     if (payload_attrs) |attrs| {
         self.event_bus.emit(.{ .payload_attributes = .{
             .proposer_index = 0,
-            .proposal_slot = self.head_tracker.head_slot + 1,
+            .proposal_slot = self.currentHeadSlot() + 1,
             .parent_block_number = 0,
             .parent_block_root = new_head_root,
-            .parent_block_hash = head_block_hash,
+            .parent_block_hash = fc_state.head_block_hash,
             .timestamp = attrs.timestamp,
             .prev_randao = attrs.prev_randao,
             .suggested_fee_recipient = attrs.suggested_fee_recipient,
@@ -112,7 +90,7 @@ pub fn preparePayload(
         .withdrawals = withdrawals_slice,
         .parent_beacon_block_root = parent_beacon_block_root,
     };
-    try notifyForkchoiceUpdateWithAttrs(self, self.head_tracker.head_root, attrs);
+    try notifyForkchoiceUpdateWithAttrs(self, self.currentHeadRoot(), attrs);
 }
 
 pub fn getExecutionPayload(self: *BeaconNode) !GetPayloadResponse {
@@ -122,12 +100,10 @@ pub fn getExecutionPayload(self: *BeaconNode) !GetPayloadResponse {
     const result = engine.getPayload(payload_id) catch |err| {
         std.log.warn("engine_getPayloadV3 failed: {}", .{err});
         self.el_offline = true;
-        self.api_sync_status.el_offline = true;
         return err;
     };
 
     self.el_offline = false;
-    self.api_sync_status.el_offline = false;
     self.cached_payload_id = null;
 
     std.log.info("getPayload: block_number={d} block_value={d} txs={d} blobs={d}", .{
@@ -150,9 +126,7 @@ pub fn getExecutionPayload(self: *BeaconNode) !GetPayloadResponse {
         if (maybe_bid) |bid| {
             const bid_value = bid.message.value;
             const local_value = result.block_value;
-            const threshold_scaled = @as(u256, @intFromFloat(
-                @as(f64, @floatFromInt(local_value)) * self.builder_bid_threshold
-            ));
+            const threshold_scaled = @as(u256, @intFromFloat(@as(f64, @floatFromInt(local_value)) * self.builder_bid_threshold));
 
             if (bid_value >= threshold_scaled and bid_value > 0) {
                 std.log.info(
@@ -187,7 +161,7 @@ pub fn registerValidatorsWithBuilder(
 }
 
 pub fn produceBlock(self: *BeaconNode, slot: u64) !ProducedBlockBody {
-    return produceBlockBody(self.allocator, slot, self.op_pool);
+    return self.chainService().produceBlock(slot);
 }
 
 pub fn produceFullBlock(self: *BeaconNode, slot: u64, prod_config: BlockProductionConfig) !ProducedBlock {
@@ -195,9 +169,6 @@ pub fn produceFullBlock(self: *BeaconNode, slot: u64, prod_config: BlockProducti
     if (effective_config.graffiti == null) {
         effective_config.graffiti = self.node_options.graffiti;
     }
-
-    const head = self.getHead();
-    const parent_root = head.root;
 
     var exec_payload = types.electra.ExecutionPayload.default_value;
     var blobs_bundle: ?chain_mod.produce_block.BlobsBundle = null;
@@ -227,40 +198,19 @@ pub fn produceFullBlock(self: *BeaconNode, slot: u64, prod_config: BlockProducti
         }
     }
 
-    var eth1_data = types.phase0.Eth1Data.default_value;
-    if (self.block_state_cache.get(parent_root)) |head_state| {
-        const state_eth1 = head_state.state.eth1Data() catch null;
-        if (state_eth1) |eth1_view| {
-            eth1_data.deposit_root = (eth1_view.getFieldRoot("deposit_root") catch &std.mem.zeroes([32]u8)).*;
-            eth1_data.deposit_count = eth1_view.get("deposit_count") catch 0;
-            eth1_data.block_hash = (eth1_view.getFieldRoot("block_hash") catch &std.mem.zeroes([32]u8)).*;
-        }
-    }
-
-    var proposer_index: u64 = 0;
-    if (self.block_state_cache.get(parent_root)) |head_state| {
-        proposer_index = head_state.getBeaconProposer(slot) catch 0;
-    }
-
-    const block = try assembleBlock(
-        self.allocator,
+    const block = try self.chainService().produceFullBlockWithPayload(
         slot,
-        proposer_index,
-        parent_root,
-        self.op_pool,
         exec_payload,
         blobs_bundle,
         block_value,
         blob_commitments,
-        eth1_data,
         effective_config,
-        self.sync_contribution_pool,
     );
 
     std.log.info("Produced full block: slot={d} proposer={d} parent={s}... value={d}", .{
         slot,
-        proposer_index,
-        &std.fmt.bytesToHex(parent_root[0..4], .lower),
+        block.proposer_index,
+        &std.fmt.bytesToHex(block.parent_root[0..4], .lower),
         @as(u64, @truncate(block.block_value)),
     });
 
@@ -288,7 +238,7 @@ pub fn produceAndImportBlock(
         .signature = [_]u8{0} ** 96,
     };
 
-    if (self.block_state_cache.get(produced.parent_root)) |head_state| {
+    if (self.headState()) |head_state| {
         const any_block = fork_types.AnySignedBeaconBlock{ .full_electra = signed_block };
 
         const post_state = state_transition.stateTransition(

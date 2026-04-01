@@ -119,31 +119,8 @@ test "getState head returns serialized bytes from live state query" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
     defer test_state.deinit();
 
-    const StateQueryCb = struct {
-        cached: *state_transition.CachedBeaconState,
-
-        fn getHeadState(ptr: *anyopaque) ?*state_transition.CachedBeaconState {
-            const self: *@This() = @ptrCast(@alignCast(ptr));
-            return self.cached;
-        }
-
-        fn getStateByRoot(ptr: *anyopaque, _: [32]u8) anyerror!?*state_transition.CachedBeaconState {
-            const self: *@This() = @ptrCast(@alignCast(ptr));
-            return self.cached;
-        }
-
-        fn getStateBySlot(_: *anyopaque, _: u64) anyerror!?*state_transition.CachedBeaconState {
-            return null;
-        }
-    };
-
-    var cb_ctx = StateQueryCb{ .cached = test_state.cached_state };
-    tc.ctx.state_query = .{
-        .ptr = &cb_ctx,
-        .getHeadStateFn = &StateQueryCb.getHeadState,
-        .getStateByRootFn = &StateQueryCb.getStateByRoot,
-        .getStateBySlotFn = &StateQueryCb.getStateBySlot,
-    };
+    tc.chain_fixture.head_state = test_state.cached_state;
+    tc.chain_fixture.state_by_root = test_state.cached_state;
 
     const result = try getState(&tc.ctx, .head);
     defer allocator.free(result.data);
@@ -209,8 +186,8 @@ test "getHeads returns single head entry" {
     defer tc.ctx.allocator.free(result.data);
 
     try std.testing.expectEqual(@as(usize, 1), result.data.len);
-    try std.testing.expectEqual(tc.ctx.head_tracker.head_slot, result.data[0].slot);
-    try std.testing.expectEqual(tc.ctx.head_tracker.head_root, result.data[0].root);
+    try std.testing.expectEqual(tc.head_tracker.head_slot, result.data[0].slot);
+    try std.testing.expectEqual(tc.head_tracker.head_root, result.data[0].root);
 }
 
 // ---------------------------------------------------------------------------

@@ -61,6 +61,7 @@ const ProducedBlock = produce_block_mod.ProducedBlock;
 const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
 const ProtoBlock = fork_choice_mod.ProtoBlock;
+const CheckpointWithPayloadStatus = fork_choice_mod.CheckpointWithPayloadStatus;
 
 const networking = @import("networking");
 const StatusMessage = networking.messages.StatusMessage;
@@ -71,8 +72,8 @@ const ChainGossipState = gossip_validation_mod.ChainState;
 pub const ImportResult = chain_types.ImportResult;
 pub const HeadInfo = chain_types.HeadInfo;
 pub const SyncStatus = chain_types.SyncStatus;
-pub const EventCallback = chain_types.EventCallback;
-pub const SseEvent = chain_types.SseEvent;
+pub const NotificationSink = chain_types.NotificationSink;
+pub const ChainNotification = chain_types.ChainNotification;
 
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const sync_contribution_pool_mod = @import("sync_contribution_pool.zig");
@@ -94,11 +95,24 @@ fn unixTimestampSeconds() u64 {
     }
 }
 
+fn dummyBalancesGetterFn(
+    _: ?*anyopaque,
+    _: CheckpointWithPayloadStatus,
+    _: *CachedBeaconState,
+) fork_choice_mod.JustifiedBalances {
+    return fork_choice_mod.JustifiedBalances.init(std.heap.page_allocator);
+}
+
 // ---------------------------------------------------------------------------
 // Chain
 // ---------------------------------------------------------------------------
 
 pub const Chain = struct {
+    const BootstrapResult = struct {
+        genesis_time: u64,
+        genesis_validators_root: [32]u8,
+    };
+
     allocator: Allocator,
     config: *const BeaconConfig,
 
@@ -145,8 +159,8 @@ pub const Chain = struct {
     /// Maps block root → state root for pre-state lookup.
     block_to_state: std.AutoArrayHashMap([32]u8, [32]u8),
 
-    // --- SSE event callback (optional, set by BeaconNode) ---
-    event_callback: ?EventCallback,
+    // --- Chain notification sink (optional, set by BeaconNode) ---
+    notification_sink: ?NotificationSink,
 
     // --- Validator monitor (optional, set by BeaconNode) ---
     validator_monitor: ?*ValidatorMonitor = null,
@@ -191,13 +205,17 @@ pub const Chain = struct {
             .sync_committee_message_pool = null,
             .verify_signatures = false,
             .block_to_state = std.AutoArrayHashMap([32]u8, [32]u8).init(allocator),
-            .event_callback = null,
+            .notification_sink = null,
             .genesis_validators_root = [_]u8{0} ** 32,
             .genesis_time_s = 0,
         };
     }
 
     pub fn deinit(self: *Chain) void {
+        if (self.fork_choice) |fc| {
+            fork_choice_mod.destroyFromAnchor(self.allocator, fc);
+            self.fork_choice = null;
+        }
         self.block_to_state.deinit();
     }
 
@@ -211,11 +229,132 @@ pub const Chain = struct {
         try self.block_to_state.put(block_root, state_root);
     }
 
+    pub fn bootstrapFromGenesis(self: *Chain, genesis_state: *CachedBeaconState) !BootstrapResult {
+        try genesis_state.state.commit();
+
+        var genesis_header = try genesis_state.state.latestBlockHeader();
+        const genesis_block_root = (try genesis_header.hashTreeRoot()).*;
+        const genesis_slot = try genesis_state.state.slot();
+
+        return self.bootstrapFromAnchorState(genesis_state, genesis_block_root, genesis_slot);
+    }
+
+    pub fn bootstrapFromCheckpoint(self: *Chain, checkpoint_state: *CachedBeaconState) !BootstrapResult {
+        try checkpoint_state.state.commit();
+        const state_root = (try checkpoint_state.state.hashTreeRoot()).*;
+
+        var cp_header = try checkpoint_state.state.latestBlockHeader();
+        const header_slot = try cp_header.get("slot");
+        const header_proposer = try cp_header.get("proposer_index");
+        const header_parent = (try cp_header.getFieldRoot("parent_root")).*;
+        const header_body = (try cp_header.getFieldRoot("body_root")).*;
+
+        var header_state_root = (try cp_header.getFieldRoot("state_root")).*;
+        if (std.mem.eql(u8, &header_state_root, &([_]u8{0} ** 32))) {
+            header_state_root = state_root;
+        }
+
+        const cp_header_val = consensus_types.phase0.BeaconBlockHeader.Type{
+            .slot = header_slot,
+            .proposer_index = header_proposer,
+            .parent_root = header_parent,
+            .state_root = header_state_root,
+            .body_root = header_body,
+        };
+        var anchor_block_root: [32]u8 = undefined;
+        try consensus_types.phase0.BeaconBlockHeader.hashTreeRoot(&cp_header_val, &anchor_block_root);
+
+        const checkpoint_slot = try checkpoint_state.state.slot();
+        return self.bootstrapFromAnchorState(checkpoint_state, anchor_block_root, checkpoint_slot);
+    }
+
+    fn bootstrapFromAnchorState(
+        self: *Chain,
+        anchor_state: *CachedBeaconState,
+        anchor_block_root: [32]u8,
+        anchor_slot: u64,
+    ) !BootstrapResult {
+        const cached_state_root = if (self.queued_regen) |qr|
+            try qr.onNewBlock(anchor_state, true)
+        else
+            try self.state_regen.onNewBlock(anchor_state, true);
+
+        try self.registerGenesisRoot(anchor_block_root, cached_state_root);
+        try self.head_tracker.onBlock(anchor_block_root, anchor_slot, cached_state_root);
+        self.head_tracker.setHead(anchor_block_root, anchor_slot, cached_state_root);
+        try self.head_tracker.onEpochTransition(anchor_state);
+
+        const genesis_validators_root = (try anchor_state.state.genesisValidatorsRoot()).*;
+        self.genesis_validators_root = genesis_validators_root;
+        const genesis_time = try anchor_state.state.genesisTime();
+        self.genesis_time_s = genesis_time;
+
+        var justified_cp: consensus_types.phase0.Checkpoint.Type = undefined;
+        try anchor_state.state.currentJustifiedCheckpoint(&justified_cp);
+        var finalized_cp: consensus_types.phase0.Checkpoint.Type = undefined;
+        try anchor_state.state.finalizedCheckpoint(&finalized_cp);
+
+        const balances = anchor_state.epoch_cache.getEffectiveBalanceIncrements();
+        const justified_root = anchor_block_root;
+        const finalized_root = anchor_block_root;
+
+        const fc_anchor = ProtoBlock{
+            .slot = anchor_slot,
+            .block_root = anchor_block_root,
+            .parent_root = anchor_block_root,
+            .state_root = cached_state_root,
+            .target_root = anchor_block_root,
+            .justified_epoch = justified_cp.epoch,
+            .justified_root = justified_root,
+            .finalized_epoch = finalized_cp.epoch,
+            .finalized_root = finalized_root,
+            .unrealized_justified_epoch = justified_cp.epoch,
+            .unrealized_justified_root = justified_root,
+            .unrealized_finalized_epoch = finalized_cp.epoch,
+            .unrealized_finalized_root = finalized_root,
+            .extra_meta = .{ .pre_merge = {} },
+            .timeliness = true,
+        };
+
+        const fc = try fork_choice_mod.initFromAnchor(
+            self.allocator,
+            self.config,
+            fc_anchor,
+            anchor_slot,
+            CheckpointWithPayloadStatus.fromCheckpoint(.{
+                .epoch = justified_cp.epoch,
+                .root = justified_root,
+            }, .full),
+            CheckpointWithPayloadStatus.fromCheckpoint(.{
+                .epoch = finalized_cp.epoch,
+                .root = finalized_root,
+            }, .full),
+            balances.items,
+            .{ .getFn = dummyBalancesGetterFn },
+            .{},
+            .{},
+        );
+
+        self.replaceForkChoice(fc);
+
+        return .{
+            .genesis_time = genesis_time,
+            .genesis_validators_root = genesis_validators_root,
+        };
+    }
+
+    fn replaceForkChoice(self: *Chain, next: *ForkChoice) void {
+        if (self.fork_choice) |old_fc| {
+            fork_choice_mod.destroyFromAnchor(self.allocator, old_fc);
+        }
+        self.fork_choice = next;
+    }
+
     // -----------------------------------------------------------------------
     // Block import pipeline
     // -----------------------------------------------------------------------
 
-    /// Full block import pipeline: sanity → STFN → fork choice → persist → head → SSE.
+    /// Full block import pipeline: sanity → STFN → fork choice → persist → head → notifications.
     ///
     /// Fork-polymorphic entry point. Accepts any signed beacon block via
     /// AnySignedBeaconBlock and delegates to processBlockPipeline, eliminating
@@ -316,7 +455,7 @@ pub const Chain = struct {
             .db = self.db,
             .head_tracker = self.head_tracker,
             .block_to_state = &self.block_to_state,
-            .event_callback = self.event_callback,
+            .notification_sink = self.notification_sink,
             .execution_verifier = null, // Set by BeaconNode when EL is configured
             .current_slot = current_slot,
             .reprocess_queue = self.reprocess_queue, // P1-10: wire reprocess queue
@@ -367,9 +506,9 @@ pub const Chain = struct {
         // Both formats are accepted; the pool handles fork-aware storage.
         try self.op_pool.attestation_pool.addAny(attestation);
 
-        // Emit SSE attestation event.
-        if (self.event_callback) |cb| {
-            cb.emit(.{
+        // Publish attestation notification.
+        if (self.notification_sink) |sink| {
+            sink.publish(.{
                 .attestation = .{
                     .aggregation_bits = [_]u8{0x01} ++ [_]u8{0} ** 7, // simplified; real impl extracts from bitfield
                     .slot = attestation_slot,
@@ -432,7 +571,7 @@ pub const Chain = struct {
     /// Called when a new finalized checkpoint is detected.
     ///
     /// Prunes caches to free memory from pre-finalization data,
-    /// prunes the fork choice DAG, and emits SSE finalized_checkpoint event.
+    /// prunes the fork choice DAG, and keeps finalized checkpoint notifications bounded.
     pub fn onFinalized(self: *Chain, finalized_epoch: u64, finalized_root: [32]u8) void {
         log_mod.logger(.chain).info("onFinalized: epoch={d} root={s}...", .{
             finalized_epoch,
@@ -503,7 +642,7 @@ pub const Chain = struct {
             var b2s_it = self.block_to_state.iterator();
             while (b2s_it.next()) |entry| {
                 const root = entry.key_ptr.*;
-                // Never evict the finalized root itself — needed for SSE event above.
+                // Never evict the finalized root itself — needed for the finalized notification above.
                 if (std.mem.eql(u8, &root, &finalized_root)) continue;
                 // Keep entries still referenced by slot_roots (post-finalization blocks).
                 if (!live_roots.contains(root)) {
@@ -533,7 +672,7 @@ pub const Chain = struct {
             rq.prune(finalized_slot);
         }
 
-        // Note: finalized_checkpoint SSE event is emitted in import_block.zig
+        // Note: finalized_checkpoint notification is emitted in import_block.zig
         // (after fork choice head recomputation) with accurate state_root context.
         // Emitting it again here would produce duplicates.
     }
@@ -606,20 +745,28 @@ pub const Chain = struct {
     ///
     /// Used for req/resp Status exchanges with peers.
     pub fn getStatus(self: *const Chain) StatusMessage.Type {
+        const head = self.getHead();
+        if (self.fork_choice) |fc| {
+            const finalized = fc.getFinalizedCheckpoint();
+            return .{
+                .fork_digest = self.config.forkDigestAtSlot(head.slot, self.genesis_validators_root),
+                .finalized_root = finalized.root,
+                .finalized_epoch = finalized.epoch,
+                .head_root = head.root,
+                .head_slot = head.slot,
+            };
+        }
+
         return .{
-            .fork_digest = self.config.forkDigestAtSlot(self.head_tracker.head_slot, self.genesis_validators_root),
+            .fork_digest = self.config.forkDigestAtSlot(head.slot, self.genesis_validators_root),
             .finalized_root = if (self.head_tracker.finalized_epoch == 0)
                 [_]u8{0} ** 32
-            else if (self.fork_choice) |fc|
-                // Use fork choice's authoritative finalized checkpoint root.
-                // Avoid slot_roots lookup which may miss skip slots.
-                fc.getFinalizedCheckpoint().root
             else if (self.head_tracker.getBlockRoot(
                 self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH,
             )) |r| r else [_]u8{0} ** 32,
             .finalized_epoch = self.head_tracker.finalized_epoch,
-            .head_root = self.head_tracker.head_root,
-            .head_slot = self.head_tracker.head_slot,
+            .head_root = head.root,
+            .head_slot = head.slot,
         };
     }
 
@@ -734,10 +881,10 @@ pub const Chain = struct {
     pub fn importBlobSidecar(self: *Chain, root: [32]u8, data: []const u8) !void {
         try self.db.putBlobSidecars(root, data);
 
-        // Emit SSE blob_sidecar event.
+        // Publish blob_sidecar notification.
         // TODO: Parse actual blob fields (index, slot, kzg_commitment) from data.
-        if (self.event_callback) |cb| {
-            cb.emit(.{ .blob_sidecar = .{
+        if (self.notification_sink) |sink| {
+            sink.publish(.{ .blob_sidecar = .{
                 .block_root = root,
                 .index = 0,
                 .slot = 0,

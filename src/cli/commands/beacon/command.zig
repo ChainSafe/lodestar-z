@@ -466,10 +466,10 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
             custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
         }
         std.log.info("Initialized from checkpoint file at slot {d}", .{cp_slot});
-    } else if (if (!force_checkpoint) node.db.getLatestStateArchiveSlot() catch null else null) |db_slot| {
+    } else if (if (!force_checkpoint) node.chainQuery().latestStateArchiveSlot() catch null else null) |db_slot| {
         std.log.info("Found persisted state in DB at slot {d}, resuming...", .{db_slot});
 
-        const state_bytes = node.db.getStateArchive(db_slot) catch |err| {
+        const state_bytes = node.chainQuery().stateArchiveAtSlot(db_slot) catch |err| {
             std.log.err("Failed to read state from DB at slot {d}: {}", .{ db_slot, err });
             std.process.exit(1);
         } orelse {

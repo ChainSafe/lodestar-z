@@ -9,11 +9,11 @@
 //! 6. Cache checkpoint state at epoch boundaries
 //! 7. Compute and update head
 //! 8. Notify EL via forkchoiceUpdated (if head/finality changed)
-//! 9. Emit SSE events
+//! 9. Publish chain notifications
 //! 10. Notify queued regen / reprocess controller
 //!
 //! Order matters: DB write before fork choice (so blocks in FC always exist
-//! in DB), fork choice before head update, head update before events.
+//! in DB), fork choice before head update, head update before notifications.
 //!
 //! Reference: Lodestar chain/blocks/importBlock.ts
 
@@ -44,8 +44,7 @@ const ExecutionStatus = pipeline_types.ExecutionStatus;
 const BlockImportError = pipeline_types.BlockImportError;
 
 const chain_types = @import("../types.zig");
-const EventCallback = chain_types.EventCallback;
-const SseEvent = chain_types.SseEvent;
+const NotificationSink = chain_types.NotificationSink;
 
 const block_import = @import("../block_import.zig");
 const HeadTracker = block_import.HeadTracker;
@@ -54,8 +53,8 @@ const reprocess_mod = @import("../reprocess.zig");
 const ReprocessQueue = reprocess_mod.ReprocessQueue;
 const PendingReason = reprocess_mod.PendingReason;
 
-/// Maximum number of slots in the past for which we emit block events.
-/// Prevents flooding the event stream during sync.
+/// Maximum number of slots in the past for which we publish block notifications.
+/// Prevents flooding downstream subscribers during sync.
 const EVENTSTREAM_EMIT_RECENT_BLOCK_SLOTS: u64 = 64;
 
 /// Fork choice attestation epoch limit.
@@ -90,8 +89,8 @@ pub const ImportContext = struct {
     // -- Block root → state root mapping --
     block_to_state: *std.AutoArrayHashMap([32]u8, [32]u8),
 
-    // -- Events --
-    event_callback: ?EventCallback,
+    // -- Chain notifications --
+    notification_sink: ?NotificationSink,
 
     // -- Reprocessing -- (P1-10 fix)
     /// When set, blocks that fail with ParentUnknown are queued here for
@@ -117,7 +116,7 @@ pub const ImportContext = struct {
 /// - Fork choice DAG updated
 /// - Post-state cached
 /// - Head potentially updated
-/// - SSE events emitted
+/// - chain notifications published
 ///
 /// The block MUST have passed all verification stages before reaching this point.
 pub fn importVerifiedBlock(
@@ -223,81 +222,81 @@ pub fn importVerifiedBlock(
             // Skip attestation/slashing wiring when onBlockFromState failed — the block
             // is not in the fork choice DAG so votes and slashings cannot reference it.
             if (fc_block_ok) {
-            // Only process attestations when block epoch is recent enough:
-            // blocks older than current_epoch - FORK_CHOICE_ATT_EPOCH_LIMIT have no
-            // effect on fork choice head selection.
-            const current_epoch = computeEpochAtSlot(fc.getTime());
-            if (block_epoch + FORK_CHOICE_ATT_EPOCH_LIMIT >= current_epoch) {
-                const block_body = block_input.block.beaconBlock().beaconBlockBody();
-                const any_atts = block_body.attestations();
-                switch (any_atts) {
-                    .phase0 => |atts| {
-                        for (atts.items) |*att| {
-                            const att_slot = att.data.slot;
-                            const att_target_epoch = att.data.target.epoch;
-                            const att_block_root = att.data.beacon_block_root;
-                            var indices = post_state.epoch_cache.getAttestingIndicesPhase0(att) catch continue;
-                            defer indices.deinit();
-                            for (indices.items) |validator_index| {
-                                fc.onSingleVote(
-                                    ctx.allocator,
-                                    validator_index,
-                                    att_slot,
-                                    att_block_root,
-                                    att_target_epoch,
-                                ) catch |err| switch (err) {
-                                    error.OutOfMemory => return BlockImportError.InternalError,
-                                    else => {},
-                                };
+                // Only process attestations when block epoch is recent enough:
+                // blocks older than current_epoch - FORK_CHOICE_ATT_EPOCH_LIMIT have no
+                // effect on fork choice head selection.
+                const current_epoch = computeEpochAtSlot(fc.getTime());
+                if (block_epoch + FORK_CHOICE_ATT_EPOCH_LIMIT >= current_epoch) {
+                    const block_body = block_input.block.beaconBlock().beaconBlockBody();
+                    const any_atts = block_body.attestations();
+                    switch (any_atts) {
+                        .phase0 => |atts| {
+                            for (atts.items) |*att| {
+                                const att_slot = att.data.slot;
+                                const att_target_epoch = att.data.target.epoch;
+                                const att_block_root = att.data.beacon_block_root;
+                                var indices = post_state.epoch_cache.getAttestingIndicesPhase0(att) catch continue;
+                                defer indices.deinit();
+                                for (indices.items) |validator_index| {
+                                    fc.onSingleVote(
+                                        ctx.allocator,
+                                        validator_index,
+                                        att_slot,
+                                        att_block_root,
+                                        att_target_epoch,
+                                    ) catch |err| switch (err) {
+                                        error.OutOfMemory => return BlockImportError.InternalError,
+                                        else => {},
+                                    };
+                                }
                             }
+                        },
+                        .electra => |atts| {
+                            for (atts.items) |*att| {
+                                const att_slot = att.data.slot;
+                                const att_target_epoch = att.data.target.epoch;
+                                const att_block_root = att.data.beacon_block_root;
+                                var indices = post_state.epoch_cache.getAttestingIndicesElectra(att) catch continue;
+                                defer indices.deinit();
+                                for (indices.items) |validator_index| {
+                                    fc.onSingleVote(
+                                        ctx.allocator,
+                                        validator_index,
+                                        att_slot,
+                                        att_block_root,
+                                        att_target_epoch,
+                                    ) catch |err| switch (err) {
+                                        error.OutOfMemory => return BlockImportError.InternalError,
+                                        else => {},
+                                    };
+                                }
+                            }
+                        },
+                    }
+                }
+
+                // 3b. Wire attester slashings into fork choice.
+                // Mark equivocating validators so their weight is excluded from future head computation.
+                // Delegate to fc.onAttesterSlashing() which encapsulates the sorted-intersection logic.
+                const any_slashings = block_input.block.beaconBlock().beaconBlockBody().attesterSlashings();
+                switch (any_slashings) {
+                    .phase0 => |slashings| {
+                        for (slashings.items) |*slashing| {
+                            const any_slashing = fork_types.AnyAttesterSlashing{ .phase0 = slashing.* };
+                            fc.onAttesterSlashing(&any_slashing) catch |err| return switch (err) {
+                                error.OutOfMemory => BlockImportError.InternalError,
+                            };
                         }
                     },
-                    .electra => |atts| {
-                        for (atts.items) |*att| {
-                            const att_slot = att.data.slot;
-                            const att_target_epoch = att.data.target.epoch;
-                            const att_block_root = att.data.beacon_block_root;
-                            var indices = post_state.epoch_cache.getAttestingIndicesElectra(att) catch continue;
-                            defer indices.deinit();
-                            for (indices.items) |validator_index| {
-                                fc.onSingleVote(
-                                    ctx.allocator,
-                                    validator_index,
-                                    att_slot,
-                                    att_block_root,
-                                    att_target_epoch,
-                                ) catch |err| switch (err) {
-                                    error.OutOfMemory => return BlockImportError.InternalError,
-                                    else => {},
-                                };
-                            }
+                    .electra => |slashings| {
+                        for (slashings.items) |*slashing| {
+                            const any_slashing = fork_types.AnyAttesterSlashing{ .electra = slashing.* };
+                            fc.onAttesterSlashing(&any_slashing) catch |err| return switch (err) {
+                                error.OutOfMemory => BlockImportError.InternalError,
+                            };
                         }
                     },
                 }
-            }
-
-            // 3b. Wire attester slashings into fork choice.
-            // Mark equivocating validators so their weight is excluded from future head computation.
-            // Delegate to fc.onAttesterSlashing() which encapsulates the sorted-intersection logic.
-            const any_slashings = block_input.block.beaconBlock().beaconBlockBody().attesterSlashings();
-            switch (any_slashings) {
-                .phase0 => |slashings| {
-                    for (slashings.items) |*slashing| {
-                        const any_slashing = fork_types.AnyAttesterSlashing{ .phase0 = slashing.* };
-                        fc.onAttesterSlashing(&any_slashing) catch |err| return switch (err) {
-                            error.OutOfMemory => BlockImportError.InternalError,
-                        };
-                    }
-                },
-                .electra => |slashings| {
-                    for (slashings.items) |*slashing| {
-                        const any_slashing = fork_types.AnyAttesterSlashing{ .electra = slashing.* };
-                        fc.onAttesterSlashing(&any_slashing) catch |err| return switch (err) {
-                            error.OutOfMemory => BlockImportError.InternalError,
-                        };
-                    }
-                },
-            }
             } // end if (fc_block_ok)
         }
     }
@@ -368,10 +367,10 @@ pub fn importVerifiedBlock(
         // Check finality changes.
         const new_finalized = fc.getFinalizedCheckpoint();
         if (new_finalized.epoch > ctx.head_tracker.finalized_epoch) {
-            if (ctx.event_callback) |cb| {
+            if (ctx.notification_sink) |sink| {
                 const fin_state_root = ctx.block_to_state.get(new_finalized.root) orelse
                     [_]u8{0} ** 32;
-                cb.emit(.{ .finalized_checkpoint = .{
+                sink.publish(.{ .finalized_checkpoint = .{
                     .epoch = new_finalized.epoch,
                     .root = new_finalized.root,
                     .state_root = fin_state_root,
@@ -404,8 +403,8 @@ pub fn importVerifiedBlock(
             );
         } else {
             // Head didn't change (same root) — emit head event for the new canonical tip.
-            if (ctx.event_callback) |cb| {
-                cb.emit(.{ .head = .{
+            if (ctx.notification_sink) |sink| {
+                sink.publish(.{ .head = .{
                     .slot = new_head.slot,
                     .block_root = new_head.block_root,
                     .state_root = new_head.state_root,
@@ -416,12 +415,12 @@ pub fn importVerifiedBlock(
         }
     }
 
-    // 7. Emit SSE block event (only for recent blocks to avoid flooding during sync).
+    // 7. Publish block notification (only for recent blocks to avoid flooding during sync).
     // Use block_slot as fallback when fork choice current_slot is 0 (e.g., after genesis init
     // before updateTime is called). This avoids integer overflow in the subtraction.
     //
-    // NOTE (P0-4 fix): HEAD events are emitted ONLY from the fork-choice recompute block
-    // above (step 6), not here. Previously both places emitted head events, causing
+    // NOTE (P0-4 fix): head notifications are published ONLY from the fork-choice
+    // recompute block above (step 6), not here. Previously both places emitted them, causing
     // double-emission on every new block. Now:
     // - 'block' event: emitted here for all recent blocks
     // - 'head' event: emitted from fork choice recompute (detectAndEmitReorg or head-unchanged path)
@@ -432,8 +431,8 @@ pub fn importVerifiedBlock(
         break :blk block_slot;
     };
     if (current_slot - block_slot < EVENTSTREAM_EMIT_RECENT_BLOCK_SLOTS) {
-        if (ctx.event_callback) |cb| {
-            cb.emit(.{ .block = .{
+        if (ctx.notification_sink) |sink| {
+            sink.publish(.{ .block = .{
                 .slot = block_slot,
                 .block_root = block_root,
             } });
@@ -469,10 +468,10 @@ pub fn importVerifiedBlock(
 // Head recomputation helpers
 // ---------------------------------------------------------------------------
 
-/// Detect and emit a chain reorg event when head switches branches.
+/// Detect and publish a chain reorg notification when head switches branches.
 ///
 /// Walks the proto_array to find the common ancestor of old and new head,
-/// computes reorg depth, and emits a `chain_reorg` SSE event.
+/// computes reorg depth, and publishes a `chain_reorg` notification.
 fn detectAndEmitReorg(
     ctx: ImportContext,
     old_head_root: [32]u8,
@@ -506,8 +505,8 @@ fn detectAndEmitReorg(
                     &std.fmt.bytesToHex(new_head.block_root[0..4], .lower),
                 });
 
-                if (ctx.event_callback) |cb| {
-                    cb.emit(.{ .chain_reorg = .{
+                if (ctx.notification_sink) |sink| {
+                    sink.publish(.{ .chain_reorg = .{
                         .slot = new_head.slot,
                         .depth = reorg_depth,
                         .old_head_root = old_head_root,
@@ -523,8 +522,8 @@ fn detectAndEmitReorg(
     }
 
     // No reorg (or ancestor not found) — emit head event.
-    if (ctx.event_callback) |cb| {
-        cb.emit(.{ .head = .{
+    if (ctx.notification_sink) |sink| {
+        sink.publish(.{ .head = .{
             .slot = new_head.slot,
             .block_root = new_head.block_root,
             .state_root = new_head.state_root,
@@ -559,7 +558,7 @@ pub fn getDependentRoot(
     return ancestor.block_root;
 }
 
-/// Compute previous and current duty dependent roots for SSE head events.
+/// Compute previous and current duty dependent roots for head notifications.
 ///
 /// Returns a struct with:
 /// - previous_duty_dependent_root: root at start of (epoch-1) - 1

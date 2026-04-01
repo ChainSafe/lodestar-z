@@ -39,6 +39,31 @@ pub const Query = struct {
         return self.chain.getSyncStatus();
     }
 
+    pub fn executionForkchoiceState(self: Query, head_root: Root) ?chain_types.ForkchoiceUpdateState {
+        const fc = self.chain.fork_choice orelse return null;
+
+        const head_node = fc.getBlockDefaultStatus(head_root) orelse return null;
+        const head_block_hash = head_node.extra_meta.executionPayloadBlockHash() orelse return null;
+
+        const justified_cp = fc.getJustifiedCheckpoint();
+        const safe_block_hash = if (fc.getBlockDefaultStatus(justified_cp.root)) |node|
+            node.extra_meta.executionPayloadBlockHash() orelse std.mem.zeroes([32]u8)
+        else
+            std.mem.zeroes([32]u8);
+
+        const finalized_cp = fc.getFinalizedCheckpoint();
+        const finalized_block_hash = if (fc.getBlockDefaultStatus(finalized_cp.root)) |node|
+            node.extra_meta.executionPayloadBlockHash() orelse std.mem.zeroes([32]u8)
+        else
+            std.mem.zeroes([32]u8);
+
+        return .{
+            .head_block_hash = head_block_hash,
+            .safe_block_hash = safe_block_hash,
+            .finalized_block_hash = finalized_block_hash,
+        };
+    }
+
     pub fn status(self: Query) networking.messages.StatusMessage.Type {
         return self.chain.getStatus();
     }
@@ -99,6 +124,10 @@ pub const Query = struct {
 
     pub fn stateArchiveAtSlot(self: Query, slot: Slot) !?[]const u8 {
         return self.chain.db.getStateArchive(slot);
+    }
+
+    pub fn latestStateArchiveSlot(self: Query) !?Slot {
+        return self.chain.db.getLatestStateArchiveSlot();
     }
 
     pub fn stateArchiveByRoot(self: Query, root: Root) !?[]const u8 {

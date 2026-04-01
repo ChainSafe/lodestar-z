@@ -958,7 +958,7 @@ test "getStateRoot for head returns head state root" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const resp = try getStateRoot(&tc.ctx, .head);
-    try std.testing.expectEqual(tc.ctx.head_tracker.head_state_root, resp.data);
+    try std.testing.expectEqual(tc.head_tracker.head_state_root, resp.data);
 }
 
 test "getStateRoot for slot returns state_root from block" {
@@ -1005,7 +1005,7 @@ test "getFinalityCheckpoints returns checkpoint data" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const resp = try getFinalityCheckpoints(&tc.ctx, .head);
-    const expected_epoch = tc.ctx.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH;
+    const expected_epoch = tc.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH;
     try std.testing.expectEqual(expected_epoch, resp.data.finalized.epoch);
 }
 
@@ -1013,7 +1013,7 @@ test "getBlockHeader for head returns header" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const resp = try getBlockHeader(&tc.ctx, .head);
-    try std.testing.expectEqual(tc.ctx.head_tracker.head_slot, resp.data.header.message.slot);
+    try std.testing.expectEqual(tc.head_tracker.head_slot, resp.data.header.message.slot);
     try std.testing.expect(resp.data.canonical);
 }
 
@@ -1025,7 +1025,7 @@ test "getBlockHeader for head extracts real fields from DB block" {
 
     // Build a phase0 signed block with known fields
     var signed_block = ct.phase0.SignedBeaconBlock.default_value;
-    signed_block.message.slot = tc.ctx.head_tracker.head_slot;
+    signed_block.message.slot = tc.head_tracker.head_slot;
     signed_block.message.proposer_index = 42;
     signed_block.message.parent_root = [_]u8{0xab} ** 32;
     signed_block.message.state_root = [_]u8{0xcd} ** 32;
@@ -1037,7 +1037,7 @@ test "getBlockHeader for head extracts real fields from DB block" {
     _ = ct.phase0.SignedBeaconBlock.serializeIntoBytes(&signed_block, block_bytes);
 
     // Store under the head root
-    try tc.db.putBlock(tc.ctx.head_tracker.head_root, block_bytes);
+    try tc.db.putBlock(tc.head_tracker.head_root, block_bytes);
 
     const resp = try getBlockHeader(&tc.ctx, .head);
     try std.testing.expectEqual(@as(u64, 42), resp.data.header.message.proposer_index);
@@ -1049,7 +1049,7 @@ test "getBlockHeader for head extracts real fields from DB block" {
 test "getValidators without head state returns StateNotAvailable" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    // state_query is null in test context
+    // test context defaults to archive-backed state reads unless a live state is injected
     const result = getValidators(&tc.ctx, .head, .{});
     try std.testing.expectError(error.StateNotAvailable, result);
 }
@@ -1076,30 +1076,7 @@ test "getValidators with head state returns non-empty list" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
     defer test_state.deinit();
 
-    const StateQueryCb = struct {
-        cached: *state_transition.CachedBeaconState,
-
-        fn getHeadState(ptr: *anyopaque) ?*state_transition.CachedBeaconState {
-            const self: *@This() = @ptrCast(@alignCast(ptr));
-            return self.cached;
-        }
-
-        fn getStateByRoot(_: *anyopaque, _: [32]u8) anyerror!?*state_transition.CachedBeaconState {
-            return null;
-        }
-
-        fn getStateBySlot(_: *anyopaque, _: u64) anyerror!?*state_transition.CachedBeaconState {
-            return null;
-        }
-    };
-
-    var cb_ctx = StateQueryCb{ .cached = test_state.cached_state };
-    tc.ctx.state_query = .{
-        .ptr = &cb_ctx,
-        .getHeadStateFn = &StateQueryCb.getHeadState,
-        .getStateByRootFn = &StateQueryCb.getStateByRoot,
-        .getStateBySlotFn = &StateQueryCb.getStateBySlot,
-    };
+    tc.chain_fixture.head_state = test_state.cached_state;
 
     const resp = try getValidators(&tc.ctx, .head, .{});
     defer allocator.free(resp.data);
@@ -1125,30 +1102,7 @@ test "getValidator with valid index returns data" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
     defer test_state.deinit();
 
-    const StateQueryCb = struct {
-        cached: *state_transition.CachedBeaconState,
-
-        fn getHeadState(ptr: *anyopaque) ?*state_transition.CachedBeaconState {
-            const self: *@This() = @ptrCast(@alignCast(ptr));
-            return self.cached;
-        }
-
-        fn getStateByRoot(_: *anyopaque, _: [32]u8) anyerror!?*state_transition.CachedBeaconState {
-            return null;
-        }
-
-        fn getStateBySlot(_: *anyopaque, _: u64) anyerror!?*state_transition.CachedBeaconState {
-            return null;
-        }
-    };
-
-    var cb_ctx = StateQueryCb{ .cached = test_state.cached_state };
-    tc.ctx.state_query = .{
-        .ptr = &cb_ctx,
-        .getHeadStateFn = &StateQueryCb.getHeadState,
-        .getStateByRootFn = &StateQueryCb.getStateByRoot,
-        .getStateBySlotFn = &StateQueryCb.getStateBySlot,
-    };
+    tc.chain_fixture.head_state = test_state.cached_state;
 
     const resp = try getValidator(&tc.ctx, .head, .{ .index = 2 });
     try std.testing.expectEqual(@as(u64, 2), resp.data.index);
@@ -1171,30 +1125,7 @@ test "getValidator with out-of-range index returns ValidatorNotFound" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
     defer test_state.deinit();
 
-    const StateQueryCb = struct {
-        cached: *state_transition.CachedBeaconState,
-
-        fn getHeadState(ptr: *anyopaque) ?*state_transition.CachedBeaconState {
-            const self: *@This() = @ptrCast(@alignCast(ptr));
-            return self.cached;
-        }
-
-        fn getStateByRoot(_: *anyopaque, _: [32]u8) anyerror!?*state_transition.CachedBeaconState {
-            return null;
-        }
-
-        fn getStateBySlot(_: *anyopaque, _: u64) anyerror!?*state_transition.CachedBeaconState {
-            return null;
-        }
-    };
-
-    var cb_ctx = StateQueryCb{ .cached = test_state.cached_state };
-    tc.ctx.state_query = .{
-        .ptr = &cb_ctx,
-        .getHeadStateFn = &StateQueryCb.getHeadState,
-        .getStateByRootFn = &StateQueryCb.getStateByRoot,
-        .getStateBySlotFn = &StateQueryCb.getStateBySlot,
-    };
+    tc.chain_fixture.head_state = test_state.cached_state;
 
     const result = getValidator(&tc.ctx, .head, .{ .index = 99 });
     try std.testing.expectError(error.ValidatorNotFound, result);
@@ -1757,15 +1688,15 @@ pub fn getBlockHeaders(
 /// GET /eth/v1/beacon/blob_sidecars/{block_id}
 ///
 /// Returns blob sidecars for a block. Stubs empty list until
-/// Deneb blob storage is wired into BeaconDB.
+/// Deneb blob storage is wired into the chain query surface.
 pub fn getBlobSidecars(
     _: *ApiContext,
     _: types.BlockId,
     _: ?[]const u64,
 ) !HandlerResult([]const u8) {
     // Return empty list — Deneb blob DB not yet wired.
-    // When available: query ctx.db.getBlobSidecars(block_root)
-    // and filter by requested indices.
+    // When available: resolve the block through chain queries, then read
+    // blob sidecars via a chain-owned blob storage/query API.
     return error.NotImplemented;
 }
 

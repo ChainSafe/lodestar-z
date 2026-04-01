@@ -96,11 +96,10 @@ pub const SimNodeHarness = struct {
         self.checker.deinit();
     }
 
-    /// Get the current head state from the node's block_state_cache.
+    /// Get the current head state from the node's chain query surface.
     /// Returns null if not found (shouldn't happen after initFromGenesis).
     pub fn getHeadState(self: *SimNodeHarness) ?*CachedBeaconState {
-        const head_state_root = self.node.head_tracker.head_state_root;
-        return self.node.block_state_cache.get(head_state_root);
+        return self.node.headState();
     }
 
     /// Advance the simulation by one slot.

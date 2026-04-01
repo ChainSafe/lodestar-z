@@ -2066,8 +2066,8 @@ test "handleRequest GET /eth/v1/node/health ready" {
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
-    tc.ctx.sync_status.is_syncing = false;
-    tc.ctx.sync_status.head_slot = 1000;
+    tc.sync_status.is_syncing = false;
+    tc.sync_status.head_slot = 1000;
     const resp = try server.handleRequest("GET", "/eth/v1/node/health", null);
     defer resp.deinit(std.testing.allocator);
 
@@ -2079,7 +2079,7 @@ test "handleRequest GET /eth/v1/node/health syncing returns 206" {
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
-    tc.ctx.sync_status.is_syncing = true;
+    tc.sync_status.is_syncing = true;
     const resp = try server.handleRequest("GET", "/eth/v1/node/health", null);
     defer resp.deinit(std.testing.allocator);
 
@@ -2091,8 +2091,8 @@ test "handleRequest GET /eth/v1/node/health not initialized returns 503" {
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
-    tc.ctx.sync_status.is_syncing = false;
-    tc.ctx.sync_status.head_slot = 0;
+    tc.sync_status.is_syncing = false;
+    tc.sync_status.head_slot = 0;
     const resp = try server.handleRequest("GET", "/eth/v1/node/health", null);
     defer resp.deinit(std.testing.allocator);
 

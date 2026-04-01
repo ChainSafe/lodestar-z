@@ -43,3 +43,9 @@ pub const ImportOutcome = struct {
     snapshot: ChainSnapshot,
     effects: ImportEffects,
 };
+
+pub const BootstrapOutcome = struct {
+    snapshot: ChainSnapshot,
+    genesis_time: u64,
+    genesis_validators_root: Root,
+};

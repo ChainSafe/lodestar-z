@@ -48,11 +48,11 @@ test "node integration: genesis → blocks → API" {
     const node = harness.node;
 
     // Capture initial head slot (high value due to electra fork epoch offset).
-    const initial_slot = node.head_tracker.head_slot;
+    const initial_slot = node.getHead().slot;
 
     // 1. Verify genesis head has a valid state (non-zero state root).
     {
-        const state_root = node.head_tracker.head_state_root;
+        const state_root = node.getHead().state_root;
         try testing.expect(!std.mem.eql(u8, &state_root, &([_]u8{0} ** 32)));
     }
 
@@ -70,9 +70,9 @@ test "node integration: genesis → blocks → API" {
     try testing.expectEqual(initial_slot + 3, r3.slot);
 
     // Head tracker must reflect the last imported block.
-    try testing.expectEqual(initial_slot + 3, node.head_tracker.head_slot);
+    try testing.expectEqual(initial_slot + 3, node.getHead().slot);
     // Block root is non-zero.
-    try testing.expect(!std.mem.eql(u8, &node.head_tracker.head_root, &([_]u8{0} ** 32)));
+    try testing.expect(!std.mem.eql(u8, &node.getHead().root, &([_]u8{0} ** 32)));
 
     // 3. Query Beacon API handlers directly (no HTTP).
 
@@ -109,13 +109,12 @@ test "node integration: genesis → blocks → API" {
     // Decode and verify response reflects our chain state.
     var our_status: StatusMessage.Type = undefined;
     try StatusMessage.deserializeFromBytes(chunks[0].ssz_payload, &our_status);
-    // Our head_slot reflects head_tracker (updated by importBlock).
+    // Our head_slot reflects the canonical chain head.
     try testing.expectEqual(initial_slot + 3, our_status.head_slot);
     try testing.expect(!std.mem.eql(u8, &our_status.head_root, &([_]u8{0} ** 32)));
 
-    // 5. Verify fork choice head matches head_tracker root.
-    // (fork choice and head_tracker are kept in sync by importBlock)
-    try testing.expectEqualSlices(u8, &node.head_tracker.head_root, &our_status.head_root);
+    // 5. Verify req/resp status matches the canonical chain head.
+    try testing.expectEqualSlices(u8, &node.getHead().root, &our_status.head_root);
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +130,7 @@ test "node integration: attestations → finality advances" {
     defer harness.deinit();
 
     const node = harness.node;
-    const initial_slot = node.head_tracker.head_slot;
+    const initial_slot = node.getHead().slot;
 
     // Enable 100% validator participation.
     harness.sim.participation_rate = 1.0;
@@ -146,10 +145,10 @@ test "node integration: attestations → finality advances" {
     try testing.expect(harness.sim.epochs_processed >= 3);
 
     // Head advanced by slots_needed.
-    try testing.expectEqual(initial_slot + slots_needed, node.head_tracker.head_slot);
+    try testing.expectEqual(initial_slot + slots_needed, node.getHead().slot);
 
     // With 100% participation over 3 epochs, finality should have advanced.
-    try testing.expect(node.head_tracker.finalized_epoch > 0);
+    try testing.expect(node.getHead().finalized_epoch > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +164,7 @@ test "node integration: skip slots → head root unchanged" {
     defer harness.deinit();
 
     const node = harness.node;
-    const initial_slot = node.head_tracker.head_slot;
+    const initial_slot = node.getHead().slot;
 
     // Import one real block.
     const r1 = try harness.sim.processSlot(false);
@@ -173,7 +172,7 @@ test "node integration: skip slots → head root unchanged" {
     try testing.expectEqual(initial_slot + 1, r1.slot);
 
     // Capture the head root after the block.
-    const root_after_block = node.head_tracker.head_root;
+    const root_after_block = node.getHead().root;
     try testing.expect(!std.mem.eql(u8, &root_after_block, &([_]u8{0} ** 32)));
 
     // Skip 3 slots — no new blocks.
@@ -185,16 +184,16 @@ test "node integration: skip slots → head root unchanged" {
     try testing.expect(!skip3.block_processed);
 
     // Head ROOT must stay the same (no blocks imported).
-    try testing.expectEqualSlices(u8, &root_after_block, &node.head_tracker.head_root);
+    try testing.expectEqualSlices(u8, &root_after_block, &node.getHead().root);
 
     // Head slot advanced through the skips.
-    try testing.expectEqual(initial_slot + 4, node.head_tracker.head_slot);
+    try testing.expectEqual(initial_slot + 4, node.getHead().slot);
 
     // Import another block after the skips — root must change.
     const r5 = try harness.sim.processSlot(false);
     try testing.expect(r5.block_processed);
     try testing.expectEqual(initial_slot + 5, r5.slot);
-    try testing.expect(!std.mem.eql(u8, &root_after_block, &node.head_tracker.head_root));
+    try testing.expect(!std.mem.eql(u8, &root_after_block, &node.getHead().root));
 }
 
 // ---------------------------------------------------------------------------
@@ -210,21 +209,20 @@ test "node integration: DB persistence — imported blocks retrievable by root" 
     defer harness.deinit();
 
     const node = harness.node;
-    const initial_slot = node.head_tracker.head_slot;
+    const initial_slot = node.getHead().slot;
 
     // Import 5 blocks.
     for (0..5) |_| {
         _ = try harness.sim.processSlot(false);
     }
 
-    // For each imported slot, the block root is in head_tracker and DB.
+    // For each imported slot, the canonical block root and block bytes are queryable.
     for (1..6) |offset| {
         const slot = initial_slot + offset;
-        const block_root = node.head_tracker.getBlockRoot(slot);
+        const block_root = try node.chainQuery().canonicalBlockRootAtSlot(slot);
         try testing.expect(block_root != null);
 
-        // Fetch from DB — must exist.
-        const block_bytes = try node.db.getBlock(block_root.?);
+        const block_bytes = try node.chainQuery().blockBytesByRoot(block_root.?);
         try testing.expect(block_bytes != null);
         if (block_bytes) |bytes| {
             // SSZ bytes for a real block are non-trivial.
@@ -247,7 +245,7 @@ test "node integration: BeaconBlocksByRange req/resp with real blocks" {
     defer harness.deinit();
 
     const node = harness.node;
-    const initial_slot = node.head_tracker.head_slot;
+    const initial_slot = node.getHead().slot;
 
     // Import 4 blocks.
     for (0..4) |_| {

@@ -6,7 +6,6 @@
 const std = @import("std");
 
 const preset_root = @import("preset");
-const chain_mod = @import("chain");
 const networking = @import("networking");
 const StatusMessage = networking.messages.StatusMessage;
 const ReqRespContext = networking.ReqRespContext;
@@ -46,7 +45,7 @@ fn requestNode(ptr: *anyopaque) *BeaconNode {
 
 fn reqRespGetStatus(ptr: *anyopaque) StatusMessage.Type {
     const node = requestNode(ptr);
-    return chain_mod.Query.init(node.chain).status();
+    return node.getStatus();
 }
 
 fn reqRespGetMetadata(ptr: *anyopaque) networking.messages.MetadataV2.Type {
@@ -65,7 +64,7 @@ fn reqRespGetPingSequence(ptr: *anyopaque) u64 {
 
 fn reqRespFindBlockByRoot(ptr: *anyopaque, root: [32]u8, sink: *const PayloadSink) anyerror!void {
     const node = requestNode(ptr);
-    const maybe_bytes = chain_mod.Query.init(node.chain).blockBytesByRoot(root) catch return;
+    const maybe_bytes = node.chainQuery().blockBytesByRoot(root) catch return;
     const bytes = maybe_bytes orelse return;
     defer node.allocator.free(bytes);
 
@@ -77,7 +76,7 @@ fn reqRespFindBlockByRoot(ptr: *anyopaque, root: [32]u8, sink: *const PayloadSin
 
 fn reqRespStreamBlocksByRange(ptr: *anyopaque, start_slot: u64, count: u64, sink: *const PayloadSink) anyerror!void {
     const node = requestNode(ptr);
-    const query = chain_mod.Query.init(node.chain);
+    const query = node.chainQuery();
 
     const end_slot = std.math.add(u64, start_slot, count) catch return;
     var slot = start_slot;
@@ -96,7 +95,7 @@ fn reqRespStreamBlocksByRange(ptr: *anyopaque, start_slot: u64, count: u64, sink
 fn reqRespFindBlobByRoot(ptr: *anyopaque, root: [32]u8, index: u64, sink: *const PayloadSink) anyerror!void {
     const node = requestNode(ptr);
 
-    const maybe_bytes = chain_mod.Query.init(node.chain).blobSidecarsByRoot(root) catch return;
+    const maybe_bytes = node.chainQuery().blobSidecarsByRoot(root) catch return;
     const bytes = maybe_bytes orelse return;
     defer node.allocator.free(bytes);
 
@@ -114,7 +113,7 @@ fn reqRespFindBlobByRoot(ptr: *anyopaque, root: [32]u8, index: u64, sink: *const
 
 fn reqRespStreamBlobsByRange(ptr: *anyopaque, start_slot: u64, count: u64, sink: *const PayloadSink) anyerror!void {
     const node = requestNode(ptr);
-    const query = chain_mod.Query.init(node.chain);
+    const query = node.chainQuery();
     const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
 
     const end_slot = std.math.add(u64, start_slot, count) catch return;
@@ -138,7 +137,7 @@ fn reqRespStreamBlobsByRange(ptr: *anyopaque, start_slot: u64, count: u64, sink:
 fn reqRespFindDataColumnByRoot(ptr: *anyopaque, root: [32]u8, index: u64, sink: *const PayloadSink) anyerror!void {
     const node = requestNode(ptr);
 
-    const maybe_bytes = chain_mod.Query.init(node.chain).dataColumnByRoot(root, index) catch return;
+    const maybe_bytes = node.chainQuery().dataColumnByRoot(root, index) catch return;
     const bytes = maybe_bytes orelse return;
     defer node.allocator.free(bytes);
 
@@ -156,7 +155,7 @@ fn reqRespStreamDataColumnsByRange(
     sink: *const PayloadSink,
 ) anyerror!void {
     const node = requestNode(ptr);
-    const query = chain_mod.Query.init(node.chain);
+    const query = node.chainQuery();
 
     const end_slot = std.math.add(u64, start_slot, count) catch return;
     var slot = start_slot;

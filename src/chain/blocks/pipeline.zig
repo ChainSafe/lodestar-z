@@ -8,7 +8,7 @@
 //! 3. verifyDA           — check data availability status
 //! 4. stateTransition    — run STFN (includes batch sig verification)
 //! 5. verifyExecution    — engine_newPayload (or optimistic)
-//! 6. importBlock        — fork choice, DB, caches, events
+//! 6. importBlock        — fork choice, DB, caches, notifications
 //!
 //! Each stage can fail independently. Early stages are cheap (microseconds),
 //! later stages are expensive (state transition: ~100ms, EL call: ~50ms).
@@ -94,8 +94,8 @@ pub const PipelineContext = struct {
     // -- Block root → state root mapping --
     block_to_state: *std.AutoArrayHashMap([32]u8, [32]u8),
 
-    // -- Events --
-    event_callback: ?@import("../types.zig").EventCallback,
+    // -- Chain notifications --
+    notification_sink: ?@import("../types.zig").NotificationSink,
 
     // -- Execution verification (optional) --
     execution_verifier: ?ExecutionVerifier,
@@ -122,7 +122,7 @@ pub const PipelineContext = struct {
             .db = self.db,
             .head_tracker = self.head_tracker,
             .block_to_state = self.block_to_state,
-            .event_callback = self.event_callback,
+            .notification_sink = self.notification_sink,
             .reprocess_queue = self.reprocess_queue,
             .on_finalized_ptr = self.on_finalized_ptr,
             .on_finalized_fn = self.on_finalized_fn,

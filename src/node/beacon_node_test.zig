@@ -65,7 +65,7 @@ test "BeaconNode: init and deinit" {
     const head = ctx.node.getHead();
     try std.testing.expectEqual(@as(u64, 0), head.slot);
     try std.testing.expectEqual(@as(u64, 0), head.finalized_epoch);
-    try std.testing.expectEqual(@as(usize, 0), ctx.node.op_pool.attestation_pool.groupCount());
+    try std.testing.expectEqual(@as(usize, 0), ctx.node.chainQuery().opPoolCounts()[0]);
 }
 
 test "BeaconNode: initFromGenesis sets head at slot 0" {
@@ -134,7 +134,7 @@ test "BeaconNode: op pool integration" {
     defer ctx.deinit();
 
     const exit = chain_mod.op_pool.makeTestExit(42, 10);
-    try ctx.node.op_pool.voluntary_exit_pool.add(exit);
+    try ctx.node.chainService().importVoluntaryExit(exit);
 
     var body = try ctx.node.produceBlock(1);
     defer body.deinit(allocator);
@@ -147,10 +147,10 @@ test "BeaconNode: seen cache dedup" {
     defer ctx.deinit();
 
     const root = [_]u8{0xAB} ** 32;
-    try std.testing.expect(!ctx.node.seen_cache.hasSeenBlock(root));
+    try std.testing.expect(!ctx.node.chain_runtime.seen_cache.hasSeenBlock(root));
 
-    try ctx.node.seen_cache.markBlockSeen(root, 5);
-    try std.testing.expect(ctx.node.seen_cache.hasSeenBlock(root));
+    try ctx.node.chain_runtime.seen_cache.markBlockSeen(root, 5);
+    try std.testing.expect(ctx.node.chain_runtime.seen_cache.hasSeenBlock(root));
 }
 
 test "BeaconNode: onReqResp Status" {
@@ -183,7 +183,8 @@ test "BeaconNode: onReqResp Status returns real head slot and root" {
     const expected_root = [_]u8{0xAB} ** 32;
     const expected_slot: u64 = 42;
     const state_root = [_]u8{0x11} ** 32;
-    try ctx.node.head_tracker.onBlock(expected_root, expected_slot, state_root);
+    try ctx.node.chain_runtime.head_tracker.onBlock(expected_root, expected_slot, state_root);
+    ctx.node.chain_runtime.head_tracker.setHead(expected_root, expected_slot, state_root);
 
     const peer_status = StatusMessage.Type{
         .fork_digest = [_]u8{0} ** 4,
@@ -213,12 +214,12 @@ test "BeaconNode: onReqResp BeaconBlocksByRoot returns stored block" {
     defer ctx.deinit();
 
     const known_root = [_]u8{0xCC} ** 32;
-    const fake_block_bytes = [_]u8{0x01, 0x02, 0x03, 0x04} ** 8;
-    try ctx.node.db.putBlock(known_root, &fake_block_bytes);
+    const fake_block_bytes = [_]u8{ 0x01, 0x02, 0x03, 0x04 } ** 8;
+    try ctx.node.chain_runtime.db.putBlock(known_root, &fake_block_bytes);
 
     const known_root_2 = [_]u8{0xDD} ** 32;
-    const fake_block_bytes_2 = [_]u8{0x05, 0x06} ** 16;
-    try ctx.node.db.putBlock(known_root_2, &fake_block_bytes_2);
+    const fake_block_bytes_2 = [_]u8{ 0x05, 0x06 } ** 16;
+    try ctx.node.chain_runtime.db.putBlock(known_root_2, &fake_block_bytes_2);
 
     const unknown_root = [_]u8{0xFF} ** 32;
     var request_bytes: [32 * 3]u8 = undefined;
@@ -266,10 +267,10 @@ test "BeaconNode: onReqResp BeaconBlocksByRange returns blocks for known slots" 
     const block_10 = [_]u8{0xAA} ** 20;
     const block_11 = [_]u8{0xBB} ** 20;
 
-    try ctx.node.head_tracker.onBlock(root_10, 10, [_]u8{0} ** 32);
-    try ctx.node.head_tracker.onBlock(root_11, 11, [_]u8{0} ** 32);
-    try ctx.node.db.putBlock(root_10, &block_10);
-    try ctx.node.db.putBlock(root_11, &block_11);
+    try ctx.node.chain_runtime.head_tracker.onBlock(root_10, 10, [_]u8{0} ** 32);
+    try ctx.node.chain_runtime.head_tracker.onBlock(root_11, 11, [_]u8{0} ** 32);
+    try ctx.node.chain_runtime.db.putBlock(root_10, &block_10);
+    try ctx.node.chain_runtime.db.putBlock(root_11, &block_11);
 
     const request = networking.messages.BeaconBlocksByRangeRequest.Type{
         .start_slot = 10,
@@ -351,8 +352,8 @@ test "BeaconNode: onReqResp BlobSidecarsByRange returns stored blobs" {
     const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
     const root_5 = [_]u8{0x05} ** 32;
     const root_6 = [_]u8{0x06} ** 32;
-    try ctx.node.head_tracker.onBlock(root_5, 5, [_]u8{0} ** 32);
-    try ctx.node.head_tracker.onBlock(root_6, 6, [_]u8{0} ** 32);
+    try ctx.node.chain_runtime.head_tracker.onBlock(root_5, 5, [_]u8{0} ** 32);
+    try ctx.node.chain_runtime.head_tracker.onBlock(root_6, 6, [_]u8{0} ** 32);
 
     const blob_5 = try allocator.alloc(u8, sidecar_size * 2);
     defer allocator.free(blob_5);
@@ -389,12 +390,12 @@ test "BeaconNode: archiveState stores state bytes in DB and retrieves them" {
     defer ctx.deinit();
 
     const state = try ctx.test_state.cached_state.clone(allocator, .{});
-    const state_root = try ctx.node.queued_regen.onNewBlock(state, true);
+    const state_root = try ctx.node.chain_runtime.queued_regen.onNewBlock(state, true);
     const slot: u64 = 32;
 
     try ctx.node.archiveState(slot, state_root);
 
-    const retrieved = try ctx.node.db.getStateArchive(slot);
+    const retrieved = try ctx.node.chain_runtime.db.getStateArchive(slot);
     try std.testing.expect(retrieved != null);
     if (retrieved) |bytes| allocator.free(bytes);
 }
@@ -406,7 +407,7 @@ test "BeaconNode: archiveState is no-op for unknown state root" {
     const missing_root = [_]u8{0xff} ** 32;
     try ctx.node.archiveState(64, missing_root);
 
-    const retrieved = try ctx.node.db.getStateArchive(64);
+    const retrieved = try ctx.node.chain_runtime.db.getStateArchive(64);
     try std.testing.expectEqual(@as(?[]const u8, null), retrieved);
 }
 
@@ -420,10 +421,10 @@ test "BeaconNode: forkchoiceUpdated called after block import for post-merge hea
     try ctx.node.initFromGenesis(genesis_state);
 
     const mock = ctx.node.mock_engine orelse return error.TestFailed;
-    const genesis_root = ctx.node.head_tracker.head_root;
+    const genesis_root = ctx.node.getHead().root;
     const fake_exec_hash = [_]u8{0xab} ** 32;
     const post_merge_root = [_]u8{0xcd} ** 32;
-    const fc = ctx.node.fork_choice.?;
+    const fc = ctx.node.chain.fork_choice.?;
     const finalized_cp = fc.getFinalizedCheckpoint();
     const post_merge_slot = finalized_cp.epoch * preset.SLOTS_PER_EPOCH + 10;
 
@@ -467,7 +468,7 @@ test "BeaconNode: forkchoiceUpdated not called for pre-merge head" {
     try ctx.node.initFromGenesis(genesis_state);
 
     const mock = ctx.node.mock_engine orelse return error.TestFailed;
-    const genesis_root = ctx.node.head_tracker.head_root;
+    const genesis_root = ctx.node.getHead().root;
 
     try block_production_mod.notifyForkchoiceUpdate(ctx.node, genesis_root);
 

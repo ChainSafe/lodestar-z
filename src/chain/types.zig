@@ -60,15 +60,21 @@ pub const SyncStatus = struct {
     el_offline: bool,
 };
 
+pub const ForkchoiceUpdateState = struct {
+    head_block_hash: Root,
+    safe_block_hash: Root,
+    finalized_block_hash: Root,
+};
+
 // ---------------------------------------------------------------------------
-// SSE Events — chain events for SSE subscribers.
+// Chain notifications.
 //
-// These mirror the API event types but are defined here so the chain
-// module has no dependency on the API module. The wiring layer (BeaconNode)
-// adapts these to the API EventBus.
+// These describe state-machine notifications emitted by the chain runtime.
+// Outer adapters such as the API event bus are responsible for translating
+// them into transport-specific formats like SSE.
 // ---------------------------------------------------------------------------
 
-pub const SseEventType = enum {
+pub const ChainNotificationTag = enum {
     head,
     block,
     finalized_checkpoint,
@@ -80,19 +86,19 @@ pub const SseEventType = enum {
     blob_sidecar,
 };
 
-pub const SseEvent = union(SseEventType) {
-    head: HeadEvent,
-    block: BlockEvent,
-    finalized_checkpoint: FinalizedCheckpointEvent,
-    chain_reorg: ChainReorgEvent,
-    attestation: AttestationEvent,
-    voluntary_exit: VoluntaryExitEvent,
-    contribution_and_proof: ContributionAndProofEvent,
-    payload_attributes: PayloadAttributesEvent,
-    blob_sidecar: BlobSidecarEvent,
+pub const ChainNotification = union(ChainNotificationTag) {
+    head: HeadNotification,
+    block: BlockNotification,
+    finalized_checkpoint: FinalizedCheckpointNotification,
+    chain_reorg: ChainReorgNotification,
+    attestation: AttestationNotification,
+    voluntary_exit: VoluntaryExitNotification,
+    contribution_and_proof: ContributionAndProofNotification,
+    payload_attributes: PayloadAttributesNotification,
+    blob_sidecar: BlobSidecarNotification,
 };
 
-pub const HeadEvent = struct {
+pub const HeadNotification = struct {
     slot: Slot,
     block_root: Root,
     state_root: Root,
@@ -101,18 +107,18 @@ pub const HeadEvent = struct {
     execution_optimistic: bool = false,
 };
 
-pub const BlockEvent = struct {
+pub const BlockNotification = struct {
     slot: Slot,
     block_root: Root,
 };
 
-pub const FinalizedCheckpointEvent = struct {
+pub const FinalizedCheckpointNotification = struct {
     epoch: Epoch,
     root: Root,
     state_root: Root,
 };
 
-pub const ChainReorgEvent = struct {
+pub const ChainReorgNotification = struct {
     slot: Slot,
     depth: u64,
     old_head_root: Root,
@@ -125,8 +131,8 @@ pub const ChainReorgEvent = struct {
     epoch: Epoch,
 };
 
-/// Emitted when a new attestation is received (gossip or API).
-pub const AttestationEvent = struct {
+/// Published when a new attestation is received (gossip or API).
+pub const AttestationNotification = struct {
     aggregation_bits: [8]u8,
     slot: Slot,
     committee_index: u64,
@@ -138,15 +144,15 @@ pub const AttestationEvent = struct {
     signature: [96]u8,
 };
 
-/// Emitted when a signed voluntary exit is received.
-pub const VoluntaryExitEvent = struct {
+/// Published when a signed voluntary exit is received.
+pub const VoluntaryExitNotification = struct {
     epoch: Epoch,
     validator_index: u64,
     signature: [96]u8,
 };
 
-/// Emitted when a sync committee contribution and proof is received.
-pub const ContributionAndProofEvent = struct {
+/// Published when a sync committee contribution and proof is received.
+pub const ContributionAndProofNotification = struct {
     aggregator_index: u64,
     slot: Slot,
     beacon_block_root: Root,
@@ -156,8 +162,8 @@ pub const ContributionAndProofEvent = struct {
     selection_proof: [96]u8,
 };
 
-/// Emitted when forkchoiceUpdated provides payload attributes.
-pub const PayloadAttributesEvent = struct {
+/// Published when forkchoiceUpdated provides payload attributes.
+pub const PayloadAttributesNotification = struct {
     proposer_index: u64,
     proposal_slot: Slot,
     parent_block_number: u64,
@@ -168,8 +174,8 @@ pub const PayloadAttributesEvent = struct {
     suggested_fee_recipient: [20]u8,
 };
 
-/// Emitted when a blob sidecar is received.
-pub const BlobSidecarEvent = struct {
+/// Published when a blob sidecar is received.
+pub const BlobSidecarNotification = struct {
     block_root: Root,
     index: u64,
     slot: Slot,
@@ -178,17 +184,18 @@ pub const BlobSidecarEvent = struct {
 };
 
 // ---------------------------------------------------------------------------
-// EventCallback — vtable for SSE event emission.
+// NotificationSink — vtable for publishing chain notifications.
 //
-// Chain calls this on import success. BeaconNode provides the implementation
-// that forwards to the API EventBus.
+// Chain publishes notifications here when external adapters need to observe
+// internal state-machine events. BeaconNode provides the implementation that
+// forwards them to the API EventBus.
 // ---------------------------------------------------------------------------
 
-pub const EventCallback = struct {
+pub const NotificationSink = struct {
     ptr: *anyopaque,
-    emitFn: *const fn (ptr: *anyopaque, event: SseEvent) void,
+    publishFn: *const fn (ptr: *anyopaque, notification: ChainNotification) void,
 
-    pub fn emit(self: EventCallback, event: SseEvent) void {
-        self.emitFn(self.ptr, event);
+    pub fn publish(self: NotificationSink, notification: ChainNotification) void {
+        self.publishFn(self.ptr, notification);
     }
 };

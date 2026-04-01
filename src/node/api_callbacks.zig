@@ -27,10 +27,11 @@ const ValidatorMonitor = chain_mod.ValidatorMonitor;
 
 pub const ApiBindings = struct {
     block_import_ctx: *BlockImportCallbackCtx,
-    chain_view_ctx: *ChainViewCallbackCtx,
+    chain_ctx: *ChainCallbackCtx,
+    sync_status_ctx: *SyncStatusCallbackCtx,
     agg_att_cb_ctx: *AggregateAttestationCallbackCtx,
     op_pool_cb_ctx: *OpPoolCallbackCtx,
-    event_callback_ctx: *EventCallbackCtx,
+    notification_sink_ctx: *ChainNotificationSinkCtx,
     produce_block_ctx: *ProduceBlockCallbackCtx,
     attestation_data_ctx: *AttestationDataCallbackCtx,
     pool_submit_ctx: *PoolSubmitCallbackCtx,
@@ -42,10 +43,11 @@ pub const ApiBindings = struct {
         errdefer allocator.destroy(bindings);
         bindings.* = .{
             .block_import_ctx = undefined,
-            .chain_view_ctx = undefined,
+            .chain_ctx = undefined,
+            .sync_status_ctx = undefined,
             .agg_att_cb_ctx = undefined,
             .op_pool_cb_ctx = undefined,
-            .event_callback_ctx = undefined,
+            .notification_sink_ctx = undefined,
             .produce_block_ctx = undefined,
             .attestation_data_ctx = undefined,
             .pool_submit_ctx = undefined,
@@ -60,21 +62,25 @@ pub const ApiBindings = struct {
             .beacon_config = beacon_config,
         };
 
-        bindings.chain_view_ctx = try allocator.create(ChainViewCallbackCtx);
-        errdefer allocator.destroy(bindings.chain_view_ctx);
-        bindings.chain_view_ctx.* = .{ .chain = node.chain };
+        bindings.chain_ctx = try allocator.create(ChainCallbackCtx);
+        errdefer allocator.destroy(bindings.chain_ctx);
+        bindings.chain_ctx.* = .{ .query = node.chainQuery() };
+
+        bindings.sync_status_ctx = try allocator.create(SyncStatusCallbackCtx);
+        errdefer allocator.destroy(bindings.sync_status_ctx);
+        bindings.sync_status_ctx.* = .{ .node = node };
 
         bindings.agg_att_cb_ctx = try allocator.create(AggregateAttestationCallbackCtx);
         errdefer allocator.destroy(bindings.agg_att_cb_ctx);
-        bindings.agg_att_cb_ctx.* = .{ .chain = node.chain };
+        bindings.agg_att_cb_ctx.* = .{ .query = node.chainQuery() };
 
         bindings.op_pool_cb_ctx = try allocator.create(OpPoolCallbackCtx);
         errdefer allocator.destroy(bindings.op_pool_cb_ctx);
-        bindings.op_pool_cb_ctx.* = .{ .chain = node.chain };
+        bindings.op_pool_cb_ctx.* = .{ .query = node.chainQuery() };
 
-        bindings.event_callback_ctx = try allocator.create(EventCallbackCtx);
-        errdefer allocator.destroy(bindings.event_callback_ctx);
-        bindings.event_callback_ctx.* = .{ .event_bus = node.event_bus };
+        bindings.notification_sink_ctx = try allocator.create(ChainNotificationSinkCtx);
+        errdefer allocator.destroy(bindings.notification_sink_ctx);
+        bindings.notification_sink_ctx.* = .{ .event_bus = node.event_bus };
 
         bindings.produce_block_ctx = try allocator.create(ProduceBlockCallbackCtx);
         errdefer allocator.destroy(bindings.produce_block_ctx);
@@ -82,7 +88,7 @@ pub const ApiBindings = struct {
 
         bindings.attestation_data_ctx = try allocator.create(AttestationDataCallbackCtx);
         errdefer allocator.destroy(bindings.attestation_data_ctx);
-        bindings.attestation_data_ctx.* = .{ .chain = node.chain };
+        bindings.attestation_data_ctx.* = .{ .query = node.chainQuery() };
 
         bindings.pool_submit_ctx = try allocator.create(PoolSubmitCallbackCtx);
         errdefer allocator.destroy(bindings.pool_submit_ctx);
@@ -99,9 +105,9 @@ pub const ApiBindings = struct {
         }
 
         wireApiContext(bindings, node.api_context);
-        node.chain.event_callback = .{
-            .ptr = @ptrCast(bindings.event_callback_ctx),
-            .emitFn = &eventCallbackFn,
+        node.chain.notification_sink = .{
+            .ptr = @ptrCast(bindings.notification_sink_ctx),
+            .publishFn = &publishChainNotificationFn,
         };
         return bindings;
     }
@@ -112,10 +118,11 @@ pub const ApiBindings = struct {
         allocator.destroy(self.pool_submit_ctx);
         allocator.destroy(self.attestation_data_ctx);
         allocator.destroy(self.produce_block_ctx);
-        allocator.destroy(self.event_callback_ctx);
+        allocator.destroy(self.notification_sink_ctx);
         allocator.destroy(self.op_pool_cb_ctx);
         allocator.destroy(self.agg_att_cb_ctx);
-        allocator.destroy(self.chain_view_ctx);
+        allocator.destroy(self.sync_status_ctx);
+        allocator.destroy(self.chain_ctx);
         allocator.destroy(self.block_import_ctx);
     }
 
@@ -124,13 +131,9 @@ pub const ApiBindings = struct {
             .ptr = @ptrCast(self.block_import_ctx),
             .importFn = &importBlockCallback,
         };
-        api_ctx.chain_view = .{
-            .ptr = @ptrCast(self.chain_view_ctx),
+        api_ctx.chain = .{
+            .ptr = @ptrCast(self.chain_ctx),
             .getHeadTrackerFn = &getChainHeadTrackerCallback,
-            .getSyncStatusFn = &getChainSyncStatusCallback,
-        };
-        api_ctx.chain_query = .{
-            .ptr = @ptrCast(self.chain_view_ctx),
             .getBlockRootBySlotFn = &getChainBlockRootBySlotCallback,
             .getBlockBytesByRootFn = &getChainBlockBytesByRootCallback,
             .getStateRootBySlotFn = &getChainStateRootBySlotCallback,
@@ -139,12 +142,13 @@ pub const ApiBindings = struct {
             .getStateBytesByRootFn = &getChainStateBytesByRootCallback,
             .getStateArchiveAtSlotFn = &getChainStateArchiveAtSlotCallback,
             .getStateArchiveByRootFn = &getChainStateArchiveByRootCallback,
-        };
-        api_ctx.state_query = .{
-            .ptr = @ptrCast(self.chain_view_ctx),
             .getHeadStateFn = &getChainHeadStateCallback,
             .getStateByRootFn = &getChainStateByRootCallback,
             .getStateBySlotFn = &getChainStateBySlotCallback,
+        };
+        api_ctx.sync_status_view = .{
+            .ptr = @ptrCast(self.sync_status_ctx),
+            .getSyncStatusFn = &getNodeSyncStatusCallback,
         };
         api_ctx.aggregate_attestation = .{
             .ptr = @ptrCast(self.agg_att_cb_ctx),
@@ -194,19 +198,23 @@ pub const BlockImportCallbackCtx = struct {
     beacon_config: *const BeaconConfig,
 };
 
-pub const ChainViewCallbackCtx = struct {
-    chain: *chain_mod.Chain,
+pub const ChainCallbackCtx = struct {
+    query: ChainQuery,
 };
 
 pub const AggregateAttestationCallbackCtx = struct {
-    chain: *chain_mod.Chain,
+    query: ChainQuery,
+};
+
+pub const SyncStatusCallbackCtx = struct {
+    node: *BeaconNode,
 };
 
 pub const ValidatorMonitorCallbackCtx = struct {
     monitor: *ValidatorMonitor,
 };
 
-pub const EventCallbackCtx = struct {
+pub const ChainNotificationSinkCtx = struct {
     event_bus: *api_mod.EventBus,
 };
 
@@ -215,7 +223,7 @@ pub const ProduceBlockCallbackCtx = struct {
 };
 
 pub const AttestationDataCallbackCtx = struct {
-    chain: *chain_mod.Chain,
+    query: ChainQuery,
 };
 
 pub const PoolSubmitCallbackCtx = struct {
@@ -227,12 +235,12 @@ pub const BuilderCallbackCtx = struct {
 };
 
 pub const OpPoolCallbackCtx = struct {
-    chain: *chain_mod.Chain,
+    query: ChainQuery,
 };
 
 fn getChainHeadTrackerCallback(ptr: *anyopaque) ApiHeadTracker {
-    const ctx: *ChainViewCallbackCtx = @ptrCast(@alignCast(ptr));
-    const snapshot = ChainQuery.init(ctx.chain).currentSnapshot();
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    const snapshot = ctx.query.currentSnapshot();
     return .{
         .head_slot = snapshot.head.slot,
         .head_root = snapshot.head.root,
@@ -244,9 +252,9 @@ fn getChainHeadTrackerCallback(ptr: *anyopaque) ApiHeadTracker {
     };
 }
 
-fn getChainSyncStatusCallback(ptr: *anyopaque) ApiSyncStatus {
-    const ctx: *ChainViewCallbackCtx = @ptrCast(@alignCast(ptr));
-    const status = ChainQuery.init(ctx.chain).syncStatus();
+fn getNodeSyncStatusCallback(ptr: *anyopaque) ApiSyncStatus {
+    const ctx: *SyncStatusCallbackCtx = @ptrCast(@alignCast(ptr));
+    const status = ctx.node.getSyncStatus();
     return .{
         .head_slot = status.head_slot,
         .sync_distance = status.sync_distance,
@@ -257,58 +265,58 @@ fn getChainSyncStatusCallback(ptr: *anyopaque) ApiSyncStatus {
 }
 
 fn getChainBlockRootBySlotCallback(ptr: *anyopaque, slot: u64) anyerror!?[32]u8 {
-    const ctx: *ChainViewCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).canonicalBlockRootAtSlot(slot);
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.canonicalBlockRootAtSlot(slot);
 }
 
 fn getChainBlockBytesByRootCallback(ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8 {
-    const ctx: *ChainViewCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).blockBytesByRoot(root);
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.blockBytesByRoot(root);
 }
 
 fn getChainStateRootBySlotCallback(ptr: *anyopaque, slot: u64) anyerror!?[32]u8 {
-    const ctx: *ChainViewCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).stateRootBySlot(slot);
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.stateRootBySlot(slot);
 }
 
 fn getChainStateRootByBlockRootCallback(ptr: *anyopaque, root: [32]u8) anyerror!?[32]u8 {
-    const ctx: *ChainViewCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).stateRootByBlockRoot(root);
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.stateRootByBlockRoot(root);
 }
 
 fn getChainStateBytesBySlotCallback(ptr: *anyopaque, slot: u64) anyerror!?[]const u8 {
-    const ctx: *ChainViewCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).stateBytesBySlot(slot);
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.stateBytesBySlot(slot);
 }
 
 fn getChainStateBytesByRootCallback(ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8 {
-    const ctx: *ChainViewCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).stateBytesByRoot(root);
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.stateBytesByRoot(root);
 }
 
 fn getChainStateArchiveAtSlotCallback(ptr: *anyopaque, slot: u64) anyerror!?[]const u8 {
-    const ctx: *ChainViewCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).stateArchiveAtSlot(slot);
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.stateArchiveAtSlot(slot);
 }
 
 fn getChainStateArchiveByRootCallback(ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8 {
-    const ctx: *ChainViewCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).stateArchiveByRoot(root);
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.stateArchiveByRoot(root);
 }
 
 fn getChainHeadStateCallback(ptr: *anyopaque) ?*CachedBeaconState {
-    const ctx: *ChainViewCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).headState();
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.headState();
 }
 
 fn getChainStateByRootCallback(ptr: *anyopaque, state_root: [32]u8) anyerror!?*CachedBeaconState {
-    const ctx: *ChainViewCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).stateByRoot(state_root);
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.stateByRoot(state_root);
 }
 
 fn getChainStateBySlotCallback(ptr: *anyopaque, slot: u64) anyerror!?*CachedBeaconState {
-    const ctx: *ChainViewCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).stateBySlot(slot);
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.stateBySlot(slot);
 }
 
 fn getAggregateAttestationCallback(
@@ -318,7 +326,7 @@ fn getAggregateAttestationCallback(
     attestation_data_root: [32]u8,
 ) anyerror![]const u8 {
     const ctx: *AggregateAttestationCallbackCtx = @ptrCast(@alignCast(ptr));
-    const best = ChainQuery.init(ctx.chain).aggregateAttestation(@intCast(slot), attestation_data_root) orelse
+    const best = ctx.query.aggregateAttestation(@intCast(slot), attestation_data_root) orelse
         return error.NotFound;
 
     var out: std.Io.Writer.Allocating = .init(alloc);
@@ -362,7 +370,7 @@ fn importBlockCallback(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
     const block_slot: u64 = if (block_bytes.len >= 108)
         std.mem.readInt(u64, block_bytes[100..108], .little)
     else
-        node.head_tracker.head_slot;
+        node.currentHeadSlot();
     const fork_seq = cb_ctx.beacon_config.forkSeq(block_slot);
 
     const any_signed = try AnySignedBeaconBlock.deserialize(node.allocator, .full, fork_seq, block_bytes);
@@ -469,10 +477,10 @@ fn getValidatorMonitorCallback(
     return out.toOwnedSlice();
 }
 
-fn eventCallbackFn(ptr: *anyopaque, event: chain_mod.SseEvent) void {
-    const ctx: *EventCallbackCtx = @ptrCast(@alignCast(ptr));
+fn publishChainNotificationFn(ptr: *anyopaque, notification: chain_mod.ChainNotification) void {
+    const ctx: *ChainNotificationSinkCtx = @ptrCast(@alignCast(ptr));
     const bus = ctx.event_bus;
-    const api_event: api_mod.Event = switch (event) {
+    const api_event: api_mod.Event = switch (notification) {
         .head => |e| .{ .head = .{
             .slot = e.slot,
             .block_root = e.block_root,
@@ -567,7 +575,7 @@ fn getAttestationDataCallback(
     committee_index: u64,
 ) anyerror!api_mod.context.AttestationDataResult {
     const ctx: *AttestationDataCallbackCtx = @ptrCast(@alignCast(ptr));
-    const query = ChainQuery.init(ctx.chain);
+    const query = ctx.query;
     const snapshot = query.currentSnapshot();
     const head_root = snapshot.head.root;
 
@@ -669,7 +677,7 @@ fn builderRegisterValidatorsCallback(ptr: *anyopaque, registrations_json: []cons
 
 fn opPoolGetCountsCallback(ptr: *anyopaque) [5]usize {
     const ctx: *OpPoolCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).opPoolCounts();
+    return ctx.query.opPoolCounts();
 }
 
 fn opPoolGetAttestationsCallback(
@@ -679,7 +687,7 @@ fn opPoolGetAttestationsCallback(
     committee_index_filter: ?u64,
 ) anyerror![]types.phase0.Attestation.Type {
     const ctx: *OpPoolCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).attestations(allocator, slot_filter, committee_index_filter);
+    return ctx.query.attestations(allocator, slot_filter, committee_index_filter);
 }
 
 fn opPoolGetVoluntaryExitsCallback(
@@ -687,7 +695,7 @@ fn opPoolGetVoluntaryExitsCallback(
     allocator: std.mem.Allocator,
 ) anyerror![]types.phase0.SignedVoluntaryExit.Type {
     const ctx: *OpPoolCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).voluntaryExits(allocator);
+    return ctx.query.voluntaryExits(allocator);
 }
 
 fn opPoolGetProposerSlashingsCallback(
@@ -695,7 +703,7 @@ fn opPoolGetProposerSlashingsCallback(
     allocator: std.mem.Allocator,
 ) anyerror![]types.phase0.ProposerSlashing.Type {
     const ctx: *OpPoolCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).proposerSlashings(allocator);
+    return ctx.query.proposerSlashings(allocator);
 }
 
 fn opPoolGetAttesterSlashingsCallback(
@@ -703,7 +711,7 @@ fn opPoolGetAttesterSlashingsCallback(
     allocator: std.mem.Allocator,
 ) anyerror![]types.phase0.AttesterSlashing.Type {
     const ctx: *OpPoolCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).attesterSlashings(allocator);
+    return ctx.query.attesterSlashings(allocator);
 }
 
 fn opPoolGetBlsToExecutionChangesCallback(
@@ -711,7 +719,7 @@ fn opPoolGetBlsToExecutionChangesCallback(
     allocator: std.mem.Allocator,
 ) anyerror![]types.capella.SignedBLSToExecutionChange.Type {
     const ctx: *OpPoolCallbackCtx = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(ctx.chain).blsToExecutionChanges(allocator);
+    return ctx.query.blsToExecutionChanges(allocator);
 }
 
 const beacon_node_mod = @import("beacon_node.zig");

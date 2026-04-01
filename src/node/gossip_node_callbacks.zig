@@ -13,9 +13,6 @@ const types = @import("consensus_types");
 const state_transition = @import("state_transition");
 const fork_types = @import("fork_types");
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
-const chain_mod = @import("chain");
-const ChainQuery = chain_mod.Query;
-const ChainService = chain_mod.Service;
 const preset = @import("preset").preset;
 const constants = @import("constants");
 
@@ -29,7 +26,7 @@ const BeaconNode = beacon_node_mod.BeaconNode;
 
 pub fn importBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
+    const fork_seq = node.config.forkSeq(node.currentHeadSlot());
     const any_signed = AnySignedBeaconBlock.deserialize(
         node.allocator,
         .full,
@@ -61,19 +58,19 @@ pub fn importBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!
 /// Returns the expected block proposer for `slot` from the head state's epoch cache.
 pub fn getProposerIndex(ptr: *anyopaque, slot: u64) ?u32 {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(node.chain).getProposerIndex(slot);
+    return node.chainQuery().getProposerIndex(slot);
 }
 
 /// Returns true if `root` appears in the head tracker's slot→root map or fork choice.
 pub fn isKnownBlockRoot(ptr: *anyopaque, root: [32]u8) bool {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(node.chain).isKnownBlockRoot(root);
+    return node.chainQuery().isKnownBlockRoot(root);
 }
 
 /// Returns the total validator count.
 pub fn getValidatorCount(ptr: *anyopaque) u32 {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    return ChainQuery.init(node.chain).getValidatorCount();
+    return node.chainQuery().getValidatorCount();
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +102,7 @@ pub fn importAttestation(
         .signature = [_]u8{0} ** 96,
     };
 
-    try ChainService.init(node.chain).importAttestation(
+    try node.chainService().importAttestation(
         attestation_slot,
         committee_index,
         beacon_block_root,
@@ -125,7 +122,7 @@ pub fn importVoluntaryExit(ptr: *anyopaque, validator_index: u64, epoch: u64) an
         },
         .signature = [_]u8{0} ** 96,
     };
-    try ChainService.init(node.chain).importVoluntaryExit(exit);
+    try node.chainService().importVoluntaryExit(exit);
 }
 
 pub fn importProposerSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
@@ -135,7 +132,7 @@ pub fn importProposerSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!v
         std.log.warn("Proposer slashing SSZ decode failed: {}", .{err});
         return err;
     };
-    try ChainService.init(node.chain).importProposerSlashing(slashing);
+    try node.chainService().importProposerSlashing(slashing);
 }
 
 pub fn importAttesterSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
@@ -145,7 +142,7 @@ pub fn importAttesterSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!v
         std.log.warn("Attester slashing SSZ decode failed: {}", .{err});
         return err;
     };
-    try ChainService.init(node.chain).importAttesterSlashing(slashing);
+    try node.chainService().importAttesterSlashing(slashing);
 }
 
 pub fn importBlsChange(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
@@ -155,7 +152,7 @@ pub fn importBlsChange(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
         std.log.warn("BLS change SSZ decode failed: {}", .{err});
         return err;
     };
-    try ChainService.init(node.chain).importBlsChange(change);
+    try node.chainService().importBlsChange(change);
 }
 
 pub fn importSyncContribution(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
@@ -166,7 +163,7 @@ pub fn importSyncContribution(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!v
         return err;
     };
 
-    try ChainService.init(node.chain).importSyncContribution(&signed_cap.message.contribution);
+    try node.chainService().importSyncContribution(&signed_cap.message.contribution);
 }
 
 pub fn importSyncCommitteeMessage(ptr: *anyopaque, ssz_bytes: []const u8, subnet: u64) anyerror!void {
@@ -180,7 +177,7 @@ pub fn importSyncCommitteeMessage(ptr: *anyopaque, ssz_bytes: []const u8, subnet
     const subcommittee_size = preset.SYNC_COMMITTEE_SIZE / constants.SYNC_COMMITTEE_SUBNET_COUNT;
     const index_in_subcommittee = msg.validator_index % subcommittee_size;
 
-    try ChainService.init(node.chain).importSyncCommitteeMessage(
+    try node.chainService().importSyncCommitteeMessage(
         subnet,
         msg.slot,
         msg.beacon_block_root,
@@ -195,10 +192,9 @@ pub fn importSyncCommitteeMessage(ptr: *anyopaque, ssz_bytes: []const u8, subnet
 
 pub fn verifyBlockSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return true;
+    const cached = node.headState() orelse return true;
 
-    const fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
+    const fork_seq = node.config.forkSeq(node.currentHeadSlot());
     const any_signed = fork_types.AnySignedBeaconBlock.deserialize(
         node.allocator,
         .full,
@@ -219,8 +215,7 @@ pub fn verifyBlockSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
 
 pub fn verifyVoluntaryExitSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return true;
+    const cached = node.headState() orelse return true;
 
     var signed_exit: types.phase0.SignedVoluntaryExit.Type = undefined;
     types.phase0.SignedVoluntaryExit.deserializeFromBytes(ssz_bytes, &signed_exit) catch return false;
@@ -234,8 +229,7 @@ pub fn verifyVoluntaryExitSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool
 
 pub fn verifyProposerSlashingSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return true;
+    const cached = node.headState() orelse return true;
 
     var slashing: types.phase0.ProposerSlashing.Type = undefined;
     types.phase0.ProposerSlashing.deserializeFromBytes(ssz_bytes, &slashing) catch return false;
@@ -253,8 +247,7 @@ pub fn verifyProposerSlashingSignature(ptr: *anyopaque, ssz_bytes: []const u8) b
 
 pub fn verifyAttesterSlashingSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return true;
+    const cached = node.headState() orelse return true;
 
     var slashing: types.phase0.AttesterSlashing.Type = undefined;
     types.phase0.AttesterSlashing.deserializeFromBytes(node.allocator, ssz_bytes, &slashing) catch return false;
@@ -299,8 +292,7 @@ pub fn verifyBlsChangeSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
 
 pub fn verifyAttestationSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return true;
+    const cached = node.headState() orelse return true;
 
     var att: types.electra.SingleAttestation.Type = undefined;
     types.electra.SingleAttestation.deserializeFromBytes(ssz_bytes, &att) catch return false;
@@ -326,8 +318,7 @@ pub fn verifyAttestationSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
 
 pub fn verifyAggregateSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return true;
+    const cached = node.headState() orelse return true;
 
     var signed_agg: types.phase0.SignedAggregateAndProof.Type = undefined;
     types.phase0.SignedAggregateAndProof.deserializeFromBytes(node.allocator, ssz_bytes, &signed_agg) catch return false;
@@ -409,8 +400,7 @@ pub fn verifyAggregateSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
 
 pub fn verifySyncCommitteeSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return true;
+    const cached = node.headState() orelse return true;
 
     var msg: types.altair.SyncCommitteeMessage.Type = undefined;
     types.altair.SyncCommitteeMessage.deserializeFromBytes(ssz_bytes, &msg) catch return false;

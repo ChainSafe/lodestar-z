@@ -91,10 +91,8 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
     validator.fixupPointers();
     self.p2p_validator = validator;
 
-    const fork_digest = self.config.forkDigestAtSlot(
-        self.head_tracker.head_slot,
-        self.genesis_validators_root,
-    );
+    const head_slot = self.currentHeadSlot();
+    const fork_digest = self.config.forkDigestAtSlot(head_slot, self.genesis_validators_root);
 
     var host_identity = self.node_identity.libp2pKeyPair();
     {
@@ -110,7 +108,7 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
 
     self.p2p_service = try networking.p2p_service.P2pService.init(self.allocator, .{
         .fork_digest = fork_digest,
-        .fork_seq = self.config.forkSeq(self.head_tracker.head_slot),
+        .fork_seq = self.config.forkSeq(head_slot),
         .req_resp_context = req_resp_ctx,
         .validator = &validator.ctx,
         .host_identity = host_identity,
@@ -269,16 +267,6 @@ pub fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking
     }
 }
 
-pub fn updateApiSyncStatus(self: *BeaconNode) void {
-    if (self.sync_service_inst) |svc| {
-        const status = svc.getSyncStatus();
-        self.api_sync_status.head_slot = status.head_slot;
-        self.api_sync_status.sync_distance = status.sync_distance;
-        self.api_sync_status.is_syncing = status.state == .syncing_finalized or status.state == .syncing_head;
-        self.api_sync_status.is_optimistic = status.is_optimistic;
-    }
-}
-
 fn subscribeInitialSubnets(self: *BeaconNode, svc: *networking.P2pService) void {
     const gossip_topics = networking.gossip_topics;
 
@@ -367,16 +355,15 @@ fn runLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
 
         processSyncBatches(self, io, svc);
         processSyncByRootRequests(self, io, svc);
-        updateApiSyncStatus(self);
         updateSyncMetrics(self);
         maybePrepareProposerPayload(self, io);
         pruneSyncCommitteePools(self);
-        advanceForkChoiceClock(self, io);
+        advanceChainClock(self, io);
     }
 }
 
 fn maybeHandleForkTransition(self: *BeaconNode, svc: *networking.P2pService) void {
-    const head_slot = self.head_tracker.head_slot;
+    const head_slot = self.currentHeadSlot();
     const current_digest = self.config.forkDigestAtSlot(
         head_slot,
         self.genesis_validators_root,
@@ -414,21 +401,20 @@ fn updateSyncMetrics(self: *BeaconNode) void {
 }
 
 fn pruneSyncCommitteePools(self: *BeaconNode) void {
-    const head_slot = self.head_tracker.head_slot;
-    if (self.sync_contribution_pool) |pool| pool.prune(head_slot);
-    if (self.sync_committee_message_pool) |pool| pool.prune(head_slot);
+    const head_slot = self.currentHeadSlot();
+    self.chainService().pruneSyncCommitteePools(head_slot);
 }
 
-fn advanceForkChoiceClock(self: *BeaconNode, io: std.Io) void {
-    if (self.clock) |clock| {
-        if (clock.currentSlot(io)) |current_slot| {
-            if (self.chain.fork_choice) |fc| {
-                fc.updateTime(self.allocator, current_slot) catch |err| {
-                    std.log.warn("fork choice updateTime failed: {}", .{err});
-                };
-            }
-        }
+fn advanceChainClock(self: *BeaconNode, io: std.Io) void {
+    const clock = self.clock orelse return;
+    const current_slot = clock.currentSlot(io) orelse return;
+
+    if (self.last_slot_tick) |last_slot| {
+        if (current_slot <= last_slot) return;
     }
+
+    self.chainService().onSlot(current_slot);
+    self.last_slot_tick = current_slot;
 }
 
 fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, enr_str: []const u8) !void {
@@ -500,7 +486,7 @@ fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, e
 
 fn initDiscoveryService(self: *BeaconNode) !void {
     const fork_digest = self.config.forkDigestAtSlot(
-        self.head_tracker.head_slot,
+        self.currentHeadSlot(),
         self.genesis_validators_root,
     );
 
@@ -650,12 +636,12 @@ fn initSyncPipeline(self: *BeaconNode) !void {
     sync_svc.* = SyncService.init(
         self.allocator,
         cb_ctx.syncServiceCallbacks(),
-        self.head_tracker.head_slot,
+        self.currentHeadSlot(),
         0,
     );
     self.sync_service_inst = sync_svc;
 
-    std.log.info("Sync pipeline initialized (head_slot={d})", .{self.head_tracker.head_slot});
+    std.log.info("Sync pipeline initialized (head_slot={d})", .{self.currentHeadSlot()});
 }
 
 fn fetchBlockByRoot(
@@ -878,8 +864,8 @@ fn processGossipEventsFromSlice(self: *BeaconNode, io: std.Io, events: anytype) 
                     .data_column_sidecar => handleGossipDataColumn(self, gossip_decoding, msg.data, parsed.subnet_id),
                     else => {
                         if (self.gossip_handler) |gh| {
-                            const slot = self.head_tracker.head_slot;
-                            gh.updateClock(slot, computeEpochAtSlot(slot), self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH);
+                            const slot = self.currentHeadSlot();
+                            gh.updateClock(slot, computeEpochAtSlot(slot), self.currentFinalizedSlot());
                             gh.onGossipMessageWithSubnetAndMetadata(parsed.topic_type, parsed.subnet_id, msg.data, metadata) catch |err| {
                                 switch (err) {
                                     error.ValidationIgnored => {},
@@ -918,7 +904,7 @@ fn handleGossipBlock(
         return;
     };
 
-    const fork_seq = self.config.forkSeq(self.head_tracker.head_slot);
+    const fork_seq = self.config.forkSeq(self.currentHeadSlot());
     const any_signed = AnySignedBeaconBlock.deserialize(
         self.allocator,
         .full,
@@ -1020,8 +1006,7 @@ fn maybePrepareProposerPayload(self: *BeaconNode, io: std.Io) void {
     const current_slot = clock.currentSlot(io) orelse return;
     const next_slot = current_slot + 1;
 
-    const head_state_root = self.head_tracker.head_state_root;
-    const head_state = self.block_state_cache.get(head_state_root) orelse return;
+    const head_state = self.headState() orelse return;
     _ = head_state.epoch_cache.getBeaconProposer(next_slot) catch return;
 
     const fee_recipient = self.node_options.suggested_fee_recipient orelse return;
@@ -1041,7 +1026,7 @@ fn maybePrepareProposerPayload(self: *BeaconNode, io: std.Io) void {
         prev_randao,
         fee_recipient,
         &.{},
-        self.head_tracker.head_root,
+        self.currentHeadRoot(),
     ) catch |err| {
         std.log.warn("W7: preparePayload failed for slot {d}: {}", .{ next_slot, err });
     };

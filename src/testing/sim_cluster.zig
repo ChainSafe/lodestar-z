@@ -149,7 +149,7 @@ pub const SimCluster = struct {
         // Nodes 1..N: each gets a clone of the genesis state.
         for (1..config.num_nodes) |i| {
             // Get the genesis state from node 0's cache to clone it.
-            const genesis_state_0 = bn0.block_state_cache.get(bn0.head_tracker.head_state_root) orelse
+            const genesis_state_0 = bn0.headState() orelse
                 return error.NoGenesisState;
             const cloned = try genesis_state_0.clone(allocator, .{ .transfer_cache = false });
 

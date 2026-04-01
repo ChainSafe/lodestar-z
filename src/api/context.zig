@@ -9,8 +9,6 @@ const std = @import("std");
 const types = @import("types.zig");
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
-const db_mod = @import("db");
-const BeaconDB = db_mod.BeaconDB;
 const state_transition = @import("state_transition");
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 pub const CachedBeaconState = state_transition.CachedBeaconState;
@@ -53,24 +51,14 @@ pub const SyncStatus = struct {
     el_offline: bool,
 };
 
-/// Type-erased callback for current chain snapshots.
+/// Type-erased callback for chain-backed reads and state lookup.
 ///
-/// This is the compatibility boundary for API handlers that still need
-/// head/checkpoint and sync views without reaching into raw node-owned
-/// tracker structs directly.
-pub const ChainViewCallback = struct {
+/// This is the API-facing chain boundary: handlers ask this port for head
+/// snapshots, canonical block/state reads, and live state lookup/regeneration
+/// without depending on node-local trackers or direct DB access.
+pub const ChainCallback = struct {
     ptr: *anyopaque,
     getHeadTrackerFn: *const fn (ptr: *anyopaque) HeadTracker,
-    getSyncStatusFn: *const fn (ptr: *anyopaque) SyncStatus,
-};
-
-/// Type-erased callback for chain-backed block/state reads.
-///
-/// This lets API handlers ask the chain boundary for canonical block and
-/// archived state data without hard-coding direct DB access as their primary
-/// integration path.
-pub const ChainQueryCallback = struct {
-    ptr: *anyopaque,
     getBlockRootBySlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!?[32]u8,
     getBlockBytesByRootFn: *const fn (ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8,
     getStateRootBySlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!?[32]u8,
@@ -79,18 +67,18 @@ pub const ChainQueryCallback = struct {
     getStateBytesByRootFn: *const fn (ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8,
     getStateArchiveAtSlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!?[]const u8,
     getStateArchiveByRootFn: *const fn (ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8,
-};
-
-/// Type-erased callback for chain-owned state lookup/regeneration.
-///
-/// This is the main API-facing boundary for resolved beacon states. It allows
-/// handlers to ask the chain for head or historical states without depending on
-/// node-local regen internals.
-pub const StateQueryCallback = struct {
-    ptr: *anyopaque,
     getHeadStateFn: *const fn (ptr: *anyopaque) ?*CachedBeaconState,
     getStateByRootFn: *const fn (ptr: *anyopaque, state_root: [32]u8) anyerror!?*CachedBeaconState,
     getStateBySlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!?*CachedBeaconState,
+};
+
+/// Type-erased callback for live node sync status.
+///
+/// Sync status is a node/runtime concern rather than a pure chain query since
+/// it depends on the sync service state machine and EL liveness.
+pub const SyncStatusCallback = struct {
+    ptr: *anyopaque,
+    getSyncStatusFn: *const fn (ptr: *anyopaque) SyncStatus,
 };
 
 // Comptime ABI guard: verify field layout matches what BeaconNode writes via raw pointer.
@@ -339,19 +327,8 @@ pub const DeleteKeyResult = struct {
 // ---------------------------------------------------------------------------
 
 pub const ApiContext = struct {
-    /// Mirrored chain head tracking. Kept as a compatibility fallback until
-    /// all handlers are moved to `chain_view`.
-    head_tracker: *HeadTracker,
-
-    /// Block / state database.
-    db: *BeaconDB,
-
     /// This node's identity on the P2P network.
     node_identity: *types.NodeIdentity,
-
-    /// Mirrored sync status. Kept as a compatibility fallback until all
-    /// handlers are moved to `chain_view`.
-    sync_status: *SyncStatus,
 
     /// Beacon chain configuration.
     beacon_config: *const BeaconConfig,
@@ -367,14 +344,11 @@ pub const ApiContext = struct {
     /// Optional block import callback. Nil until wired by BeaconNode.init.
     block_import: ?BlockImportCallback = null,
 
-    /// Optional chain snapshot callback. Nil until wired by BeaconNode.init.
-    chain_view: ?ChainViewCallback = null,
+    /// Optional chain callback. Nil until wired by BeaconNode.init.
+    chain: ?ChainCallback = null,
 
-    /// Optional chain read/query callback. Nil until wired by BeaconNode.init.
-    chain_query: ?ChainQueryCallback = null,
-
-    /// Optional chain state lookup/regeneration callback. Nil until wired by BeaconNode.init.
-    state_query: ?StateQueryCallback = null,
+    /// Optional live node sync-status callback. Nil until wired by BeaconNode.init.
+    sync_status_view: ?SyncStatusCallback = null,
 
     /// Optional peer DB callback. Nil until wired by BeaconNode.init.
     peer_db: ?PeerDBCallback = null,
@@ -404,24 +378,23 @@ pub const ApiContext = struct {
     builder: ?BuilderCallback = null,
 
     pub fn currentHeadTracker(self: *const ApiContext) HeadTracker {
-        if (self.chain_view) |cb| return cb.getHeadTrackerFn(cb.ptr);
-        return self.head_tracker.*;
+        if (self.chain) |cb| return cb.getHeadTrackerFn(cb.ptr);
+        return std.mem.zeroes(HeadTracker);
     }
 
     pub fn currentSyncStatus(self: *const ApiContext) SyncStatus {
-        if (self.chain_view) |cb| return cb.getSyncStatusFn(cb.ptr);
-        return self.sync_status.*;
+        if (self.sync_status_view) |cb| return cb.getSyncStatusFn(cb.ptr);
+        return std.mem.zeroes(SyncStatus);
     }
 
     pub fn blockRootBySlot(self: *const ApiContext, slot: u64) !?[32]u8 {
-        if (self.chain_query) |cb| return cb.getBlockRootBySlotFn(cb.ptr, slot);
-        return self.db.getBlockRootBySlot(slot);
+        if (self.chain) |cb| return cb.getBlockRootBySlotFn(cb.ptr, slot);
+        return null;
     }
 
     pub fn blockBytesByRoot(self: *const ApiContext, root: [32]u8) !?[]const u8 {
-        if (self.chain_query) |cb| return cb.getBlockBytesByRootFn(cb.ptr, root);
-        if (try self.db.getBlock(root)) |block_bytes| return block_bytes;
-        return self.db.getBlockArchiveByRoot(root);
+        if (self.chain) |cb| return cb.getBlockBytesByRootFn(cb.ptr, root);
+        return null;
     }
 
     pub fn blockBytesAtSlot(self: *const ApiContext, slot: u64) !?[]const u8 {
@@ -430,7 +403,7 @@ pub const ApiContext = struct {
     }
 
     pub fn stateRootBySlot(self: *const ApiContext, slot: u64) !?[32]u8 {
-        if (self.chain_query) |cb| return cb.getStateRootBySlotFn(cb.ptr, slot);
+        if (self.chain) |cb| return cb.getStateRootBySlotFn(cb.ptr, slot);
         const head = self.currentHeadTracker();
         if (slot == head.head_slot) return head.head_state_root;
         const block_root = try self.blockRootBySlot(slot) orelse return null;
@@ -438,7 +411,7 @@ pub const ApiContext = struct {
     }
 
     pub fn stateRootByBlockRoot(self: *const ApiContext, root: [32]u8) !?[32]u8 {
-        if (self.chain_query) |cb| return cb.getStateRootByBlockRootFn(cb.ptr, root);
+        if (self.chain) |cb| return cb.getStateRootByBlockRootFn(cb.ptr, root);
 
         const block_bytes = try self.blockBytesByRoot(root) orelse return null;
         defer self.allocator.free(block_bytes);
@@ -447,17 +420,19 @@ pub const ApiContext = struct {
     }
 
     pub fn stateArchiveAtSlot(self: *const ApiContext, slot: u64) !?[]const u8 {
-        if (self.chain_query) |cb| return cb.getStateArchiveAtSlotFn(cb.ptr, slot);
-        return self.db.getStateArchive(slot);
+        if (self.chain) |cb| return cb.getStateArchiveAtSlotFn(cb.ptr, slot);
+        return null;
     }
 
     pub fn stateArchiveByRoot(self: *const ApiContext, root: [32]u8) !?[]const u8 {
-        if (self.chain_query) |cb| return cb.getStateArchiveByRootFn(cb.ptr, root);
-        return self.db.getStateArchiveByRoot(root);
+        if (self.chain) |cb| return cb.getStateArchiveByRootFn(cb.ptr, root);
+        return null;
     }
 
     pub fn stateBytesBySlot(self: *const ApiContext, slot: u64) !?[]const u8 {
-        if (self.chain_query) |cb| return cb.getStateBytesBySlotFn(cb.ptr, slot);
+        if (self.chain) |cb| {
+            if (try cb.getStateBytesBySlotFn(cb.ptr, slot)) |bytes| return bytes;
+        }
         if (try self.stateArchiveAtSlot(slot)) |bytes| return bytes;
         if (try self.stateBySlot(slot)) |state| {
             const bytes = try state.state.serialize(self.allocator);
@@ -467,7 +442,9 @@ pub const ApiContext = struct {
     }
 
     pub fn stateBytesByRoot(self: *const ApiContext, root: [32]u8) !?[]const u8 {
-        if (self.chain_query) |cb| return cb.getStateBytesByRootFn(cb.ptr, root);
+        if (self.chain) |cb| {
+            if (try cb.getStateBytesByRootFn(cb.ptr, root)) |bytes| return bytes;
+        }
         if (try self.stateArchiveByRoot(root)) |bytes| return bytes;
         if (try self.stateByRoot(root)) |state| {
             const bytes = try state.state.serialize(self.allocator);
@@ -477,12 +454,12 @@ pub const ApiContext = struct {
     }
 
     pub fn headState(self: *const ApiContext) ?*CachedBeaconState {
-        if (self.state_query) |cb| return cb.getHeadStateFn(cb.ptr);
+        if (self.chain) |cb| return cb.getHeadStateFn(cb.ptr);
         return null;
     }
 
     pub fn stateByRoot(self: *const ApiContext, state_root: [32]u8) !?*CachedBeaconState {
-        if (self.state_query) |cb| return cb.getStateByRootFn(cb.ptr, state_root);
+        if (self.chain) |cb| return cb.getStateByRootFn(cb.ptr, state_root);
         return null;
     }
 
@@ -492,7 +469,7 @@ pub const ApiContext = struct {
     }
 
     pub fn stateBySlot(self: *const ApiContext, slot: u64) !?*CachedBeaconState {
-        if (self.state_query) |cb| return cb.getStateBySlotFn(cb.ptr, slot);
+        if (self.chain) |cb| return cb.getStateBySlotFn(cb.ptr, slot);
         if (slot == self.currentHeadTracker().head_slot) return self.headState();
         if (try self.stateRootBySlot(slot)) |state_root| return self.stateByRoot(state_root);
         return null;

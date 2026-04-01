@@ -33,26 +33,14 @@ const state_transition = @import("state_transition");
 const bls_mod = @import("bls");
 const BlsThreadPool = bls_mod.ThreadPool;
 const CachedBeaconState = state_transition.CachedBeaconState;
-const BlockStateCache = state_transition.BlockStateCache;
-const CheckpointStateCache = state_transition.CheckpointStateCache;
-const CheckpointKey = state_transition.CheckpointKey;
-const StateRegen = state_transition.StateRegen;
-const db_mod = @import("db");
-const BeaconDB = db_mod.BeaconDB;
 const chain_mod = @import("chain");
 const Chain = chain_mod.Chain;
 const ChainRuntime = chain_mod.Runtime;
-const QueuedStateRegen = chain_mod.QueuedStateRegen;
-const OpPool = chain_mod.OpPool;
-const SeenCache = chain_mod.SeenCache;
 const ChainService = chain_mod.Service;
-const SyncContributionAndProofPool = chain_mod.SyncContributionAndProofPool;
-const SyncCommitteeMessagePool = chain_mod.SyncCommitteeMessagePool;
 const ProducedBlockBody = chain_mod.ProducedBlockBody;
 const ProducedBlock = chain_mod.ProducedBlock;
 const ValidatorMonitor = chain_mod.ValidatorMonitor;
 const BlockProductionConfig = chain_mod.BlockProductionConfig;
-const ImportOutcome = chain_mod.ImportOutcome;
 pub const HeadTracker = chain_mod.HeadTracker;
 pub const ImportResult = chain_mod.ImportResult;
 const ImportError = chain_mod.ImportError;
@@ -86,19 +74,6 @@ const SyncMode = sync_mod.SyncMode;
 const SyncServiceCallbacks = sync_mod.SyncServiceCallbacks;
 const BatchBlock = sync_mod.BatchBlock;
 const BatchId = sync_mod.BatchId;
-
-const fork_choice_mod = @import("fork_choice");
-const ForkChoice = fork_choice_mod.ForkChoiceStruct;
-const ProtoBlock = fork_choice_mod.ProtoBlock;
-const BlockExtraMeta = fork_choice_mod.BlockExtraMeta;
-const ForkChoiceCheckpoint = fork_choice_mod.Checkpoint;
-const LVHExecResponse = fork_choice_mod.LVHExecResponse;
-const ForkChoiceStore = fork_choice_mod.ForkChoiceStore;
-const ProtoArrayStruct = fork_choice_mod.ProtoArrayStruct;
-const CheckpointWithPayloadStatus = fork_choice_mod.CheckpointWithPayloadStatus;
-const ForkChoiceOpts = fork_choice_mod.ForkChoiceOpts;
-const JustifiedBalancesGetter = fork_choice_mod.JustifiedBalancesGetter;
-const JustifiedBalances = fork_choice_mod.JustifiedBalances;
 
 const execution_mod = @import("execution");
 const EngineApi = execution_mod.EngineApi;
@@ -183,37 +158,18 @@ pub const BeaconNode = struct {
     // Chain runtime ownership root.
     chain_runtime: *ChainRuntime,
 
-    // Core chain component aliases.
-    db: *BeaconDB,
-    state_regen: *StateRegen,
-    queued_regen: *QueuedStateRegen,
-    block_state_cache: *BlockStateCache,
-    checkpoint_state_cache: *CheckpointStateCache,
-    head_tracker: *HeadTracker,
-    fork_choice: ?*ForkChoice,
-
     // Chain coordinator (delegates to all chain components)
     chain: *Chain,
-
-    // Chain components (owned by BeaconNode, pointers held by chain)
-    op_pool: *OpPool,
-    seen_cache: *SeenCache,
-
-    // Sync committee pools — collect contributions for SyncAggregate production.
-    sync_contribution_pool: ?*SyncContributionAndProofPool,
-    sync_committee_message_pool: ?*SyncCommitteeMessagePool,
 
     // Clock
     clock: ?SlotClock,
 
     // API context
     api_context: *ApiContext,
-    api_head_tracker: *api_mod.context.HeadTracker,
-    api_sync_status: *api_mod.context.SyncStatus,
     api_node_identity: *api_mod.types.NodeIdentity,
     api_bindings: ?*api_callbacks_mod.ApiBindings = null,
     /// EventBus for SSE beacon chain events. Owned by BeaconNode, wired into
-    /// ApiContext.event_bus and Chain.event_callback.
+    /// ApiContext.event_bus and Chain.notification_sink.
     event_bus: *api_mod.EventBus,
 
     // Prometheus metrics (real or noop depending on --metrics flag).
@@ -251,6 +207,9 @@ pub const BeaconNode = struct {
     // Last known active fork digest — used to detect fork transitions
     // so we can resubscribe gossip topics under the new fork digest.
     last_active_fork_digest: [4]u8 = [4]u8{ 0, 0, 0, 0 },
+
+    // Last slot for which chain.onSlot() was applied.
+    last_slot_tick: ?u64 = null,
 
     // Sync subsystem components (lazily initialized when P2P starts).
 
@@ -382,7 +341,7 @@ pub const BeaconNode = struct {
         source: BlockSource,
     ) !ImportResult {
         const t0 = std.Io.Clock.awake.now(self.io);
-        const outcome = try ChainService.init(self.chain).importBlock(any_signed, source);
+        const outcome = try self.chainService().importBlock(any_signed, source);
         const result = outcome.result;
 
         // Notify EL of fork choice update after each block import.
@@ -404,14 +363,11 @@ pub const BeaconNode = struct {
             m.head_root.set(std.mem.readInt(u64, outcome.snapshot.head.root[0..8], .big));
         }
 
-        // Update API context
-        self.applyImportOutcome(outcome);
-
         if (result.epoch_transition) {
             // Archive the post-epoch state for cold-path recovery.
             // Errors are non-fatal — the block is already imported.
             if (outcome.effects.archive_state) |archive_state| {
-                ChainService.init(self.chain).archiveState(archive_state.slot, archive_state.state_root) catch {};
+                self.chainService().archiveState(archive_state.slot, archive_state.state_root) catch {};
             }
             if (outcome.effects.finalized_checkpoint) |finalized| {
                 self.unknown_chain_sync.onFinalized(finalized.slot);
@@ -438,7 +394,7 @@ pub const BeaconNode = struct {
     /// All sidecars for a given block root are stored together as raw bytes, keyed by root.
     /// Callers that have disaggregated sidecar data should aggregate before calling this.
     pub fn importBlobSidecar(self: *BeaconNode, root: [32]u8, data: []const u8) !void {
-        try ChainService.init(self.chain).importBlobSidecar(root, data);
+        try self.chainService().importBlobSidecar(root, data);
     }
 
     /// Store a data column sidecar received via gossip or req/resp (PeerDAS / Fulu).
@@ -446,7 +402,7 @@ pub const BeaconNode = struct {
     /// Data column sidecars arrive individually, keyed by (block_root, column_index).
     /// Each sidecar is stored independently to support per-column availability tracking.
     pub fn importDataColumnSidecar(self: *BeaconNode, root: [32]u8, column_index: u64, data: []const u8) !void {
-        try ChainService.init(self.chain).importDataColumnSidecar(root, column_index, data);
+        try self.chainService().importDataColumnSidecar(root, column_index, data);
         std.log.info("Imported data column sidecar root={s}... column={d}", .{
             &std.fmt.bytesToHex(root[0..4], .lower),
             column_index,
@@ -462,7 +418,7 @@ pub const BeaconNode = struct {
         var columns_found: u64 = 0;
         var col_idx: u64 = 0;
         while (col_idx < 128) : (col_idx += 1) {
-            if (self.db.getDataColumn(root, col_idx) catch null) |data| {
+            if (self.chainQuery().dataColumnByRoot(root, col_idx) catch null) |data| {
                 self.allocator.free(data);
                 columns_found += 1;
                 if (columns_found >= custody_req) return true;
@@ -474,7 +430,7 @@ pub const BeaconNode = struct {
     /// Retrieve a single data column sidecar from the DB.
     /// Used by req/resp handlers to serve DataColumnSidecarsByRoot requests.
     pub fn getDataColumnSidecar(self: *BeaconNode, root: [32]u8, column_index: u64) !?[]const u8 {
-        return self.db.getDataColumn(root, column_index);
+        return self.chainQuery().dataColumnByRoot(root, column_index);
     }
 
     /// Archive the post-epoch state to the cold store.
@@ -485,7 +441,7 @@ pub const BeaconNode = struct {
     /// Serializes the CachedBeaconState's inner AnyBeaconState to SSZ bytes
     /// and stores it via `BeaconDB.putStateArchive(slot, state_root, bytes)`.
     pub fn archiveState(self: *BeaconNode, slot: u64, state_root: [32]u8) !void {
-        try ChainService.init(self.chain).archiveState(slot, state_root);
+        try self.chainService().archiveState(slot, state_root);
     }
 
     /// Advance the head state by one empty slot (no block).
@@ -497,40 +453,8 @@ pub const BeaconNode = struct {
     /// The head_tracker.head_root stays the same (last real block root),
     /// but head_state_root advances to the new state.
     pub fn advanceSlot(self: *BeaconNode, target_slot: u64) !void {
-        const head_state_root = self.head_tracker.head_state_root;
-        const pre_state = self.block_state_cache.get(head_state_root) orelse
-            return error.NoHeadState;
-
-        // Clone and advance.
-        const post_state = try pre_state.clone(self.allocator, .{ .transfer_cache = false });
-        errdefer {
-            post_state.deinit();
-            self.allocator.destroy(post_state);
-        }
-
-        try state_transition.processSlots(self.allocator, post_state, target_slot, .{});
-        try post_state.state.commit();
-
-        // Cache the new state as the head.
-        const new_state_root = try self.queued_regen.onNewBlock(post_state, true);
-
-        // Update chain's block_root -> state_root mapping so the
-        // next block import can find this state as parent.
-        try self.chain.block_to_state.put(
-            self.head_tracker.head_root,
-            new_state_root,
-        );
-
-        // Update head tracker to reflect the new state_root.
-        self.head_tracker.head_state_root = new_state_root;
-        self.head_tracker.head_slot = target_slot;
-
-        // Persist slot->root for range queries.
-        try self.head_tracker.slot_roots.put(target_slot, self.head_tracker.head_root);
-
-        // Update API context.
-        self.api_head_tracker.head_slot = target_slot;
-        self.api_head_tracker.head_state_root = new_state_root;
+        try self.chainService().advanceSlot(target_slot);
+        self.last_slot_tick = target_slot;
     }
 
     /// Start the Beacon REST API HTTP server (blocking).
@@ -688,7 +612,31 @@ pub const BeaconNode = struct {
 
     /// Get the current head info.
     pub fn getHead(self: *const BeaconNode) HeadInfo {
-        return self.chain.getHead();
+        return self.chainQuery().head();
+    }
+
+    pub fn chainQuery(self: *const BeaconNode) chain_mod.Query {
+        return chain_mod.Query.init(self.chain);
+    }
+
+    pub fn chainService(self: *BeaconNode) chain_mod.Service {
+        return chain_mod.Service.init(self.chain);
+    }
+
+    pub fn headState(self: *const BeaconNode) ?*CachedBeaconState {
+        return self.chainQuery().headState();
+    }
+
+    pub fn currentHeadSlot(self: *const BeaconNode) u64 {
+        return self.getHead().slot;
+    }
+
+    pub fn currentHeadRoot(self: *const BeaconNode) [32]u8 {
+        return self.getHead().root;
+    }
+
+    pub fn currentFinalizedSlot(self: *const BeaconNode) u64 {
+        return self.chainQuery().finalizedCheckpoint().slot;
     }
 
     /// Get the current sync status.
@@ -709,9 +657,8 @@ pub const BeaconNode = struct {
             };
         }
         // Fallback: no sync service (e.g. tests without P2P).
-        const head_slot = if (self.fork_choice) |fc| fc.head.slot else self.head_tracker.head_slot;
         return .{
-            .head_slot = head_slot,
+            .head_slot = self.currentHeadSlot(),
             .sync_distance = 0,
             .is_syncing = false,
             .is_optimistic = false,
@@ -785,7 +732,7 @@ pub const BeaconNode = struct {
     }
     /// Used for req/resp Status exchanges with peers.
     pub fn getStatus(self: *const BeaconNode) StatusMessage.Type {
-        return self.chain.getStatus();
+        return self.chainQuery().status();
     }
 
     /// Handle an incoming req/resp request.
@@ -807,14 +754,12 @@ pub const BeaconNode = struct {
         return handleRequest(self.allocator, method, request_bytes, &ctx);
     }
 
-    fn applyImportOutcome(self: *BeaconNode, outcome: ImportOutcome) void {
-        self.api_head_tracker.head_slot = outcome.snapshot.head.slot;
-        self.api_head_tracker.head_root = outcome.snapshot.head.root;
-        self.api_head_tracker.head_state_root = outcome.snapshot.head.state_root;
-        self.api_head_tracker.finalized_slot = outcome.snapshot.finalized.slot;
-        self.api_head_tracker.finalized_root = outcome.snapshot.finalized.root;
-        self.api_head_tracker.justified_slot = outcome.snapshot.justified.slot;
-        self.api_head_tracker.justified_root = outcome.snapshot.justified.root;
+    pub fn applyBootstrapOutcome(self: *BeaconNode, outcome: chain_mod.BootstrapOutcome) void {
+        self.genesis_validators_root = outcome.genesis_validators_root;
+        self.last_slot_tick = null;
+        self.clock = SlotClock.fromGenesis(outcome.genesis_time, self.config.chain);
+        self.api_context.genesis_time = outcome.genesis_time;
+        _ = outcome.snapshot;
     }
 };
 
@@ -924,19 +869,16 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                 // Import to fork choice (apply vote weight).
                 // Op pool insertion requires a full Attestation struct — deferred to
                 // when full attestation objects are threaded through the pipeline.
-                if (node.chain.fork_choice) |fc| {
-                    fc.onSingleVote(
-                        node.allocator,
-                        @intCast(queued.att.attester_index),
-                        queued.att.slot,
-                        queued.att.target_root,
-                        queued.att.target_epoch,
-                    ) catch |err| {
-                        std.log.warn("FC onSingleVote failed validator={d} slot={d}: {}", .{
-                            queued.att.attester_index, queued.att.slot, err,
-                        });
-                    };
-                }
+                node.chainService().applyAttestationVote(
+                    @intCast(queued.att.attester_index),
+                    queued.att.slot,
+                    queued.att.beacon_block_root,
+                    queued.att.target_epoch,
+                ) catch |err| {
+                    std.log.warn("FC onSingleVote failed validator={d} slot={d}: {}", .{
+                        queued.att.attester_index, queued.att.slot, err,
+                    });
+                };
             }
         },
         .aggregate_batch => |batch| {
@@ -968,17 +910,14 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             }
 
             // Import to fork choice.
-            if (node.chain.fork_choice) |fc| {
-                fc.onSingleVote(
-                    node.allocator,
-                    @intCast(queued.att.attester_index),
-                    queued.att.slot,
-                    queued.att.target_root,
-                    queued.att.target_epoch,
-                ) catch |err| {
-                    std.log.warn("FC onSingleVote failed validator={d}: {}", .{ queued.att.attester_index, err });
-                };
-            }
+            node.chainService().applyAttestationVote(
+                @intCast(queued.att.attester_index),
+                queued.att.slot,
+                queued.att.beacon_block_root,
+                queued.att.target_epoch,
+            ) catch |err| {
+                std.log.warn("FC onSingleVote failed validator={d}: {}", .{ queued.att.attester_index, err });
+            };
         },
         else => {
             // For all other work types, log at debug level.

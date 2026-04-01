@@ -457,7 +457,7 @@ test "getAttestationData returns stub data without callback" {
     const result = try getAttestationData(&tc.ctx, 100, 0);
     try std.testing.expectEqual(@as(u64, 100), result.data.slot);
     try std.testing.expectEqual(@as(u64, 0), result.data.index);
-    try std.testing.expectEqual(tc.ctx.head_tracker.head_root, result.data.beacon_block_root);
+    try std.testing.expectEqual(tc.head_tracker.head_root, result.data.beacon_block_root);
 }
 
 test "getAttestationData uses callback when wired" {

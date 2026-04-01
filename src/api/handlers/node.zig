@@ -152,8 +152,8 @@ test "getVersion returns version string" {
 test "getSyncing reflects sync status" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    tc.ctx.sync_status.is_syncing = true;
-    tc.ctx.sync_status.sync_distance = 100;
+    tc.sync_status.is_syncing = true;
+    tc.sync_status.sync_distance = 100;
     const resp = getSyncing(&tc.ctx);
     try std.testing.expect(resp.data.is_syncing);
     try std.testing.expectEqual(@as(u64, 100), resp.data.sync_distance);
@@ -162,7 +162,7 @@ test "getSyncing reflects sync status" {
 test "getHealth returns syncing (206) when syncing" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    tc.ctx.sync_status.is_syncing = true;
+    tc.sync_status.is_syncing = true;
     const result = getHealth(&tc.ctx);
     try std.testing.expectEqual(@as(u16, 206), result.status);
 }
@@ -170,8 +170,8 @@ test "getHealth returns syncing (206) when syncing" {
 test "getHealth returns not_initialized (503) when head_slot is 0" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    tc.ctx.sync_status.is_syncing = false;
-    tc.ctx.sync_status.head_slot = 0;
+    tc.sync_status.is_syncing = false;
+    tc.sync_status.head_slot = 0;
     const result = getHealth(&tc.ctx);
     try std.testing.expectEqual(@as(u16, 503), result.status);
 }
@@ -179,8 +179,8 @@ test "getHealth returns not_initialized (503) when head_slot is 0" {
 test "getHealth returns ready (200) when synced" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    tc.ctx.sync_status.is_syncing = false;
-    tc.ctx.sync_status.head_slot = 1000;
+    tc.sync_status.is_syncing = false;
+    tc.sync_status.head_slot = 1000;
     const result = getHealth(&tc.ctx);
     try std.testing.expectEqual(@as(u16, 200), result.status);
 }

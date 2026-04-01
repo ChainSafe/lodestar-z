@@ -74,10 +74,13 @@ pub const SyncCallbackCtx = struct {
         const node = ctx.node;
         const allocator = node.allocator;
 
-        const fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
+        const fork_seq = node.config.forkSeq(node.currentHeadSlot());
 
         const any_signed = AnySignedBeaconBlock.deserialize(
-            allocator, .full, fork_seq, block_bytes,
+            allocator,
+            .full,
+            fork_seq,
+            block_bytes,
         ) catch |err| {
             std.log.warn("SyncCallbackCtx: block deserialize error: {}", .{err});
             return err;

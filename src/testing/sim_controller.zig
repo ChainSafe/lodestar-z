@@ -150,7 +150,7 @@ pub const SimController = struct {
 
         // Nodes 1..N: clone genesis state.
         for (1..config.num_nodes) |i| {
-            const genesis_state_0 = bn0.block_state_cache.get(bn0.head_tracker.head_state_root) orelse
+            const genesis_state_0 = bn0.headState() orelse
                 return error.NoGenesisState;
             const cloned = try genesis_state_0.clone(allocator, .{ .transfer_cache = false });
 
@@ -268,29 +268,26 @@ pub const SimController = struct {
                 );
                 defer attestations.deinit(self.allocator);
 
-                // Feed each attestation to this node's fork choice.
-                if (self.beacon_nodes[i].chain.fork_choice) |fc| {
-                    for (attestations.attestations.items) |*att| {
-                        // Apply each attesting validator's vote to fork choice.
-                        // In the real client, getAttestingIndices resolves committee → validators.
-                        // Here we know the attester from SimValidator's committee walk.
-                        const att_data = &att.data;
-                        const committee = head_state.epoch_cache.getBeaconCommittee(
-                            att_data.slot,
-                            att_data.index,
-                        ) catch continue;
+                for (attestations.attestations.items) |*att| {
+                    // Apply each attesting validator's vote to fork choice.
+                    // In the real client, getAttestingIndices resolves committee → validators.
+                    // Here we know the attester from SimValidator's committee walk.
+                    const att_data = &att.data;
+                    const committee = head_state.epoch_cache.getBeaconCommittee(
+                        att_data.slot,
+                        att_data.index,
+                    ) catch continue;
 
-                        for (committee, 0..) |vi, pos| {
-                            // Check if this validator actually attested (bit set in aggregation_bits).
-                            const is_set = att.aggregation_bits.get(pos) catch false;
-                            if (is_set) {
-                                fc.onSingleVote(
-                                    self.allocator,
-                                    @intCast(vi),
-                                    att_data.target.root,
-                                    att_data.target.epoch,
-                                ) catch {};
-                            }
+                    for (committee, 0..) |vi, pos| {
+                        // Check if this validator actually attested (bit set in aggregation_bits).
+                        const is_set = att.aggregation_bits.get(pos) catch false;
+                        if (is_set) {
+                            self.beacon_nodes[i].chainService().applyAttestationVote(
+                                @intCast(vi),
+                                att_data.slot,
+                                att_data.beacon_block_root,
+                                att_data.target.epoch,
+                            ) catch {};
                         }
                     }
                 }
@@ -433,7 +430,7 @@ pub const SimController = struct {
             },
             .head_freshness => |max_behind| {
                 for (0..self.num_nodes) |i| {
-                    const head_slot = self.beacon_nodes[i].head_tracker.head_slot;
+                    const head_slot = self.beacon_nodes[i].getHead().slot;
                     if (self.current_slot > head_slot + max_behind) return error.HeadTooStale;
                 }
             },
