@@ -2163,8 +2163,6 @@ fn deinitTestForkChoice(allocator: Allocator, fc: *ForkChoice) void {
     allocator.destroy(fc_store);
 }
 
-// ── Proposer reorg tests ──
-
 /// Test-only helper: create ForkChoice with custom options.
 fn initTestForkChoiceWithOpts(
     allocator: Allocator,
@@ -2266,8 +2264,6 @@ fn initReorgTest(allocator: Allocator, params: ReorgTestParams) !ReorgTestCtx {
         .head_root = head_root,
     };
 }
-
-// ── Group 1: getProposerHead ──
 
 test "getProposerHead reorgs when all conditions met" {
     var ctx = try initReorgTest(testing.allocator, .{});
@@ -2375,8 +2371,6 @@ test "getProposerHead no reorg: not proposing on time" {
     try testing.expectEqual(@as(?NotReorgedReason, .not_proposing_on_time), result.not_reorged_reason);
 }
 
-// ── Group 2: shouldOverrideForkChoiceUpdate (deduplicated — preliminary checks covered by Group 1) ──
-
 test "shouldOverrideFCU overrides when head.slot == current_slot" {
     // head_slot=10, current_slot=10 → head.slot == current_slot → timing passes
     var ctx = try initReorgTest(testing.allocator, .{ .current_slot = 10 });
@@ -2412,8 +2406,6 @@ test "shouldOverrideFCU no override: timing fails" {
         .should_override => return error.TestUnexpectedResult,
     }
 }
-
-// ── getDependentRoot tests ──
 
 /// Compute target root for a block at `slot`, given `skipped_slots`.
 fn getTargetRoot(slot: Slot, skipped_slots: []const Slot) Root {
@@ -2524,8 +2516,6 @@ test "getDependentRoot table-driven" {
         try testing.expectEqual(expected_root, result);
     }
 }
-
-// ── getAllAncestorBlocks / getAllNonAncestorBlocks tests ──
 
 // Tree:
 //       0(genesis)
@@ -2786,8 +2776,6 @@ test "deep chain head selection follows longest weighted branch" {
     try testing.expectEqual(@as(usize, 9), fc.proto_array.nodes.items.len); // genesis + 8 blocks
 }
 
-// ── shouldOverrideForkChoiceUpdate tests (continued) ──
-
 test "shouldOverrideFCU no override: not FFG competitive" {
     // Head has lower uj_epoch than parent → not FFG competitive → no override.
     var ctx = try initReorgTest(testing.allocator, .{ .head_uj_epoch = 0, .parent_uj_epoch = 1 });
@@ -2842,7 +2830,17 @@ test "shouldOverrideFCU no override: not shuffling stable (epoch boundary)" {
     }
 }
 
-// ── Balance update tests ──
+test "shouldOverrideFCU no override: head block is timely" {
+    // head_timely=true → getPreliminaryProposerHead returns .head_block_is_timely
+    var ctx = try initReorgTest(testing.allocator, .{ .head_timely = true });
+    defer deinitTestForkChoice(testing.allocator, ctx.fc);
+
+    const result = ctx.fc.shouldOverrideForkChoiceUpdate(&ctx.head_block, 0, 11);
+    switch (result) {
+        .should_not_override => |r| try testing.expectEqual(NotReorgedReason.head_block_is_timely, r.reason),
+        .should_override => return error.TestUnexpectedResult,
+    }
+}
 
 // Tree:
 //       genesis
@@ -3108,8 +3106,6 @@ test "failed insertion cleanup: unknown parent does not leave dangling root" {
     try testing.expectEqual(@as(?u32, null), fc.proto_array.getDefaultNodeIndex(orphan_root));
 }
 
-// ── IsCanonical / AncestorRoot tests ──
-
 // Tree:
 //         0(genesis)
 //          / \
@@ -3269,4 +3265,338 @@ test "AncestorRoot: lower slot with gap returns parent" {
 
     const ancestor = try fc.proto_array.getAncestor(root3, 150);
     try testing.expectEqual(root1, ancestor.block_root);
+}
+
+// Tree:
+//       genesis(0)
+//       /        \
+//     a(1)       b(1)
+//    /   \         \
+//  c(2)   d(2)    e(2)
+//  |       |
+//  f(3)   g(3)
+//
+// 7 validators, balances = [100]*7.
+// Phase 1: No votes → head = root tiebreak.
+// Phase 2: V0-V2 vote for f → head = f.
+// Phase 3: V3-V6 vote for e → head = e (4*100 > 3*100 on b-branch).
+// Phase 4: V3-V4 switch from e to g → a-branch=5*100 > b-branch=2*100 → head = f.
+// Phase 5: Slash V0 → f=2*100, g=2*100, e=2*100 → a-branch=4*100, b-branch=2*100 → head on a still.
+test "comprehensive multi-phase vote: 8-node tree with switching and slashing" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const c_root = hashFromByte(0x0C);
+    const d_root = hashFromByte(0x0D);
+    const e_root = hashFromByte(0x0E);
+    const f_root = hashFromByte(0x0F);
+    const g_root = hashFromByte(0x10);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 7;
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Insert tree.
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, a_root, genesis_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, b_root, genesis_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(2, c_root, a_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(2, d_root, a_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(2, e_root, b_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(3, f_root, c_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(3, g_root, d_root), 10);
+
+    // Phase 1: No votes → head = highest leaf by root tiebreak.
+    try fc.updateHead(allocator);
+    // g_root=0x10 > f_root=0x0F > e_root=0x0E → deepest leaves are f,g,e.
+    // Weight ties at 0 → best-child chosen by root. The head depends on tree
+    // back-propagation: genesis has children a(0x0A) and b(0x0B). b > a by root,
+    // so best-child of genesis is b → head follows b → e.
+    try testing.expectEqual(e_root, fc.head.block_root);
+
+    // Phase 2: V0-V2 vote for f.
+    try fc.addLatestMessage(allocator, 0, 3, f_root, .full);
+    try fc.addLatestMessage(allocator, 1, 3, f_root, .full);
+    try fc.addLatestMessage(allocator, 2, 3, f_root, .full);
+    try fc.updateHead(allocator);
+    // a-branch weight: a=300(propagated), c=300, f=300. b-branch: b=0, e=0.
+    // a-branch wins → head = f.
+    try testing.expectEqual(f_root, fc.head.block_root);
+
+    // Phase 3: V3-V6 vote for e.
+    try fc.addLatestMessage(allocator, 3, 2, e_root, .full);
+    try fc.addLatestMessage(allocator, 4, 2, e_root, .full);
+    try fc.addLatestMessage(allocator, 5, 2, e_root, .full);
+    try fc.addLatestMessage(allocator, 6, 2, e_root, .full);
+    try fc.updateHead(allocator);
+    // a-branch=300, b-branch=400 → head = e.
+    try testing.expectEqual(e_root, fc.head.block_root);
+
+    // Phase 4: V3-V4 switch from e to g.
+    // addLatestMessage requires epoch advancement to accept a vote switch.
+    // Phase 3 used slot 2 (epoch 0), so we need slot in epoch 1.
+    const epoch1_slot = preset.SLOTS_PER_EPOCH;
+    try fc.addLatestMessage(allocator, 3, epoch1_slot, g_root, .full);
+    try fc.addLatestMessage(allocator, 4, epoch1_slot, g_root, .full);
+    try fc.updateHead(allocator);
+    // a-branch: f=300, g=200, total through a = 500.
+    // b-branch: e=200, total through b = 200.
+    // a wins → head. Within a: c(300) vs d(200) → c wins → head = f.
+    try testing.expectEqual(f_root, fc.head.block_root);
+
+    // Phase 5: Slash V0 → f loses 100. f=200, g=200, e=200.
+    var slashing = makeTestAttesterSlashing(&[_]u64{0});
+    try fc.onAttesterSlashing(allocator, &.{ .phase0 = &slashing });
+    try fc.updateHead(allocator);
+    // a-branch: f=200, g=200, total through a = 400.
+    // b-branch: e=200, total through b = 200.
+    // a still wins. Within a: c(200) vs d(200) → root tiebreak d(0x0D) > c(0x0C) → head = g.
+    try testing.expectEqual(g_root, fc.head.block_root);
+}
+
+/// Test-only helper: convert a pre-merge ProtoBlock to a Gloas block.
+/// Sets parent_block_hash and extra_meta.post_merge so that isGloasBlock() returns true.
+fn makeGloasTestBlock(slot: Slot, root: Root, parent_root: Root, parent_bh: Root) ProtoBlock {
+    var block = makeTestBlock(slot, root, parent_root);
+    block.parent_block_hash = parent_bh;
+    block.extra_meta = .{
+        .post_merge = BlockExtraMeta.PostMergeMeta.init(
+            parent_bh,
+            0,
+            .payload_separated,
+            .pre_data,
+        ),
+    };
+    return block;
+}
+
+//
+// Tree (Gloas block A with PENDING, EMPTY, FULL; children B and C):
+//
+//   genesis(0, pre-merge)
+//     |
+//   A.PENDING(slot=1, Gloas)
+//     / \
+//   A.EMPTY  A.FULL  (created via onExecutionPayload)
+//     |        |
+//   B.PENDING  C.PENDING  (B child of EMPTY, C child of FULL)
+//     |          |
+//   B.EMPTY    C.EMPTY
+//
+// With current_slot=2, A is at slot n-1. EMPTY/FULL effective weights are zeroed.
+// The tiebreaker decides: without PTC → EMPTY wins → head follows B.
+// With PTC supermajority → FULL wins → head follows C.
+test "Gloas head integration: EMPTY vs FULL tiebreaker via PTC" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const c_root = hashFromByte(0x0C);
+
+    // parentBlockHash for block A's bid (used for PENDING/EMPTY).
+    const a_parent_bh = hashFromByte(0xA0);
+    // executionPayloadBlockHash for A's FULL variant (arrives via onExecutionPayload).
+    const a_exec_bh = hashFromByte(0xAA);
+
+    const balances = [_]u16{100} ** 4;
+
+    var fc = try initTestForkChoiceWithOpts(
+        allocator,
+        makeTestBlock(0, genesis_root, ZERO_HASH),
+        2, // current_slot = 2, so A (slot=1) is at n-1
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+        .{ .proposer_boost = true },
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Phase 1: Insert Gloas block A at slot 1.
+    // onBlock creates PENDING + EMPTY nodes.
+    try onBlockFromProto(fc, allocator, makeGloasTestBlock(1, a_root, genesis_root, a_parent_bh), 2);
+
+    // Verify PENDING and EMPTY exist, no FULL yet.
+    try testing.expect(fc.proto_array.getNodeIndexByRootAndStatus(a_root, .pending) != null);
+    try testing.expect(fc.proto_array.getNodeIndexByRootAndStatus(a_root, .empty) != null);
+    try testing.expect(fc.proto_array.getNodeIndexByRootAndStatus(a_root, .full) == null);
+
+    // Phase 2: Execution payload arrives for A → creates FULL node.
+    try fc.onExecutionPayload(allocator, a_root, a_exec_bh, 1, ZERO_HASH, .valid);
+    try testing.expect(fc.proto_array.getNodeIndexByRootAndStatus(a_root, .full) != null);
+
+    // Phase 3: Insert B (child of A's EMPTY) and C (child of A's FULL).
+    // B's parent_block_hash = a_parent_bh (matches A's EMPTY execution_payload_block_hash).
+    try onBlockFromProto(fc, allocator, makeGloasTestBlock(2, b_root, a_root, a_parent_bh), 2);
+    // C's parent_block_hash = a_exec_bh (matches A's FULL execution_payload_block_hash).
+    try onBlockFromProto(fc, allocator, makeGloasTestBlock(2, c_root, a_root, a_exec_bh), 2);
+
+    // Phase 4: Vote for both B and C equally.
+    // V0-V1 vote for B, V2-V3 vote for C.
+    try fc.addLatestMessage(allocator, 0, 2, b_root, .pending);
+    try fc.addLatestMessage(allocator, 1, 2, b_root, .pending);
+    try fc.addLatestMessage(allocator, 2, 2, c_root, .pending);
+    try fc.addLatestMessage(allocator, 3, 2, c_root, .pending);
+
+    // Phase 5: With proposer boost on B (extends A's EMPTY), no PTC votes.
+    // shouldExtendPayload: boost root = B, B's parent = A, B extends EMPTY → returns false.
+    // EMPTY tiebreaker = 1, FULL tiebreaker = 0 (not timely, extends EMPTY) → EMPTY wins → head through B.
+    fc.proposer_boost_root = b_root;
+    try fc.updateHead(allocator);
+    try testing.expectEqual(b_root, fc.head.block_root);
+    // Head is B's EMPTY node.
+    try testing.expectEqual(PayloadStatus.empty, fc.head.payload_status);
+
+    // Phase 6: Add PTC supermajority → isPayloadTimely true → shouldExtendPayload true → FULL wins.
+    // Set all PTC votes to true for block A.
+    fc.proto_array.ptc_votes.getPtr(a_root).?.* = ProtoArray.PtcVotes.initFull();
+
+    try fc.updateHead(allocator);
+    // FULL tiebreaker = 2, EMPTY tiebreaker = 1 → FULL wins → head follows C.
+    try testing.expectEqual(c_root, fc.head.block_root);
+    try testing.expectEqual(PayloadStatus.empty, fc.head.payload_status);
+}
+
+/// Test-only helper: post-merge block with syncing execution status.
+fn makePostMergeTestBlock(slot: Slot, root: Root, parent_root: Root, exec_hash: Root) ProtoBlock {
+    var block = makeTestBlock(slot, root, parent_root);
+    block.extra_meta = .{
+        .post_merge = BlockExtraMeta.PostMergeMeta.init(exec_hash, 0, .syncing, .available),
+    };
+    return block;
+}
+
+//
+// Tree:
+//   genesis(0)
+//     /      \
+//   A(1)     B(1)     [post-merge, syncing]
+//   |         |
+//   C(2)     D(2)
+//
+// Phase 1: V0-V3 vote for C → head = C.
+// Phase 2: Invalidate A (LVH=genesis exec hash) → A + C become invalid.
+// Phase 3: updateHead → head must be D (only viable branch).
+test "head moves to valid branch after mass invalidation" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const c_root = hashFromByte(0x0C);
+    const d_root = hashFromByte(0x0D);
+
+    // Execution payload hashes for invalidation tracking.
+    const genesis_exec_hash = hashFromByte(0xE0);
+    const a_exec_hash = hashFromByte(0xEA);
+    const b_exec_hash = hashFromByte(0xEB);
+    const c_exec_hash = hashFromByte(0xEC);
+    const d_exec_hash = hashFromByte(0xED);
+
+    const balances = [_]u16{100} ** 6;
+
+    // Genesis needs to be post-merge for the invalidation chain to work.
+    var fc = try initTestForkChoice(
+        allocator,
+        makePostMergeTestBlock(0, genesis_root, ZERO_HASH, genesis_exec_hash),
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Insert two branches: A →C, B→D (all post-merge syncing).
+    try onBlockFromProto(fc, allocator, makePostMergeTestBlock(1, a_root, genesis_root, a_exec_hash), 10);
+    try onBlockFromProto(fc, allocator, makePostMergeTestBlock(1, b_root, genesis_root, b_exec_hash), 10);
+    try onBlockFromProto(fc, allocator, makePostMergeTestBlock(2, c_root, a_root, c_exec_hash), 10);
+    try onBlockFromProto(fc, allocator, makePostMergeTestBlock(2, d_root, b_root, d_exec_hash), 10);
+
+    // Phase 1: V0-V3 vote for C → head = C.
+    try fc.addLatestMessage(allocator, 0, 2, c_root, .full);
+    try fc.addLatestMessage(allocator, 1, 2, c_root, .full);
+    try fc.addLatestMessage(allocator, 2, 2, c_root, .full);
+    try fc.addLatestMessage(allocator, 3, 2, c_root, .full);
+    // V4-V5 vote for D (minority).
+    try fc.addLatestMessage(allocator, 4, 2, d_root, .full);
+    try fc.addLatestMessage(allocator, 5, 2, d_root, .full);
+
+    try fc.updateHead(allocator);
+    try testing.expectEqual(c_root, fc.head.block_root);
+
+    // Phase 2: Invalidate A's branch. LVH = genesis exec hash.
+    // This marks A (and its descendant C) as invalid.
+    fc.validateLatestHash(allocator, .{
+        .invalid = .{
+            .invalidate_from_parent_block_root = a_root,
+            .latest_valid_exec_hash = genesis_exec_hash,
+        },
+    }, 10);
+
+    // Phase 3: updateHead → head should move to D (only viable branch).
+    try fc.updateHead(allocator);
+    try testing.expectEqual(d_root, fc.head.block_root);
+}
+
+//
+// Tree:
+//   genesis(0)
+//     /      \
+//   A(1,Gloas)  B(1,Gloas)
+//
+// Phase 1: V0-V2 vote for A → head = A.
+// Phase 2: V3-V6 vote for B → head = B (4*100 > 3*100).
+// Phase 3: V3-V4 switch from B to A at epoch 1 → A=5*100, B=2*100 → head = A.
+test "Gloas forked branches attestation shift" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const a_parent_bh = hashFromByte(0xA0);
+    const b_parent_bh = hashFromByte(0xB0);
+
+    const balances = [_]u16{100} ** 7;
+
+    var fc = try initTestForkChoice(
+        allocator,
+        makeTestBlock(0, genesis_root, ZERO_HASH),
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Insert two Gloas branches.
+    try onBlockFromProto(fc, allocator, makeGloasTestBlock(1, a_root, genesis_root, a_parent_bh), 10);
+    try onBlockFromProto(fc, allocator, makeGloasTestBlock(1, b_root, genesis_root, b_parent_bh), 10);
+
+    // Phase 1: V0-V2 vote for A → head = A.
+    try fc.addLatestMessage(allocator, 0, 1, a_root, .pending);
+    try fc.addLatestMessage(allocator, 1, 1, a_root, .pending);
+    try fc.addLatestMessage(allocator, 2, 1, a_root, .pending);
+    try fc.updateHead(allocator);
+    try testing.expectEqual(a_root, fc.head.block_root);
+
+    // Phase 2: V3-V6 vote for B → head = B (4*100 > 3*100).
+    try fc.addLatestMessage(allocator, 3, 1, b_root, .pending);
+    try fc.addLatestMessage(allocator, 4, 1, b_root, .pending);
+    try fc.addLatestMessage(allocator, 5, 1, b_root, .pending);
+    try fc.addLatestMessage(allocator, 6, 1, b_root, .pending);
+    try fc.updateHead(allocator);
+    try testing.expectEqual(b_root, fc.head.block_root);
+
+    // Phase 3: V3-V4 switch from B to A at epoch 1 (needs slot >= SLOTS_PER_EPOCH).
+    const epoch1_slot = preset.SLOTS_PER_EPOCH;
+    try fc.addLatestMessage(allocator, 3, epoch1_slot, a_root, .pending);
+    try fc.addLatestMessage(allocator, 4, epoch1_slot, a_root, .pending);
+    try fc.updateHead(allocator);
+    // A now has 5 votes (V0,V1,V2,V3,V4), B has 2 (V5,V6). Head = A.
+    try testing.expectEqual(a_root, fc.head.block_root);
 }
