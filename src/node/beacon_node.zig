@@ -58,7 +58,6 @@ const handleRequest = networking.handleRequest;
 const freeResponseChunks = networking.freeResponseChunks;
 const StatusMessage = networking.messages.StatusMessage;
 const P2pService = networking.p2p_service.P2pService;
-const PassthroughValidator = networking.p2p_service.PassthroughValidator;
 const api_mod = @import("api");
 const ApiContext = api_mod.context.ApiContext;
 
@@ -195,10 +194,6 @@ pub const BeaconNode = struct {
     // P2P service (lazy-initialized via startP2p).
     // Owns the libp2p Switch, gossipsub service, and gossip adapter.
     p2p_service: ?P2pService = null,
-
-    // Passthrough gossip validator — owned by BeaconNode for the lifetime of p2p_service.
-    // Heap-allocated so its internal pointers remain stable even if BeaconNode moves.
-    p2p_validator: ?*PassthroughValidator = null,
 
     // Req/resp context used by the P2P service (persistent, heap-allocated).
     // Uses self.allocator as scratch; block bytes returned by callbacks are copied

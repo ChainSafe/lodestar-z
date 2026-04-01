@@ -62,6 +62,7 @@ pub const block_import_mod = @import("block_import.zig");
 
 pub const api_callbacks_mod = @import("api_callbacks.zig");
 pub const p2p_runtime_mod = @import("p2p_runtime.zig");
+pub const gossip_ingress_mod = @import("gossip_ingress.zig");
 pub const lifecycle_mod = @import("lifecycle.zig");
 
 pub const sync_bridge_mod = @import("sync_bridge.zig");

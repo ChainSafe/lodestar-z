@@ -7,8 +7,6 @@ const std = @import("std");
 const log = @import("log");
 
 const preset = @import("preset").preset;
-const consensus_types = @import("consensus_types");
-const fork_types = @import("fork_types");
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
 const state_transition = @import("state_transition");
@@ -34,9 +32,8 @@ const sync_mod = @import("sync");
 const SyncService = sync_mod.SyncService;
 const BatchBlock = sync_mod.BatchBlock;
 
-const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const GossipHandler = @import("gossip_handler.zig").GossipHandler;
-const GossipIngressMetadata = @import("gossip_handler.zig").GossipIngressMetadata;
+const gossip_ingress_mod = @import("gossip_ingress.zig");
 const reqresp_callbacks_mod = @import("reqresp_callbacks.zig");
 const gossip_node_callbacks_mod = @import("gossip_node_callbacks.zig");
 const SyncCallbackCtx = @import("sync_bridge.zig").SyncCallbackCtx;
@@ -96,12 +93,6 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
     req_resp_ctx.* = reqresp_callbacks_mod.makeReqRespContext(p2p_req_ctx);
     self.p2p_req_resp_ctx = req_resp_ctx;
 
-    const validator = try self.allocator.create(networking.p2p_service.PassthroughValidator);
-    errdefer self.allocator.destroy(validator);
-    validator.* = networking.p2p_service.PassthroughValidator.init(self.allocator);
-    validator.fixupPointers();
-    self.p2p_validator = validator;
-
     const head_slot = self.currentHeadSlot();
     const fork_digest = self.config.forkDigestAtSlot(head_slot, self.genesis_validators_root);
 
@@ -121,7 +112,6 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
         .fork_digest = fork_digest,
         .fork_seq = self.config.forkSeq(head_slot),
         .req_resp_context = req_resp_ctx,
-        .validator = &validator.ctx,
         .host_identity = host_identity,
         .identify_agent_version = self.identify_agent_version,
         .gossipsub_config = .{
@@ -182,12 +172,6 @@ pub fn deinitOwnedState(self: *BeaconNode) void {
         svc.deinit();
         self.allocator.destroy(svc);
         self.subnet_service = null;
-    }
-
-    if (self.p2p_validator) |validator| {
-        validator.deinit();
-        self.allocator.destroy(validator);
-        self.p2p_validator = null;
     }
 
     if (self.p2p_req_resp_ctx) |ctx| {
@@ -686,9 +670,7 @@ fn runPeerManagerMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2p
 fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) bool {
     var did_work = false;
 
-    if (self.p2p_service) |p2p| {
-        did_work = processGossipEvents(self, io, p2p) > 0 or did_work;
-    }
+    did_work = gossip_ingress_mod.processEvents(self, io, svc) > 0 or did_work;
 
     if (self.beacon_processor) |bp| {
         const dispatched = bp.tick(128);
@@ -1595,196 +1577,9 @@ fn initGossipHandler(self: *BeaconNode) void {
     }
 }
 
-fn processGossipEvents(self: *BeaconNode, io: std.Io, p2p: anytype) usize {
-    const events = p2p.gossipsub.drainEvents() catch &.{};
-    defer self.allocator.free(events);
-    return processGossipEventsFromSlice(self, io, events);
-}
-
-fn processGossipEventsFromSlice(self: *BeaconNode, io: std.Io, events: anytype) usize {
-    const gossip_topics = networking.gossip_topics;
-    const gossip_decoding = networking.gossip_decoding;
-    var processed_messages: usize = 0;
-
-    for (events) |event| {
-        switch (event) {
-            .message => |msg| {
-                processed_messages += 1;
-                const metadata = GossipIngressMetadata{
-                    .peer_id = hashOpaqueGossipBytes(0x70656572, msg.from),
-                    .message_id = networking.computeGossipMessageId(self.allocator, msg.data) catch std.mem.zeroes(networking.GossipMessageId),
-                    .seen_timestamp_ns = currentUnixTimeNs(io),
-                };
-
-                const parsed = gossip_topics.parseTopic(msg.topic) orelse continue;
-                const fork_seq = resolveGossipForkSeq(self, parsed) orelse continue;
-                switch (parsed.topic_type) {
-                    .beacon_block => handleGossipBlock(self, gossip_decoding, msg.data, metadata, fork_seq),
-                    .data_column_sidecar => handleGossipDataColumn(self, gossip_decoding, msg.data, parsed.subnet_id, fork_seq),
-                    else => {
-                        if (self.gossip_handler) |gh| {
-                            const slot = self.currentHeadSlot();
-                            gh.updateClock(slot, computeEpochAtSlot(slot), self.currentFinalizedSlot());
-                            gh.updateForkSeq(fork_seq);
-                            gh.onGossipMessageWithSubnetAndMetadata(parsed.topic_type, parsed.subnet_id, msg.data, metadata) catch |err| {
-                                switch (err) {
-                                    error.ValidationIgnored => {},
-                                    error.ValidationRejected => {
-                                        std.log.debug("Gossip {s} rejected", .{parsed.topic_type.topicName()});
-                                    },
-                                    error.DecodeFailed => {
-                                        std.log.debug("Gossip {s} decode failed", .{parsed.topic_type.topicName()});
-                                    },
-                                    else => {
-                                        std.log.warn("Gossip {s} error: {}", .{ parsed.topic_type.topicName(), err });
-                                    },
-                                }
-                            };
-                        }
-                    },
-                }
-            },
-            else => {},
-        }
-    }
-
-    return processed_messages;
-}
-
-fn resolveGossipForkSeq(self: *BeaconNode, parsed: networking.GossipTopic) ?config_mod.ForkSeq {
-    const slot = currentNetworkSlot(self, self.io) orelse self.currentHeadSlot();
-    const epoch = computeEpochAtSlot(slot);
-    return self.config.forkSeqForGossipDigestAtEpoch(epoch, parsed.fork_digest, self.genesis_validators_root);
-}
-
-fn handleGossipBlock(
-    self: *BeaconNode,
-    gossip_decoding: anytype,
-    data: []const u8,
-    metadata: GossipIngressMetadata,
-    fork_seq: config_mod.ForkSeq,
-) void {
-    const ssz_bytes = gossip_decoding.decompressGossipPayload(
-        self.allocator,
-        data,
-        gossip_decoding.MAX_GOSSIP_SIZE_BEACON_BLOCK,
-    ) catch {
-        std.log.warn("Gossip: failed to decompress block", .{});
-        return;
-    };
-
-    const any_signed = AnySignedBeaconBlock.deserialize(
-        self.allocator,
-        .full,
-        fork_seq,
-        ssz_bytes,
-    ) catch |err| {
-        self.allocator.free(ssz_bytes);
-        std.log.warn("Gossip block deserialize: {}", .{err});
-        return;
-    };
-
-    if (self.beacon_processor) |bp| {
-        self.allocator.free(ssz_bytes);
-        bp.ingest(.{ .gossip_block = .{
-            .peer_id = metadata.peer_id,
-            .message_id = metadata.message_id,
-            .block = any_signed,
-            .seen_timestamp_ns = metadata.seen_timestamp_ns,
-        } });
-        return;
-    }
-
-    defer self.allocator.free(ssz_bytes);
-    const seen_timestamp_sec: u64 = if (metadata.seen_timestamp_ns > 0)
-        @intCast(@divFloor(metadata.seen_timestamp_ns, std.time.ns_per_s))
-    else
-        0;
-    const accepted = self.chainService().acceptGossipBlock(any_signed, seen_timestamp_sec) catch |err| {
-        any_signed.deinit(self.allocator);
-        std.log.warn("Gossip block ingress failed: {}", .{err});
-        return;
-    };
-    const ready = switch (accepted) {
-        .pending_data => return,
-        .ready => |ready| ready,
-    };
-    defer ready.block.deinit(self.allocator);
-
-    const result = self.importReadyBlock(ready) catch |err| {
-        if (err == error.UnknownParentBlock) {
-            self.queueOrphanBlock(ready.block, ssz_bytes);
-        } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
-            std.log.warn("Gossip block import: {}", .{err});
-        }
-        return;
-    };
-    self.processPendingChildren(result.block_root);
-    std.log.info("GOSSIP BLOCK IMPORTED slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-        result.slot,
-        result.block_root[0],
-        result.block_root[1],
-        result.block_root[2],
-        result.block_root[3],
-    });
-}
-
-fn handleGossipDataColumn(
-    self: *BeaconNode,
-    gossip_decoding_mod: anytype,
-    data: []const u8,
-    subnet_id: ?u8,
-    fork_seq: config_mod.ForkSeq,
-) void {
-    _ = subnet_id;
-    if (!fork_seq.gte(.fulu)) return;
-    const ssz_bytes = gossip_decoding_mod.decompressGossipPayload(
-        self.allocator,
-        data,
-        gossip_decoding_mod.MAX_GOSSIP_SIZE_DEFAULT,
-    ) catch {
-        std.log.warn("Gossip: failed to decompress data column sidecar", .{});
-        return;
-    };
-    defer self.allocator.free(ssz_bytes);
-
-    var sidecar = consensus_types.fulu.DataColumnSidecar.default_value;
-    consensus_types.fulu.DataColumnSidecar.deserializeFromBytes(self.allocator, ssz_bytes, &sidecar) catch |err| {
-        std.log.warn("Gossip: failed to decode data column sidecar: {}", .{err});
-        return;
-    };
-    defer consensus_types.fulu.DataColumnSidecar.deinit(self.allocator, &sidecar);
-
-    const column_index = sidecar.index;
-    var block_root: [32]u8 = undefined;
-    consensus_types.phase0.BeaconBlockHeader.hashTreeRoot(&sidecar.signed_block_header.message, &block_root) catch |err| {
-        std.log.warn("Gossip: failed to hash data column block header: {}", .{err});
-        return;
-    };
-
-    self.importDataColumnSidecar(block_root, column_index, ssz_bytes) catch |err| {
-        std.log.warn("Gossip data column import error: {}", .{err});
-    };
-}
-
-fn currentUnixTimeNs(io: std.Io) i64 {
-    const ns = std.Io.Timestamp.now(io, .real).toNanoseconds();
-    return if (ns > std.math.maxInt(i64))
-        std.math.maxInt(i64)
-    else if (ns < std.math.minInt(i64))
-        std.math.minInt(i64)
-    else
-        @intCast(ns);
-}
-
 fn currentUnixTimeMs(io: std.Io) u64 {
     const ms = std.Io.Timestamp.now(io, .real).toMilliseconds();
     return if (ms < 0) 0 else @intCast(ms);
-}
-
-fn hashOpaqueGossipBytes(seed: u64, maybe_bytes: ?[]const u8) u64 {
-    const bytes = maybe_bytes orelse return 0;
-    return std.hash.Wyhash.hash(seed, bytes);
 }
 
 fn maybePrepareProposerPayload(self: *BeaconNode, io: std.Io) void {

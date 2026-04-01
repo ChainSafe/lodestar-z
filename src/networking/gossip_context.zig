@@ -14,7 +14,7 @@
 //! var gc = gossip_context.NodeGossipContext.init(allocator, @ptrCast(self));
 //! defer gc.deinit();
 //! gc.fixupPointers(slot, epoch, finalized_slot, &beaconNodeCallbacks);
-//! // pass &gc.ctx to P2pConfig.validator
+//! // use &gc.ctx with networking.gossip_validation helpers
 //! ```
 
 const std = @import("std");
@@ -35,8 +35,8 @@ pub const GossipCallbacks = struct {
 
 /// Gossip validation context that owns all six SeenSets.
 ///
-/// The `ctx` field is the `GossipValidationContext` suitable for passing to
-/// `P2pConfig.validator`.
+/// The `ctx` field is the `GossipValidationContext` suitable for passing to the
+/// fast gossip validation helpers in `networking.gossip_validation`.
 ///
 /// **Lifecycle:**
 /// 1. Call `init` with an allocator and the opaque node pointer.

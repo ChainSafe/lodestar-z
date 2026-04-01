@@ -5,7 +5,8 @@
 //!   and a gossipsub handler, plus an EthGossipAdapter for subscribe/publish.
 //! - The Switch is comptime-composed with QUIC transport and the 8 req/resp
 //!   protocol handlers plus gossipsub.
-//! - Gossip messages are handled by `EthGossipAdapter` (eth_gossip.zig).
+//! - Inbound gossip events are drained from gossipsub and routed by the node's
+//!   GossipHandler.
 //! - Req/resp messages are dispatched by each `Eth2Protocol` handler into
 //!   `req_resp_handler`.
 //!
@@ -14,7 +15,6 @@
 //! var svc = try P2pService.init(allocator, .{
 //!     .fork_digest = node.getForkDigest(),
 //!     .req_resp_context = &rr_ctx,
-//!     .validator = &validator,
 //! });
 //! defer svc.deinit(io);
 //! try svc.start(io, listen_multiaddr);
@@ -40,17 +40,15 @@ const Multiaddr = @import("multiaddr").Multiaddr;
 const eth2_protocols = @import("eth2_protocols.zig");
 const eth_gossip = @import("eth_gossip.zig");
 const req_resp_handler = @import("req_resp_handler.zig");
-const gossip_validation = @import("gossip_validation.zig");
 const config_mod = @import("config");
 const ForkSeq = config_mod.ForkSeq;
 
 const EthGossipAdapter = eth_gossip.EthGossipAdapter;
 pub const GossipTopicType = eth_gossip.GossipTopicType;
 pub const ActiveGossipFork = eth_gossip.EthGossipAdapter.ActiveFork;
+pub const GossipEvent = gossipsub_mod.config.Event;
 pub const QuicStream = quic_mod.Stream;
 const ReqRespContext = req_resp_handler.ReqRespContext;
-const GossipValidationContext = gossip_validation.GossipValidationContext;
-const SeenSet = gossip_validation.SeenSet;
 
 const StatusProtocol = eth2_protocols.StatusProtocol;
 const GoodbyeProtocol = eth2_protocols.GoodbyeProtocol;
@@ -117,86 +115,6 @@ pub const Eth2Switch = swarm_mod.Switch(.{
     },
 });
 
-// ─── Stub validator (passthrough) ────────────────────────────────────────────
-//
-// Used when no real validator is provided. Accepts all messages.
-
-fn stubGetProposerIndex(_: *anyopaque, _: u64) ?u32 {
-    return null;
-}
-fn stubIsKnownBlockRoot(_: *anyopaque, _: [32]u8) bool {
-    return true;
-}
-fn stubIsValidatorActive(_: *anyopaque, _: u64, _: u64) bool {
-    return true;
-}
-fn stubGetValidatorCount(_: *anyopaque) u32 {
-    return 0;
-}
-
-/// Passthrough gossip validator — accepts all messages.
-///
-/// Caller owns the returned struct and its SeenSet fields (use deinitStubValidator).
-pub fn createPassthroughValidator(allocator: Allocator) !PassthroughValidator {
-    return PassthroughValidator.init(allocator);
-}
-
-pub const PassthroughValidator = struct {
-    seen_blocks: SeenSet,
-    seen_aggregators: SeenSet,
-    seen_exits: SeenSet,
-    seen_proposer_slashings: SeenSet,
-    seen_attester_slashings: SeenSet,
-    seen_bls_changes: SeenSet,
-    ctx: GossipValidationContext,
-
-    /// Initialise the validator.
-    ///
-    /// **Important:** call  immediately after placing the struct
-    /// in its final location (e.g., after ).
-    /// The ctx pointers point into self — they become stale if the struct is moved.
-    pub fn init(allocator: Allocator) PassthroughValidator {
-        return .{
-            .seen_blocks = SeenSet.init(allocator),
-            .seen_aggregators = SeenSet.init(allocator),
-            .seen_exits = SeenSet.init(allocator),
-            .seen_proposer_slashings = SeenSet.init(allocator),
-            .seen_attester_slashings = SeenSet.init(allocator),
-            .seen_bls_changes = SeenSet.init(allocator),
-            .ctx = undefined,
-        };
-    }
-
-    /// Fix up self-referential ctx pointers after the struct is in its final location.
-    pub fn fixupPointers(self: *PassthroughValidator) void {
-        self.ctx = .{
-            .ptr = @ptrFromInt(1),
-            .current_slot = 0,
-            .current_epoch = 0,
-            .finalized_slot = 0,
-            .seen_block_roots = &self.seen_blocks,
-            .seen_aggregators = &self.seen_aggregators,
-            .seen_voluntary_exits = &self.seen_exits,
-            .seen_proposer_slashings = &self.seen_proposer_slashings,
-            .seen_attester_slashings = &self.seen_attester_slashings,
-            .seen_bls_changes = &self.seen_bls_changes,
-            .getProposerIndex = &stubGetProposerIndex,
-            .isKnownBlockRoot = &stubIsKnownBlockRoot,
-            .isValidatorActive = &stubIsValidatorActive,
-            .getValidatorCount = &stubGetValidatorCount,
-        };
-    }
-
-    pub fn deinit(self: *PassthroughValidator) void {
-        self.seen_blocks.deinit();
-        self.seen_aggregators.deinit();
-        self.seen_exits.deinit();
-        self.seen_proposer_slashings.deinit();
-        self.seen_attester_slashings.deinit();
-        self.seen_bls_changes.deinit();
-    }
-};
-
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 pub const P2pConfig = struct {
@@ -206,8 +124,6 @@ pub const P2pConfig = struct {
     fork_seq: ForkSeq,
     /// Req/resp handler callbacks (provides blocks, status, etc.).
     req_resp_context: *const ReqRespContext,
-    /// Gossip message validator. Use `createPassthroughValidator` for a no-op stub.
-    validator: *GossipValidationContext,
     /// Optional libp2p host identity for QUIC/TLS and peer-id derivation.
     /// When null, eth-p2p-z generates an ephemeral host identity.
     host_identity: ?identity_mod.KeyPair = null,
@@ -277,7 +193,6 @@ pub const P2pService = struct {
         const gossip_adapter = EthGossipAdapter.init(
             allocator,
             gossipsub,
-            config.validator,
             config.fork_digest,
             config.fork_seq,
         );
@@ -381,6 +296,16 @@ pub const P2pService = struct {
         ssz_bytes: []const u8,
     ) !void {
         return self.gossip_adapter.publish(topic_type, subnet_id, ssz_bytes);
+    }
+
+    /// Drain pending gossipsub events. Caller owns the returned slice.
+    pub fn drainGossipEvents(self: *Self) ![]GossipEvent {
+        return self.gossipsub.drainEvents();
+    }
+
+    /// Report an invalid inbound gossip message to gossipsub's mesh scorer.
+    pub fn recordInvalidGossipMessage(self: *Self, peer_id: []const u8, topic: []const u8) void {
+        self.gossipsub.router.recordInvalidMessage(peer_id, topic);
     }
 
     /// Subscribe to a gossip subnet topic (e.g., attestation subnets).
@@ -498,13 +423,4 @@ test "P2pService: all eth2 protocol IDs are unique" {
             }
         }
     }
-}
-
-test "PassthroughValidator: init, fixup, and deinit" {
-    var v = PassthroughValidator.init(std.testing.allocator);
-    defer v.deinit();
-    v.fixupPointers();
-    // After fixupPointers, ctx pointers must reference the struct's own seen sets.
-    try std.testing.expect(v.ctx.seen_block_roots == &v.seen_blocks);
-    try std.testing.expect(v.ctx.seen_aggregators == &v.seen_aggregators);
 }

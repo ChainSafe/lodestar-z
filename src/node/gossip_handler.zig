@@ -20,9 +20,10 @@ const testing = std.testing;
 const networking = @import("networking");
 const config_mod = @import("config");
 const ForkSeq = config_mod.ForkSeq;
+const fork_types = @import("fork_types");
+const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const GossipTopicType = networking.GossipTopicType;
 const gossip_decoding = networking.gossip_decoding;
-const DecodedGossipMessage = networking.DecodedGossipMessage;
 
 const chain = @import("chain");
 const SeenCache = chain.SeenCache;
@@ -46,6 +47,14 @@ pub const GossipHandlerError = error{
     ValidationRejected,
     /// Decode failed (bad snappy or SSZ).
     DecodeFailed,
+};
+
+pub const GossipProcessResult = union(enum) {
+    accepted,
+    ignored,
+    rejected,
+    decode_failed,
+    failed: anyerror,
 };
 
 /// Handles incoming gossip messages with two-phase validation.
@@ -311,7 +320,6 @@ pub const GossipHandler = struct {
         message_data: []const u8,
         metadata: GossipIngressMetadata,
     ) !void {
-        _ = metadata;
         // Decompress once — reused for decode, BLS verify, and import.
         const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_BEACON_BLOCK) catch
             return GossipHandlerError.DecodeFailed;
@@ -350,7 +358,22 @@ pub const GossipHandler = struct {
         }
 
         // Phase 2: Full import (STFN + fork choice).
-        // TODO: Replace direct call with WorkItem queue push.
+        if (self.beacon_processor) |bp| {
+            const any_signed = AnySignedBeaconBlock.deserialize(
+                self.allocator,
+                .full,
+                self.current_fork_seq,
+                ssz_bytes,
+            ) catch return GossipHandlerError.DecodeFailed;
+            bp.ingest(.{ .gossip_block = .{
+                .peer_id = metadata.peer_id,
+                .message_id = metadata.message_id,
+                .block = any_signed,
+                .seen_timestamp_ns = metadata.seen_timestamp_ns,
+            } });
+            return;
+        }
+
         try self.importBlockFn(self.node, ssz_bytes);
     }
 
@@ -1033,30 +1056,61 @@ pub const GossipHandler = struct {
         });
     }
 
-    /// Route a gossip message by topic type.
-    pub fn onGossipMessage(self: *GossipHandler, topic: GossipTopicType, data: []const u8) !void {
+    fn recordProcessResult(self: *GossipHandler, result: GossipProcessResult) GossipProcessResult {
+        switch (result) {
+            .accepted => if (self.metrics) |m| m.gossip_messages_validated.incr(),
+            .ignored => if (self.metrics) |m| m.gossip_messages_ignored.incr(),
+            .rejected, .decode_failed => if (self.metrics) |m| m.gossip_messages_rejected.incr(),
+            .failed => {},
+        }
+        return result;
+    }
+
+    pub fn processGossipMessage(self: *GossipHandler, topic: GossipTopicType, data: []const u8) GossipProcessResult {
+        return self.processGossipMessageWithSubnetAndMetadata(topic, null, data, .{});
+    }
+
+    pub fn processGossipMessageWithSubnetAndMetadata(
+        self: *GossipHandler,
+        topic: GossipTopicType,
+        subnet_id: ?u8,
+        data: []const u8,
+        metadata: GossipIngressMetadata,
+    ) GossipProcessResult {
         if (self.metrics) |m| m.gossip_messages_received.incr();
 
-        self.onGossipMessageWithSubnet(topic, null, data) catch |err| {
-            switch (err) {
-                GossipHandlerError.ValidationIgnored => {
-                    if (self.metrics) |m| m.gossip_messages_ignored.incr();
-                },
-                GossipHandlerError.ValidationRejected => {
-                    if (self.metrics) |m| m.gossip_messages_rejected.incr();
-                    return err;
-                },
-                else => return err,
-            }
-            return;
+        self.onGossipMessageWithSubnetAndMetadata(topic, subnet_id, data, metadata) catch |err| {
+            return self.recordProcessResult(switch (err) {
+                GossipHandlerError.ValidationIgnored => .ignored,
+                GossipHandlerError.ValidationRejected => .rejected,
+                GossipHandlerError.DecodeFailed => .decode_failed,
+                else => .{ .failed = err },
+            });
         };
 
-        if (self.metrics) |m| m.gossip_messages_validated.incr();
+        return self.recordProcessResult(.accepted);
+    }
+
+    /// Route a gossip message by topic type.
+    pub fn onGossipMessage(self: *GossipHandler, topic: GossipTopicType, data: []const u8) !void {
+        switch (self.processGossipMessage(topic, data)) {
+            .accepted => {},
+            .ignored => return GossipHandlerError.ValidationIgnored,
+            .rejected => return GossipHandlerError.ValidationRejected,
+            .decode_failed => return GossipHandlerError.DecodeFailed,
+            .failed => |err| return err,
+        }
     }
 
     /// Route a gossip message by topic type, with optional subnet_id for subnet-indexed topics.
     pub fn onGossipMessageWithSubnet(self: *GossipHandler, topic: GossipTopicType, subnet_id: ?u8, data: []const u8) !void {
-        return self.onGossipMessageWithSubnetAndMetadata(topic, subnet_id, data, .{});
+        switch (self.processGossipMessageWithSubnetAndMetadata(topic, subnet_id, data, .{})) {
+            .accepted => {},
+            .ignored => return GossipHandlerError.ValidationIgnored,
+            .rejected => return GossipHandlerError.ValidationRejected,
+            .decode_failed => return GossipHandlerError.DecodeFailed,
+            .failed => |err| return err,
+        }
     }
 
     pub fn onGossipMessageWithSubnetAndMetadata(

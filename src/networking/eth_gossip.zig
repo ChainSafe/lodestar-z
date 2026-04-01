@@ -1,9 +1,8 @@
-//! Ethereum gossip adapter — bridges eth-p2p-z's gossipsub to the Ethereum
-//! consensus validation layer.
+//! Ethereum gossip adapter — transport-facing topic and publish management.
 //!
 //! This adapter subscribes to all standard Ethereum gossip topics for a given
-//! fork digest, processes inbound messages through Snappy decompression and
-//! per-topic validation, and publishes outbound messages with Snappy compression.
+//! fork digest, tracks logical topic subscriptions across fork-boundary overlap
+//! windows, and publishes outbound messages with Snappy compression.
 //!
 //! Reference: https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/p2p-interface.md
 
@@ -12,27 +11,15 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 const gossip_topics = @import("gossip_topics.zig");
-const gossip_validation = @import("gossip_validation.zig");
-const gossip_decoding = @import("gossip_decoding.zig");
-
 const config_mod = @import("config");
 const ForkSeq = config_mod.ForkSeq;
 
 pub const GossipTopicType = gossip_topics.GossipTopicType;
-const GossipTopic = gossip_topics.GossipTopic;
-const ValidationResult = gossip_validation.ValidationResult;
-const GossipValidationContext = gossip_validation.GossipValidationContext;
-const DecodedGossipMessage = gossip_decoding.DecodedGossipMessage;
 
 const snappy = @import("snappy").frame;
 const libp2p = @import("zig-libp2p");
 const GossipsubService = libp2p.gossipsub.Service;
-const GossipsubConfig = libp2p.gossipsub.Config;
-const GossipsubEvent = libp2p.gossipsub.config.Event;
 const rpc = libp2p.protobuf.rpc;
-
-const peer_scoring = @import("peer_scoring.zig");
-const PeerScorer = peer_scoring.PeerScorer;
 
 const log = std.log.scoped(.eth_gossip);
 
@@ -84,11 +71,10 @@ pub const global_topic_types = [_]GossipTopicType{
     .sync_committee_contribution_and_proof,
 };
 
-/// Bridges eth-p2p-z's gossipsub `Service` to the Ethereum validation layer.
+/// Bridges eth-p2p-z's gossipsub `Service` to Ethereum topic management.
 ///
 /// Responsibilities:
 /// - Subscribe to all Ethereum gossip topics for a given fork digest.
-/// - Receive messages from gossipsub, decompress, decode, and validate.
 /// - Publish messages to gossipsub with Snappy compression.
 pub const EthGossipAdapter = struct {
     const Self = @This();
@@ -103,47 +89,29 @@ pub const EthGossipAdapter = struct {
 
     allocator: Allocator,
     gossipsub: *GossipsubService,
-    validator: *GossipValidationContext,
     /// Current fork digest used for outbound publishes.
     fork_digest: [4]u8,
     /// Current fork sequence used for outbound publishes and as a fallback
-    /// decode path when an inbound topic digest is not recognized.
+    /// publish-schema selector when callers update the outbound publish fork.
     fork_seq: ForkSeq,
     active_forks: [ForkSeq.count]ActiveFork,
     active_fork_count: usize,
-    /// Optional peer scorer for tracking validation outcomes.
-    peer_scorer: ?*PeerScorer,
-    /// Optional callback invoked for each ACCEPT-validated gossip message.
-    ///
-    /// This is the gossip → beacon node pipeline entry point. When wired, the beacon
-    /// node (or BeaconProcessor) receives validated messages for import/processing.
-    ///
-    /// Signature: fn (ctx: *anyopaque, msg: DecodedGossipMessage) void
-    /// The `ctx` pointer is passed through opaquely; cast it to the concrete type.
-    on_validated_message: ?struct {
-        ctx: *anyopaque,
-        callback: *const fn (ctx: *anyopaque, msg: DecodedGossipMessage) void,
-    },
     /// Tracks which topics we have subscribed to (for cleanup and idempotence).
     subscribed_topics: std.StringHashMapUnmanaged(void),
 
     pub fn init(
         allocator: Allocator,
         gossipsub: *GossipsubService,
-        validator: *GossipValidationContext,
         fork_digest: [4]u8,
         fork_seq: ForkSeq,
     ) Self {
         var self: Self = .{
             .allocator = allocator,
             .gossipsub = gossipsub,
-            .validator = validator,
             .fork_digest = fork_digest,
             .fork_seq = fork_seq,
             .active_forks = undefined,
             .active_fork_count = 1,
-            .peer_scorer = null,
-            .on_validated_message = null,
             .subscribed_topics = .empty,
         };
         self.active_forks[0] = .{
@@ -178,32 +146,6 @@ pub const EthGossipAdapter = struct {
         for (logical_topics.items) |logical_topic| {
             try self.subscribeLogicalTopic(logical_topic.topic_type, logical_topic.subnet_id);
         }
-    }
-
-    /// Attach a peer scorer for tracking validation outcomes.
-    pub fn setPeerScorer(self: *Self, scorer: *PeerScorer) void {
-        self.peer_scorer = scorer;
-    }
-
-    /// Wire a callback for delivering validated gossip messages to the beacon node.
-    ///
-    /// The callback is called for every ACCEPT-validated message, passing the typed
-    /// `DecodedGossipMessage` to the beacon node for processing (import block,
-    /// enqueue attestation, process exit, etc.).
-    ///
-    /// This is the gossip → beacon node pipeline. Without this, validated messages
-    /// are dropped after validation (correct for mesh scoring, wrong for sync).
-    ///
-    /// Usage (from beacon_node.zig):
-    /// ```zig
-    /// gossip_adapter.setMessageHandler(@ptrCast(self), &beaconNode_onGossipMessage);
-    /// ```
-    pub fn setMessageHandler(
-        self: *Self,
-        ctx: *anyopaque,
-        callback: *const fn (ctx: *anyopaque, msg: DecodedGossipMessage) void,
-    ) void {
-        self.on_validated_message = .{ .ctx = ctx, .callback = callback };
     }
 
     pub fn deinit(self: *Self) void {
@@ -353,202 +295,6 @@ pub const EthGossipAdapter = struct {
         }
     }
 
-    fn forkSeqForDigest(self: *const Self, fork_digest: [4]u8) ForkSeq {
-        for (self.activeForks()) |fork| {
-            if (std.mem.eql(u8, &fork.fork_digest, &fork_digest)) return fork.fork_seq;
-        }
-        return self.fork_seq;
-    }
-
-    /// Process an incoming gossip message through the full Ethereum pipeline:
-    /// 1. Parse topic string → GossipTopicType + subnet_id
-    /// 2. Snappy decompress + SSZ decode → typed message
-    /// 3. Dispatch to per-topic validation
-    /// 4. Return validation result + decoded message
-    ///
-    /// `from_peer` is the peer that sent this message (for gossipsub scoring feedback).
-    /// Pass null if the sender peer ID is unavailable.
-    ///
-    /// Called when gossipsub's `drainEvents()` yields a `message` event.
-    pub fn handleMessage(
-        self: *Self,
-        topic: []const u8,
-        data: []const u8,
-        from_peer: ?[]const u8,
-    ) HandleMessageResult {
-        // 1. Parse the topic string.
-        const parsed_topic = gossip_topics.parseTopic(topic) orelse {
-            log.warn("Failed to parse gossip topic '{s}'", .{topic});
-            return .{ .validation = .reject, .decoded = null };
-        };
-
-        // 2. Decode (decompress + SSZ deserialize) using the active fork's schema.
-        const decoded = gossip_decoding.decodeGossipMessage(
-            self.allocator,
-            parsed_topic.topic_type,
-            data,
-            self.forkSeqForDigest(parsed_topic.fork_digest),
-        ) catch {
-            log.warn("Failed to decode gossip message for topic {s}", .{
-                parsed_topic.topic_type.topicName(),
-            });
-            return .{ .validation = .reject, .decoded = null };
-        };
-
-        // 3. Dispatch to per-topic validation.
-        const validation = self.validateDecoded(parsed_topic, decoded, from_peer);
-
-        return .{ .validation = validation, .decoded = decoded };
-    }
-
-    /// Validate a decoded gossip message using the per-topic validators.
-    ///
-    /// `from_peer` is used to report validation results back to gossipsub for
-    /// mesh scoring — rejected messages penalize the originating peer.
-    fn validateDecoded(
-        self: *Self,
-        parsed_topic: GossipTopic,
-        decoded: DecodedGossipMessage,
-        from_peer: ?[]const u8,
-    ) ValidationResult {
-        const result = self.dispatchValidation(parsed_topic, decoded);
-
-        // Update legacy peer scoring if a scorer is wired.
-        if (self.peer_scorer) |scorer| {
-            scorer.recordValidation(result);
-        }
-
-        // Feed validation result back to gossipsub for mesh scoring.
-        // This is the gossipsub ACCEPT/REJECT feedback loop. Without it, gossipsub
-        // cannot penalize peers who send invalid messages, which is critical for
-        // spam resistance and mesh health.
-        if (from_peer) |peer| {
-            switch (result) {
-                .reject => {
-                    // recordInvalidMessage increments invalid_message_deliveries
-                    // for this peer on this topic, which reduces their P4 score.
-                    var topic_buf: [gossip_topics.MAX_TOPIC_LENGTH]u8 = undefined;
-                    const topic_str = gossip_topics.formatTopic(
-                        &topic_buf,
-                        parsed_topic.fork_digest,
-                        parsed_topic.topic_type,
-                        parsed_topic.subnet_id,
-                    );
-                    self.gossipsub.router.recordInvalidMessage(peer, topic_str);
-                },
-                .accept, .ignore => {},
-            }
-        }
-
-        // Deliver accepted messages to the beacon node processing pipeline.
-        // This is the gossip → BN handoff. Without this, validated messages are
-        // silently discarded and never imported into the chain.
-        //
-        // For beacon_block, raw_ssz carries the full decompressed SSZ bytes.
-        // On ACCEPT: ownership transfers to the callback recipient (they must free).
-        // On REJECT/IGNORE: we free here to avoid leaking.
-        if (result == .accept) {
-            if (self.on_validated_message) |handler| {
-                handler.callback(handler.ctx, decoded);
-            } else {
-                // No handler wired — free raw_ssz to avoid leak.
-                if (decoded == .beacon_block) {
-                    self.allocator.free(decoded.beacon_block.raw_ssz);
-                }
-            }
-        } else {
-            // REJECT or IGNORE — free raw_ssz if present.
-            if (decoded == .beacon_block) {
-                self.allocator.free(decoded.beacon_block.raw_ssz);
-            }
-        }
-
-        return result;
-    }
-
-    /// Dispatch to the appropriate per-topic validation function.
-    fn dispatchValidation(
-        self: *Self,
-        parsed_topic: GossipTopic,
-        decoded: DecodedGossipMessage,
-    ) ValidationResult {
-        switch (decoded) {
-            .beacon_block => |block| {
-                // Compute a cheap synthetic block root for dedup.
-                // Full HTR is expensive; use (slot, proposer, parent_root prefix) as key.
-                var block_root: [32]u8 = std.mem.zeroes([32]u8);
-                std.mem.writeInt(u64, block_root[0..8], block.slot, .little);
-                std.mem.writeInt(u64, block_root[8..16], block.proposer_index, .little);
-                @memcpy(block_root[16..32], block.parent_root[0..16]);
-                return gossip_validation.validateBeaconBlock(
-                    block.slot,
-                    block.proposer_index,
-                    block.parent_root,
-                    block_root,
-                    self.validator,
-                );
-            },
-            .beacon_aggregate_and_proof => |agg| {
-                return gossip_validation.validateAggregateAndProof(
-                    agg.aggregator_index,
-                    agg.attestation_slot,
-                    agg.attestation_target_epoch,
-                    agg.aggregation_bits_count,
-                    self.validator,
-                );
-            },
-            .beacon_attestation => |att| {
-                _ = parsed_topic; // subnet_id validated at topic level
-                return gossip_validation.validateAttestation(
-                    att.slot,
-                    att.committee_index,
-                    att.target_epoch,
-                    att.target_root,
-                    self.validator,
-                );
-            },
-            .voluntary_exit => |exit| {
-                return gossip_validation.validateVoluntaryExit(
-                    exit.validator_index,
-                    exit.exit_epoch,
-                    self.validator,
-                );
-            },
-            .proposer_slashing => |slashing| {
-                return gossip_validation.validateProposerSlashing(
-                    slashing.proposer_index,
-                    slashing.header_1_slot,
-                    slashing.header_2_slot,
-                    slashing.header_1_body_root,
-                    slashing.header_2_body_root,
-                    self.validator,
-                );
-            },
-            .attester_slashing => |slashing| {
-                return gossip_validation.validateAttesterSlashingDecoded(
-                    slashing.is_slashable,
-                    slashing.slashable_key,
-                    self.validator,
-                );
-            },
-            .bls_to_execution_change => |change| {
-                return gossip_validation.validateBlsToExecutionChange(
-                    change.validator_index,
-                    self.validator,
-                );
-            },
-            // Other topics (blob_sidecar, sync_committee, etc.) — not yet validated.
-            else => return .ignore,
-        }
-    }
-
-    pub const HandleMessageError = error{OutOfMemory};
-
-    pub const HandleMessageResult = struct {
-        validation: ValidationResult,
-        decoded: ?DecodedGossipMessage,
-    };
-
     /// Publish a message to a gossip topic.
     ///
     /// Handles Snappy compression and topic string formatting.
@@ -569,103 +315,14 @@ pub const EthGossipAdapter = struct {
         // 3. Publish via gossipsub.
         _ = try self.gossipsub.publish(topic_str, compressed);
     }
-
-    /// Poll for and process all pending gossipsub events.
-    ///
-    /// Returns validation results for received messages.
-    /// Non-message events (subscriptions, grafts, etc.) are logged but not returned.
-    pub fn pollEvents(self: *Self) ![]MessageResult {
-        const events = try self.gossipsub.drainEvents();
-        defer self.allocator.free(events);
-
-        var results: std.ArrayListUnmanaged(MessageResult) = .empty;
-        errdefer {
-            for (results.items) |r| {
-                self.allocator.free(r.topic);
-            }
-            results.deinit(self.allocator);
-        }
-
-        for (events) |event| {
-            switch (event) {
-                .message => |msg| {
-                    const handle_result = self.handleMessage(msg.topic, msg.data, msg.from);
-                    const topic_copy = try self.allocator.dupe(u8, msg.topic);
-                    try results.append(self.allocator, .{
-                        .topic = topic_copy,
-                        .validation = handle_result.validation,
-                    });
-                },
-                else => {},
-            }
-        }
-
-        return results.toOwnedSlice(self.allocator);
-    }
-
-    /// Result of processing a single gossip message.
-    pub const MessageResult = struct {
-        topic: []const u8,
-        validation: ValidationResult,
-    };
 };
 
 // ============================================================================
 // Tests
 // ============================================================================
 
-/// Creates a mock GossipValidationContext for testing.
-fn testValidationContext(
-    seen_blocks: *gossip_validation.SeenSet,
-    seen_aggregators: *gossip_validation.SeenSet,
-    seen_exits: *gossip_validation.SeenSet,
-    seen_proposer_slashings: *gossip_validation.SeenSet,
-    seen_attester_slashings: *gossip_validation.SeenSet,
-    seen_bls_changes: *gossip_validation.SeenSet,
-) GossipValidationContext {
-    return .{
-        .current_slot = 100,
-        .current_epoch = 3,
-        .finalized_slot = 64,
-        .seen_block_roots = seen_blocks,
-        .seen_aggregators = seen_aggregators,
-        .seen_voluntary_exits = seen_exits,
-        .seen_proposer_slashings = seen_proposer_slashings,
-        .seen_attester_slashings = seen_attester_slashings,
-        .seen_bls_changes = seen_bls_changes,
-        .ptr = @ptrFromInt(1),
-        .getProposerIndex = &testGetProposerIndex,
-        .isKnownBlockRoot = &testIsKnownBlockRoot,
-        .isValidatorActive = &testIsValidatorActive,
-        .getValidatorCount = &testGetValidatorCount,
-    };
-}
-
-fn testGetProposerIndex(_: *anyopaque, _: u64) ?u32 {
-    return 5;
-}
-
-fn testIsKnownBlockRoot(_: *anyopaque, _: [32]u8) bool {
-    return true;
-}
-
-fn testIsValidatorActive(_: *anyopaque, _: u64, _: u64) bool {
-    return true;
-}
-
-fn testGetValidatorCount(_: *anyopaque) u32 {
-    return 100;
-}
-
-/// Helper to create a test adapter with all required seen sets.
+/// Helper to create a test adapter with a live gossipsub service.
 const TestAdapter = struct {
-    seen_blocks: gossip_validation.SeenSet,
-    seen_aggs: gossip_validation.SeenSet,
-    seen_exits: gossip_validation.SeenSet,
-    seen_ps: gossip_validation.SeenSet,
-    seen_as: gossip_validation.SeenSet,
-    seen_bls: gossip_validation.SeenSet,
-    ctx: GossipValidationContext,
     gossipsub: *GossipsubService,
     adapter: EthGossipAdapter,
 
@@ -673,21 +330,11 @@ const TestAdapter = struct {
         const self = try allocator.create(TestAdapter);
         errdefer allocator.destroy(self);
 
-        self.seen_blocks = gossip_validation.SeenSet.init(allocator);
-        self.seen_aggs = gossip_validation.SeenSet.init(allocator);
-        self.seen_exits = gossip_validation.SeenSet.init(allocator);
-        self.seen_ps = gossip_validation.SeenSet.init(allocator);
-        self.seen_as = gossip_validation.SeenSet.init(allocator);
-        self.seen_bls = gossip_validation.SeenSet.init(allocator);
-
-        self.fixupPointers();
-
         self.gossipsub = try GossipsubService.init(allocator, .{});
 
         self.adapter = EthGossipAdapter.init(
             allocator,
             self.gossipsub,
-            &self.ctx,
             .{ 0xab, 0xcd, 0xef, 0x01 },
             .electra, // Use electra for tests as it is the most recent non-fulu fork
         );
@@ -695,54 +342,12 @@ const TestAdapter = struct {
         return self;
     }
 
-    /// Wire self-referential ctx pointers after the struct is in its final location.
-    fn fixupPointers(self: *TestAdapter) void {
-        self.ctx = testValidationContext(
-            &self.seen_blocks,
-            &self.seen_aggs,
-            &self.seen_exits,
-            &self.seen_ps,
-            &self.seen_as,
-            &self.seen_bls,
-        );
-    }
-
     fn destroy(self: *TestAdapter, allocator: Allocator) void {
         self.adapter.deinit();
         self.gossipsub.deinit();
-        self.seen_blocks.deinit();
-        self.seen_aggs.deinit();
-        self.seen_exits.deinit();
-        self.seen_ps.deinit();
-        self.seen_as.deinit();
-        self.seen_bls.deinit();
         allocator.destroy(self);
     }
 };
-
-test "EthGossipAdapter: handleMessage rejects malformed topic" {
-    const allocator = testing.allocator;
-    const t = try TestAdapter.create(allocator);
-    defer t.destroy(allocator);
-
-    const result = t.adapter.handleMessage("/bad/topic/string", "some-data", null);
-    try testing.expectEqual(ValidationResult.reject, result.validation);
-    try testing.expectEqual(@as(?DecodedGossipMessage, null), result.decoded);
-}
-
-test "EthGossipAdapter: handleMessage rejects invalid snappy data" {
-    const allocator = testing.allocator;
-    const t = try TestAdapter.create(allocator);
-    defer t.destroy(allocator);
-
-    const result = t.adapter.handleMessage(
-        "/eth2/abcdef01/beacon_block/ssz_snappy",
-        &([_]u8{0x00} ** 16),
-        null,
-    );
-    try testing.expectEqual(ValidationResult.reject, result.validation);
-    try testing.expectEqual(@as(?DecodedGossipMessage, null), result.decoded);
-}
 
 test "EthGossipAdapter: subscribeEthTopics formats correct topic strings" {
     const allocator = testing.allocator;
@@ -836,30 +441,4 @@ test "EthGossipAdapter: publish compresses with snappy" {
     t.adapter.publish(.beacon_block, null, fake_ssz) catch |err| {
         log.debug("Publish (expected) error with no peers: {}", .{err});
     };
-}
-
-test "EthGossipAdapter: handleMessage with valid snappy beacon_block" {
-    // Verify the full pipeline: compress → handleMessage → decompress → decode → validate.
-    const allocator = testing.allocator;
-    const t = try TestAdapter.create(allocator);
-    defer t.destroy(allocator);
-
-    // Create a minimal fake SSZ payload that would fail SSZ deserialization.
-    // This tests that the decode failure path works correctly.
-    const fake_ssz = &[_]u8{0x00} ** 16;
-    const compressed = try snappy.compress(allocator, fake_ssz);
-    defer allocator.free(compressed);
-
-    const result = t.adapter.handleMessage(
-        "/eth2/abcdef01/beacon_block/ssz_snappy",
-        compressed,
-        null,
-    );
-    defer if (result.decoded) |decoded| switch (decoded) {
-        .beacon_block => |msg| allocator.free(msg.raw_ssz),
-        else => {},
-    };
-
-    // SSZ deserialization should fail for this truncated payload.
-    try testing.expectEqual(ValidationResult.reject, result.validation);
 }
