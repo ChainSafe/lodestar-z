@@ -5010,18 +5010,15 @@ test "Prune PTC votes cleanup removes pruned entries" {
 
     // Insert genesis + 3 Gloas blocks in a chain.
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
-    try pa.onBlock(testing.allocator, TestBlock.asGloasWithParentBlockHash(
-        TestBlock.withParent(TestBlock.withSlotAndRoot(1, root_a), ZERO_HASH), parent_bh), 3, null);
-    try pa.onBlock(testing.allocator, TestBlock.asGloasWithParentBlockHash(
-        TestBlock.withParent(TestBlock.withSlotAndRoot(2, root_b), root_a), parent_bh), 3, null);
-    try pa.onBlock(testing.allocator, TestBlock.asGloasWithParentBlockHash(
-        TestBlock.withParent(TestBlock.withSlotAndRoot(3, root_c), root_b), parent_bh), 3, null);
+    try pa.onBlock(testing.allocator, TestBlock.asGloasWithParentBlockHash(TestBlock.withParent(TestBlock.withSlotAndRoot(1, root_a), ZERO_HASH), parent_bh), 3, null);
+    try pa.onBlock(testing.allocator, TestBlock.asGloasWithParentBlockHash(TestBlock.withParent(TestBlock.withSlotAndRoot(2, root_b), root_a), parent_bh), 3, null);
+    try pa.onBlock(testing.allocator, TestBlock.asGloasWithParentBlockHash(TestBlock.withParent(TestBlock.withSlotAndRoot(3, root_c), root_b), parent_bh), 3, null);
 
     // Add PTC votes for all Gloas blocks (they're auto-initialized by onBlock).
     // Set some actual votes so we can distinguish them.
     pa.notifyPtcMessages(root_a, &.{0}, true);
     pa.notifyPtcMessages(root_b, &.{1}, true);
-    pa.notifyPtcMessages(root_c, &.{0, 1}, true);
+    pa.notifyPtcMessages(root_c, &.{ 0, 1 }, true);
 
     // Verify PTC entries exist for all three.
     try testing.expect(pa.ptc_votes.get(root_a) != null);
