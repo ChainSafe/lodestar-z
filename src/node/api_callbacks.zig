@@ -25,6 +25,7 @@ const ApiContext = api_mod.context.ApiContext;
 const ApiHeadTracker = api_mod.context.HeadTracker;
 const ApiSyncStatus = api_mod.context.SyncStatus;
 const ValidatorMonitor = chain_mod.ValidatorMonitor;
+const block_production_mod = @import("block_production.zig");
 
 pub const ApiBindings = struct {
     block_import_ctx: *BlockImportCallbackCtx,
@@ -34,6 +35,7 @@ pub const ApiBindings = struct {
     op_pool_cb_ctx: *OpPoolCallbackCtx,
     notification_sink_ctx: *ChainNotificationSinkCtx,
     produce_block_ctx: *ProduceBlockCallbackCtx,
+    prepare_beacon_proposer_ctx: *PrepareBeaconProposerCallbackCtx,
     attestation_data_ctx: *AttestationDataCallbackCtx,
     pool_submit_ctx: *PoolSubmitCallbackCtx,
     subnet_subscription_cb_ctx: *SubnetSubscriptionCallbackCtx,
@@ -51,6 +53,7 @@ pub const ApiBindings = struct {
             .op_pool_cb_ctx = undefined,
             .notification_sink_ctx = undefined,
             .produce_block_ctx = undefined,
+            .prepare_beacon_proposer_ctx = undefined,
             .attestation_data_ctx = undefined,
             .pool_submit_ctx = undefined,
             .subnet_subscription_cb_ctx = undefined,
@@ -89,6 +92,10 @@ pub const ApiBindings = struct {
         errdefer allocator.destroy(bindings.produce_block_ctx);
         bindings.produce_block_ctx.* = .{ .node = node };
 
+        bindings.prepare_beacon_proposer_ctx = try allocator.create(PrepareBeaconProposerCallbackCtx);
+        errdefer allocator.destroy(bindings.prepare_beacon_proposer_ctx);
+        bindings.prepare_beacon_proposer_ctx.* = .{ .node = node };
+
         bindings.attestation_data_ctx = try allocator.create(AttestationDataCallbackCtx);
         errdefer allocator.destroy(bindings.attestation_data_ctx);
         bindings.attestation_data_ctx.* = .{ .query = node.chainQuery() };
@@ -125,6 +132,7 @@ pub const ApiBindings = struct {
         allocator.destroy(self.subnet_subscription_cb_ctx);
         allocator.destroy(self.pool_submit_ctx);
         allocator.destroy(self.attestation_data_ctx);
+        allocator.destroy(self.prepare_beacon_proposer_ctx);
         allocator.destroy(self.produce_block_ctx);
         allocator.destroy(self.notification_sink_ctx);
         allocator.destroy(self.op_pool_cb_ctx);
@@ -174,6 +182,10 @@ pub const ApiBindings = struct {
         api_ctx.produce_block = .{
             .ptr = @ptrCast(self.produce_block_ctx),
             .produceBlockFn = &produceBlockCallback,
+        };
+        api_ctx.prepare_beacon_proposer = .{
+            .ptr = @ptrCast(self.prepare_beacon_proposer_ctx),
+            .prepareBeaconProposerFn = &prepareBeaconProposerCallback,
         };
         api_ctx.attestation_data = .{
             .ptr = @ptrCast(self.attestation_data_ctx),
@@ -235,6 +247,10 @@ pub const ProduceBlockCallbackCtx = struct {
     node: *BeaconNode,
 };
 
+pub const PrepareBeaconProposerCallbackCtx = struct {
+    node: *BeaconNode,
+};
+
 pub const AttestationDataCallbackCtx = struct {
     query: ChainQuery,
 };
@@ -269,6 +285,27 @@ fn prepareBeaconCommitteeSubnetsCallback(ptr: *anyopaque, subscriptions: []const
             computeAttestationSubnet(subscription.slot, subscription.committees_at_slot, subscription.committee_index),
             subscription.slot,
             subscription.is_aggregator,
+        );
+    }
+}
+
+fn prepareBeaconProposerCallback(
+    ptr: *anyopaque,
+    preparations: []const api_mod.types.ProposerPreparation,
+) anyerror!void {
+    const ctx: *PrepareBeaconProposerCallbackCtx = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+
+    const epoch = if (node.clock) |clock|
+        (clock.currentSlot(node.io) orelse node.currentHeadSlot()) / preset.SLOTS_PER_EPOCH
+    else
+        node.currentHeadSlot() / preset.SLOTS_PER_EPOCH;
+
+    for (preparations) |preparation| {
+        try node.chainService().setBeaconProposerData(
+            epoch,
+            preparation.validator_index,
+            preparation.fee_recipient,
         );
     }
 }
@@ -616,12 +653,33 @@ fn produceBlockCallback(
 
     var prod_config = chain_mod.BlockProductionConfig{};
     if (params.graffiti) |graffiti| prod_config.graffiti = graffiti;
-    _ = params.randao_reveal;
+    if (params.fee_recipient) |fee_recipient| prod_config.fee_recipient = fee_recipient;
+    prod_config.builder_boost_factor = params.builder_boost_factor;
+    prod_config.randao_reveal = params.randao_reveal;
 
     var produced = try node.produceFullBlock(params.slot, prod_config);
     defer produced.deinit(allocator);
 
-    return error.NotImplemented;
+    if (params.strict_fee_recipient_check) {
+        const expected_fee_recipient = params.fee_recipient orelse node.chainQuery().proposerFeeRecipientForSlot(
+            params.slot,
+            node.node_options.suggested_fee_recipient,
+        ) orelse return error.MissingProposerFeeRecipient;
+        try block_production_mod.ensureProducedFeeRecipient(&produced, expected_fee_recipient, true);
+    }
+
+    const serialized = try block_production_mod.serializeUnsignedBlock(
+        node,
+        allocator,
+        params.slot,
+        &produced,
+        if (params.blinded_local) .blinded else .full,
+    );
+    return .{
+        .ssz_bytes = serialized.ssz_bytes,
+        .fork = serialized.fork_name,
+        .blinded = serialized.block_type == .blinded,
+    };
 }
 
 fn getAttestationDataCallback(

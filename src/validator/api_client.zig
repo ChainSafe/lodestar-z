@@ -69,6 +69,13 @@ pub const SyncCommitteeSubscription = struct {
     until_epoch: u64,
 };
 
+pub const ProduceBlockOpts = struct {
+    fee_recipient: ?[20]u8 = null,
+    builder_boost_factor: ?u64 = null,
+    strict_fee_recipient_check: bool = false,
+    blinded_local: bool = false,
+};
+
 // ---------------------------------------------------------------------------
 // BeaconApiClient
 // ---------------------------------------------------------------------------
@@ -756,29 +763,54 @@ pub const BeaconApiClient = struct {
     // Block production
     // -----------------------------------------------------------------------
 
+    fn buildProduceBlockPath(
+        self: *BeaconApiClient,
+        slot: u64,
+        randao_reveal: [96]u8,
+        graffiti: [32]u8,
+        opts: ProduceBlockOpts,
+    ) ![]u8 {
+        var path = std.Io.Writer.Allocating.init(self.allocator);
+        errdefer path.deinit();
+
+        const randao_hex = std.fmt.bytesToHex(&randao_reveal, .lower);
+        const graffiti_hex = std.fmt.bytesToHex(&graffiti, .lower);
+
+        try path.writer.print(
+            "/eth/v3/validator/blocks/{d}?randao_reveal=0x{s}&graffiti=0x{s}",
+            .{ slot, randao_hex, graffiti_hex },
+        );
+
+        if (opts.fee_recipient) |fee_recipient| {
+            try path.writer.print("&fee_recipient=0x{s}", .{
+                std.fmt.bytesToHex(&fee_recipient, .lower),
+            });
+        }
+        if (opts.builder_boost_factor) |boost_factor| {
+            try path.writer.print("&builder_boost_factor={d}", .{boost_factor});
+        }
+        if (opts.strict_fee_recipient_check) {
+            try path.writer.writeAll("&strict_fee_recipient_check=true");
+        }
+        if (opts.blinded_local) {
+            try path.writer.writeAll("&blinded_local=true");
+        }
+
+        return path.toOwnedSlice();
+    }
+
     /// GET /eth/v3/validator/blocks/{slot}?randao_reveal=...&graffiti=...
+    /// with optional `fee_recipient`, `builder_boost_factor`, and
+    /// `strict_fee_recipient_check` query parameters.
     pub fn produceBlock(
         self: *BeaconApiClient,
         io: Io,
         slot: u64,
         randao_reveal: [96]u8,
         graffiti: [32]u8,
-        builder_boost_factor: ?u64,
+        opts: ProduceBlockOpts,
     ) !ProduceBlockResponse {
-        const randao_hex = std.fmt.bytesToHex(&randao_reveal, .lower);
-        const graffiti_hex = std.fmt.bytesToHex(&graffiti, .lower);
-        const path = if (builder_boost_factor) |boost_factor|
-            try std.fmt.allocPrint(
-                self.allocator,
-                "/eth/v3/validator/blocks/{d}?randao_reveal=0x{s}&graffiti=0x{s}&builder_boost_factor={d}",
-                .{ slot, randao_hex, graffiti_hex, boost_factor },
-            )
-        else
-            try std.fmt.allocPrint(
-                self.allocator,
-                "/eth/v3/validator/blocks/{d}?randao_reveal=0x{s}&graffiti=0x{s}",
-                .{ slot, randao_hex, graffiti_hex },
-            );
+        const path = try self.buildProduceBlockPath(slot, randao_reveal, graffiti, opts);
         defer self.allocator.free(path);
 
         const body = try self.get(io, path);
@@ -800,28 +832,17 @@ pub const BeaconApiClient = struct {
     /// Requests the unsigned BeaconBlock as SSZ (Accept: application/octet-stream).
     /// The fork is determined from the Eth-Consensus-Version response header.
     /// Returns raw SSZ bytes of the unsigned BeaconBlock + fork metadata.
+    /// The same optional produce-block query parameters are supported as
+    /// in `produceBlock()`.
     pub fn produceBlockSsz(
         self: *BeaconApiClient,
         io: Io,
         slot: u64,
         randao_reveal: [96]u8,
         graffiti: [32]u8,
-        builder_boost_factor: ?u64,
+        opts: ProduceBlockOpts,
     ) !ProduceBlockSszResponse {
-        const randao_hex = std.fmt.bytesToHex(&randao_reveal, .lower);
-        const graffiti_hex = std.fmt.bytesToHex(&graffiti, .lower);
-        const path = if (builder_boost_factor) |boost_factor|
-            try std.fmt.allocPrint(
-                self.allocator,
-                "/eth/v3/validator/blocks/{d}?randao_reveal=0x{s}&graffiti=0x{s}&builder_boost_factor={d}",
-                .{ slot, randao_hex, graffiti_hex, boost_factor },
-            )
-        else
-            try std.fmt.allocPrint(
-                self.allocator,
-                "/eth/v3/validator/blocks/{d}?randao_reveal=0x{s}&graffiti=0x{s}",
-                .{ slot, randao_hex, graffiti_hex },
-            );
+        const path = try self.buildProduceBlockPath(slot, randao_reveal, graffiti, opts);
         defer self.allocator.free(path);
 
         const resp = try self.getSsz(io, path);
@@ -1411,6 +1432,29 @@ fn parseUintField(
         },
         else => error.InvalidResponse,
     };
+}
+
+test "buildProduceBlockPath includes extended produceBlock opts" {
+    var client = BeaconApiClient.init(std.testing.allocator, "http://127.0.0.1:5052");
+    const path = try client.buildProduceBlockPath(
+        7,
+        [_]u8{0x11} ** 96,
+        [_]u8{0x22} ** 32,
+        .{
+            .fee_recipient = [_]u8{0x33} ** 20,
+            .builder_boost_factor = 150,
+            .strict_fee_recipient_check = true,
+            .blinded_local = true,
+        },
+    );
+    defer std.testing.allocator.free(path);
+
+    try std.testing.expect(std.mem.indexOf(u8, path, "randao_reveal=0x") != null);
+    try std.testing.expect(std.mem.indexOf(u8, path, "graffiti=0x") != null);
+    try std.testing.expect(std.mem.indexOf(u8, path, "fee_recipient=0x3333") != null);
+    try std.testing.expect(std.mem.indexOf(u8, path, "builder_boost_factor=150") != null);
+    try std.testing.expect(std.mem.indexOf(u8, path, "strict_fee_recipient_check=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, path, "blinded_local=true") != null);
 }
 
 fn parseHexField(

@@ -19,6 +19,7 @@ const Io = std.Io;
 const consensus_types = @import("consensus_types");
 const fork_types = @import("fork_types");
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
+const AnyBeaconBlockBody = fork_types.AnyBeaconBlockBody;
 const ForkSeq = @import("config").ForkSeq;
 const BlockType = fork_types.BlockType;
 const types = @import("types.zig");
@@ -64,6 +65,8 @@ pub const BlockService = struct {
     syncing_tracker: ?*SyncingTracker,
     /// Slots per epoch (from chain config).
     slots_per_epoch: u64,
+    /// Whether to request local block production in blinded form.
+    blinded_local: bool,
 
     pub fn init(
         allocator: Allocator,
@@ -71,6 +74,7 @@ pub const BlockService = struct {
         validator_store: *ValidatorStore,
         signing_ctx: SigningContext,
         slots_per_epoch: u64,
+        blinded_local: bool,
     ) BlockService {
         return .{
             .allocator = allocator,
@@ -85,6 +89,7 @@ pub const BlockService = struct {
             .doppelganger = null,
             .syncing_tracker = null,
             .slots_per_epoch = slots_per_epoch,
+            .blinded_local = blinded_local,
         };
     }
 
@@ -313,7 +318,12 @@ pub const BlockService = struct {
             duty.slot,
             randao_reveal,
             self.validator_store.getGraffiti(duty.pubkey),
-            self.validator_store.getBuilderBoostFactor(duty.pubkey),
+            .{
+                .fee_recipient = self.validator_store.getFeeRecipient(duty.pubkey),
+                .builder_boost_factor = self.validator_store.getBuilderBoostFactor(duty.pubkey),
+                .strict_fee_recipient_check = self.validator_store.strictFeeRecipientCheck(duty.pubkey),
+                .blinded_local = self.blinded_local,
+            },
         );
         defer self.allocator.free(block_resp.block_ssz);
 
@@ -354,6 +364,11 @@ pub const BlockService = struct {
         defer any_signed.deinit(self.allocator);
 
         const any_block = any_signed.beaconBlock();
+        try enforceStrictFeeRecipient(
+            any_block.beaconBlockBody(),
+            self.validator_store.getFeeRecipient(duty.pubkey),
+            self.validator_store.strictFeeRecipientCheck(duty.pubkey),
+        );
 
         // 4. Compute body_root = hashTreeRoot(block.body) and build BeaconBlockHeader.
         var body_root: [32]u8 = undefined;
@@ -441,3 +456,62 @@ pub const BlockService = struct {
         return sig.compress();
     }
 };
+
+fn enforceStrictFeeRecipient(
+    body: AnyBeaconBlockBody,
+    expected_fee_recipient: [20]u8,
+    strict_fee_recipient_check: bool,
+) !void {
+    if (!strict_fee_recipient_check or !body.isExecutionType()) return;
+
+    const actual_fee_recipient = switch (body.blockType()) {
+        .full => (try body.executionPayload()).feeRecipient().*,
+        .blinded => (try body.executionPayloadHeader()).feeRecipient(),
+    };
+
+    ensureExpectedFeeRecipient(
+        actual_fee_recipient,
+        expected_fee_recipient,
+        strict_fee_recipient_check,
+    ) catch |err| {
+        log.err("produced block fee recipient mismatch expected=0x{s} actual=0x{s}", .{
+            std.fmt.bytesToHex(&expected_fee_recipient, .lower),
+            std.fmt.bytesToHex(&actual_fee_recipient, .lower),
+        });
+        return err;
+    };
+}
+
+const testing = std.testing;
+
+test "enforceStrictFeeRecipient allows mismatch when strict checking is disabled" {
+    try testing.expectError(error.FeeRecipientMismatch, ensureExpectedFeeRecipient(
+        [_]u8{0x11} ** 20,
+        [_]u8{0x22} ** 20,
+        true,
+    ));
+    try ensureExpectedFeeRecipient(
+        [_]u8{0x11} ** 20,
+        [_]u8{0x22} ** 20,
+        false,
+    );
+}
+
+test "ensureExpectedFeeRecipient accepts matching fee recipients" {
+    try ensureExpectedFeeRecipient(
+        [_]u8{0x33} ** 20,
+        [_]u8{0x33} ** 20,
+        true,
+    );
+}
+
+fn ensureExpectedFeeRecipient(
+    actual_fee_recipient: [20]u8,
+    expected_fee_recipient: [20]u8,
+    strict_fee_recipient_check: bool,
+) !void {
+    if (!strict_fee_recipient_check or std.mem.eql(u8, &actual_fee_recipient, &expected_fee_recipient)) {
+        return;
+    }
+    return error.FeeRecipientMismatch;
+}

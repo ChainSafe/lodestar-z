@@ -21,6 +21,7 @@ const std = @import("std");
 /// Standard Beacon API metadata header names.
 pub const MetaHeader = struct {
     pub const version = "Eth-Consensus-Version";
+    pub const execution_payload_blinded = "Eth-Execution-Payload-Blinded";
     pub const execution_optimistic = "Eth-Execution-Optimistic";
     pub const finalized = "Eth-Consensus-Finalized";
     pub const dependent_root = "Eth-Consensus-Dependent-Root";
@@ -67,6 +68,8 @@ pub const Fork = enum {
 pub const ResponseMeta = struct {
     /// Fork version of the response data (blocks, states).
     version: ?Fork = null,
+    /// True if the response contains a blinded execution payload.
+    execution_payload_blinded: ?bool = null,
     /// True if the data references an unverified execution payload.
     execution_optimistic: ?bool = null,
     /// True if the data references finalized chain history.
@@ -95,6 +98,11 @@ pub const ResponseMeta = struct {
             appendStr(buf, &pos, MetaHeader.version);
             first = false;
         }
+        if (self.execution_payload_blinded != null) {
+            if (!first) appendStr(buf, &pos, ",");
+            appendStr(buf, &pos, MetaHeader.execution_payload_blinded);
+            first = false;
+        }
         if (self.execution_optimistic != null) {
             if (!first) appendStr(buf, &pos, ",");
             appendStr(buf, &pos, MetaHeader.execution_optimistic);
@@ -117,6 +125,7 @@ pub const ResponseMeta = struct {
     /// Returns true if there are any metadata headers to emit.
     pub fn hasHeaders(self: ResponseMeta) bool {
         return self.version != null or
+            self.execution_payload_blinded != null or
             self.execution_optimistic != null or
             self.finalized != null or
             self.dependent_root != null;
@@ -131,12 +140,13 @@ pub const Header = struct {
 
 /// Result of writing metadata headers.
 ///
-/// Contains up to 5 headers (version, execution_optimistic, finalized,
-/// dependent_root, expose_headers) plus their value strings in fixed buffers.
+/// Contains up to 6 headers (version, execution_payload_blinded,
+/// execution_optimistic, finalized, dependent_root, expose_headers) plus their
+/// value strings in fixed buffers.
 /// The struct is stack-allocated — no heap allocation needed.
 pub const MetaHeaders = struct {
     /// The header entries (name/value pairs).
-    headers: [5]Header = undefined,
+    headers: [6]Header = undefined,
     /// Number of valid entries in `headers`.
     count: usize = 0,
 
@@ -168,6 +178,14 @@ pub fn buildHeaders(meta: ResponseMeta, result: *MetaHeaders) void {
         const out = result.version_buf[0..v.len];
         @memcpy(out, v);
         result.headers[result.count] = .{ .name = MetaHeader.version, .value = out };
+        result.count += 1;
+    }
+
+    if (meta.execution_payload_blinded) |blinded| {
+        result.headers[result.count] = .{
+            .name = MetaHeader.execution_payload_blinded,
+            .value = if (blinded) "true" else "false",
+        };
         result.count += 1;
     }
 
@@ -263,6 +281,17 @@ test "buildHeaders execution_optimistic" {
 
     try std.testing.expectEqual(@as(usize, 2), s.len);
     try std.testing.expectEqualStrings("Eth-Execution-Optimistic", s[0].name);
+    try std.testing.expectEqualStrings("true", s[0].value);
+}
+
+test "buildHeaders execution_payload_blinded" {
+    const meta = ResponseMeta{ .execution_payload_blinded = true };
+    var hdrs: MetaHeaders = undefined;
+    buildHeaders(meta, &hdrs);
+    const s = hdrs.slice();
+
+    try std.testing.expectEqual(@as(usize, 2), s.len);
+    try std.testing.expectEqualStrings("Eth-Execution-Payload-Blinded", s[0].name);
     try std.testing.expectEqualStrings("true", s[0].value);
 }
 

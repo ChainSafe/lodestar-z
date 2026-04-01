@@ -61,11 +61,11 @@ pub const spec = cli.command(.{
         }),
         .proposerSettingsFile = cli.option(?[]const u8, .{
             .long = "proposerSettingsFile",
-            .description = "Compatibility flag only. Proposer settings files are not implemented yet",
+            .description = "YAML file with default and per-validator proposer settings",
         }, null),
         .strictFeeRecipientCheck = cli.flag(.{
             .long = "strictFeeRecipientCheck",
-            .description = "Compatibility flag only. Strict fee recipient checks are not implemented yet",
+            .description = "Reject produced blocks whose execution payload fee recipient does not match the configured validator policy",
         }),
         .builder = cli.flag(.{
             .long = "builder",
@@ -88,7 +88,7 @@ pub const spec = cli.command(.{
         }, null),
         .blindedLocal = cli.flag(.{
             .long = "blindedLocal",
-            .description = "Compatibility flag only. Blinded-local controls are not implemented yet",
+            .description = "Request locally produced validator blocks in blinded form when the beacon node can provide them",
         }),
         .distributed = cli.flag(.{
             .long = "distributed",
@@ -131,7 +131,7 @@ pub const spec = cli.command(.{
         }, null),
         .@"keymanager.headerLimit" = cli.option(?u64, .{
             .long = "keymanager.headerLimit",
-            .description = "Compatibility flag only. Keymanager header limits are not implemented yet",
+            .description = "Maximum accepted request-header size in bytes for the validator keymanager API server",
             .group = "keymanager",
         }, null),
         .@"keymanager.stacktraces" = cli.flag(.{

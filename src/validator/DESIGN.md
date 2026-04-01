@@ -30,16 +30,23 @@ Current gaps:
    fee-recipient updates, graffiti updates, gas-limit updates, builder-boost
    updates, proposer-config reads, and voluntary-exit signing. The remaining
    keymanager gaps are:
-   `--keymanager.headerLimit`, `--keymanager.stacktraces`, and dedicated
-   keymanager metrics/monitoring integration.
+   `--keymanager.stacktraces` and dedicated keymanager metrics/monitoring
+   integration.
 
-5. Proposer settings files, strict fee-recipient checks, builder selection
-   policy flags, distributed-validator flags, broadcast validation controls,
-   blinded-local controls, and mnemonic / interop signer sources are still not
+5. Builder selection policy flags, distributed-validator flags, broadcast
+   validation controls, and mnemonic / interop signer sources are still not
    implemented.
-   The validator launcher now resolves Lodestar-style `cache/`, `remoteKeys/`,
-   and `proposerConfigs/` paths, and `proposerConfigs/` is now loaded and
-   persisted by the keymanager/runtime path instead of being ignored.
+   The validator launcher now supports Lodestar-style proposer settings files,
+   enforces strict fee-recipient checks before signing/publishing produced
+   blocks, resolves Lodestar-style `cache/`, `remoteKeys/`, and
+   `proposerConfigs/` paths, and loads/persists `proposerConfigs/` instead of
+   ignoring them. The local lodestar-z beacon-node proposal path now honors
+   `prepare_beacon_proposer` fee-recipient data, explicit `fee_recipient`
+   request overrides, request-level `builder_boost_factor`, validator-
+   provided `randao_reveal`, and `blindedLocal` response shaping for local
+   block production, but it still does not implement Lodestar TS's full
+   `produceBlockV3` option surface such as `builder.selection` and
+   `broadcastValidation`.
 
 6. Beacon-node config verification is implemented only against the subset of
    `/eth/v1/config/spec` that lodestar-z currently exposes and consumes.
@@ -63,6 +70,10 @@ Non-gap note:
 1. Local keystores are now locked at startup and held for the process lifetime.
    `--force` bypasses those ownership locks intentionally and should be treated
    as an operator escape hatch, not the default mode.
+
+2. When `--proposerSettingsFile` is used, proposer policy writes are
+   intentionally disabled through the keymanager API. The file is treated as the
+   source of truth for proposer policy.
 
 ## Architecture Overview
 

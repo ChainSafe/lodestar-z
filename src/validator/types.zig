@@ -218,6 +218,8 @@ pub const ValidatorConfig = struct {
     /// Whether the validator must enforce that the block returned by the beacon
     /// node uses the configured fee recipient.
     strict_fee_recipient_check: bool = false,
+    /// Request local beacon-node block production in blinded form when possible.
+    blinded_local: bool = false,
 };
 
 pub const PersistencePaths = struct {

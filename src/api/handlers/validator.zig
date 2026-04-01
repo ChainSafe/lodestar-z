@@ -391,7 +391,10 @@ test "prepareSyncCommitteeSubnets forwards subscriptions to callback" {
 /// POST /eth/v2/beacon/blocks.
 ///
 /// Takes: slot (path param), randao_reveal (query param, 0x-hex BLS sig),
-///        graffiti (optional query param, 0x-hex 32 bytes).
+///        fee_recipient (optional 0x-hex 20 bytes), graffiti (optional
+///        query param, 0x-hex 32 bytes), builder_boost_factor (optional),
+///        strict_fee_recipient_check (optional boolean), blinded_local
+///        (optional boolean).
 ///
 /// Returns a HandlerResult with the block in JSON (or SSZ if requested).
 /// The .meta.version field must be set to the fork name for the block.
@@ -401,13 +404,21 @@ pub fn produceBlock(
     ctx: *ApiContext,
     slot: u64,
     randao_reveal: [96]u8,
+    fee_recipient: ?[20]u8,
     graffiti: ?[32]u8,
+    builder_boost_factor: ?u64,
+    strict_fee_recipient_check: bool,
+    blinded_local: bool,
 ) !HandlerResult(context.ProducedBlockData) {
     const cb = ctx.produce_block orelse return error.NotImplemented;
     const block_data = try cb.produceBlockFn(cb.ptr, ctx.allocator, .{
         .slot = slot,
         .randao_reveal = randao_reveal,
+        .fee_recipient = fee_recipient,
         .graffiti = graffiti,
+        .builder_boost_factor = builder_boost_factor,
+        .strict_fee_recipient_check = strict_fee_recipient_check,
+        .blinded_local = blinded_local,
     });
     return .{
         .data = block_data,
@@ -584,8 +595,60 @@ test "getAttestationData uses callback when wired" {
 test "produceBlock returns NotImplemented without callback" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    const result = produceBlock(&tc.ctx, 100, [_]u8{0} ** 96, null);
+    const result = produceBlock(&tc.ctx, 100, [_]u8{0} ** 96, null, null, null, false, false);
     try std.testing.expectError(error.NotImplemented, result);
+}
+
+test "produceBlock forwards extended params to callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const MockCb = struct {
+        var saw_params = false;
+
+        fn produce(
+            _: *anyopaque,
+            allocator: std.mem.Allocator,
+            params: context.ProduceBlockParams,
+        ) anyerror!context.ProducedBlockData {
+            saw_params = true;
+            try std.testing.expectEqual(@as(u64, 123), params.slot);
+            try std.testing.expectEqual([_]u8{0xAA} ** 96, params.randao_reveal);
+            try std.testing.expect(params.fee_recipient != null);
+            try std.testing.expectEqual([_]u8{0xBB} ** 20, params.fee_recipient.?);
+            try std.testing.expect(params.graffiti != null);
+            try std.testing.expectEqual([_]u8{0xCC} ** 32, params.graffiti.?);
+            try std.testing.expectEqual(@as(?u64, 150), params.builder_boost_factor);
+            try std.testing.expect(params.strict_fee_recipient_check);
+            try std.testing.expect(params.blinded_local);
+
+            return .{
+                .ssz_bytes = try allocator.dupe(u8, "block"),
+                .fork = "electra",
+                .blinded = true,
+            };
+        }
+    };
+
+    var dummy: u8 = 0;
+    tc.ctx.produce_block = .{
+        .ptr = &dummy,
+        .produceBlockFn = &MockCb.produce,
+    };
+
+    const result = try produceBlock(
+        &tc.ctx,
+        123,
+        [_]u8{0xAA} ** 96,
+        [_]u8{0xBB} ** 20,
+        [_]u8{0xCC} ** 32,
+        150,
+        true,
+        true,
+    );
+    defer tc.ctx.allocator.free(result.data.ssz_bytes);
+    try std.testing.expect(MockCb.saw_params);
+    try std.testing.expect(result.data.blinded);
 }
 
 test "getAggregateAttestation returns NotImplemented without callback" {
@@ -656,11 +719,11 @@ pub fn getValidatorLiveness(
 /// Stores the fee recipient mapping; actual use during block production
 /// requires wiring to the block builder.
 pub fn prepareBeaconProposer(
-    _: *ApiContext,
-    _: []const types.ProposerPreparation,
+    ctx: *ApiContext,
+    preparations: []const types.ProposerPreparation,
 ) !HandlerResult(void) {
-    // TODO: store fee_recipient per validator_index in a fee recipient cache.
-    // For now, accept and ignore (return 200).
+    const cb = ctx.prepare_beacon_proposer orelse return error.NotImplemented;
+    try cb.prepareBeaconProposerFn(cb.ptr, preparations);
     return .{ .data = {} };
 }
 

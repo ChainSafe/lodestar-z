@@ -1,4 +1,6 @@
 const std = @import("std");
+const yaml = @import("yaml");
+const Yaml = yaml.Yaml;
 
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -25,7 +27,9 @@ pub const KeymanagerConfig = struct {
     cors_origin: ?[]const u8,
     auth_enabled: bool,
     token_file: []const u8,
+    header_limit: usize,
     body_limit: usize,
+    proposer_config_write_enabled: bool,
 };
 
 pub const PreparedRuntime = struct {
@@ -38,6 +42,7 @@ pub const PreparedRuntime = struct {
     remote_signer_source: RemoteSignerSource = .none,
     external_signer_fetch_enabled: bool = false,
     keymanager: ?KeymanagerConfig = null,
+    proposer_settings_file: ?[]const u8 = null,
     startup_signers: validator_mod.StartupSigners,
     validator_config: validator_mod.ValidatorConfig,
     signing_context: validator_mod.SigningContext,
@@ -114,6 +119,12 @@ pub const PreparedRuntime = struct {
         }
         if (self.keymanager) |keymanager| {
             std.log.info("  keymanager:   http://{s}:{d}", .{ keymanager.address, keymanager.port });
+            if (!keymanager.proposer_config_write_enabled) {
+                std.log.info("  keymanager proposer writes: disabled (owned by proposer settings file)", .{});
+            }
+        }
+        if (self.proposer_settings_file) |path| {
+            std.log.info("  proposer settings: {s}", .{path});
         }
     }
 };
@@ -158,8 +169,7 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
     errdefer paths.deinit();
     try paths.ensureDirs(io);
 
-    const proposer_configs = try validator_mod.readPersistedProposerConfigs(io, allocator, paths.proposer_dir);
-    errdefer if (proposer_configs.len > 0) allocator.free(proposer_configs);
+    const cli_default_proposer_config = try parseCliDefaultProposerConfig(opts);
 
     var external_signer_urls: []const []const u8 = if (external_signer_urls_raw) |raw|
         try splitCsvOwnedUnique(allocator, raw)
@@ -251,16 +261,12 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
     try ensureConfigSpecMatches(beacon_config, remote_spec);
     try validator_mod.ensureGenesisMetadata(io, allocator, paths.metadata_file, genesis);
 
-    const fee_recipient = parseFeeRecipient(opts.suggestedFeeRecipient) catch |err| {
-        std.log.err("Invalid --suggestedFeeRecipient: {}", .{err});
-        return err;
-    };
-    const builder_boost_factor = parseBuilderBoostFactor(opts.@"builder.boostFactor") catch |err| {
-        std.log.err("Invalid --builder.boostFactor: {}", .{err});
-        return err;
-    };
     const external_signer_fetch_interval_ms = parseExternalSignerFetchInterval(opts.@"externalSigner.fetchInterval") catch |err| {
         std.log.err("Invalid --externalSigner.fetchInterval: {}", .{err});
+        return err;
+    };
+    const keymanager_header_limit = parseKeymanagerHeaderLimit(opts.@"keymanager.headerLimit") catch |err| {
+        std.log.err("Invalid --keymanager.headerLimit: {}", .{err});
         return err;
     };
     const keymanager_body_limit = parseKeymanagerBodyLimit(opts.@"keymanager.bodyLimit") catch |err| {
@@ -268,13 +274,41 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
         return err;
     };
 
+    var proposer_configs: []const validator_mod.ProposerConfigEntry = &.{};
+    errdefer if (proposer_configs.len > 0) allocator.free(proposer_configs);
+
+    var default_proposer_config = cliDefaultEffectiveProposerConfig(cli_default_proposer_config);
+
+    if (opts.proposerSettingsFile) |path| {
+        if (try directoryHasEntries(io, paths.proposer_dir)) {
+            std.log.err(
+                "Cannot use --proposerSettingsFile while persisted proposer configs exist under {s}. Clear that directory or remove --proposerSettingsFile.",
+                .{paths.proposer_dir},
+            );
+            return error.ProposerSettingsConflict;
+        }
+
+        const parsed = loadProposerSettingsFile(io, allocator, path) catch |err| {
+            std.log.err("Invalid --proposerSettingsFile '{s}': {}", .{ path, err });
+            return err;
+        };
+        proposer_configs = parsed.proposer_configs;
+        default_proposer_config = cliDefaultEffectiveProposerConfig(
+            mergeProposerConfig(parsed.default_config, cli_default_proposer_config),
+        );
+    } else {
+        proposer_configs = try validator_mod.readPersistedProposerConfigs(io, allocator, paths.proposer_dir);
+    }
+
     const keymanager: ?KeymanagerConfig = if (opts.keymanager) .{
         .address = opts.@"keymanager.address" orelse "127.0.0.1",
         .port = opts.@"keymanager.port" orelse 5062,
         .cors_origin = opts.@"keymanager.cors" orelse "*",
         .auth_enabled = opts.@"keymanager.auth",
         .token_file = opts.@"keymanager.tokenFile" orelse paths.keymanager_token_file,
+        .header_limit = keymanager_header_limit,
         .body_limit = keymanager_body_limit,
+        .proposer_config_write_enabled = opts.proposerSettingsFile == null,
     } else null;
 
     return .{
@@ -287,6 +321,7 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
         .remote_signer_source = remote_signer_source,
         .external_signer_fetch_enabled = external_signer_fetch_enabled,
         .keymanager = keymanager,
+        .proposer_settings_file = opts.proposerSettingsFile,
         .startup_signers = startup_signers,
         .signing_context = buildSigningContext(beacon_config, genesis),
         .validator_config = .{
@@ -312,11 +347,12 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
             .external_signer_fetch_interval_ms = external_signer_fetch_interval_ms,
             .beacon_node_fallback_urls = fallback_urls,
             .proposer_configs = proposer_configs,
-            .suggested_fee_recipient = fee_recipient,
-            .gas_limit = opts.defaultGasLimit orelse 60_000_000,
-            .graffiti = parseGraffiti(opts.graffiti),
-            .builder_boost_factor = builder_boost_factor orelse 100,
-            .strict_fee_recipient_check = opts.strictFeeRecipientCheck,
+            .suggested_fee_recipient = default_proposer_config.fee_recipient,
+            .gas_limit = default_proposer_config.gas_limit,
+            .graffiti = default_proposer_config.graffiti,
+            .builder_boost_factor = default_proposer_config.builder_boost_factor,
+            .strict_fee_recipient_check = default_proposer_config.strict_fee_recipient_check,
+            .blinded_local = opts.blindedLocal,
         },
     };
 }
@@ -440,6 +476,163 @@ fn parseKeymanagerBodyLimit(input: ?u64) !usize {
     const bytes = input orelse return 20 * 1024 * 1024;
     if (bytes == 0) return error.InvalidKeymanagerBodyLimit;
     return std.math.cast(usize, bytes) orelse return error.InvalidKeymanagerBodyLimit;
+}
+
+fn parseKeymanagerHeaderLimit(input: ?u64) !usize {
+    const bytes = input orelse return @import("api").HttpServer.default_max_header_bytes;
+    if (bytes == 0) return error.InvalidKeymanagerHeaderLimit;
+    return std.math.cast(usize, bytes) orelse return error.InvalidKeymanagerHeaderLimit;
+}
+
+fn parseCliDefaultProposerConfig(opts: anytype) !validator_mod.ProposerConfig {
+    var config = validator_mod.ProposerConfig{};
+
+    if (opts.suggestedFeeRecipient != null) {
+        config.fee_recipient = try parseFeeRecipient(opts.suggestedFeeRecipient);
+    }
+    if (opts.graffiti != null) {
+        config.graffiti = parseGraffiti(opts.graffiti);
+    }
+    if (opts.defaultGasLimit) |gas_limit| {
+        config.gas_limit = gas_limit;
+    }
+    if (opts.@"builder.boostFactor" != null) {
+        config.builder_boost_factor = try parseBuilderBoostFactor(opts.@"builder.boostFactor");
+    }
+    if (opts.strictFeeRecipientCheck) {
+        config.strict_fee_recipient_check = true;
+    }
+
+    return config;
+}
+
+fn cliDefaultEffectiveProposerConfig(config: validator_mod.ProposerConfig) validator_mod.EffectiveProposerConfig {
+    return .{
+        .fee_recipient = config.fee_recipient orelse [_]u8{0} ** 20,
+        .graffiti = config.graffiti orelse [_]u8{0} ** 32,
+        .gas_limit = config.gas_limit orelse 60_000_000,
+        .builder_boost_factor = config.builder_boost_factor orelse 100,
+        .strict_fee_recipient_check = config.strict_fee_recipient_check orelse false,
+    };
+}
+
+fn mergeProposerConfig(
+    base: validator_mod.ProposerConfig,
+    overrides: validator_mod.ProposerConfig,
+) validator_mod.ProposerConfig {
+    var merged = base;
+    if (overrides.fee_recipient) |value| merged.fee_recipient = value;
+    if (overrides.graffiti) |value| merged.graffiti = value;
+    if (overrides.gas_limit) |value| merged.gas_limit = value;
+    if (overrides.builder_boost_factor) |value| merged.builder_boost_factor = value;
+    if (overrides.strict_fee_recipient_check) |value| merged.strict_fee_recipient_check = value;
+    return merged;
+}
+
+const ParsedProposerSettingsFile = struct {
+    default_config: validator_mod.ProposerConfig = .{},
+    proposer_configs: []const validator_mod.ProposerConfigEntry = &.{},
+};
+
+fn loadProposerSettingsFile(
+    io: Io,
+    allocator: Allocator,
+    path: []const u8,
+) !ParsedProposerSettingsFile {
+    const bytes = try readFileAlloc(io, allocator, path);
+    defer allocator.free(bytes);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var doc = Yaml{ .source = bytes };
+    try doc.load(arena.allocator());
+    defer doc.deinit(arena.allocator());
+
+    if (doc.docs.items.len == 0) return error.EmptyYaml;
+
+    const root = try doc.docs.items[0].asMap();
+
+    const default_config = if (root.get("default_config")) |value|
+        try parseProposerSettingsSection(try value.asMap())
+    else
+        validator_mod.ProposerConfig{};
+
+    var proposer_entries: std.ArrayListUnmanaged(validator_mod.ProposerConfigEntry) = .empty;
+    errdefer proposer_entries.deinit(allocator);
+
+    if (root.get("proposer_config")) |value| {
+        const proposer_map = try value.asMap();
+        try proposer_entries.ensureTotalCapacity(allocator, proposer_map.count());
+        for (proposer_map.keys(), proposer_map.values()) |pubkey_text, section_value| {
+            const pubkey = try parseValidatorPubkeyHex(pubkey_text);
+            proposer_entries.appendAssumeCapacity(.{
+                .pubkey = pubkey,
+                .config = try parseProposerSettingsSection(try section_value.asMap()),
+            });
+        }
+    }
+
+    return .{
+        .default_config = default_config,
+        .proposer_configs = if (proposer_entries.items.len == 0)
+            &.{}
+        else
+            try proposer_entries.toOwnedSlice(allocator),
+    };
+}
+
+fn parseProposerSettingsSection(map: Yaml.Map) !validator_mod.ProposerConfig {
+    var config = validator_mod.ProposerConfig{};
+
+    if (map.get("graffiti")) |value| {
+        config.graffiti = parseGraffiti(try scalarString(value));
+    }
+    if (map.get("strict_fee_recipient_check")) |value| {
+        config.strict_fee_recipient_check = try parseYamlBool(value);
+    }
+    if (map.get("fee_recipient")) |value| {
+        config.fee_recipient = try parseFeeRecipient(try scalarString(value));
+    }
+    if (map.get("builder")) |value| {
+        const builder = try value.asMap();
+        if (builder.get("selection") != null) {
+            return error.UnsupportedBuilderSelection;
+        }
+        if (builder.get("gas_limit")) |gas_value| {
+            config.gas_limit = try parseYamlU64(gas_value);
+        }
+        if (builder.get("boost_factor")) |boost_value| {
+            config.builder_boost_factor = try parseYamlU64(boost_value);
+        }
+    }
+
+    return config;
+}
+
+fn scalarString(value: Yaml.Value) !?[]const u8 {
+    const scalar = try value.asScalar();
+    return std.mem.trim(u8, scalar, " \t\r\n'\"");
+}
+
+fn parseYamlBool(value: Yaml.Value) !bool {
+    const scalar = try scalarString(value) orelse return error.InvalidProposerSettingsFile;
+    if (std.ascii.eqlIgnoreCase(scalar, "true")) return true;
+    if (std.ascii.eqlIgnoreCase(scalar, "false")) return false;
+    return error.InvalidProposerSettingsFile;
+}
+
+fn parseYamlU64(value: Yaml.Value) !u64 {
+    const scalar = try scalarString(value) orelse return error.InvalidProposerSettingsFile;
+    return try std.fmt.parseInt(u64, scalar, 10);
+}
+
+fn parseValidatorPubkeyHex(raw: []const u8) ![48]u8 {
+    const stripped = if (std.mem.startsWith(u8, raw, "0x") or std.mem.startsWith(u8, raw, "0X")) raw[2..] else raw;
+    if (stripped.len != 96) return error.InvalidValidatorPubkey;
+    var pubkey: [48]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&pubkey, stripped);
+    return pubkey;
 }
 
 fn loadPinnedRemoteSignerKeys(
@@ -646,4 +839,37 @@ test "loadPinnedRemoteSignerKeys parses and deduplicates pubkeys" {
     try testing.expectEqual(@as(usize, 1), grouped.len);
     try testing.expectEqualStrings("http://signer.example:9000", grouped[0].url);
     try testing.expectEqual(@as(usize, 2), grouped[0].pubkeys.len);
+}
+
+test "loadProposerSettingsFile parses default and per-validator overrides" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const config_bytes =
+        \\default_config:
+        \\  graffiti: hello
+        \\  strict_fee_recipient_check: true
+        \\  fee_recipient: "0x1111111111111111111111111111111111111111"
+        \\  builder:
+        \\    gas_limit: 123456
+        \\    boost_factor: 250
+        \\proposer_config:
+        \\  "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":
+        \\    graffiti: world
+        \\    fee_recipient: "0x2222222222222222222222222222222222222222"
+    ;
+
+    try tmp.dir.writeFile(.{ .sub_path = "proposer.yaml", .data = config_bytes });
+    const path = try tmp.dir.realpathAlloc(testing.allocator, "proposer.yaml");
+    defer testing.allocator.free(path);
+
+    const parsed = try loadProposerSettingsFile(testing.io, testing.allocator, path);
+    defer if (parsed.proposer_configs.len > 0) testing.allocator.free(parsed.proposer_configs);
+
+    try testing.expectEqualStrings("hello", std.mem.trimRight(u8, &parsed.default_config.graffiti.?, "\x00"));
+    try testing.expect(parsed.default_config.strict_fee_recipient_check.?);
+    try testing.expectEqual(@as(u64, 123456), parsed.default_config.gas_limit.?);
+    try testing.expectEqual(@as(u64, 250), parsed.default_config.builder_boost_factor.?);
+    try testing.expectEqual(@as(usize, 1), parsed.proposer_configs.len);
+    try testing.expectEqualStrings("world", std.mem.trimRight(u8, &parsed.proposer_configs[0].config.graffiti.?, "\x00"));
 }

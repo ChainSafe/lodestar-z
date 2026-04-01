@@ -31,8 +31,8 @@ fn rejectUnsupportedOptions(opts: anytype) !void {
     if (opts.@"monitoring.endpoint" != null or opts.@"monitoring.interval" != null) {
         return unsupportedOption("Validator monitoring flags are not implemented yet. Remove --monitoring.endpoint and --monitoring.interval.");
     }
-    if (opts.@"keymanager.headerLimit" != null or opts.@"keymanager.stacktraces") {
-        return unsupportedOption("Validator keymanager header-limit and stacktrace options are not implemented yet. Remove --keymanager.headerLimit and --keymanager.stacktraces.");
+    if (opts.@"keymanager.stacktraces") {
+        return unsupportedOption("Validator keymanager stacktrace responses are not implemented yet. Remove --keymanager.stacktraces.");
     }
     if (!opts.keymanager and
         (opts.@"keymanager.tokenFile" != null or
@@ -47,17 +47,11 @@ fn rejectUnsupportedOptions(opts: anytype) !void {
     if (opts.importKeystores != null or opts.importKeystoresPassword != null) {
         return unsupportedOption("Validator keystore import at startup is not implemented yet. Populate the keystores and secrets directories directly instead.");
     }
-    if (opts.proposerSettingsFile != null) {
-        return unsupportedOption("Validator proposer settings files are not implemented yet. Remove --proposerSettingsFile.");
-    }
-    if (opts.strictFeeRecipientCheck) {
-        return unsupportedOption("Validator strict fee recipient checks are not implemented yet. Remove --strictFeeRecipientCheck.");
-    }
     if (opts.builder or opts.@"builder.selection" != null) {
         return unsupportedOption("Validator builder selection policy flags are not implemented yet. Remove --builder and --builder.selection.");
     }
-    if (opts.broadcastValidation != null or opts.blindedLocal) {
-        return unsupportedOption("Validator broadcast validation and blinded-local flags are not implemented yet. Remove --broadcastValidation and --blindedLocal.");
+    if (opts.broadcastValidation != null) {
+        return unsupportedOption("Validator broadcast validation controls are not implemented yet. Remove --broadcastValidation.");
     }
     if (opts.distributed) {
         return unsupportedOption("Distributed validator mode is not implemented yet. Remove --distributed.");
@@ -167,6 +161,12 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
 
     var keymanager: ?keymanager_server.Runtime = null;
     if (prepared.keymanager) |keymanager_config| {
+        if (!keymanager_config.proposer_config_write_enabled) {
+            std.log.warn(
+                "Validator keymanager proposer policy writes are disabled while --proposerSettingsFile owns proposer settings",
+                .{},
+            );
+        }
         keymanager = try keymanager_server.Runtime.init(
             io,
             allocator,
@@ -178,7 +178,9 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
                 .cors_origin = keymanager_config.cors_origin,
                 .auth_enabled = keymanager_config.auth_enabled,
                 .token_file = keymanager_config.token_file,
+                .header_limit = keymanager_config.header_limit,
                 .body_limit = keymanager_config.body_limit,
+                .proposer_config_write_enabled = keymanager_config.proposer_config_write_enabled,
             },
         );
         errdefer if (keymanager) |*km| km.deinit();

@@ -220,6 +220,7 @@ pub const ValidatorClient = struct {
             &self.validator_store,
             signing_ctx,
             config.slots_per_epoch,
+            config.blinded_local,
         );
         errdefer self.block_service.deinit();
         self.attestation_service = AttestationService.init(

@@ -110,6 +110,7 @@ pub const HttpServer = struct {
         allow_keymanager_cors: bool = false,
         allowed_path_prefixes: ?[]const []const u8 = null,
         allowed_operation_ids: ?[]const []const u8 = null,
+        max_header_bytes: usize = default_max_header_bytes,
         max_body_bytes: usize = default_max_body_bytes,
         max_block_body_bytes: usize = default_max_block_body_bytes,
     };
@@ -124,6 +125,7 @@ pub const HttpServer = struct {
     allow_keymanager_cors: bool = false,
     allowed_path_prefixes: ?[]const []const u8 = null,
     allowed_operation_ids: ?[]const []const u8 = null,
+    max_header_bytes: usize = default_max_header_bytes,
     max_body_bytes: usize = default_max_body_bytes,
     max_block_body_bytes: usize = default_max_block_body_bytes,
     /// Set to true to request a clean shutdown of the serve loop.
@@ -142,6 +144,8 @@ pub const HttpServer = struct {
     pub const default_max_body_bytes: usize = 1 * 1024 * 1024;
     /// Maximum request body size for block-submission endpoints (10 MiB).
     pub const default_max_block_body_bytes: usize = 10 * 1024 * 1024;
+    /// Maximum request head size accepted per connection.
+    pub const default_max_header_bytes: usize = 8 * 1024;
     /// Maximum keep-alive requests per connection.
     pub const max_keepalive_requests: u32 = 100;
     /// Maximum concurrent TCP connections.
@@ -189,6 +193,7 @@ pub const HttpServer = struct {
             .allow_keymanager_cors = options.allow_keymanager_cors,
             .allowed_path_prefixes = options.allowed_path_prefixes,
             .allowed_operation_ids = options.allowed_operation_ids,
+            .max_header_bytes = options.max_header_bytes,
             .max_body_bytes = options.max_body_bytes,
             .max_block_body_bytes = options.max_block_body_bytes,
         };
@@ -320,8 +325,12 @@ pub const HttpServer = struct {
         }
 
         var send_buf: [8192]u8 = undefined;
-        var recv_buf: [8192]u8 = undefined;
-        var conn_reader = stream.reader(io, &recv_buf);
+        const recv_buf = self.allocator.alloc(u8, self.max_header_bytes) catch |err| {
+            log.err("failed to allocate HTTP header buffer: {s}", .{@errorName(err)});
+            return;
+        };
+        defer self.allocator.free(recv_buf);
+        var conn_reader = stream.reader(io, recv_buf);
         var conn_writer = stream.writer(io, &send_buf);
         var server: http.Server = .init(&conn_reader.interface, &conn_writer.interface);
 
@@ -1348,16 +1357,60 @@ pub const HttpServer = struct {
             }
             break :blk null;
         } else null;
-        const handler_res = try handlers.validator.produceBlock(self.api_context, slot, randao_reveal, graffiti);
+        const fee_recipient: ?[20]u8 = if (dc.getQuery("fee_recipient")) |fee| blk: {
+            const fee_src = if (std.mem.startsWith(u8, fee, "0x")) fee[2..] else fee;
+            if (fee_src.len != 40) return error.InvalidRequest;
+            var parsed: [20]u8 = undefined;
+            _ = std.fmt.hexToBytes(&parsed, fee_src) catch return error.InvalidRequest;
+            break :blk parsed;
+        } else null;
+        const builder_boost_factor: ?u64 = if (dc.getQuery("builder_boost_factor")) |boost|
+            std.fmt.parseInt(u64, boost, 10) catch return error.InvalidRequest
+        else
+            null;
+        const strict_fee_recipient_check: bool = if (dc.getQuery("strict_fee_recipient_check")) |strict|
+            if (std.mem.eql(u8, strict, "true"))
+                true
+            else if (std.mem.eql(u8, strict, "false"))
+                false
+            else
+                return error.InvalidRequest
+        else
+            false;
+        const blinded_local: bool = if (dc.getQuery("blinded_local")) |blinded|
+            if (std.mem.eql(u8, blinded, "true"))
+                true
+            else if (std.mem.eql(u8, blinded, "false"))
+                false
+            else
+                return error.InvalidRequest
+        else
+            false;
+        const handler_res = try handlers.validator.produceBlock(
+            self.api_context,
+            slot,
+            randao_reveal,
+            fee_recipient,
+            graffiti,
+            builder_boost_factor,
+            strict_fee_recipient_check,
+            blinded_local,
+        );
         var block_meta = handler_res.meta;
         block_meta.version = response_meta.Fork.fromString(handler_res.data.fork);
+        block_meta.execution_payload_blinded = handler_res.data.blinded;
         if (dc.format == .ssz) {
             const ssz_copy = try alloc.dupe(u8, handler_res.data.ssz_bytes);
             return .{ .status = 200, .content_type = "application/octet-stream", .body = ssz_copy, .meta = block_meta };
         }
         // Deserialize SSZ bytes into typed block, then serialize to JSON via SSZ type system
         const fork_seq = ForkSeq.fromName(handler_res.data.fork);
-        const any_block = try AnySignedBeaconBlock.deserialize(alloc, .full, fork_seq, handler_res.data.ssz_bytes);
+        const any_block = try AnySignedBeaconBlock.deserialize(
+            alloc,
+            if (handler_res.data.blinded) .blinded else .full,
+            fork_seq,
+            handler_res.data.ssz_bytes,
+        );
         defer any_block.deinit(alloc);
         const body_json = try json_response.writeBlockEnvelope(alloc, any_block, block_meta);
         return .{ .status = 200, .content_type = "application/json", .body = body_json, .meta = block_meta };

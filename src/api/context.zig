@@ -200,7 +200,11 @@ pub const PoolSubmitCallback = struct {
 pub const ProduceBlockParams = struct {
     slot: u64,
     randao_reveal: [96]u8,
+    fee_recipient: ?[20]u8 = null,
     graffiti: ?[32]u8 = null,
+    builder_boost_factor: ?u64 = null,
+    strict_fee_recipient_check: bool = false,
+    blinded_local: bool = false,
 };
 
 /// Result of block production (minimal, for API response).
@@ -209,6 +213,8 @@ pub const ProducedBlockData = struct {
     ssz_bytes: []const u8,
     /// Fork name for the produced block (e.g. "electra").
     fork: []const u8,
+    /// True when the produced block bytes encode a blinded block.
+    blinded: bool = false,
 };
 
 /// Callback for producing blocks (GET /eth/v1/validator/blocks/{slot}).
@@ -216,6 +222,11 @@ pub const ProduceBlockCallback = struct {
     ptr: *anyopaque,
     /// Produce a block for the given slot. Caller owns returned ssz_bytes.
     produceBlockFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, params: ProduceBlockParams) anyerror!ProducedBlockData,
+};
+
+pub const PrepareBeaconProposerCallback = struct {
+    ptr: *anyopaque,
+    prepareBeaconProposerFn: *const fn (ptr: *anyopaque, preparations: []const types.ProposerPreparation) anyerror!void,
 };
 
 // ---------------------------------------------------------------------------
@@ -368,6 +379,8 @@ pub const ApiContext = struct {
 
     /// Optional block production callback. Nil until wired by BeaconNode.init.
     produce_block: ?ProduceBlockCallback = null,
+    /// Optional proposer-preparation callback. Nil until wired by BeaconNode.init.
+    prepare_beacon_proposer: ?PrepareBeaconProposerCallback = null,
 
     /// Optional attestation data callback. Nil until wired by BeaconNode.init.
     attestation_data: ?AttestationDataCallback = null,
