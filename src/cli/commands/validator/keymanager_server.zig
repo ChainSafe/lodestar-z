@@ -13,7 +13,9 @@ pub const Config = struct {
     cors_origin: ?[]const u8,
     auth_enabled: bool,
     token_file: []const u8,
+    header_limit: usize,
     body_limit: usize,
+    proposer_config_write_enabled: bool,
 };
 
 pub const Runtime = struct {
@@ -39,7 +41,13 @@ pub const Runtime = struct {
             auth = try validator_mod.KeymanagerAuth.loadOrGenerate(io, allocator, config.token_file);
         }
 
-        const keymanager_runtime = validator_mod.KeymanagerRuntime.init(io, allocator, client, auth);
+        const keymanager_runtime = validator_mod.KeymanagerRuntime.init(
+            io,
+            allocator,
+            client,
+            auth,
+            config.proposer_config_write_enabled,
+        );
 
         var runtime = Runtime{
             .io = io,
@@ -76,6 +84,7 @@ pub const Runtime = struct {
             .{
                 .cors_origin = config.cors_origin,
                 .allow_keymanager_cors = true,
+                .max_header_bytes = config.header_limit,
                 .allowed_operation_ids = &.{
                     "listKeystores",
                     "importKeystores",

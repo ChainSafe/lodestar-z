@@ -28,6 +28,7 @@ const sync_contribution_pool_mod = @import("sync_contribution_pool.zig");
 const SyncContributionAndProofPool = sync_contribution_pool_mod.SyncContributionAndProofPool;
 const SyncCommitteeMessagePool = sync_contribution_pool_mod.SyncCommitteeMessagePool;
 const ValidatorMonitor = @import("validator_monitor.zig").ValidatorMonitor;
+const BeaconProposerCache = @import("beacon_proposer_cache.zig").BeaconProposerCache;
 
 pub const RuntimeOptions = struct {
     max_block_states: u32 = 64,
@@ -76,6 +77,7 @@ pub const Runtime = struct {
     seen_cache: *SeenCache,
     sync_contribution_pool: *SyncContributionAndProofPool,
     sync_committee_message_pool: *SyncCommitteeMessagePool,
+    beacon_proposer_cache: *BeaconProposerCache,
     validator_monitor: ?*ValidatorMonitor = null,
     chain: *Chain,
 
@@ -147,6 +149,11 @@ pub const Runtime = struct {
         sync_msg_pool.* = SyncCommitteeMessagePool.init(allocator);
         errdefer sync_msg_pool.deinit();
 
+        const proposer_cache = try allocator.create(BeaconProposerCache);
+        errdefer allocator.destroy(proposer_cache);
+        proposer_cache.* = BeaconProposerCache.init(allocator);
+        errdefer proposer_cache.deinit();
+
         const chain = try allocator.create(Chain);
         errdefer allocator.destroy(chain);
         chain.* = Chain.init(
@@ -159,6 +166,7 @@ pub const Runtime = struct {
             op_pool,
             seen_cache,
             head_tracker,
+            proposer_cache,
         );
         errdefer chain.deinit();
         chain.verify_signatures = opts.verify_signatures;
@@ -181,6 +189,7 @@ pub const Runtime = struct {
             .seen_cache = seen_cache,
             .sync_contribution_pool = sync_contrib_pool,
             .sync_committee_message_pool = sync_msg_pool,
+            .beacon_proposer_cache = proposer_cache,
             .chain = chain,
         };
 
@@ -219,6 +228,9 @@ pub const Runtime = struct {
 
         self.sync_contribution_pool.deinit();
         self.allocator.destroy(self.sync_contribution_pool);
+
+        self.beacon_proposer_cache.deinit();
+        self.allocator.destroy(self.beacon_proposer_cache);
 
         self.seen_cache.deinit();
         self.allocator.destroy(self.seen_cache);

@@ -1747,8 +1747,11 @@ fn maybePrepareProposerPayload(self: *BeaconNode, io: std.Io) void {
     const head_state = self.headState() orelse return;
     _ = head_state.epoch_cache.getBeaconProposer(next_slot) catch return;
 
-    const fee_recipient = self.node_options.suggested_fee_recipient orelse return;
-    if (self.cached_payload_id != null) return;
+    const fee_recipient = self.chainQuery().proposerFeeRecipientForSlot(
+        next_slot,
+        self.node_options.suggested_fee_recipient,
+    ) orelse return;
+    if (self.cached_payload_slot == next_slot and self.cached_payload_id != null) return;
 
     const timestamp = clock.slotStartSeconds(next_slot);
     const next_epoch = next_slot / preset.SLOTS_PER_EPOCH;
@@ -1760,6 +1763,7 @@ fn maybePrepareProposerPayload(self: *BeaconNode, io: std.Io) void {
     };
 
     self.preparePayload(
+        next_slot,
         timestamp,
         prev_randao,
         fee_recipient,

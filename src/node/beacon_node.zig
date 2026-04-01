@@ -253,6 +253,7 @@ pub const BeaconNode = struct {
     /// Cached payload ID from the last forkchoiceUpdated call with payload attributes.
     /// Used by produceBlockWithPayload to retrieve the built execution payload via getPayload.
     cached_payload_id: ?[8]u8 = null,
+    cached_payload_slot: ?u64 = null,
 
     /// Optional MEV-boost builder relay client.
     /// When configured, block production attempts to use the builder for higher rewards.
@@ -575,6 +576,7 @@ pub const BeaconNode = struct {
     /// getExecutionPayload().
     pub fn preparePayload(
         self: *BeaconNode,
+        slot: u64,
         timestamp: u64,
         prev_randao: [32]u8,
         fee_recipient: [20]u8,
@@ -583,6 +585,7 @@ pub const BeaconNode = struct {
     ) !void {
         try block_production_mod.preparePayload(
             self,
+            slot,
             timestamp,
             prev_randao,
             fee_recipient,

@@ -29,18 +29,21 @@ pub const KeymanagerRuntime = struct {
     io: Io,
     client: *ValidatorClient,
     auth: ?KeymanagerAuth = null,
+    proposer_config_write_enabled: bool,
 
     pub fn init(
         io: Io,
         allocator: Allocator,
         client: *ValidatorClient,
         auth: ?KeymanagerAuth,
+        proposer_config_write_enabled: bool,
     ) KeymanagerRuntime {
         return .{
             .allocator = allocator,
             .io = io,
             .client = client,
             .auth = auth,
+            .proposer_config_write_enabled = proposer_config_write_enabled,
         };
     }
 
@@ -252,6 +255,7 @@ pub const KeymanagerRuntime = struct {
 
     fn setFeeRecipient(ptr: *anyopaque, pubkey: [48]u8, fee_recipient: [20]u8) !void {
         const self: *KeymanagerRuntime = @ptrCast(@alignCast(ptr));
+        try self.ensureProposerConfigWritable();
         const paths = self.client.config.persistence orelse return error.KeymanagerDisabled;
         try self.ensureKnownPubkey(pubkey);
         const previous = self.client.validator_store.getProposerConfig(pubkey);
@@ -262,6 +266,7 @@ pub const KeymanagerRuntime = struct {
 
     fn deleteFeeRecipient(ptr: *anyopaque, pubkey: [48]u8) !void {
         const self: *KeymanagerRuntime = @ptrCast(@alignCast(ptr));
+        try self.ensureProposerConfigWritable();
         const paths = self.client.config.persistence orelse return error.KeymanagerDisabled;
         try self.ensureKnownPubkey(pubkey);
         const previous = self.client.validator_store.getProposerConfig(pubkey);
@@ -278,6 +283,7 @@ pub const KeymanagerRuntime = struct {
 
     fn setGraffiti(ptr: *anyopaque, pubkey: [48]u8, graffiti: [32]u8) !void {
         const self: *KeymanagerRuntime = @ptrCast(@alignCast(ptr));
+        try self.ensureProposerConfigWritable();
         const paths = self.client.config.persistence orelse return error.KeymanagerDisabled;
         try self.ensureKnownPubkey(pubkey);
         const previous = self.client.validator_store.getProposerConfig(pubkey);
@@ -287,6 +293,7 @@ pub const KeymanagerRuntime = struct {
 
     fn deleteGraffiti(ptr: *anyopaque, pubkey: [48]u8) !void {
         const self: *KeymanagerRuntime = @ptrCast(@alignCast(ptr));
+        try self.ensureProposerConfigWritable();
         const paths = self.client.config.persistence orelse return error.KeymanagerDisabled;
         try self.ensureKnownPubkey(pubkey);
         const previous = self.client.validator_store.getProposerConfig(pubkey);
@@ -302,6 +309,7 @@ pub const KeymanagerRuntime = struct {
 
     fn setGasLimit(ptr: *anyopaque, pubkey: [48]u8, gas_limit: u64) !void {
         const self: *KeymanagerRuntime = @ptrCast(@alignCast(ptr));
+        try self.ensureProposerConfigWritable();
         const paths = self.client.config.persistence orelse return error.KeymanagerDisabled;
         try self.ensureKnownPubkey(pubkey);
         const previous = self.client.validator_store.getProposerConfig(pubkey);
@@ -312,6 +320,7 @@ pub const KeymanagerRuntime = struct {
 
     fn deleteGasLimit(ptr: *anyopaque, pubkey: [48]u8) !void {
         const self: *KeymanagerRuntime = @ptrCast(@alignCast(ptr));
+        try self.ensureProposerConfigWritable();
         const paths = self.client.config.persistence orelse return error.KeymanagerDisabled;
         try self.ensureKnownPubkey(pubkey);
         const previous = self.client.validator_store.getProposerConfig(pubkey);
@@ -329,6 +338,7 @@ pub const KeymanagerRuntime = struct {
 
     fn setBuilderBoostFactor(ptr: *anyopaque, pubkey: [48]u8, builder_boost_factor: u64) !void {
         const self: *KeymanagerRuntime = @ptrCast(@alignCast(ptr));
+        try self.ensureProposerConfigWritable();
         const paths = self.client.config.persistence orelse return error.KeymanagerDisabled;
         try self.ensureKnownPubkey(pubkey);
         const previous = self.client.validator_store.getProposerConfig(pubkey);
@@ -338,6 +348,7 @@ pub const KeymanagerRuntime = struct {
 
     fn deleteBuilderBoostFactor(ptr: *anyopaque, pubkey: [48]u8) !void {
         const self: *KeymanagerRuntime = @ptrCast(@alignCast(ptr));
+        try self.ensureProposerConfigWritable();
         const paths = self.client.config.persistence orelse return error.KeymanagerDisabled;
         try self.ensureKnownPubkey(pubkey);
         const previous = self.client.validator_store.getProposerConfig(pubkey);
@@ -390,6 +401,10 @@ pub const KeymanagerRuntime = struct {
 
     fn ensureKnownPubkey(self: *const KeymanagerRuntime, pubkey: [48]u8) !void {
         if (self.client.validator_store.signerKind(pubkey) == null) return error.ValidatorNotFound;
+    }
+
+    fn ensureProposerConfigWritable(self: *const KeymanagerRuntime) !void {
+        if (!self.proposer_config_write_enabled) return error.ProposerConfigWriteDisabled;
     }
 
     fn persistProposerConfig(

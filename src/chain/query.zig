@@ -267,6 +267,16 @@ pub const Query = struct {
         return @intCast(proposer);
     }
 
+    pub fn proposerFeeRecipientForSlot(
+        self: Query,
+        slot: Slot,
+        default_fee_recipient: ?[20]u8,
+    ) ?[20]u8 {
+        const cached = self.headState() orelse return default_fee_recipient;
+        const proposer_index = cached.getBeaconProposer(slot) catch return default_fee_recipient;
+        return self.chain.beacon_proposer_cache.getOrDefault(proposer_index, default_fee_recipient);
+    }
+
     pub fn getValidatorCount(self: Query) u32 {
         const cached = self.headState() orelse return 0;
         return @intCast(cached.epoch_cache.index_to_pubkey.items.len);

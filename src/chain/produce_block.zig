@@ -122,11 +122,21 @@ pub const ProducedBlock = struct {
 
 /// Configuration for block production.
 pub const BlockProductionConfig = struct {
+    /// RANDAO reveal to include in the produced block body.
+    randao_reveal: types.primitive.BLSSignature.Type = [_]u8{0} ** 96,
+
     /// Fee recipient address for execution payload.
     fee_recipient: [20]u8 = [_]u8{0} ** 20,
 
     /// Custom graffiti (32 bytes). Uses DEFAULT_GRAFFITI if null.
     graffiti: ?[32]u8 = null,
+
+    /// Request-level builder boost factor.
+    ///
+    /// The chain assembly path does not use this directly. The node-owned
+    /// execution layer path may translate it into builder bid selection policy
+    /// before the block body is assembled.
+    builder_boost_factor: ?u64 = null,
 };
 
 /// Produce a block body by selecting pending operations from the pool.
@@ -317,10 +327,7 @@ pub fn assembleBlock(
     else
         types.electra.SyncAggregate.default_value;
 
-    // 3. RANDAO reveal — zeroed (needs validator signing key)
-    const randao_reveal: types.primitive.BLSSignature.Type = [_]u8{0} ** 96;
-
-    // 4. Graffiti
+    // 3. Graffiti
     const graffiti = config.graffiti orelse DEFAULT_GRAFFITI;
 
     // 5. Convert phase0 attestations and attester slashings to electra format
@@ -351,7 +358,7 @@ pub fn assembleBlock(
 
     // 6. Assemble the full Electra BeaconBlockBody
     const block_body = types.electra.BeaconBlockBody.Type{
-        .randao_reveal = randao_reveal,
+        .randao_reveal = config.randao_reveal,
         .eth1_data = eth1_data,
         .graffiti = graffiti,
         .proposer_slashings = std.ArrayListUnmanaged(types.phase0.ProposerSlashing.Type).fromOwnedSlice(ops.proposer_slashings),

@@ -98,6 +98,8 @@ pub fn fromZigError(err: anyerror) ApiError {
         // 403 Forbidden
         error.KeymanagerDisabled,
         => .{ .code = .forbidden, .message = "Keymanager is disabled" },
+        error.ProposerConfigWriteDisabled,
+        => .{ .code = .forbidden, .message = "Proposer config writes are disabled" },
 
         // 404 Not Found
         error.BlockNotFound,

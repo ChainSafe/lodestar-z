@@ -18,6 +18,7 @@ const ProducedBlockBody = produce_block.ProducedBlockBody;
 const ProducedBlock = produce_block.ProducedBlock;
 const BlockProductionConfig = produce_block.BlockProductionConfig;
 const BlobsBundle = produce_block.BlobsBundle;
+const proposer_cache_mod = @import("beacon_proposer_cache.zig");
 
 const CachedBeaconState = state_transition.CachedBeaconState;
 const Root = [32]u8;
@@ -187,6 +188,29 @@ pub const Service = struct {
 
     pub fn archiveState(self: Service, slot: Slot, state_root: Root) !void {
         try self.chain.archiveState(slot, state_root);
+    }
+
+    pub fn updateBeaconProposerData(
+        self: Service,
+        epoch: u64,
+        preparations: []const proposer_cache_mod.ProposerPreparation,
+    ) !void {
+        for (preparations) |preparation| {
+            try self.setBeaconProposerData(
+                epoch,
+                preparation.validator_index,
+                preparation.fee_recipient,
+            );
+        }
+    }
+
+    pub fn setBeaconProposerData(
+        self: Service,
+        epoch: u64,
+        validator_index: u64,
+        fee_recipient: [20]u8,
+    ) !void {
+        try self.chain.beacon_proposer_cache.add(epoch, validator_index, fee_recipient);
     }
 
     pub fn produceBlock(self: Service, slot: Slot) !ProducedBlockBody {

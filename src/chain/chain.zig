@@ -57,6 +57,7 @@ const produceBlockBody = produce_block_mod.produceBlockBody;
 const assembleBlock = produce_block_mod.assembleBlock;
 const BlockProductionConfig = produce_block_mod.BlockProductionConfig;
 const ProducedBlock = produce_block_mod.ProducedBlock;
+const BeaconProposerCache = @import("beacon_proposer_cache.zig").BeaconProposerCache;
 
 const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
@@ -129,6 +130,7 @@ pub const Chain = struct {
     op_pool: *OpPool,
     seen_cache: *SeenCache,
     head_tracker: *HeadTracker,
+    beacon_proposer_cache: *BeaconProposerCache,
 
     // --- Data availability ---
     /// Data availability manager — optional. When set, blocks are checked
@@ -186,6 +188,7 @@ pub const Chain = struct {
         op_pool: *OpPool,
         seen_cache: *SeenCache,
         head_tracker: *HeadTracker,
+        beacon_proposer_cache: *BeaconProposerCache,
     ) Chain {
         return .{
             .allocator = allocator,
@@ -199,6 +202,7 @@ pub const Chain = struct {
             .op_pool = op_pool,
             .seen_cache = seen_cache,
             .head_tracker = head_tracker,
+            .beacon_proposer_cache = beacon_proposer_cache,
             .da_manager = null,
             .reprocess_queue = null,
             .sync_contribution_pool = null,
@@ -554,6 +558,7 @@ pub const Chain = struct {
         // each epoch. Clear it at the start of each new epoch to bound memory.
         if (slot > 0 and slot % preset.SLOTS_PER_EPOCH == 0) {
             self.seen_cache.pruneAggregators();
+            self.beacon_proposer_cache.prune(slot / preset.SLOTS_PER_EPOCH);
         }
 
         // Prune op_pool attestations — keeps only current + previous epoch.
