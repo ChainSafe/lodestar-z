@@ -25,7 +25,7 @@ pub const DataPaths = struct {
     enr: []const u8,
     peer_db: []const u8,
     state_cache: []const u8,
-    slashing_protection: []const u8,
+    validator_db_dir: []const u8,
     keystores: []const u8,
     secrets: []const u8,
     jwt_secret: []const u8,
@@ -58,7 +58,7 @@ pub const DataPaths = struct {
         const validator_base = try std.fs.path.join(allocator, &.{ root, "validator" });
         defer allocator.free(validator_base);
 
-        const slashing_protection = try std.fs.path.join(allocator, &.{ validator_base, "slashing-protection.db" });
+        const validator_db_dir = try std.fs.path.join(allocator, &.{ validator_base, "validator-db" });
         const keystores = try std.fs.path.join(allocator, &.{ validator_base, "keystores" });
         const secrets = try std.fs.path.join(allocator, &.{ validator_base, "secrets" });
 
@@ -80,7 +80,7 @@ pub const DataPaths = struct {
             .enr = enr,
             .peer_db = peer_db,
             .state_cache = state_cache,
-            .slashing_protection = slashing_protection,
+            .validator_db_dir = validator_db_dir,
             .keystores = keystores,
             .secrets = secrets,
             .jwt_secret = jwt_secret,
@@ -95,6 +95,7 @@ pub const DataPaths = struct {
         try cwd.createDirPath(io, self.beacon_db);
         try cwd.createDirPath(io, self.peer_db);
         try cwd.createDirPath(io, self.state_cache);
+        try cwd.createDirPath(io, self.validator_db_dir);
         try cwd.createDirPath(io, self.keystores);
         try cwd.createDirPath(io, self.secrets);
 
@@ -103,9 +104,6 @@ pub const DataPaths = struct {
         }
         if (std.fs.path.dirname(self.enr_key)) |network_dir| {
             try cwd.createDirPath(io, network_dir);
-        }
-        if (std.fs.path.dirname(self.slashing_protection)) |validator_dir| {
-            try cwd.createDirPath(io, validator_dir);
         }
 
         log.info("Data directories ready under {s}", .{self.root});
@@ -120,7 +118,7 @@ pub const DataPaths = struct {
         a.free(self.enr);
         a.free(self.peer_db);
         a.free(self.state_cache);
-        a.free(self.slashing_protection);
+        a.free(self.validator_db_dir);
         a.free(self.keystores);
         a.free(self.secrets);
         a.free(self.jwt_secret);
@@ -168,7 +166,7 @@ test "DataPaths.resolve - explicit data_dir" {
     try testing.expectEqualStrings("/tmp/test-datadir/beacon-node/network/enr", paths.enr);
     try testing.expectEqualStrings("/tmp/test-datadir/beacon-node/network/peer-db", paths.peer_db);
     try testing.expectEqualStrings("/tmp/test-datadir/beacon-node/state-cache", paths.state_cache);
-    try testing.expectEqualStrings("/tmp/test-datadir/validator/slashing-protection.db", paths.slashing_protection);
+    try testing.expectEqualStrings("/tmp/test-datadir/validator/validator-db", paths.validator_db_dir);
     try testing.expectEqualStrings("/tmp/test-datadir/validator/keystores", paths.keystores);
     try testing.expectEqualStrings("/tmp/test-datadir/validator/secrets", paths.secrets);
     try testing.expectEqualStrings("/tmp/test-datadir/jwt.hex", paths.jwt_secret);

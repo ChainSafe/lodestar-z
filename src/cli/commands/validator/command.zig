@@ -89,6 +89,133 @@ fn parseBuilderBoostFactor(input: ?[]const u8) !?u64 {
     return try std.fmt.parseInt(u64, raw, 10);
 }
 
+fn unsupportedOption(message: []const u8) error{UnsupportedValidatorOption}!void {
+    std.log.err("{s}", .{message});
+    std.log.err("Current validator-client simplifications are documented in src/validator/DESIGN.md.", .{});
+    return error.UnsupportedValidatorOption;
+}
+
+fn countCsvValues(input: []const u8) usize {
+    var count: usize = 0;
+    var it = std.mem.splitScalar(u8, input, ',');
+    while (it.next()) |part| {
+        if (std.mem.trim(u8, part, " \t\r\n").len > 0) count += 1;
+    }
+    return count;
+}
+
+fn rejectUnsupportedOptions(opts: anytype) !void {
+    if (opts.metrics or opts.@"metrics.port" != null or opts.@"metrics.address" != null) {
+        return unsupportedOption("Validator metrics flags are not implemented yet. Remove --metrics, --metrics.port, and --metrics.address.");
+    }
+    if (opts.@"monitoring.endpoint" != null or opts.@"monitoring.interval" != null) {
+        return unsupportedOption("Validator monitoring flags are not implemented yet. Remove --monitoring.endpoint and --monitoring.interval.");
+    }
+    if (opts.importKeystores != null or opts.importKeystoresPassword != null) {
+        return unsupportedOption("Validator keystore import at startup is not implemented yet. Populate the keystores/secrets directories directly instead.");
+    }
+    if (opts.@"externalSigner.pubkeys" != null) {
+        return unsupportedOption("Validator external signer pubkey pinning is not implemented yet. The current implementation only supports fetching all keys from one signer.");
+    }
+    if (opts.@"externalSigner.fetchInterval" != null) {
+        return unsupportedOption("Validator external signer fetchInterval is not implemented yet. Remote signer keys are refreshed on the validator epoch loop.");
+    }
+
+    const external_signer_urls = opts.@"externalSigner.urls" orelse opts.@"externalSigner.url";
+    if (external_signer_urls) |raw| {
+        if (!opts.@"externalSigner.fetch") {
+            return unsupportedOption("Validator external signer support currently requires --externalSigner.fetch. Only fetch-all mode from one signer is implemented.");
+        }
+        if (countCsvValues(raw) > 1) {
+            return unsupportedOption("Multiple external signer URLs are not implemented yet. Only one Web3Signer endpoint can be used.");
+        }
+    } else if (opts.@"externalSigner.fetch") {
+        return unsupportedOption("--externalSigner.fetch requires --externalSigner.url or --externalSigner.urls.");
+    }
+}
+
+fn waitForGenesis(
+    io: Io,
+    beacon_api: *validator_mod.BeaconApiClient,
+    beacon_url: []const u8,
+) !validator_mod.api_client.GenesisResponse {
+    var attempts: usize = 0;
+    while (true) {
+        if (ShutdownHandler.shouldStop()) return error.ShutdownRequested;
+
+        const genesis = beacon_api.getGenesis(io) catch |err| {
+            attempts += 1;
+            if (attempts == 1 or attempts % 12 == 0) {
+                std.log.warn("Waiting for beacon genesis from {s}: {s}", .{ beacon_url, @errorName(err) });
+            }
+            try io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_s }, .real);
+            continue;
+        };
+
+        if (attempts > 0) {
+            std.log.info("Fetched beacon genesis from {s} after {d} retry attempt(s)", .{ beacon_url, attempts });
+        }
+        return genesis;
+    }
+}
+
+fn ensureGenesisForkVersionMatches(
+    beacon_config: *const BeaconConfig,
+    genesis: validator_mod.api_client.GenesisResponse,
+) !void {
+    if (!std.mem.eql(u8, &beacon_config.chain.GENESIS_FORK_VERSION, &genesis.genesis_fork_version)) {
+        std.log.err(
+            "Beacon node genesis fork version mismatch expected=0x{s} actual=0x{s}",
+            .{
+                std.fmt.bytesToHex(&beacon_config.chain.GENESIS_FORK_VERSION, .lower),
+                std.fmt.bytesToHex(&genesis.genesis_fork_version, .lower),
+            },
+        );
+        return error.BeaconConfigMismatch;
+    }
+}
+
+fn compareOptionalUintField(name: []const u8, expected: u64, actual: ?u64) !void {
+    if (actual) |value| {
+        if (value != expected) {
+            std.log.err("Beacon node config mismatch field={s} expected={d} actual={d}", .{ name, expected, value });
+            return error.BeaconConfigMismatch;
+        }
+    }
+}
+
+fn compareOptionalVersionField(name: []const u8, expected: [4]u8, actual: ?[4]u8) !void {
+    if (actual) |value| {
+        if (!std.mem.eql(u8, &expected, &value)) {
+            std.log.err("Beacon node config mismatch field={s} expected=0x{s} actual=0x{s}", .{
+                name,
+                std.fmt.bytesToHex(&expected, .lower),
+                std.fmt.bytesToHex(&value, .lower),
+            });
+            return error.BeaconConfigMismatch;
+        }
+    }
+}
+
+fn ensureConfigSpecMatches(
+    beacon_config: *const BeaconConfig,
+    spec: validator_mod.api_client.ConfigSpecResponse,
+) !void {
+    try compareOptionalVersionField("GENESIS_FORK_VERSION", beacon_config.chain.GENESIS_FORK_VERSION, spec.genesis_fork_version);
+    try compareOptionalVersionField("ALTAIR_FORK_VERSION", beacon_config.chain.ALTAIR_FORK_VERSION, spec.altair_fork_version);
+    try compareOptionalUintField("ALTAIR_FORK_EPOCH", beacon_config.chain.ALTAIR_FORK_EPOCH, spec.altair_fork_epoch);
+    try compareOptionalVersionField("BELLATRIX_FORK_VERSION", beacon_config.chain.BELLATRIX_FORK_VERSION, spec.bellatrix_fork_version);
+    try compareOptionalUintField("BELLATRIX_FORK_EPOCH", beacon_config.chain.BELLATRIX_FORK_EPOCH, spec.bellatrix_fork_epoch);
+    try compareOptionalVersionField("CAPELLA_FORK_VERSION", beacon_config.chain.CAPELLA_FORK_VERSION, spec.capella_fork_version);
+    try compareOptionalUintField("CAPELLA_FORK_EPOCH", beacon_config.chain.CAPELLA_FORK_EPOCH, spec.capella_fork_epoch);
+    try compareOptionalVersionField("DENEB_FORK_VERSION", beacon_config.chain.DENEB_FORK_VERSION, spec.deneb_fork_version);
+    try compareOptionalUintField("DENEB_FORK_EPOCH", beacon_config.chain.DENEB_FORK_EPOCH, spec.deneb_fork_epoch);
+    try compareOptionalVersionField("ELECTRA_FORK_VERSION", beacon_config.chain.ELECTRA_FORK_VERSION, spec.electra_fork_version);
+    try compareOptionalUintField("ELECTRA_FORK_EPOCH", beacon_config.chain.ELECTRA_FORK_EPOCH, spec.electra_fork_epoch);
+    try compareOptionalUintField("SECONDS_PER_SLOT", beacon_config.chain.SECONDS_PER_SLOT, spec.seconds_per_slot);
+    try compareOptionalUintField("MIN_GENESIS_TIME", beacon_config.chain.MIN_GENESIS_TIME, spec.min_genesis_time);
+}
+
 fn buildSigningContext(beacon_config: *const BeaconConfig, genesis: validator_mod.api_client.GenesisResponse) validator_mod.SigningContext {
     var ctx = validator_mod.SigningContext{
         .genesis_validators_root = genesis.genesis_validators_root,
@@ -125,6 +252,8 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     const external_signer_urls = opts.@"externalSigner.urls" orelse opts.@"externalSigner.url";
 
     log_mod.global = log_mod.GlobalLogger.init(log_level.toLogLevel(), log_format);
+    try rejectUnsupportedOptions(opts);
+    ShutdownHandler.installSignalHandlers();
 
     var file_transport: ?log_mod.FileTransport = null;
     if (log_file) |log_file_path| {
@@ -171,27 +300,12 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
 
     const keystores_dir = opts.keystoresDir orelse data_dir_info.keystores;
     const secrets_dir = opts.secretsDir orelse data_dir_info.secrets;
-    const validators_db_dir = if (opts.validatorsDbDir) |dir|
-        try std.fs.path.join(allocator, &.{ dir, "slashing-protection.db" })
-    else
-        data_dir_info.slashing_protection;
-    defer if (opts.validatorsDbDir != null) allocator.free(validators_db_dir);
-    if (std.fs.path.dirname(validators_db_dir)) |parent| {
-        try Io.Dir.cwd().createDirPath(io, parent);
-    }
-
-    var beacon_api = validator_mod.BeaconApiClient.init(allocator, primary_beacon_url);
-    defer beacon_api.deinit();
-    const genesis = beacon_api.getGenesis(io) catch |err| {
-        std.log.err("Failed to fetch beacon genesis from {s}: {}", .{ primary_beacon_url, err });
-        return err;
-    };
-
-    if (params_file != null) {
-        custom_beacon_config.genesis_validator_root = genesis.genesis_validators_root;
-    }
-
-    const signing_ctx = buildSigningContext(beacon_config, genesis);
+    const validator_db_dir = opts.validatorsDbDir orelse data_dir_info.validator_db_dir;
+    try Io.Dir.cwd().createDirPath(io, validator_db_dir);
+    const slashing_protection_path = try std.fs.path.join(allocator, &.{ validator_db_dir, "slashing-protection.db" });
+    defer allocator.free(slashing_protection_path);
+    const metadata_path = try std.fs.path.join(allocator, &.{ validator_db_dir, "metadata.json" });
+    defer allocator.free(metadata_path);
 
     var fallback_urls: [][]const u8 = &.{};
     defer if (fallback_urls.len > 0) freeOwnedStrings(allocator, fallback_urls);
@@ -206,22 +320,37 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         freeOwnedStrings(allocator, urls);
     }
 
-    if (opts.metrics or opts.@"metrics.port" != null or opts.@"metrics.address" != null) {
-        std.log.warn("Validator metrics flags are accepted but metrics server wiring is not implemented yet.", .{});
-    }
-    if (opts.@"monitoring.endpoint" != null or opts.@"monitoring.interval" != null) {
-        std.log.warn("Validator monitoring flags are accepted but monitoring service wiring is not implemented yet.", .{});
-    }
-    if (opts.importKeystores != null or opts.importKeystoresPassword != null) {
-        std.log.warn("validator import flags are not wired into startup; use the validator keystore/secrets directories directly.", .{});
+    var beacon_api = if (fallback_urls.len > 0)
+        validator_mod.BeaconApiClient{
+            .allocator = allocator,
+            .base_url = primary_beacon_url,
+            .fallback_urls = fallback_urls,
+            .active_url_idx = 0,
+            .consecutive_failures = 0,
+            .was_unreachable = false,
+            .unreachable_since_ns = 0,
+        }
+    else
+        validator_mod.BeaconApiClient.init(allocator, primary_beacon_url);
+    defer beacon_api.deinit();
+    const genesis = try waitForGenesis(io, &beacon_api, primary_beacon_url);
+
+    if (params_file != null) {
+        custom_beacon_config.genesis_validator_root = genesis.genesis_validators_root;
     }
 
+    try ensureGenesisForkVersionMatches(beacon_config, genesis);
+    const remote_spec = beacon_api.getConfigSpec(io) catch |err| {
+        std.log.err("Failed to fetch beacon config spec from {s}: {}", .{ primary_beacon_url, err });
+        return err;
+    };
+    try ensureConfigSpecMatches(beacon_config, remote_spec);
+    try validator_mod.ensureGenesisMetadata(io, allocator, metadata_path, genesis);
+
+    const signing_ctx = buildSigningContext(beacon_config, genesis);
+
     const web3signer_url = if (external_signer_urls) |raw| blk: {
-        const first = firstCsvValue(raw);
-        if (std.mem.indexOfScalar(u8, raw, ',')) |_| {
-            std.log.warn("Multiple external signer URLs provided, using the first one: {s}", .{first});
-        }
-        break :blk first;
+        break :blk firstCsvValue(raw);
     } else null;
 
     const fee_recipient = parseFeeRecipient(opts.suggestedFeeRecipient) catch |err| {
@@ -244,7 +373,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         .sync_committee_subnet_count = constants.SYNC_COMMITTEE_SUBNET_COUNT,
         .electra_fork_epoch = beacon_config.chain.ELECTRA_FORK_EPOCH,
         .doppelganger_protection = opts.doppelgangerProtection,
-        .slashing_protection_path = validators_db_dir,
+        .slashing_protection_path = slashing_protection_path,
         .keystores_dir = keystores_dir,
         .secrets_dir = secrets_dir,
         .web3signer_url = web3signer_url,
@@ -255,12 +384,8 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         .builder_boost_factor = builder_boost_factor,
     };
 
-    const client = try allocator.create(validator_mod.ValidatorClient);
-    defer allocator.destroy(client);
-    client.* = try validator_mod.ValidatorClient.init(io, allocator, vc_config, signing_ctx);
-    defer client.deinit();
-
-    ShutdownHandler.installSignalHandlers();
+    const client = try validator_mod.ValidatorClient.init(io, allocator, vc_config, signing_ctx);
+    defer client.destroy();
 
     const WatchCtx = struct {
         io: Io,
@@ -296,12 +421,13 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     std.log.info("  network:      {s}", .{@tagName(network)});
     std.log.info("  beacon-node:  {s}", .{primary_beacon_url});
     std.log.info("  data-dir:     {s}", .{data_dir_info.root});
+    std.log.info("  validator-db: {s}", .{validator_db_dir});
     std.log.info("  keystores:    {s}", .{keystores_dir});
     std.log.info("  secrets:      {s}", .{secrets_dir});
-    std.log.info("  slashing-db:  {s}", .{validators_db_dir});
+    std.log.info("  slashing-db:  {s}", .{slashing_protection_path});
     if (web3signer_url) |url| {
         std.log.info("  web3signer:   {s}", .{url});
     }
 
-    try client.start(io);
+    try client.start();
 }

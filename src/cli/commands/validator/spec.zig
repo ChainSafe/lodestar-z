@@ -54,60 +54,60 @@ pub const spec = cli.command(.{
         }, null),
         .@"externalSigner.urls" = cli.option(?[]const u8, .{
             .long = "externalSigner.urls",
-            .description = "Comma-separated external signer URLs",
+            .description = "External signer URL. Current implementation supports exactly one URL when used with --externalSigner.fetch",
             .group = "externalSigner",
         }, null),
         .@"externalSigner.url" = cli.option(?[]const u8, .{
             .long = "externalSigner.url",
-            .description = "External signer URL",
+            .description = "External signer URL. Current implementation supports exactly one URL when used with --externalSigner.fetch",
             .group = "externalSigner",
         }, null),
         .@"externalSigner.pubkeys" = cli.option(?[]const u8, .{
             .long = "externalSigner.pubkeys",
-            .description = "Comma-separated external signer public keys",
+            .description = "Compatibility flag only. Explicit remote-signer pubkey lists are not implemented yet",
             .group = "externalSigner",
         }, null),
         .@"externalSigner.fetch" = cli.flag(.{
             .long = "externalSigner.fetch",
-            .description = "Fetch validator pubkeys from external signer",
+            .description = "Fetch validator pubkeys from the external signer. This is the only currently supported remote-signer mode",
             .group = "externalSigner",
         }),
         .@"externalSigner.fetchInterval" = cli.option(?u64, .{
             .long = "externalSigner.fetchInterval",
-            .description = "External signer fetch interval in milliseconds",
+            .description = "Compatibility flag only. Custom external signer fetch intervals are not implemented yet",
             .group = "externalSigner",
         }, null),
         .importKeystores = cli.option(?[]const u8, .{
             .long = "importKeystores",
-            .description = "Keystore import source path(s)",
+            .description = "Compatibility flag only. Startup keystore import is not implemented yet",
         }, null),
         .importKeystoresPassword = cli.option(?[]const u8, .{
             .long = "importKeystoresPassword",
-            .description = "Password file for importKeystores",
+            .description = "Compatibility flag only. Startup keystore import is not implemented yet",
         }, null),
         .metrics = cli.flag(.{
             .long = "metrics",
-            .description = "Enable Prometheus metrics HTTP server",
+            .description = "Compatibility flag only. Validator metrics server is not implemented yet",
             .group = "metrics",
         }),
         .@"metrics.port" = cli.option(?u16, .{
             .long = "metrics.port",
-            .description = "Listen TCP port for metrics",
+            .description = "Compatibility flag only. Validator metrics server is not implemented yet",
             .group = "metrics",
         }, null),
         .@"metrics.address" = cli.option(?[]const u8, .{
             .long = "metrics.address",
-            .description = "Listen address for metrics",
+            .description = "Compatibility flag only. Validator metrics server is not implemented yet",
             .group = "metrics",
         }, null),
         .@"monitoring.endpoint" = cli.option(?[]const u8, .{
             .long = "monitoring.endpoint",
-            .description = "Remote monitoring endpoint URL",
+            .description = "Compatibility flag only. Validator monitoring is not implemented yet",
             .group = "monitoring",
         }, null),
         .@"monitoring.interval" = cli.option(?u64, .{
             .long = "monitoring.interval",
-            .description = "Monitoring interval in milliseconds",
+            .description = "Compatibility flag only. Validator monitoring is not implemented yet",
             .group = "monitoring",
         }, null),
         .logFile = cli.option(?[]const u8, .{

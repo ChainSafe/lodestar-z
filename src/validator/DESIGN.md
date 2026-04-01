@@ -2,6 +2,40 @@
 
 Zig scaffolding for the lodestar-z Ethereum consensus validator client.
 
+## Current Production Gaps
+
+This document is also the canonical place to record validator-client
+simplifications relative to Lodestar TS so they are not hidden behind
+compatibility flags or launcher shortcuts.
+
+Current gaps:
+
+1. The validator CLI does **not** implement metrics or remote monitoring yet.
+   `--metrics*` and `--monitoring.*` are rejected at startup.
+
+2. The validator CLI does **not** implement Lodestar's keystore import flow yet.
+   `--importKeystores*` is rejected. Operators must populate the keystore and
+   secret directories directly.
+
+3. External signer support is narrower than Lodestar TS.
+   The current implementation only supports a single Web3Signer endpoint in
+   fetch-all mode (`--externalSigner.fetch` with one URL). Explicit pubkey
+   pinning, multiple signer URLs, and custom fetch intervals are not supported.
+
+4. Keymanager API, proposer settings files, strict fee-recipient checks,
+   distributed-validator flags, broadcast validation controls, blinded-local
+   controls, and mnemonic / interop signer sources are not implemented yet.
+
+5. Beacon-node config verification is implemented only against the subset of
+   `/eth/v1/config/spec` that lodestar-z currently exposes and consumes.
+   That is enough to catch the major fork/timing mismatches we depend on, but it
+   is not yet a full Lodestar-TS-style critical-params check.
+
+6. Validator persistence is intentionally simpler than Lodestar TS.
+   Slashing protection uses an append-only file, and validator metadata
+   (`genesis_time`, `genesis_validators_root`) is stored in a small sidecar file
+   under `validator-db/`.
+
 ## Architecture Overview
 
 ```
@@ -22,17 +56,21 @@ ValidatorClient
 ### 1. BN Connection
 
 ```
-ValidatorClient.start(io)
+validator command bootstrap
   │
-  ├─ BeaconApiClient.getGenesis() → genesis_time, validators_root
+  ├─ waitForGenesis() → genesis_time, validators_root
+  ├─ getConfigSpec() → startup config compatibility checks
+  ├─ persist/verify validator metadata
   │
-  └─ BeaconApiClient.subscribeToEvents(["head","block"])
+  └─ ValidatorClient.start()
+       │
+       └─ BeaconApiClient.subscribeToEvents(["head","block"])
        │
        └─ SSE stream (GET /eth/v1/events?topics=head,block)
             │
             └─ HeadEvent { slot, block_root, ... }
                  │
-                 └─ (TODO) ChainHeaderTracker.onHead() → notify AttestationService
+                 └─ ChainHeaderTracker.onHead() → notify attestation/sync services
 ```
 
 ### 2. Duty Cycle (Epoch Boundary)
@@ -197,15 +235,14 @@ Checks liveness via `/eth/v1/validator/liveness/{epoch}` for DEFAULT_REMAINING_D
 ## What's Different from TypeScript
 
 1. **No class hierarchy** — flat structs, no `extends` / `implements`.
-2. **Explicit memory management** — `allocator` everywhere, `deinit()` required.
+2. **Explicit memory management** — `allocator` everywhere, `deinit()` / `destroy()` required.
 3. **No closures** — callbacks use `*anyopaque` context pointers.
-4. **Synchronous-first clock** — no concurrent promise chains; sub-slot timing needs `io.background.async()`.
+4. **Synchronous-first clock** — no concurrent promise chains; sub-slot timing still needs `io.background.async()` or an equivalent task primitive.
 5. **BLS API** — `SecretKey.sign(msg, dst, aug)` vs `secretKey.sign(msg)`.
 6. **Pubkeys as raw bytes** — `[48]u8` vs hex strings (PubkeyHex in TS).
-7. **No metrics layer** — metrics hooks removed from scaffolding for clarity.
-8. **No remote signer** — web3signer support (SignerRemote in TS) deferred.
-9. **In-process slashing protection** — no SQLite backend yet (TS uses slashingProtection DB).
-10. **Merged duty services** — AttestationDutiesService + AttestationService → single `AttestationService`.
+7. **Remote signer support is present but narrower** — current Web3Signer support fetches keys from one signer and signs by duty type; TS supports a broader signer-loading matrix.
+8. **Validator persistence is file-based** — append-only slashing protection file + metadata sidecar instead of LevelDB buckets.
+9. **Merged duty services** — AttestationDutiesService + AttestationService → single `AttestationService`.
 
 ## Files
 
@@ -228,6 +265,6 @@ Checks liveness via `/eth/v1/validator/liveness/{epoch}` for DEFAULT_REMAINING_D
 2. **compute_signing_root()** — domain computation for all signing operations.
 3. **HTTP client implementation** — wire BeaconApiClient to real HTTP requests using std.Io.net.
 4. **Sub-slot timing** — use `io.background.async()` for 1/3 and 2/3 slot waits.
-5. **Slashing protection DB** — persistent store (SQLite or custom) for cross-restart protection.
-6. **Validator key loading** — keystore decryption (EIP-2335).
-7. **prepare_beacon_proposer.zig** — fee recipient registration polling.
+5. **Full beacon config critical-params verification** — extend the startup comparison beyond the currently parsed subset.
+6. **Keymanager API** — runtime key import/delete, auth, and proposer-config persistence.
+7. **Metrics and monitoring** — Prometheus endpoint and remote monitoring reporter.

@@ -106,9 +106,8 @@ pub const ValidatorClient = struct {
     builder_registration: ?BuilderRegistrationService,
     doppelganger: ?DoppelgangerService,
 
-    // I/O context — stored so clock callbacks can make HTTP calls.
-    // Set in start() before the run loop begins.
-    io: ?std.Io,
+    // I/O context — stored so clock callbacks and background services can make HTTP calls.
+    io: std.Io,
 
     // Index tracker — resolves pubkey → validator index mappings.
     index_tracker: IndexTracker,
@@ -145,12 +144,26 @@ pub const ValidatorClient = struct {
     /// or supply from config.
     ///
     /// TS: Validator.init(opts, genesis)
-    pub fn init(io: Io, allocator: Allocator, config: ValidatorConfig, signing_ctx: SigningContext) !ValidatorClient {
-        // Initialize API client — use multi-BN if fallback URLs provided.
-        var api = if (config.beacon_node_fallback_urls.len > 0) blk: {
-            // Build combined URL slice: [primary] ++ fallbacks.
-            // NOTE: caller owns config memory; we borrow the slices.
-            break :blk BeaconApiClient{
+    pub fn init(io: Io, allocator: Allocator, config: ValidatorConfig, signing_ctx: SigningContext) !*ValidatorClient {
+        const self = try allocator.create(ValidatorClient);
+        errdefer allocator.destroy(self);
+
+        self.allocator = allocator;
+        self.config = config;
+        self.clock = ValidatorSlotTicker.init(
+            config.genesis_time,
+            config.seconds_per_slot,
+            config.slots_per_epoch,
+        );
+        self.io = io;
+        self.signing_context = signing_ctx;
+        self.shutdown_requested = std.atomic.Value(bool).init(false);
+        self.sse_thread_handle = null;
+        self.session_start_ns = time.realtimeNs();
+        self.remote_signer = null;
+
+        self.api = if (config.beacon_node_fallback_urls.len > 0)
+            .{
                 .allocator = allocator,
                 .base_url = config.beacon_node_url,
                 .fallback_urls = config.beacon_node_fallback_urls,
@@ -158,49 +171,47 @@ pub const ValidatorClient = struct {
                 .consecutive_failures = 0,
                 .was_unreachable = false,
                 .unreachable_since_ns = 0,
-            };
-        } else BeaconApiClient.init(allocator, config.beacon_node_url);
-        var validator_store = try ValidatorStore.init(io, allocator, config.slashing_protection_path);
-        errdefer validator_store.deinit();
+            }
+        else
+            BeaconApiClient.init(allocator, config.beacon_node_url);
+        self.validator_store = try ValidatorStore.init(io, allocator, config.slashing_protection_path);
+        errdefer self.validator_store.deinit();
 
-        const clock = ValidatorSlotTicker.init(
-            config.genesis_time,
-            config.seconds_per_slot,
-            config.slots_per_epoch,
-        );
-
-        // We use pointer-to-field for service references.
-        // Pointers are stable because ValidatorClient is heap-allocated by the caller.
-        // NOTE: Services store *BeaconApiClient and *ValidatorStore by pointer.
-        //       These fields must not move after init; the client must be stable.
-        //       Pass &vc.api / &vc.validator_store after heap-allocating if needed.
-
-        const block_service = BlockService.init(allocator, &api, &validator_store, signing_ctx, config.slots_per_epoch, config.graffiti, config.builder_boost_factor);
-        const attestation_service = AttestationService.init(
+        self.header_tracker = ChainHeaderTracker.init(allocator, &self.api);
+        self.block_service = BlockService.init(
             allocator,
-            &api,
-            &validator_store,
+            &self.api,
+            &self.validator_store,
+            signing_ctx,
+            config.slots_per_epoch,
+            config.graffiti,
+            config.builder_boost_factor,
+        );
+        errdefer self.block_service.deinit();
+        self.attestation_service = AttestationService.init(
+            allocator,
+            &self.api,
+            &self.validator_store,
             signing_ctx,
             config.seconds_per_slot,
-            config.genesis_time, // BUG-5 fix: pass genesis_time for correct sub-slot timing
-            config.electra_fork_epoch, // EIP-7549: Electra attestation format support
+            config.genesis_time,
+            config.electra_fork_epoch,
         );
-        const sync_committee_service = SyncCommitteeService.init(
+        errdefer self.attestation_service.deinit();
+        self.sync_committee_service = SyncCommitteeService.init(
             allocator,
-            &api,
-            &validator_store,
+            &self.api,
+            &self.validator_store,
             signing_ctx,
             config.slots_per_epoch,
             config.epochs_per_sync_committee_period,
             config.sync_committee_size,
             config.sync_committee_subnet_count,
             config.seconds_per_slot,
-            config.genesis_time, // BUG-5 fix: pass genesis_time for correct sub-slot timing
+            config.genesis_time,
         );
+        errdefer self.sync_committee_service.deinit();
 
-        const header_tracker = ChainHeaderTracker.init(allocator, &api);
-
-        // Convert suggested_fee_recipient (20 raw bytes) to hex string [42]u8 ("0x" + 40 hex).
         const fee_recipient_hex: [42]u8 = blk: {
             var buf: [42]u8 = undefined;
             buf[0] = '0';
@@ -212,31 +223,37 @@ pub const ValidatorClient = struct {
             }
             break :blk buf;
         };
-        const prepare_proposer = PrepareBeaconProposerService.init(
+        self.prepare_proposer = PrepareBeaconProposerService.init(
             allocator,
-            &api,
-            &validator_store,
+            &self.api,
+            &self.validator_store,
             fee_recipient_hex,
         );
 
-        // Initialize builder registration service if builder is configured.
-        const builder_registration: ?BuilderRegistrationService = if (config.builder_url != null)
+        self.builder_registration = if (config.builder_url != null)
             BuilderRegistrationService.init(
                 allocator,
-                &api,
-                &validator_store,
+                &self.api,
+                &self.validator_store,
                 config.suggested_fee_recipient,
                 config.gas_limit,
             )
         else
             null;
+        errdefer if (self.builder_registration) |*builder_registration| builder_registration.deinit();
 
-        var doppelganger: ?DoppelgangerService = if (config.doppelganger_protection)
-            DoppelgangerService.init(allocator, &api)
+        self.doppelganger = if (config.doppelganger_protection)
+            DoppelgangerService.init(allocator, &self.api)
         else
             null;
+        errdefer if (self.doppelganger) |*doppelganger| doppelganger.deinit();
 
-        // Load validator keys from disk if keystores_dir and secrets_dir are configured.
+        self.index_tracker = IndexTracker.init(allocator, &self.api);
+        errdefer self.index_tracker.deinit();
+        self.liveness_tracker = LivenessTracker.init(allocator);
+        errdefer self.liveness_tracker.deinit();
+        self.syncing_tracker = SyncingTracker.init(allocator, &self.api);
+
         var loaded_count: usize = 0;
         if (config.keystores_dir) |ks_dir| {
             if (config.secrets_dir) |sec_dir| {
@@ -246,9 +263,9 @@ pub const ValidatorClient = struct {
                     allocator.free(loaded_keys);
                 }
                 for (loaded_keys) |k| {
-                    try validator_store.addKey(k.secret_key);
-                    if (doppelganger) |*d| {
-                        try d.registerValidator(k.pubkey);
+                    try self.validator_store.addKey(k.secret_key);
+                    if (self.doppelganger) |*doppelganger| {
+                        try doppelganger.registerValidator(k.pubkey);
                     }
                     loaded_count += 1;
                 }
@@ -256,9 +273,6 @@ pub const ValidatorClient = struct {
         }
         log.info("validator keys loaded from disk: {d}", .{loaded_count});
 
-        // Import EIP-3076 slashing protection interchange if configured.
-        // This must happen before any signing, so we do it during init().
-        // TS: equivalent to --slashingProtection flag feeding importInterchange().
         if (config.interchange_import_path) |ipath| {
             const interchange_data = fs.readFileAlloc(io, allocator, ipath, 16 * 1024 * 1024) catch |err| blk: {
                 log.err("failed to read interchange file {s}: {s}", .{ ipath, @errorName(err) });
@@ -278,15 +292,13 @@ pub const ValidatorClient = struct {
                     defer allocator.free(recs);
                     var imported_count: usize = 0;
                     for (recs) |rec| {
-                        // Feed highest signed block slot into slashing DB.
                         if (rec.last_signed_block_slot) |slot| {
-                            _ = try validator_store.slashing_db.checkAndInsertBlock(rec.pubkey, slot);
+                            _ = try self.validator_store.slashing_db.checkAndInsertBlock(rec.pubkey, slot);
                             imported_count += 1;
                         }
-                        // Feed highest signed attestation epochs into slashing DB.
                         if (rec.last_signed_attestation_source_epoch) |src| {
                             if (rec.last_signed_attestation_target_epoch) |tgt| {
-                                _ = try validator_store.slashing_db.checkAndInsertAttestation(
+                                _ = try self.validator_store.slashing_db.checkAndInsertAttestation(
                                     rec.pubkey,
                                     src,
                                     tgt,
@@ -299,37 +311,12 @@ pub const ValidatorClient = struct {
             }
         }
 
-        var idx_tracker = IndexTracker.init(allocator, &api);
-        var live_tracker = LivenessTracker.init(allocator);
-
-        // Register all loaded keys in the index tracker and liveness tracker.
-        for (validator_store.validators.items) |v| {
-            idx_tracker.trackPubkey(v.pubkey);
-            live_tracker.register(v.pubkey);
+        for (self.validator_store.validators.items) |v| {
+            self.index_tracker.trackPubkey(v.pubkey);
+            self.liveness_tracker.register(v.pubkey);
         }
 
-        return .{
-            .allocator = allocator,
-            .config = config,
-            .clock = clock,
-            .api = api,
-            .validator_store = validator_store,
-            .header_tracker = header_tracker,
-            .block_service = block_service,
-            .attestation_service = attestation_service,
-            .sync_committee_service = sync_committee_service,
-            .prepare_proposer = prepare_proposer,
-            .builder_registration = builder_registration,
-            .doppelganger = doppelganger,
-            .io = null,
-            .index_tracker = idx_tracker,
-            .liveness_tracker = live_tracker,
-            .signing_context = signing_ctx,
-            .syncing_tracker = SyncingTracker.init(allocator, &api),
-            .shutdown_requested = std.atomic.Value(bool).init(false),
-            .sse_thread_handle = null,
-            .session_start_ns = time.realtimeNs(),
-        };
+        return self;
     }
 
     pub fn deinit(self: *ValidatorClient) void {
@@ -344,6 +331,12 @@ pub const ValidatorClient = struct {
         self.api.deinit();
         // Free the heap-allocated RemoteSigner if web3signer was configured.
         if (self.remote_signer) |rs| self.allocator.destroy(rs);
+    }
+
+    pub fn destroy(self: *ValidatorClient) void {
+        const allocator = self.allocator;
+        self.deinit();
+        allocator.destroy(self);
     }
 
     /// Request graceful shutdown of the validator client.
@@ -524,48 +517,13 @@ pub const ValidatorClient = struct {
         }
     }
 
-    /// Re-wire all service api/store pointers to stable fields of this ValidatorClient.
-    ///
-    /// Must be called after the ValidatorClient is placed at a stable memory address
-    /// (i.e., heap-allocated by the caller). start() calls this automatically.
-    ///
-    /// BUG-1 Fix: init() captures &api / &validator_store as local variable addresses.
-    /// Once the caller assigns the returned struct to heap memory, those local addresses
-    /// are stale. This method updates all service pointers to &self.api and &self.validator_store.
-    pub fn wireServices(self: *ValidatorClient) void {
-        self.block_service.api = &self.api;
-        self.block_service.validator_store = &self.validator_store;
-        self.attestation_service.api = &self.api;
-        self.attestation_service.validator_store = &self.validator_store;
-        self.sync_committee_service.api = &self.api;
-        self.sync_committee_service.validator_store = &self.validator_store;
-        self.header_tracker.api = &self.api;
-        self.prepare_proposer.api = &self.api;
-        self.prepare_proposer.validator_store = &self.validator_store;
-        if (self.builder_registration) |*br| {
-            br.api = &self.api;
-            br.validator_store = &self.validator_store;
-            br.remote_signer = self.remote_signer;
-        }
-        if (self.doppelganger) |*d| {
-            d.api = &self.api;
-        }
-        self.index_tracker.api = &self.api;
-        self.syncing_tracker.api = &self.api;
-    }
-
     /// Start the validator client: wire up clock callbacks and enter the run loop.
     ///
     /// Blocks until error or explicit stop.
     ///
     /// TS: clock.start(signal) → runs all registered fns in background.
-    pub fn start(self: *ValidatorClient, io: Io) !void {
+    pub fn start(self: *ValidatorClient) !void {
         log.info("starting validator client beacon_node={s}", .{self.config.beacon_node_url});
-
-        // BUG-1 Fix: Re-wire service pointers to stable self fields.
-        // init() captures pointers to locals; now that self is at a stable address
-        // (heap-allocated by the caller), update all service api/store pointers.
-        self.wireServices();
 
         // Wire up chain header tracker callbacks.
         self.sync_committee_service.setHeaderTracker(&self.header_tracker);
@@ -621,9 +579,6 @@ pub const ValidatorClient = struct {
         // Syncing status tracker — poll every slot, gate signing when BN is behind.
         self.clock.onSlot(.{ .ctx = self, .fn_ptr = onSlotSyncingTracker });
 
-        // Store io so clock callbacks can perform HTTP requests.
-        self.io = io;
-
         // Fetch remote signer keys before the initial index resolution so remote
         // validators participate in the very first duty refresh.
         if (self.config.web3signer_url) |url| {
@@ -636,7 +591,7 @@ pub const ValidatorClient = struct {
             if (self.builder_registration) |*br| {
                 br.remote_signer = rs;
             }
-            try self.syncRemoteSignerKeys(io);
+            try self.syncRemoteSignerKeys(self.io);
         }
 
         // Resolve validator indices at startup.
@@ -644,7 +599,7 @@ pub const ValidatorClient = struct {
         //
         // TS: IndicesService.pollValidatorIndices() on startup.
         log.info("resolving validator indices at startup", .{});
-        self.index_tracker.resolveIndices(io) catch |err| {
+        self.index_tracker.resolveIndices(self.io) catch |err| {
             log.warn("startup index resolution failed: {s} — will retry on first epoch", .{@errorName(err)});
         };
         self.applyResolvedIndices();
@@ -677,7 +632,7 @@ pub const ValidatorClient = struct {
             allocator: std.mem.Allocator,
         };
         const sse_ctx = try self.allocator.create(SseThreadCtx);
-        sse_ctx.* = .{ .tracker = &self.header_tracker, .io = io, .allocator = self.allocator };
+        sse_ctx.* = .{ .tracker = &self.header_tracker, .io = self.io, .allocator = self.allocator };
         const sse_thread = std.Thread.spawn(.{}, struct {
             fn run(ctx: *SseThreadCtx) void {
                 const alloc = ctx.allocator;
@@ -699,7 +654,7 @@ pub const ValidatorClient = struct {
         }
 
         // Run the clock loop (blocking until shutdown or error).
-        try self.clock.run(io);
+        try self.clock.run(self.io);
 
         // Graceful shutdown sequence.
         log.info("validator client stopping...", .{});
@@ -733,49 +688,49 @@ pub const ValidatorClient = struct {
 
     fn onSlotBlockService(ctx: *anyopaque, slot: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io orelse return;
+        const io = self.io;
         self.block_service.onSlot(io, slot);
     }
 
     fn onEpochBlockService(ctx: *anyopaque, epoch: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io orelse return;
+        const io = self.io;
         self.block_service.onEpoch(io, epoch);
     }
 
     fn onSlotAttestationService(ctx: *anyopaque, slot: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io orelse return;
+        const io = self.io;
         self.attestation_service.onSlot(io, slot);
     }
 
     fn onEpochAttestationService(ctx: *anyopaque, epoch: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io orelse return;
+        const io = self.io;
         self.attestation_service.onEpoch(io, epoch);
     }
 
     fn onSlotSyncCommitteeService(ctx: *anyopaque, slot: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io orelse return;
+        const io = self.io;
         self.sync_committee_service.onSlot(io, slot);
     }
 
     fn onEpochSyncCommitteeService(ctx: *anyopaque, epoch: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io orelse return;
+        const io = self.io;
         self.sync_committee_service.onEpoch(io, epoch);
     }
 
     fn onEpochPrepareProposer(ctx: *anyopaque, epoch: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io orelse return;
+        const io = self.io;
         self.prepare_proposer.onEpoch(io, epoch);
     }
 
     fn onEpochBuilderRegistration(ctx: *anyopaque, epoch: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io orelse return;
+        const io = self.io;
         if (self.builder_registration) |*br| {
             br.onEpoch(io, epoch);
         }
@@ -783,7 +738,7 @@ pub const ValidatorClient = struct {
 
     fn onEpochDoppelganger(ctx: *anyopaque, epoch: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io orelse return;
+        const io = self.io;
         if (self.doppelganger) |*d| {
             d.onEpoch(io, epoch);
         }
@@ -791,7 +746,7 @@ pub const ValidatorClient = struct {
 
     fn onEpochIndexTracker(ctx: *anyopaque, epoch: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io orelse return;
+        const io = self.io;
         self.index_tracker.onEpoch(io, epoch);
         self.applyResolvedIndices();
 
@@ -805,14 +760,14 @@ pub const ValidatorClient = struct {
 
     fn onSlotSyncingTracker(ctx: *anyopaque, slot: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io orelse return;
+        const io = self.io;
         self.syncing_tracker.onSlot(io, slot);
     }
 
     fn onEpochRemoteSignerSync(ctx: *anyopaque, epoch: u64) void {
         _ = epoch;
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io orelse return;
+        const io = self.io;
         self.syncRemoteSignerKeys(io) catch |err| {
             log.warn("remote signer sync failed: {s}", .{@errorName(err)});
         };

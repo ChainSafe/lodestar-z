@@ -440,6 +440,46 @@ pub const BeaconApiClient = struct {
         };
     }
 
+    /// GET /eth/v1/config/spec
+    ///
+    /// Parses a compatibility subset of the beacon node's config/spec response.
+    /// Different clients expose different key casing and may omit fields, so we
+    /// accept either snake_case or SCREAMING_SNAKE_CASE and only compare fields
+    /// that are present.
+    pub fn getConfigSpec(self: *BeaconApiClient, io: Io) !ConfigSpecResponse {
+        const body = try self.get(io, "/eth/v1/config/spec");
+        defer self.allocator.free(body);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
+        defer parsed.deinit();
+
+        const root = switch (parsed.value) {
+            .object => |obj| obj,
+            else => return error.InvalidResponse,
+        };
+        const data_val = root.get("data") orelse return error.InvalidResponse;
+        const data = switch (data_val) {
+            .object => |obj| obj,
+            else => return error.InvalidResponse,
+        };
+
+        return .{
+            .genesis_fork_version = try parseHexField(data, &.{ "genesis_fork_version", "GENESIS_FORK_VERSION" }, 4),
+            .altair_fork_version = try parseHexField(data, &.{ "altair_fork_version", "ALTAIR_FORK_VERSION" }, 4),
+            .altair_fork_epoch = try parseUintField(data, &.{ "altair_fork_epoch", "ALTAIR_FORK_EPOCH" }),
+            .bellatrix_fork_version = try parseHexField(data, &.{ "bellatrix_fork_version", "BELLATRIX_FORK_VERSION" }, 4),
+            .bellatrix_fork_epoch = try parseUintField(data, &.{ "bellatrix_fork_epoch", "BELLATRIX_FORK_EPOCH" }),
+            .capella_fork_version = try parseHexField(data, &.{ "capella_fork_version", "CAPELLA_FORK_VERSION" }, 4),
+            .capella_fork_epoch = try parseUintField(data, &.{ "capella_fork_epoch", "CAPELLA_FORK_EPOCH" }),
+            .deneb_fork_version = try parseHexField(data, &.{ "deneb_fork_version", "DENEB_FORK_VERSION" }, 4),
+            .deneb_fork_epoch = try parseUintField(data, &.{ "deneb_fork_epoch", "DENEB_FORK_EPOCH" }),
+            .electra_fork_version = try parseHexField(data, &.{ "electra_fork_version", "ELECTRA_FORK_VERSION" }, 4),
+            .electra_fork_epoch = try parseUintField(data, &.{ "electra_fork_epoch", "ELECTRA_FORK_EPOCH" }),
+            .seconds_per_slot = try parseUintField(data, &.{ "seconds_per_slot", "SECONDS_PER_SLOT" }),
+            .min_genesis_time = try parseUintField(data, &.{ "min_genesis_time", "MIN_GENESIS_TIME" }),
+        };
+    }
+
     // -----------------------------------------------------------------------
     // Duties
     // -----------------------------------------------------------------------
@@ -1137,6 +1177,22 @@ pub const GenesisResponse = struct {
     genesis_fork_version: [4]u8,
 };
 
+pub const ConfigSpecResponse = struct {
+    genesis_fork_version: ?[4]u8 = null,
+    altair_fork_version: ?[4]u8 = null,
+    altair_fork_epoch: ?u64 = null,
+    bellatrix_fork_version: ?[4]u8 = null,
+    bellatrix_fork_epoch: ?u64 = null,
+    capella_fork_version: ?[4]u8 = null,
+    capella_fork_epoch: ?u64 = null,
+    deneb_fork_version: ?[4]u8 = null,
+    deneb_fork_epoch: ?u64 = null,
+    electra_fork_version: ?[4]u8 = null,
+    electra_fork_epoch: ?u64 = null,
+    seconds_per_slot: ?u64 = null,
+    min_genesis_time: ?u64 = null,
+};
+
 pub const ValidatorIndexAndStatus = struct {
     pubkey: [48]u8,
     index: u64,
@@ -1173,6 +1229,53 @@ pub const ProduceBlockSszResponse = struct {
         return self.fork_name[0..self.fork_name_len];
     }
 };
+
+fn getObjectField(
+    object: std.json.ObjectMap,
+    comptime names: []const []const u8,
+) ?std.json.Value {
+    inline for (names) |name| {
+        if (object.get(name)) |value| return value;
+    }
+    return null;
+}
+
+fn parseUintField(
+    object: std.json.ObjectMap,
+    comptime names: []const []const u8,
+) !?u64 {
+    const value = getObjectField(object, names) orelse return null;
+    return switch (value) {
+        .string => |s| try std.fmt.parseInt(u64, s, 10),
+        .integer => |i| blk: {
+            if (i < 0) return error.InvalidResponse;
+            break :blk @intCast(i);
+        },
+        else => error.InvalidResponse,
+    };
+}
+
+fn parseHexField(
+    object: std.json.ObjectMap,
+    comptime names: []const []const u8,
+    comptime N: usize,
+) !?[N]u8 {
+    const value = getObjectField(object, names) orelse return null;
+    const text = switch (value) {
+        .string => |s| s,
+        else => return error.InvalidResponse,
+    };
+
+    const hex = if (std.mem.startsWith(u8, text, "0x") or std.mem.startsWith(u8, text, "0X"))
+        text[2..]
+    else
+        text;
+    if (hex.len != N * 2) return error.InvalidResponse;
+
+    var out: [N]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&out, hex);
+    return out;
+}
 
 pub const AttestationDataResponse = struct {
     slot: u64,
